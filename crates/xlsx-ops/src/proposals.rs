@@ -60,6 +60,19 @@ impl ProposalSet {
         Self::default()
     }
 
+    #[doc(hidden)]
+    pub fn with_id_counter(next_id: u64) -> Self {
+        Self {
+            next_id,
+            proposals: Vec::new(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn id_counter(&self) -> u64 {
+        self.next_id
+    }
+
     /// allocate the next proposal id (`p1`, `p2`, ...).
     pub fn next_id(&mut self) -> String {
         self.next_id += 1;
@@ -72,6 +85,10 @@ impl ProposalSet {
 
     pub fn list(&self) -> &[Proposal] {
         &self.proposals
+    }
+
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut Proposal> {
+        self.proposals.iter_mut().find(|proposal| proposal.id == id)
     }
 
     /// remove and return the proposal with `id`, if present.

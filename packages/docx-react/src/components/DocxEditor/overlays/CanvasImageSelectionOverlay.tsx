@@ -24,7 +24,11 @@ import {
   calculateResizedImageDimensions,
   type ImageResizeHandle,
 } from '@betteroffice/docx/docx';
-import { findImagePrimitiveByDocPos, type DisplayListQueries } from '@betteroffice/docx/layout/render';
+import {
+  effectiveZoom,
+  findImagePrimitiveByDocPos,
+  type DisplayListQueries,
+} from '@betteroffice/docx/layout/render';
 import { canvasPageScale } from '../internals/canvasProjection';
 
 const HANDLE_SIZE = 10;
@@ -87,8 +91,11 @@ interface Projected {
   doc: { x: number; y: number; w: number; h: number };
   /** overlay-target-px box (rendered geometry) */
   rect: { left: number; top: number; width: number; height: number };
+  /** overlay-target px per document px */
   scaleX: number;
   scaleY: number;
+  /** client px per overlay-target px */
+  targetZoom: number;
 }
 
 export function CanvasImageSelectionOverlay({
@@ -146,18 +153,22 @@ export function CanvasImageSelectionOverlay({
     const scale = canvasPageScale(host, displayListQueries, pageIndex);
     if (!scale) return null;
     const targetRect = overlayTarget.getBoundingClientRect();
-    const { canvasRect, scaleX, scaleY } = scale;
+    const targetZoom = effectiveZoom(overlayTarget);
+    const { canvasRect } = scale;
+    const scaleX = scale.scaleX / targetZoom;
+    const scaleY = scale.scaleY / targetZoom;
     return {
       pageIndex,
       doc: { x: primitive.x, y: primitive.y, w: primitive.w, h: primitive.h },
       rect: {
-        left: canvasRect.left - targetRect.left + primitive.x * scaleX,
-        top: canvasRect.top - targetRect.top + primitive.y * scaleY,
+        left: (canvasRect.left - targetRect.left) / targetZoom + primitive.x * scaleX,
+        top: (canvasRect.top - targetRect.top) / targetZoom + primitive.y * scaleY,
         width: primitive.w * scaleX,
         height: primitive.h * scaleY,
       },
       scaleX,
       scaleY,
+      targetZoom,
     };
   }, [canvasHostRef, displayListQueries, overlayTarget, pmPos]);
 
@@ -189,7 +200,7 @@ export function CanvasImageSelectionOverlay({
       e.preventDefault();
       e.stopPropagation();
 
-      const { doc, rect, scaleX, scaleY } = base;
+      const { doc, rect, scaleX, scaleY, targetZoom } = base;
       const startX = e.clientX;
       const startY = e.clientY;
       const startWidthDoc = doc.w;
@@ -203,8 +214,8 @@ export function CanvasImageSelectionOverlay({
 
       const onMove = (moveEvent: MouseEvent) => {
         // client px → document px through the live canvas scale (== zoom).
-        const deltaX = scaleX > 0 ? (moveEvent.clientX - startX) / scaleX : 0;
-        const deltaY = scaleY > 0 ? (moveEvent.clientY - startY) / scaleY : 0;
+        const deltaX = scaleX > 0 ? (moveEvent.clientX - startX) / targetZoom / scaleX : 0;
+        const deltaY = scaleY > 0 ? (moveEvent.clientY - startY) / targetZoom / scaleY : 0;
         const lockAspect = !moveEvent.shiftKey;
         const d = calculateResizedImageDimensions(
           handle,
@@ -251,10 +262,11 @@ export function CanvasImageSelectionOverlay({
       const DRAG_THRESHOLD = 4;
       const startX = e.clientX;
       const startY = e.clientY;
-      const ghostW = base.rect.width;
-      const ghostH = base.rect.height;
+      const ghostW = base.rect.width * base.targetZoom;
+      const ghostH = base.rect.height * base.targetZoom;
       let dragStarted = false;
       let ghostEl: HTMLElement | null = null;
+      let ghostZoom = 1;
 
       const onMove = (moveEvent: MouseEvent) => {
         const dx = moveEvent.clientX - startX;
@@ -270,13 +282,14 @@ export function CanvasImageSelectionOverlay({
             'position: fixed; pointer-events: none; z-index: 10000; ' +
             'opacity: 0.5; border: 2px dashed #2563eb; border-radius: 4px; ' +
             'background: rgba(37, 99, 235, 0.1);';
-          ghostEl.style.width = `${ghostW}px`;
-          ghostEl.style.height = `${ghostH}px`;
           document.body.appendChild(ghostEl);
+          ghostZoom = effectiveZoom(ghostEl);
+          ghostEl.style.width = `${ghostW / ghostZoom}px`;
+          ghostEl.style.height = `${ghostH / ghostZoom}px`;
         }
         if (ghostEl) {
-          ghostEl.style.left = `${moveEvent.clientX - ghostW / 2}px`;
-          ghostEl.style.top = `${moveEvent.clientY - ghostH / 2}px`;
+          ghostEl.style.left = `${(moveEvent.clientX - ghostW / 2) / ghostZoom}px`;
+          ghostEl.style.top = `${(moveEvent.clientY - ghostH / 2) / ghostZoom}px`;
         }
       };
       const onUp = (upEvent: MouseEvent) => {

@@ -8,6 +8,7 @@
 
 import type { Document } from '../../types/document';
 import type { BlockContent, HeaderFooter } from '../../types/content';
+import { isWrittenByCanonical } from '../headerFooterAliasProjection';
 import { RELATIONSHIP_TYPES } from '../relsParser';
 import { rezipContainer } from '../wasm';
 
@@ -101,6 +102,7 @@ export function collectParts(doc: Document): Part[] {
   const addHeaderFooterParts = (map: Map<string, HeaderFooter> | undefined, type: string) => {
     if (!map) return;
     for (const [rId, hf] of map.entries()) {
+      if (isWrittenByCanonical(hf, map)) continue;
       const rel = rels.get(rId);
       if (!rel || rel.type !== type || !rel.target) continue;
       const filename = headerFooterFilename(rel.target);

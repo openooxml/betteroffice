@@ -129,12 +129,63 @@ impl Default for ThemeFontScheme {
     }
 }
 
+/// `p:clrMap`: the `a:clrScheme` slot each `tx1`/`bg1`-style name resolves to.
+/// Only non-identity entries are stored, so an empty map is the identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ColorMap(IndexMap<String, String>);
+
+impl ColorMap {
+    pub fn set(&mut self, name: &str, slot: &str) {
+        let name = normalize_color_slot(name);
+        if identity_color_slot(name) == slot || ThemeColorScheme::default().get(slot).is_none() {
+            return;
+        }
+        self.0.insert(name.to_owned(), slot.to_owned());
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn resolve<'a>(&'a self, slot: &'a str) -> &'a str {
+        self.0
+            .get(normalize_color_slot(slot))
+            .map_or(slot, String::as_str)
+    }
+}
+
+/// Scheme colour names as parsers normalize them, which is also how
+/// [`ColorMap`] keys them.
+fn normalize_color_slot(slot: &str) -> &str {
+    match slot {
+        "tx1" => "text1",
+        "tx2" => "text2",
+        "bg1" => "background1",
+        "bg2" => "background2",
+        slot => slot,
+    }
+}
+
+fn identity_color_slot(name: &str) -> &str {
+    match name {
+        "text1" => "dk1",
+        "text2" => "dk2",
+        "background1" => "lt1",
+        "background2" => "lt2",
+        name => name,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Theme {
     pub name: String,
     pub color_scheme: ThemeColorScheme,
     pub font_scheme: ThemeFontScheme,
+    /// Absent from packages serialized before `p:clrMap` was parsed.
+    #[serde(default, skip_serializing_if = "ColorMap::is_identity")]
+    pub color_map: ColorMap,
 }
 
 impl Default for Theme {
@@ -143,12 +194,15 @@ impl Default for Theme {
             name: "Office Theme".to_owned(),
             color_scheme: ThemeColorScheme::default(),
             font_scheme: ThemeFontScheme::default(),
+            color_map: ColorMap::default(),
         }
     }
 }
 
 pub fn get_theme_color(theme: Option<&Theme>, slot: &str) -> String {
-    if let Some(value) = theme.and_then(|theme| theme.color_scheme.get(slot)) {
+    if let Some(value) =
+        theme.and_then(|theme| theme.color_scheme.get(theme.color_map.resolve(slot)))
+    {
         return value.to_owned();
     }
     let defaults = ThemeColorScheme::default();
@@ -192,18 +246,33 @@ pub fn resolve_theme_font_ref(theme: Option<&Theme>, reference: &str) -> String 
     if reference.is_empty() {
         return "Calibri".to_owned();
     }
-    let lower = reference.to_ascii_lowercase();
-    let script = if lower.contains("eastasia") {
-        "ea"
-    } else if lower.contains("bidi") || lower.contains("cs") {
-        "cs"
-    } else {
-        "latin"
+    let lower = reference.trim_start_matches('+').to_ascii_lowercase();
+    let (major, script, drawingml) = match lower.split_once('-') {
+        Some((slot, script)) if slot == "mj" || slot == "mn" => (slot == "mj", script, true),
+        _ => (
+            lower.starts_with("major"),
+            lower
+                .strip_prefix("major")
+                .or_else(|| lower.strip_prefix("minor"))
+                .unwrap_or(lower.as_str()),
+            false,
+        ),
     };
-    if lower.contains("major") {
-        get_major_font(theme, script)
+    let script = match script {
+        "ea" | "eastasia" => "ea",
+        "cs" | "bidi" => "cs",
+        _ => "latin",
+    };
+    let resolve = if major {
+        get_major_font
     } else {
-        get_minor_font(theme, script)
+        get_minor_font
+    };
+    let family = resolve(theme, script);
+    if drawingml && family.is_empty() {
+        resolve(theme, "latin")
+    } else {
+        family
     }
 }
 
@@ -243,6 +312,82 @@ fn nonempty(value: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inverted_theme() -> Theme {
+        let mut theme = Theme::default();
+        theme.font_scheme.major_font.latin = "Calibri".to_owned();
+        theme.font_scheme.minor_font.latin = "Calibri Light".to_owned();
+        theme
+    }
+
+    #[test]
+    fn resolves_drawingml_and_wordprocessingml_font_references() {
+        let mut theme = inverted_theme();
+        theme.font_scheme.major_font.ea = "Major East Asia".to_owned();
+        theme.font_scheme.major_font.cs = "Major Complex Script".to_owned();
+        theme.font_scheme.minor_font.ea = "Minor East Asia".to_owned();
+        theme.font_scheme.minor_font.cs = "Minor Complex Script".to_owned();
+        for (reference, expected) in [
+            ("+mj-lt", "Calibri"),
+            ("+mn-lt", "Calibri Light"),
+            ("+mj-ea", "Major East Asia"),
+            ("+mn-ea", "Minor East Asia"),
+            ("+mj-cs", "Major Complex Script"),
+            ("+mn-cs", "Minor Complex Script"),
+            ("mj-lt", "Calibri"),
+            ("majorAscii", "Calibri"),
+            ("majorHAnsi", "Calibri"),
+            ("majorEastAsia", "Major East Asia"),
+            ("majorBidi", "Major Complex Script"),
+            ("minorAscii", "Calibri Light"),
+            ("minorHAnsi", "Calibri Light"),
+            ("minorEastAsia", "Minor East Asia"),
+            ("minorBidi", "Minor Complex Script"),
+        ] {
+            assert_eq!(resolve_theme_font_ref(Some(&theme), reference), expected);
+            assert_eq!(
+                resolve_theme_font_ref(Some(&theme), &reference.to_ascii_uppercase()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_script_slot_falls_back_to_the_latin_face() {
+        let mut theme = inverted_theme();
+        for (reference, expected) in [
+            ("+mj-ea", "Calibri"),
+            ("+mj-cs", "Calibri"),
+            ("+mn-ea", "Calibri Light"),
+            ("+mn-cs", "Calibri Light"),
+        ] {
+            assert_eq!(resolve_theme_font_ref(Some(&theme), reference), expected);
+        }
+        theme.font_scheme.major_font.latin.clear();
+        theme.font_scheme.minor_font.latin.clear();
+        for theme in [Some(&theme), None] {
+            for (reference, expected) in [
+                ("+mj-ea", "Calibri Light"),
+                ("+mj-cs", "Calibri Light"),
+                ("+mn-ea", "Calibri"),
+                ("+mn-cs", "Calibri"),
+            ] {
+                assert_eq!(resolve_theme_font_ref(theme, reference), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn wordprocessingml_empty_script_slots_stay_empty() {
+        let theme = inverted_theme();
+        for reference in ["majorEastAsia", "majorBidi", "minorEastAsia", "minorBidi"] {
+            assert_eq!(resolve_theme_font_ref(Some(&theme), reference), "");
+        }
+        for script in ["ea", "cs"] {
+            assert_eq!(get_major_font(Some(&theme), script), "");
+            assert_eq!(get_minor_font(Some(&theme), script), "");
+        }
+    }
 
     #[test]
     fn defaults_and_font_resolution_match_office_theme() {

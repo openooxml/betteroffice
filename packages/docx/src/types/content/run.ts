@@ -88,6 +88,19 @@ export interface SeparatorContent {
   type: 'separator' | 'continuationSeparator';
 }
 
+export interface HorizontalRuleContent {
+  type: 'horizontalRule';
+  rule: {
+    width: number | null;
+    widthPercent: number | null;
+    height: number;
+    alignment: string;
+    noShade: boolean;
+    color: string;
+    xml: string;
+  };
+}
+
 /** Legacy `w:ffData` projected as inert form-control state. */
 export interface FieldFormData {
   name?: string;
@@ -181,6 +194,18 @@ export interface ChartContent {
 }
 
 /**
+ * A drawing the parser does not model, replayed verbatim on save.
+ */
+export interface OpaqueDrawingContent {
+  type: 'opaqueDrawing';
+  /** Authored element kind (`drawing`, `pict`, `object`, `alternateContent`). */
+  kind: string;
+  /** Original markup, written back verbatim at the run position. */
+  xml: string;
+  preview?: Image;
+}
+
+/**
  * All possible run content types
  */
 export type RunContent =
@@ -191,6 +216,7 @@ export type RunContent =
   | NoteReferenceContent
   | NoteRefMarkContent
   | SeparatorContent
+  | HorizontalRuleContent
   | CommentReferenceContent
   | FieldCharContent
   | InstrTextContent
@@ -198,7 +224,8 @@ export type RunContent =
   | NoBreakHyphenContent
   | DrawingContent
   | ShapeContent
-  | ChartContent;
+  | ChartContent
+  | OpaqueDrawingContent;
 
 /**
  * A run (`w:r`) — a contiguous span of inline content sharing one set of

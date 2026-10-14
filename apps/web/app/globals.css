@@ -4,34 +4,70 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@theme {
-  --color-bg: #ffffff;
-  --color-surface: #fafafa;
-  --color-fg: #141414;
-  --color-ink: #5c5c5c;
-  --color-acc: #059669;
-  --color-dim: #8f8f8f;
-  --color-faint: #c9c9c9;
-  --color-line: rgb(0 0 0 / 0.1);
-  --color-line-soft: rgb(0 0 0 / 0.055);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
-    Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
-    "Liberation Mono", monospace;
+/* ink on paper: hierarchy comes from a few greys, never from extra colors */
+:root {
+  --bo-bg: #ffffff;
+  --bo-surface: #f7f7f6;
+  --bo-fg: #0b0b0b;
+  --bo-ink: #555555;
+  --bo-dim: #6b6b6b;
+  --bo-faint: #bdbdbd;
+  --bo-line: rgb(0 0 0 / 0.12);
+  --bo-line-soft: rgb(0 0 0 / 0.065);
+  --bo-acc: #047857;
+  --bo-acc-soft: rgb(4 120 87 / 0.12);
+  --bo-head: rgb(255 255 255 / 0.82);
+  --bo-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bo-bg: #090909;
+    --bo-surface: #111111;
+    --bo-fg: #f2f2f0;
+    --bo-ink: #a6a6a6;
+    --bo-dim: #8c8c8c;
+    --bo-faint: #3d3d3d;
+    --bo-line: rgb(255 255 255 / 0.13);
+    --bo-line-soft: rgb(255 255 255 / 0.07);
+    --bo-acc: #34d399;
+    --bo-acc-soft: rgb(52 211 153 / 0.14);
+    --bo-head: rgb(9 9 9 / 0.78);
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bo-bg);
+  --color-surface: var(--bo-surface);
+  --color-fg: var(--bo-fg);
+  --color-ink: var(--bo-ink);
+  --color-acc: var(--bo-acc);
+  --color-acc-soft: var(--bo-acc-soft);
+  --color-dim: var(--bo-dim);
+  --color-faint: var(--bo-faint);
+  --color-line: var(--bo-line);
+  --color-line-soft: var(--bo-line-soft);
+  --color-head: var(--bo-head);
+  --font-sans: var(--font-geist), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", SFMono-Regular,
+    Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 @layer base {
   html {
-    color-scheme: light;
+    color-scheme: light dark;
     scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
     -webkit-text-size-adjust: 100%;
+    overflow-x: clip;
   }
 
   body {
     background: var(--color-bg);
     color: var(--color-fg);
     font-family: var(--font-sans);
-    font-size: 1rem;
+    font-size: 0.9375rem;
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -45,7 +81,6 @@
   :focus-visible {
     outline: 1px solid var(--color-fg);
     outline-offset: 3px;
-    border-radius: 1px;
   }
 
   code,
@@ -54,12 +89,39 @@
     font-family: var(--font-mono);
     font-feature-settings: "liga" 0;
   }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
 }
 
-/* registration marks on the section rails — no utility for pseudo content */
-.sec::before,
-.sec::after {
+/* page frame: one centred column, hairline rails down both sides */
+.wrap {
+  position: relative;
+  margin-inline: auto;
+  width: 100%;
+  max-width: 76rem;
+  padding-inline: clamp(1.25rem, 4vw, 3rem);
+  border-inline: 1px solid var(--color-line-soft);
+}
+
+@media (max-width: 48rem) {
+  .wrap {
+    border-inline: 0;
+  }
+}
+
+/* registration marks where a section rule meets the rails */
+.rule {
+  border-top: 1px solid var(--color-line-soft);
+}
+
+.rule::before,
+.rule::after {
   content: "+";
+  content: "+" / "";
   position: absolute;
   top: -0.72em;
   font-family: var(--font-mono);
@@ -71,18 +133,136 @@
   user-select: none;
 }
 
-.sec::before {
-  left: -0.34em;
+.rule::before {
+  left: -0.36em;
 }
 
-.sec::after {
-  right: -0.34em;
+.rule::after {
+  right: -0.36em;
 }
 
-@media (max-width: 44rem) {
-  .sec::before,
-  .sec::after {
+@media (max-width: 48rem) {
+  .rule::before,
+  .rule::after {
     display: none;
+  }
+}
+
+/* one entrance, on first paint, no script; the title only settles so it paints immediately */
+@keyframes bo-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+
+@keyframes bo-settle {
+  from {
+    transform: translateY(0.12em);
+  }
+}
+
+@keyframes bo-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rise {
+    animation: bo-rise 1s var(--bo-ease) both;
+    animation-delay: calc(var(--i, 0) * 90ms + 120ms);
+  }
+
+  .settle {
+    animation: bo-settle 1.1s var(--bo-ease) both;
+  }
+
+  .blink {
+    animation: bo-blink 1.1s steps(1) infinite;
+  }
+}
+
+/* used-by ticker (USED_BY_ROTATE): slow drift with soft edges, held on hover, reset and still when a name has focus */
+.marquee {
+  min-width: 0;
+  overflow: hidden;
+  mask-image: linear-gradient(to right, transparent, #000 9%, #000 91%, transparent);
+}
+
+.marquee-track {
+  display: flex;
+  width: max-content;
+}
+
+.marquee-copy {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  list-style: none;
+}
+
+.marquee-copy a {
+  display: block;
+  padding: 1.25rem clamp(1.5rem, 3vw, 2.5rem);
+  color: var(--color-dim);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.marquee-copy a:hover {
+  color: var(--color-fg);
+}
+
+.marquee-copy a:focus-visible {
+  outline-offset: -4px;
+}
+
+@keyframes bo-marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .marquee-track {
+    animation: bo-marquee var(--marquee-s, 45s) linear infinite;
+  }
+
+  .marquee:hover .marquee-track {
+    animation-play-state: paused;
+  }
+
+  .marquee:focus-within {
+    mask-image: none;
+  }
+
+  .marquee:focus-within .marquee-track {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marquee {
+    mask-image: none;
+  }
+
+  .marquee-track {
+    width: auto;
+  }
+
+  .marquee-copy {
+    flex: 1;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
+  .marquee-copy:not(:first-child) {
+    display: none;
+  }
+
+  .marquee-copy a {
+    padding-inline: 0 1.5rem;
   }
 }
 

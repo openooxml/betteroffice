@@ -5,6 +5,7 @@
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { XlsxTextMatch, XlsxTextSearchOptions } from '../index';
 
 import {
   StaleProposalError,
@@ -21,10 +22,15 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 // the committed, hand-built fixture (regenerate via e2e/fixtures/generate-sample.mjs).
 const FIXTURE = resolve(import.meta.dir, '../../test-fixtures/sample.xlsx');
+const CHART_FIXTURE = resolve(import.meta.dir, '../../test-fixtures/charts.xlsx');
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 
 function sampleBytes(): Uint8Array {
   return new Uint8Array(readFileSync(FIXTURE));
+}
+
+function chartBytes(): Uint8Array {
+  return new Uint8Array(readFileSync(CHART_FIXTURE));
 }
 
 describe('wasm loader', () => {
@@ -33,6 +39,95 @@ describe('wasm loader', () => {
   it('reports available and a version', () => {
     expect(isWasmAvailable()).toBe(true);
     expect(wasmVersion().length).toBeGreaterThan(0);
+  });
+
+  it('saves the source container verbatim after opening and painting formulas', () => {
+    const source = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../test-fixtures/no-edit-save.xlsx'
+    )));
+    for (const options of [{}, { collaborative: true, clientId: 707 }]) {
+      const handle = openWorkbook(source, options);
+      try {
+        const frame = handle.displayList({ x: 0, y: 0, width: 600, height: 200 });
+        for (const text of ['3', '5']) {
+          expect(frame.commands.some((c) => c.op === 'text' && c.text === text)).toBe(true);
+        }
+        expect(handle.save()).toEqual(source);
+      } finally {
+        handle.dispose();
+      }
+    }
+  });
+
+  it('restores persisted state from the published 0.2.1 package', () => {
+    const update = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+    )));
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5020 });
+    const peer = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5021 });
+    try {
+      handle.applyUpdate(update);
+      expect(handle.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+      handle.editCell(0, 42, 1, 'after restore');
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      expect(peer.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+      expect(peer.cell(0, 42, 1).input).toBe('after restore');
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+        expect(reopened.cell(0, 42, 1).input).toBe('after restore');
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      handle.dispose();
+      peer.dispose();
+    }
+  });
+
+  it('refuses an old snapshot after a local edit', () => {
+    const update = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+    )));
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5022 });
+    try {
+      handle.editCell(0, 42, 0, 'local edit');
+      expect(() => handle.applyUpdate(update)).toThrow();
+      expect(handle.cell(0, 42, 0).input).toBe('local edit');
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('preserves a cleared cell and its undo history when applying a snapshot', () => {
+    for (const legacy of [false, true]) {
+      const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5023 });
+      try {
+        const original = handle.cell(0, 0, 0).input;
+        expect(original).not.toBe('');
+        const update = legacy
+          ? new Uint8Array(readFileSync(resolve(
+            import.meta.dir,
+            '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+          )))
+          : handle.encodeStateAsUpdate();
+        handle.editCell(0, 0, 0, '');
+        expect(handle.cell(0, 0, 0).input).toBe('');
+        if (legacy) {
+          expect(() => handle.applyUpdate(update)).toThrow();
+        } else {
+          handle.applyUpdate(update);
+        }
+        expect(handle.cell(0, 0, 0).input).toBe('');
+        handle.undo();
+        expect(handle.cell(0, 0, 0).input).toBe(original);
+      } finally {
+        handle.dispose();
+      }
+    }
   });
 
   it('opens the hand-built fixture and reads sheet info', () => {
@@ -57,6 +152,82 @@ describe('wasm loader', () => {
     }
   });
 
+  it('restores inherited column formatting when undoing a deletion', () => {
+    const bytes = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/column-style-undo.xlsx'
+    )));
+    const handle = openWorkbook(bytes);
+    const viewport = { x: 0, y: 0, width: 500, height: 250 };
+    const redFills = () => JSON.stringify(handle.displayList(viewport)).match(/#ff0000/gi)?.length ?? 0;
+    try {
+      expect(redFills()).toBeGreaterThan(0);
+      const before = handle.displayList(viewport);
+      handle.applyOps([{ type: 'deleteCols', sheet: 0, at: 1, count: 1 }]);
+      expect(redFills()).toBe(0);
+      for (let i = 0; i < 2; i += 1) {
+        handle.undo();
+        expect(handle.displayList(viewport)).toEqual(before);
+        const reopened = openWorkbook(handle.save());
+        try {
+          expect(reopened.displayList(viewport)).toEqual(before);
+        } finally {
+          reopened.dispose();
+        }
+        handle.redo();
+        expect(redFills()).toBe(0);
+      }
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('searches formatted cell text without changing workbook state', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      handle.editCell(0, 20, 1, 'QueryNeedle');
+      handle.editCell(1, 0, 0, 'queryneedle');
+      handle.editCell(2, 4, 2, '0.25');
+      handle.setNumberFormat(2, 'C5', 'percent');
+      const before = handle.encodeStateVector();
+
+      const options: XlsxTextSearchOptions = { caseSensitive: false };
+      const matches: XlsxTextMatch[] = handle.searchText('queryneedle', options);
+      expect(matches).toEqual([
+        {
+          sheet: 0,
+          sheetId: 'sheet:0',
+          sheetName: 'Budget',
+          row: 20,
+          col: 1,
+          a1: 'B21',
+          text: 'QueryNeedle',
+        },
+        {
+          sheet: 1,
+          sheetId: 'sheet:1',
+          sheetName: 'Summary',
+          row: 0,
+          col: 0,
+          a1: 'A1',
+          text: 'queryneedle',
+        },
+      ]);
+      expect(handle.searchText('QueryNeedle', { caseSensitive: true })).toHaveLength(1);
+      expect(handle.searchText('queryneedle', { limit: 1 })).toHaveLength(1);
+      expect(handle.searchText('25.00%')[0]).toMatchObject({
+        sheet: 2,
+        a1: 'C5',
+        text: '25.00%',
+      });
+      expect(handle.searchText('')).toEqual([]);
+      expect(() => handle.searchText('queryneedle', { limit: -1 })).toThrow(RangeError);
+      expect(handle.encodeStateVector()).toEqual(before);
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('renders a display list with real commands', () => {
     const handle = openWorkbook(sampleBytes());
     try {
@@ -68,6 +239,111 @@ describe('wasm loader', () => {
       expect(texts.some((c) => c.op === 'text' && c.text.includes('Quarterly'))).toBe(true);
       // the formula cell's cached total value renders as a number command.
       expect(texts.some((c) => c.op === 'text' && c.text === '157')).toBe(true);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('renders every chart anchor variant through the wasm display list', () => {
+    const handle = openWorkbook(chartBytes());
+    try {
+      const dl = handle.displayList({ x: 0, y: 0, width: 800, height: 800 });
+      expect(dl.charts?.length).toBe(4);
+      expect(dl.commands.some((command) => command.op === 'path')).toBe(true);
+      expect(
+        dl.commands.some(
+          (command) => command.op === 'text' && command.chart && command.text === 'Revenue trend'
+        )
+      ).toBe(true);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('resolves a point to the chart under it and nothing outside one', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const chart = (handle.displayList(viewport).charts ?? [])[0];
+      expect(chart.id.length).toBeGreaterThan(0);
+      const hit = handle.chartAtPoint(
+        viewport,
+        chart.clip.x + chart.clip.w / 2,
+        chart.clip.y + chart.clip.h / 2
+      );
+      expect(hit?.id).toBe(chart.id);
+      expect(hit?.rect).toEqual(chart.rect);
+      expect(handle.chartAtPoint(viewport, chart.rect.x - 8, chart.rect.y - 8)).toBeNull();
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  // a chart part backs a frame, not the other way round: two anchors may name
+  // one part, so only the anchor addresses a frame across the boundary.
+  it('addresses a chart by its drawing anchor and moves that one alone', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = handle.displayList(viewport).charts ?? [];
+      expect(before.map((chart) => chart.id)).toEqual([
+        'xl/drawings/drawing1.xml#0',
+        'xl/drawings/drawing1.xml#1',
+        'xl/drawings/drawing1.xml#2',
+        'xl/drawings/drawing1.xml#3',
+      ]);
+
+      const target = before.findIndex((chart) => chart.movable);
+      expect(handle.moveChart(0, before[target].id, 24, 12).applied).toBe(true);
+      const after = handle.displayList(viewport).charts ?? [];
+      expect(after.map((chart) => chart.id)).toEqual(before.map((chart) => chart.id));
+      for (const [index, chart] of after.entries()) {
+        if (index === target) expect(chart.rect).not.toEqual(before[index].rect);
+        else expect(chart.rect).toEqual(before[index].rect);
+      }
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('moves a chart by a pixel delta that survives save and undoes in one step', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = (handle.displayList(viewport).charts ?? [])[0];
+      expect(handle.moveChart(0, before.id, 24, 12).applied).toBe(true);
+
+      const moved = (handle.displayList(viewport).charts ?? [])[0];
+      expect(moved.rect.x).toBeCloseTo(before.rect.x + 24, 1);
+      expect(moved.rect.y).toBeCloseTo(before.rect.y + 12, 1);
+      expect(moved.rect.w).toBeCloseTo(before.rect.w, 1);
+      expect(moved.rect.h).toBeCloseTo(before.rect.h, 1);
+
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect((reopened.displayList(viewport).charts ?? [])[0].rect).toEqual(moved.rect);
+      } finally {
+        reopened.dispose();
+      }
+
+      handle.undo();
+      expect((handle.displayList(viewport).charts ?? [])[0].rect).toEqual(before.rect);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('refuses to move a chart pinned to the sheet by an absolute anchor', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const charts = handle.displayList(viewport).charts ?? [];
+      const pinned = charts.filter((chart) => !chart.movable);
+      expect(pinned.length).toBe(1);
+      expect(() => handle.moveChart(0, pinned[0].id, 1, 0)).toThrow(/pinned/);
+      expect(() => handle.moveChart(0, 'xl/drawings/drawing1.xml#9', 1, 0)).toThrow(
+        /drawing1\.xml#9/
+      );
     } finally {
       handle.dispose();
     }
@@ -287,6 +563,10 @@ describe('wasm loader — proposals', () => {
       }
       expect(stale).toBeInstanceOf(StaleProposalError);
       expect(stale?.cells).toContain('E7');
+      expect(stale?.message).toBe('stale: E7');
+      expect(stale?.targets).toEqual([
+        { sheet: 0, sheetId: 'sheet:0', row: 6, col: 4, a1: 'E7' },
+      ]);
 
       // force applies despite the drift.
       const forced = handle.acceptProposal(proposal.id, { force: true });

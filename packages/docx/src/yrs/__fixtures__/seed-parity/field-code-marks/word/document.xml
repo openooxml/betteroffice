@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t xml:space="preserve">Spanning </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF 1 = 1 </w:instrText></w:r></w:p>
+    <w:p><w:r><w:instrText xml:space="preserve">"yes" </w:instrText></w:r></w:p>
+    <w:p><w:r><w:instrText xml:space="preserve">"no" </w:instrText></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    <w:p><w:r><w:t xml:space="preserve">Adjacent </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF 1 = 1 "yes" "no" </w:instrText></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    <w:p><w:r><w:t xml:space="preserve">Chained </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF 1 = 1 </w:instrText></w:r></w:p>
+    <w:p><w:r><w:instrText xml:space="preserve">"yes" "no" </w:instrText></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> and </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF 1 = 1 </w:instrText></w:r></w:p>
+    <w:p><w:r><w:instrText xml:space="preserve">"again" "no" </w:instrText></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">again</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    <w:p><w:r><w:t xml:space="preserve">Nested </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF </w:instrText></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:instrText xml:space="preserve"> = 1 "yes" "no" </w:instrText></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    <w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+    <w:p><w:r><w:t xml:space="preserve">Cell </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF 1 = 1 </w:instrText></w:r></w:p>
+    <w:p><w:r><w:instrText xml:space="preserve">"yes" "no" </w:instrText></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    <w:p><w:r><w:t xml:space="preserve">Cell end</w:t></w:r></w:p>
+    </w:tc></w:tr></w:tbl>
+    <w:p><w:r><w:t xml:space="preserve">After the fields.</w:t></w:r></w:p>
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>
+  </w:body>
+</w:document>

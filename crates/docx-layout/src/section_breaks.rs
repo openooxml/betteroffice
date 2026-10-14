@@ -7,22 +7,25 @@
 //!
 //! - `nextPage` applies the next section's page size and margins immediately,
 //!   then forces a page.
-//! - `evenPage` / `oddPage` do the same and then insert one blank page if the
-//!   forced break landed on the wrong parity.
+//! - `evenPage` / `oddPage` advance under the preceding section until reaching
+//!   the requested parity, then apply the next section's page geometry.
 //! - `continuous` keeps the current sheet and defers the new geometry to the
 //!   next natural page break — unless the page size changes, which Word and
 //!   LibreOffice promote to a page break because two page sizes cannot share
 //!   one physical sheet. Sizes are compared after rounding.
+//! - `nextColumn` advances in the current band and defers geometry until the
+//!   next page. A spent band falls through to a new page; page-size or
+//!   column-count changes are promoted because they cannot share the sheet.
 //!
-//! Column layout is applied for every break kind, defaulting to a single
-//! full-width column when the section declares none.
+//! New column geometry is applied at a fresh region and otherwise queued. An
+//! omitted column layout resolves to one full-width column.
 //!
 //! The tracker half ([`SectionLayoutTracker`] and the `apply` / `promote` /
-//! `resolve_next_*` functions) models the same rules as a two-stage schedule:
-//! a break writes into `queued`, and a page or region boundary folds `queued`
-//! onto `in_force`. Every queued field is optional, and an omitted field
-//! inherits the in-force value at the boundary — that is how a `w:sectPr` that
-//! overrides only some geometry keeps the rest.
+//! `resolve_next_*` functions) is not wired into placement. It is a two-stage
+//! scheduling model, and its `nextColumn` arm neither promotes incompatible
+//! geometry nor opens the live column region. Its unit tests cover bookkeeping,
+//! not the behavior of [`handle_section_break`]; the two must be reconciled
+//! before the tracker gains a consumer.
 //!
 //! Rounding uses ties-toward-`+∞` and NaN-propagating maximum so the values
 //! reaching the canonical JSON match the host's numeric semantics.
@@ -92,6 +95,8 @@ pub struct SectionBreakOutcome {
     pub page_parity: Option<PageParity>,
     /// Begin a new column region on the current page (continuous column change).
     pub open_column_region: bool,
+    /// Move to the next column of the region in force (`nextColumn`).
+    pub advance_column: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,12 +116,20 @@ pub trait SectionBreakPaginator {
     ) -> Result<(), LayoutError>;
     /// Forces a page break and returns the new page number.
     fn force_page_break(&mut self) -> u32;
+    /// Moves to the next column, reporting whether placement now sits at the
+    /// start of a fresh column region. Idempotent on a pristine page.
+    fn advance_to_next_column(&mut self) -> bool;
     /// Create a new page even when the current page is pristine.
     fn insert_blank_page(&mut self) -> u32;
+    /// Marks the current page as an automatic parity filler.
+    fn mark_parity_filler(&mut self) {}
     /// Returns the current page size, creating the first page if needed.
     fn current_page_size(&mut self) -> Size;
+    fn current_columns(&self) -> ColumnLayout;
     /// Updates the active columns.
     fn update_columns(&mut self, columns: &ColumnLayout);
+    /// Queues columns for the next page, leaving the band in force alone.
+    fn queue_columns(&mut self, columns: &ColumnLayout);
 }
 
 // JS Math.round: nearest integer, ties toward +infinity (Rust's f64::round
@@ -127,6 +140,32 @@ fn js_math_round(x: f64) -> f64 {
     }
     let f = x.floor();
     if x - f >= 0.5 { f + 1.0 } else { f }
+}
+
+// Two page sizes cannot share one physical sheet. Sizes are compared after
+// rounding, matching the host's numeric semantics.
+fn page_size_differs(current: &Size, next: &Size) -> bool {
+    js_math_round(next.w) != js_math_round(current.w)
+        || js_math_round(next.h) != js_math_round(current.h)
+}
+
+pub(crate) fn restart_starts_page<P: SectionBreakPaginator>(
+    paginator: &mut P,
+    next: &SectionLayoutConfig,
+    section_type: Option<SectionBreakType>,
+) -> bool {
+    match section_type {
+        Some(SectionBreakType::Continuous) => {
+            page_size_differs(&paginator.current_page_size(), &next.page_size)
+        }
+        Some(SectionBreakType::NextColumn) => {
+            let columns = paginator.current_columns().count;
+            columns == 1.0
+                || next.columns.as_ref().map_or(1.0, |next| next.count) != columns
+                || page_size_differs(&paginator.current_page_size(), &next.page_size)
+        }
+        _ => true,
+    }
 }
 
 // JS Math.max(a, b): NaN-propagating (Rust's f64::max ignores NaN).
@@ -199,8 +238,10 @@ pub fn create_section_layout_tracker(
 ///
 /// The tracker is never mutated in place, so a caller can discard the result.
 /// `nextPage` / `evenPage` / `oddPage` always break and queue their columns.
-/// A `continuous` break opens a new column region on the current page only
-/// when its column count or gap differs from the columns in force; a section
+/// `nextColumn` queues and advances here; live-geometry promotion remains in
+/// [`handle_section_break`]. A
+/// `continuous` break opens a new column region on the current page only when
+/// its column count or gap differs from the columns in force; a section
 /// declaring no columns resolves to a single full-width column.
 pub fn apply_section_break(
     block: &SectionBreakBlock,
@@ -235,6 +276,7 @@ pub fn apply_section_break(
             break_to_new_page: true,
             page_parity: None,
             open_column_region: false,
+            advance_column: false,
         };
         if break_kind == SectionBreakType::EvenPage {
             outcome.page_parity = Some(PageParity::Even);
@@ -244,6 +286,19 @@ pub fn apply_section_break(
         }
         return ApplySectionBreakResult {
             outcome,
+            tracker: updated,
+        };
+    }
+
+    if break_kind == SectionBreakType::NextColumn {
+        updated.queued.columns = Some(incoming_columns);
+        return ApplySectionBreakResult {
+            outcome: SectionBreakOutcome {
+                break_to_new_page: false,
+                page_parity: None,
+                open_column_region: false,
+                advance_column: true,
+            },
             tracker: updated,
         };
     }
@@ -258,6 +313,7 @@ pub fn apply_section_break(
                 break_to_new_page: false,
                 page_parity: None,
                 open_column_region: true,
+                advance_column: false,
             },
             tracker: updated,
         };
@@ -268,6 +324,7 @@ pub fn apply_section_break(
             break_to_new_page: false,
             page_parity: None,
             open_column_region: false,
+            advance_column: false,
         },
         tracker: updated,
     }
@@ -330,12 +387,11 @@ pub fn resolve_next_columns(tracker: &SectionLayoutTracker) -> ColumnLayout {
 // One inch at 96 DPI.
 const DEFAULT_MARGIN_PX: f64 = 96.0;
 
-/// Fills missing body margins with one inch and defaults the header/footer
-/// distances to the resolved top/bottom body margins.
+/// Missing margins default to one inch; negative top/bottom resolve to absolute distance.
 pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
-    let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top);
+    let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top.abs());
     let right = requested.map_or(DEFAULT_MARGIN_PX, |m| m.right);
-    let bottom = requested.map_or(DEFAULT_MARGIN_PX, |m| m.bottom);
+    let bottom = requested.map_or(DEFAULT_MARGIN_PX, |m| m.bottom.abs());
     let left = requested.map_or(DEFAULT_MARGIN_PX, |m| m.left);
     PageMargins {
         top,
@@ -349,6 +405,9 @@ pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
 
 /// Drives the paginator through a section break, per the module rules.
 ///
+/// Returns whether the new section opened a fresh column region. A same-band
+/// `nextColumn` queues its columns and returns false.
+///
 /// `next_section_config` and `next_section_type` describe the section being
 /// entered, not the one ending; the block itself carries no geometry the
 /// paginator needs at this point.
@@ -357,12 +416,18 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
     paginator: &mut P,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
-) -> Result<(), LayoutError> {
+) -> Result<bool, LayoutError> {
     // ECMA-376 §17.6.22: w:type specifies how the NEXT section starts relative
     // to this one. Default is 'nextPage' when w:type is absent.
     let break_type = next_section_type.unwrap_or(SectionBreakType::NextPage);
     let page_size = Some(&next_section_config.page_size);
     let margins = Some(&next_section_config.margins);
+    let default_cols = default_columns();
+    let next_columns = next_section_config
+        .columns
+        .as_ref()
+        .unwrap_or(&default_cols);
+    let mut opened_column_region = true;
 
     match break_type {
         SectionBreakType::NextPage => {
@@ -371,21 +436,21 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
         }
 
         SectionBreakType::EvenPage => {
-            paginator.update_page_layout(page_size, margins, true)?;
             let page_number = paginator.force_page_break();
-            // If landed on odd page, add another page
             if page_number % 2 != 0 {
+                paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
+            paginator.update_page_layout(page_size, margins, true)?;
         }
 
         SectionBreakType::OddPage => {
-            paginator.update_page_layout(page_size, margins, true)?;
             let page_number = paginator.force_page_break();
-            // If landed on even page, add another page
             if page_number % 2 == 0 {
+                paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
+            paginator.update_page_layout(page_size, margins, true)?;
         }
 
         SectionBreakType::Continuous => {
@@ -396,10 +461,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
             // section, so Word and LibreOffice promote it to a page break when
             // the next section's page size differs from the current page's.
             let current_size = paginator.current_page_size();
-            let next_size = &next_section_config.page_size;
-            let page_size_changes = js_math_round(next_size.w) != js_math_round(current_size.w)
-                || js_math_round(next_size.h) != js_math_round(current_size.h);
-            if page_size_changes {
+            if page_size_differs(&current_size, &next_section_config.page_size) {
                 paginator.update_page_layout(page_size, margins, true)?;
                 paginator.force_page_break();
             } else {
@@ -407,23 +469,38 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
                     .update_page_layout(page_size, margins, /* apply_immediately */ false)?;
             }
         }
+
+        SectionBreakType::NextColumn => {
+            // Page size and column count cannot change mid-sheet, so Word
+            // promotes incompatible breaks. Otherwise geometry is deferred as
+            // the current band advances, falling through when it is spent.
+            let current_size = paginator.current_page_size();
+            let incompatible = page_size_differs(&current_size, &next_section_config.page_size)
+                || next_columns.count != paginator.current_columns().count;
+            if incompatible {
+                paginator.update_page_layout(page_size, margins, true)?;
+                paginator.force_page_break();
+            } else {
+                paginator
+                    .update_page_layout(page_size, margins, /* apply_immediately */ false)?;
+                opened_column_region = paginator.advance_to_next_column();
+            }
+        }
     }
 
-    // Update column layout for the next section
-    let default_cols = default_columns();
-    paginator.update_columns(
-        next_section_config
-            .columns
-            .as_ref()
-            .unwrap_or(&default_cols),
-    );
-    Ok(())
+    if opened_column_region {
+        paginator.update_columns(next_columns);
+    } else {
+        paginator.queue_columns(next_columns);
+    }
+    Ok(opened_column_region)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::BlockId;
+    use serde_json::{Value, json};
 
     fn margins(top: f64, right: f64, bottom: f64, left: f64) -> PageMargins {
         PageMargins {
@@ -704,6 +781,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_page_margins_absorbs_negative_body_distances() {
+        let top_only = resolve_page_margins(Some(&PageMargins {
+            header: Some(709.0 / 15.0),
+            footer: Some(48.0),
+            ..margins(-1438.0 / 15.0, 96.0, 96.0, 96.0)
+        }));
+        assert_eq!(top_only.top, 1438.0 / 15.0);
+        assert_eq!(top_only.bottom, 96.0);
+        assert_eq!(top_only.header, Some(709.0 / 15.0));
+
+        let bottom_only = resolve_page_margins(Some(&PageMargins {
+            header: Some(48.0),
+            footer: Some(48.0),
+            ..margins(96.0, 96.0, -1440.0 / 15.0, 96.0)
+        }));
+        assert_eq!(bottom_only.top, 96.0);
+        assert_eq!(bottom_only.bottom, 1440.0 / 15.0);
+
+        let both = resolve_page_margins(Some(&margins(-1438.0 / 15.0, 96.0, -1440.0 / 15.0, 96.0)));
+        assert_eq!(both.top, 1438.0 / 15.0);
+        assert_eq!(both.bottom, 1440.0 / 15.0);
+        assert_eq!(both.header, Some(1438.0 / 15.0));
+        assert_eq!(both.footer, Some(1440.0 / 15.0));
+    }
+
+    #[test]
     fn js_math_round_matches_js_semantics() {
         assert_eq!(js_math_round(0.5), 1.0);
         assert_eq!(js_math_round(-0.5), 0.0); // JS: -0, ties toward +infinity
@@ -712,6 +815,13 @@ mod tests {
         assert_eq!(js_math_round(816.0), 816.0);
         // spec edge: closest double below 0.5 must not round up
         assert_eq!(js_math_round(0.49999999999999994), 0.0);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ColumnLanding {
+        AlreadyFresh,
+        SameRegion,
+        NewPage,
     }
 
     #[derive(Debug, PartialEq)]
@@ -727,7 +837,15 @@ mod tests {
         InsertBlankPage {
             new_page_number: u32,
         },
+        MarkParityFiller {
+            page_number: u32,
+        },
+        AdvanceColumn(ColumnLanding),
         UpdateColumns {
+            count: f64,
+            gap: f64,
+        },
+        QueueColumns {
             count: f64,
             gap: f64,
         },
@@ -735,19 +853,66 @@ mod tests {
 
     struct MockPaginator {
         page_size: Size,
+        margins_top: f64,
         page_number: u32,
         pending_page_size: Option<Size>,
+        pending_margins_top: Option<f64>,
+        columns: ColumnLayout,
+        pending_columns: Option<ColumnLayout>,
+        column_index: usize,
+        pristine: bool,
+        /// Geometry stamped on the current sheet, distinct from pending state.
+        page: Size,
+        page_margins_top: f64,
         calls: Vec<Call>,
     }
+
+    const INITIAL_MARGIN_TOP: f64 = 96.0;
 
     impl MockPaginator {
         fn new(page_size: Size, page_number: u32) -> Self {
             MockPaginator {
+                page: page_size.clone(),
+                page_margins_top: INITIAL_MARGIN_TOP,
                 page_size,
+                margins_top: INITIAL_MARGIN_TOP,
                 page_number,
                 pending_page_size: None,
+                pending_margins_top: None,
+                columns: SINGLE_COLUMN,
+                pending_columns: None,
+                column_index: 0,
+                pristine: false,
                 calls: Vec::new(),
             }
+        }
+
+        fn with_columns(page_size: Size, page_number: u32, columns: ColumnLayout) -> Self {
+            MockPaginator {
+                columns,
+                ..MockPaginator::new(page_size, page_number)
+            }
+        }
+
+        fn stamp_page(&mut self) {
+            self.page = self.page_size.clone();
+            self.page_margins_top = self.margins_top;
+        }
+
+        fn open_page(&mut self) {
+            if let Some(size) = self.pending_page_size.take() {
+                self.page_size = size;
+            }
+            if let Some(top) = self.pending_margins_top.take() {
+                self.margins_top = top;
+            }
+            if let Some(columns) = self.pending_columns.take() {
+                self.columns = columns;
+            }
+            self.page_number += 1;
+            self.column_index = 0;
+            self.pristine = true;
+            self.stamp_page();
         }
     }
 
@@ -767,18 +932,29 @@ mod tests {
                 if let Some(size) = page_size {
                     self.page_size = size.clone();
                 }
+                if let Some(margins) = margins {
+                    self.margins_top = margins.top;
+                }
                 self.pending_page_size = None;
-            } else if let Some(size) = page_size {
-                self.pending_page_size = Some(size.clone());
+                self.pending_margins_top = None;
+                if self.pristine {
+                    self.stamp_page();
+                }
+            } else {
+                if let Some(size) = page_size {
+                    self.pending_page_size = Some(size.clone());
+                }
+                if let Some(margins) = margins {
+                    self.pending_margins_top = Some(margins.top);
+                }
             }
             Ok(())
         }
 
         fn force_page_break(&mut self) -> u32 {
-            if let Some(size) = self.pending_page_size.take() {
-                self.page_size = size;
+            if !self.pristine {
+                self.open_page();
             }
-            self.page_number += 1;
             self.calls.push(Call::ForcePageBreak {
                 new_page_number: self.page_number,
             });
@@ -786,15 +962,41 @@ mod tests {
         }
 
         fn insert_blank_page(&mut self) -> u32 {
-            self.page_number += 1;
+            self.open_page();
             self.calls.push(Call::InsertBlankPage {
                 new_page_number: self.page_number,
             });
             self.page_number
         }
 
+        fn mark_parity_filler(&mut self) {
+            self.calls.push(Call::MarkParityFiller {
+                page_number: self.page_number,
+            });
+        }
+
+        fn advance_to_next_column(&mut self) -> bool {
+            let landing = if self.pristine && self.column_index == 0 {
+                ColumnLanding::AlreadyFresh
+            } else if (self.column_index as f64) + 1.0 < self.columns.count {
+                self.column_index += 1;
+                self.pristine = false;
+                ColumnLanding::SameRegion
+            } else {
+                self.open_page();
+                ColumnLanding::NewPage
+            };
+            let opened_region = landing != ColumnLanding::SameRegion;
+            self.calls.push(Call::AdvanceColumn(landing));
+            opened_region
+        }
+
         fn current_page_size(&mut self) -> Size {
-            self.page_size.clone()
+            self.page.clone()
+        }
+
+        fn current_columns(&self) -> ColumnLayout {
+            self.columns.clone()
         }
 
         fn update_columns(&mut self, columns: &ColumnLayout) {
@@ -802,6 +1004,16 @@ mod tests {
                 count: columns.count,
                 gap: columns.gap,
             });
+            self.pending_columns = None;
+            self.columns = columns.clone();
+        }
+
+        fn queue_columns(&mut self, columns: &ColumnLayout) {
+            self.calls.push(Call::QueueColumns {
+                count: columns.count,
+                gap: columns.gap,
+            });
+            self.pending_columns = Some(columns.clone());
         }
     }
 
@@ -870,7 +1082,8 @@ mod tests {
             apply_immediately: true,
         }));
 
-        // sb2: back to portrait — promoted again
+        // Give the second break content to break away from.
+        paginator.pristine = false;
         handle_section_break(
             &empty_break(),
             &mut paginator,
@@ -1000,6 +1213,72 @@ mod tests {
     }
 
     #[test]
+    fn parity_mismatch_marks_the_current_sheet_before_inserting() {
+        for (break_type, start, mismatch, content) in [
+            (SectionBreakType::OddPage, 1, 2, 3),
+            (SectionBreakType::EvenPage, 2, 3, 4),
+        ] {
+            let mut paginator = MockPaginator::new(PORTRAIT, start);
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(PORTRAIT, None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, content);
+            let breaks: Vec<_> = paginator
+                .calls
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call,
+                        Call::ForcePageBreak { .. }
+                            | Call::MarkParityFiller { .. }
+                            | Call::InsertBlankPage { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(
+                breaks,
+                [
+                    &Call::ForcePageBreak {
+                        new_page_number: mismatch
+                    },
+                    &Call::MarkParityFiller {
+                        page_number: mismatch
+                    },
+                    &Call::InsertBlankPage {
+                        new_page_number: content
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn parity_match_marks_no_sheet() {
+        for (break_type, start, landed) in [
+            (SectionBreakType::OddPage, 2, 3),
+            (SectionBreakType::EvenPage, 1, 2),
+        ] {
+            let mut paginator = MockPaginator::new(PORTRAIT, start);
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(PORTRAIT, None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, landed);
+            assert!(!paginator.calls.iter().any(|call| matches!(
+                call,
+                Call::MarkParityFiller { .. } | Call::InsertBlankPage { .. }
+            )));
+        }
+    }
+
+    #[test]
     fn continuous_break_applies_next_section_columns() {
         let mut paginator = MockPaginator::new(Size { w: 500.0, h: 500.0 }, 1);
         handle_section_break(
@@ -1026,5 +1305,817 @@ mod tests {
                 gap: 20.0
             })
         );
+    }
+
+    fn cols(count: f64, gap: f64) -> ColumnLayout {
+        ColumnLayout {
+            count,
+            gap,
+            equal_width: None,
+            separator: None,
+            columns: None,
+        }
+    }
+
+    fn next_column_break<P: SectionBreakPaginator>(
+        paginator: &mut P,
+        next: SectionLayoutConfig,
+    ) -> bool {
+        handle_section_break(
+            &empty_break(),
+            paginator,
+            &next,
+            Some(SectionBreakType::NextColumn),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn next_column_break_stays_in_the_band_and_queues_the_new_columns() {
+        let mut paginator = MockPaginator::with_columns(PORTRAIT, 1, cols(2.0, 24.0));
+        let opened_region =
+            next_column_break(&mut paginator, config(PORTRAIT, Some(cols(2.0, 36.0))));
+        assert!(!opened_region);
+        assert_eq!(paginator.page_number, 1);
+        assert_eq!(paginator.column_index, 1);
+        assert_eq!(paginator.columns.gap, 24.0);
+        assert_eq!(
+            paginator.calls,
+            vec![
+                Call::UpdatePageLayout {
+                    page_size: Some(PORTRAIT),
+                    margins_top: Some(50.0),
+                    apply_immediately: false,
+                },
+                Call::AdvanceColumn(ColumnLanding::SameRegion),
+                Call::QueueColumns {
+                    count: 2.0,
+                    gap: 36.0
+                },
+            ]
+        );
+
+        paginator.open_page();
+        assert_eq!(paginator.columns.gap, 36.0);
+    }
+
+    #[test]
+    fn next_column_break_promotes_a_column_count_change_to_a_page() {
+        for next in [cols(3.0, 24.0), cols(1.0, 0.0)] {
+            let mut paginator = MockPaginator::with_columns(PORTRAIT, 1, cols(2.0, 24.0));
+            let opened_region =
+                next_column_break(&mut paginator, config(PORTRAIT, Some(next.clone())));
+            assert!(opened_region);
+            assert_eq!(paginator.page_number, 2);
+            assert_eq!(
+                paginator.calls,
+                vec![
+                    Call::UpdatePageLayout {
+                        page_size: Some(PORTRAIT),
+                        margins_top: Some(50.0),
+                        apply_immediately: true,
+                    },
+                    Call::ForcePageBreak { new_page_number: 2 },
+                    Call::UpdateColumns {
+                        count: next.count,
+                        gap: next.gap
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn next_column_break_promotes_a_page_size_change_to_a_page() {
+        let mut paginator = MockPaginator::with_columns(PORTRAIT, 1, cols(2.0, 24.0));
+        let opened_region =
+            next_column_break(&mut paginator, config(LANDSCAPE, Some(cols(2.0, 24.0))));
+        assert!(opened_region);
+        assert_eq!(paginator.page_number, 2);
+        assert_eq!(paginator.current_page_size(), LANDSCAPE);
+        assert!(
+            paginator
+                .calls
+                .contains(&Call::ForcePageBreak { new_page_number: 2 })
+        );
+    }
+
+    #[test]
+    fn next_column_break_from_the_last_column_opens_a_page() {
+        let mut paginator = MockPaginator::with_columns(PORTRAIT, 1, cols(2.0, 24.0));
+        paginator.column_index = 1;
+        let opened_region =
+            next_column_break(&mut paginator, config(PORTRAIT, Some(cols(2.0, 24.0))));
+        assert!(opened_region);
+        assert_eq!(paginator.page_number, 2);
+        assert_eq!(paginator.column_index, 0);
+        assert_eq!(
+            paginator.calls,
+            vec![
+                Call::UpdatePageLayout {
+                    page_size: Some(PORTRAIT),
+                    margins_top: Some(50.0),
+                    apply_immediately: false,
+                },
+                Call::AdvanceColumn(ColumnLanding::NewPage),
+                Call::UpdateColumns {
+                    count: 2.0,
+                    gap: 24.0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn next_column_break_in_a_single_column_section_starts_a_page() {
+        let mut paginator = MockPaginator::new(PORTRAIT, 1);
+        let opened_region = next_column_break(&mut paginator, config(PORTRAIT, None));
+        assert!(opened_region);
+        assert_eq!(paginator.page_number, 2);
+        assert!(
+            paginator
+                .calls
+                .contains(&Call::AdvanceColumn(ColumnLanding::NewPage))
+        );
+    }
+
+    #[test]
+    fn next_column_break_on_a_pristine_page_adds_no_blank_page() {
+        for columns in [cols(1.0, 0.0), cols(2.0, 24.0)] {
+            let mut paginator = MockPaginator::with_columns(PORTRAIT, 1, columns.clone());
+            paginator.pristine = true;
+            let opened_region = next_column_break(&mut paginator, config(PORTRAIT, Some(columns)));
+            assert!(opened_region);
+            assert_eq!(paginator.page_number, 1);
+            assert_eq!(paginator.column_index, 0);
+            assert_eq!(
+                paginator.calls[1],
+                Call::AdvanceColumn(ColumnLanding::AlreadyFresh)
+            );
+        }
+    }
+
+    #[test]
+    fn promoted_breaks_on_a_pristine_page_re_form_it() {
+        let mut paginator = MockPaginator::new(PORTRAIT, 1);
+        paginator.pristine = true;
+        for (break_type, size) in [
+            (SectionBreakType::Continuous, LANDSCAPE),
+            (SectionBreakType::NextColumn, PORTRAIT),
+        ] {
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(size.clone(), None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, 1);
+            assert_eq!(paginator.current_page_size(), size);
+            assert_eq!(paginator.page_margins_top, 50.0);
+        }
+    }
+
+    #[test]
+    fn apply_next_column_break_advances_the_column_and_queues_columns() {
+        let tracker = base_tracker();
+        let columns = cols(2.0, 24.0);
+        let result = apply_section_break(
+            &SectionBreakBlock {
+                break_type: Some(SectionBreakType::NextColumn),
+                columns: Some(columns.clone()),
+                ..empty_break()
+            },
+            &tracker,
+        );
+        assert!(result.outcome.advance_column);
+        assert!(!result.outcome.break_to_new_page);
+        assert!(!result.outcome.open_column_region);
+        assert_eq!(result.tracker.queued.columns, Some(columns));
+    }
+
+    fn measured_paragraph_with_line_height(id: u32, lines: usize, line_height: f64) -> Value {
+        json!({
+            "block": {
+                "kind": "paragraph",
+                "id": id,
+                "runs": [{"kind": "text", "text": "x"}],
+                "attrs": {}
+            },
+            "measure": {
+                "kind": "paragraph",
+                "lines": (0..lines)
+                    .map(|_| json!({
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                        "width": 200,
+                        "ascent": line_height * 0.8,
+                        "descent": line_height * 0.2,
+                        "lineHeight": line_height
+                    }))
+                    .collect::<Vec<_>>(),
+                "totalHeight": lines as f64 * line_height
+            }
+        })
+    }
+
+    fn measured_paragraph(id: u32, lines: usize) -> Value {
+        measured_paragraph_with_line_height(id, lines, 24.0)
+    }
+
+    #[derive(Default)]
+    struct Scenario {
+        first: Option<ColumnLayout>,
+        second: Option<ColumnLayout>,
+        final_page_size: Option<Size>,
+        head_lines: usize,
+        tail_lines: usize,
+    }
+
+    fn layout_of(break_type: &str, scenario: Scenario) -> crate::types::Layout {
+        let mut section_break = json!({"kind": "sectionBreak", "id": 1});
+        if let Some(columns) = &scenario.first {
+            section_break["columns"] = serde_json::to_value(columns).unwrap();
+        }
+        let mut options = json!({
+            "pageSize": {"w": 816, "h": 1056},
+            "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+            "bodyBreakType": break_type
+        });
+        if let Some(columns) = &scenario.second {
+            options["columns"] = serde_json::to_value(columns).unwrap();
+        }
+        if let Some(size) = &scenario.final_page_size {
+            options["finalPageSize"] = serde_json::to_value(size).unwrap();
+        }
+        let input = json!({
+            "measured": [
+                measured_paragraph(0, scenario.head_lines.max(1)),
+                {"block": section_break, "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(2, scenario.tail_lines.max(1))
+            ],
+            "options": options
+        });
+        crate::compute_layout(&input.to_string()).unwrap()
+    }
+
+    fn placements(layout: &crate::types::Layout) -> Vec<(u32, f64, f64)> {
+        layout
+            .pages
+            .iter()
+            .flat_map(|page| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let crate::types::Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    Some((page.number, paragraph.x, paragraph.y))
+                })
+            })
+            .collect()
+    }
+
+    fn parity_mismatch_layout(break_type: &str, leading: bool) -> crate::types::Layout {
+        let mut measured = Vec::new();
+        if !leading {
+            measured.push(measured_paragraph(0, 1));
+        }
+        measured.push(json!({
+            "block": {
+                "kind": "sectionBreak",
+                "id": 1,
+                "columns": {"count": 2, "gap": 24}
+            },
+            "measure": {"kind": "sectionBreak"}
+        }));
+        measured.push(measured_paragraph(2, 1));
+        let input = json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": break_type,
+                "columns": {"count": 3, "gap": 48},
+                "finalPageSize": {"w": 1056, "h": 816},
+                "finalMargins": {"top": 48, "right": 72, "bottom": 64, "left": 80}
+            }
+        });
+        crate::compute_layout(&input.to_string()).unwrap()
+    }
+
+    fn page_spine(layout: &crate::types::Layout) -> Vec<(u32, f64, f64, f64, f64, usize, usize)> {
+        layout
+            .pages
+            .iter()
+            .map(|page| {
+                let columns = page.columns.as_ref().unwrap_or(&SINGLE_COLUMN);
+                (
+                    page.number,
+                    page.size.w,
+                    page.size.h,
+                    columns.count,
+                    columns.gap,
+                    page.fragments.len(),
+                    page.region_section_index,
+                )
+            })
+            .collect()
+    }
+
+    fn distinct_section_furniture() -> crate::regions::DocumentRegions {
+        serde_json::from_value(json!({
+            "sections": [
+                {
+                    "sectionId": "old",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-old",
+                        "footerDefault": "footer-old"
+                    },
+                    "pageBorders": {"source": "old"},
+                    "watermark": {"source": "old"},
+                    "pageNumbering": {"start": 9}
+                },
+                {
+                    "sectionId": "new",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-new",
+                        "footerDefault": "footer-new"
+                    },
+                    "pageBorders": {"source": "new"},
+                    "watermark": {"source": "new"},
+                    "pageNumbering": {"start": 3}
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn assert_section_furniture(
+        page: &crate::types::Page,
+        section_index: u64,
+        section_id: &str,
+        section_page_number: u64,
+    ) {
+        let refs = page.header_footer_refs.as_ref().unwrap();
+        assert_eq!(page.section_index, Some(section_index));
+        assert_eq!(page.section_id.as_deref(), Some(section_id));
+        assert_eq!(
+            refs.header_default.as_deref(),
+            Some(format!("header-{section_id}").as_str())
+        );
+        assert_eq!(
+            refs.footer_default.as_deref(),
+            Some(format!("footer-{section_id}").as_str())
+        );
+        assert_eq!(
+            page.page_borders.as_ref(),
+            Some(&json!({"source": section_id}))
+        );
+        assert_eq!(
+            page.watermark.as_ref(),
+            Some(&json!({"source": section_id}))
+        );
+        assert_eq!(page.section_page_number, Some(section_page_number));
+    }
+
+    #[test]
+    fn next_column_section_break_places_the_next_section_in_the_next_column() {
+        let layout = layout_of(
+            "nextColumn",
+            Scenario {
+                first: Some(cols(2.0, 24.0)),
+                second: Some(cols(2.0, 24.0)),
+                ..Scenario::default()
+            },
+        );
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(placements(&layout), vec![(1, 96.0, 96.0), (1, 420.0, 96.0)]);
+    }
+
+    #[test]
+    fn continuous_column_bands_follow_the_deepest_column_and_restore_page_room() {
+        for (reservation, page, y) in [(0.0, 1, 350.0), (200.0, 2, 100.0)] {
+            let input = json!({
+                "measured": [
+                    measured_paragraph_with_line_height(0, 1, 50.0),
+                    {"block":{"kind":"sectionBreak","id":1,"type":"continuous",
+                        "columns":{"count":1,"gap":20}},"measure":{"kind":"sectionBreak"}},
+                    measured_paragraph_with_line_height(2, 1, 100.0),
+                    measured_paragraph_with_line_height(3, 1, 100.0),
+                    measured_paragraph_with_line_height(4, 1, 100.0),
+                    {"block":{"kind":"sectionBreak","id":5,"type":"continuous",
+                        "columns":{"count":2,"gap":20}},"measure":{"kind":"sectionBreak"}},
+                    measured_paragraph_with_line_height(6, 1, 500.0),
+                ],
+                "options": {
+                    "pageSize":{"w":800,"h":1000},
+                    "margins":{"top":100,"right":100,"bottom":100,"left":100},
+                    "bodyBreakType":"continuous","columns":{"count":1,"gap":20},
+                    "footnoteReservedHeights":{"1":reservation},
+                }
+            });
+            let layout = crate::compute_layout(&input.to_string()).unwrap();
+            assert_eq!(layout.pages.len(), page as usize);
+            assert_eq!(
+                placements(&layout),
+                vec![
+                    (1, 100.0, 100.0),
+                    (1, 100.0, 150.0),
+                    (1, 100.0, 250.0),
+                    (1, 410.0, 150.0),
+                    (page, 100.0, y),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn continuous_column_bands_keep_current_page_margins_until_overflow() {
+        let input = json!({
+            "measured": [
+                measured_paragraph_with_line_height(0, 1, 100.0),
+                measured_paragraph_with_line_height(1, 1, 100.0),
+                measured_paragraph_with_line_height(2, 1, 100.0),
+                {"block":{"kind":"sectionBreak","id":3,"type":"continuous",
+                    "columns":{"count":2,"gap":20}},"measure":{"kind":"sectionBreak"}},
+                measured_paragraph_with_line_height(4, 1, 550.0),
+                measured_paragraph_with_line_height(5, 1, 100.0),
+            ],
+            "options": {
+                "pageSize":{"w":800,"h":1000},
+                "margins":{"top":100,"right":100,"bottom":100,"left":100},
+                "bodyBreakType":"continuous","columns":{"count":1,"gap":20},
+                "finalMargins":{"top":150,"right":100,"bottom":200,"left":100},
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            placements(&layout),
+            vec![
+                (1, 100.0, 100.0),
+                (1, 100.0, 200.0),
+                (1, 410.0, 100.0),
+                (1, 100.0, 300.0),
+                (2, 100.0, 150.0),
+            ]
+        );
+        assert_eq!(layout.pages[0].margins.bottom, 100.0);
+        assert_eq!(layout.pages[1].margins.bottom, 200.0);
+    }
+
+    #[test]
+    fn next_column_section_does_not_inherit_the_outgoing_balance_limit() {
+        let mut measured = vec![
+            measured_paragraph_with_line_height(0, 2, 100.0),
+            json!({
+                "block": {
+                    "kind": "sectionBreak",
+                    "id": 1,
+                    "columns": {"count": 2, "gap": 20}
+                },
+                "measure": {"kind": "sectionBreak"}
+            }),
+        ];
+        measured.extend((2..8).map(|id| measured_paragraph_with_line_height(id, 1, 100.0)));
+        let input = json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 800, "h": 1000},
+                "margins": {"top": 100, "right": 100, "bottom": 100, "left": 100},
+                "bodyBreakType": "nextColumn",
+                "columns": {"count": 2, "gap": 20}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(
+            placements(&layout),
+            vec![
+                (1, 100.0, 100.0),
+                (1, 410.0, 100.0),
+                (1, 410.0, 200.0),
+                (1, 410.0, 300.0),
+                (1, 410.0, 400.0),
+                (1, 410.0, 500.0),
+                (1, 410.0, 600.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn later_next_column_section_does_not_inherit_the_outgoing_balance_limit() {
+        let mut measured = vec![
+            measured_paragraph_with_line_height(0, 1, 100.0),
+            json!({
+                "block": {
+                    "kind": "sectionBreak",
+                    "id": 1,
+                    "columns": {"count": 2, "gap": 20}
+                },
+                "measure": {"kind": "sectionBreak"}
+            }),
+            measured_paragraph_with_line_height(2, 2, 100.0),
+            json!({
+                "block": {
+                    "kind": "sectionBreak",
+                    "id": 3,
+                    "type": "nextPage",
+                    "columns": {"count": 2, "gap": 20}
+                },
+                "measure": {"kind": "sectionBreak"}
+            }),
+        ];
+        measured.extend((4..10).map(|id| measured_paragraph_with_line_height(id, 1, 100.0)));
+        let input = json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 800, "h": 1000},
+                "margins": {"top": 100, "right": 100, "bottom": 100, "left": 100},
+                "bodyBreakType": "nextColumn",
+                "columns": {"count": 2, "gap": 20}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            placements(&layout),
+            vec![
+                (1, 100.0, 100.0),
+                (2, 100.0, 100.0),
+                (2, 410.0, 100.0),
+                (2, 410.0, 200.0),
+                (2, 410.0, 300.0),
+                (2, 410.0, 400.0),
+                (2, 410.0, 500.0),
+                (2, 410.0, 600.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn next_column_section_break_defers_a_gap_change_to_the_next_page() {
+        let layout = layout_of(
+            "nextColumn",
+            Scenario {
+                first: Some(cols(2.0, 24.0)),
+                second: Some(cols(2.0, 120.0)),
+                tail_lines: 74,
+                ..Scenario::default()
+            },
+        );
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            placements(&layout),
+            vec![
+                (1, 96.0, 96.0),
+                (1, 420.0, 96.0),
+                (2, 96.0, 96.0),
+                (2, 468.0, 96.0),
+            ]
+        );
+        assert_eq!(layout.pages[0].columns.as_ref().unwrap().gap, 24.0);
+        assert_eq!(layout.pages[1].columns.as_ref().unwrap().gap, 120.0);
+    }
+
+    #[test]
+    fn next_column_section_break_promoted_by_a_column_count_change() {
+        for second in [cols(3.0, 24.0), cols(1.0, 0.0)] {
+            let layout = layout_of(
+                "nextColumn",
+                Scenario {
+                    first: Some(cols(2.0, 24.0)),
+                    second: Some(second.clone()),
+                    ..Scenario::default()
+                },
+            );
+            assert_eq!(layout.pages.len(), 2);
+            assert_eq!(placements(&layout), vec![(1, 96.0, 96.0), (2, 96.0, 96.0)]);
+            assert_eq!(
+                layout.pages[1].columns.as_ref().map_or(1.0, |c| c.count),
+                second.count
+            );
+        }
+    }
+
+    #[test]
+    fn next_column_section_break_promoted_by_a_page_size_change() {
+        let landscape = Size {
+            w: 1056.0,
+            h: 816.0,
+        };
+        let layout = layout_of(
+            "nextColumn",
+            Scenario {
+                first: Some(cols(2.0, 24.0)),
+                second: Some(cols(2.0, 24.0)),
+                final_page_size: Some(landscape.clone()),
+                ..Scenario::default()
+            },
+        );
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(placements(&layout), vec![(1, 96.0, 96.0), (2, 96.0, 96.0)]);
+        assert_eq!(layout.pages[1].size, landscape);
+    }
+
+    #[test]
+    fn next_column_section_break_in_a_single_column_document_starts_a_new_page() {
+        let layout = layout_of("nextColumn", Scenario::default());
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(placements(&layout), vec![(1, 96.0, 96.0), (2, 96.0, 96.0)]);
+    }
+
+    #[test]
+    fn next_page_section_break_leaves_the_band_for_a_new_page() {
+        let layout = layout_of(
+            "nextPage",
+            Scenario {
+                first: Some(cols(2.0, 24.0)),
+                second: Some(cols(2.0, 24.0)),
+                ..Scenario::default()
+            },
+        );
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(placements(&layout), vec![(1, 96.0, 96.0), (2, 96.0, 96.0)]);
+    }
+
+    #[test]
+    fn leading_even_page_mismatch_preserves_the_filler_section() {
+        let mut layout = parity_mismatch_layout("evenPage", true);
+        assert_eq!(
+            page_spine(&layout),
+            vec![
+                (1, 816.0, 1056.0, 2.0, 24.0, 0, 0),
+                (2, 1056.0, 816.0, 3.0, 48.0, 1, 1),
+            ]
+        );
+
+        crate::regions::apply_document_regions(&mut layout, &distinct_section_furniture());
+        assert_section_furniture(&layout.pages[0], 0, "old", 9);
+        assert_section_furniture(&layout.pages[1], 1, "new", 3);
+    }
+
+    #[test]
+    fn odd_page_mismatch_preserves_the_filler_section() {
+        let mut layout = parity_mismatch_layout("oddPage", false);
+        assert_eq!(
+            page_spine(&layout),
+            vec![
+                (1, 816.0, 1056.0, 2.0, 24.0, 1, 0),
+                (2, 816.0, 1056.0, 2.0, 24.0, 0, 0),
+                (3, 1056.0, 816.0, 3.0, 48.0, 1, 1),
+            ]
+        );
+
+        crate::regions::apply_document_regions(&mut layout, &distinct_section_furniture());
+        assert_section_furniture(&layout.pages[0], 0, "old", 9);
+        assert_section_furniture(&layout.pages[1], 0, "old", 10);
+        assert_section_furniture(&layout.pages[2], 1, "new", 3);
+    }
+
+    #[test]
+    fn leading_next_column_section_break_adds_no_blank_page() {
+        let input = json!({
+            "measured": [
+                {"block": {"kind": "sectionBreak", "id": 0, "columns": {"count": 2, "gap": 24}},
+                 "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(1, 1)
+            ],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": "nextColumn",
+                "columns": {"count": 2, "gap": 24}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(placements(&layout), vec![(1, 96.0, 96.0)]);
+    }
+
+    #[test]
+    fn promoted_break_on_a_pristine_page_reports_the_geometry_it_laid_out_to() {
+        let landscape = Size {
+            w: 1056.0,
+            h: 816.0,
+        };
+        let input = json!({
+            "measured": [
+                {"block": {"kind": "sectionBreak", "id": 0, "columns": {"count": 2, "gap": 24}},
+                 "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(1, 1)
+            ],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": "nextColumn",
+                "columns": {"count": 2, "gap": 24},
+                "finalPageSize": {"w": 1056, "h": 816},
+                "finalMargins": {"top": 48, "right": 96, "bottom": 96, "left": 96}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(layout.pages[0].size, landscape);
+        assert_eq!(layout.pages[0].margins.top, 48.0);
+        let crate::types::Fragment::Paragraph(paragraph) = &layout.pages[0].fragments[0] else {
+            panic!("expected a paragraph fragment");
+        };
+        assert_eq!(paragraph.width, landscape.w - 192.0);
+        assert_eq!(paragraph.y, 48.0);
+    }
+
+    #[test]
+    fn restamped_pristine_page_uses_the_new_content_limit() {
+        let input = json!({
+            "measured": [
+                {"block": {"kind": "sectionBreak", "id": 0},
+                 "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(1, 30)
+            ],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": "nextPage",
+                "finalPageSize": {"w": 816, "h": 816},
+                "finalMargins": {"top": 48, "right": 96, "bottom": 96, "left": 96}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        let fragments: Vec<_> = layout
+            .pages
+            .iter()
+            .flat_map(|page| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let crate::types::Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    Some((
+                        page.number,
+                        paragraph.from_line,
+                        paragraph.to_line,
+                        paragraph.y,
+                    ))
+                })
+            })
+            .collect();
+
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(fragments, vec![(1, 0, 28, 48.0), (2, 28, 30, 48.0)]);
+    }
+
+    #[test]
+    fn restamped_pristine_page_uses_the_new_section_furniture() {
+        let input = json!({
+            "measured": [
+                {"block": {"kind": "sectionBreak", "id": 0},
+                 "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(1, 1)
+            ],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": "nextPage",
+                "finalPageSize": {"w": 1056, "h": 816},
+                "finalMargins": {"top": 48, "right": 96, "bottom": 96, "left": 96}
+            }
+        });
+        let mut layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages[0].region_section_index, 1);
+
+        let regions: crate::regions::DocumentRegions = serde_json::from_value(json!({
+            "sections": [
+                {
+                    "sectionId": "old",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-old",
+                        "footerDefault": "footer-old"
+                    },
+                    "pageBorders": {"source": "old"},
+                    "watermark": {"source": "old"},
+                    "pageNumbering": {"start": 9}
+                },
+                {
+                    "sectionId": "new",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-new",
+                        "footerDefault": "footer-new"
+                    },
+                    "pageBorders": {"source": "new"},
+                    "watermark": {"source": "new"},
+                    "pageNumbering": {"start": 3}
+                }
+            ]
+        }))
+        .unwrap();
+        crate::regions::apply_document_regions(&mut layout, &regions);
+
+        let page = &layout.pages[0];
+        let refs = page.header_footer_refs.as_ref().unwrap();
+        assert_eq!(page.section_index, Some(1));
+        assert_eq!(page.section_id.as_deref(), Some("new"));
+        assert_eq!(refs.header_default.as_deref(), Some("header-new"));
+        assert_eq!(refs.footer_default.as_deref(), Some("footer-new"));
+        assert_eq!(page.page_borders, Some(json!({"source": "new"})));
+        assert_eq!(page.watermark, Some(json!({"source": "new"})));
+        assert_eq!(page.section_page_number, Some(3));
     }
 }

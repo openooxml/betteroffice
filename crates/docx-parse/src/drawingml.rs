@@ -13,6 +13,7 @@ pub use ooxml_drawingml::{
 const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
 const MAX_CUSTOM_PATH_COMMANDS: usize = 2_048;
 const MAX_CUSTOM_GUIDES: usize = 512;
+const PRESET_GUIDE_SPACE: f64 = 100_000.0;
 const MAX_ABS_CUSTOM_PATH_NUMBER: f64 = 1_000_000_000.0;
 const MAX_ABS_NORMALIZED_PATH_NUMBER: f64 = 10_000.0;
 
@@ -92,7 +93,20 @@ fn apply_color_modifiers(mut color: ColorValue, element: &XmlElement) -> ColorVa
             js_round(value / 100_000.0 * 255.0) as i64
         ));
     }
+    color.luminance_modulation = color_fraction(element, "a:lumMod");
+    color.luminance_offset = color_fraction(element, "a:lumOff");
+    color.saturation_modulation = color_fraction(element, "a:satMod");
+    color.alpha = color_fraction(element, "a:alpha");
     color
+}
+
+/// A `ST_Percentage` in thousandths of a percent, as a fraction.
+fn color_fraction(element: &XmlElement, name: &str) -> Option<f64> {
+    let value = element
+        .child_by_full_name(name)
+        .and_then(|child| child.attribute(None, "val"))
+        .and_then(parse_javascript_integer_prefix)?;
+    (value.is_finite() && (0.0..=1_000_000.0).contains(&value)).then_some(value / 100_000.0)
 }
 
 fn scheme_color(value: &str) -> &str {
@@ -245,14 +259,14 @@ pub fn parse_preset_geometry_path(
 ) -> Option<Vec<GeometryPathCommand>> {
     let preset = sp_pr?.child_by_full_name("a:prstGeom")?;
     let shape_type = preset.attribute(None, "prst")?;
-    let mut values = standard_guide_values(100_000.0, 100_000.0);
+    let mut values = standard_guide_values(PRESET_GUIDE_SPACE, PRESET_GUIDE_SPACE);
     apply_guide_list(Some(preset), "avLst", &mut values);
     let mut adjustments = HashMap::new();
     if let Some(list) = local_child(Some(preset), "avLst") {
         for guide in list.children_by_local_name("gd").take(MAX_CUSTOM_GUIDES) {
             if let Some(name) = guide.attribute(None, "name") {
                 if let Some(value) = values.get(name) {
-                    adjustments.insert(name.to_owned(), *value);
+                    adjustments.insert(name.to_owned(), *value / PRESET_GUIDE_SPACE);
                 }
             }
         }
@@ -725,6 +739,27 @@ mod tests {
             serde_json::to_value(tail).unwrap(),
             serde_json::json!({"type":"oval","width":null,"length":null})
         );
+    }
+
+    #[test]
+    fn preset_adjust_values_use_normalized_guide_units() {
+        for shape in ["chevron", "homePlate"] {
+            for (guide, aspect, x) in [
+                (75_000, 1.0, 0.25),
+                (200_000, 4.0, 0.5),
+                (600_000, 4.0, 0.0),
+                (1, 1.0, 0.999_99),
+            ] {
+                let properties = root(&format!(
+                    "<wps:spPr><a:prstGeom prst=\"{shape}\"><a:avLst><a:gd name=\"adj\" fmla=\"val {guide}\"/></a:avLst></a:prstGeom></wps:spPr>"
+                ));
+                assert_eq!(
+                    parse_preset_geometry_path(Some(&properties), aspect).unwrap()[1],
+                    GeometryPathCommand::Line { x, y: 0.0 },
+                    "{shape}, adj={guide}, aspect={aspect}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -10,11 +10,43 @@ text rule as the DOCX editing core.
 `DeckUndoManager` tracks local user-origin transactions only; remote updates
 stay out of local history.
 
+Hosts edit through version-checked batches: `DeckSession::version`,
+`read_content` and `find_text` return story text with the session version it
+was read at, and `apply_edits` resolves every step against that version, stages
+the whole batch on a private replica, rehearses its update, and adopts it as one
+transaction (one undo step by default) or returns an `EditRefusal` with the deck,
+history and id allocation untouched. `validate_edits` runs the same checks
+without changing anything. Proposal previews and acceptance share the staging.
+
+`structured` exports the committed deck read-only: `DeckSession::export_structured`
+and `export_markdown` for a session, `export_pptx_structured` and
+`export_pptx_markdown` for bytes, and `render_pptx_markdown` for content read
+earlier. One walker reads the current shape tree, projects stories as
+`read_content` does, maps seeded shapes back to their retained source XML, and
+admits records within block and byte budgets. `paragraph` holds the
+paragraph-property cascade and list numbering the renderer shares.
+
 State vectors, diffs, and updates are standard Yrs v1, so any transport that
 speaks Yjs sync-v1 works.
+
+Comments use a separate shared map. Saving patches existing XML and preserves
+untouched comment parts byte for byte. Deleting a thread removes its known
+replies; a reply added concurrently becomes a root when its parent is absent,
+so both clients and saved files retain it.
+
+The current deck schema is 2.2. Opening migrates released 1.0, 2.0 and 2.1
+snapshots; attaching the original package with `open_from_update_with_source`
+restores source properties. Older clients reject new-schema updates;
+collaborators upgrade together or exchange saved PPTX files.
+Default text overflow settings and starting slide numbers remain omitted from
+package JSON.
 
 Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx). The
 `wasm` feature exposes the JavaScript surface consumed by
 [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx).
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
+
+`add_picture` inserts PNG, JPEG, GIF, BMP, TIFF, WebP, or SVG bytes (up to 8 MiB).
+Pictures synchronize with the shared deck and resolve through `media_bytes` before save.
+`bring_to_front`, `send_to_back`, `bring_forward`, and `send_backward` arrange slide objects.

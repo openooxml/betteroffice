@@ -28,6 +28,7 @@ export type {
   DrawingContent,
   ShapeContent,
   ChartContent,
+  OpaqueDrawingContent,
   RunContent,
   Run,
 } from './content/run';
@@ -68,6 +69,8 @@ export type { TableCell, TableRow, Table } from './content/table';
 export type { Comment, CommentRangeStart, CommentRangeEnd } from './content/comment';
 
 export type { MathEquation } from './content/math';
+
+export type { RawXml } from './content/rawXml';
 
 export type {
   TrackedChangeInfo,

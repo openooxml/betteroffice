@@ -22,15 +22,18 @@
  * documents. Living in core means both adapters get it for free.
  */
 
+import { visitTrackedControlContent } from '../utils/trackedControlContent';
+
 import type { BlockContent, Comment, ParagraphContent } from '../types/content';
 
 /**
  * Inject `commentRangeStart`/`commentRangeEnd` for reply comments
  * that share their parent comment's text range.
  */
-export function injectReplyRangeMarkers(content: BlockContent[], comments: Comment[]): void {
+export function injectReplyRangeMarkers(content: BlockContent[], comments: Comment[]): boolean {
   const replies = comments.filter((c) => c.parentId != null);
-  if (replies.length === 0) return;
+  if (replies.length === 0) return false;
+  let inserted = false;
 
   // Build parentId → reply IDs map
   const replyIdsByParent = new Map<number, number[]>();
@@ -56,6 +59,7 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
             if (replyIds) {
               for (const rid of replyIds) {
                 newItems.push({ type: 'commentRangeStart', id: rid });
+                inserted = true;
               }
             }
           } else if (item.type === 'commentRangeEnd') {
@@ -64,6 +68,7 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
             if (replyIds) {
               for (const rid of replyIds) {
                 newItems.push({ type: 'commentRangeEnd', id: rid });
+                inserted = true;
               }
             }
           } else {
@@ -82,6 +87,7 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
   }
 
   walkBlocks(content);
+  return inserted;
 }
 
 /**
@@ -89,10 +95,11 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
  * parent is a tracked-change revision (insertion/deletion). The TC
  * content nodes don't carry the comment's range, so we wrap them.
  */
-export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Comment[]): void {
+export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Comment[]): boolean {
   const commentIds = new Set(comments.map((c) => c.id));
   const tcReplies = comments.filter((c) => c.parentId != null && !commentIds.has(c.parentId));
-  if (tcReplies.length === 0) return;
+  if (tcReplies.length === 0) return false;
+  let inserted = false;
 
   const replyIdsByRevision = new Map<number, number[]>();
   for (const r of tcReplies) {
@@ -101,27 +108,47 @@ export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Com
     else replyIdsByRevision.set(r.parentId!, [r.id]);
   }
 
+  const noReplies: number[] = [];
+  function revisionReplies(item: ParagraphContent): number[] {
+    if (item.type === 'run') return noReplies;
+    const ordinary = item.type === 'insertion' || item.type === 'deletion'
+      ? replyIdsByRevision.get(item.info.id) ?? noReplies
+      : noReplies;
+    let nested: Set<number> | undefined;
+    visitTrackedControlContent(item, (node) => {
+      let revisionId: number | undefined;
+      if (
+        node.type === 'insertion' || node.type === 'deletion' ||
+        node.type === 'moveFrom' || node.type === 'moveTo'
+      ) revisionId = node.info.id;
+      else if (node.type === 'inlineSdt' && (
+        item.type === 'insertion' || item.type === 'deletion' ||
+        item.type === 'moveFrom' || item.type === 'moveTo'
+      )) revisionId = item.info.id;
+      if (revisionId === undefined) return;
+      const ids = replyIdsByRevision.get(revisionId);
+      if (!ids) return;
+      nested ??= new Set(ordinary);
+      for (const id of ids) nested.add(id);
+    });
+    return nested ? [...nested] : ordinary;
+  }
+
   function walkBlocks(blocks: BlockContent[]): void {
     for (const block of blocks) {
       if (block.type === 'paragraph') {
-        const hasTC = block.content.some(
-          (item) =>
-            (item.type === 'insertion' || item.type === 'deletion') &&
-            replyIdsByRevision.has(item.info.id)
-        );
+        const hasTC = block.content.some((item) => revisionReplies(item).length > 0);
         if (!hasTC) continue;
 
         const newItems: ParagraphContent[] = [];
         const items = block.content;
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
-          if (
-            (item.type === 'insertion' || item.type === 'deletion') &&
-            replyIdsByRevision.has(item.info.id)
-          ) {
-            const replyIds = replyIdsByRevision.get(item.info.id)!;
+          const replyIds = revisionReplies(item);
+          if (replyIds.length > 0) {
             for (const rid of replyIds) {
               newItems.push({ type: 'commentRangeStart', id: rid });
+              inserted = true;
             }
             newItems.push(item);
             // Adjacent del+ins replacement pair share author+date —
@@ -130,6 +157,7 @@ export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Com
             const next = items[i + 1];
             if (
               next &&
+              (item.type === 'insertion' || item.type === 'deletion') &&
               (next.type === 'insertion' || next.type === 'deletion') &&
               next.type !== item.type &&
               next.info.author === item.info.author &&
@@ -157,4 +185,5 @@ export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Com
   }
 
   walkBlocks(content);
+  return inserted;
 }

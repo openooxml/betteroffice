@@ -2,10 +2,24 @@
 
 mod error;
 mod presentation;
+#[cfg(feature = "raster")]
+mod render;
 mod types;
 
 pub use error::Error;
-pub use presentation::Presentation;
+pub use presentation::{
+    Presentation, export_pptx_markdown, export_pptx_structured, render_pptx_markdown,
+};
+#[cfg(feature = "raster")]
+pub use render::{
+    Background, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_SLIDE_DIM, MAX_SLIDE_PIXELS, RenderOptions,
+    RenderedPng,
+};
 pub use types::*;
+
+/// Largest collaboration update or state vector the engine will decode.
+pub const MAX_COLLABORATION_BYTES: usize = pptx_edit::MAX_UPDATE_BYTES;
+/// Largest collaboration client ID the engine accepts; 0 is rejected too.
+pub const MAX_COLLABORATION_CLIENT_ID: u64 = pptx_edit::MAX_SAFE_CLIENT_ID;
 
 pub type Result<T> = std::result::Result<T, Error>;

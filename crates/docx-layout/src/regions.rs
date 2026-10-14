@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,8 @@ pub struct RegionSection {
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredRegionSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_flags: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footnote_pr: Option<NoteProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endnote_pr: Option<NoteProperties>,
@@ -79,6 +82,8 @@ pub struct AuthoredRegionSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredSectionProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_grid: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_width: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +240,48 @@ impl DocumentRegions {
         properties
     }
 
+    /// One paragraph-spacing line, in pixels.
+    pub fn paragraph_spacing_line_px(&self, section_index: usize) -> f64 {
+        self.sections
+            .get(section_index)
+            .or_else(|| self.sections.last())
+            .and_then(|section| section.properties.as_ref())
+            .and_then(|properties| properties.doc_grid.as_ref())
+            .filter(|grid| {
+                matches!(
+                    grid.get("type").and_then(Value::as_str),
+                    Some("lines" | "linesAndChars" | "snapToChars")
+                )
+            })
+            .and_then(|grid| grid.get("linePitch").and_then(Value::as_f64))
+            .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+            .map_or(16.0, twips_to_pixels)
+    }
+
+    /// Document-grid snap pitch in pixels for line-height snapping
+    /// (`w:docGrid`, §17.6.5), or `None` when the grid is inactive.
+    ///
+    /// Activation is narrow: only grid types `lines`, `linesAndChars` and
+    /// `snapToChars` with a finite positive `linePitch` snap. `default` (or
+    /// a bare `linePitch` with no type, as many English corpus documents
+    /// carry) yields `None`, leaving those files completely unaffected.
+    pub fn doc_grid_snap_pitch_px(&self, section_index: usize) -> Option<f64> {
+        self.sections
+            .get(section_index)
+            .or_else(|| self.sections.last())
+            .and_then(|section| section.properties.as_ref())
+            .and_then(|properties| properties.doc_grid.as_ref())
+            .filter(|grid| {
+                matches!(
+                    grid.get("type").and_then(Value::as_str),
+                    Some("lines" | "linesAndChars" | "snapToChars")
+                )
+            })
+            .and_then(|grid| grid.get("linePitch").and_then(Value::as_f64))
+            .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+            .map(twips_to_pixels)
+    }
+
     pub fn footnote_columns(&self, section_index: usize) -> u64 {
         self.sections
             .get(section_index)
@@ -343,20 +390,47 @@ fn authored_header_footer_refs(properties: &AuthoredSectionProperties) -> Option
 }
 
 fn twips_to_pixels(twips: f64) -> f64 {
-    (twips / 1440.0 * 96.0).round()
+    twips / 15.0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageNumbering {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_page_start"
+    )]
     pub start: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }
 
+fn deserialize_page_start<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let value = Option::<serde_json::Number>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            value
+                .as_u64()
+                .or_else(|| {
+                    value.as_f64().and_then(|value| {
+                        (value >= 0.0 && value < u64::MAX as f64 && value.fract() == 0.0)
+                            .then_some(value as u64)
+                    })
+                })
+                .ok_or_else(|| {
+                    serde::de::Error::custom("page numbering start must be a nonnegative integer")
+                })
+        })
+        .transpose()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegionLayoutInput {
+    #[serde(default)]
+    pub cached_page_totals: bool,
     #[serde(default)]
     pub measured: Vec<crate::types::MeasuredBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,6 +459,16 @@ impl RegionLayoutInput {
         Option<String>,
     ) {
         self.regions.normalize_authored();
+        if let Some(compatibility) = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            && let Some(env) = self.render_env.as_object_mut()
+        {
+            env.entry("compatibilityFlags")
+                .or_insert_with(|| compatibility.clone());
+        }
         (
             Input {
                 measured: self.measured,
@@ -413,6 +497,24 @@ pub fn apply_section_geometry_to_blocks<T>(
     let Some(first) = regions.sections.first() else {
         return;
     };
+    let restarts: Vec<_> = regions
+        .sections
+        .iter()
+        .map(|section| {
+            Some(crate::types::SectionPageRestart {
+                start: section.page_numbering.as_ref()?.start?,
+                align_parity: section
+                    .even_and_odd_headers
+                    .unwrap_or(regions.even_and_odd_headers),
+            })
+        })
+        .collect();
+    options.section_page_restarts = restarts
+        .iter()
+        .skip(1)
+        .flatten()
+        .any(|restart| restart.align_parity)
+        .then_some(restarts);
     if first.page_size.is_some() {
         options.page_size.clone_from(&first.page_size);
     }
@@ -469,9 +571,36 @@ impl RegionBlock for LayoutBlock {
     }
 }
 
+/// Stamps each page with its section's regions and numbering. A section's page numbers restart at
+/// its `w:pgNumType w:start` and otherwise continue from the previous page, whatever the format;
+/// a page whose number is not its physical one always carries a label.
 pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
+    apply_document_regions_with(layout, regions, |_| {});
+}
+
+/// Stamps page regions and appends indices whose section or numbering changed.
+pub fn apply_document_regions_tracked(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    changed: &mut Vec<usize>,
+) {
+    apply_document_regions_with(layout, regions, |index| changed.push(index));
+}
+
+/// Stamps page regions and reports changed section and numbering stamps.
+fn apply_document_regions_with(
+    layout: &mut Layout,
+    regions: &DocumentRegions,
+    mut changed: impl FnMut(usize),
+) {
     let mut page_counts = BTreeMap::<usize, u64>::new();
+    let mut previous_number = 0_u64;
     for (page_index, page) in layout.pages.iter_mut().enumerate() {
+        let section_id = std::mem::take(&mut page.section_id);
+        let section_index_before = page.section_index;
+        let section_page_index_before = page.section_page_index;
+        let section_page_number = page.section_page_number;
+        let page_label = std::mem::take(&mut page.page_label);
         let section_index = page.region_section_index;
         page.section_index = Some(section_index as u64);
         let section = regions
@@ -480,6 +609,9 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             .or_else(|| regions.sections.last());
         let section_page_index = page_counts.entry(section_index).or_default();
         page.section_page_index = Some(*section_page_index);
+        page.section_page_number = None;
+        page.page_label = None;
+        page.page_numbering = None;
         *section_page_index += 1;
 
         if let Some(section) = section {
@@ -496,18 +628,30 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
                 .clone()
                 .or_else(|| regions.watermark.clone());
             page.vertical_align = section.vertical_align.clone();
+            let restart = section
+                .page_numbering
+                .as_ref()
+                .and_then(|numbering| numbering.start)
+                .filter(|_| page.section_page_index == Some(0));
+            let number = restart.unwrap_or(previous_number + 1);
             if let Some(numbering) = &section.page_numbering {
-                let number = numbering.start.unwrap_or(1) + page.section_page_index.unwrap_or(0);
                 page.section_page_number = Some(number);
                 page.page_label = Some(format_number(
                     number as i64,
                     numbering.format.as_deref().unwrap_or("decimal"),
                 ));
-                page.page_numbering = serde_json::to_value(numbering).ok();
+                page.page_numbering = serde_json::to_string(&numbering)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok());
+            } else if number != u64::from(page.number) {
+                page.section_page_number = Some(number);
+                page.page_label = Some(number.to_string());
             }
+            previous_number = number;
         } else {
             page.section_id = Some(section_index.to_string());
             page.watermark = regions.watermark.clone();
+            previous_number += 1;
         }
 
         if let Some(areas) = &regions.note_areas {
@@ -520,6 +664,14 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
                 page.note_areas = Some(selected);
             }
         }
+        if section_id.as_deref() != page.section_id.as_deref()
+            || section_index_before != page.section_index
+            || section_page_index_before != page.section_page_index
+            || section_page_number != page.section_page_number
+            || page_label.as_deref() != page.page_label.as_deref()
+        {
+            changed(page_index);
+        }
     }
 }
 
@@ -527,48 +679,40 @@ pub fn effective_header_footer_refs(
     regions: &DocumentRegions,
     section_index: usize,
 ) -> Option<HeaderFooterRefs> {
-    let mut effective = HeaderFooterRefs {
-        header_default: None,
-        header_first: None,
-        header_even: None,
-        footer_default: None,
-        footer_first: None,
-        footer_even: None,
-    };
+    let mut effective = HeaderFooterRefs::default();
     for section in regions.sections.iter().take(section_index + 1) {
-        let Some(authored) = &section.header_footer_refs else {
-            continue;
-        };
-        if authored.header_default.is_some() {
-            effective
-                .header_default
-                .clone_from(&authored.header_default);
-        }
-        if authored.header_first.is_some() {
-            effective.header_first.clone_from(&authored.header_first);
-        }
-        if authored.header_even.is_some() {
-            effective.header_even.clone_from(&authored.header_even);
-        }
-        if authored.footer_default.is_some() {
-            effective
-                .footer_default
-                .clone_from(&authored.footer_default);
-        }
-        if authored.footer_first.is_some() {
-            effective.footer_first.clone_from(&authored.footer_first);
-        }
-        if authored.footer_even.is_some() {
-            effective.footer_even.clone_from(&authored.footer_even);
+        if let Some(authored) = &section.header_footer_refs {
+            effective.inherit(authored);
         }
     }
-    (effective.header_default.is_some()
-        || effective.header_first.is_some()
-        || effective.header_even.is_some()
-        || effective.footer_default.is_some()
-        || effective.footer_first.is_some()
-        || effective.footer_even.is_some())
-    .then_some(effective)
+    (effective != HeaderFooterRefs::default()).then_some(effective)
+}
+
+/// Resolved PAGE field text for one page.
+pub(crate) fn page_field_text(page_label: Option<&str>, page_number: u64) -> Cow<'_, str> {
+    match page_label {
+        Some(label) => Cow::Borrowed(label),
+        None => Cow::Owned(page_number.to_string()),
+    }
+}
+
+/// Whether [`format_number`] writes `number` in `format` rather than falling back to decimal.
+pub fn number_format_resolves(number: i64, format: &str) -> bool {
+    match format {
+        "upperRoman" | "lowerRoman" => (1..=3999).contains(&number),
+        "upperLetter" | "lowerLetter" => number > 0,
+        "decimal"
+        | "decimalZero"
+        | "decimalZero3"
+        | "decimalZero4"
+        | "decimalZero5"
+        | "ordinal"
+        | "bullet"
+        | "none"
+        | "decimalEnclosedParen"
+        | "numberInDash" => true,
+        _ => false,
+    }
 }
 
 pub(crate) fn format_number(number: i64, format: &str) -> String {
@@ -647,6 +791,27 @@ fn ordinal(number: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_numbering_accepts_integral_native_json_numbers() {
+        for source in [r#"{"start":1.0}"#, r#"{"start":1}"#] {
+            let numbering: super::PageNumbering = serde_json::from_str(source).unwrap();
+            assert_eq!(numbering.start, Some(1));
+        }
+        for source in [
+            r#"{"start":1.5}"#,
+            r#"{"start":-1}"#,
+            r#"{"start":18446744073709551616.0}"#,
+        ] {
+            assert!(serde_json::from_str::<super::PageNumbering>(source).is_err());
+        }
+        assert_eq!(
+            serde_json::from_str::<super::PageNumbering>(r#"{"start":null}"#)
+                .unwrap()
+                .start,
+            None
+        );
+    }
+
     use serde_json::json;
 
     use super::*;
@@ -656,6 +821,8 @@ mod tests {
         Page {
             number,
             fragments: Vec::new(),
+            body_margins: None,
+            body_anchor_margins: None,
             margins: PageMargins {
                 top: 96.0,
                 right: 96.0,
@@ -674,6 +841,8 @@ mod tests {
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: None,
+            float_bands: Vec::new(),
+            opening_fragment_geometry: None,
             footnote_columns: None,
             columns: None,
             section_id: None,
@@ -687,6 +856,7 @@ mod tests {
             watermark: None,
             vertical_align: None,
             note_areas: None,
+            parity_filler: None,
         }
     }
 
@@ -697,11 +867,13 @@ mod tests {
                 w: 816.0,
                 h: 1056.0,
             },
-            pages: vec![page(1, 0), page(2, 0), page(3, 1)],
+            pages: vec![page(1, 0), page(2, 0), page(3, 1), page(4, 2)],
             columns: None,
             headers: None,
             footers: None,
             page_gap: Some(20.0),
+            partial: false,
+            cached_page_totals: false,
         };
         let regions = DocumentRegions {
             sections: vec![
@@ -723,6 +895,10 @@ mod tests {
                     footer_distance: Some(18.0),
                     ..RegionSection::default()
                 },
+                RegionSection {
+                    section_id: Some("c".to_owned()),
+                    ..RegionSection::default()
+                },
             ],
             ..DocumentRegions::default()
         };
@@ -736,6 +912,172 @@ mod tests {
         assert_eq!(layout.pages[2].section_page_index, Some(0));
         assert_eq!(layout.pages[2].page_label.as_deref(), Some("a"));
         assert_eq!(layout.pages[2].footer_distance, Some(18.0));
+        assert_eq!(layout.pages[3].section_page_index, Some(0));
+        assert_eq!(layout.pages[3].section_page_number, Some(2));
+        assert_eq!(
+            page_field_text(
+                layout.pages[3].page_label.as_deref(),
+                layout.pages[3].number as u64
+            )
+            .as_ref(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn pages_without_a_restart_continue_the_previous_number() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 1), page(3, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let regions = DocumentRegions {
+            sections: vec![RegionSection::default(), RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &regions);
+        for page in &layout.pages {
+            assert_eq!(page.section_page_number, None);
+            assert_eq!(page.page_label, None);
+        }
+    }
+
+    #[test]
+    fn restamping_a_page_back_on_its_physical_number_drops_its_label() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let restarted = DocumentRegions {
+            sections: vec![
+                RegionSection::default(),
+                RegionSection {
+                    page_numbering: Some(PageNumbering {
+                        start: Some(5),
+                        format: None,
+                    }),
+                    ..RegionSection::default()
+                },
+            ],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &restarted);
+        assert_eq!(layout.pages[1].page_label.as_deref(), Some("5"));
+        let plain = DocumentRegions {
+            sections: vec![RegionSection::default(), RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &plain);
+        let mut fresh = layout.clone();
+        fresh.pages = vec![page(1, 0), page(2, 1)];
+        apply_document_regions(&mut fresh, &plain);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&fresh).unwrap()
+        );
+    }
+
+    /// Tracking appends only pages whose five display stamps changed.
+    #[test]
+    fn tracked_regions_report_only_changed_stamps() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: (1..=6).map(|number| page(number, 0)).collect(),
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+            cached_page_totals: false,
+        };
+        let regions = DocumentRegions {
+            sections: vec![RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &regions);
+        let expected = layout.clone();
+        layout.pages[0].section_id = Some("other".to_owned());
+        layout.pages[1].section_index = None;
+        layout.pages[2].section_page_index = None;
+        layout.pages[3].section_page_number = Some(50);
+        layout.pages[4].page_label = Some("i".to_owned());
+        layout.pages[5].header_distance = Some(18.0);
+        let mut changed = vec![usize::MAX];
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+        );
+        apply_document_regions_tracked(&mut layout, &regions, &mut changed);
+        assert_eq!(changed, [usize::MAX, 0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn restart_and_continued_roman_labels_match_pg_num_type() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 0), page(3, 1), page(4, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: Some(20.0),
+            partial: false,
+            cached_page_totals: false,
+        };
+        let regions = DocumentRegions {
+            sections: vec![
+                RegionSection {
+                    section_id: Some("a".to_owned()),
+                    page_numbering: Some(PageNumbering {
+                        start: Some(5),
+                        format: Some("decimal".to_owned()),
+                    }),
+                    ..RegionSection::default()
+                },
+                RegionSection {
+                    section_id: Some("b".to_owned()),
+                    page_numbering: Some(PageNumbering {
+                        start: None,
+                        format: Some("lowerRoman".to_owned()),
+                    }),
+                    ..RegionSection::default()
+                },
+            ],
+            ..DocumentRegions::default()
+        };
+
+        apply_document_regions(&mut layout, &regions);
+
+        assert_eq!(layout.pages[0].section_page_number, Some(5));
+        assert_eq!(layout.pages[0].page_label.as_deref(), Some("5"));
+        assert_eq!(layout.pages[1].page_label.as_deref(), Some("6"));
+        assert_eq!(layout.pages[2].section_page_number, Some(7));
+        assert_eq!(layout.pages[2].page_label.as_deref(), Some("vii"));
+        assert_eq!(layout.pages[3].page_label.as_deref(), Some("viii"));
     }
 
     #[test]
@@ -774,6 +1116,310 @@ mod tests {
         assert_eq!(section_break.margins.as_ref().unwrap().top, 10.0);
     }
 
+    fn restart_parity_input(
+        headers: bool,
+        restart: Option<u64>,
+        preceding_pages: usize,
+        section_type: Option<&str>,
+        first_start: u64,
+    ) -> (Input, DocumentRegions) {
+        let paragraph = |id: &str| {
+            json!({
+                "block": {"kind": "paragraph", "id": id,
+                    "runs": [{"kind": "text", "text": "Content"}], "attrs": {}},
+                "measure": {"kind": "paragraph", "totalHeight": 24,
+                    "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0,
+                        "tailChar": 7, "width": 100, "ascent": 18,
+                        "descent": 6, "lineHeight": 24}]}
+            })
+        };
+        let mut measured = Vec::new();
+        for index in 0..preceding_pages {
+            if index > 0 {
+                measured.push(json!({
+                    "block": {"kind": "pageBreak", "id": "page-break"},
+                    "measure": {"kind": "pageBreak"}
+                }));
+            }
+            measured.push(paragraph(&format!("preceding-{index}")));
+        }
+        let mut sections = Vec::new();
+        if preceding_pages > 0 {
+            measured.push(json!({
+                "block": {"kind": "sectionBreak", "id": "section-break"},
+                "measure": {"kind": "sectionBreak"}
+            }));
+            sections.push(json!({"properties": {"pageNumbering": {"start": first_start}}}));
+        }
+        measured.push(paragraph("following"));
+        sections.push(json!({"properties": {
+            "pageNumbering": {"start": restart, "format": "decimal"},
+            "sectionStart": section_type
+        }}));
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "measured": measured,
+            "regions": {"settings": {"evenAndOddHeaders": headers}, "sections": sections}
+        }))
+        .unwrap();
+        let (mut input, regions, _, _, _, _) = request.split();
+        apply_section_geometry(&mut input, &regions);
+        (input, regions)
+    }
+
+    fn restart_parity_layout(
+        headers: bool,
+        restart: Option<u64>,
+        preceding_pages: usize,
+        section_type: Option<&str>,
+    ) -> Layout {
+        let (mut input, regions) =
+            restart_parity_input(headers, restart, preceding_pages, section_type, 1);
+        let mut layout = crate::compute_layout_input(&mut input).unwrap();
+        apply_document_regions(&mut layout, &regions);
+        layout
+    }
+
+    #[test]
+    fn section_restart_parity_matches_word_facing_page_matrix() {
+        for (headers, restart, preceding, section_type, expected_page) in [
+            (false, None, 1, None, 2),
+            (false, None, 2, None, 3),
+            (false, Some(1), 1, None, 2),
+            (false, Some(1), 2, None, 3),
+            (false, Some(2), 1, None, 2),
+            (false, Some(2), 2, None, 3),
+            (true, None, 1, None, 2),
+            (true, None, 2, None, 3),
+            (true, Some(1), 1, None, 3),
+            (true, Some(1), 2, None, 3),
+            (true, Some(2), 1, None, 2),
+            (true, Some(2), 2, None, 4),
+            (true, Some(1), 1, Some("nextPage"), 3),
+            (true, Some(1), 2, Some("nextPage"), 3),
+            (false, None, 1, Some("oddPage"), 3),
+            (false, None, 2, Some("oddPage"), 3),
+            (false, None, 1, Some("evenPage"), 2),
+            (false, None, 2, Some("evenPage"), 4),
+        ] {
+            let layout = restart_parity_layout(headers, restart, preceding, section_type);
+            let following = layout
+                .pages
+                .iter()
+                .find(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment,
+                    crate::types::Fragment::Paragraph(paragraph)
+                        if paragraph.block_id == crate::types::BlockId::Str("following".into()))
+                    })
+                })
+                .unwrap();
+            assert_eq!(
+                following.number, expected_page,
+                "headers={headers}, restart={restart:?}, preceding={preceding}, type={section_type:?}"
+            );
+            assert_eq!(layout.pages.len(), expected_page as usize);
+            if let Some(restart) = restart {
+                assert_eq!(following.section_page_number, Some(restart));
+                assert_eq!(following.section_page_index, Some(0));
+            }
+            if expected_page as usize > preceding + 1 {
+                let filler = &layout.pages[preceding];
+                assert!(filler.fragments.is_empty());
+                assert_eq!(filler.region_section_index, 0);
+                assert_eq!(following.region_section_index, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn parity_filler_marks_only_the_mismatch_sheet() {
+        for (headers, restart, preceding, section_type, filler) in [
+            (true, Some(1), 1, None, Some(1)),
+            (true, Some(2), 2, None, Some(2)),
+            (false, None, 1, Some("oddPage"), Some(1)),
+            (false, None, 2, Some("evenPage"), Some(2)),
+            (true, Some(2), 1, None, None),
+            (true, None, 1, None, None),
+        ] {
+            let layout = restart_parity_layout(headers, restart, preceding, section_type);
+            let context = format!(
+                "headers={headers}, restart={restart:?}, preceding={preceding}, type={section_type:?}"
+            );
+            assert_eq!(
+                layout.pages.len(),
+                preceding + 1 + usize::from(filler.is_some()),
+                "{context}"
+            );
+            let following = layout
+                .pages
+                .iter()
+                .find(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment,
+                    crate::types::Fragment::Paragraph(paragraph)
+                        if paragraph.block_id == crate::types::BlockId::Str("following".into()))
+                    })
+                })
+                .expect("following content page");
+            assert_ne!(following.parity_filler, Some(true), "{context}");
+            assert_eq!(following.region_section_index, 1, "{context}");
+            if let Some(index) = filler {
+                let filler = &layout.pages[index];
+                assert!(filler.fragments.is_empty(), "{context}");
+                assert_eq!(filler.parity_filler, Some(true), "{context}");
+                assert_eq!(filler.region_section_index, 0, "{context}");
+                let wire = serde_json::to_value(&layout).expect("layout serializes");
+                assert_eq!(
+                    wire["pages"][index]["parityFiller"],
+                    serde_json::json!(true),
+                    "{context}"
+                );
+                assert!(
+                    wire["pages"][index + 1]["parityFiller"].is_null(),
+                    "{context}"
+                );
+            } else {
+                for (index, page) in layout.pages.iter().enumerate() {
+                    assert_ne!(page.parity_filler, Some(true), "{context} page {index}");
+                }
+            }
+            if let Some(restart) = restart {
+                assert_eq!(following.section_page_number, Some(restart), "{context}");
+            }
+        }
+    }
+
+    #[test]
+    fn section_restart_parity_does_not_insert_a_leading_or_continuous_page() {
+        let first = restart_parity_layout(true, Some(2), 0, None);
+        assert_eq!(first.pages.len(), 1);
+        assert_eq!(first.pages[0].section_page_number, Some(2));
+        let continuous = restart_parity_layout(true, Some(1), 1, Some("continuous"));
+        assert_eq!(continuous.pages.len(), 1);
+        assert_eq!(continuous.pages[0].fragments.len(), 2);
+    }
+
+    #[test]
+    fn section_restart_parity_uses_the_preceding_numbering_offset() {
+        for (restart, expected_pages) in [(1, 2), (2, 3)] {
+            let (mut input, regions) = restart_parity_input(true, Some(restart), 1, None, 2);
+            let mut layout = crate::compute_layout_input(&mut input).unwrap();
+            apply_document_regions(&mut layout, &regions);
+            assert_eq!(layout.pages.len(), expected_pages);
+            assert_eq!(layout.pages[0].section_page_number, Some(2));
+            assert_eq!(
+                layout.pages.last().unwrap().section_page_number,
+                Some(restart)
+            );
+        }
+    }
+
+    #[test]
+    fn section_restart_parity_survives_incremental_page_resume() {
+        let (mut input, _) = restart_parity_input(true, Some(1), 2, None, 2);
+        let mut previous = crate::place::layout_document_checkpointed(&mut input).unwrap();
+        assert_eq!(previous.layout.pages.len(), 4);
+        let before = vec![0; input.measured.len()];
+        let mut after = before.clone();
+        after[2] = 1;
+        let crate::types::BlockExtent::Paragraph(paragraph) = &mut input.measured[2].measure else {
+            panic!("paragraph expected");
+        };
+        paragraph.lines[0].line_height = 30.0;
+        paragraph.total_height = 30.0;
+        let incremental = crate::place::layout_document_incremental(
+            &mut input,
+            &mut previous.layout,
+            &previous.checkpoints,
+            &before,
+            &after,
+            2,
+        )
+        .unwrap();
+        let full = crate::place::layout_document_checkpointed(&mut input).unwrap();
+        // the changed paragraph opens page 1, so placement resumes a page earlier
+        assert_eq!(incremental.rebuilt_page_start, 0);
+        assert_eq!(
+            serde_json::to_value(&incremental.layout).unwrap(),
+            serde_json::to_value(&full.layout).unwrap()
+        );
+        for layout in [&incremental.layout, &full.layout] {
+            assert_eq!(layout.pages.len(), 4);
+            assert_eq!(layout.pages[2].parity_filler, Some(true));
+            assert!(layout.pages[2].fragments.is_empty());
+            assert_ne!(layout.pages[3].parity_filler, Some(true));
+        }
+    }
+
+    #[test]
+    fn section_restart_parity_matches_word_across_three_sections() {
+        for (first_start, second_start, third_start, continuous, spill, expected_pages) in [
+            (1, 1, 1, true, false, 3),
+            (1, 1, 2, true, false, 2),
+            (1, 2, 1, true, false, 3),
+            (1, 2, 2, true, false, 2),
+            (1, 1, 1, true, true, 3),
+            (1, 1, 2, true, true, 4),
+            (1, 2, 1, true, true, 3),
+            (1, 2, 2, true, true, 4),
+            (1, 2, 1, false, false, 3),
+            (2, 2, 1, false, false, 4),
+            (1, 1, 1, false, false, 5),
+        ] {
+            let section_type = if continuous { "continuous" } else { "nextPage" };
+            let (mut input, mut regions) =
+                restart_parity_input(true, Some(second_start), 1, Some(section_type), first_start);
+            let mut paragraph = input.measured.last().unwrap().clone();
+            let LayoutBlock::Paragraph(block) = &mut paragraph.block else {
+                panic!("paragraph expected");
+            };
+            block.id = crate::types::BlockId::Str("third".into());
+            if spill {
+                input.measured.push(
+                    serde_json::from_value(json!({
+                        "block": {"kind": "pageBreak", "id": "second-section-page"},
+                        "measure": {"kind": "pageBreak"}
+                    }))
+                    .unwrap(),
+                );
+                let mut continued = paragraph.clone();
+                let LayoutBlock::Paragraph(block) = &mut continued.block else {
+                    panic!("paragraph expected");
+                };
+                block.id = crate::types::BlockId::Str("second-continued".into());
+                input.measured.push(continued);
+            }
+            input.measured.push(
+                serde_json::from_value(json!({
+                    "block": {"kind": "sectionBreak", "id": "second-break", "type": section_type},
+                    "measure": {"kind": "sectionBreak"}
+                }))
+                .unwrap(),
+            );
+            input.measured.push(paragraph);
+            regions.sections.push(RegionSection {
+                page_numbering: Some(PageNumbering {
+                    start: Some(third_start),
+                    format: None,
+                }),
+                section_start: Some(crate::types::SectionBreakType::NextPage),
+                ..RegionSection::default()
+            });
+            apply_section_geometry(&mut input, &regions);
+            let mut layout = crate::compute_layout_input(&mut input).unwrap();
+            apply_document_regions(&mut layout, &regions);
+            assert_eq!(
+                layout.pages.len(),
+                expected_pages,
+                "first={first_start}, second={second_start}, third={third_start}, continuous={continuous}, spill={spill}"
+            );
+            assert_eq!(
+                layout.pages.last().unwrap().section_page_number,
+                Some(third_start)
+            );
+        }
+    }
+
     #[test]
     fn header_footer_relationships_inherit_per_type() {
         let regions = DocumentRegions {
@@ -808,6 +1454,22 @@ mod tests {
         assert_eq!(effective.header_default.as_deref(), Some("header-a"));
         assert_eq!(effective.header_even.as_deref(), Some("header-even-b"));
         assert_eq!(effective.footer_default.as_deref(), Some("footer-a"));
+    }
+
+    #[test]
+    fn section_geometry_retains_subpixel_page_and_margin_sizes() {
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "bodyStory":"body","regions":{"sections":[{"sectionId":"main","properties":{
+                "pageWidth":11900,"pageHeight":16840,"marginTop":1871,"headerDistance":709
+            }}]},"renderEnv":{}
+        }))
+        .unwrap();
+        let (_, regions, _, _, _, _) = request.split();
+        let section = &regions.sections[0];
+        assert_eq!(section.page_size.as_ref().unwrap().w, 11900.0 / 15.0);
+        assert_eq!(section.page_size.as_ref().unwrap().h, 16840.0 / 15.0);
+        assert_eq!(section.margins.as_ref().unwrap().top, 1871.0 / 15.0);
+        assert_eq!(section.header_distance, Some(709.0 / 15.0));
     }
 
     #[test]
@@ -872,5 +1534,39 @@ mod tests {
         );
         assert!(regions.even_and_odd_headers);
         assert_eq!(regions.note_settings.footnote.num_start, Some(3));
+    }
+
+    #[test]
+    fn authored_negative_margins_preserve_sign_for_overlap() {
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 12240,
+                    "pageHeight": 15840,
+                    "marginTop": -1438,
+                    "marginBottom": 1440,
+                    "marginLeft": 1797,
+                    "marginRight": 1797,
+                    "headerDistance": 709,
+                    "footerDistance": 709
+                }
+            }]},
+            "renderEnv": {}
+        }))
+        .unwrap();
+
+        let (mut input, regions, _, _, _, _) = request.split();
+        let section = &regions.sections[0];
+        assert_eq!(section.margins.as_ref().unwrap().top, -1438.0 / 15.0);
+        assert_eq!(section.margins.as_ref().unwrap().bottom, 1440.0 / 15.0);
+        assert_eq!(section.header_distance, Some(709.0 / 15.0));
+
+        apply_section_geometry(&mut input, &regions);
+        assert_eq!(input.options.margins.as_ref().unwrap().top, -1438.0 / 15.0);
+        let resolved = crate::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+        assert_eq!(resolved.top, 1438.0 / 15.0);
+        assert_eq!(resolved.bottom, 1440.0 / 15.0);
     }
 }

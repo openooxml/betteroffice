@@ -1,7 +1,9 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
-import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
-import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
+import type { BlockContent, Document, HeaderFooter, Hyperlink, Image, Run } from '../types/document';
+import { visitTrackedControlContent } from '../utils/trackedControlContent';
+import { isWrittenByCanonical } from './headerFooterAliasProjection';
+import { preloadParseWasm, writeDocxS13WithWarningsWire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 
@@ -15,13 +17,57 @@ export interface RustSaveDeterminism {
   now: string;
 }
 
+/** Main-document body paragraphs a save replaces by source location, guarded by the part digest. */
+export interface RustSourceParagraphs {
+  partSha256: string;
+  paragraphs: Array<{ path: number[]; block: number }>;
+}
+
 export interface RustSelectiveSave {
   changedParaIds: Iterable<string>;
+  /** Replace only these paragraphs and keep every other part's source bytes. */
+  sourceParagraphs?: RustSourceParagraphs;
 }
 
 export interface RustSaveResult {
   buffer: ArrayBuffer;
   determinism: RustSaveDeterminism;
+  warnings: string[];
+}
+
+/**
+ * Paragraph IDs a session save applies: IDs for source paragraphs outside
+ * the edited stories by part and `w:p` occurrence, and parts written as their
+ * source bytes with only these IDs patched in.
+ */
+export interface RustParagraphIds {
+  assignments: Array<{ part: string; ordinal: number; paraId: string }>;
+  patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
+  /**
+   * Story parts written as their source bytes with only some paragraphs
+   * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
+   * written comments, revisions, notes or relationships differ from their
+   * source. `paragraphs` lists every `sourceOrdinal` the model holds for the
+   * part, `sha256` the source part it addresses, `removed` the source
+   * paragraphs it no longer holds, and `inserted`, in writing order, where
+   * each paragraph written without a `sourceOrdinal` goes.
+   */
+  splicedParts?: Array<{
+    part: string;
+    sha256: string;
+    paragraphs: number[];
+    changed: number[];
+    inserted?: Array<{ before: number } | { after: number }>;
+    removed?: number[];
+  }>;
+}
+
+function headerFooterSaveEntries(
+  entries: Map<string, HeaderFooter> | undefined
+): Array<[string, HeaderFooter]> {
+  return entries
+    ? [...entries].filter(([, part]) => !isWrittenByCanonical(part, entries))
+    : [];
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -35,10 +81,11 @@ export async function writeDocumentWithRust(
   originalBuffer: ArrayBuffer,
   options: RustSaveOptions = {},
   selective?: RustSelectiveSave,
-  determinism?: RustSaveDeterminism
+  determinism?: RustSaveDeterminism,
+  paragraphIds?: RustParagraphIds,
+  skipMutations = false
 ): Promise<RustSaveResult> {
-  await preloadOpcWasm();
-  await preloadParseWasm();
+  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const fixed =
     determinism ??
     ({
@@ -51,8 +98,8 @@ export async function writeDocumentWithRust(
   const request = {
     determinism: fixed,
     document: pkg.document,
-    headerEntries: [...(pkg.headers?.entries() ?? [])],
-    footerEntries: [...(pkg.footers?.entries() ?? [])],
+    headerEntries: headerFooterSaveEntries(pkg.headers),
+    footerEntries: headerFooterSaveEntries(pkg.footers),
     footnotes: pkg.footnotes ?? [],
     endnotes: pkg.endnotes ?? [],
     footnoteSeparators: pkg.footnoteSeparators ?? [],
@@ -65,13 +112,24 @@ export async function writeDocumentWithRust(
     },
     ...(selective === undefined
       ? {}
-      : { selective: { changedParaIds: [...selective.changedParaIds] } }),
+      : {
+          selective: {
+            changedParaIds: [...selective.changedParaIds],
+            ...(selective.sourceParagraphs === undefined
+              ? {}
+              : { sourceParagraphs: selective.sourceParagraphs }),
+          },
+        }),
+    ...(paragraphIds === undefined ? {} : { paragraphIds }),
   };
   assertSafeSaveTree(request, 'save');
-  const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));
+  const { bytes, warnings } = writeDocxS13WithWarningsWire(
+    JSON.stringify(request),
+    new Uint8Array(originalBuffer)
+  );
   const buffer = exactArrayBuffer(bytes);
-  if (!selective) applyRustSaveMutations(document, originalBuffer, buffer);
-  return { buffer, determinism: fixed };
+  if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
+  return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
 }
 
 /** Applies saved relationship IDs to bound model nodes. */
@@ -168,7 +226,16 @@ function collectNewImages(blocks: BlockContent[]): Image[] {
           content.type === 'moveFrom' ||
           content.type === 'moveTo'
         ) {
-          for (const inline of content.content) if (inline.type === 'run') visitRun(inline);
+          for (const inline of content.content) {
+            if (inline.type === 'run') visitRun(inline);
+            else visitTrackedControlContent(inline, (node) => {
+              if (node.type === 'run') visitRun(node);
+            }, false, true);
+          }
+        } else {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'run') visitRun(node);
+          });
         }
       }
     } else if (block.type === 'table') {
@@ -187,6 +254,13 @@ function collectExternalHyperlinks(blocks: BlockContent[]): Hyperlink[] {
       for (const content of block.content) {
         if (content.type === 'hyperlink' && (content.href || content.rId) && !content.anchor) {
           hyperlinks.push(content);
+        }
+        if (content.type !== 'run') {
+          visitTrackedControlContent(content, (node) => {
+            if (node.type === 'hyperlink' && (node.href || node.rId) && !node.anchor) {
+              hyperlinks.push(node);
+            }
+          });
         }
       }
     } else if (block.type === 'table') {

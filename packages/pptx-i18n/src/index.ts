@@ -16,10 +16,10 @@ import ptBRJson from '../pt-BR.json';
 import trJson from '../tr.json';
 import zhCNJson from '../zh-CN.json';
 
-export type LocaleStrings = typeof enJson;
+export type LocaleStrings = typeof en;
 export type LocaleCode = 'en' | 'de' | 'fr' | 'he' | 'hi' | 'id' | 'pl' | 'pt-BR' | 'tr' | 'zh-CN';
 
-export const en: LocaleStrings = enJson;
+export const en = enJson;
 export const de: PartialLocaleStrings = deJson;
 export const fr: PartialLocaleStrings = frJson;
 export const he: PartialLocaleStrings = heJson;
@@ -49,6 +49,7 @@ export type DeepPartial<T> = {
 
 export type PartialLocaleStrings = DeepPartial<LocaleStrings> & {
   _lang?: LocaleCode | (string & {});
+  editor?: DeepPartial<LocaleStrings['editor']> & { textInput?: string | null; selectionAnnouncement?: string | null };
 };
 
 export type Translations = PartialLocaleStrings;
@@ -59,7 +60,7 @@ type DotPath<T, Prefix extends string = ''> = {
     : `${Prefix}${K}`;
 }[keyof T & string];
 
-export type TranslationKey = DotPath<LocaleStrings>;
+export type TranslationKey = DotPath<LocaleStrings> | 'editor.textInput' | 'editor.selectionAnnouncement';
 
 type AnyRecord = Record<string, unknown>;
 

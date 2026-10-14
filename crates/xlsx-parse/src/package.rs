@@ -1,11 +1,12 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
-use xlsx_model::Workbook;
+use xlsx_model::{SheetId, Workbook};
 
-use crate::read::SharedStringCells;
+use crate::read::{SharedStringCells, SourceCellFacts};
+use crate::reference::UnpatchableReference;
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
@@ -28,16 +29,25 @@ pub struct PreservedPackage {
     pub(crate) calc_chains: Vec<PartReference>,
     pub(crate) stylesheet_template: Option<XmlTemplate>,
     pub(crate) original_workbook: Workbook,
-    pub(crate) unmodelled_chart_part: Option<String>,
+    pub(crate) active_sheet: SheetId,
+    pub(crate) unpatchable_references: Vec<UnpatchableReference>,
+    pub(crate) rich_shared_strings: BTreeSet<usize>,
 }
 
 impl PreservedPackage {
+    /// `parts` moves into the package: the inflated archive is retained once,
+    /// and the save path borrows from it rather than holding a second copy.
     pub(crate) fn capture(
-        parts: &[(String, Vec<u8>)],
+        parts: Vec<(String, Vec<u8>)>,
         workbook: &Workbook,
+        active_sheet: SheetId,
         shared_string_cells: &[SharedStringCells],
+        declined_parts: &[String],
+        rich_shared_strings: BTreeSet<usize>,
+        cell_facts: Vec<SourceCellFacts>,
     ) -> Result<Self, ParseError> {
-        let workbook_xml = find_part(parts, "xl/workbook.xml")
+        let mut cell_facts = cell_facts.into_iter();
+        let workbook_xml = find_part(&parts, "xl/workbook.xml")
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
         let workbook_template = XmlTemplate::capture(workbook_xml)?;
         let workbook_pr_attributes = workbook_template
@@ -54,7 +64,7 @@ impl PreservedPackage {
             .map(|child| attributes_from_fragment(&child.bytes))
             .transpose()?;
 
-        let workbook_relationships = find_part(parts, "xl/_rels/workbook.xml.rels")
+        let workbook_relationships = find_part(&parts, "xl/_rels/workbook.xml.rels")
             .map(parse_relationships)
             .transpose()?
             .unwrap_or_default();
@@ -75,7 +85,7 @@ impl PreservedPackage {
                 .map(|target| resolve_part_path("xl", target))
                 .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
             let bytes =
-                find_part(parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
+                find_part(&parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
             let relationship_type = relationship
                 .and_then(|relationship| relationship.attribute("Type"))
                 .map(str::to_owned);
@@ -87,25 +97,26 @@ impl PreservedPackage {
                 attributes: entry.attributes,
                 template: XmlTemplate::capture(bytes)?,
                 shared_string_cells: shared_string_cells.get(index).cloned().unwrap_or_default(),
+                cell_facts: cell_facts.next().unwrap_or_default(),
             });
         }
 
         let shared_strings = part_reference(
-            parts,
+            &parts,
             &workbook_relationships,
             "sharedStrings",
             "xl/sharedStrings.xml",
         );
-        let styles = part_reference(parts, &workbook_relationships, "styles", "xl/styles.xml");
+        let styles = part_reference(&parts, &workbook_relationships, "styles", "xl/styles.xml");
         let theme = part_reference(
-            parts,
+            &parts,
             &workbook_relationships,
             "theme",
             "xl/theme/theme1.xml",
         );
         let shared_strings_template = shared_strings
             .as_ref()
-            .and_then(|part| find_part(parts, &part.path))
+            .and_then(|part| find_part(&parts, &part.path))
             .map(XmlTemplate::capture)
             .transpose()?;
         let mut calc_chains = workbook_relationships
@@ -118,7 +129,7 @@ impl PreservedPackage {
                 })
             })
             .collect::<Vec<_>>();
-        if calc_chains.is_empty() && find_part(parts, "xl/calcChain.xml").is_some() {
+        if calc_chains.is_empty() && find_part(&parts, "xl/calcChain.xml").is_some() {
             calc_chains.push(PartReference {
                 path: "xl/calcChain.xml".to_owned(),
                 relationship_id: None,
@@ -126,27 +137,34 @@ impl PreservedPackage {
         }
         let stylesheet_template = styles
             .as_ref()
-            .and_then(|part| find_part(parts, &part.path))
+            .and_then(|part| find_part(&parts, &part.path))
             .map(XmlTemplate::capture)
             .transpose()?;
 
-        let content_types = find_part(parts, "[Content_Types].xml")
+        let content_types = find_part(&parts, "[Content_Types].xml")
             .map(parse_content_types)
             .transpose()?
             .unwrap_or_default();
-        let unmodelled_chart_part = crate::chart::unmodelled_chart_part(
-            parts,
-            &part_content_types(&content_types, parts),
+        let unpatchable_references = crate::reference::unpatchable_references(
+            &parts,
+            &part_content_types(&content_types, &parts),
             workbook,
+            &sheets
+                .iter()
+                .map(|sheet| sheet.path.clone())
+                .collect::<Vec<_>>(),
+            declined_parts,
         )?;
 
+        let root_relationships = find_part(&parts, "_rels/.rels")
+            .map(parse_relationships)
+            .transpose()?
+            .unwrap_or_default();
+
         Ok(Self {
-            parts: parts.to_vec(),
+            parts,
             content_types,
-            root_relationships: find_part(parts, "_rels/.rels")
-                .map(parse_relationships)
-                .transpose()?
-                .unwrap_or_default(),
+            root_relationships,
             workbook_relationships,
             workbook_template,
             workbook_pr_attributes,
@@ -160,7 +178,9 @@ impl PreservedPackage {
             calc_chains,
             stylesheet_template,
             original_workbook: workbook.clone(),
-            unmodelled_chart_part,
+            active_sheet,
+            unpatchable_references,
+            rich_shared_strings,
         })
     }
 
@@ -174,20 +194,46 @@ impl PreservedPackage {
         self.sheets.len()
     }
 
+    /// Every preserved part whose references cannot be patched, with the cells
+    /// each one names.
+    #[doc(hidden)]
+    pub fn unpatchable_references(&self) -> &[UnpatchableReference] {
+        &self.unpatchable_references
+    }
+
     /// Returns a preserved part whose references cannot be patched.
     #[doc(hidden)]
     pub fn unpatchable_reference_part(&self) -> Option<&str> {
-        const REFERENCE_BEARING: [&str; 2] = ["xl/pivottables/", "xl/pivotcache/"];
-        self.parts
+        self.unpatchable_references
+            .first()
+            .map(UnpatchableReference::part)
+    }
+
+    /// Returns a preserved part that renaming, dropping or reordering `sheet`
+    /// would strand.
+    #[doc(hidden)]
+    pub fn reference_naming_sheet(&self, sheet: &str) -> Option<&str> {
+        self.stranded(|reference| reference.names_sheet(sheet))
+    }
+
+    /// Returns a preserved part that inserting or deleting rows at `at` on
+    /// `sheet` would strand.
+    #[doc(hidden)]
+    pub fn reference_moved_by_rows(&self, sheet: &str, at: u32) -> Option<&str> {
+        self.stranded(|reference| reference.moved_by_rows(sheet, at))
+    }
+
+    /// The column-wise counterpart of [`Self::reference_moved_by_rows`].
+    #[doc(hidden)]
+    pub fn reference_moved_by_cols(&self, sheet: &str, at: u32) -> Option<&str> {
+        self.stranded(|reference| reference.moved_by_cols(sheet, at))
+    }
+
+    fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
+        self.unpatchable_references
             .iter()
-            .find_map(|(path, _)| {
-                let normalized = path.trim_start_matches('/').to_ascii_lowercase();
-                REFERENCE_BEARING
-                    .iter()
-                    .any(|prefix| normalized.starts_with(prefix))
-                    .then_some(path.as_str())
-            })
-            .or(self.unmodelled_chart_part.as_deref())
+            .find(|reference| disturbed(reference))
+            .map(UnpatchableReference::part)
     }
 
     /// The shared-string entries a source sheet's cells were authored against.
@@ -206,6 +252,93 @@ impl PreservedPackage {
             .get(index)
             .is_none_or(PreservedSheet::is_worksheet)
     }
+
+    /// The part path of a source sheet.
+    pub fn source_sheet_part(&self, index: usize) -> Option<&str> {
+        self.sheets.get(index).map(|sheet| sheet.path.as_str())
+    }
+
+    /// The `state` a source sheet's `<sheet>` entry declares; absent reads as visible.
+    pub fn source_sheet_visibility(&self, index: usize) -> Option<SheetVisibility> {
+        let sheet = self.sheets.get(index)?;
+        let state = sheet
+            .attributes
+            .iter()
+            .find(|attribute| attribute.local_name() == "state")
+            .map(|attribute| attribute.value.as_str());
+        Some(match state {
+            None | Some("visible") => SheetVisibility::Visible,
+            Some("hidden") => SheetVisibility::Hidden,
+            Some("veryHidden") => SheetVisibility::VeryHidden,
+            Some(_) => SheetVisibility::Unknown,
+        })
+    }
+
+    /// What kind of sheet a source sheet's relationship names.
+    pub fn source_sheet_kind(&self, index: usize) -> Option<SourceSheetKind> {
+        let sheet = self.sheets.get(index)?;
+        Some(
+            match sheet
+                .relationship_type
+                .as_deref()
+                .and_then(|kind| kind.rsplit('/').next())
+            {
+                None | Some("worksheet") => SourceSheetKind::Worksheet,
+                Some("chartsheet") => SourceSheetKind::Chartsheet,
+                Some("dialogsheet") => SourceSheetKind::Dialogsheet,
+                Some("xlMacrosheet" | "xlIntlMacrosheet") => SourceSheetKind::Macrosheet,
+                Some(_) => SourceSheetKind::Other,
+            },
+        )
+    }
+
+    /// Cell facts of source sheet `index` the model does not keep.
+    pub fn source_cell_facts(&self, index: usize) -> Option<&SourceCellFacts> {
+        self.sheets.get(index).map(|sheet| &sheet.cell_facts)
+    }
+
+    /// Whether source shared string `index` carried formatted runs, which the model
+    /// reads as plain text.
+    pub fn shared_string_is_rich(&self, index: usize) -> bool {
+        self.rich_shared_strings.contains(&index)
+    }
+
+    /// Whether a source sheet enables `sheetProtection`. A declaration that cannot be read
+    /// counts as enabled.
+    #[doc(hidden)]
+    pub fn source_sheet_is_protected(&self, index: usize) -> bool {
+        self.sheets
+            .get(index)
+            .and_then(|sheet| sheet.template.child("sheetProtection"))
+            .is_some_and(|protection| {
+                attributes_from_fragment(&protection.bytes).map_or(true, |attributes| {
+                    attributes.iter().any(|attribute| {
+                        attribute.local_name() == "sheet"
+                            && matches!(attribute.value.as_str(), "1" | "true")
+                    })
+                })
+            })
+    }
+}
+
+/// A sheet's `state` in the workbook part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetVisibility {
+    Visible,
+    Hidden,
+    VeryHidden,
+    /// A value outside the schema.
+    Unknown,
+}
+
+/// What a workbook `<sheet>` entry's relationship names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceSheetKind {
+    Worksheet,
+    Chartsheet,
+    Dialogsheet,
+    Macrosheet,
+    Other,
 }
 
 #[derive(Clone, Debug)]
@@ -217,6 +350,7 @@ pub(crate) struct PreservedSheet {
     pub(crate) attributes: Vec<XmlAttribute>,
     pub(crate) template: XmlTemplate,
     pub(crate) shared_string_cells: SharedStringCells,
+    pub(crate) cell_facts: SourceCellFacts,
 }
 
 impl PreservedSheet {
@@ -283,7 +417,6 @@ impl ContentTypeEntry {
 
 pub(crate) struct ResolvedContentType<'a> {
     pub(crate) value: &'a str,
-    pub(crate) overridden: bool,
 }
 
 /// Resolves a part's effective content type.
@@ -302,16 +435,8 @@ pub(crate) fn effective_content_type<'a>(
             .then(|| entry.attribute("ContentType"))
             .flatten()
         })
-        .map(|value| ResolvedContentType {
-            value,
-            overridden: true,
-        })
-        .or_else(|| {
-            default_content_type(entries, path).map(|value| ResolvedContentType {
-                value,
-                overridden: false,
-            })
-        })
+        .map(|value| ResolvedContentType { value })
+        .or_else(|| default_content_type(entries, path).map(|value| ResolvedContentType { value }))
 }
 
 fn default_content_type<'a>(entries: &'a [ContentTypeEntry], path: &str) -> Option<&'a str> {
@@ -363,6 +488,40 @@ pub(crate) struct XmlChild {
 }
 
 impl XmlTemplate {
+    pub(crate) fn render_with_attributes(
+        &self,
+        replacements: Vec<(&'static str, Option<Vec<u8>>)>,
+        rank: fn(&str) -> usize,
+        changes: &[(&str, Option<String>)],
+    ) -> Result<Vec<u8>, ParseError> {
+        let mut template = self.clone();
+        let mut reader = Reader::from_reader(self.prefix.as_slice());
+        let mut writer = Writer::new(Vec::new());
+        loop {
+            match reader.read_event().map_err(xml_err)? {
+                Event::Start(element) => {
+                    let mut values = attributes(&element)?;
+                    for (name, value) in changes {
+                        match value {
+                            Some(value) => set_attribute(&mut values, name, name, value.clone()),
+                            None => remove_attribute(&mut values, name),
+                        }
+                    }
+                    let mut root = BytesStart::new(self.root_name.as_str());
+                    for value in &values {
+                        root.push_attribute((value.name.as_str(), value.value.as_str()));
+                    }
+                    writer.write_event(Event::Start(root)).map_err(xml_err)?;
+                    break;
+                }
+                Event::Eof => return Err(ParseError::Malformed("missing template root".into())),
+                event => writer.write_event(event.into_owned()).map_err(xml_err)?,
+            }
+        }
+        template.prefix = writer.into_inner();
+        template.render(replacements, rank)
+    }
+
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
         let mut reader = NsReader::from_reader(data);
         let config = reader.config_mut();
@@ -994,7 +1153,6 @@ fn part_content_types(
             Some(PartContentType {
                 path: normalized_part_name(path),
                 content_type: resolved.value.to_owned(),
-                overridden: resolved.overridden,
             })
         })
         .collect()
@@ -1003,7 +1161,6 @@ fn part_content_types(
 pub(crate) struct PartContentType {
     pub(crate) path: String,
     pub(crate) content_type: String,
-    pub(crate) overridden: bool,
 }
 
 struct SheetEntry {
@@ -1071,7 +1228,7 @@ fn part_reference(
     })
 }
 
-fn attributes(element: &BytesStart<'_>) -> Result<Vec<XmlAttribute>, ParseError> {
+pub(crate) fn attributes(element: &BytesStart<'_>) -> Result<Vec<XmlAttribute>, ParseError> {
     element
         .attributes()
         .map(|attribute| {

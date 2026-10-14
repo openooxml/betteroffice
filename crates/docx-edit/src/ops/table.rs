@@ -7,7 +7,7 @@
 //! rewrites them together in one transaction, and creates/removes cell stories
 //! in that same transaction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -17,10 +17,13 @@ use yrs::{
     Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
 };
 
+use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
+use crate::ops::paragraph_content_before;
+use crate::seed::border_side_sources;
 use crate::{
-    EditCtx, EditingDoc, KIND_KEY, Position, STORIES, check_position, insertion_attrs, map_string,
-    out_len, revision_value, story_ref, write_pilcrow_properties,
+    EditCtx, EditingDoc, KIND_KEY, ParagraphIdOrigin, Position, STORIES, check_position,
+    insertion_attrs, map_string, out_len, revision_value, story_ref,
 };
 
 const TR_INS: &str = "trIns";
@@ -101,6 +104,9 @@ pub struct TableReceipt {
     pub columns: u32,
     pub created_story_ids: Vec<String>,
     pub deleted_story_ids: Vec<String>,
+    /// Existing stories whose content changed: the table's story, plus a merge's surviving cell.
+    #[serde(default)]
+    pub changed_story_ids: Vec<String>,
     pub new_para_ids: Vec<String>,
     pub deleted_table: bool,
     #[serde(default)]
@@ -317,6 +323,52 @@ fn to_any_array(values: Vec<Any>) -> Any {
     Any::Array(Arc::from(values))
 }
 
+/// Merges physical border edges into a cell's `tcPr.borders`. A `None` value
+/// drops that edge; an emptied object drops the whole key.
+fn merge_cell_borders<'a>(
+    cell: &mut CellData,
+    edges: impl IntoIterator<Item = (&'a str, &'a Option<Any>)>,
+) {
+    let mut merged = cell
+        .tc_pr
+        .get("borders")
+        .and_then(|value| match value {
+            Any::Map(map) => Some(map.as_ref().clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for (edge, value) in edges {
+        match value {
+            Some(value) => merged.insert(edge.to_owned(), value.clone()),
+            None => merged.remove(edge),
+        };
+    }
+    if merged.is_empty() {
+        cell.tc_pr.remove("borders");
+    } else {
+        cell.tc_pr.insert("borders".to_owned(), to_any_map(merged));
+    }
+}
+
+/// `tcPr.borders` for a freshly inserted table: Word's Table Grid rules, a
+/// single 0.5pt (`w:sz="4"`) black line on every edge.
+fn default_cell_borders() -> Any {
+    let edge = to_any_map(HashMap::from([
+        ("style".to_owned(), Any::from("single")),
+        ("size".to_owned(), Any::Number(4.0)),
+        (
+            "color".to_owned(),
+            to_any_map(HashMap::from([("rgb".to_owned(), Any::from("000000"))])),
+        ),
+    ]));
+    to_any_map(HashMap::from([
+        ("top".to_owned(), edge.clone()),
+        ("bottom".to_owned(), edge.clone()),
+        ("left".to_owned(), edge.clone()),
+        ("right".to_owned(), edge),
+    ]))
+}
+
 fn write_table(txn: &mut TransactionMut<'_>, map: &MapRef, data: &TableData) {
     let rows = data
         .rows
@@ -516,6 +568,10 @@ fn selected_anchors(data: &TableData, range: &TableRange) -> OpResult<Vec<CellAn
 }
 
 fn reset_cell_spans(mut cell: CellData) -> CellData {
+    let source_story = Any::from(cell.story.as_str());
+    cell.tc_pr
+        .entry("_sourceCellStory".to_owned())
+        .or_insert(source_story);
     set_spans(&mut cell, 1, 1);
     cell.tc_pr.remove("colwidth");
     cell.tc_pr.remove("cellMarker");
@@ -596,6 +652,7 @@ fn fresh_cell_story(
 fn create_cell_story(
     doc: &EditingDoc,
     txn: &mut TransactionMut<'_>,
+    ids: &mut IdAllocator,
     story_id: &str,
 ) -> OpResult<String> {
     let stories = txn
@@ -604,7 +661,7 @@ fn create_cell_story(
     if stories.contains_key(txn, story_id) {
         return Err(OpError::StoryExists(story_id.to_owned()));
     }
-    let para_id = doc.next_id();
+    let para_id = ids.session_key(doc);
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     let pilcrow = story.insert_embed_with_attributes(
         txn,
@@ -612,7 +669,9 @@ fn create_cell_story(
         MapPrelim::default(),
         insertion_attrs(None, None),
     );
-    write_pilcrow_properties(&pilcrow, txn, &para_id, "Normal", "left");
+    pilcrow.insert(txn, KIND_KEY, crate::PILCROW_KIND);
+    pilcrow.insert(txn, crate::PARA_ID, para_id.as_str());
+    ids.bind(txn, &pilcrow, &para_id, ParagraphIdOrigin::Authored);
     Ok(para_id)
 }
 
@@ -732,6 +791,7 @@ fn receipt(
         (0, 0, true)
     };
     Ok(TableReceipt {
+        changed_story_ids: vec![locator.story.clone()],
         table: locator,
         rows,
         columns,
@@ -771,6 +831,39 @@ fn remove_row_at(
     data.rows.remove(row);
     data.rows = reconstruct_rows(std::mem::take(&mut data.rows), kept)?;
     Ok(())
+}
+
+pub(crate) fn table_revisions<T: ReadTxn>(table: &MapRef, txn: &T) -> [Option<Any>; 2] {
+    let Ok(data) = read_table(table, txn) else {
+        return [None, None];
+    };
+    [TR_INS, TR_DEL].map(|key| {
+        let stamp = data.rows.first()?.tr_pr.get(key)?;
+        data.rows
+            .iter()
+            .all(|row| row.tr_pr.get(key).and_then(row_revision_parts).is_some())
+            .then(|| stamp.clone())
+    })
+}
+
+pub(crate) fn table_revision_stamps<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+) -> Vec<(String, String, String)> {
+    if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+        return Vec::new();
+    }
+    let Ok(data) = read_table(map, txn) else {
+        return Vec::new();
+    };
+    data.rows
+        .iter()
+        .flat_map(|row| {
+            [TR_INS, TR_DEL]
+                .into_iter()
+                .filter_map(move |key| row.tr_pr.get(key).and_then(row_revision_parts))
+        })
+        .collect()
 }
 
 /// Collects structural row revisions at their containing table embed. Multiple
@@ -851,7 +944,7 @@ pub(crate) fn resolve_table_row_revisions(
     span: Option<(u32, u32)>,
     filter: Option<&str>,
     resolved: &mut Vec<String>,
-) -> OpResult<()> {
+) -> OpResult<u32> {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
     let mut tables = Vec::new();
     let mut offset = 0u32;
@@ -869,6 +962,7 @@ pub(crate) fn resolve_table_row_revisions(
         offset += len;
     }
 
+    let mut removed_tables = 0;
     for (table_offset, table_index, table) in tables.into_iter().rev() {
         let mut data = read_table(&table, txn)?;
         let mut remove = Vec::new();
@@ -897,6 +991,7 @@ pub(crate) fn resolve_table_row_revisions(
         if remove.len() == data.rows.len() {
             let locator = TableLocator::new(story_id, table_index);
             delete_table_in_txn(txn, &locator, story, table_offset, &data)?;
+            removed_tables += 1;
             continue;
         }
         let mut deleted = Vec::new();
@@ -905,7 +1000,7 @@ pub(crate) fn resolve_table_row_revisions(
         }
         write_table(txn, &table, &data);
     }
-    Ok(())
+    Ok(removed_tables)
 }
 
 fn delete_table_in_txn(
@@ -926,6 +1021,14 @@ fn delete_table_in_txn(
 }
 
 impl EditingDoc {
+    /// The payload of `locator`'s table embed, as [`EditingDoc::story_segments`]
+    /// gives it, without reading the rest of the story's segments.
+    pub fn table_payload(&self, locator: &TableLocator) -> OpResult<BTreeMap<String, Any>> {
+        let txn = self.yrs_doc().transact();
+        let (_, table, _) = table_at(&txn, locator)?;
+        Ok(crate::embed_payload(&table, &txn))
+    }
+
     /// Story-global position of the table embed. Used by wasm awareness state
     /// to make a cell selection sticky without putting it in the document.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
@@ -1039,7 +1142,7 @@ impl EditingDoc {
     pub fn insert_table(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         rows: u32,
         columns: u32,
     ) -> OpResult<TableReceipt> {
@@ -1050,6 +1153,20 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        at.index = crate::ops::code_point_range(&story, &txn, at.index, at.index).0;
+        let split_para_id = if paragraph_content_before(&story, &txn, at.index) {
+            let split = self.split_paragraph_in_transaction(
+                ctx,
+                &mut txn,
+                at.clone(),
+                None,
+                revision_id.clone(),
+            )?;
+            at.index += 1;
+            Some(split.second_para_id)
+        } else {
+            None
+        };
 
         let mut ordinal = 0u32;
         let mut offset = 0u32;
@@ -1066,23 +1183,27 @@ impl EditingDoc {
         }
         let locator = TableLocator::new(at.story.clone(), ordinal);
         let mut used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let table_slot = fresh_table_slot(&used, &at.story, ordinal as usize);
         let base = format!("{}:t{table_slot}", at.story);
         let mut created_story_ids = Vec::with_capacity((rows * columns) as usize);
-        let mut new_para_ids = Vec::with_capacity((rows * columns) as usize);
+        let mut new_para_ids = Vec::with_capacity((rows * columns) as usize + 1);
+        new_para_ids.extend(split_para_id);
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let borders = default_cell_borders();
         let mut table_rows = Vec::with_capacity(rows as usize);
         for row in 0..rows as usize {
             let mut cells = Vec::with_capacity(columns as usize);
             for column in 0..columns as usize {
                 let story_id = fresh_cell_story(&mut used, &base, row, column);
-                let para_id = create_cell_story(self, &mut txn, &story_id)?;
+                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 cells.push(CellData {
                     tc_pr: HashMap::from([
                         ("rowspan".to_owned(), Any::Number(1.0)),
                         ("colspan".to_owned(), Any::Number(1.0)),
+                        ("borders".to_owned(), borders.clone()),
                     ]),
                     story: story_id.clone(),
                 });
@@ -1151,6 +1272,7 @@ impl EditingDoc {
             );
         }
         let used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let base = table_base(&locator);
         let row_slot = fresh_row_slot(&used, &base, data.rows.len(), columns);
         let mut used = used;
@@ -1183,7 +1305,7 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row_slot, column);
-            let para_id = create_cell_story(self, &mut txn, &story_id)?;
+            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted_anchors.push(CellAnchor {
@@ -1236,6 +1358,7 @@ impl EditingDoc {
             target.column
         };
         let used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let base = table_base(&locator);
         let column_slot = fresh_column_slot(&used, &base, data.rows.len(), columns);
         let mut used = used;
@@ -1273,7 +1396,7 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row, column_slot);
-            let para_id = create_cell_story(self, &mut txn, &story_id)?;
+            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted.push(CellAnchor {
@@ -1474,7 +1597,9 @@ impl EditingDoc {
         survivor.colspan = rect.right - rect.left;
         data.rows = reconstruct_rows(data.rows, kept)?;
         write_table(&mut txn, &table, &data);
-        receipt(locator, Some(&data), Vec::new(), deleted, Vec::new())
+        let mut receipt = receipt(locator, Some(&data), Vec::new(), deleted, Vec::new())?;
+        receipt.changed_story_ids.push(target.cell.story);
+        Ok(receipt)
     }
 
     /// Splits the merged cell covering `at` back into one cell per grid slot.
@@ -1553,6 +1678,7 @@ impl EditingDoc {
 
         let base = table_base(&locator);
         let mut used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let mut created = Vec::new();
         let mut new_para_ids = Vec::new();
         for row in target.row..target.row + requested_rows {
@@ -1570,7 +1696,7 @@ impl EditingDoc {
                     continue;
                 }
                 let story_id = fresh_cell_story(&mut used, &base, row, column);
-                let para_id = create_cell_story(self, &mut txn, &story_id)?;
+                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
                 next_anchors.push(CellAnchor {
@@ -1673,7 +1799,11 @@ impl EditingDoc {
         receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
     }
 
-    /// Replaces the complete `tcPr.borders` object on every selected cell.
+    /// Merges the supplied border sides into every selected cell's
+    /// `tcPr.borders`. `insideH`/`insideV` resolve per cell to the physical
+    /// edges interior to the selection, the same mapping seeding uses to push
+    /// `tblBorders` down. An omitted side is left untouched, `style: "none"`
+    /// authors an explicit no-border, and JSON `null` drops the authored side.
     pub fn set_cell_borders(
         &self,
         ctx: &EditCtx,
@@ -1684,21 +1814,43 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let (_, table, _) = table_at(&txn, &locator)?;
         let mut data = read_table(&table, &txn)?;
+        let rect = checked_rect(&data, range)?;
         let selected = selected_anchors(&data, range)?;
         let (all, _) = anchors(&data)?;
 
-        for anchor in &selected {
-            data.rows[anchor.row].cells[anchor.cell_index]
-                .tc_pr
-                .insert("borders".to_owned(), to_any_map(borders.clone()));
+        let resolved: Vec<(&CellAnchor, Vec<(&'static str, Option<Any>)>)> = selected
+            .iter()
+            .map(|anchor| {
+                let edges = border_side_sources(
+                    anchor.row == rect.top,
+                    anchor.row + anchor.rowspan == rect.bottom,
+                    anchor.column == rect.left,
+                    anchor.column + anchor.colspan == rect.right,
+                )
+                .into_iter()
+                .filter_map(|(edge, source)| {
+                    let value = borders.get(source)?;
+                    let keep = !matches!(value, Any::Null | Any::Undefined);
+                    Some((edge, keep.then(|| value.clone())))
+                })
+                .collect();
+                (anchor, edges)
+            })
+            .collect();
+
+        for (anchor, edges) in &resolved {
+            merge_cell_borders(
+                &mut data.rows[anchor.row].cells[anchor.cell_index],
+                edges.iter().map(|(edge, value)| (*edge, value)),
+            );
         }
 
-        // Keep shared edges symmetric. A supplied top/bottom/left/right value
-        // is mirrored onto every cell touching that edge, including cells just
-        // outside the selection.
-        for anchor in &selected {
-            for (side, value) in borders {
-                let (facing, slots): (&str, Vec<(usize, usize)>) = match side.as_str() {
+        // Keep shared edges symmetric. A resolved edge is mirrored onto the
+        // facing edge of every cell across it, including cells just outside
+        // the selection.
+        for (anchor, edges) in &resolved {
+            for (edge, value) in edges {
+                let (facing, slots): (&str, Vec<(usize, usize)>) = match *edge {
                     "top" if anchor.row > 0 => (
                         "bottom",
                         (anchor.column..anchor.column + anchor.colspan)
@@ -1733,18 +1885,10 @@ impl EditingDoc {
                     if !neighbors.insert(neighbor.cell.story.clone()) {
                         continue;
                     }
-                    let cell = &mut data.rows[neighbor.row].cells[neighbor.cell_index];
-                    let mut neighbor_borders = cell
-                        .tc_pr
-                        .get("borders")
-                        .and_then(|value| match value {
-                            Any::Map(map) => Some(map.as_ref().clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    neighbor_borders.insert(facing.to_owned(), value.clone());
-                    cell.tc_pr
-                        .insert("borders".to_owned(), to_any_map(neighbor_borders));
+                    merge_cell_borders(
+                        &mut data.rows[neighbor.row].cells[neighbor.cell_index],
+                        std::iter::once((facing, value)),
+                    );
                 }
             }
         }
@@ -1908,6 +2052,40 @@ mod tests {
     }
 
     #[test]
+    fn a_table_payload_is_the_one_its_story_segment_carries() {
+        let doc = seed_table();
+        doc.insert_table(&direct(), Position::new("body", 1), 1, 2)
+            .unwrap();
+        let tables: Vec<_> = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables.len(), 2);
+        for (index, payload) in tables.iter().enumerate() {
+            assert_eq!(
+                &doc.table_payload(&TableLocator::new("body", index as u32))
+                    .unwrap(),
+                payload
+            );
+        }
+        assert!(matches!(
+            doc.table_payload(&TableLocator::new("body", 2)),
+            Err(OpError::UnknownTable { .. })
+        ));
+        assert!(matches!(
+            doc.table_payload(&TableLocator::new("missing", 0)),
+            Err(OpError::UnknownStory(_))
+        ));
+    }
+
+    #[test]
     fn insert_row_creates_stories_and_still_lowers_to_layout_table() {
         let doc = seed_table();
         let receipt = doc.insert_row(&direct(), &cell(0, 0), true).unwrap();
@@ -1935,6 +2113,189 @@ mod tests {
         let value = serde_json::to_value(&blocks).unwrap();
         assert_eq!(value[0]["kind"], "table");
         assert_eq!(value[0]["rows"].as_array().unwrap().len(), 3);
+    }
+
+    fn inserted(ctx: &EditCtx, rows: u32, columns: u32) -> EditingDoc {
+        let doc = EditingDoc::new(74);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.insert_table(ctx, Position::new("body", 0), rows, columns)
+            .unwrap();
+        doc
+    }
+
+    #[test]
+    fn insert_table_closes_its_anchor_paragraph_and_undo_restores_it() {
+        for offset in [0, 2, 4] {
+            let doc = EditingDoc::new(74);
+            doc.create_story("body", "Seed", "Normal", "center")
+                .unwrap();
+            let before = project_story(&doc, "body").unwrap();
+            let original_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+            let mut undo = doc.undo_manager();
+            let receipt = doc
+                .insert_table(&direct(), Position::new("body", offset), 2, 2)
+                .unwrap();
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let value = serde_json::to_value(&blocks).unwrap();
+            let table_index = usize::from(offset > 0);
+            assert_eq!(value[table_index]["kind"], "table");
+            let paragraphs = doc.paragraphs("body").unwrap();
+            let expected = match offset {
+                0 => vec!["Seed"],
+                2 => vec!["Se", "ed"],
+                _ => vec!["Seed", ""],
+            };
+            assert_eq!(
+                paragraphs
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(paragraphs[0].para_id, original_id);
+            assert_eq!(receipt.new_para_ids.len(), 4 + table_index);
+            assert!(undo.undo());
+            assert_eq!(project_story(&doc, "body").unwrap(), before);
+            assert_eq!(doc.story_ids_for_test(), vec!["body"]);
+            assert!(undo.redo());
+            assert!(yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejecting_a_suggested_table_also_rejoins_its_split_paragraph() {
+        let doc = EditingDoc::new(74);
+        doc.create_story("body", "Seed", "Normal", "left").unwrap();
+        let receipt = doc
+            .insert_table(&suggesting(), Position::new("body", 2), 1, 1)
+            .unwrap();
+        assert!(yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).is_ok());
+        doc.reject_change(
+            &direct(),
+            &crate::ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+        assert_eq!(doc.paragraphs("body").unwrap().len(), 1);
+        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "Seed");
+        assert_eq!(doc.story_ids_for_test(), vec!["body"]);
+    }
+
+    #[test]
+    fn revision_stamps_keep_distinct_dates_for_rows_sharing_a_revision() {
+        for key in [TR_INS, TR_DEL] {
+            let doc = seed_table();
+            let stamp = |date: &str| {
+                Any::from_json(&format!(
+                    r#"{{"id":"shared","author":"Ada","date":"{date}"}}"#
+                ))
+                .unwrap()
+            };
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let (_, table, _) = table_at(&txn, &TableLocator::new("body", 0)).unwrap();
+                let mut data = read_table(&table, &txn).unwrap();
+                data.rows[0]
+                    .tr_pr
+                    .insert(key.into(), stamp("2026-07-14T10:00:00Z"));
+                data.rows[1]
+                    .tr_pr
+                    .insert(key.into(), stamp("2026-07-14T10:01:00Z"));
+                write_table(&mut txn, &table, &data);
+            }
+            assert_eq!(
+                doc.revision_stamps(&["shared".into()]).unwrap(),
+                BTreeMap::from([(
+                    "shared".into(),
+                    std::collections::BTreeSet::from([
+                        ("Ada".into(), "2026-07-14T10:00:00Z".into()),
+                        ("Ada".into(), "2026-07-14T10:01:00Z".into()),
+                    ]),
+                )])
+            );
+        }
+    }
+
+    fn assert_grid_borders(doc: &EditingDoc) {
+        let (_, _, rows) = table_value(doc);
+        for row in rows.as_array().unwrap() {
+            for cell in row["cells"].as_array().unwrap() {
+                let borders = &cell["tcPr"]["borders"];
+                for side in ["top", "bottom", "left", "right"] {
+                    assert_eq!(borders[side]["style"], "single", "{side} of {cell}");
+                    assert_eq!(borders[side]["size"], 4.0, "{side} of {cell}");
+                    assert_eq!(borders[side]["color"]["rgb"], "000000", "{side} of {cell}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inserted_table_carries_word_default_grid_borders() {
+        assert_grid_borders(&inserted(&direct(), 3, 2));
+        assert_grid_borders(&inserted(&suggesting(), 3, 2));
+    }
+
+    #[test]
+    fn inserted_table_keeps_grid_borders_when_rows_and_columns_grow() {
+        let doc = inserted(&direct(), 2, 2);
+        doc.insert_row(&direct(), &cell(1, 0), true).unwrap();
+        doc.insert_column(&direct(), &cell(0, 1), true).unwrap();
+        let (_, grid, rows) = table_value(&doc);
+        assert_eq!(grid.as_array().unwrap().len(), 3);
+        assert_eq!(rows.as_array().unwrap().len(), 3);
+        assert_grid_borders(&doc);
+    }
+
+    #[test]
+    fn inserted_table_paints_a_rule_on_every_cell_edge() {
+        use docx_layout::display_list::{LineRole, Primitive};
+        use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
+        use docx_layout::types::{Input, LayoutOptions, MeasuredBlock, PageMargins, Size};
+
+        let doc = inserted(&direct(), 2, 2);
+        let mut blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let measures = measure_blocks(&mut blocks, 600.0, &MeasurementConfig::default()).unwrap();
+        let mut input = Input {
+            measured: blocks
+                .into_iter()
+                .zip(measures)
+                .map(|(block, measure)| MeasuredBlock { block, measure })
+                .collect(),
+            options: LayoutOptions {
+                page_size: Some(Size {
+                    w: 816.0,
+                    h: 1056.0,
+                }),
+                margins: Some(PageMargins {
+                    top: 96.0,
+                    right: 108.0,
+                    bottom: 96.0,
+                    left: 108.0,
+                    header: None,
+                    footer: None,
+                }),
+                ..LayoutOptions::default()
+            },
+        };
+        let layout = docx_layout::compute_layout_input(&mut input).unwrap();
+        let display_list = docx_layout::build_display_list(&input, &layout).unwrap();
+        let rules: Vec<_> = display_list.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Line(line) if line.role == Some(LineRole::TableBorder) => Some(line),
+                _ => None,
+            })
+            .collect();
+        // A 2x2 grid draws three horizontal and three vertical rules, each
+        // split into one segment per cell it borders.
+        let horizontal = rules.iter().filter(|line| line.y1 == line.y2).count();
+        let vertical = rules.iter().filter(|line| line.x1 == line.x2).count();
+        assert_eq!((horizontal, vertical), (6, 6), "every grid edge is painted");
+        for line in &rules {
+            assert_eq!(line.color, "#000000");
+            assert_eq!(line.stroke_width.as_f64(), Some(0.667));
+        }
     }
 
     #[test]
@@ -2133,6 +2494,7 @@ mod tests {
         let range = TableRange::new(cell(0, 0), cell(1, 1));
         let merged = doc.merge_cells(&direct(), &range).unwrap();
         assert_eq!(merged.deleted_story_ids.len(), 3);
+        assert_eq!(merged.changed_story_ids, ["body", "body:t0:r0c0"]);
         let (_, _, rows) = table_value(&doc);
         assert_eq!(rows[0]["cells"].as_array().unwrap().len(), 1);
         assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 0);
@@ -2224,6 +2586,283 @@ mod tests {
         assert_eq!(grid[0], 2400);
         assert_eq!(tbl_pr["width"], 5000);
         assert_eq!(tbl_pr["widthType"], "dxa");
+    }
+
+    fn line(color: &str) -> Any {
+        Any::from_json(&format!(
+            r#"{{"style":"single","size":4,"color":{{"rgb":"{color}"}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn cleared() -> Any {
+        Any::from_json(r#"{"style":"none","size":0,"color":{"rgb":"000000"}}"#).unwrap()
+    }
+
+    fn sides(names: &[&str], value: &Any) -> HashMap<String, Any> {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), value.clone()))
+            .collect()
+    }
+
+    /// The six-, four- and two-key payloads the border toolbar actually sends.
+    const ALL: &[&str] = &["top", "bottom", "left", "right", "insideH", "insideV"];
+    const OUTSIDE: &[&str] = &["top", "bottom", "left", "right"];
+    const INSIDE: &[&str] = &["insideH", "insideV"];
+
+    fn whole_table() -> TableRange {
+        TableRange::new(cell(0, 0), cell(1, 1))
+    }
+
+    fn grid_table() -> EditingDoc {
+        let doc = seed_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(ALL, &line("000000")))
+            .unwrap();
+        doc
+    }
+
+    /// Every cell's four physical edge styles, `None` where unauthored.
+    fn edges(doc: &EditingDoc, row: usize, column: usize) -> [Option<String>; 4] {
+        let (_, _, rows) = table_value(doc);
+        let borders = &rows[row]["cells"][column]["tcPr"]["borders"];
+        ["top", "bottom", "left", "right"].map(|side| {
+            borders[side]["style"]
+                .as_str()
+                .filter(|style| *style != "none")
+                .map(str::to_owned)
+        })
+    }
+
+    fn authored(styles: [&str; 4]) -> [Option<String>; 4] {
+        styles.map(|style| Some(style.to_owned()))
+    }
+
+    /// Painted table-border rules as `(x1, y1, x2, y2, color)` page pixels.
+    fn rules(doc: &EditingDoc) -> Vec<(f64, f64, f64, f64, String)> {
+        use docx_layout::display_list::{LineRole, Primitive};
+        use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
+        use docx_layout::types::{Input, LayoutOptions, MeasuredBlock, PageMargins, Size};
+
+        let mut blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+        let measures = measure_blocks(&mut blocks, 600.0, &MeasurementConfig::default()).unwrap();
+        let mut input = Input {
+            measured: blocks
+                .into_iter()
+                .zip(measures)
+                .map(|(block, measure)| MeasuredBlock { block, measure })
+                .collect(),
+            options: LayoutOptions {
+                page_size: Some(Size {
+                    w: 816.0,
+                    h: 1056.0,
+                }),
+                margins: Some(PageMargins {
+                    top: 96.0,
+                    right: 108.0,
+                    bottom: 96.0,
+                    left: 108.0,
+                    header: None,
+                    footer: None,
+                }),
+                ..LayoutOptions::default()
+            },
+        };
+        let layout = docx_layout::compute_layout_input(&mut input).unwrap();
+        let display_list = docx_layout::build_display_list(&input, &layout).unwrap();
+        let number = |value: &serde_json::Number| value.as_f64().unwrap();
+        display_list.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Line(l) if l.role == Some(LineRole::TableBorder) => Some((
+                    number(&l.x1),
+                    number(&l.y1),
+                    number(&l.x2),
+                    number(&l.y2),
+                    l.color.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `(horizontal, vertical)` painted rule segments.
+    fn rule_counts(doc: &EditingDoc) -> (usize, usize) {
+        let painted = rules(doc);
+        (
+            painted.iter().filter(|rule| rule.1 == rule.3).count(),
+            painted.iter().filter(|rule| rule.0 == rule.2).count(),
+        )
+    }
+
+    #[test]
+    fn border_all_authors_four_physical_edges_and_no_inside_keys() {
+        let doc = grid_table();
+        let (_, _, rows) = table_value(&doc);
+        for row in 0..2 {
+            for column in 0..2 {
+                assert_eq!(edges(&doc, row, column), authored(["single"; 4]));
+                let borders = &rows[row]["cells"][column]["tcPr"]["borders"];
+                assert!(borders["insideH"].is_null(), "insideH reached a cell");
+                assert!(borders["insideV"].is_null(), "insideV reached a cell");
+            }
+        }
+        assert_eq!(rule_counts(&doc), (6, 6));
+    }
+
+    #[test]
+    fn a_single_side_button_keeps_the_cell_s_other_three_sides() {
+        let doc = grid_table();
+        assert_eq!(rule_counts(&doc), (6, 6));
+        doc.set_cell_borders(
+            &direct(),
+            &TableRange::cell(cell(0, 0)),
+            &sides(&["top"], &line("FF0000")),
+        )
+        .unwrap();
+        assert_eq!(edges(&doc, 0, 0), authored(["single"; 4]));
+        assert_eq!(rule_counts(&doc), (6, 6));
+    }
+
+    #[test]
+    fn single_side_buttons_apply_to_the_selection_s_own_edge() {
+        for (side, painted, authored_at) in [
+            ("top", (2, 0), [(0, 0), (0, 1)]),
+            ("bottom", (2, 0), [(1, 0), (1, 1)]),
+            ("left", (0, 2), [(0, 0), (1, 0)]),
+            ("right", (0, 2), [(0, 1), (1, 1)]),
+        ] {
+            let doc = seed_table();
+            doc.set_cell_borders(&direct(), &whole_table(), &sides(&[side], &line("000000")))
+                .unwrap();
+            let index = ["top", "bottom", "left", "right"]
+                .iter()
+                .position(|name| *name == side)
+                .unwrap();
+            for row in 0..2 {
+                for column in 0..2 {
+                    let expected = authored_at.contains(&(row, column));
+                    assert_eq!(
+                        edges(&doc, row, column)[index].is_some(),
+                        expected,
+                        "{side} on cell ({row},{column})"
+                    );
+                }
+            }
+            assert_eq!(rule_counts(&doc), painted, "{side}");
+        }
+    }
+
+    #[test]
+    fn border_outside_leaves_the_selection_s_interior_alone() {
+        let doc = seed_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(OUTSIDE, &line("000000")))
+            .unwrap();
+        assert_eq!(
+            edges(&doc, 0, 0),
+            [
+                Some("single".to_owned()),
+                None,
+                Some("single".to_owned()),
+                None
+            ]
+        );
+        assert_eq!(
+            edges(&doc, 1, 1),
+            [
+                None,
+                Some("single".to_owned()),
+                None,
+                Some("single".to_owned())
+            ]
+        );
+        assert_eq!(rule_counts(&doc), (4, 4));
+
+        let grid = grid_table();
+        grid.set_cell_borders(&direct(), &whole_table(), &sides(OUTSIDE, &line("FF0000")))
+            .unwrap();
+        assert_eq!(rule_counts(&grid), (6, 6));
+        let painted = rules(&grid);
+        let interior = painted.iter().filter(|rule| rule.4 == "#000000").count();
+        assert_eq!(interior, 4, "the four interior segments keep their colour");
+    }
+
+    #[test]
+    fn border_inside_paints_the_interior_rules_and_no_exterior_ones() {
+        let doc = seed_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(INSIDE, &line("000000")))
+            .unwrap();
+        let interior = Some("single".to_owned());
+        assert_eq!(
+            edges(&doc, 0, 0),
+            [None, interior.clone(), None, interior.clone()]
+        );
+        // the same two edges seen from the far side, kept symmetric
+        assert_eq!(edges(&doc, 1, 1), [interior.clone(), None, interior, None]);
+
+        let painted = rules(&doc);
+        let horizontal: Vec<_> = painted.iter().filter(|rule| rule.1 == rule.3).collect();
+        let vertical: Vec<_> = painted.iter().filter(|rule| rule.0 == rule.2).collect();
+        assert_eq!((horizontal.len(), vertical.len()), (2, 2));
+        let y = horizontal[0].1;
+        let x = vertical[0].0;
+        assert!(horizontal.iter().all(|rule| rule.1 == y));
+        assert!(vertical.iter().all(|rule| rule.0 == x));
+        let left = horizontal
+            .iter()
+            .map(|rule| rule.0)
+            .fold(f64::MAX, f64::min);
+        let right = horizontal
+            .iter()
+            .map(|rule| rule.2)
+            .fold(f64::MIN, f64::max);
+        let top = vertical.iter().map(|rule| rule.1).fold(f64::MAX, f64::min);
+        let bottom = vertical.iter().map(|rule| rule.3).fold(f64::MIN, f64::max);
+        assert!(left < x && x < right, "the column rule is interior");
+        assert!(top < y && y < bottom, "the row rule is interior");
+    }
+
+    #[test]
+    fn border_none_clears_the_selection_and_the_edges_its_neighbours_own() {
+        let doc = grid_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(ALL, &cleared()))
+            .unwrap();
+        assert_eq!(edges(&doc, 0, 0), [const { None }; 4]);
+        assert_eq!(rule_counts(&doc), (0, 0));
+
+        let corner = grid_table();
+        corner
+            .set_cell_borders(
+                &direct(),
+                &TableRange::cell(cell(1, 1)),
+                &sides(ALL, &cleared()),
+            )
+            .unwrap();
+        assert_eq!(rule_counts(&corner), (4, 4));
+    }
+
+    #[test]
+    fn one_side_clears_by_style_none_or_by_null_without_touching_the_rest() {
+        for value in [cleared(), Any::Null] {
+            let doc = grid_table();
+            doc.set_cell_borders(
+                &direct(),
+                &TableRange::cell(cell(0, 0)),
+                &sides(&["top"], &value),
+            )
+            .unwrap();
+            assert_eq!(
+                edges(&doc, 0, 0),
+                [
+                    None,
+                    Some("single".to_owned()),
+                    Some("single".to_owned()),
+                    Some("single".to_owned())
+                ]
+            );
+            assert_eq!(rule_counts(&doc), (5, 6));
+        }
     }
 
     #[test]

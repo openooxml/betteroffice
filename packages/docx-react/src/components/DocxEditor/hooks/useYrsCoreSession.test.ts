@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import {
+  dirtyProjectionStory,
   mergeDocxHostMetadata,
   seedYrsSession,
   warmCompatibilityBase,
@@ -10,16 +11,20 @@ import {
 function fakeSeedSession(): {
   session: Pick<YrsSession, 'openDocx' | 'loadState'>;
   host: YrsDocxHost;
-  opened: { bytes: Uint8Array; seedStories: boolean }[];
+  opened: { bytes: Uint8Array; seedStories: boolean; mediaTokens?: boolean }[];
   loaded: Uint8Array[];
 } {
   const host = { name: 'host' } as unknown as YrsDocxHost;
-  const opened: { bytes: Uint8Array; seedStories: boolean }[] = [];
+  const opened: { bytes: Uint8Array; seedStories: boolean; mediaTokens?: boolean }[] = [];
   const loaded: Uint8Array[] = [];
   return {
     session: {
-      openDocx: (bytes, seedStories) => {
-        opened.push({ bytes, seedStories });
+      openDocx: (bytes, seedStories, options) => {
+        opened.push({
+          bytes,
+          seedStories,
+          ...(options?.mediaTokens ? { mediaTokens: true } : {}),
+        });
         return host;
       },
       loadState: (update) => {
@@ -94,6 +99,19 @@ describe('seedYrsSession', () => {
     expect(opened).toEqual([{ bytes, seedStories: true }]);
     expect(loaded).toEqual([]);
     expect(host).toBe(expectedHost);
+  });
+
+  test('opens images as media tokens only when asked to', () => {
+    const { session, opened } = fakeSeedSession();
+    const bytes = Uint8Array.of(1, 2);
+
+    seedYrsSession(session, () => expect.unreachable(), {
+      bytes,
+      document: null,
+      mediaTokens: true,
+    });
+
+    expect(opened).toEqual([{ bytes, seedStories: true, mediaTokens: true }]);
   });
 });
 
@@ -228,5 +246,23 @@ describe('warmCompatibilityBase', () => {
     warmCompatibilityBase({ materializeDocx: () => expect.unreachable() }, compatibilityBase);
 
     expect(compatibilityBase.current).toBe(projected);
+  });
+});
+
+describe('dirtyProjectionStory', () => {
+  test('marks the note story itself for header, footer, footnote and endnote input', () => {
+    expect(dirtyProjectionStory('hf:rId5')).toBe('hf:rId5');
+    expect(dirtyProjectionStory('fn:2')).toBe('fn:2');
+    expect(dirtyProjectionStory('en:2')).toBe('en:2');
+  });
+
+  test('falls back to the body for a table cell nested in it', () => {
+    expect(dirtyProjectionStory('body:t0:r0c0')).toBe('body');
+  });
+
+  test('marks the note or header root for a table cell nested in it', () => {
+    expect(dirtyProjectionStory('hf:rId5:t0:r0c0')).toBe('hf:rId5');
+    expect(dirtyProjectionStory('fn:2:t0:r0c0')).toBe('fn:2');
+    expect(dirtyProjectionStory('en:2:t0:r0c0:sdt0')).toBe('en:2');
   });
 });

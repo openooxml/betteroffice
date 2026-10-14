@@ -64,7 +64,7 @@ export type {
   SdtGalleryState,
   SdtControlState,
 } from './content/sdt';
-export type { FieldFormData, CommentReferenceContent } from './content/run';
+export type { FieldFormData, CommentReferenceContent, HorizontalRuleContent } from './content/run';
 export type {
   ImageWrapPoint,
   ImageRotationBounds,
@@ -79,7 +79,13 @@ export type {
   DrawingSceneNode,
   DrawingScene,
 } from './content/shape';
-export type { ChartGrouping, ChartPoint, ChartPlotGroup } from './content/chart';
+export type {
+  ChartDataLabels,
+  ChartGrouping,
+  ChartPoint,
+  ChartPointLabel,
+  ChartPlotGroup,
+} from './content/chart';
 export type { CommentAuthor, CommentAnchorRange } from './content/comment';
 export type { NoteKind, NoteSeparatorReference } from './content/headerFooter';
 export type { PageNumberingProperties } from './content/section';
@@ -111,6 +117,7 @@ export type {
   DrawingContent,
   ShapeContent,
   ChartContent,
+  OpaqueDrawingContent,
   RunContent,
   Run,
   Hyperlink,

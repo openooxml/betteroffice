@@ -51,6 +51,12 @@ export interface A11yRow {
   cells: A11yCell[];
 }
 
+export interface A11yChart {
+  label: string;
+  /** the chart could not be drawn; a neutral box occupies its rect instead. */
+  placeholder: boolean;
+}
+
 /**
  * The full offscreen grid mirror for the current frame.
  */
@@ -59,4 +65,5 @@ export interface A11yGrid {
   sheetName: string;
   columnHeaders: A11yColumnHeader[];
   rows: A11yRow[];
+  charts: A11yChart[];
 }

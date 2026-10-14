@@ -1,0 +1,12 @@
+{
+  "pages": [
+    "index",
+    "packages",
+    "javascript",
+    "rust",
+    "python",
+    "agents",
+    "collaboration",
+    "vsdx"
+  ]
+}

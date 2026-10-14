@@ -1,12 +1,14 @@
 //! undo/redo over committed transactions. each stack entry is the base-op list
 //! that reverses one transaction; undoing replays it and captures a redo inverse.
 
+use serde::{Deserialize, Serialize};
 use xlsx_model::Workbook;
 
 use crate::apply::{OpError, apply_ops};
 use crate::op::{Op, Transaction};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UndoStack {
     undo: Vec<Vec<Op>>,
     redo: Vec<Vec<Op>>,
@@ -42,9 +44,15 @@ impl UndoStack {
     /// redo stack.
     pub fn commit(&mut self, wb: &mut Workbook, tx: &Transaction) -> Result<(), OpError> {
         let inverse = apply_ops(wb, &tx.ops)?;
+        self.record(inverse);
+        Ok(())
+    }
+
+    /// record the inverse of a transaction the caller already applied to the
+    /// workbook, skipping a second apply pass; clears the redo stack.
+    pub fn record(&mut self, inverse: Vec<Op>) {
         self.undo.push(inverse);
         self.redo.clear();
-        Ok(())
     }
 
     /// the ops the next `undo` would apply, so a caller that must clear a

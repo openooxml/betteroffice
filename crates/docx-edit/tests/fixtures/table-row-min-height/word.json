@@ -1,0 +1,9 @@
+{
+  "source": "Microsoft Word 16.113.2 PDF export. Each fixture fills the page with exact 12pt lines, then a one-column table: a test row (w:trHeight minimum, if any, and N lines of 1.15-spaced Arial 12pt) and a one-line row. testLinesOnPageOne is how many of the test row's lines Word puts on page one.",
+  "split-min850-2l-room38": { "testLinesOnPageOne": 0 },
+  "split-min850-2l-room26": { "testLinesOnPageOne": 0 },
+  "split-min1700-2l-room50": { "testLinesOnPageOne": 0 },
+  "split-min1700-4l-room50": { "testLinesOnPageOne": 0 },
+  "split-min850-6l-room50": { "testLinesOnPageOne": 3 },
+  "split-nomin-6l-room50": { "testLinesOnPageOne": 3 }
+}

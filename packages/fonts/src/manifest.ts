@@ -1,0 +1,658 @@
+/** Deterministic bundled-font resolution with lazy loading and optional CJK assets. */
+
+/** Script bucket a bundled face provides glyph coverage for. */
+export type BundledFontScript =
+  | 'cjk-sc'
+  | 'cjk-tc'
+  | 'cjk-jp'
+  | 'cjk-kr'
+  | 'arabic'
+  | 'hebrew';
+
+/** One bundled font binary and the Word font(s) it stands in for. */
+export interface BundledFontFace {
+  /** Family name as it appears in the font's own name table, e.g. "Carlito". */
+  family: string;
+  /**
+   * The Word font this face substitutes, e.g. "Calibri". For the Latin set
+   * this is a true metric match; for the CJK set it is a coverage fallback
+   * (see the module doc). Absent on the pure script-fallback faces (RTL).
+   */
+  metricCompatWith?: string;
+  weight: 400 | 700;
+  style: 'normal' | 'italic';
+  /** Asset filename under this package's `assets/` directory. */
+  file: string;
+  byteLength: number;
+  /** Present on faces that serve as per-script coverage fallbacks. */
+  script?: BundledFontScript;
+}
+
+function familyFaces(
+  family: string,
+  metricCompatWith: string,
+  fileBase: string,
+  byteLengths: readonly [number, number, number, number],
+): BundledFontFace[] {
+  return [
+    {
+      family,
+      metricCompatWith,
+      weight: 400,
+      style: 'normal',
+      file: `${fileBase}-Regular.ttf`,
+      byteLength: byteLengths[0],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 700,
+      style: 'normal',
+      file: `${fileBase}-Bold.ttf`,
+      byteLength: byteLengths[1],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 400,
+      style: 'italic',
+      file: `${fileBase}-Italic.ttf`,
+      byteLength: byteLengths[2],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 700,
+      style: 'italic',
+      file: `${fileBase}-BoldItalic.ttf`,
+      byteLength: byteLengths[3],
+    },
+  ];
+}
+
+/**
+ * The complete manifest of bundled faces. Single source of truth: the
+ * metric-compat and script-fallback resolution below is derived from this
+ * list, never duplicated.
+ *
+ * Order matters within a script bucket: `resolveScriptFallbackFace` prefers
+ * earlier entries on ties, so the sans face of each script comes first.
+ */
+export const BUNDLED_FONTS: BundledFontFace[] = [
+  ...familyFaces(
+    'Carlito',
+    'Calibri',
+    'Carlito',
+    [628032, 682468, 615236, 808508],
+  ),
+  ...familyFaces('Caladea', 'Cambria', 'Caladea', [81600, 84492, 83780, 83356]),
+  ...familyFaces(
+    'Liberation Sans',
+    'Arial',
+    'LiberationSans',
+    [410712, 414456, 415816, 408996],
+  ),
+  ...familyFaces(
+    'Liberation Serif',
+    'Times New Roman',
+    'LiberationSerif',
+    [393576, 370096, 375632, 376772],
+  ),
+  ...familyFaces(
+    'Liberation Mono',
+    'Courier New',
+    'LiberationMono',
+    [319508, 307996, 281536, 284068],
+  ),
+
+  // Families the office-quality references are actually drawn with. The Google
+  // families are the same font PowerPoint used, so their lines break where the
+  // deck wrote them; Gelasio is Georgia's metric-compatible clone and Comic
+  // Relief is Comic Sans MS's (#797).
+  ...familyFaces('Gelasio', 'Georgia', 'Gelasio', [107588, 107864, 107904, 107932]),
+  ...familyFaces('Inter', 'Inter', 'Inter', [341396, 343104, 344784, 346628]),
+  ...familyFaces('Roboto', 'Roboto', 'Roboto', [157584, 158316, 163212, 164100]),
+  ...familyFaces(
+    'Source Sans 3',
+    'Source Sans Pro',
+    'SourceSans3',
+    [379576, 379468, 240444, 240384],
+  ),
+  ...familyFaces('DM Sans', 'DM Sans', 'DMSans', [56856, 56784, 61472, 61324]),
+  ...familyFaces('Open Sans', 'Open Sans', 'OpenSans', [130484, 130504, 136020, 135700]),
+  ...familyFaces(
+    'Montserrat',
+    'Montserrat',
+    'Montserrat',
+    [374500, 374640, 384612, 384792],
+  ),
+  ...familyFaces('Poppins', 'Poppins', 'Poppins', [28468, 28108, 30772, 30388]),
+  // Faces the references use that ship no italic, or none at all: the missing
+  // ones fall back through the chain.
+  {
+    family: 'Oswald',
+    metricCompatWith: 'Oswald',
+    weight: 400,
+    style: 'normal',
+    file: 'Oswald-Regular.ttf',
+    byteLength: 78404,
+  },
+  {
+    family: 'Oswald',
+    metricCompatWith: 'Oswald',
+    weight: 700,
+    style: 'normal',
+    file: 'Oswald-Bold.ttf',
+    byteLength: 78736,
+  },
+  {
+    family: 'Heebo',
+    metricCompatWith: 'Heebo',
+    weight: 400,
+    style: 'normal',
+    file: 'Heebo-Regular.ttf',
+    byteLength: 42368,
+  },
+  {
+    family: 'Heebo',
+    metricCompatWith: 'Heebo',
+    weight: 700,
+    style: 'normal',
+    file: 'Heebo-Bold.ttf',
+    byteLength: 42732,
+  },
+  {
+    family: 'DM Serif Display',
+    metricCompatWith: 'DM Serif Display',
+    weight: 400,
+    style: 'normal',
+    file: 'DMSerifDisplay-Regular.ttf',
+    byteLength: 70440,
+  },
+  {
+    family: 'DM Serif Display',
+    metricCompatWith: 'DM Serif Display',
+    weight: 400,
+    style: 'italic',
+    file: 'DMSerifDisplay-Italic.ttf',
+    byteLength: 68560,
+  },
+
+  // Comic Relief ships no italics, so those fall back through the chain.
+  {
+    family: 'Comic Relief',
+    metricCompatWith: 'Comic Sans MS',
+    weight: 400,
+    style: 'normal',
+    file: 'ComicRelief-Regular.ttf',
+    byteLength: 80324,
+  },
+  {
+    family: 'Comic Relief',
+    metricCompatWith: 'Comic Sans MS',
+    weight: 700,
+    style: 'normal',
+    file: 'ComicRelief-Bold.ttf',
+    byteLength: 94684,
+  },
+
+  // RTL script fallbacks. No metricCompatWith: Hebrew/Arabic documents mostly
+  // name Latin families (Arial, Times New Roman, ...) whose mapping stays with
+  // the Liberation faces; these faces ride the per-script fallback chain.
+  {
+    family: 'Noto Sans Hebrew',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSansHebrew-Regular.ttf',
+    byteLength: 26860,
+    script: 'hebrew',
+  },
+  {
+    family: 'Noto Sans Hebrew',
+    weight: 700,
+    style: 'normal',
+    file: 'NotoSansHebrew-Bold.ttf',
+    byteLength: 26860,
+    script: 'hebrew',
+  },
+  {
+    family: 'Noto Sans Arabic',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSansArabic-Regular.ttf',
+    byteLength: 234892,
+    script: 'arabic',
+  },
+  {
+    family: 'Noto Sans Arabic',
+    weight: 700,
+    style: 'normal',
+    file: 'NotoSansArabic-Bold.ttf',
+    byteLength: 261460,
+    script: 'arabic',
+  },
+  {
+    family: 'Noto Naskh Arabic',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoNaskhArabic-Regular.ttf',
+    byteLength: 247336,
+    script: 'arabic',
+  },
+
+  // CJK coverage faces (Regular-only statics; see the module doc). The sans
+  // face precedes the serif face of the same script bucket on purpose.
+  {
+    family: 'Noto Sans SC',
+    metricCompatWith: 'Microsoft YaHei',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSansSC-Regular.otf',
+    byteLength: 8331336,
+    script: 'cjk-sc',
+  },
+  {
+    family: 'Noto Serif SC',
+    metricCompatWith: 'SimSun',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSerifSC-Regular.otf',
+    byteLength: 11625800,
+    script: 'cjk-sc',
+  },
+  {
+    family: 'Noto Sans TC',
+    metricCompatWith: 'Microsoft JhengHei',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSansTC-Regular.otf',
+    byteLength: 5683368,
+    script: 'cjk-tc',
+  },
+  {
+    family: 'Noto Sans JP',
+    metricCompatWith: 'MS Gothic',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSansJP-Regular.otf',
+    byteLength: 4533028,
+    script: 'cjk-jp',
+  },
+  {
+    family: 'Noto Sans KR',
+    metricCompatWith: 'Malgun Gothic',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSansKR-Regular.otf',
+    byteLength: 4644748,
+    script: 'cjk-kr',
+  },
+];
+
+/**
+ * Alternate Word font names that resolve to the same bundled face as a
+ * covered Word family (keys and values lowercase). Kept separate from the
+ * manifest: these are aliases of the *Word-side* name, resolved through
+ * `BUNDLED_FONTS`.
+ *
+ * The CJK alias set mirrors the CJK table in core's `utils/fontResolver.ts`
+ * (both romanized and native spellings; native full-width Latin lowercases
+ * too, e.g. `ＭＳ ゴシック` -> `ｍｓ ゴシック`). Where fontResolver picks a
+ * serif Noto family this package does not vendor (Noto Serif TC/JP/KR), the
+ * alias points at the vendored sans face of the same region — coverage
+ * first.
+ */
+export const WORD_FAMILY_ALIASES: Record<string, string> = {
+  helvetica: 'arial',
+  times: 'times new roman',
+  courier: 'courier new',
+
+  // Metric-compatible clones of the core families. A deck that asks for one
+  // was laid out against those metrics, so it resolves to the same face rather
+  // than through the last-resort pick (#797).
+  arimo: 'arial',
+  'liberation sans': 'arial',
+  'nimbus sans': 'arial',
+  'helvetica neue': 'arial',
+  carlito: 'calibri',
+  tinos: 'times new roman',
+  'liberation serif': 'times new roman',
+  'nimbus roman': 'times new roman',
+  cousine: 'courier new',
+  'liberation mono': 'courier new',
+  'nimbus mono ps': 'courier new',
+  caladea: 'cambria',
+
+  // Simplified Chinese — sans
+  simhei: 'microsoft yahei',
+  dengxian: 'microsoft yahei',
+  微软雅黑: 'microsoft yahei',
+  黑体: 'microsoft yahei',
+  等线: 'microsoft yahei',
+  // Simplified Chinese — serif
+  nsimsun: 'simsun',
+  fangsong: 'simsun',
+  kaiti: 'simsun',
+  宋体: 'simsun',
+  仿宋: 'simsun',
+  楷体: 'simsun',
+  // Traditional Chinese (the Ming/Kai serif families map to the sans face —
+  // Noto Serif TC is not vendored)
+  微軟正黑體: 'microsoft jhenghei',
+  pmingliu: 'microsoft jhenghei',
+  mingliu: 'microsoft jhenghei',
+  'dfkai-sb': 'microsoft jhenghei',
+  新細明體: 'microsoft jhenghei',
+  細明體: 'microsoft jhenghei',
+  標楷體: 'microsoft jhenghei',
+  // Japanese (the Mincho serif families map to the sans face — Noto Serif JP
+  // is not vendored)
+  'ms pgothic': 'ms gothic',
+  meiryo: 'ms gothic',
+  'yu gothic': 'ms gothic',
+  'ｍｓ ゴシック': 'ms gothic',
+  'ｍｓ ｐゴシック': 'ms gothic',
+  メイリオ: 'ms gothic',
+  游ゴシック: 'ms gothic',
+  'ms mincho': 'ms gothic',
+  'ms pmincho': 'ms gothic',
+  'yu mincho': 'ms gothic',
+  'ｍｓ 明朝': 'ms gothic',
+  'ｍｓ ｐ明朝': 'ms gothic',
+  游明朝: 'ms gothic',
+  // Korean (Batang/Gungsuh serif map to the sans face — Noto Serif KR is not
+  // vendored)
+  '맑은 고딕': 'malgun gothic',
+  gulim: 'malgun gothic',
+  dotum: 'malgun gothic',
+  batang: 'malgun gothic',
+  gungsuh: 'malgun gothic',
+  굴림: 'malgun gothic',
+  돋움: 'malgun gothic',
+  바탕: 'malgun gothic',
+  궁서: 'malgun gothic',
+};
+
+const metricCompatByWordFamily = new Map<string, string>();
+for (const face of BUNDLED_FONTS) {
+  if (face.metricCompatWith !== undefined) {
+    metricCompatByWordFamily.set(
+      face.metricCompatWith.toLowerCase(),
+      face.family,
+    );
+  }
+}
+
+/**
+ * Resolve a Word font name (case-insensitive) to the bundled substitute
+ * family, e.g. `"calibri"` -> `"Carlito"`, `"SimSun"` -> `"Noto Serif SC"`.
+ * Returns `undefined` when no bundled font covers the name.
+ */
+export function resolveMetricCompatFamily(
+  wordFamily: string,
+): string | undefined {
+  const key = wordFamily.trim().toLowerCase();
+  return metricCompatByWordFamily.get(WORD_FAMILY_ALIASES[key] ?? key);
+}
+
+/**
+ * Resolve a Word font name plus style request to a concrete bundled face.
+ * Exact (weight, style) match first; families that only ship a Regular (the
+ * CJK set) fall back to it — bold then falls back through the font chain,
+ * mirroring how the measurement registry treats embedded faces.
+ */
+export function resolveMetricCompatFace(
+  wordFamily: string,
+  bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const family = resolveMetricCompatFamily(wordFamily);
+  if (!family) return undefined;
+  const faces = BUNDLED_FONTS.filter((f) => f.family === family);
+  const weight = bold ? 700 : 400;
+  const style = italic ? 'italic' : 'normal';
+  return (
+    faces.find((f) => f.weight === weight && f.style === style) ??
+    faces.find((f) => f.weight === 400 && f.style === 'normal')
+  );
+}
+
+const bundledFamilyByName = new Map(
+  BUNDLED_FONTS.map((face) => [face.family.toLowerCase(), face.family]),
+);
+
+/** Serif Noto families this package does not vendor; the same region's sans face covers them. */
+const UNVENDORED_NOTO_SERIF: Record<string, string> = {
+  'noto serif tc': 'Noto Sans TC',
+  'noto serif jp': 'Noto Sans JP',
+  'noto serif kr': 'Noto Sans KR',
+};
+
+/**
+ * Resolve a family by its bundled name (`"Gelasio"`, `"Noto Sans SC"`) or as a
+ * Word family, returning only a face whose weight and style match, so a
+ * browser can synthesize the styles a family does not ship.
+ */
+export function resolveBundledFamilyFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const key = family.trim().toLowerCase();
+  const bundled =
+    bundledFamilyByName.get(key) ??
+    UNVENDORED_NOTO_SERIF[key] ??
+    resolveMetricCompatFamily(family);
+  const weight = bold ? 700 : 400;
+  const style = italic ? 'italic' : 'normal';
+  return BUNDLED_FONTS.find(
+    (f) => f.family === bundled && f.weight === weight && f.style === style,
+  );
+}
+
+/**
+ * Pick the bundled face that provides glyph coverage for a script bucket.
+ * Preference order: exact (weight, style) -> same weight upright -> the
+ * script's Regular -> the first face of the bucket. Ties resolve to the
+ * earlier manifest entry, i.e. the sans face (Noto Naskh Arabic is reachable
+ * by requesting it as a family, not through the script fallback).
+ */
+export function resolveScriptFallbackFace(
+  script: BundledFontScript,
+  bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const faces = BUNDLED_FONTS.filter((f) => f.script === script);
+  if (faces.length === 0) return undefined;
+  const weight = bold ? 700 : 400;
+  const style = italic ? 'italic' : 'normal';
+  return (
+    faces.find((f) => f.weight === weight && f.style === style) ??
+    faces.find((f) => f.weight === weight && f.style === 'normal') ??
+    faces.find((f) => f.weight === 400 && f.style === 'normal') ??
+    faces[0]
+  );
+}
+
+/**
+ * Whether a Word family name reads as a serif — decides only which
+ * always-available base face measures a truly-unknown font (Liberation Serif
+ * vs Liberation Sans). Mirrors the serif branch of core's `detectFontCategory`
+ * (`utils/fontResolver.ts`) so an unmapped serif name lands on a serif base.
+ * Deliberately coarse: this feeds the last-resort face pick, nothing else.
+ */
+function looksSerif(family: string): boolean {
+  const lower = family.toLowerCase();
+  return (
+    lower.includes('antiqua') ||
+    lower.includes('bookman') ||
+    lower.includes('calisto') ||
+    lower.includes('schoolbook') ||
+    lower.includes('goudy') ||
+    lower.includes('perpetua') ||
+    lower.includes('rockwell') ||
+    lower.includes('caslon') ||
+    lower.includes('constantia') ||
+    lower.includes('didot') ||
+    lower.includes('baskerville') ||
+    lower.includes('times') ||
+    lower.includes('georgia') ||
+    lower.includes('garamond') ||
+    lower.includes('palatino') ||
+    lower.includes('baskerville') ||
+    lower.includes('bodoni') ||
+    lower.includes('cambria') ||
+    lower.includes('minion') ||
+    lower.includes('mincho') ||
+    lower.includes('明朝') ||
+    lower.includes('明體') ||
+    lower.includes('宋') ||
+    lower.includes('ming') ||
+    lower.includes('song') ||
+    lower.includes('serif')
+  );
+}
+
+/** Matching total text widths does not guarantee matching individual digit widths. */
+const WIDTH_MATCHED_SUBSTITUTES = new Map<
+  string,
+  {
+    family: string;
+    digitAdvances: Partial<Record<'regular' | 'bold' | 'italic' | 'boldItalic', number>>;
+  }
+>([
+  ['verdana', {
+    family: 'Montserrat',
+    digitAdvances: { regular: 0.636, bold: 0.711, italic: 0.636, boldItalic: 0.711 },
+  }],
+]);
+
+function resolveWidthMatchedSubstitute(family: string) {
+  return WIDTH_MATCHED_SUBSTITUTES.get(family.trim().toLowerCase());
+}
+
+/**
+ * `Calibri Light` and `Inter Light` are families of their own on the machine
+ * that drew the reference: a Regular and an Italic, no bold member, so a run
+ * marked bold is still drawn at the family's own weight, and a name we cannot
+ * place at all is Calibri, whatever weight it claims (#797).
+ */
+const LIGHTER_THAN_REGULAR = new Set([
+  'thin',
+  'hairline',
+  'extralight',
+  'ultralight',
+  'semilight',
+  'light',
+  'medium',
+]);
+
+function lightVariantOf(
+  family: string,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const words = family.trim().split(/[\s-]+/);
+  if (words.length < 2) return undefined;
+  if (!LIGHTER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
+    return undefined;
+  }
+  return resolveMetricCompatFace(words.slice(0, -1).join(' '), false, italic);
+}
+
+/**
+ * Whether a family name reads as a typewriter face. A monospaced document was
+ * laid out against a fixed pitch, so a proportional substitute rewraps every
+ * line of it; Courier New's clone keeps the pitch even where the shapes differ.
+ */
+function looksMono(family: string): boolean {
+  const lower = family.toLowerCase();
+  return (
+    lower.includes('consolas') ||
+    lower.includes('monaco') ||
+    lower.includes('menlo') ||
+    lower.includes('console') ||
+    lower.includes('andale') ||
+    lower.includes('inconsolata') ||
+    lower.includes('cascadia') ||
+    lower.includes('typewriter') ||
+    /(^|[\s-])mono([\s-]|$)/.test(lower)
+  );
+}
+
+const HEAVIER_THAN_REGULAR = new Set([
+  'black',
+  'heavy',
+  'extrabold',
+  'ultrabold',
+  'extrablack',
+  'ultra',
+]);
+
+function heavyVariantOf(family: string, italic: boolean): BundledFontFace | undefined {
+  const words = family.trim().split(/[\s-]+/);
+  if (words.length < 2 || !HEAVIER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
+    return undefined;
+  }
+  return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
+}
+
+/** The Office application whose font substitution a last-resort pick follows. */
+export type LastResortOffice = 'powerpoint' | 'word';
+
+/**
+ * Choose a related family, then a serif or sans fallback.
+ *
+ * The sans fallback follows the application that drew the file. PowerPoint
+ * substitutes Calibri for a family it cannot find: a deck asking for Google
+ * Sans, Inter or Questrial is drawn in Calibri, which is ~7% narrower than
+ * Arial, so falling back to Arial rewraps every line the deck wrote against
+ * those metrics. Word substitutes Arial, and a document paginated against
+ * Arial loses pages when drawn in Calibri. A heavy weight in the name is read
+ * only for a family we bundle: Office substitutes `Archivo Black` with a
+ * regular face, and matching that keeps the line breaks.
+ */
+export function resolveLastResortFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  office: LastResortOffice = 'powerpoint',
+): BundledFontFace {
+  const light = lightVariantOf(family, italic);
+  if (light) return light;
+  const heavy = heavyVariantOf(family, italic);
+  if (heavy) return heavy;
+  if (looksMono(family)) {
+    return resolveMetricCompatFace('Courier New', bold, italic)!;
+  }
+  const matched = resolveWidthMatchedSubstitute(family);
+  if (matched) {
+    const face = resolveMetricCompatFace(matched.family, bold, italic);
+    if (face) return face;
+  }
+  const sans = office === 'word' ? 'Arial' : 'Calibri';
+  const base = looksSerif(family) ? 'Times New Roman' : sans;
+  return resolveMetricCompatFace(base, bold, italic)!;
+}
+
+/** Recorded widest digit advance in em for the requested family and style. */
+export function resolveDigitAdvance(
+  family: string,
+  bold = false,
+  italic = false,
+): number | undefined {
+  const style = bold ? (italic ? 'boldItalic' : 'bold') : (italic ? 'italic' : 'regular');
+  return resolveWidthMatchedSubstitute(family)?.digitAdvances[style];
+}
+
+/** Widest digit advance in whole pixels for spreadsheet column widths. */
+export function maxDigitWidth(
+  family: string,
+  sizePx: number,
+  measure: (digit: string) => number,
+  bold = false,
+  italic = false,
+): number {
+  const advance = resolveDigitAdvance(family, bold, italic);
+  if (advance !== undefined) return Math.round(advance * sizePx);
+  return Math.max(...[...'0123456789'].map((digit) => Math.round(measure(digit))));
+}

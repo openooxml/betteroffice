@@ -1,0 +1,54 @@
+import { paintSlide, sizeCanvasForSlide, type SlideDisplayList, type SlidePrimitive } from '@betteroffice/pptx';
+import { createCommandFramePainter } from '../../../packages/pptx-react/src/worker/commandFramePainter';
+import type { PeerlessViewSnapshot } from '../../../packages/pptx-react/src/worker/peerlessViewStore';
+
+export interface CommandPainterProbe {
+  pixels(primitive: SlidePrimitive, region: { x: number; y: number; width: number; height: number }):
+    Promise<{ actual: number[]; reference: number[] }>;
+}
+
+declare global {
+  interface Window { __pptxCommandPainter: CommandPainterProbe }
+}
+
+const font = new FontFace('CommandPainterMono',
+  `url("${new URL('../../../packages/fonts/assets/LiberationMono-Regular.ttf', import.meta.url).href}")`);
+document.fonts.add(font);
+await font.load();
+await document.fonts.ready;
+
+window.__pptxCommandPainter = {
+  async pixels(primitive, region) {
+    const list: SlideDisplayList = { contractVersion: 1, width: 960, height: 540,
+      background: { kind: 'solid', color: '#ffffff' }, primitives: [primitive] };
+    const canvas = document.createElement('canvas');
+    const reference = document.createElement('canvas');
+    const painter = createCommandFramePainter(canvas);
+    try {
+      const frame = { displayList: list, frame: {
+        slideId: 'slide', slideIndex: 0, slideRevision: 0, coversThroughSeq: 0,
+        documentEpoch: 1, incarnation: 'worker', epoch: 1, version: 'v0', media: [],
+        displayList: new TextEncoder().encode(JSON.stringify(list)).buffer,
+      } };
+      const view: PeerlessViewSnapshot = { confirmed: frame, selection: null, focused: false, caret: null,
+        selectionRects: [], composition: null, echo: null, activeLine: null, activeContextBytes: 0,
+        pending: [], waitingInputCount: 0, appliedThroughSeq: 0, presentedThroughSeq: 0,
+        editState: { readOnly: false, canUndo: false, canRedo: false,
+          toolbar: { target: null, storedMarks: {}, formatting: null, alignment: null,
+            hyperlink: null, table: null, canEditText: true } },
+        thumbnails: new Map(), dirtyThumbnailIds: new Set<string>() };
+      painter.paintFrame(frame, view);
+      if (!await painter.whenPainted()) throw new Error('Painter did not finish');
+      sizeCanvasForSlide(reference, list, devicePixelRatio, 1);
+      const ctx = reference.getContext('2d');
+      if (!ctx) throw new Error('Reference canvas is unavailable');
+      await paintSlide(ctx, list, devicePixelRatio, 1);
+      const read = (surface: HTMLCanvasElement) => {
+        const ctx = surface.getContext('2d');
+        if (!ctx) throw new Error('Canvas is unavailable');
+        return Array.from(ctx.getImageData(region.x, region.y, region.width, region.height).data);
+      };
+      return { actual: read(canvas), reference: read(reference) };
+    } finally { painter.dispose(); }
+  },
+};

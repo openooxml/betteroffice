@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/docx",
-  "version": "0.0.4",
+  "version": "0.4.3",
   "sideEffects": [
     "**/residentEngineWorker.*"
   ],
@@ -116,6 +116,10 @@
     "./editor": {
       "types": "./dist/editor/index.d.mts",
       "import": "./dist/editor/index.mjs"
+    },
+    "./peerless": {
+      "types": "./dist/peerless.d.mts",
+      "import": "./dist/peerless.mjs"
     }
   },
   "typesVersions": {
@@ -197,6 +201,9 @@
       ],
       "editor": [
         "./dist/editor/index.d.mts"
+      ],
+      "peerless": [
+        "./dist/peerless.d.mts"
       ]
     }
   },
@@ -208,7 +215,16 @@
     "typecheck": "tsc --noEmit",
     "build:wasm": "bun ../../scripts/build-docx-wasm.ts"
   },
+  "peerDependencies": {
+    "@betteroffice/fonts": "workspace:^0"
+  },
+  "peerDependenciesMeta": {
+    "@betteroffice/fonts": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@betteroffice/fonts": "workspace:*",
     "tsup": "^8.0.1",
     "typescript": "^6.0.3",
     "@types/bun": "^1.0.0",

@@ -1,0 +1,345 @@
+//! PPTX packaging around the shared DrawingML chart part.
+
+use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
+use ooxml_drawingml::{
+    Theme, get_theme_color, resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex,
+};
+
+use crate::drawing::parse_color_container;
+use crate::xml::XmlElement;
+
+/// Deeper elements are unreachable for the shared parser, which descends at
+/// most 64 levels from any node it searches.
+const MAX_CHART_DEPTH: usize = 256;
+/// Elements one chart part may present to the shared parser. Well past what
+/// the parser itself will read, and it keeps a hostile part from turning
+/// package memory into adapter memory.
+const MAX_CHART_ELEMENTS: usize = 500_000;
+
+/// A chart element paired with the deck theme, so `a:solidFill` resolves
+/// through the presentation's colours instead of Office defaults.
+pub(crate) struct ChartElement<'a> {
+    element: &'a XmlElement,
+    theme: &'a Theme,
+    children: Vec<ChartElement<'a>>,
+}
+
+impl<'a> ChartElement<'a> {
+    fn new(element: &'a XmlElement, theme: &'a Theme, budget: &mut usize, depth: usize) -> Self {
+        let mut children = Vec::new();
+        if depth < MAX_CHART_DEPTH {
+            for child in element.child_elements() {
+                let Some(remaining) = budget.checked_sub(1) else {
+                    break;
+                };
+                *budget = remaining;
+                children.push(Self::new(child, theme, budget, depth + 1));
+            }
+        }
+        Self {
+            element,
+            theme,
+            children,
+        }
+    }
+}
+
+impl ChartXml for ChartElement<'_> {
+    fn local_name(&self) -> &str {
+        self.element.local_name()
+    }
+
+    fn attribute(&self, prefix: Option<&str>, name: &str) -> Option<&str> {
+        prefix
+            .and_then(|prefix| self.element.attribute(&format!("{prefix}:{name}")))
+            .or_else(|| self.element.attribute(name))
+    }
+
+    fn child_elements(&self) -> impl Iterator<Item = &Self> {
+        self.children.iter()
+    }
+
+    fn descendant_text(&self) -> String {
+        self.element.text_content()
+    }
+
+    fn solid_fill_hex(&self) -> Option<String> {
+        // A series fill carries `a:alpha` as often as not — a stack of one
+        // colour at falling opacities is how a deck bands its bars. An opaque
+        // fill stays six digits, which is what every other consumer reads.
+        let color = parse_color_container(self.element);
+        let translucent = color
+            .as_ref()
+            .and_then(|color| color.alpha)
+            .is_some_and(|alpha| alpha.is_finite() && alpha < 1.0);
+        if translucent {
+            resolve_color_value_to_rgba_hex(color.as_ref(), Some(self.theme))
+        } else {
+            resolve_color_value_to_hex_with_theme(color.as_ref(), Some(self.theme))
+        }
+    }
+
+    fn theme_color_hex(&self, slot: &str) -> Option<String> {
+        Some(format!("#{}", get_theme_color(Some(self.theme), slot)))
+    }
+}
+
+/// Parse a `c:chartSpace` root, resolving its colours through `theme`.
+pub(crate) fn parse_chart_part(root: &XmlElement, theme: &Theme) -> Option<ChartSpace> {
+    let mut budget = MAX_CHART_ELEMENTS;
+    parse_chart_space(&ChartElement::new(root, theme, &mut budget, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+    use ooxml_drawingml::chart::{ChartFill, ChartLine};
+
+    fn parse(xml: &str, theme: &Theme) -> Option<ChartSpace> {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(xml.as_bytes(), "ppt/charts/chart1.xml", &mut budget).unwrap();
+        parse_chart_part(&root, theme)
+    }
+
+    /// The same chart with every element name qualified by `ns`.
+    fn fixture(ns: &str) -> String {
+        format!(
+            r#"<{ns}chartSpace xmlns:c="c" xmlns:a="a"><{ns}chart>
+                 <{ns}title><{ns}tx><{ns}rich><a:p><a:r><a:t> Sales </a:t></a:r></a:p></{ns}rich></{ns}tx></{ns}title>
+                 <{ns}legend><{ns}legendPos val="l"/></{ns}legend>
+                 <{ns}plotArea>
+                   <{ns}barChart><{ns}barDir val="bar"/><{ns}grouping val="stacked"/>
+                     <{ns}ser>
+                       <{ns}tx><{ns}v>North</{ns}v></{ns}tx>
+                       <{ns}spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></{ns}spPr>
+                       <{ns}cat><{ns}strRef><{ns}strCache><{ns}pt><{ns}v>Q1</{ns}v></{ns}pt></{ns}strCache></{ns}strRef></{ns}cat>
+                       <{ns}val><{ns}numRef><{ns}numCache><{ns}pt><{ns}v>7</{ns}v></{ns}pt></{ns}numCache></{ns}numRef></{ns}val>
+                     </{ns}ser>
+                     <{ns}axId val="1"/>
+                   </{ns}barChart>
+                   <{ns}catAx><{ns}axId val="1"/><{ns}axPos val="b"/></{ns}catAx>
+                   <{ns}valAx><{ns}axId val="2"/><{ns}scaling><{ns}min val="0"/><{ns}max val="9"/></{ns}scaling></{ns}valAx>
+                 </{ns}plotArea>
+               </{ns}chart></{ns}chartSpace>"#
+        )
+    }
+
+    fn themed() -> Theme {
+        let mut theme = Theme::default();
+        theme.color_scheme.accent1 = "6254E7".to_owned();
+        theme
+    }
+
+    #[test]
+    fn a_namespace_prefixed_part_parses_the_same_as_a_bare_one() {
+        let theme = themed();
+        let prefixed = parse(&fixture("c:"), &theme).expect("prefixed parses");
+        let bare = parse(&fixture(""), &theme).expect("bare parses");
+        assert_eq!(prefixed, bare);
+        assert_eq!(prefixed.chart_type, "bar");
+        assert_eq!(prefixed.title.as_deref(), Some("Sales"));
+        assert_eq!(prefixed.legend.unwrap().position.as_deref(), Some("left"));
+        assert_eq!(prefixed.series[0].name.as_deref(), Some("North"));
+        assert_eq!(prefixed.series[0].categories, ["Q1"]);
+        assert_eq!(prefixed.series[0].values, [7.0]);
+        assert_eq!(prefixed.plot_groups[0].grouping.as_deref(), Some("stacked"));
+        assert_eq!(prefixed.axis_list.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_series_without_its_own_fill_takes_the_theme_accent_in_turn() {
+        let mut theme = Theme::default();
+        theme.color_scheme.accent1 = "112233".to_owned();
+        theme.color_scheme.accent2 = "445566".to_owned();
+        let xml = r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>
+              <c:ser><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+              <c:ser><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+            </c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let parsed = parse(xml, &theme).expect("parses");
+        assert_eq!(parsed.series[0].color, "#112233");
+        assert_eq!(parsed.series[1].color, "#445566");
+    }
+
+    #[test]
+    fn series_colours_resolve_through_the_deck_theme() {
+        assert_eq!(
+            parse(&fixture("c:"), &themed()).unwrap().series[0].color,
+            "#6254E7"
+        );
+        assert_eq!(
+            parse(&fixture("c:"), &Theme::default()).unwrap().series[0].color,
+            "#4472C4"
+        );
+    }
+
+    #[test]
+    fn theme_tints_shades_and_direct_colours_resolve_per_point() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:pieChart><c:ser>
+                 <c:val><c:numCache><c:pt><c:v>3</c:v></c:pt><c:pt><c:v>1</c:v></c:pt></c:numCache></c:val>
+                 <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:schemeClr val="accent1"><a:tint val="50000"/></a:schemeClr></a:solidFill></c:spPr></c:dPt>
+                 <c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></c:spPr></c:dPt>
+               </c:ser></c:pieChart></c:plotArea></c:chart></c:chartSpace>"#,
+            &themed(),
+        )
+        .expect("chart parses");
+        let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
+        assert_eq!(points[0].color, "#B0A9F3");
+        assert_eq!(points[1].color, "#112233");
+    }
+
+    #[test]
+    fn luminance_modifiers_resolve_instead_of_leaving_the_accent_oversaturated() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:pieChart><c:ser>
+                 <c:val><c:numCache><c:pt><c:v>3</c:v></c:pt><c:pt><c:v>1</c:v></c:pt></c:numCache></c:val>
+                 <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill></c:spPr></c:dPt>
+                 <c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:schemeClr val="accent1"><a:satMod val="0"/></a:schemeClr></a:solidFill></c:spPr></c:dPt>
+               </c:ser></c:pieChart></c:plotArea></c:chart></c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
+        assert_eq!(points[0].color, "#8FAADC");
+        assert_eq!(points[1].color, "#848484");
+    }
+
+    #[test]
+    fn the_chart_space_fill_and_the_axis_lines_reach_the_model() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
+                 <c:lineChart><c:ser><c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val></c:ser></c:lineChart>
+                 <c:catAx><c:axId val="1"/><c:spPr><a:noFill/><a:ln w="9525"><a:solidFill><a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/></a:schemeClr></a:solidFill></a:ln></c:spPr></c:catAx>
+                 <c:valAx><c:axId val="2"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:valAx>
+               </c:plotArea></c:chart>
+               <c:spPr><a:pattFill prst="smGrid"><a:fgClr><a:srgbClr val="01C4BF"/></a:fgClr><a:bgClr><a:srgbClr val="01BABC"/></a:bgClr></a:pattFill><a:ln><a:noFill/></a:ln></c:spPr>
+               </c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        assert_eq!(
+            chart.fill,
+            Some(ChartFill::Pattern {
+                foreground: Some("#01C4BF".to_owned()),
+                background: Some("#01BABC".to_owned()),
+            })
+        );
+        let axes = chart.axis_list.as_ref().expect("both axes parse");
+        assert_eq!(
+            axes[0].line,
+            Some(ChartLine {
+                none: false,
+                color: Some("#D9D9D9".to_owned()),
+                width_emu: Some(9525.0),
+            })
+        );
+        assert_eq!(
+            axes[1].line,
+            Some(ChartLine {
+                none: true,
+                color: None,
+                width_emu: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_series_line_reaches_the_model_with_its_own_width() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:lineChart>
+                 <c:ser>
+                   <c:spPr><a:ln w="41275" cap="rnd"><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></a:ln></c:spPr>
+                   <c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val>
+                 </c:ser>
+                 <c:ser>
+                   <c:spPr><a:ln><a:noFill/></a:ln></c:spPr>
+                   <c:val><c:numCache><c:pt><c:v>1</c:v></c:pt></c:numCache></c:val>
+                 </c:ser>
+               </c:lineChart></c:plotArea></c:chart></c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        let series = &chart.plot_groups[0].series;
+        assert_eq!(
+            series[0].line,
+            Some(ChartLine {
+                none: false,
+                color: Some("#FFFFFF".to_owned()),
+                width_emu: Some(41275.0),
+            })
+        );
+        assert_eq!(
+            series[1].line,
+            Some(ChartLine {
+                none: true,
+                color: None,
+                width_emu: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_chart_space_without_shape_properties_leaves_the_fill_to_the_renderer() {
+        let space = |properties: &str| {
+            parse(
+                &format!(
+                    r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
+                         <c:lineChart><c:ser><c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val></c:ser></c:lineChart>
+                       </c:plotArea></c:chart>{properties}</c:chartSpace>"#
+                ),
+                &themed(),
+            )
+            .expect("chart parses")
+            .fill
+        };
+        assert_eq!(space(""), None);
+        assert_eq!(space("<c:spPr><a:noFill/></c:spPr>"), Some(ChartFill::None));
+        assert_eq!(
+            space(r#"<c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr>"#),
+            Some(ChartFill::Solid {
+                color: "#6254E7".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_qualified_val_attribute_resolves_through_the_prefix_fallback() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c"><c:chart><c:legend><c:legendPos c:val="b"/></c:legend><c:plotArea><c:pieChart/></c:plotArea></c:chart></c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        assert_eq!(chart.legend.unwrap().position.as_deref(), Some("bottom"));
+    }
+
+    #[test]
+    fn a_part_without_a_recognized_plot_yields_nothing() {
+        assert!(parse(r#"<c:chartSpace xmlns:c="c"/>"#, &Theme::default()).is_none());
+        assert!(
+            parse(
+                r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea/></c:chart></c:chartSpace>"#,
+                &Theme::default()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_deeply_nested_part_is_truncated_instead_of_overflowing() {
+        let depth = MAX_CHART_DEPTH + 8;
+        let nested = format!(
+            r#"<c:chartSpace xmlns:c="c">{}<c:plotArea><c:lineChart/></c:plotArea>{}</c:chartSpace>"#,
+            "<c:x>".repeat(depth),
+            "</c:x>".repeat(depth)
+        );
+        let limits = ParseLimits {
+            max_xml_depth: depth + 8,
+            ..ParseLimits::default()
+        };
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(nested.as_bytes(), "ppt/charts/chart1.xml", &mut budget).unwrap();
+        assert!(parse_chart_part(&root, &Theme::default()).is_none());
+    }
+}

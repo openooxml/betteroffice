@@ -4,7 +4,7 @@
  * the chrome hands the system clipboard the string this produces and feeds paste
  * text back through {@link fromTsv}.
  *
- * Security (CLAUDE.md formula-injection contract): a foreign spreadsheet treats
+ * Security: a foreign spreadsheet treats
  * a pasted cell as a formula when its text leads with `=`, `+`, `-`, `@`, or a
  * control char that can break the field. We defang such *text* with a leading
  * single quote so it pastes literally — but we export our own real formulas

@@ -89,6 +89,52 @@ describe('buildA11yGrid', () => {
     expect(g.rows[0].cells[1].text).toBe('42');
   });
 
+  it('exposes chart labels without treating chart text as cell text', () => {
+    const dl = sampleDisplayList();
+    const chartText = textCmd({ x: 0, y: 0, w: 80, h: 20 }, 'Chart title');
+    if (chartText.op === 'text') chartText.chart = true;
+    dl.commands.push(chartText);
+    const box = { x: 0, y: 0, w: 80, h: 20 };
+    dl.charts = [
+      {
+        id: 'xl/charts/chart1.xml',
+        label: 'Column chart titled Revenue with 2 series',
+        rect: box,
+        clip: box,
+        movable: true,
+      },
+    ];
+    const g = buildA11yGrid(dl, null, 'Sheet1', strings);
+    expect(g.rows[0].cells[0].text).toBe('');
+    expect(g.charts).toEqual([
+      { label: 'Column chart titled Revenue with 2 series', placeholder: false },
+    ]);
+  });
+
+  it('carries the placeholder flag for a chart the renderer could not draw', () => {
+    const dl = sampleDisplayList();
+    const box = { x: 0, y: 0, w: 80, h: 20 };
+    dl.charts = [
+      {
+        id: 'xl/charts/chart1.xml',
+        label: 'Revenue, bar chart, 1 series, 4 categories, not shown',
+        placeholder: true,
+        rect: box,
+        clip: box,
+        movable: true,
+      },
+      {
+        id: 'xl/charts/chart2.xml',
+        label: 'Costs, pie chart, 1 series, 2 categories',
+        rect: box,
+        clip: box,
+        movable: true,
+      },
+    ];
+    const g = buildA11yGrid(dl, null, 'Sheet1', strings);
+    expect(g.charts.map((chart) => chart.placeholder)).toEqual([true, false]);
+  });
+
   it('addresses columns past Z with bijective letters', () => {
     const dl: DisplayList = {
       width: 80,

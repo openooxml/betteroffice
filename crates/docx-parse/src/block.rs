@@ -1,5 +1,7 @@
 //! Shared story dispatcher for body and recursively nested block content.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
@@ -13,7 +15,7 @@ use crate::paragraph::{
     DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph,
 };
 use crate::relationships::RelationshipMap;
-use crate::shape::{RelativeRect, Shape, ShapeTextBody};
+use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
 use crate::smart_art::SmartArtContext;
 use crate::styles::{DocDefaults, StyleMap};
 use crate::table::{
@@ -35,12 +37,16 @@ pub struct BlockSdt {
     pub content: Vec<BlockContent>,
 }
 
+/// Block payloads live behind `Arc` so derived views (section content,
+/// structured field caches) share the parsed allocation instead of
+/// deep-cloning it. Mutation goes through `Arc::make_mut` copy-on-write.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockContent {
-    Paragraph(Paragraph),
-    Table(Table),
-    BlockSdt(BlockSdt),
+    Paragraph(Arc<Paragraph>),
+    Table(Arc<Table>),
+    BlockSdt(Arc<BlockSdt>),
+    RawXml(Arc<crate::inline::RawInlineXml>),
 }
 
 impl BlockContent {
@@ -48,6 +54,7 @@ impl BlockContent {
         match self {
             Self::Paragraph(paragraph) => &paragraph.node_type,
             Self::Table(table) => &table.node_type,
+            Self::RawXml(_) => "rawXml",
             Self::BlockSdt(sdt) => &sdt.node_type,
         }
     }
@@ -95,6 +102,47 @@ pub struct StoryParser<'a, 'limits> {
     pub part: &'a str,
 }
 
+pub const PREVIEW_MIN_BLOCKS: usize = 32;
+
+pub(crate) struct LegacyBodyCut {
+    limit: usize,
+    blocks: usize,
+    open_fields: usize,
+    stopped: bool,
+}
+
+impl LegacyBodyCut {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            blocks: 0,
+            open_fields: 0,
+            stopped: false,
+        }
+    }
+
+    pub(crate) fn read_child(&mut self, name: &str) {
+        if is_story_block_name(name) {
+            self.stopped |= self.blocks >= self.limit && self.open_fields == 0;
+            self.blocks = self.blocks.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn finish_block(&mut self, external_ends: usize, unmatched_fields: usize) {
+        if !self.stopped {
+            // Unparsed field openings can only overestimate the fields the dispatcher retains.
+            self.open_fields = self
+                .open_fields
+                .saturating_sub(external_ends)
+                .saturating_add(unmatched_fields);
+        }
+    }
+
+    pub(crate) fn is_partial(&self) -> bool {
+        self.stopped
+    }
+}
+
 impl StoryParser<'_, '_> {
     pub fn parse_blocks(
         &mut self,
@@ -102,20 +150,110 @@ impl StoryParser<'_, '_> {
         depth: usize,
         in_header_footer: bool,
     ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_until(parent, depth, in_header_footer, None)
+            .map(|(content, _)| content)
+    }
+
+    /// [`Self::parse_blocks`] that stops once it holds `limit` blocks and no
+    /// field it opened is still open. Also returns how many of the parent's
+    /// children it read.
+    pub fn parse_blocks_until(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        in_header_footer: bool,
+        limit: Option<usize>,
+    ) -> Result<(Vec<BlockContent>, usize), ParseError> {
+        self.parse_blocks_until_with_read_limit(
+            parent,
+            depth,
+            in_header_footer,
+            limit,
+            None,
+            None,
+            None,
+        )
+        .map(|(content, read, _)| (content, read))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn parse_blocks_until_with_read_limit(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        in_header_footer: bool,
+        limit: Option<usize>,
+        read_limit: Option<usize>,
+        paragraph_budget: Option<usize>,
+        mut legacy_partial: Option<bool>,
+    ) -> Result<(Vec<BlockContent>, usize, bool), ParseError> {
         self.budget.check_nesting_depth(depth, self.part)?;
         let mut content = Vec::new();
         let mut records: Vec<FieldRecord> = Vec::new();
         let mut open_fields: Vec<OpenField> = Vec::new();
+        let mut read = 0;
+        let mut weight = 0usize;
+        let mut budget_stopped = false;
+        let mut legacy_cut = paragraph_budget
+            .filter(|_| legacy_partial.is_none())
+            .and_then(|_| limit.map(LegacyBodyCut::new));
 
-        for child in parent.child_elements() {
-            let recognized = matches!(
-                child.local_name(),
-                "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
-            );
-            if !recognized {
+        let children = transparent_children(parent, false);
+        for child in &children {
+            if read_limit.is_some_and(|limit| read >= limit) {
+                break;
+            }
+            let budget_reached = paragraph_budget.is_some_and(|budget| weight >= budget)
+                && content.len() >= PREVIEW_MIN_BLOCKS
+                && is_story_block(child)
+                && open_fields.is_empty()
+                && *legacy_partial.get_or_insert_with(|| {
+                    let Some(mut cut) = legacy_cut.take() else {
+                        return false;
+                    };
+                    for child in children
+                        .iter()
+                        .take(read_limit.unwrap_or(children.len()))
+                        .skip(read)
+                    {
+                        cut.read_child(&child.name);
+                        if cut.is_partial() {
+                            return true;
+                        }
+                        if typed_block(child) {
+                            let events = scan_field_block_events(child);
+                            cut.finish_block(events.external_ends, events.unmatched_modes.len());
+                        }
+                    }
+                    false
+                });
+            if open_fields.is_empty()
+                && (limit.is_some_and(|limit| content.len() >= limit) || budget_reached)
+            {
+                budget_stopped = budget_reached;
+                break;
+            }
+            read += 1;
+            if let Some(cut) = &mut legacy_cut {
+                cut.read_child(&child.name);
+            }
+            let paragraphs_before = self.budget.paragraph_count();
+            if !typed_block(child) {
+                if let Some(raw) = crate::inline::raw_foreign_node(child, self.budget) {
+                    content.push(BlockContent::RawXml(Arc::new(raw)));
+                    weight = weight.saturating_add(
+                        self.budget
+                            .paragraph_count()
+                            .saturating_sub(paragraphs_before)
+                            .max(1),
+                    );
+                }
                 continue;
             }
             let events = scan_field_block_events(child);
+            if let Some(cut) = &mut legacy_cut {
+                cut.finish_block(events.external_ends, events.unmatched_modes.len());
+            }
             if events.external_separates > 0
                 && let Some(open) = open_fields.last_mut()
             {
@@ -144,15 +282,21 @@ impl StoryParser<'_, '_> {
                         depth,
                     )?;
                     self.enrich_paragraph_text_boxes(&mut paragraph, child, depth)?;
-                    BlockContent::Paragraph(paragraph)
+                    BlockContent::Paragraph(Arc::new(paragraph))
                 }
-                "tbl" => BlockContent::Table(self.parse_table(child, depth, in_header_footer)?),
-                "sdt" => {
-                    BlockContent::BlockSdt(self.parse_block_sdt(child, depth, in_header_footer)?)
-                }
+                "tbl" => BlockContent::Table(Arc::new(self.parse_table(
+                    child,
+                    depth,
+                    in_header_footer,
+                )?)),
+                "sdt" => BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(
+                    child,
+                    depth,
+                    in_header_footer,
+                )?)),
                 "oMath" | "oMathPara" => {
                     self.budget.charge_paragraph(self.part)?;
-                    BlockContent::Paragraph(math_paragraph(child))
+                    BlockContent::Paragraph(Arc::new(math_paragraph(child)))
                 }
                 _ => unreachable!(),
             };
@@ -172,6 +316,12 @@ impl StoryParser<'_, '_> {
                 }
             }
             content.push(parsed);
+            weight = weight.saturating_add(
+                self.budget
+                    .paragraph_count()
+                    .saturating_sub(paragraphs_before)
+                    .max(1),
+            );
 
             if !events.unmatched_modes.is_empty() {
                 let candidates = top_level_complex_field_indices(&content[parsed_index]);
@@ -196,7 +346,7 @@ impl StoryParser<'_, '_> {
         }
 
         attach_recorded_field_blocks(&mut content, records);
-        Ok(content)
+        Ok((content, read, budget_stopped))
     }
 
     fn parse_block_sdt(
@@ -238,7 +388,10 @@ impl StoryParser<'_, '_> {
             column_widths: parse_table_grid(element.child("w", "tblGrid")),
             rows: Vec::new(),
         };
-        for row in element.children_named("w", "tr") {
+        for row in transparent_children(element, true)
+            .into_iter()
+            .filter(|row| row.matches_name("w", "tr"))
+        {
             self.budget.charge_table_row(self.part)?;
             table
                 .rows
@@ -263,7 +416,10 @@ impl StoryParser<'_, '_> {
             formatting,
             cells: Vec::new(),
         };
-        for cell in element.children_named("w", "tc") {
+        for cell in transparent_children(element, true)
+            .into_iter()
+            .filter(|cell| cell.matches_name("w", "tc"))
+        {
             self.budget.charge_table_cell(self.part)?;
             row.cells
                 .push(self.parse_table_cell(cell, depth, in_header_footer)?);
@@ -285,7 +441,7 @@ impl StoryParser<'_, '_> {
         if content.is_empty() {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
-            content.push(BlockContent::Paragraph(empty_paragraph()));
+            content.push(BlockContent::Paragraph(Arc::new(empty_paragraph())));
         }
         Ok(TableCell {
             node_type: "tableCell".to_owned(),
@@ -306,8 +462,8 @@ impl StoryParser<'_, '_> {
             return Ok(());
         }
         let mut run_index = 0usize;
-        for run in source
-            .child_elements()
+        for run in transparent_children(source, false)
+            .into_iter()
             .filter(|child| child.local_name() == "r")
         {
             for child in run.child_elements() {
@@ -357,18 +513,28 @@ impl StoryParser<'_, '_> {
         {
             blocks = self.parse_blocks(container, depth.saturating_add(1), false)?;
         }
-        let mut shape = Shape::empty("rect".to_owned(), text_box.size);
-        shape.id = text_box.id;
-        shape.position = text_box.position;
-        shape.wrap = text_box.wrap;
-        shape.fill = text_box.fill;
-        shape.outline = text_box.outline;
+        let mut shape = crate::shape::parse_shape_from_drawing(drawing).unwrap_or_else(|| {
+            let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
+            shape.id = text_box.id;
+            shape.name = text_box.name;
+            shape.position = text_box.position;
+            shape.wrap = text_box.wrap;
+            shape.fill = text_box.fill;
+            shape.outline = text_box.outline;
+            shape
+        });
+        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
         shape.text_body = Some(ShapeTextBody {
-            vertical: None,
-            rotation: None,
-            anchor: None,
-            anchor_center: None,
-            auto_fit: None,
+            vertical: body.as_ref().and_then(|body| {
+                body.vertical
+                    .as_deref()
+                    .filter(|value| *value != "horizontal")
+                    .map(|_| true)
+            }),
+            rotation: body.as_ref().and_then(|body| body.rotation),
+            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
+            anchor_center: body.as_ref().and_then(|body| body.anchor_center),
+            auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
             margins: text_box.margins.map(|margins| RelativeRect {
                 left: margins.left,
                 top: margins.top,
@@ -381,6 +547,7 @@ impl StoryParser<'_, '_> {
                 .collect::<Result<_, _>>()
                 .map_err(|error| ParseError::Canonical(error.to_string()))?,
         });
+        shape.text_body_properties = shape.text_body_properties.or(body);
         let mut target = run_index;
         if target >= paragraph.content.len() {
             let Some(last_run) = paragraph.content.iter().rposition(|content| {
@@ -399,6 +566,92 @@ impl StoryParser<'_, '_> {
         }
         Ok(())
     }
+}
+
+/// `parent`'s children in document order, descending through `w:customXml`
+/// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
+pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {
+    let mut children = Vec::new();
+    visit_transparent_children(parent, through_sdt, &mut Vec::new(), &mut |_, child| {
+        children.push(child)
+    });
+    children
+}
+
+fn visit_transparent_children<'a>(
+    parent: &'a XmlElement,
+    through_sdt: bool,
+    path: &mut Vec<u32>,
+    visit: &mut impl FnMut(&[u32], &'a XmlElement),
+) {
+    for (ordinal, child) in parent.child_elements().enumerate() {
+        path.push(ordinal as u32);
+        if child.matches_name("w", "customXml") || child.matches_name("w", "smartTag") {
+            visit_transparent_children(child, through_sdt, path, visit);
+        } else if through_sdt && child.matches_name("w", "sdt") {
+            if let Some((index, content)) = child
+                .child_elements()
+                .enumerate()
+                .find(|(_, element)| element.matches_name("w", "sdtContent"))
+            {
+                path.push(index as u32);
+                visit_transparent_children(content, through_sdt, path, visit);
+                path.pop();
+            }
+        } else {
+            visit(path, child);
+        }
+        path.pop();
+    }
+}
+
+/// Whether the story dispatcher reads `element` as a typed block.
+fn typed_block(element: &XmlElement) -> bool {
+    typed_block_name(&element.name)
+}
+
+pub(crate) fn typed_block_name(name: &str) -> bool {
+    matches!(
+        crate::xml::local_name(name),
+        "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
+    )
+}
+
+/// Whether the story dispatcher reads `element` as a block: a typed one, or foreign markup it
+/// keeps as a raw block.
+fn is_story_block(element: &XmlElement) -> bool {
+    is_story_block_name(&element.name)
+}
+
+fn is_story_block_name(name: &str) -> bool {
+    typed_block_name(name) || crate::inline::is_foreign_name(name)
+}
+
+/// The elements [`StoryParser::parse_blocks`] reads as blocks from `parent`, in order, each with
+/// its element-child ordinals below `parent`.
+pub fn story_block_elements(parent: &XmlElement) -> Vec<(Vec<u32>, &XmlElement)> {
+    let mut blocks = Vec::new();
+    visit_transparent_children(parent, false, &mut Vec::new(), &mut |path, child| {
+        if is_story_block(child) {
+            blocks.push((path.to_vec(), child));
+        }
+    });
+    blocks
+}
+
+/// The rows of a `w:tbl`, or the cells of a `w:tr`, as the table parser reads them, each with
+/// its element-child ordinals below `parent`.
+pub fn table_part_elements<'a>(
+    parent: &'a XmlElement,
+    local: &str,
+) -> Vec<(Vec<u32>, &'a XmlElement)> {
+    let mut parts = Vec::new();
+    visit_transparent_children(parent, true, &mut Vec::new(), &mut |path, child| {
+        if child.matches_name("w", local) {
+            parts.push((path.to_vec(), child));
+        }
+    });
+    parts
 }
 
 fn scan_field_block_events(root: &XmlElement) -> FieldEvents {
@@ -515,7 +768,7 @@ fn complex_field_mut(
         return None;
     };
     let ParagraphContent::Inline(InlineNode::ComplexField(field)) =
-        paragraph.content.get_mut(content_index)?
+        Arc::make_mut(paragraph).content.get_mut(content_index)?
     else {
         return None;
     };
@@ -537,7 +790,7 @@ fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
         return;
     };
     let mut remaining = count;
-    paragraph.content.retain(|content| {
+    Arc::make_mut(paragraph).content.retain(|content| {
         if remaining == 0 {
             return true;
         }
@@ -569,7 +822,11 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
     Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
+        repeated_para_id: None,
+        para_id_attribute: None,
+        source_ordinal: None,
         text_id: None,
+        extra_attributes: Vec::new(),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,
@@ -599,7 +856,11 @@ fn empty_paragraph() -> Paragraph {
     Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
+        repeated_para_id: None,
+        para_id_attribute: None,
+        source_ordinal: None,
         text_id: None,
+        extra_attributes: Vec::new(),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,
@@ -814,6 +1075,36 @@ mod tests {
     }
 
     #[test]
+    fn text_boxes_inside_wrapped_runs_are_enriched() {
+        let blocks = parse(
+            r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps"><w:p>
+              <w:r><w:t>lead</w:t></w:r>
+              <w:smartTag w:element="place"><w:r><w:drawing>
+                <wp:inline><wp:extent cx="914400" cy="457200"/><a:graphic><a:graphicData><wps:wsp>
+                  <wps:txbx><w:txbxContent><w:p><w:r><w:t>boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                </wps:wsp></a:graphicData></a:graphic></wp:inline>
+              </w:drawing></w:r></w:smartTag>
+            </w:p></w:body>"#,
+        );
+        let BlockContent::Paragraph(paragraph) = &blocks[0] else {
+            panic!("paragraph")
+        };
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[1] else {
+            panic!("wrapped run")
+        };
+        let shape = run
+            .content
+            .iter()
+            .find_map(|content| match content {
+                RunContent::Shape { shape } => Some(shape.as_ref()),
+                _ => None,
+            })
+            .expect("text box shape");
+        let content = &shape.text_body.as_ref().expect("text body").content;
+        assert_eq!(content[0]["content"][0]["content"][0]["text"], "boxed");
+    }
+
+    #[test]
     fn cell_story_keeps_block_field_ownership_and_order() {
         let blocks = parse(
             r#"<w:body xmlns:w="w"><w:tbl><w:tr><w:tc>
@@ -851,6 +1142,58 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn body_and_cell_level_custom_xml_wrappers_are_transparent() {
+        let blocks = parse(
+            r#"<w:body xmlns:w="w">
+              <w:customXml w:uri="urn:x" w:element="section">
+                <w:customXmlPr><w:placeholder w:val="p"/></w:customXmlPr>
+                <w:p><w:r><w:t>wrapped</w:t></w:r></w:p>
+                <w:tbl><w:tr><w:tc>
+                  <w:customXml w:element="cell"><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:customXml>
+                </w:tc></w:tr></w:tbl>
+              </w:customXml>
+            </w:body>"#,
+        );
+        assert_eq!(blocks.len(), 2);
+        let BlockContent::Paragraph(paragraph) = &blocks[0] else {
+            panic!("paragraph")
+        };
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[0] else {
+            panic!("run")
+        };
+        assert!(matches!(
+            &run.content[0],
+            RunContent::Text { text, .. } if text == "wrapped"
+        ));
+        let BlockContent::Table(table) = &blocks[1] else {
+            panic!("table")
+        };
+        assert_eq!(crate::table::get_table_text(table), "cell");
+    }
+
+    #[test]
+    fn sdt_and_custom_xml_wrapped_rows_and_cells_are_flattened() {
+        let blocks = parse(
+            r#"<w:body xmlns:w="w"><w:tbl>
+              <w:sdt><w:sdtPr><w:alias w:val="row"/></w:sdtPr><w:sdtContent>
+                <w:tr>
+                  <w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+                  <w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt>
+                  <w:customXml w:element="cell"><w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:customXml>
+                </w:tr>
+              </w:sdtContent></w:sdt>
+              <w:customXml w:element="row"><w:tr><w:tc><w:p><w:r><w:t>d</w:t></w:r></w:p></w:tc></w:tr></w:customXml>
+            </w:tbl></w:body>"#,
+        );
+        let BlockContent::Table(table) = &blocks[0] else {
+            panic!("table")
+        };
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.rows[0].cells.len(), 3);
+        assert_eq!(crate::table::get_table_text(table), "a\tb\tc\nd");
     }
 
     #[test]

@@ -1,0 +1,4 @@
+# TypeScript tests stay out of GitHub language statistics
+*.test.ts linguist-detectable=false
+*.test.tsx linguist-detectable=false
+e2e/** linguist-detectable=false

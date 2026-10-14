@@ -113,6 +113,32 @@ fn references_and_sheets() {
 }
 
 #[test]
+fn absolute_and_relative_concatenation() {
+    let mut wb = fixture();
+    for (address, value) in [("B6", 6.0), ("B4", 4.0), ("D2", 2.0)] {
+        wb.sheets[0].set_cell(
+            CellRef::parse_a1(address).unwrap(),
+            Cell {
+                value: n(value),
+                ..Cell::default()
+            },
+        );
+    }
+    for formula in [
+        r#"$B$6&"A"&$B$4&"B"&$D$2"#,
+        r#"B6&"A"&B4&"B"&D2"#,
+        r#"$B6&"A"&B$4&"B"&D2"#,
+    ] {
+        let expression = parse_formula(formula).unwrap();
+        assert_eq!(
+            evaluate(&expression, &EvalContext::new(&wb, SheetId(0))),
+            t("6A4B2"),
+            "{formula}"
+        );
+    }
+}
+
+#[test]
 fn functions() {
     let cases: &[(&str, CellValue)] = &[
         ("SUM(A1:A3)", n(60.0)),

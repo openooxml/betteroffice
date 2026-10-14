@@ -5,6 +5,7 @@ export {
   type CollaborationErrorCode,
   type CollaborationErrorListener,
   type CollaborationProviderOptions,
+  type AsyncCollaborationReplica,
   type CollaborationReplica,
   type CollaborationStatus,
   type CollaborationStatusChange,

@@ -1,4 +1,5 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
+import { resolveDefaultFontProvider } from './defaultFontProvider';
 import {
   TextMeasureFontRegistry,
   type BundledFontProvider,
@@ -8,6 +9,13 @@ import {
 
 export interface RustTextEngine {
   registerFont(bytes: Uint8Array): number;
+  /**
+   * Measurement view of `id` carrying the vertical metrics and advance pitch
+   * Word measures `family` with; `id` when the engine knows none. Optional so
+   * a host that predates it still measures, with the substitute's own
+   * metrics.
+   */
+  registerSubstituteFont?(id: number, family: string): number;
   clearFonts(): void;
 }
 
@@ -21,7 +29,7 @@ export interface ResidentFontRequirement {
 
 export interface ResidentMeasurementConfig {
   fontChains: Record<string, number[]>;
-  defaults: { fontSize: 11; fontFamily: 'Calibri' };
+  defaults: { fontSize: number; fontFamily: string };
   compat: { noLeading: boolean; doNotExpandShiftReturn: boolean };
   authoritativeShaping: true;
 }
@@ -29,9 +37,11 @@ export interface ResidentMeasurementConfig {
 export interface RustMeasureSource {
   setEmbeddedFaces(faces: EmbeddedFaceInput[]): void;
   setCompat(flags: CompatibilityFlags | undefined): void;
-  prepareFontRequirements(requirements: ResidentFontRequirement[]): Promise<boolean>;
+  prepareFontRequirements(
+    requirements: ResidentFontRequirement[],
+  ): Promise<boolean>;
   measurementConfigForRequirements(
-    requirements: ResidentFontRequirement[]
+    requirements: ResidentFontRequirement[],
   ): ResidentMeasurementConfig | undefined;
   clear(): void;
 }
@@ -43,19 +53,28 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
     await module.preloadLayoutWasm();
     return {
       registerFont: module.registerMeasureFont,
+      registerSubstituteFont: module.registerSubstituteMeasureFont,
       clearFonts: module.clearMeasureFonts,
     };
   });
   return enginePromise;
 }
 
+/** Builds a source with an explicit provider or the optional default package. */
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
 }): RustMeasureSource {
+  const engine = options.engine;
   const registry = new TextMeasureFontRegistry(
-    { registerFont: (bytes) => options.engine.registerFont(bytes) },
-    { bundled: options.bundled }
+    {
+      registerFont: (bytes) => engine.registerFont(bytes),
+      ...(engine.registerSubstituteFont && {
+        registerSubstituteFont: (id, family) =>
+          engine.registerSubstituteFont!(id, family),
+      }),
+    },
+    { bundled: options.bundled ?? resolveDefaultFontProvider },
   );
   let compat: CompatibilityFlags | undefined;
 
@@ -76,13 +95,14 @@ export function createRustMeasureSource(options: {
               const cached = registry.getCachedFontIdChain(
                 requirement.family,
                 requirement.bold,
-                requirement.italic
+                requirement.italic,
+                false,
               );
               if (cached !== undefined) return false;
               await registry.getFontIdChain(
                 requirement.family,
                 requirement.bold,
-                requirement.italic
+                requirement.italic,
               );
               return true;
             } catch {
@@ -91,28 +111,57 @@ export function createRustMeasureSource(options: {
           })(),
           ...Array.from(new Set(requirement.scripts ?? []), async (script) => {
             try {
-              if (registry.getCachedScriptFallbackIds([script]) !== undefined) return false;
+              if (
+                registry.getCachedScriptFallbackIds([script], false) !==
+                undefined
+              )
+                return false;
               await registry.getScriptFallbackIds([script]);
               return true;
             } catch {
               return false;
             }
           }),
-        ])
+        ]),
       );
       return settled.some(Boolean);
     },
 
-    measurementConfigForRequirements(requirements): ResidentMeasurementConfig | undefined {
+    measurementConfigForRequirements(
+      requirements,
+    ): ResidentMeasurementConfig | undefined {
+      const settled = requirements.map((requirement) => ({
+        requirement,
+        familyIds: registry.getCachedFontIdChain(
+          requirement.family,
+          requirement.bold,
+          requirement.italic,
+          false,
+        ),
+        scriptIds: registry.getCachedScriptFallbackIds(
+          requirement.scripts ?? [],
+          false,
+        ),
+      }));
+      if (
+        settled.some(
+          ({ familyIds, scriptIds }) =>
+            familyIds === undefined || scriptIds === undefined,
+        )
+      )
+        return undefined;
       const fontChains: Record<string, number[]> = {};
-      for (const requirement of requirements) {
+      for (const { requirement } of settled) {
         const familyIds = registry.getCachedFontIdChain(
           requirement.family,
           requirement.bold,
-          requirement.italic
+          requirement.italic,
         );
-        const scriptIds = registry.getCachedScriptFallbackIds(requirement.scripts ?? []);
-        if (familyIds === undefined || scriptIds === undefined) return undefined;
+        const scriptIds = registry.getCachedScriptFallbackIds(
+          requirement.scripts ?? [],
+        );
+        if (familyIds === undefined || scriptIds === undefined)
+          return undefined;
         const chain = Array.from(familyIds);
         for (const id of scriptIds) if (!chain.includes(id)) chain.push(id);
         if (chain.length > 0) fontChains[requirement.key] = chain;

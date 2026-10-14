@@ -194,6 +194,8 @@ export interface Image {
   padding?: ImagePadding;
   /** Source-image crop (fractional, OOXML `a:srcRect`). */
   crop?: ImageCrop;
+  /** Picture preset geometry; undefined means rect. */
+  shapeType?: string;
   /** Opacity in [0, 1] (OOXML `a:alphaModFix amt`). Undefined = fully opaque. */
   opacity?: number;
   /** Whether this is a decorative image */

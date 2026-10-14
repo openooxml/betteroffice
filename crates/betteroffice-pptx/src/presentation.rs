@@ -1,26 +1,71 @@
 use std::collections::BTreeMap;
 
+use pptx_edit::structured::{
+    PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxStructuredContent,
+};
 use pptx_edit::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot,
-    TextReceipt, TextStyle, TextStylePatch, TransformReceipt,
+    CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
+    DocumentVersion, EditCtx, EditError, EditOutcome, EditRequest, FindOutcome, FindRequest,
+    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
+    ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideScope,
+    StorySnapshot, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
+    UpdateEvent, UpdateSubscription, ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
     SlideMaster, ThemePart,
 };
-use pptx_render::{RenderedSlide, SlideRenderer};
+use pptx_render::{RenderError, RenderedSlide, SlideRenderer};
 
 use crate::Result;
 
 const STANDALONE_CLIENT_ID: u64 = 1;
 
+fn slide_scope(session: &DeckSession, slide_index: usize) -> Result<SlideScope> {
+    session
+        .slide_scope(slide_index)
+        .map_err(|error| match error {
+            EditError::OutOfBounds { .. } => RenderError::SlideNotFound(slide_index).into(),
+            error => error.into(),
+        })
+}
+
 pub struct Presentation {
     session: DeckSession,
     renderer: SlideRenderer,
+    #[cfg(feature = "raster")]
+    caches: crate::render::RenderCaches,
 }
 
 impl Presentation {
+    pub fn propose(&self, request: crate::ProposalRequest) -> Result<crate::Proposal> {
+        Ok(self.session.propose(request)?)
+    }
+
+    pub fn proposals(&self) -> Result<Vec<crate::Proposal>> {
+        Ok(self.session.proposals()?)
+    }
+
+    pub fn preview_proposal(&self, id: &str) -> Result<crate::ProposalPreview> {
+        Ok(self.session.preview_proposal(id)?)
+    }
+
+    pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
+        let preview = self.session.proposal_preview_session(id)?;
+        let scope = slide_scope(&preview, slide_index)?;
+        Ok(self
+            .renderer
+            .layout_scoped_slide(preview.package(), &scope)?)
+    }
+
+    pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
+        Ok(self.session.accept_proposal(id, force)?)
+    }
+
+    pub fn reject_proposal(&self, id: &str) -> bool {
+        self.session.reject_proposal(id)
+    }
+
     pub fn open(bytes: &[u8]) -> Result<Self> {
         Self::open_with_limits_internal(bytes, &ParseLimits::default(), STANDALONE_CLIENT_ID)
     }
@@ -47,10 +92,12 @@ impl Presentation {
         client_id: u64,
     ) -> Result<Self> {
         let package = pptx_parse::parse_pptx_with_limits(bytes, limits)?;
-        let session = DeckSession::from_package(package, client_id)?;
+        let session = DeckSession::from_package_with_source(package, bytes, client_id)?;
         Ok(Self {
             session,
             renderer: SlideRenderer::new(),
+            #[cfg(feature = "raster")]
+            caches: crate::render::RenderCaches::default(),
         })
     }
 
@@ -86,12 +133,83 @@ impl Presentation {
         &self.package().media
     }
 
+    /// Resolves a display-list image asset, including unsaved pictures.
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>> {
+        Ok(self.session.media_bytes(asset_id)?)
+    }
+
+    pub fn search_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<TextSearchMatch>> {
+        Ok(self.session.search_text(query, case_sensitive, limit)?)
+    }
+
     pub fn snapshot(&self) -> Result<DeckSnapshot> {
         Ok(self.session.snapshot()?)
     }
 
+    /// The session-scoped version token of the committed deck state; see
+    /// [`DeckSession::version`].
+    pub fn version(&self) -> DocumentVersion {
+        self.session.version()
+    }
+
+    /// Slides and their stories' text with the version it was read at. Policy refusals are the
+    /// inner `Err`.
+    pub fn read_content(&self, request: &ReadRequest) -> Result<ReadOutcome> {
+        Ok(self.session.read_content(request)?)
+    }
+
+    /// Exact, case-sensitive, paragraph-local search with the version it ran at.
+    pub fn find_text(&self, request: &FindRequest) -> Result<FindOutcome> {
+        Ok(self.session.find_text(request)?)
+    }
+
+    /// Structured slide content with the version it was read at; anchors are scoped to that
+    /// version. Nothing changes. Option refusals are the inner `Err`.
+    pub fn export_structured(
+        &self,
+        options: &PptxExportOptions,
+    ) -> Result<PptxExportResult<PptxStructuredContent>> {
+        Ok(self.session.export_structured(options)?)
+    }
+
+    /// [`Presentation::export_structured`] rendered as Markdown from the same read.
+    pub fn export_markdown(
+        &self,
+        options: &PptxExportOptions,
+    ) -> Result<PptxExportResult<PptxMarkdownContent>> {
+        Ok(self.session.export_markdown(options)?)
+    }
+
+    /// Runs every check of [`Presentation::apply_edits`] without changing anything.
+    pub fn validate_edits(&self, request: &EditRequest) -> Result<ValidationOutcome> {
+        Ok(self.session.validate_edits(request)?)
+    }
+
+    /// Applies every step or none against `expect_version`, as one transaction.
+    pub fn apply_edits(&self, request: &EditRequest) -> Result<EditOutcome> {
+        Ok(self.session.apply_edits(request)?)
+    }
+
+    /// Slide ids in deck order, without serializing a full [`DeckSnapshot`].
+    pub fn slide_ids(&self) -> Result<Vec<String>> {
+        Ok(self.session.slide_ids()?)
+    }
+
     pub fn story(&self, story_id: &str) -> Result<StorySnapshot> {
         Ok(self.session.story(story_id)?)
+    }
+
+    pub fn anchor_caret(&self, story_id: &str, index: u32) -> Result<CaretAnchor> {
+        Ok(self.session.anchor_caret(story_id, index)?)
+    }
+
+    pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
+        self.session.resolve_caret_anchor(anchor)
     }
 
     pub fn insert_slide(
@@ -116,6 +234,11 @@ impl Presentation {
         to_index: u32,
     ) -> Result<SlideReceipt> {
         Ok(self.session.move_slide(context, slide_id, to_index)?)
+    }
+
+    /// Sets a slide's speaker notes; empty text clears them.
+    pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> Result<()> {
+        Ok(self.session.set_slide_notes(context, slide_id, text)?)
     }
 
     pub fn add_text_box(
@@ -205,6 +328,18 @@ impl Presentation {
             .resize_shape(context, slide_id, shape_id, width, height)?)
     }
 
+    pub fn set_shape_rect(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        rect: ShapeRect,
+    ) -> Result<TransformReceipt> {
+        Ok(self
+            .session
+            .set_shape_rect(context, slide_id, shape_id, rect)?)
+    }
+
     pub fn insert_text(
         &self,
         context: &EditCtx,
@@ -241,6 +376,81 @@ impl Presentation {
             .format_text(context, story_id, start, end, patch)?)
     }
 
+    pub fn set_paragraph_alignment(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        alignment: Option<&str>,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .set_paragraph_alignment(context, story_id, start, end, alignment)?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_comment(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+        x_emu: i64,
+        y_emu: i64,
+    ) -> Result<CommentReceipt> {
+        Ok(self.session.add_comment(
+            context, slide_id, author, initials, text, created, x_emu, y_emu,
+        )?)
+    }
+
+    pub fn reply_to_comment(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+    ) -> Result<CommentReceipt> {
+        Ok(self
+            .session
+            .reply_to_comment(context, comment_id, author, initials, text, created)?)
+    }
+
+    pub fn set_comment_status(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        resolved: bool,
+    ) -> Result<CommentReceipt> {
+        Ok(self
+            .session
+            .set_comment_status(context, comment_id, resolved)?)
+    }
+
+    pub fn remove_comment(&self, context: &EditCtx, comment_id: &str) -> Result<CommentReceipt> {
+        Ok(self.session.remove_comment(context, comment_id)?)
+    }
+
+    pub fn set_comment_flavor(
+        &self,
+        context: &EditCtx,
+        flavor: CommentFlavor,
+    ) -> Result<CommentFlavor> {
+        Ok(self.session.set_comment_flavor(context, flavor)?)
+    }
+
+    pub fn comments(&self) -> Result<Vec<CommentSnapshot>> {
+        Ok(self.session.comments()?)
+    }
+
+    pub fn comment_flavor(&self) -> Result<CommentFlavor> {
+        Ok(self.session.comment_flavor()?)
+    }
+
     pub fn insert_paragraph_break(
         &self,
         context: &EditCtx,
@@ -250,6 +460,17 @@ impl Presentation {
         Ok(self
             .session
             .insert_paragraph_break(context, story_id, index)?)
+    }
+
+    pub fn delete_paragraph_break(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        index: u32,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .delete_paragraph_break(context, story_id, index)?)
     }
 
     pub fn register_font(
@@ -262,17 +483,29 @@ impl Presentation {
         Ok(self.renderer.register_font(family, bold, italic, bytes)?)
     }
 
-    pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
-        let snapshot = self.session.snapshot()?;
-        Ok(self
-            .renderer
-            .layout_slide(self.session.package(), &snapshot, slide_index)?)
+    #[cfg(feature = "raster")]
+    pub(crate) fn renderer(&self) -> &SlideRenderer {
+        &self.renderer
     }
 
-    /// Re-zips the retained parts. Part bytes survive unchanged; the container
-    /// is rebuilt, so the output is not byte-identical to the source.
+    #[cfg(feature = "raster")]
+    pub(crate) fn caches(&self) -> &crate::render::RenderCaches {
+        &self.caches
+    }
+
+    pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
+        let scope = slide_scope(&self.session, slide_index)?;
+        Ok(self
+            .renderer
+            .layout_scoped_slide(self.session.package(), &scope)?)
+    }
+
+    /// Serializes the deck with all edits applied. Untouched slides keep their
+    /// exact source part bytes; edited slides are patched at the XML level.
+    /// The container is rebuilt, so the output is not byte-identical to the
+    /// source even without edits.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(pptx_parse::write_pptx(self.session.package())?)
+        Ok(self.session.save()?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -289,6 +522,13 @@ impl Presentation {
 
     pub fn apply_update_v1(&self, update: &[u8]) -> Result<DeckSnapshot> {
         Ok(self.session.apply_update_v1(update)?)
+    }
+
+    pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
+    where
+        F: Fn(UpdateEvent) + 'static,
+    {
+        Ok(self.session.observe_update_v1(callback)?)
     }
 
     pub fn undo(&self) -> bool {
@@ -310,4 +550,32 @@ impl Presentation {
     pub fn add_undo_barrier(&self) {
         self.session.add_undo_barrier();
     }
+}
+
+/// Exports PPTX bytes as structured content; anchors address the returned snapshot only.
+pub fn export_pptx_structured(
+    bytes: &[u8],
+    options: &PptxExportOptions,
+) -> Result<PptxStructuredContent> {
+    Ok(pptx_edit::structured::export_pptx_structured(
+        bytes, options,
+    )?)
+}
+
+/// [`export_pptx_structured`] rendered as Markdown.
+pub fn export_pptx_markdown(
+    bytes: &[u8],
+    options: &PptxExportOptions,
+) -> Result<PptxMarkdownContent> {
+    Ok(pptx_edit::structured::export_pptx_markdown(bytes, options)?)
+}
+
+/// Renders structured content as Markdown.
+pub fn render_pptx_markdown(
+    content: &PptxStructuredContent,
+    options: &pptx_edit::structured::PptxMarkdownOptions,
+) -> Result<PptxMarkdownContent> {
+    Ok(pptx_edit::structured::render_pptx_markdown(
+        content, options,
+    )?)
 }

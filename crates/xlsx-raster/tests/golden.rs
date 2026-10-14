@@ -13,6 +13,7 @@ fn fill(x: f32, y: f32, w: f32, h: f32, color: &str) -> DrawCmd {
         w,
         h,
         color: color.into(),
+        clip: None,
     }
 }
 
@@ -32,7 +33,9 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         highlight: None,
         dashed_underline: false,
         font_family: None,
+        number_format: None,
         ghost: false,
+        chart: false,
     }
 }
 
@@ -64,7 +67,9 @@ fn styled_text(
         highlight: None,
         dashed_underline: false,
         font_family: None,
+        number_format: None,
         ghost: false,
+        chart: false,
     }
 }
 
@@ -85,6 +90,8 @@ fn line(
         width,
         color: color.into(),
         style: style.map(Into::into),
+        rail: None,
+        clip: None,
     }
 }
 
@@ -104,6 +111,7 @@ fn dl(width: f32, height: f32, commands: Vec<DrawCmd>) -> DisplayList {
         commands,
         grid: GridMeta::default(),
         hyperlinks: Vec::new(),
+        charts: Vec::new(),
     }
 }
 

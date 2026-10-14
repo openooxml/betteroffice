@@ -1,0 +1,246 @@
+[
+  {
+    "name": "nullable optional widths",
+    "valid": true,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>",
+        "width": null,
+        "widthPercent": null
+      }
+    }
+  },
+  {
+    "name": "omitted optional widths",
+    "valid": true,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "numeric widths",
+    "valid": true,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>",
+        "width": 95250,
+        "widthPercent": 50
+      }
+    }
+  },
+  {
+    "name": "null",
+    "valid": false,
+    "payload": {
+      "rule": null
+    }
+  },
+  {
+    "name": "string",
+    "valid": false,
+    "payload": {
+      "rule": "line"
+    }
+  },
+  {
+    "name": "array",
+    "valid": false,
+    "payload": {
+      "rule": []
+    }
+  },
+  {
+    "name": "empty object",
+    "valid": false,
+    "payload": {
+      "rule": {}
+    }
+  },
+  {
+    "name": "missing rule",
+    "valid": false,
+    "payload": {}
+  },
+  {
+    "name": "invalid height",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": "19050",
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "invalid width",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>",
+        "width": "wide"
+      }
+    }
+  },
+  {
+    "name": "invalid widthPercent",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>",
+        "widthPercent": "50%"
+      }
+    }
+  },
+  {
+    "name": "invalid alignment",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": 0,
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "invalid noShade",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": "false",
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "invalid color",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": null,
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "invalid xml",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": false
+      }
+    }
+  },
+  {
+    "name": "missing height",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "missing alignment",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "noShade": false,
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "missing noShade",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "color": "#A0A0A0",
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "missing color",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "xml": "<w:pict/>"
+      }
+    }
+  },
+  {
+    "name": "missing xml",
+    "valid": false,
+    "payload": {
+      "rule": {
+        "height": 19050,
+        "alignment": "left",
+        "noShade": false,
+        "color": "#A0A0A0"
+      }
+    }
+  },
+  {
+    "name": "positional struct array",
+    "valid": false,
+    "payload": {
+      "rule": [
+        null,
+        null,
+        19050,
+        "left",
+        false,
+        "#A0A0A0",
+        "<w:pict/>"
+      ]
+    }
+  }
+]

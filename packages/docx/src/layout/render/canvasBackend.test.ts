@@ -1,0 +1,574 @@
+import { beforeAll, describe, expect, it, mock, spyOn } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import {
+  buildDisplayListJson,
+  preloadLayoutWasm,
+  registerMeasureFont,
+} from '../../wasm/layout';
+import {
+  drawDisplayPage,
+  drawPrimitive,
+  rasterizeDisplayPageToBackBuffer,
+  releaseOffscreenPageCanvas,
+  sizeCanvasForPage,
+  withFontFamilies,
+} from './canvasBackend';
+import type {
+  DisplayList,
+  DisplayPaintClip,
+  GlyphRunPrimitive,
+  TextRunPrimitive,
+} from './displayList';
+import type { GlyphCache } from './glyphCache';
+
+interface Bounds {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+interface PaintedBounds extends Bounds {
+  naturalLeft: number;
+  naturalRight: number;
+  naturalTop: number;
+  naturalBottom: number;
+}
+
+interface TextInk {
+  width: number;
+  ascent: number;
+  descent: number;
+}
+
+interface TransformState {
+  x: number;
+  y: number;
+  scaleX: number;
+  scaleY: number;
+}
+
+interface CanvasState {
+  clip: Bounds;
+  transform: TransformState;
+}
+
+interface FakeGlyphPath {
+  width: number;
+  height: number;
+}
+
+const FONT = resolve(
+  import.meta.dir,
+  '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+);
+
+let fontId = -1;
+
+beforeAll(async () => {
+  await preloadLayoutWasm();
+  fontId = registerMeasureFont(new Uint8Array(readFileSync(FONT)));
+});
+
+function textRun(
+  text: string,
+  x: number,
+  width: number,
+  family: string,
+  rtl: boolean = false,
+  paintClip?: DisplayPaintClip
+): TextRunPrimitive {
+  return {
+    kind: 'text',
+    text,
+    x,
+    baselineY: 20,
+    width,
+    paintClip,
+    font: `16px "${family}"`,
+    color: '#000000',
+    rtl,
+  };
+}
+
+function intersect(a: Bounds, b: Bounds): Bounds {
+  const left = Math.max(a.left, b.left);
+  const right = Math.max(left, Math.min(a.right, b.right));
+  const top = Math.max(a.top, b.top);
+  const bottom = Math.max(top, Math.min(a.bottom, b.bottom));
+  return { left, right, top, bottom };
+}
+
+function recordingContext(textInk: ReadonlyMap<string, TextInk>): {
+  ctx: CanvasRenderingContext2D;
+  paints: PaintedBounds[];
+} {
+  const paints: PaintedBounds[] = [];
+  const stack: CanvasState[] = [];
+  let state: CanvasState = {
+    clip: { left: -Infinity, right: Infinity, top: -Infinity, bottom: Infinity },
+    transform: { x: 0, y: 0, scaleX: 1, scaleY: 1 },
+  };
+  let path: Bounds | undefined;
+
+  const transformedBounds = (x: number, y: number, width: number, height: number): Bounds => {
+    const x1 = state.transform.x + x * state.transform.scaleX;
+    const x2 = state.transform.x + (x + width) * state.transform.scaleX;
+    const y1 = state.transform.y + y * state.transform.scaleY;
+    const y2 = state.transform.y + (y + height) * state.transform.scaleY;
+    return {
+      left: Math.min(x1, x2),
+      right: Math.max(x1, x2),
+      top: Math.min(y1, y2),
+      bottom: Math.max(y1, y2),
+    };
+  };
+
+  const record = (natural: Bounds): void => {
+    const painted = intersect(natural, state.clip);
+    paints.push({
+      ...painted,
+      naturalLeft: natural.left,
+      naturalRight: natural.right,
+      naturalTop: natural.top,
+      naturalBottom: natural.bottom,
+    });
+  };
+
+  const ctx = {
+    save(): void {
+      stack.push({
+        clip: { ...state.clip },
+        transform: { ...state.transform },
+      });
+    },
+    restore(): void {
+      state = stack.pop() ?? state;
+    },
+    beginPath(): void {
+      path = undefined;
+    },
+    rect(x: number, y: number, width: number, height: number): void {
+      path = transformedBounds(x, y, width, height);
+    },
+    clip(): void {
+      if (path) state.clip = intersect(state.clip, path);
+    },
+    translate(x: number, y: number): void {
+      state.transform.x += x * state.transform.scaleX;
+      state.transform.y += y * state.transform.scaleY;
+    },
+    scale(x: number, y: number): void {
+      state.transform.scaleX *= x;
+      state.transform.scaleY *= y;
+    },
+    fill(pathToFill: Path2D): void {
+      const glyph = pathToFill as unknown as FakeGlyphPath;
+      record(transformedBounds(0, 0, glyph.width, glyph.height));
+    },
+    fillText(text: string, x: number, y: number): void {
+      const ink = textInk.get(text) ?? { width: 0, ascent: 0, descent: 0 };
+      record(transformedBounds(x, y - ink.ascent, ink.width, ink.ascent + ink.descent));
+    },
+  } as unknown as CanvasRenderingContext2D;
+  return { ctx, paints };
+}
+
+function syntheticMixedFamilyDisplayList(): DisplayList {
+  const first = '@@@@@@@@@@@@@@@@@@@@';
+  const input = {
+    measured: [
+      {
+        block: {
+          kind: 'paragraph',
+          id: 0,
+          runs: [
+            {
+              kind: 'text',
+              text: first,
+              pmStart: 1,
+              pmEnd: 21,
+              fontFamily: 'Liberation Sans',
+              fontSize: 12,
+            },
+            {
+              kind: 'text',
+              text: 'next',
+              pmStart: 21,
+              pmEnd: 25,
+              fontFamily: 'Unregistered Face',
+              fontSize: 12,
+            },
+          ],
+          attrs: { defaultFontFamily: 'Liberation Sans', defaultFontSize: 12 },
+          pmStart: 0,
+          pmEnd: 26,
+        },
+        measure: {
+          kind: 'paragraph',
+          totalHeight: 18.4,
+          lines: [
+            {
+              headRun: 0,
+              headChar: 0,
+              tailRun: 1,
+              tailChar: 4,
+              width: 384,
+              ascent: 12.8,
+              descent: 3.2,
+              lineHeight: 18.4,
+              syntheticFallback: true,
+            },
+          ],
+        },
+      },
+    ],
+    fontChains: { 'liberation sans|0|0': [fontId] },
+    options: {},
+    layout: {
+      pages: [
+        {
+          size: { w: 816, h: 1056 },
+          margins: { top: 96, right: 96, bottom: 96, left: 96 },
+          number: 1,
+          fragments: [
+            {
+              kind: 'paragraph',
+              blockId: 0,
+              x: 96,
+              y: 96,
+              width: 624,
+              height: 18.4,
+              fromLine: 0,
+              toLine: 1,
+              pmStart: 0,
+              pmEnd: 26,
+            },
+          ],
+        },
+      ],
+    },
+  };
+  return JSON.parse(buildDisplayListJson(JSON.stringify(input))) as DisplayList;
+}
+
+describe('Canvas page extents', () => {
+  it.each(['direct', 'back buffer'] as const)(
+    'keeps fractional page edges in the %s raster',
+    async (mode) => {
+      let width = 0;
+      let height = 0;
+      let resizes = 0;
+      const context = {
+        scale: mock(() => {}),
+        resetTransform: mock(() => {}),
+        clearRect: mock(() => {}),
+      } as unknown as CanvasRenderingContext2D;
+      const canvas = {
+        get width() {
+          return width;
+        },
+        set width(value: number) {
+          width = Math.trunc(value);
+          resizes += 1;
+        },
+        get height() {
+          return height;
+        },
+        set height(value: number) {
+          height = Math.trunc(value);
+          resizes += 1;
+        },
+        style: { width: '', height: '' },
+        getContext: () => context,
+      };
+      const page = {
+        pageIndex: 0,
+        width: 11906 / 15,
+        height: 16838 / 15,
+        primitives: [],
+      };
+      if (mode === 'direct') {
+        sizeCanvasForPage(canvas, context, page, 1.25, 1.25);
+        expect(canvas.style.width).toBe(`${page.width * 1.25}px`);
+        expect(canvas.style.height).toBe(`${page.height * 1.25}px`);
+      } else {
+        for (let frame = 0; frame < 2; frame += 1) {
+          await rasterizeDisplayPageToBackBuffer(
+            canvas as unknown as HTMLCanvasElement,
+            page,
+            {},
+            1.25,
+            1.25
+          );
+        }
+        expect(resizes).toBe(2);
+      }
+      expect(canvas.width).toBe(1241);
+      expect(canvas.height).toBe(1754);
+      expect(context.scale).toHaveBeenLastCalledWith(1.5625, 1.5625);
+    }
+  );
+});
+
+describe('Canvas page layers', () => {
+  it.each([undefined, 2])(
+    'paints the watermark prefix (%s) under the header, footer and body',
+    async (watermarkPrimitiveCount) => {
+      const painted: string[] = [];
+      const context = {
+        fillStyle: '',
+        clearRect: () => {},
+        fillRect(this: { fillStyle: string }) {
+          painted.push(this.fillStyle);
+        },
+      } as unknown as CanvasRenderingContext2D;
+      const rect = (fill: string) => ({ kind: 'rect' as const, x: 0, y: 0, w: 10, h: 10, fill });
+      const watermark = watermarkPrimitiveCount === undefined
+        ? []
+        : [rect('watermark'), rect('wash')];
+      await drawDisplayPage(context, {
+        pageIndex: 0,
+        width: 20,
+        height: 20,
+        background: '#fefefe',
+        primitives: [...watermark, rect('behind'), rect('body'), rect('front')],
+        watermarkPrimitiveCount,
+        header: {
+          rId: 'rIdHeader',
+          kind: 'header',
+          y: 0,
+          height: 10,
+          primitives: [rect('header')],
+        },
+        footer: {
+          rId: 'rIdFooter',
+          kind: 'footer',
+          y: 10,
+          height: 10,
+          primitives: [rect('footer')],
+        },
+        noteAreas: [{ kind: 'footnote', y: 10, height: 10, primitives: [rect('note')] }],
+      } as unknown as Parameters<typeof drawDisplayPage>[1]);
+      expect(painted).toEqual([
+        '#fefefe',
+        ...watermark.map((primitive) => primitive.fill),
+        'header',
+        'footer',
+        'behind',
+        'body',
+        'front',
+        'note',
+      ]);
+    }
+  );
+});
+
+describe('Canvas text-run slot clipping', () => {
+  it('clips a Rust-shaped run from a synthetic mixed-family line', async () => {
+    const list = syntheticMixedFamilyDisplayList();
+    const glyphRun = list.pages[0].primitives.find(
+      (primitive): primitive is GlyphRunPrimitive =>
+        primitive.kind === 'glyphRun' && primitive.text.startsWith('@')
+    );
+    const nextRun = list.pages[0].primitives.find(
+      (primitive): primitive is TextRunPrimitive =>
+        primitive.kind === 'text' && primitive.text === 'next'
+    );
+    if (!glyphRun?.paintClip || !nextRun?.paintClip) {
+      throw new Error('synthetic line did not emit paint clips');
+    }
+
+    const clipRight = glyphRun.paintClip.x + glyphRun.paintClip.w;
+    const shapedRight = Math.max(
+      ...glyphRun.glyphs.map((glyph) => glyph.x + (glyph.advance ?? 0))
+    );
+    expect(glyphRun.paintClip).toEqual({ x: 96, w: 320 });
+    expect(nextRun.paintClip).toEqual({ x: 416, w: 64 });
+    expect(shapedRight).toBeGreaterThan(clipRight);
+
+    const glyphPath = { width: 2048, height: 2048 } as unknown as Path2D;
+    const glyphCache = {
+      get: () => ({ path: glyphPath, upem: 2048 }),
+    } as unknown as GlyphCache;
+    const { ctx, paints } = recordingContext(
+      new Map([['next', { width: 64, ascent: 12.8, descent: 3.2 }]])
+    );
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await drawPrimitive(ctx, glyphRun, { glyphCache });
+      await drawPrimitive(ctx, nextRun);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+
+    const glyphPaints = paints.slice(0, glyphRun.glyphs.length);
+    expect(glyphPaints.some((paint) => paint.naturalRight > nextRun.x)).toBe(true);
+    expect(glyphPaints.every((paint) => paint.right <= nextRun.x)).toBe(true);
+    expect(paints.at(-1)?.left).toBe(nextRun.x);
+  });
+
+  it('keeps wide browser glyphs out of the following run', async () => {
+    const probes = [
+      {
+        text: '@@@@@@@@@@',
+        family: 'Liberation Sans',
+        reservedEm: 10,
+        naturalEm: 10.151,
+      },
+      { text: '⸻', family: 'Noto Sans SC', reservedEm: 1, naturalEm: 2.459 },
+      {
+        text: '﷽',
+        family: 'Noto Sans Arabic',
+        reservedEm: 1,
+        naturalEm: 9.779,
+        rtl: true,
+      },
+    ];
+
+    for (const probe of probes) {
+      const slotWidth = probe.reservedEm * 16;
+      const naturalWidth = probe.naturalEm * 16;
+      const { ctx, paints } = recordingContext(
+        new Map([
+          [probe.text, { width: naturalWidth, ascent: 12.8, descent: 3.2 }],
+          ['next', { width: 16, ascent: 12.8, descent: 3.2 }],
+        ])
+      );
+
+      await drawPrimitive(
+        ctx,
+        textRun(probe.text, 0, slotWidth, probe.family, probe.rtl, {
+          x: 0,
+          w: slotWidth,
+        })
+      );
+      await drawPrimitive(
+        ctx,
+        textRun('next', slotWidth, 16, probe.family, false, { x: slotWidth, w: 16 })
+      );
+
+      expect(paints).toHaveLength(2);
+      expect(paints[0].naturalRight).toBeGreaterThan(paints[1].left);
+      expect(paints[0].right).toBeLessThanOrEqual(paints[1].left);
+    }
+  });
+
+  it('leaves accented capitals and emphasis marks vertically unbounded', async () => {
+    const run = textRun('É', 0, 16, 'Liberation Sans', false, { x: 0, w: 16 });
+    run.baselineY = 100;
+    run.emphasisMark = 'dot';
+    const { ctx, paints } = recordingContext(
+      new Map([
+        ['É', { width: 12, ascent: 13.872, descent: 3.2 }],
+        ['•', { width: 8, ascent: 4, descent: 4 }],
+      ])
+    );
+
+    await drawPrimitive(ctx, run);
+
+    expect(paints).toHaveLength(2);
+    expect(paints[0].naturalTop).toBeLessThan(run.baselineY - 12.8);
+    expect(paints[0].top).toBe(paints[0].naturalTop);
+    expect(paints[0].bottom).toBe(paints[0].naturalBottom);
+    expect(paints[1].naturalTop).toBeCloseTo(82.4);
+    expect(paints[1].top).toBe(paints[1].naturalTop);
+    expect(paints[1].bottom).toBe(paints[1].naturalBottom);
+  });
+
+  it('leaves registered-face browser effects unclipped', async () => {
+    const { ctx, paints } = recordingContext(
+      new Map([['wide', { width: 64, ascent: 12.8, descent: 3.2 }]])
+    );
+    const run = textRun('wide', 0, 16, 'Liberation Sans');
+    run.textShadow = 'shadow';
+
+    await drawPrimitive(ctx, run);
+
+    expect(paints).toHaveLength(1);
+    expect(paints[0].right).toBe(paints[0].naturalRight);
+    expect(paints[0].right).toBeGreaterThan(run.width);
+  });
+});
+
+describe('Canvas font families', () => {
+  it('swaps only the mapped families of a CSS font shorthand', () => {
+    const families = new Map([['Calibri', 'Calibri#1f2e']]);
+    expect(withFontFamilies('italic 700 13.333px Calibri, sans-serif', families)).toBe(
+      'italic 700 13.333px "Calibri#1f2e", sans-serif'
+    );
+    expect(withFontFamilies('400 11px "Calibri", serif', families)).toBe(
+      '400 11px "Calibri#1f2e", serif'
+    );
+    expect(withFontFamilies('400 11px Cambria, sans-serif', families)).toBe(
+      '400 11px Cambria, sans-serif'
+    );
+    expect(withFontFamilies('400 11px calibri, sans-serif', families)).toBe(
+      '400 11px "Calibri#1f2e", sans-serif'
+    );
+    expect(withFontFamilies('Calibri', families)).toBe('"Calibri#1f2e"');
+    expect(
+      withFontFamilies('400 11px "Review, Sans", Calibri', new Map([['Review, Sans', 'Review#2']]))
+    ).toBe('400 11px "Review#2", Calibri');
+  });
+
+  it('paints browser text with the family the document registered', async () => {
+    const fonts: string[] = [];
+    const { ctx } = recordingContext(new Map([['Hi', { width: 10, ascent: 8, descent: 2 }]]));
+    const recorded = new Proxy(ctx, {
+      set(target, key, value) {
+        if (key === 'font') fonts.push(value as string);
+        return Reflect.set(target, key, value);
+      },
+    });
+    const run = {
+      kind: 'text',
+      text: 'Hi',
+      x: 0,
+      baselineY: 10,
+      width: 10,
+      font: '400 13px Calibri, sans-serif',
+      color: '#000000',
+    } as TextRunPrimitive;
+    await drawPrimitive(recorded, run, { fontFamilies: new Map([['Calibri', 'Calibri#1f2e']]) });
+    expect(fonts).toEqual(['400 13px "Calibri#1f2e", sans-serif']);
+  });
+});
+
+describe('Offscreen page canvas release', () => {
+  it('shrinks to one pixel with an empty bitmap, never to 0x0, and only once', () => {
+    const bitmaps: unknown[] = [];
+    const sizes: number[] = [];
+    let width = 794;
+    let height = 1123;
+    const canvas = {
+      get width() {
+        return width;
+      },
+      set width(value: number) {
+        sizes.push(value);
+        width = value;
+      },
+      get height() {
+        return height;
+      },
+      set height(value: number) {
+        sizes.push(value);
+        height = value;
+      },
+      getContext: (kind: string) =>
+        kind === 'bitmaprenderer'
+          ? { transferFromImageBitmap: (bitmap: unknown) => bitmaps.push(bitmap) }
+          : null,
+    };
+    releaseOffscreenPageCanvas(canvas as unknown as OffscreenCanvas);
+    expect(sizes).toEqual([1, 1]);
+    expect(bitmaps).toEqual([null]);
+    releaseOffscreenPageCanvas(canvas as unknown as OffscreenCanvas);
+    expect(sizes).toEqual([1, 1]);
+    expect(bitmaps).toEqual([null]);
+  });
+});

@@ -106,3 +106,32 @@ export function displayPrimitiveRect(primitive: DisplayPrimitive): GeoRect {
       return lineRect(primitive);
   }
 }
+
+/** Whether the primitive's paint clips contain a page-local point. */
+export function clipPaintsPoint(primitive: DisplayPrimitive, x: number, y: number): boolean {
+  const finite = (value: number | undefined): number =>
+    value !== undefined && Number.isFinite(value) ? value : 0;
+  const clip = primitive.clipGroup?.clip;
+  if (clip) {
+    const left = finite(clip.x);
+    const top = finite(clip.y);
+    const width = Math.max(0, finite(clip.w));
+    const height = Math.max(0, finite(clip.h));
+    if (
+      width <= 0 ||
+      height <= 0 ||
+      x < left ||
+      x > left + width ||
+      y < top ||
+      y > top + height
+    ) {
+      return false;
+    }
+  }
+  const paintClip =
+    primitive.kind === 'text' || primitive.kind === 'glyphRun' ? primitive.paintClip : undefined;
+  if (!paintClip) return true;
+  const left = finite(paintClip.x);
+  const width = Math.max(0, finite(paintClip.w));
+  return width > 0 && x >= left && x <= left + width;
+}

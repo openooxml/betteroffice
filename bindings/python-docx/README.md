@@ -1,0 +1,246 @@
+# betteroffice-docx
+
+Read, edit, lay out, and rasterize DOCX documents from Python. `python-docx`
+reads a document and writes one back; this also *paginates* it — page boxes, a
+display list, PNG pages — because the Rust
+[BetterOffice](https://betteroffice.dev) DOCX core is compiled into the wheel:
+no Word, no LibreOffice subprocess, no COM.
+
+```bash
+pip install betteroffice-docx
+```
+
+The distribution is hyphenated, the module is not: `import betteroffice_docx`.
+
+## Read a document
+
+```python
+from betteroffice_docx import Document
+
+document = Document.open_path("report.docx")
+
+print(document.structure())          # Structure(body_paragraphs=42, body_tables=3, sections=2)
+for paragraph in document:
+    print(paragraph.id, paragraph.style, repr(paragraph.text))
+
+for table in document.tables():
+    for row in table.rows:
+        print([cell.text for cell in row.cells])
+```
+
+`paragraphs()` walks the body in document order and descends into table cells
+and content controls, so a cell paragraph is reachable both ways.
+`document[key]` and `document.paragraph(key)` take either a `w14:paraId` or a
+body index. Everything a read returns is a value, not a live view — read again
+after an edit.
+
+Page geometry is in twips — 1440 to the inch. The module exports
+`TWIPS_PER_INCH` and `TWIPS_PER_POINT`.
+
+```python
+section = document.sections()[0]
+print(section.page_width, section.page_height, section.margin_left)
+print(document.headers()[0].text)
+```
+
+## Edit text
+
+```python
+edit = document.replace_text("11111111", "Edited from Python")
+print(edit.para_id, edit.start, edit.end)
+
+document.save_path("report-edited.docx")
+```
+
+`replace_text` rewrites one paragraph and keeps its style, alignment, and the
+run formatting it already had. The engine rebuilds the paragraph from a single
+run, so a paragraph that mixes runs — half bold, a hyperlink, a field — raises
+`UnsupportedEditError` rather than flattening the formatting you did not ask it
+to touch. An unknown `w14:paraId` raises `KeyError`.
+
+`replace_text` uses non-`None` entries from `paragraph_ids`. Repeated IDs
+receive fresh identities that are saved after editing.
+
+## Write
+
+`save()` serializes the edited model; reopening it returns the edited text.
+
+```python
+document = Document.open_path("report.docx")
+document.replace_text(document.paragraph_ids[0], "New first line")
+print(Document.open(document.save()).paragraph(0).text)
+```
+
+Saving is deterministic. The engine has no clock, so timestamps come from
+`document.timestamp` — the epoch until you set one — and the same input plus the
+same edits produce the same bytes. `save(now=..., update_modified_date=True,
+modified_by=...)` overrides that for one call.
+
+Saving rebuilds the ZIP container and preserves untouched retained parts.
+
+## Export structured content
+
+```python
+content = document.export_structured(revision_view="accepted", stories=["body", "comments"])
+for block in content["stories"][0]["blocks"]:
+    print(block["kind"], block["anchor"])
+
+markdown = document.export_markdown(revision_view="markup")
+print(markdown["markdown"])
+```
+
+`export_structured` returns plain dicts in the same camelCase schema the
+JavaScript and Rust APIs produce: ordered stories of paragraphs, headings, list
+items, tables and content controls, each with the location it was read from, and
+`diagnostics` for everything omitted or not represented. `revision_view` is
+required (`accepted`, `original`, or `markup`); only the body is exported unless
+`stories` selects `headers`, `footers`, `footnotes`, `endnotes` or `comments`.
+Fields export cached results; images export alt text and relationship metadata.
+`max_blocks` and `max_bytes` stop the export at a whole block and set
+`truncated`. `export_markdown` and `render_docx_markdown(content)` add a
+`<!-- docx-export:N -->` marker per block, mapped to its anchor in `anchors`.
+Content with no location of its own is anchored
+`{"kind": "unlocated", "story": ..., "reason": ...}`, never as a paragraph.
+
+## List content controls
+
+```python
+for control in document.list_content_controls()["controls"]:
+    print(control["tag"], control["controlType"], control["value"])
+
+matches = document.find_content_controls({"kind": "tag", "tag": "customer.name"})
+```
+
+Controls come in document order with the same camelCase fields the JavaScript and
+Rust APIs produce: the control's id, `w:id`, type, tag, alias, lock and
+placeholder state, whether it is data-bound, its placement, anchor, parent,
+current `value` and effective lock. `stories` defaults to every category, and
+`max_controls` or `max_bytes` refuse with `ExportError` rather than returning a
+partial list. Tags, aliases and `ooxmlId`s match exactly.
+
+## Lay a document out
+
+Layout is a two-stage contract. Something else measures text — the browser, or
+`ooxml-text` — and the engine paginates the measured blocks and compiles them
+into a display list:
+
+```python
+layout = document.layout(open("layout-input.json").read())
+print(len(layout), layout.pages)
+layout.write("layout.json")
+
+pages = layout.display_list
+print(len(pages), pages.primitives)
+```
+
+`layout()` takes the envelope as a `dict` or as a JSON string, and returns the
+page boxes (`layout.json`, `layout.to_dict()`) beside the display list that
+paints them.
+
+## Rasterize
+
+Register a face under each family the text names before rasterizing; here
+Carlito stands in for Calibri:
+
+```python
+from pathlib import Path
+
+document.register_font("Calibri", Path("Carlito-Regular.ttf").read_bytes())
+document.register_font("Calibri", Path("Carlito-Bold.ttf").read_bytes(), bold=True)
+
+png = document.render_png(layout.display_list, 0)
+png.write("page-0.png")
+print(len(png), png.skipped_images)
+```
+
+Text whose family has no chain raises `RenderError` naming the chain it wanted
+— ``missing font chain for `calibri|0|0` `` — so a missing face is loud rather
+than silently blank.
+
+`png.skipped_images` counts unresolved references. Register image bytes under
+the relationship ID and owning part:
+
+```python
+document.register_image(
+    "rId9", Path("header.png").read_bytes(), scope="header_footer", part="rId7"
+)
+```
+
+Images the display list already carries as `data:` URLs need no registration.
+A page past `MAX_PIXMAP_DIM` per side or `MAX_PIXMAP_PIXELS` in area is refused
+before any surface is allocated.
+
+## Compared with python-docx
+
+| | `python-docx` | `betteroffice-docx` |
+| --- | --- | --- |
+| Read paragraphs, tables, sections | yes | yes |
+| Write text back to a file | yes | yes, single-run paragraphs |
+| Paginate (page boxes, display list) | no | yes |
+| Rasterize pages to PNG | no | yes |
+| Engine | pure Python | Rust, compiled |
+
+`python-docx` is a far broader authoring library. If what you need is
+pagination, page images, or an engine that reads what Word actually wrote, that
+is the gap this fills.
+
+## API
+
+| | |
+| --- | --- |
+| `Document.open(data)` / `open_path(path)` | open from bytes or a path |
+| `document.structure()` | paragraph, table, section, and note counts |
+| `document.paragraphs()` / `tables()` / `sections()` | body content |
+| `document.headers()` / `footers()` | header and footer stories |
+| `document[key]` / `document.paragraph(key)` | one paragraph by ID or index |
+| `document.paragraph_ids` / `text` | body IDs, and the whole text |
+| `document.warnings` / `template_variables` | what the parser found |
+| `document.replace_text(para_id, text)` | rewrite one paragraph |
+| `document.export_structured(...)` / `export_markdown(...)` | read-only structured content or Markdown |
+| `document.list_content_controls(...)` / `find_content_controls(query)` | the document's content controls |
+| `render_docx_markdown(content)` | render exported content as Markdown |
+| `document.author` / `origin` / `timestamp` | how an edit is attributed and stamped |
+| `document.layout(input)` | paginate a measured envelope |
+| `document.register_font` / `register_image` | raster resources |
+| `document.render_png(display_list, page)` | rasterize one page |
+| `document.save()` / `save_path(path)` | serialize to DOCX |
+
+Errors raise `DocxError` or a more specific subclass: `ParseError`,
+`EditError`, `UnsupportedEditError`, `LayoutError`, `RenderError`,
+`ExportError` (export or content-control read options the engine refuses; its `failure` is the refusal
+as a dict). An unknown
+paragraph ID raises `KeyError`, an out-of-range index `IndexError`, and a bad
+argument — an unknown parse limit, an unknown image scope, malformed font bytes
+— `ValueError`.
+
+Parser bounds can be tightened for untrusted input:
+
+```python
+Document.open_path("untrusted.docx", limits={"max_paragraphs": 5_000, "max_tables": 500})
+```
+
+An unknown limit name raises `ValueError` rather than being ignored.
+
+## Threads
+
+A `Document` is not pinned to a thread: the engine's document type is `Send` and
+`Sync`, so opening on one thread and dropping on another is fine. Parsing,
+layout, rasterization, and saving release the GIL for their duration, so several
+documents genuinely proceed in parallel.
+
+## Status
+
+Pre-1.0: the API may change between minor versions. Text replacement preserves
+paragraph and run formatting.
+
+Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
+(x86_64) against the stable ABI for CPython 3.9 and up.
+
+## Links
+
+- [BetterOffice](https://betteroffice.dev) — the project
+- [Documentation](https://docs.betteroffice.dev/docs/python)
+- [Source](https://github.com/openooxml/betteroffice) — `bindings/python-docx`
+- [betteroffice-docx on crates.io](https://crates.io/crates/betteroffice-docx) — the engine this wraps
+
+Apache-2.0.

@@ -9,12 +9,19 @@ export type {
   Rect,
   TextAlign,
   FillRectCmd,
+  PatternFillCmd,
+  PatternType,
   LineCmd,
+  GeometryPathCommand,
+  PathStroke,
+  PathCmd,
   TextCmd,
   DrawCmd,
   DisplayList,
   GridMeta,
   HyperlinkRegion,
+  ChartRegion,
+  ChartA11yAttrs,
 } from './display-list/types';
 
 export type { TrackOffsets, ViewportState, VisibleRange, VisibleCells } from './viewport/index';
@@ -49,7 +56,7 @@ export {
   selectionKeyReducer,
 } from './selection/index';
 
-export { cellAtPoint, cellRect, rangeRect } from './hittest/index';
+export { cellAtPoint, cellRect, chartRegionAtPoint, rangeRect } from './hittest/index';
 
 export type { HyperlinkDestination } from './hyperlinks/index';
 export {
@@ -61,5 +68,12 @@ export {
 export type { CellInput } from './clipboard/index';
 export { toTsv, fromTsv } from './clipboard/index';
 
-export type { A11yStrings, A11yCell, A11yColumnHeader, A11yRow, A11yGrid } from './a11y/index';
+export type {
+  A11yStrings,
+  A11yCell,
+  A11yChart,
+  A11yColumnHeader,
+  A11yRow,
+  A11yGrid,
+} from './a11y/index';
 export { buildA11yGrid } from './a11y/index';

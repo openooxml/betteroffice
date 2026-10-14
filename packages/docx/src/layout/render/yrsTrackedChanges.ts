@@ -5,6 +5,8 @@ import {
   yrsIdToNumericId,
 } from './yrsSidebarProjection';
 
+const TABLE_SITE_TYPES = new Set(['tableInserted', 'tableDeleted', 'rowInserted', 'rowDeleted']);
+
 /** Tracked-change sidebar data derived from the authoritative Yrs session. */
 export interface TrackedChangesResult {
   entries: TrackedChangeEntry[];
@@ -78,8 +80,12 @@ export function extractTrackedChangesFromYrs(
         to,
       };
     }
+    // A paragraph mark kept before a table carries the table's revision; the
+    // table names the change.
     const primary =
-      sites.find((site) => site.type === 'insertion' || site.type === 'deletion') ?? sites[0]!;
+      sites.find((site) => site.type === 'insertion' || site.type === 'deletion') ??
+      sites.find((site) => TABLE_SITE_TYPES.has(site.type)) ??
+      sites[0]!;
     const matchingText = sites
       .filter((site) => site.type === primary.type)
       .map((site) => site.text)
