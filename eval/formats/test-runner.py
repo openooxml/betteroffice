@@ -56,7 +56,7 @@ if os.environ.get('FAKE_MODE') == 'hang':
     time.sleep(60)
 if os.environ.get('FAKE_MODE') == 'crash':
     sys.exit(9)
-if os.environ.get('FAKE_MODE') not in ('missing', 'no-tools'):
+if os.environ.get('FAKE_MODE') != 'missing':
     source = workspace / task['input'] if os.environ.get('FAKE_MODE') == 'untouched' else Path(os.environ['FAKE_CORRECT']) / (task['id'] + '.' + task['format'])
     shutil.copyfile(source, workspace / task['output'])
 if os.environ.get('FAKE_MODE') == 'change-source':
@@ -129,8 +129,9 @@ assert args[-1].endswith(os.environ['FAKE_GENERIC_SUFFIX'])
 task = next(task for task in json.loads(Path(os.environ['FAKE_TASKS']).read_text()) if args[-1].startswith(task['prompt']))
 shutil.copyfile(Path(os.environ['FAKE_CORRECT']) / (task['id'] + '.' + task['format']), workspace / task['output'])
 print(json.dumps({'type': 'thread.started'}))
-for item in [{'id': 'shell-1', 'type': 'command_execution', 'command': 'python3 edit.py'},
-             {'id': 'patch-1', 'type': 'file_change', 'changes': [{'path': 'edit.py', 'kind': 'add'}]}]:
+for item in [] if os.environ.get('FAKE_MODE') == 'no-tools' else [
+        {'id': 'shell-1', 'type': 'command_execution', 'command': 'python3 edit.py'},
+        {'id': 'patch-1', 'type': 'file_change', 'changes': [{'path': 'edit.py', 'kind': 'add'}]}]:
     for event in ['item.started', 'item.completed']:
         print(json.dumps({'type': event, 'item': item}))
 mode = os.environ.get('FAKE_MODE')
@@ -262,12 +263,24 @@ class RunnerTests(unittest.TestCase):
 
     def test_tasks_without_tool_calls_are_reported(self):
         record = self.run_one('no-tools')
+        runner.checker.check(runner.checker.tasks()[0], self.root / 'no-tools' / record['task'] / 'output.xlsx')
         self.assertEqual(record['tool_calls'], 0)
         self.assertFalse(record['pass'])
+        self.assertIn('no tool calls', record['check_message'])
         runner.write_results(self.root / 'no-tools', 'test-model', [record, self.run_one('missing')])
         report = (self.root / 'no-tools' / 'results.md').read_text()
         self.assertIn('Tasks without tool calls: 1.', report)
         self.assertRegex(report, r'\| xlsx-01-correct-value \| FAIL \| [^|]+ \| 0 \|')
+
+    def test_generic_tasks_without_tool_calls_fail_with_correct_output(self):
+        results = self.root / 'generic-no-tools'
+        results.mkdir()
+        with self.generic_environment(FAKE_MODE='no-tools'):
+            record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
+        runner.checker.check(runner.checker.tasks()[0], results / record['task'] / 'output.xlsx')
+        self.assertEqual(record['tool_calls'], 0)
+        self.assertFalse(record['pass'])
+        self.assertIn('no tool calls', record['check_message'])
 
     def test_missing_output_crash_and_untouched_export_fail(self):
         for mode in ['missing', 'crash', 'untouched', 'change-source']:
