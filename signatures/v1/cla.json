@@ -83,6 +83,12 @@
       "id": 64964090,
       "signed_at": "2026-10-09T17:58:41Z",
       "pull_request_no": 1120
+    },
+    {
+      "name": "barakkesten",
+      "id": 293841847,
+      "signed_at": "2026-10-14T15:17:35Z",
+      "pull_request_no": 1321
     }
   ]
 }
