@@ -618,6 +618,16 @@ fn datetime_functions() {
         ("WEEKNUM(1E+300)", e(ErrorValue::Num)),
         ("ISOWEEKNUM(1E+300)", e(ErrorValue::Num)),
         ("DAY(-1E+300)", e(ErrorValue::Num)),
+        ("DATE(10000, 1, 1)", e(ErrorValue::Num)),
+        ("DATE(9999, 12, 31)", n(2958465.0)),
+        ("DATE(2020, 1, 1E+300)", e(ErrorValue::Num)),
+        ("EDATE(2958465, 1)", e(ErrorValue::Num)),
+        ("EDATE(1, 1E+300)", e(ErrorValue::Num)),
+        ("WORKDAY(1, 1E+300)", e(ErrorValue::Num)),
+        ("WORKDAY(1E+300, 1)", e(ErrorValue::Num)),
+        ("NETWORKDAYS(0, 1E+300)", e(ErrorValue::Num)),
+        ("DAYS(2958466, 1)", e(ErrorValue::Num)),
+        ("YEARFRAC(1, 2958466, 2)", e(ErrorValue::Num)),
         ("MONTH(43831)", n(1.0)),
         ("DAY(43831)", n(1.0)),
         ("DAY(60)", n(29.0)),
@@ -1530,6 +1540,8 @@ fn every_builtin_survives_any_argument_list() {
         "1,1E+300",
         "1,1,1E+300",
         "1,1,1,1E+300",
+        "0,1E+300",
+        "1,-1E+300",
     ];
     let names = builtin_names();
     for name in ["ISOWEEKNUM", "SEQUENCE", "LAMBDA", "WORKDAY.INTL"] {
