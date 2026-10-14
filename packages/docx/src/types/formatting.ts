@@ -232,6 +232,8 @@ export interface TextFormatting {
   rtl?: boolean;
   /** Complex script formatting (w:cs) */
   cs?: boolean;
+  /** Snap to document grid (w:snapToGrid). Absent is the OOXML default (on). */
+  snapToGrid?: boolean;
 
   // Style reference
   /** Character style ID (w:rStyle) */
@@ -312,6 +314,8 @@ export interface ParagraphFormatting {
   spaceBefore?: number;
   /** Spacing after in twips (w:spacing/@w:after) */
   spaceAfter?: number;
+  spaceBeforeLines?: number;
+  spaceAfterLines?: number;
   /** Line spacing value (w:spacing/@w:line) */
   lineSpacing?: number;
   /** Line spacing rule (w:spacing/@w:lineRule) */
@@ -322,8 +326,7 @@ export interface ParagraphFormatting {
   afterAutospacing?: boolean;
   /**
    * Per-side flags marking which `<w:spacing>` attrs came from this
-   * paragraph's own pPr (vs inherited). Word collapses style-inherited
-   * spacing on empty paragraphs but honors the explicit values.
+   * paragraph's own pPr (vs inherited).
    */
   spacingExplicit?: SpacingExplicit;
 
@@ -336,6 +339,14 @@ export interface ParagraphFormatting {
   indentFirstLine?: number;
   /** Whether first line is hanging indent */
   hangingIndent?: boolean;
+  /** Left indent in hundredths of a character (w:ind/@w:leftChars) */
+  indentLeftChars?: number;
+  /** Right indent in hundredths of a character (w:ind/@w:rightChars) */
+  indentRightChars?: number;
+  /** First line indent in hundredths of a character - negative for hanging (w:ind/@w:firstLineChars or @w:hangingChars) */
+  indentFirstLineChars?: number;
+  /** Whether the character first-line indent is hanging; the sign of a zero does not survive JSON */
+  hangingIndentChars?: boolean;
 
   // Borders
   /** Paragraph borders (w:pBdr) */
@@ -367,6 +378,12 @@ export interface ParagraphFormatting {
   pageBreakBefore?: boolean;
   /** Contextual spacing — suppress space between paragraphs of the same style (w:contextualSpacing) */
   contextualSpacing?: boolean;
+  /** Snap to document grid (w:snapToGrid on pPr). Absent is the OOXML default (on). */
+  snapToGrid?: boolean;
+  /** Space between East Asian and Latin text (w:autoSpaceDE). Absent is the OOXML default (on). */
+  autoSpaceDE?: boolean;
+  /** Space between East Asian text and numbers (w:autoSpaceDN). Absent is the OOXML default (on). */
+  autoSpaceDN?: boolean;
 
   // Numbering/List
   /** Numbering properties (w:numPr) */

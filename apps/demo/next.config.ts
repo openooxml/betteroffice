@@ -6,7 +6,10 @@ const nextConfig: NextConfig = {
   transpilePackages: [
     "@betteroffice/xlsx",
     "@betteroffice/xlsx-react",
-    "@betteroffice/docx-fonts",
+    "@betteroffice/fonts",
+    "@betteroffice/fonts-cjk",
+    "@betteroffice/vsdx",
+    "@betteroffice/vsdx-react",
   ],
 };
 

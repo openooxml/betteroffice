@@ -4,7 +4,6 @@
  * Maintains undo/redo stacks with support for:
  * - undo() and redo() operations
  * - canUndo and canRedo state
- * - Keyboard shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z)
  * - Grouping rapid changes to avoid cluttering history
  */
 
@@ -34,16 +33,12 @@ export interface UseHistoryOptions<T> {
   maxEntries?: number;
   /** Time in ms to group rapid changes (default: 500) */
   groupingInterval?: number;
-  /** Whether to enable keyboard shortcuts (default: true) */
-  enableKeyboardShortcuts?: boolean;
   /** Custom comparison function for detecting changes */
   isEqual?: (a: T, b: T) => boolean;
   /** Callback when undo is triggered */
   onUndo?: (state: T) => void;
   /** Callback when redo is triggered */
   onRedo?: (state: T) => void;
-  /** Ref to the container element for keyboard events */
-  containerRef?: React.RefObject<HTMLElement>;
 }
 
 /**
@@ -103,11 +98,9 @@ export function useHistory<T>(
   const {
     maxEntries = 100,
     groupingInterval = 500,
-    enableKeyboardShortcuts = true,
     isEqual = defaultIsEqual,
     onUndo,
     onRedo,
-    containerRef,
   } = options;
 
   // Current state
@@ -302,40 +295,6 @@ export function useHistory<T>(
     setUndoStack((prev) => prev.map((entry) => ({ ...entry, state: fn(entry.state) })));
     setRedoStack((prev) => prev.map((entry) => ({ ...entry, state: fn(entry.state) })));
   }, []);
-
-  /**
-   * Handle keyboard shortcuts
-   */
-  useEffect(() => {
-    if (!enableKeyboardShortcuts) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      // Ctrl+Z or Cmd+Z for undo
-      if ((event.ctrlKey || event.metaKey) && event.key === 'z' && !event.shiftKey) {
-        event.preventDefault();
-        undo();
-        return;
-      }
-
-      // Ctrl+Y or Cmd+Shift+Z for redo
-      if (
-        ((event.ctrlKey || event.metaKey) && event.key === 'y') ||
-        ((event.ctrlKey || event.metaKey) && event.key === 'z' && event.shiftKey)
-      ) {
-        event.preventDefault();
-        redo();
-        return;
-      }
-    };
-
-    // Add listener to container or document
-    const target = containerRef?.current || document;
-    target.addEventListener('keydown', handleKeyDown as EventListener);
-
-    return () => {
-      target.removeEventListener('keydown', handleKeyDown as EventListener);
-    };
-  }, [enableKeyboardShortcuts, undo, redo, containerRef]);
 
   return {
     state,

@@ -20,6 +20,8 @@ pub struct TextBox {
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub size: ImageSize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<ImagePosition>,
@@ -126,9 +128,13 @@ pub fn parse_text_box(drawing: &XmlElement) -> Option<TextBox> {
         width: safe_numeric_attribute(extent, "cx").unwrap_or(0.0),
         height: safe_numeric_attribute(extent, "cy").unwrap_or(0.0),
     };
-    let id = container
-        .child_by_full_name("wp:docPr")
+    let doc_properties = container.child_by_full_name("wp:docPr");
+    let id = doc_properties
         .and_then(|properties| properties.attribute(None, "id"))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let name = doc_properties
+        .and_then(|properties| properties.attribute(None, "name"))
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let (margins, body_properties) = parse_body_properties(body);
@@ -136,6 +142,7 @@ pub fn parse_text_box(drawing: &XmlElement) -> Option<TextBox> {
     Some(TextBox {
         content_type: "textBox".to_owned(),
         id,
+        name,
         size,
         position: anchored.then(|| parse_anchor_position(container)).flatten(),
         wrap: anchored.then(|| parse_anchor_wrap(container)),
@@ -162,15 +169,20 @@ pub fn parse_text_box_from_shape(
     shape.child_by_full_name("wps:txbx")?;
     let properties = shape.child_by_full_name("wps:spPr");
     let body = shape.child_by_full_name("wps:bodyPr");
-    let id = shape
-        .child_by_full_name("wps:cNvPr")
+    let non_visual = shape.child_by_full_name("wps:cNvPr");
+    let id = non_visual
         .and_then(|properties| properties.attribute(None, "id"))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let name = non_visual
+        .and_then(|properties| properties.attribute(None, "name"))
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let (margins, body_properties) = parse_body_properties(body);
     Some(TextBox {
         content_type: "textBox".to_owned(),
         id,
+        name,
         size,
         position,
         wrap,

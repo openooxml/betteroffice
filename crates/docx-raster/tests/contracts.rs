@@ -1,11 +1,18 @@
 //! Raster contract and refusal-path tests.
 
+use std::io::{Cursor, Write};
+
 use docx_layout::display_list::DisplayList;
-use docx_raster::{FontChains, ImageMap, RenderResources, render_png};
+use docx_raster::{
+    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, MAX_IMAGE_PIXELS,
+    MAX_PAGE_IMAGE_PIXELS, RenderResources, render_page, render_page_cached, render_png,
+    scoped_image_key,
+};
 use ooxml_text::{FontStore, shape};
 use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("assets/Carlito-Regular.ttf");
+const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
 fn list(width: f64, height: f64, primitives: Vec<Value>) -> DisplayList {
     serde_json::from_value(json!({
@@ -21,6 +28,238 @@ fn list(width: f64, height: f64, primitives: Vec<Value>) -> DisplayList {
 
 fn empty_resources() -> (FontStore, FontChains, ImageMap) {
     (FontStore::new(), FontChains::new(), ImageMap::new())
+}
+
+/// A chain whose first face lacks Hebrew, so text mixing Latin and Hebrew
+/// shapes into one segment per font.
+fn fallback_resources() -> (FontStore, FontChains, ImageMap) {
+    let mut fonts = FontStore::new();
+    let carlito = fonts.register(FONT.to_vec()).expect("carlito");
+    let liberation = fonts.register(LIBERATION.to_vec()).expect("liberation");
+    assert!(!fonts.covers(carlito, '\u{05d0}').expect("coverage"));
+    assert!(fonts.covers(liberation, '\u{05d0}').expect("coverage"));
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![carlito, liberation])]);
+    (fonts, chains, ImageMap::new())
+}
+
+fn carlito_resources() -> (FontStore, FontChains, ImageMap) {
+    let mut fonts = FontStore::new();
+    let id = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![id])]);
+    (fonts, chains, ImageMap::new())
+}
+
+fn leader_scene(rtl: bool, glyph: &str) -> DisplayList {
+    list(
+        160.0,
+        48.0,
+        vec![json!({
+            "kind": "text",
+            "text": "Tab",
+            "x": 10,
+            "baselineY": 34,
+            "width": 130,
+            "font": "400 24px Carlito, sans-serif",
+            "color": "#000000",
+            "leaderGlyphs": {"glyph": glyph, "count": 3, "advance": 10, "rtl": rtl}
+        })],
+    )
+}
+
+fn single_glyph_scene() -> DisplayList {
+    list(
+        60.0,
+        24.0,
+        vec![json!({
+            "kind": "text",
+            "text": "A",
+            "x": 4,
+            "baselineY": 16,
+            "width": 20,
+            "font": "400 12px Carlito, sans-serif",
+            "color": "#000000"
+        })],
+    )
+}
+
+/// One glyph id, painted from whichever face the run names.
+fn glyph_id_scene(font_id: u32, glyph_id: u32) -> DisplayList {
+    list(
+        60.0,
+        24.0,
+        vec![json!({
+            "kind": "glyphRun",
+            "fontId": font_id,
+            "size": 18,
+            "color": "#000000",
+            "text": "A",
+            "glyphs": [{"id": glyph_id, "x": 6, "y": 19, "cluster": 0, "advance": 12}]
+        })],
+    )
+}
+
+/// A glyph id past the outline range, so the page fails before the cache holds
+/// anything.
+fn missing_glyph_scene() -> DisplayList {
+    list(
+        60.0,
+        24.0,
+        vec![json!({
+            "kind": "glyphRun",
+            "fontId": 0,
+            "size": 12,
+            "color": "#000000",
+            "text": "A",
+            "glyphs": [{"id": 65_536, "x": 4, "y": 16, "cluster": 0, "advance": 8}]
+        })],
+    )
+}
+
+fn leader_extent(resources: &RenderResources<'_>, rtl: bool, glyph: &str) -> f64 {
+    let png = render_png(&leader_scene(rtl, glyph), 0, resources).expect("leader render");
+    let bounds = ink_bounds(&png).expect("leader ink");
+    f64::from(bounds.1 - bounds.0)
+}
+
+/// A leader whose text splits across fallback fonts has to advance the pen
+/// through every segment; resetting it at each segment overprints them.
+#[test]
+fn a_multi_segment_leader_advances_across_fallback_segments() {
+    let (fonts, chains, images) = fallback_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let single = leader_extent(&resources, false, "A");
+    let mixed = leader_extent(&resources, false, "A\u{05d0}");
+    let grew = mixed - single;
+    assert!(
+        grew > 3.0,
+        "the fallback segment must extend the leader past the first segment's ink, grew {grew}"
+    );
+}
+
+/// The same, reading right-to-left: the segments still lay out sequentially
+/// rather than stacking on the stamp origin.
+#[test]
+fn an_rtl_multi_segment_leader_advances_across_fallback_segments() {
+    let (fonts, chains, images) = fallback_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let single = leader_extent(&resources, true, "A");
+    let mixed = leader_extent(&resources, true, "A\u{05d0}");
+    let grew = mixed - single;
+    assert!(
+        grew > 3.0,
+        "the fallback segment must extend the leader past the first segment's ink, grew {grew}"
+    );
+}
+
+/// Glyph ids are store-local, so a cache filled by one store must never feed
+/// renders of another: it is bound to the store that filled it.
+#[test]
+fn a_glyph_cache_is_bound_to_the_store_that_filled_it() {
+    let mut cache = GlyphCache::default();
+    {
+        let (fonts, chains, images) = carlito_resources();
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        render_page_cached(
+            &single_glyph_scene(),
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default(),
+        )
+        .expect("render into an unbound cache");
+    }
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    assert_eq!(
+        render_page_cached(
+            &single_glyph_scene(),
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default()
+        )
+        .unwrap_err(),
+        "glyph cache is bound to another font store"
+    );
+}
+
+/// Glyph ids are face-local, so a cache spanning pages has to key on the face
+/// too. The same id from a second face must paint that face's outline, not the
+/// one an earlier page cached.
+#[test]
+fn a_shared_cache_keeps_one_glyph_id_apart_per_face() {
+    let mut fonts = FontStore::new();
+    let carlito = fonts.register(FONT.to_vec()).expect("carlito");
+    let liberation = fonts.register(LIBERATION.to_vec()).expect("liberation");
+    let chains = FontChains::new();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let first = glyph_id_scene(carlito.to_u32(), 36);
+    let second = glyph_id_scene(liberation.to_u32(), 36);
+    let fresh_first = render_page(&first, 0, &resources).expect("first").bytes;
+    let fresh_second = render_page(&second, 0, &resources).expect("second").bytes;
+    assert_ne!(
+        fresh_first, fresh_second,
+        "the fixture faces must draw glyph 36 differently"
+    );
+
+    let mut cache = GlyphCache::default();
+    assert_eq!(
+        render_page_cached(
+            &first,
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default()
+        )
+        .expect("shared first")
+        .bytes,
+        fresh_first
+    );
+    assert_eq!(
+        render_page_cached(
+            &second,
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default()
+        )
+        .expect("shared second")
+        .bytes,
+        fresh_second
+    );
+}
+
+/// A page that fails before it caches anything leaves the cache unbound: only
+/// an outline the cache actually holds can tie it to the store it came from.
+#[test]
+fn a_failed_page_leaves_a_glyph_cache_free_to_bind_elsewhere() {
+    let mut cache = GlyphCache::default();
+    {
+        let (fonts, chains, images) = carlito_resources();
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        assert_eq!(
+            render_page_cached(
+                &missing_glyph_scene(),
+                0,
+                &resources,
+                &mut cache,
+                &mut ImageCache::default()
+            )
+            .unwrap_err(),
+            "glyph id 65536 exceeds the font outline range"
+        );
+    }
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    render_page_cached(
+        &single_glyph_scene(),
+        0,
+        &resources,
+        &mut cache,
+        &mut ImageCache::default(),
+    )
+    .expect("render into a cache no failed page bound");
 }
 
 #[test]
@@ -99,6 +338,95 @@ fn glyph_run_uses_positioned_ids_without_reshaping_source_text() {
     let second =
         render_png(&list(28.0, 28.0, vec![primitive("not G")]), 0, &resources).expect("second");
     assert_eq!(first, second);
+}
+
+#[test]
+fn synthetic_text_run_clip_intersects_the_outer_mask() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![font])]);
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitive = |clipped: bool| {
+        let mut run = json!({
+            "kind": "text",
+            "text": "@@@@@@@@@@",
+            "x": 4,
+            "baselineY": 31,
+            "width": 12,
+            "font": "400 28px Carlito, sans-serif",
+            "color": "#000000"
+        });
+        if clipped {
+            run["paintClip"] = json!({"x": 4, "w": 12});
+            run["clipGroup"] = json!({"clip": {"x": 8, "y": 0, "w": 72, "h": 40}});
+        }
+        run
+    };
+
+    let control = render_png(&list(80.0, 40.0, vec![primitive(false)]), 0, &resources)
+        .expect("control render");
+    let clipped = render_png(&list(80.0, 40.0, vec![primitive(true)]), 0, &resources)
+        .expect("clipped render");
+    let control_bounds = ink_bounds(&control).expect("control ink");
+    let clipped_bounds = ink_bounds(&clipped).expect("clipped ink");
+
+    assert!(control_bounds.0 < 8);
+    assert!(control_bounds.1 >= 16);
+    assert!(clipped_bounds.0 >= 8);
+    assert!(clipped_bounds.1 < 16);
+}
+
+#[test]
+fn synthetic_glyph_run_clip_intersects_the_outer_mask() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let shaped = shape(&fonts, font, "@@@@@@@@@@", 28.0, &[]).expect("shape");
+    let mut pen = 4.0_f64;
+    let glyphs: Vec<Value> = shaped
+        .into_iter()
+        .map(|glyph| {
+            let placed = json!({
+                "id": glyph.glyph_id,
+                "x": pen + f64::from(glyph.x_offset),
+                "y": 31.0 - f64::from(glyph.y_offset),
+                "cluster": glyph.cluster,
+                "advance": glyph.x_advance
+            });
+            pen += f64::from(glyph.x_advance);
+            placed
+        })
+        .collect();
+    let primitive = |clipped: bool| {
+        let mut run = json!({
+            "kind": "glyphRun",
+            "fontId": font.to_u32(),
+            "size": 28,
+            "color": "#000000",
+            "text": "@@@@@@@@@@",
+            "glyphs": glyphs
+        });
+        if clipped {
+            run["paintClip"] = json!({"x": 4, "w": 12});
+            run["clipGroup"] = json!({"clip": {"x": 8, "y": 0, "w": 72, "h": 40}});
+        }
+        run
+    };
+    let chains = FontChains::new();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+
+    let control = render_png(&list(80.0, 40.0, vec![primitive(false)]), 0, &resources)
+        .expect("control render");
+    let clipped = render_png(&list(80.0, 40.0, vec![primitive(true)]), 0, &resources)
+        .expect("clipped render");
+    let control_bounds = ink_bounds(&control).expect("control ink");
+    let clipped_bounds = ink_bounds(&clipped).expect("clipped ink");
+
+    assert!(control_bounds.0 < 8);
+    assert!(control_bounds.1 >= 16);
+    assert!(clipped_bounds.0 >= 8);
+    assert!(clipped_bounds.1 < 16);
 }
 
 #[test]
@@ -252,4 +580,429 @@ fn a_tab_leader_paints_from_a_bare_family_name() {
     );
     let png = render_png(&list, 0, &resources).expect("a bare leader family must render");
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+/// A cache shared across pages has to paint exactly what a fresh cache paints:
+/// the second page reuses the outlines the first one extracted.
+#[test]
+fn a_shared_glyph_cache_renders_every_page_identically() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![font])]);
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let run = json!({
+        "kind": "text",
+        "text": "Page glyph",
+        "x": 4,
+        "baselineY": 26,
+        "width": 60,
+        "font": "400 16px Carlito, sans-serif",
+        "color": "#000000"
+    });
+    let list: DisplayList = serde_json::from_value(json!({
+        "pages": [
+            {"pageIndex": 0, "width": 120.0, "height": 40.0, "primitives": [run.clone()]},
+            {"pageIndex": 1, "width": 120.0, "height": 40.0, "primitives": [run]}
+        ]
+    }))
+    .expect("display list");
+    let mut cache = GlyphCache::default();
+    for page in 0..2 {
+        let shared = render_page_cached(
+            &list,
+            page,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default(),
+        )
+        .expect("shared");
+        let fresh = render_page(&list, page, &resources).expect("fresh");
+        assert_eq!(shared.bytes, fresh.bytes);
+    }
+}
+
+/// An image cache shared across pages has to paint exactly what fresh caches
+/// paint: the second page resolves the decode the first one cached.
+#[test]
+fn a_shared_image_cache_renders_every_page_identically() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdLogo"),
+        solid_png(32, 32),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let logo = |y: f64| json!({"kind":"image","relId":"rIdLogo","x":8,"y":y,"w":32,"h":32});
+    let list: DisplayList = serde_json::from_value(json!({
+        "pages": [
+            {"pageIndex": 0, "width": 120.0, "height": 60.0, "primitives": [logo(4.0)]},
+            {"pageIndex": 1, "width": 120.0, "height": 60.0, "primitives": [logo(20.0), logo(24.0)]}
+        ]
+    }))
+    .expect("display list");
+    let mut glyphs = GlyphCache::default();
+    let mut cache = ImageCache::default();
+    for page in 0..2 {
+        let shared =
+            render_page_cached(&list, page, &resources, &mut glyphs, &mut cache).expect("shared");
+        let fresh = render_page(&list, page, &resources).expect("fresh");
+        assert_eq!(shared.bytes, fresh.bytes);
+        assert_eq!(shared.skipped_images, fresh.skipped_images);
+    }
+}
+
+/// The same bytes under two relationship ids are one decode in one cache: the
+/// key is the content, not the reference.
+#[test]
+fn two_relationship_ids_sharing_bytes_share_the_decode() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([
+        (
+            scoped_image_key(ImageScope::Body, "rIdLeft"),
+            solid_png(16, 16),
+        ),
+        (
+            scoped_image_key(ImageScope::Body, "rIdRight"),
+            solid_png(16, 16),
+        ),
+    ]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        40.0,
+        24.0,
+        vec![
+            json!({"kind":"image","relId":"rIdLeft","x":0,"y":4,"w":16,"h":16}),
+            json!({"kind":"image","relId":"rIdRight","x":20,"y":4,"w":16,"h":16}),
+        ],
+    );
+    let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 8, 12), [0x11, 0x66, 0xcc, 255]);
+    assert_eq!(pixel(&rendered.bytes, 28, 12), [0x11, 0x66, 0xcc, 255]);
+}
+
+#[test]
+fn header_and_footer_drawings_lie_under_the_body() {
+    let rect =
+        |x: u32, y: u32, fill: &str| json!({"kind":"rect","x":x,"y":y,"w":20,"h":10,"fill":fill});
+    let scene: DisplayList = serde_json::from_value(json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 60,
+            "height": 40,
+            "primitives": [rect(0, 10, "#1166cc"), rect(30, 10, "#000000")],
+            "header": {"rId": "rIdHeader", "kind": "header", "y": 0, "height": 20,
+                "primitives": [rect(0, 10, "#ffffff"), rect(30, 20, "#ffffff")]},
+            "footer": {"rId": "rIdFooter", "kind": "footer", "y": 20, "height": 20,
+                "primitives": [rect(30, 10, "#ffffff")]}
+        }]
+    }))
+    .expect("display list");
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(pixel(&rendered.bytes, 10, 15), [0x11, 0x66, 0xcc, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 15), [0, 0, 0, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 25), [0xff, 0xff, 0xff, 255]);
+}
+
+#[test]
+fn watermark_prefix_lies_under_header_footer_and_body_drawings() {
+    let rect = |x: u32, y: u32, w: u32, fill: &str| json!({"kind":"rect","x":x,"y":y,"w":w,"h":10,"fill":fill});
+    let scene: DisplayList = serde_json::from_value(json!({
+        "pages": [{
+            "pageIndex": 0, "width": 80, "height": 50,
+            "watermarkPrimitiveCount": 2,
+            "primitives": [
+                rect(0, 10, 80, "#cc0000"), rect(0, 30, 80, "#cc0000"),
+                rect(30, 10, 20, "#1166cc")
+            ],
+            "header": {"rId": "rIdHeader", "kind": "header", "y": 0, "height": 20,
+                "primitives": [rect(0, 10, 50, "#ffffff")]},
+            "footer": {"rId": "rIdFooter", "kind": "footer", "y": 30, "height": 20,
+                "primitives": [rect(0, 30, 80, "#ffffff")]},
+            "noteAreas": [{"kind": "footnote", "y": 30, "height": 10,
+                "primitives": [rect(30, 30, 20, "#000000")]}]
+        }]
+    }))
+    .expect("display list");
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(pixel(&rendered.bytes, 10, 15), [0xff, 0xff, 0xff, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 15), [0x11, 0x66, 0xcc, 255]);
+    assert_eq!(pixel(&rendered.bytes, 70, 15), [0xcc, 0, 0, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 35), [0xff, 0xff, 0xff, 255]);
+    assert_eq!(pixel(&rendered.bytes, 40, 35), [0, 0, 0, 255]);
+}
+
+/// A refusal written to a shared cache must not spend the next page's decode
+/// budget: page two gets its own [`MAX_PAGE_IMAGE_PIXELS`] to spend, no matter
+/// what page one refused.
+#[test]
+fn a_shared_cache_does_not_spend_the_next_pages_budget_on_refusals() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("\u{1f}rIdSmall".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let pages: DisplayList = serde_json::from_value(json!({
+        "pages": [
+            {"pageIndex": 0, "width": 20.0, "height": 20.0,
+             "primitives": [{"kind":"image","relId":BOMB_40000_SQUARE,"x":0,"y":0,"w":5,"h":5}]},
+            {"pageIndex": 1, "width": 20.0, "height": 20.0,
+             "primitives": [
+                {"kind":"image","relId":BOMB_40000_SQUARE,"x":0,"y":0,"w":5,"h":5},
+                {"kind":"image","relId":CAP_8192_BY_4096,"x":0,"y":0,"w":5,"h":5},
+                {"kind":"image","relId":CAP_4096_BY_8192,"x":5,"y":0,"w":5,"h":5},
+                {"kind":"image","relId":"rIdSmall","x":0,"y":0,"w":20,"h":20}
+             ]}
+        ]
+    }))
+    .expect("display list");
+    let mut glyphs = GlyphCache::default();
+    let mut cache = ImageCache::default();
+    for page in 0..2 {
+        let shared =
+            render_page_cached(&pages, page, &resources, &mut glyphs, &mut cache).expect("shared");
+        let fresh = render_page(&pages, page, &resources).expect("fresh");
+        assert_eq!(shared.bytes, fresh.bytes, "page {page}");
+        assert_eq!(shared.skipped_images, fresh.skipped_images, "page {page}");
+    }
+}
+
+/// PNG headers declaring a bomb-sized surface, with an IDAT too short to
+/// decode. The declared extent is the only thing the budget may consult, so
+/// these skip on the cap and never on the truncated stream.
+const BOMB_40000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAnEAAAJxACAIAAADebplSAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+const BOMB_9000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIygAACMoCAIAAADit+XtAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+
+fn image_list(src: &str) -> DisplayList {
+    list(
+        20.0,
+        20.0,
+        vec![json!({"kind":"image","relId":src,"x":0,"y":0,"w":20,"h":20})],
+    )
+}
+
+/// A solid RGBA PNG of any extent, streamed a row at a time so the fixture
+/// costs one row rather than the whole surface.
+fn solid_png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder.write_header().expect("png header");
+        let mut stream = writer.stream_writer().expect("png stream");
+        let row: Vec<u8> = [0x11_u8, 0x66, 0xcc, 0xff].repeat(width as usize);
+        for _ in 0..height {
+            stream.write_all(&row).expect("png row");
+        }
+        stream.finish().expect("png finish");
+    }
+    bytes
+}
+
+fn pixel(png: &[u8], x: u32, y: u32) -> [u8; 4] {
+    let mut reader = png::Decoder::new(Cursor::new(png))
+        .read_info()
+        .expect("png header");
+    let mut pixels = vec![0_u8; reader.output_buffer_size().expect("buffer size")];
+    let info = reader.next_frame(&mut pixels).expect("png frame");
+    let start = ((y * info.width + x) * 4) as usize;
+    pixels[start..start + 4].try_into().expect("rgba pixel")
+}
+
+fn ink_bounds(png: &[u8]) -> Option<(u32, u32, u32, u32)> {
+    let mut reader = png::Decoder::new(Cursor::new(png))
+        .read_info()
+        .expect("png header");
+    let mut pixels = vec![0_u8; reader.output_buffer_size().expect("buffer size")];
+    let info = reader.next_frame(&mut pixels).expect("png frame");
+    let mut bounds = (u32::MAX, 0, u32::MAX, 0);
+    let mut found = false;
+    for y in 0..info.height {
+        for x in 0..info.width {
+            let start = ((y * info.width + x) * 4) as usize;
+            if pixels[start..start + 4] != [255, 255, 255, 255] {
+                bounds.0 = bounds.0.min(x);
+                bounds.1 = bounds.1.max(x);
+                bounds.2 = bounds.2.min(y);
+                bounds.3 = bounds.3.max(y);
+                found = true;
+            }
+        }
+    }
+    found.then_some(bounds)
+}
+
+/// An image past the pixel budget is skipped, not refused: a 9000x9000 scan is
+/// not a bomb, and neither it nor a real bomb may take the page down with it.
+#[test]
+fn an_image_past_the_pixel_budget_is_skipped_not_an_error() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for reference in [BOMB_40000_SQUARE, BOMB_9000_SQUARE] {
+        let png = render_png(&image_list(reference), 0, &resources)
+            .unwrap_or_else(|error| panic!("an oversized image failed the page: {error}"));
+        assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
+    }
+}
+
+/// 20000x100 is 2 Mpx and a few KB on the wire — a banner, not a bomb. Cost is
+/// area, so a long side alone must not cost it the page.
+#[test]
+fn a_banner_wider_than_the_page_still_renders() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("\u{1f}rIdBanner".to_string(), solid_png(20_000, 100))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let png = render_png(&image_list("rIdBanner"), 0, &resources).expect("banner");
+    assert_eq!(pixel(&png, 10, 10), [0x11, 0x66, 0xcc, 255]);
+}
+
+/// An unresolvable image reference is skipped, matching the canvas backend's
+/// resolver. Empty `src`, an external or dangling relationship, and media
+/// outside `word/media/` all reach the renderer this way, and one of them must
+/// not blank the page around it.
+#[test]
+fn an_unresolvable_image_reference_is_skipped_not_an_error() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for reference in ["", "rId9", "http://example.invalid/logo.png"] {
+        let list = list(
+            20.0,
+            20.0,
+            vec![
+                json!({"kind":"image","relId":reference,"x":0,"y":0,"w":20,"h":20}),
+                json!({"kind":"rect","x":0,"y":0,"w":20,"h":20,"fill":"#ff0000"}),
+            ],
+        );
+        let png = render_png(&list, 0, &resources)
+            .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
+        assert_eq!(pixel(&png, 10, 10), [255, 0, 0, 255]);
+    }
+}
+
+/// Two distinct headers, each declaring exactly [`MAX_IMAGE_PIXELS`], with an
+/// IDAT too short to decode. Together they claim the whole page budget.
+const CAP_8192_BY_4096: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIAAAABAACAIAAABVq/hcAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+const CAP_4096_BY_8192: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAEAAAACAACAIAAADVohYSAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+
+/// The page budget is spent across the whole render, so an image that arrives
+/// after it is gone is skipped however cheap it is on its own.
+#[test]
+fn a_page_stops_decoding_once_its_pixel_budget_is_spent() {
+    const { assert!(MAX_IMAGE_PIXELS * 2 == MAX_PAGE_IMAGE_PIXELS) };
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("\u{1f}rIdSmall".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let list = list(
+        20.0,
+        20.0,
+        vec![
+            json!({"kind":"image","relId":CAP_8192_BY_4096,"x":0,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":CAP_4096_BY_8192,"x":5,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":"rIdSmall","x":0,"y":0,"w":20,"h":20}),
+        ],
+    );
+    let rendered = render_page(&list, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 3);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+}
+
+/// `ImageMap` shipped documented and keyed by bare relationship id, and a
+/// caller that predates part scoping still hands one over. A body image has to
+/// keep resolving that way rather than turning into a silent hole.
+#[test]
+fn a_legacy_unscoped_image_key_still_resolves_in_the_body() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("rIdImage".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&image_list("rIdImage"), 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [0x11, 0x66, 0xcc, 255]);
+}
+
+/// The legacy key is the body's alone. Reaching one from a header is the
+/// cross-part lookup scoping exists to prevent, so it stays a hole.
+#[test]
+fn a_legacy_unscoped_image_key_resolves_in_no_other_part() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("rIdImage".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene: DisplayList = serde_json::from_value(json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 20,
+            "height": 20,
+            "primitives": [],
+            "header": {
+                "rId": "rId7",
+                "kind": "header",
+                "y": 0,
+                "height": 20,
+                "primitives": [
+                    {"kind": "image", "relId": "rIdImage", "x": 0, "y": 0, "w": 20, "h": 20}
+                ]
+            }
+        }]
+    }))
+    .expect("display list");
+    let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 1);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+}
+
+/// Scoping runs both ways. A body relationship id that spells a header's
+/// scoped key must not reach the header's bytes through the legacy lookup.
+#[test]
+fn a_body_relationship_id_cannot_spell_another_parts_scoped_key() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::HeaderFooter("rId7"), "rIdImage"),
+        solid_png(8, 8),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered =
+        render_page(&image_list("hf:rId7\u{1f}rIdImage"), 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 1);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+}
+
+/// A skipped reference leaves a hole in an otherwise successful page, so the
+/// count is the only thing a caller can log about it.
+#[test]
+fn a_render_reports_every_image_reference_it_skipped() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let list = list(
+        20.0,
+        20.0,
+        vec![
+            json!({"kind":"image","relId":"rId9","x":0,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":BOMB_9000_SQUARE,"x":5,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":"data:image/png;base64,%%%%","x":10,"y":0,"w":5,"h":5}),
+        ],
+    );
+    let rendered = render_page(&list, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 3);
+    assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+/// The canvas resolver skips what will not load as well as what does not
+/// resolve, so bytes that cannot be decoded are skipped rather than refused.
+#[test]
+fn undecodable_image_bytes_are_skipped_like_an_unresolvable_reference() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for reference in [
+        "data:image/png;base64,%%%%",
+        "data:image/png;base64",
+        "data:image/png,notbase64",
+        "data:image/png;base64,aGVsbG8=",
+    ] {
+        let png = render_png(&image_list(reference), 0, &resources)
+            .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
+        assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
+    }
 }

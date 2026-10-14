@@ -3,13 +3,56 @@
 from __future__ import annotations
 
 import os
-from typing import Iterator, Mapping, Union
+import json
+from typing import Any, Iterator, Mapping, Sequence, Union
+from .edits import (
+    PptxEditFailure,
+    PptxEditFailureCode,
+    PptxEditHistory,
+    PptxEditReceipt,
+    PptxEditRefusal,
+    PptxEditRequest,
+    PptxEditResult,
+    PptxEditSource,
+    PptxEditStep,
+    PptxFindMatch,
+    PptxFindRequest,
+    PptxFindResult,
+    PptxFindScope,
+    PptxParagraphText,
+    PptxReadRequest,
+    PptxReadResult,
+    PptxShapeTarget,
+    PptxSlideTarget,
+    PptxStoryTarget,
+    PptxStoryText,
+    PptxTextRange,
+    PptxTextTarget,
+    PptxValidationResult,
+)
+from .exports import (
+    PptxAnchor,
+    PptxAnchorScope,
+    PptxExportDiagnostic,
+    PptxExportFailure,
+    PptxExportFailureCode,
+    PptxExportOptions,
+    PptxExportRefusal,
+    PptxMarkdownContent,
+    PptxMarkdownResult,
+    PptxStructuredContent,
+    PptxStructuredResult,
+)
+from .proposals import Proposal, ProposalChange, ProposalPreview
 
 from ._betteroffice_pptx import (
     AdjustEdit,
     CollaborativeStateError,
+    Comment,
+    CommentEdit,
     Deck,
     DisplayList,
+    ExportError,
     FillEdit,
     InvalidUpdateError,
     MAX_COLLABORATION_BYTES,
@@ -17,6 +60,7 @@ from ._betteroffice_pptx import (
     NotCollaborativeError,
     Paragraph,
     ParseError,
+    Png,
     RangeError,
     Rect,
     RenderError,
@@ -25,12 +69,15 @@ from ._betteroffice_pptx import (
     Slide,
     SlideEdit,
     Story,
+    StaleProposalError,
     Stroke,
     StrokeEdit,
     TextEdit,
     TextRun,
     TransformEdit,
-    UnsupportedWriteError,
+    export_pptx_markdown_json as _export_pptx_markdown_json,
+    export_pptx_structured_json as _export_pptx_structured_json,
+    render_pptx_markdown_json as _render_pptx_markdown_json,
 )
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
@@ -38,11 +85,14 @@ from ._betteroffice_pptx import PptxError, __version__
 __all__ = [
     "AdjustEdit",
     "CollaborativeStateError",
+    "Comment",
+    "CommentEdit",
     "Deck",
     "DisplayList",
     "EMU_PER_CENTIMETER",
     "EMU_PER_INCH",
     "EMU_PER_POINT",
+    "ExportError",
     "FillEdit",
     "InvalidUpdateError",
     "MAX_COLLABORATION_BYTES",
@@ -50,8 +100,47 @@ __all__ = [
     "NotCollaborativeError",
     "Paragraph",
     "ParseError",
+    "Png",
     "PptxError",
     "Presentation",
+    "PptxAnchor",
+    "PptxAnchorScope",
+    "PptxEditFailure",
+    "PptxEditFailureCode",
+    "PptxEditHistory",
+    "PptxEditReceipt",
+    "PptxEditRefusal",
+    "PptxEditRequest",
+    "PptxEditResult",
+    "PptxEditSource",
+    "PptxEditStep",
+    "PptxExportDiagnostic",
+    "PptxExportFailure",
+    "PptxExportFailureCode",
+    "PptxExportOptions",
+    "PptxExportRefusal",
+    "PptxFindMatch",
+    "PptxFindRequest",
+    "PptxFindResult",
+    "PptxFindScope",
+    "PptxMarkdownContent",
+    "PptxMarkdownResult",
+    "PptxParagraphText",
+    "PptxReadRequest",
+    "PptxReadResult",
+    "PptxShapeTarget",
+    "PptxSlideTarget",
+    "PptxStoryTarget",
+    "PptxStoryText",
+    "PptxStructuredContent",
+    "PptxStructuredResult",
+    "PptxTextRange",
+    "PptxTextTarget",
+    "PptxValidationResult",
+    "Proposal",
+    "ProposalChange",
+    "ProposalPreview",
+    "StaleProposalError",
     "RangeError",
     "Rect",
     "RenderError",
@@ -66,8 +155,10 @@ __all__ = [
     "TextEdit",
     "TextRun",
     "TransformEdit",
-    "UnsupportedWriteError",
     "__version__",
+    "export_pptx_markdown",
+    "export_pptx_structured",
+    "render_pptx_markdown",
 ]
 
 EMU_PER_INCH = 914400
@@ -139,7 +230,7 @@ class Presentation:
 
     @property
     def is_edited(self) -> bool:
-        """True once an accepted edit has made ``save`` refuse."""
+        """True once the engine has accepted an edit since the deck opened."""
         return self._inner.is_edited
 
     @property
@@ -299,6 +390,17 @@ class Presentation:
     ) -> TransformEdit:
         return self._inner.resize_shape(slide, shape_id, width, height)
 
+    def set_shape_rect(
+        self,
+        slide: SlideKey,
+        shape_id: str,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> TransformEdit:
+        return self._inner.set_shape_rect(slide, shape_id, x, y, width, height)
+
     def insert_text(
         self,
         story_id: str,
@@ -358,6 +460,57 @@ class Presentation:
     def insert_paragraph_break(self, story_id: str, index: int) -> TextEdit:
         return self._inner.insert_paragraph_break(story_id, index)
 
+    def add_comment(
+        self,
+        slide: SlideKey,
+        text: str,
+        *,
+        author: str,
+        initials: str = "",
+        created: str,
+        x: int = 0,
+        y: int = 0,
+    ) -> CommentEdit:
+        """Add a slide comment at an EMU position."""
+        return self._inner.add_comment(
+            slide, text, author=author, initials=initials, created=created, x=x, y=y
+        )
+
+    def reply_to_comment(
+        self,
+        comment_id: str,
+        text: str,
+        *,
+        author: str,
+        initials: str = "",
+        created: str,
+    ) -> CommentEdit:
+        """Reply to a modern comment thread."""
+        return self._inner.reply_to_comment(
+            comment_id, text, author=author, initials=initials, created=created
+        )
+
+    def set_comment_status(self, comment_id: str, resolved: bool = True) -> CommentEdit:
+        """Resolve or reopen a modern comment thread."""
+        return self._inner.set_comment_status(comment_id, resolved)
+
+    def remove_comment(self, comment_id: str) -> CommentEdit:
+        """Remove a comment; a thread root takes its replies with it."""
+        return self._inner.remove_comment(comment_id)
+
+    def comments(self) -> "list[Comment]":
+        """Every comment on the deck, replies included."""
+        return self._inner.comments()
+
+    @property
+    def comment_flavor(self) -> str:
+        """Either ``legacy`` or ``modern``; a deck never carries both."""
+        return self._inner.comment_flavor
+
+    def set_comment_flavor(self, flavor: str) -> str:
+        """Switch comment systems. Only legal while the deck has no comments."""
+        return self._inner.set_comment_flavor(flavor)
+
     def register_font(
         self,
         family: str,
@@ -366,7 +519,7 @@ class Presentation:
         bold: bool = False,
         italic: bool = False,
     ) -> int:
-        """Register a face for layout. No face is embedded in the wheel."""
+        """Register a face for layout."""
         return self._inner.register_font(
             family, _as_bytes(data), bold=bold, italic=italic
         )
@@ -375,17 +528,138 @@ class Presentation:
         """Lay a slide out into the renderer's display list."""
         return self._inner.render_slide(slide)
 
-    def save(self) -> bytes:
-        """Serialize back to PPTX bytes.
+    def propose(
+        self, agent_id: str, edits: Sequence[Mapping[str, object]], *,
+        note: str | None = None,
+    ) -> Proposal:
+        """Stage edit objects without changing the presentation."""
+        request = json.dumps(
+            {"agentId": agent_id, "note": note, "edits": [dict(edit) for edit in edits]},
+            allow_nan=False,
+        )
+        return Proposal._from_dict(json.loads(self._inner.propose_json(request)))
 
-        Raises ``UnsupportedWriteError`` once the deck has been edited: the
-        engine writes the parsed package, not the edited model, so saving
-        would drop the edits. Check ``is_edited`` to branch early.
+    def proposals(self) -> list[Proposal]:
+        """Read pending proposals and their current stale targets."""
+        return [
+            Proposal._from_dict(value)
+            for value in json.loads(self._inner.proposals_json())
+        ]
+
+    def preview_proposal(self, proposal_id: str) -> ProposalPreview:
+        """Preview edits against the current document without applying them."""
+        return ProposalPreview._from_dict(
+            json.loads(self._inner.preview_proposal_json(proposal_id))
+        )
+
+    def render_proposal(self, proposal_id: str, slide: SlideKey) -> DisplayList:
+        """Render one proposed slide without changing the presentation."""
+        return self._inner.render_proposal(proposal_id, slide)
+
+    def accept_proposal(self, proposal_id: str, *, force: bool = False) -> bool:
+        """Apply the proposal atomically as one local undo step."""
+        return self._inner.accept_proposal(proposal_id, force=force)
+
+    def reject_proposal(self, proposal_id: str) -> bool:
+        """Remove a proposal without changing the presentation."""
+        return self._inner.reject_proposal(proposal_id)
+
+    def version(self) -> str:
+        """This session's version token; every committed change, undo and redo included, moves it."""
+        return self._inner.version()
+
+    def read_content(self, request: "PptxReadRequest | None" = None) -> PptxReadResult:
+        """Slides and their stories' text, with the version they were read at."""
+        return json.loads(self._inner.read_content_json(_request_json(request or {})))
+
+    def find_text(self, request: PptxFindRequest) -> PptxFindResult:
+        """Exact, case-sensitive, paragraph-local search; overlapping matches all count."""
+        return json.loads(self._inner.find_text_json(_request_json(request)))
+
+    def export_structured(
+        self,
+        *,
+        include_hidden_slides: bool = False,
+        include_hidden_shapes: bool = False,
+        include_notes: bool = False,
+        include_comments: bool = False,
+        include_formatting: bool = True,
+        max_blocks: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> PptxStructuredResult:
+        """Structured slide content with the version it was read at; nothing changes.
+
+        Returns ``{"ok": True, "version", "content"}``, or ``{"ok": False, "version",
+        "failure"}`` when the limits are unusable. Anchors belong to that version.
         """
+        return json.loads(
+            self._inner.export_structured_json(
+                _export_options(
+                    include_hidden_slides,
+                    include_hidden_shapes,
+                    include_notes,
+                    include_comments,
+                    include_formatting,
+                    max_blocks,
+                    max_bytes,
+                )
+            )
+        )
+
+    def export_markdown(
+        self,
+        *,
+        include_hidden_slides: bool = False,
+        include_hidden_shapes: bool = False,
+        include_notes: bool = False,
+        include_comments: bool = False,
+        include_formatting: bool = True,
+        max_blocks: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> PptxMarkdownResult:
+        """``export_structured`` rendered as Markdown with anchor markers, from the same read."""
+        return json.loads(
+            self._inner.export_markdown_json(
+                _export_options(
+                    include_hidden_slides,
+                    include_hidden_shapes,
+                    include_notes,
+                    include_comments,
+                    include_formatting,
+                    max_blocks,
+                    max_bytes,
+                )
+            )
+        )
+
+    def validate_edits(self, request: PptxEditRequest) -> PptxValidationResult:
+        """Run every check of ``apply_edits`` without changing anything."""
+        return json.loads(self._inner.validate_edits_json(_request_json(request)))
+
+    def apply_edits(self, request: PptxEditRequest) -> PptxEditResult:
+        """Apply every step or none against ``expectVersion``, as one transaction.
+
+        Policy failures come back as ``{"ok": False, ...}``; a malformed request raises
+        ``ValueError``.
+        """
+        return json.loads(self._inner.apply_edits_json(_request_json(request)))
+
+    def render_png(
+        self,
+        slide: SlideKey,
+        *,
+        scale: float = 1.0,
+        background: str = "slide",
+    ) -> Png:
+        """Rasterize a slide to PNG bytes. Register a font first."""
+        return self._inner.render_png(slide, scale=scale, background=background)
+
+    def save(self) -> bytes:
+        """Serialize back to PPTX bytes, edits included."""
         return self._inner.save()
 
     def save_path(self, path: "str | os.PathLike[str]") -> None:
-        """Serialize to a filesystem path. Refuses once the deck has been edited."""
+        """Serialize to a filesystem path, edits included."""
         self._inner.save_path(os.fspath(path))
 
     def state_vector(self) -> bytes:
@@ -440,6 +714,79 @@ class Presentation:
 
     def __repr__(self) -> str:
         return f"Presentation(slides={self.slide_count})"
+
+
+def export_pptx_structured(
+    data: "bytes | bytearray | memoryview",
+    *,
+    options: "PptxExportOptions | None" = None,
+) -> PptxStructuredContent:
+    """Export PPTX bytes as structured content whose anchors address this snapshot only.
+
+    ``options`` uses the camelCase wire keys. Raises ``ExportError`` for refused options (its
+    ``failure`` is the refusal) and ``ParseError`` for bytes that are not a readable PPTX.
+    """
+    return _content(_export_pptx_structured_json(_as_bytes(data), _request_json(options or {})))
+
+
+def export_pptx_markdown(
+    data: "bytes | bytearray | memoryview",
+    *,
+    options: "PptxExportOptions | None" = None,
+) -> PptxMarkdownContent:
+    """``export_pptx_structured`` rendered as Markdown with anchor markers."""
+    return _content(_export_pptx_markdown_json(_as_bytes(data), _request_json(options or {})))
+
+
+def render_pptx_markdown(
+    content: "PptxStructuredContent | Mapping[str, Any]", *, max_bytes: int = 8_388_608
+) -> PptxMarkdownContent:
+    """Render structured content (schema version 1) as Markdown.
+
+    Raises ``ExportError`` for a refused limit or content that contradicts itself, and
+    ``ValueError`` for content that is not schema version 1.
+    """
+    return _content(
+        _render_pptx_markdown_json(
+            json.dumps(dict(content), allow_nan=False),
+            _request_json({"maxBytes": max_bytes}),
+        )
+    )
+
+
+def _content(envelope: str) -> Any:
+    outcome = json.loads(envelope)
+    if not outcome["ok"]:
+        error = ExportError(outcome["failure"]["message"])
+        error.failure = outcome["failure"]
+        raise error
+    return outcome["content"]
+
+
+def _export_options(
+    include_hidden_slides: bool,
+    include_hidden_shapes: bool,
+    include_notes: bool,
+    include_comments: bool,
+    include_formatting: bool,
+    max_blocks: int,
+    max_bytes: int,
+) -> str:
+    return _request_json(
+        {
+            "includeHiddenSlides": include_hidden_slides,
+            "includeHiddenShapes": include_hidden_shapes,
+            "includeNotes": include_notes,
+            "includeComments": include_comments,
+            "includeFormatting": include_formatting,
+            "maxBlocks": max_blocks,
+            "maxBytes": max_bytes,
+        }
+    )
+
+
+def _request_json(request: "Mapping[str, object]") -> str:
+    return json.dumps(dict(request), allow_nan=False)
 
 
 def _as_limits(limits: "Mapping[str, int] | None") -> "dict[str, int] | None":

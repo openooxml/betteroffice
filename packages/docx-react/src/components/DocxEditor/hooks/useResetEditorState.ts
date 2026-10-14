@@ -1,13 +1,15 @@
 import { useCallback } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { HeadingInfo } from '@betteroffice/docx/utils';
+import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import { EMPTY_ANCHOR_POSITIONS } from '../commentFactories';
+import type { PartEditTarget } from '../partEdit';
 
 /**
  * Bundles the document-load reset surface — every state setter that
  * needs to clear when the user opens a new document. Twelve setters
  * fan out from one callback: comments, headings, sidebar visibility,
- * the new-comment workflow state, the floating button, H/F editing,
+ * the new-comment workflow state, the floating button, the open part,
  * anchor positions, find-replace matches, and the orphan-cleanup timer.
  *
  * Lifted out of `DocxEditor.tsx` so the orchestrator doesn't carry the
@@ -18,22 +20,25 @@ import { EMPTY_ANCHOR_POSITIONS } from '../commentFactories';
 export function useResetEditorState({
   commentsLoadedRef,
   trackedChangesLoadedRef,
+  sidebarAutoOpenedRef,
   setComments,
+  setYrsTrackedChangesResult,
   setHeadingInfos,
   setShowCommentsSidebar,
   setIsAddingComment,
   setCommentSelectionRange,
   setAddCommentYPosition,
   setFloatingCommentBtn,
-  setHfEditPosition,
-  setHfEditIsFirstPage,
+  setPartEditTarget,
   setAnchorPositions,
   clearFindReplaceMatches,
   cleanOrphanedCommentsTimerRef,
 }: {
   commentsLoadedRef: React.RefObject<boolean>;
   trackedChangesLoadedRef: React.RefObject<boolean>;
+  sidebarAutoOpenedRef: React.RefObject<boolean>;
   setComments: React.Dispatch<React.SetStateAction<Comment[]>>;
+  setYrsTrackedChangesResult: React.Dispatch<React.SetStateAction<TrackedChangesResult>>;
   setHeadingInfos: React.Dispatch<React.SetStateAction<HeadingInfo[]>>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   setIsAddingComment: React.Dispatch<React.SetStateAction<boolean>>;
@@ -42,8 +47,7 @@ export function useResetEditorState({
   >;
   setAddCommentYPosition: React.Dispatch<React.SetStateAction<number | null>>;
   setFloatingCommentBtn: React.Dispatch<React.SetStateAction<{ top: number; left: number } | null>>;
-  setHfEditPosition: React.Dispatch<React.SetStateAction<'header' | 'footer' | null>>;
-  setHfEditIsFirstPage: React.Dispatch<React.SetStateAction<boolean>>;
+  setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
   setAnchorPositions: React.Dispatch<React.SetStateAction<Map<string, number>>>;
   clearFindReplaceMatches: () => void;
   cleanOrphanedCommentsTimerRef: React.RefObject<ReturnType<typeof setTimeout> | null>;
@@ -51,15 +55,16 @@ export function useResetEditorState({
   const resetForNewDocument = useCallback(() => {
     commentsLoadedRef.current = false;
     trackedChangesLoadedRef.current = false;
+    sidebarAutoOpenedRef.current = false;
     setComments([]);
+    setYrsTrackedChangesResult({ entries: [], commentToRevision: new Map() });
     setHeadingInfos([]);
     setShowCommentsSidebar(false);
     setIsAddingComment(false);
     setCommentSelectionRange(null);
     setAddCommentYPosition(null);
     setFloatingCommentBtn(null);
-    setHfEditPosition(null);
-    setHfEditIsFirstPage(false);
+    setPartEditTarget(null);
     setAnchorPositions(EMPTY_ANCHOR_POSITIONS);
     clearFindReplaceMatches();
     if (cleanOrphanedCommentsTimerRef.current) {
@@ -69,15 +74,16 @@ export function useResetEditorState({
   }, [
     commentsLoadedRef,
     trackedChangesLoadedRef,
+    sidebarAutoOpenedRef,
     setComments,
+    setYrsTrackedChangesResult,
     setHeadingInfos,
     setShowCommentsSidebar,
     setIsAddingComment,
     setCommentSelectionRange,
     setAddCommentYPosition,
     setFloatingCommentBtn,
-    setHfEditPosition,
-    setHfEditIsFirstPage,
+    setPartEditTarget,
     setAnchorPositions,
     clearFindReplaceMatches,
     cleanOrphanedCommentsTimerRef,

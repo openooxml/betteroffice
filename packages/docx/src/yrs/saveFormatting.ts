@@ -13,6 +13,10 @@ export interface ParagraphSaveAttrs extends Record<string, unknown> {
   alignment?: ParagraphFormatting['alignment'];
   spaceBefore?: number;
   spaceAfter?: number;
+  spaceBeforeLines?: number;
+  spaceAfterLines?: number;
+  beforeAutospacing?: boolean;
+  afterAutospacing?: boolean;
   lineSpacing?: number;
   lineSpacingRule?: ParagraphFormatting['lineSpacingRule'];
   indentLeft?: number;
@@ -28,6 +32,9 @@ export interface ParagraphSaveAttrs extends Record<string, unknown> {
   outlineLevel?: number;
   contextualSpacing?: boolean;
   pageBreakBefore?: boolean;
+  widowControl?: boolean | null;
+  autoSpaceDE?: boolean | null;
+  autoSpaceDN?: boolean | null;
   bidi?: boolean;
   _originalFormatting?: ParagraphFormatting;
   _originalRunBoundaries?: unknown[];
@@ -41,13 +48,73 @@ function isStyleSourcedNumPr(attrs: ParagraphSaveAttrs): boolean {
   );
 }
 
+function sameValue(left: unknown, right: unknown): boolean {
+  return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
+
+/** Whether `attrs[key]` only restates what the paragraph inherits and `orig` leaves unset. */
+function inheritsValue(
+  attrs: ParagraphSaveAttrs,
+  orig: ParagraphFormatting,
+  inherited: ParagraphFormatting | undefined,
+  key: keyof ParagraphFormatting
+): boolean {
+  return (
+    orig[key] === undefined &&
+    inherited?.[key] !== undefined &&
+    sameValue(attrs[key], inherited[key])
+  );
+}
+
+/**
+ * `formatting` without the values that only restate `inherited`, the
+ * docDefaults and style properties the paragraph inherits.
+ */
+function withoutInherited(
+  formatting: ParagraphFormatting,
+  inherited: ParagraphFormatting
+): ParagraphFormatting | undefined {
+  const result: ParagraphFormatting = { ...formatting };
+  const drop = (keys: (keyof ParagraphFormatting)[], same: boolean) => {
+    if (same) for (const key of keys) delete result[key];
+  };
+  for (const key of Object.keys(result) as (keyof ParagraphFormatting)[]) {
+    if (
+      key === 'styleId' ||
+      key === 'numPr' ||
+      key === 'lineSpacing' ||
+      key === 'lineSpacingRule' ||
+      key === 'indentFirstLine' ||
+      key === 'hangingIndent'
+    ) {
+      continue;
+    }
+    drop([key], inherited[key] !== undefined && sameValue(result[key], inherited[key]));
+  }
+  drop(
+    ['lineSpacing', 'lineSpacingRule'],
+    inherited.lineSpacing !== undefined &&
+      result.lineSpacing === inherited.lineSpacing &&
+      (result.lineSpacingRule ?? 'auto') === (inherited.lineSpacingRule ?? 'auto')
+  );
+  return Object.values(result).some((value) => value !== undefined) ? result : undefined;
+}
+
+/**
+ * The paragraph formatting `attrs` save as. `inherited`, when given, is what
+ * the paragraph inherits from docDefaults and its style: values that only
+ * restate it are left out, so inherited properties stay inherited.
+ */
 export function paragraphAttrsToFormatting(
-  attrs: ParagraphSaveAttrs
+  attrs: ParagraphSaveAttrs,
+  inherited?: ParagraphFormatting
 ): ParagraphFormatting | undefined {
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
-    if (attrs.alignment !== (orig.alignment || undefined)) {
+    const inherits = (key: keyof ParagraphFormatting) =>
+      inheritsValue(attrs, orig, inherited, key);
+    if (!inherits('alignment') && attrs.alignment !== (orig.alignment || undefined)) {
       result.alignment = attrs.alignment || undefined;
     }
     if (isStyleSourcedNumPr(attrs)) {
@@ -63,10 +130,22 @@ export function paragraphAttrsToFormatting(
     if (attrs.styleId !== (orig.styleId || undefined)) {
       result.styleId = attrs.styleId || undefined;
     }
-    if (attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)) {
+    if (
+      !inherits('pageBreakBefore') &&
+      attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)
+    ) {
       result.pageBreakBefore = attrs.pageBreakBefore || undefined;
     }
-    if (attrs.bidi !== (orig.bidi || undefined)) {
+    if (!inherits('widowControl') && attrs.widowControl !== (orig.widowControl ?? undefined)) {
+      result.widowControl = attrs.widowControl ?? undefined;
+    }
+    if (!inherits('autoSpaceDE') && attrs.autoSpaceDE !== (orig.autoSpaceDE ?? undefined)) {
+      result.autoSpaceDE = attrs.autoSpaceDE ?? undefined;
+    }
+    if (!inherits('autoSpaceDN') && attrs.autoSpaceDN !== (orig.autoSpaceDN ?? undefined)) {
+      result.autoSpaceDN = attrs.autoSpaceDN ?? undefined;
+    }
+    if (!inherits('bidi') && attrs.bidi !== (orig.bidi || undefined)) {
       result.bidi = attrs.bidi || undefined;
     }
     return result;
@@ -74,8 +153,12 @@ export function paragraphAttrsToFormatting(
 
   const hasFormatting =
     attrs.alignment ||
-    attrs.spaceBefore ||
-    attrs.spaceAfter ||
+    attrs.spaceBefore != null ||
+    attrs.spaceAfter != null ||
+    attrs.spaceBeforeLines != null ||
+    attrs.spaceAfterLines != null ||
+    attrs.beforeAutospacing != null ||
+    attrs.afterAutospacing != null ||
     attrs.lineSpacing ||
     attrs.indentLeft ||
     attrs.indentRight ||
@@ -88,13 +171,20 @@ export function paragraphAttrsToFormatting(
     attrs.outlineLevel != null ||
     attrs.contextualSpacing ||
     attrs.pageBreakBefore ||
+    attrs.widowControl != null ||
+    attrs.autoSpaceDE != null ||
+    attrs.autoSpaceDN != null ||
     attrs.bidi;
   if (!hasFormatting) return undefined;
 
-  return {
+  const formatting: ParagraphFormatting = {
     alignment: attrs.alignment || undefined,
-    spaceBefore: attrs.spaceBefore || undefined,
-    spaceAfter: attrs.spaceAfter || undefined,
+    spaceBefore: attrs.spaceBefore ?? undefined,
+    spaceAfter: attrs.spaceAfter ?? undefined,
+    spaceBeforeLines: attrs.spaceBeforeLines ?? undefined,
+    spaceAfterLines: attrs.spaceAfterLines ?? undefined,
+    beforeAutospacing: attrs.beforeAutospacing ?? undefined,
+    afterAutospacing: attrs.afterAutospacing ?? undefined,
     lineSpacing: attrs.lineSpacing || undefined,
     lineSpacingRule: attrs.lineSpacingRule || undefined,
     indentLeft: attrs.indentLeft || undefined,
@@ -109,8 +199,12 @@ export function paragraphAttrsToFormatting(
     outlineLevel: attrs.outlineLevel ?? undefined,
     contextualSpacing: attrs.contextualSpacing || undefined,
     pageBreakBefore: attrs.pageBreakBefore || undefined,
+    widowControl: attrs.widowControl ?? undefined,
+    autoSpaceDE: attrs.autoSpaceDE ?? undefined,
+    autoSpaceDN: attrs.autoSpaceDN ?? undefined,
     bidi: attrs.bidi || undefined,
   };
+  return inherited ? withoutInherited(formatting, inherited) : formatting;
 }
 
 export interface TableSaveAttrs extends Record<string, unknown> {
@@ -122,6 +216,7 @@ export interface TableSaveAttrs extends Record<string, unknown> {
   tableLayout?: TableFormatting['layout'];
   floating?: TableFormatting['floating'];
   cellMargins?: { top?: number; bottom?: number; left?: number; right?: number };
+  _originalResolvedMargins?: TableSaveAttrs['cellMargins'];
   look?: TableFormatting['look'];
   bidi?: boolean;
   _originalFormatting?: TableFormatting;
@@ -129,6 +224,9 @@ export interface TableSaveAttrs extends Record<string, unknown> {
 }
 
 export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting | undefined {
+  const margins = sameValue(attrs.cellMargins, attrs._originalResolvedMargins)
+    ? attrs._originalFormatting?.cellMargins
+    : attrs.cellMargins ? measurementMargins(attrs.cellMargins) : undefined;
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
@@ -153,9 +251,7 @@ export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting |
             }
           : undefined;
     }
-    if (attrs.cellMargins) {
-      result.cellMargins = measurementMargins(attrs.cellMargins);
-    }
+    if (margins !== orig.cellMargins) result.cellMargins = margins;
     return result;
   }
 
@@ -166,7 +262,7 @@ export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting |
     attrs.justification ||
     attrs.tableLayout ||
     attrs.floating ||
-    attrs.cellMargins ||
+    margins ||
     attrs.look ||
     attrs.bidi;
   if (!hasFormatting) return undefined;
@@ -182,7 +278,7 @@ export function tableAttrsToFormatting(attrs: TableSaveAttrs): TableFormatting |
     justification: attrs.justification || undefined,
     layout: attrs.tableLayout || undefined,
     floating: attrs.floating || undefined,
-    cellMargins: attrs.cellMargins ? measurementMargins(attrs.cellMargins) : undefined,
+    cellMargins: margins,
     look: attrs.look || undefined,
     bidi: attrs.bidi || undefined,
   };
@@ -249,6 +345,8 @@ export interface TableCellSaveAttrs extends Record<string, unknown> {
   margins?: { top?: number; bottom?: number; left?: number; right?: number };
   _originalFormatting?: TableCellFormatting;
   _originalResolvedFill?: string;
+  _originalResolvedBorders?: TableCellSaveAttrs['borders'];
+  _originalResolvedMargins?: TableCellSaveAttrs['margins'];
   cellMarker?:
     | { kind: 'ins'; info: RevisionInfo }
     | { kind: 'del'; info: RevisionInfo }
@@ -265,6 +363,11 @@ export interface TableCellSaveAttrs extends Record<string, unknown> {
 export function tableCellAttrsToFormatting(
   attrs: TableCellSaveAttrs
 ): TableCellFormatting | undefined {
+  const borders = sameValue(attrs.borders, attrs._originalResolvedBorders)
+    ? attrs._originalFormatting?.borders : attrs.borders || undefined;
+  const margins = sameValue(attrs.margins, attrs._originalResolvedMargins)
+    ? attrs._originalFormatting?.margins
+    : attrs.margins ? cellMargins(attrs.margins) : undefined;
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
@@ -286,8 +389,8 @@ export function tableCellAttrsToFormatting(
     } else if (orig.shading) {
       result.shading = undefined;
     }
-    if (attrs.borders) result.borders = attrs.borders;
-    if (attrs.margins) result.margins = cellMargins(attrs.margins);
+    if (borders !== orig.borders) result.borders = borders;
+    if (margins !== orig.margins) result.margins = margins;
     if (attrs.textDirection !== (orig.textDirection || undefined)) {
       result.textDirection = attrs.textDirection || undefined;
     }
@@ -300,8 +403,8 @@ export function tableCellAttrsToFormatting(
     attrs.width != null ||
     attrs.verticalAlign ||
     attrs.backgroundColor ||
-    attrs.borders ||
-    attrs.margins ||
+    borders ||
+    margins ||
     attrs.textDirection;
   if (!hasFormatting) return undefined;
   return {
@@ -316,8 +419,8 @@ export function tableCellAttrsToFormatting(
     verticalAlign: attrs.verticalAlign || undefined,
     textDirection: attrs.textDirection || undefined,
     shading: attrs.backgroundColor ? { fill: { rgb: attrs.backgroundColor } } : undefined,
-    borders: attrs.borders,
-    margins: attrs.margins ? cellMargins(attrs.margins) : undefined,
+    borders,
+    margins,
   };
 }
 

@@ -1,0 +1,106 @@
+# Deck schema fixtures
+
+Deck schema 2.2 migrates released 1.0, 2.0 and 2.1 snapshots. These fixtures
+cover those released versions.
+
+`deck-schema-v1.update.bin` was produced by release `4bdccdd` and is documented
+in `../schema_migration.rs`. `deck-schema-v2*.update.bin` and
+`deck-custom-schema-v2.update.bin` are legacy v2 snapshots reproduced by the two
+generators below.
+
+## Hidden shapes
+
+`hidden-shapes.pptx` is the repository's demo deck with `hidden="1"` added to
+these `p:cNvPr` elements; every other ZIP part payload is unchanged:
+
+| Slide | Snapshot shape ID | Name |
+| --- | --- | --- |
+| 1 | `slide:0:256:shape:0` | Cobalt rail |
+| 1 | `slide:0:256:shape:8` | BetterOffice editor preview |
+| 1 | `slide:0:256:shape:8.13` | PPTX tab |
+| 2 | `slide:1:257:shape:4` | Format connector |
+| 2 | `slide:1:257:shape:16` | Panel divider three |
+
+Slide 1 loses 21 primitives: the cobalt rail, 14 child shapes, and six child
+text boxes. Thirteen children have no hidden flag of their own. Slide 2 loses
+the two marked shapes; slide 3 is unchanged.
+
+`deck-schema-v2-hidden.update.bin` comes from the hidden fixture with client ID
+4343. Before encoding the update:
+
+1. Add a text box to `slide:1:257`, named `Persisted v2 textbox`, at
+   `(100000, 100000, 2000000, 600000)` EMU, containing `persisted on v2`.
+2. Insert `edited ` at offset 0 of `story:shape:4343:0:0`.
+3. Remove `slide:1:257:shape:4`.
+4. Move `slide:2:258` to index 0.
+
+The update uses main's legacy parser without connectors, defaults the slide
+numbering, omits shape/picture style references and theme formatting, drops
+main's seeded hidden shape-map keys, and is stamped version 2. Migration must
+recover four flags, preserve the edits, and leave the deleted shape absent.
+
+`deck-schema-v2.update.bin` is the same legacy seed of `style-matrix-deck.pptx`
+with `persisted-v2 ` inserted into its first story. `deck-custom-schema-v2.update.bin`
+is the legacy seed of `custom-geometry.pptx` with client ID 285; it omits custom
+paths, which the writer does not model.
+
+The generator runs against `origin/main` at
+`54fdaa00c8242d58db61418ac3bc3b2ad6d50cb4` (schema 6), using its locked
+dependencies and a separate Cargo target directory. Copy
+`generate_hidden_schema_snapshots.rs` into that checkout's
+`crates/pptx-edit/examples/`, then run from that checkout:
+
+```sh
+CARGO_TARGET_DIR=/absolute/path/to/main-target cargo run --locked -p betteroffice-pptx-edit --example generate_hidden_schema_snapshots -- /absolute/path/to/this/branch
+```
+
+The generator asserts that main seeds schema 6 before restamping.
+
+## Released 2.1 defaults
+
+`deck-schema-v2.1-defaults.pptx` is `../../../pptx-render/tests/fixtures/run-caps.pptx`
+with its master's `p:clrMap` inverted (`bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2"`), its
+first two runs coloured `tx1`, and seven preset shapes added: a default `star5` and one
+authoring `adj` 45000, a default trapezoid and one authoring 30000, a default `arc`, and a
+default `star8` inside a group. It is repacked with `ooxml_opc::rezip_parts`, so a no-op
+save reproduces its bytes. `deck-schema-v2.1-defaults.update.bin` is its seed by release
+0.1.1 (`cf3d220f7`, schema 2.1, client ID 2101), which stored the old star and trapezoid
+defaults, no caps and colours resolved without the colour map.
+
+`deck-schema-v2.1-edits.pptx` is the same deck with the `Direct all caps` text box
+replaced by two paragraphs of differently capped and coloured runs holding supplementary
+characters (`𝐁`, `😀`). `deck-schema-v2.1-edits.update.bin` is its 0.1.1 seed (client ID
+2102) after that release deleted within and across runs, including a surrogate pair,
+and inserted `NEW` and `𝐂`; `schema_migration.rs` applies the same edits to a fresh
+open and expects the recovered story to match it.
+
+The generator `generate_v2_1_defaults_snapshot.rs` writes both updates. Copy it into
+that checkout's `crates/pptx-edit/examples/`, then run from that checkout:
+
+```sh
+CARGO_TARGET_DIR=/absolute/path/to/release-target cargo run --locked -p betteroffice-pptx-edit --example generate_v2_1_defaults_snapshot -- /absolute/path/to/this/branch
+```
+
+## Connectors and comments
+
+`connectors.md` documents the connector decks and
+`generate_schema_snapshots.rs`; `modern-comments.md` documents
+`modern-comments.pptx` and `deck-schema-v2-comments.update.bin`.
+
+## Composite source decks
+
+`blip-shadow.pptx` (bitmap effects with shape shadows), `chart-text-overflow.pptx`
+(chart fills, axis `noFill` and explicit overflow), `metafile-tracking.pptx` (an OLE
+preview with 6-point character spacing) and `run-spacing-shadow.pptx` (a shadow with
+character spacing) each combine two features in one deck. `schema_migration.rs` drives
+them through synthetic 2.0 snapshots: it parses the deck, strips the fields a released
+2.0 writer never stored, stamps the seed 2.0, migrates it, and asserts the reattached
+source restores them.
+
+## Structured export
+
+`structured-export.golden.json` and `structured-export.golden.md` are the
+structured export and Markdown of the synthetic deck `../structured_export.rs`
+builds, with hidden slides, notes and comments included. Rewrite them with
+`PPTX_EXPORT_GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-edit --test
+structured_export golden` and review the diff.

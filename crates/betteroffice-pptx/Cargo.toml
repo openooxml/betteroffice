@@ -11,7 +11,15 @@ readme = "README.md"
 keywords = ["pptx", "powerpoint", "ooxml", "presentationml"]
 categories = ["parser-implementations", "rendering"]
 
+[features]
+default = []
+raster = ["dep:pptx-raster"]
+
 [dependencies]
 pptx-edit.workspace = true
 pptx-parse.workspace = true
+pptx-raster = { workspace = true, optional = true }
 pptx-render.workspace = true
+
+[dev-dependencies]
+png = "0.18"

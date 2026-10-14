@@ -1,49 +1,49 @@
-import { officialCrateNames, rollingDownloads } from "../app/api/crates-downloads/route";
+const OFFICIAL_REPOSITORY = "https://github.com/openooxml/betteroffice";
 
-const CRATES_API = "https://crates.io/api/v1";
-const USER_AGENT =
-  "betteroffice.dev badge (https://github.com/openooxml/betteroffice)";
-
-type CrateSearch = Parameters<typeof officialCrateNames>[0];
-type CrateHistory = Parameters<typeof rollingDownloads>[0];
-
-async function fetchWithRetry(url: string): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const response = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
-      if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
-      return response;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
+interface CrateSummary {
+  name: string;
+  repository: string | null;
 }
 
-export async function cratesMonthlyDownloadsTotal(): Promise<number | null> {
-  const search = (await (
-    await fetchWithRetry(`${CRATES_API}/crates?page=1&per_page=100&q=betteroffice`)
-  ).json()) as { crates: CrateSearch };
-  const crateNames = officialCrateNames(search.crates);
-  if (crateNames.length === 0) throw new Error("no BetterOffice crates found");
+interface DownloadEntry {
+  date: string;
+  downloads: number;
+}
 
-  const results = await Promise.allSettled(
-    crateNames.map(async (crateName) => {
-      const response = await fetchWithRetry(
-        `${CRATES_API}/crates/${encodeURIComponent(crateName)}/downloads`,
-      );
-      return rollingDownloads((await response.json()) as CrateHistory);
-    }),
-  );
+interface DownloadHistory {
+  version_downloads: DownloadEntry[];
+  meta: { extra_downloads: DownloadEntry[] };
+}
 
-  let downloads = 0;
-  let resolved = 0;
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      downloads += result.value;
-      resolved += 1;
+function normalizeRepository(repository: string | null) {
+  return repository?.replace(/\.git$/, "").replace(/\/$/, "");
+}
+
+export function officialCrateNames(crates: CrateSummary[]) {
+  return crates
+    .filter(
+      (crate) =>
+        crate.name.startsWith("betteroffice-") &&
+        normalizeRepository(crate.repository) === OFFICIAL_REPOSITORY,
+    )
+    .map((crate) => crate.name);
+}
+
+export function rollingDownloads(history: DownloadHistory, now = new Date()) {
+  const cutoff = new Date(now);
+  cutoff.setUTCHours(0, 0, 0, 0);
+  cutoff.setUTCDate(cutoff.getUTCDate() - 29);
+  const cutoffDate = cutoff.toISOString().slice(0, 10);
+  const entries = [...history.version_downloads, ...history.meta.extra_downloads];
+
+  return entries.reduce((total, entry) => {
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(entry.date) ||
+      !Number.isSafeInteger(entry.downloads) ||
+      entry.downloads < 0
+    ) {
+      throw new Error("Invalid crates.io download history");
     }
-  }
-  return resolved === 0 ? null : downloads;
+    return entry.date >= cutoffDate ? total + entry.downloads : total;
+  }, 0);
 }

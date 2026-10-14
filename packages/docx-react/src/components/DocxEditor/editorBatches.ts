@@ -1,0 +1,228 @@
+import type {
+  DocxEditFailure,
+  DocxEditRefusal,
+  DocxEditRequest,
+  DocxEditResult,
+  DocxProposalResult,
+  YrsSession,
+} from '@betteroffice/docx/yrs';
+import { proposalProjectionStories } from '@betteroffice/docx/yrs';
+import type { PagedEditorRef } from './PagedEditor';
+import type { EditorMode } from './internals/editing-modes';
+import { awaitWorkerOpenReplica, workerOpenDocumentHeld } from './internals/workerOpenReplica';
+import { handedOverRequest, workerProposalAuthority } from './internals/workerProposalAuthority';
+
+export type EditorFlush =
+  | { ok: true; editor: PagedEditorRef; session: YrsSession }
+  | { ok: false; code: 'editor-unavailable' | 'document-replaced' | 'input-failed'; error: Error };
+
+export type EditorFlushFailure = Extract<EditorFlush, { ok: false }>;
+
+/**
+ * Commits pending input. Handles are rebuilt on layout changes, so only the session identifies
+ * the document the flush started on.
+ */
+export async function flushEditorInput(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  experimentalWorkerOpen = false
+): Promise<EditorFlush> {
+  const editor = pagedEditorRef.current;
+  const session = editor?.getYrsSession();
+  if (!editor || !session) {
+    return {
+      ok: false,
+      code: 'editor-unavailable',
+      error: new Error('The editor input is unavailable'),
+    };
+  }
+  try {
+    await editor.flushPendingInput();
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      throw new Error('The document changed while flushing input');
+    }
+    const ready = experimentalWorkerOpen && !workerOpenDocumentHeld(session) && editor.isWorkerViewer?.() !== true
+      ? awaitWorkerOpenReplica(session)
+      : undefined;
+    if (ready) {
+      await ready;
+      if (pagedEditorRef.current?.getYrsSession() !== session) {
+        throw new Error('The document changed while opening the replica');
+      }
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      code:
+        pagedEditorRef.current?.getYrsSession() === session ? 'input-failed' : 'document-replaced',
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+  const flushed = pagedEditorRef.current;
+  if (!flushed || flushed.getYrsSession() !== session) {
+    return {
+      ok: false,
+      code: 'document-replaced',
+      error: new Error('The document changed while flushing input'),
+    };
+  }
+  return { ok: true, editor: flushed, session };
+}
+
+/** Flushes pending input and returns the current handle; throws when that fails. */
+export async function flushedSession(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  experimentalWorkerOpen = false
+): Promise<{ editor: PagedEditorRef; session: YrsSession }> {
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
+  if (!flushed.ok) throw flushed.error;
+  return flushed;
+}
+
+function refusal(session: YrsSession, failure: DocxEditFailure): DocxEditRefusal {
+  return { ok: false, version: workerProposalAuthority(session)?.geometry()?.version ?? session.version(), failure };
+}
+
+/** Refuses writes the editor's mode does not allow; suggesting mode needs `suggest` on every step. */
+export function modeRefusal(
+  session: YrsSession,
+  mode: EditorMode,
+  request: DocxEditRequest
+): DocxEditRefusal | null {
+  if (mode === 'viewing') {
+    return refusal(session, { code: 'read-only', message: 'The editor is read-only' });
+  }
+  const direct = request.steps.findIndex((step) => !('suggest' in step && step.suggest));
+  if (mode === 'suggesting' && direct >= 0) {
+    return refusal(session, {
+      code: 'invalid-step',
+      stepIndex: direct,
+      message: 'Suggesting mode records every step as a tracked change; supply suggest metadata',
+    });
+  }
+  return null;
+}
+
+/**
+ * The editor's batch path: the mode gate, an input flush, `authorize` immediately before the
+ * mutation, which runs inside `commit`, then one refresh of every changed story. A refusal never
+ * rolls back flushed typing.
+ */
+export async function applyEditBatch<Refusal = never>(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  mode: () => EditorMode,
+  request: DocxEditRequest,
+  authorize?: () => Refusal | null,
+  commit: <T>(write: () => T) => T = (write) => write(),
+  experimentalWorkerOpen = false
+): Promise<{ flush: EditorFlushFailure } | { result: DocxEditResult | Refusal }> {
+  const session = pagedEditorRef.current?.getYrsSession();
+  if (!session) {
+    return {
+      flush: {
+        ok: false,
+        code: 'editor-unavailable',
+        error: new Error('The editor input is unavailable'),
+      },
+    };
+  }
+  const early = modeRefusal(session, mode(), request);
+  if (early) return { result: early };
+  const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+  if (ready) {
+    try {
+      await ready;
+    } catch (error) {
+      return {
+        flush: {
+          ok: false,
+          code: pagedEditorRef.current?.getYrsSession() === session ? 'input-failed' : 'document-replaced',
+          error: error instanceof Error ? error : new Error(String(error)),
+        },
+      };
+    }
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      return {
+        flush: {
+          ok: false,
+          code: 'document-replaced',
+          error: new Error('The document changed while opening the replica'),
+        },
+      };
+    }
+  }
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
+  if (!flushed.ok) return { flush: flushed };
+  if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
+    return {
+      flush: {
+        ok: false,
+        code: 'document-replaced',
+        error: new Error('The document changed while flushing input'),
+      },
+    };
+  }
+  const denied = authorize?.() ?? null;
+  if (denied) return { result: denied };
+  const refused = modeRefusal(session, mode(), request);
+  if (refused) return { result: refused };
+  const result = commit(() => session.applyEdits(handedOverRequest(session, request)));
+  if (result.ok && result.applied) {
+    try {
+      flushed.editor.syncYrsInputState(true, result.changedStories, { inWorker: true });
+    } catch (error) {
+      console.error('[DocxEditor] refreshing after an applied edit batch failed', error);
+    }
+  }
+  return { result };
+}
+
+/**
+ * The ref's proposal path: the host-proposal gate, an input flush, the gate again, the session
+ * call, then one refresh of the stories new proposals or a withdrawal changed. Throws when the
+ * document is unavailable or replaced while flushing.
+ */
+export async function applyProposalCall(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  allowed: () => boolean,
+  call: (session: YrsSession) => DocxProposalResult,
+  experimentalWorkerOpen = false
+): Promise<DocxProposalResult> {
+  const denied = (session: YrsSession): DocxProposalResult => ({
+    ok: false,
+    version: session.version(),
+    failure: { code: 'read-only', message: 'The editor is read-only' },
+  });
+  const session = pagedEditorRef.current?.getYrsSession();
+  if (!session) throw new Error('The editor input is unavailable');
+  if (workerOpenDocumentHeld(session)) {
+    if (!allowed()) return denied(session);
+    throw new Error('Viewer proposals must use the worker proposal authority');
+  }
+  const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+  if (ready) {
+    await ready;
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      throw new Error('The document changed while opening the replica');
+    }
+  }
+  if (!allowed()) return denied(session);
+  const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
+  if (!flushed.ok) throw flushed.error;
+  if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
+    throw new Error('The document changed while flushing input');
+  }
+  if (!allowed()) return denied(session);
+  const known = new Set(session.getProposals().proposals.map((proposal) => proposal.id));
+  const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+  const result = call(session);
+  if (!result.ok) return result;
+  const stories = proposalProjectionStories(known, result, session.storiesChangedSince(since).stories);
+  if (stories.size > 0) {
+    try {
+      flushed.editor.syncYrsInputState(true, [...stories], { inWorker: true });
+    } catch (error) {
+      console.error('[DocxEditor] refreshing after applied proposals failed', error);
+    }
+  }
+  return result;
+}

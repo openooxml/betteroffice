@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use docx_layout::display_list::DisplayList;
-use docx_raster::{FontChains, ImageMap, RenderResources, measure_text, render_png};
+use docx_raster::{
+    FontChains, ImageMap, ImageScope, RenderResources, measure_text, render_png, scoped_image_key,
+};
 use ooxml_text::{FontId, FontStore, shape};
 use serde_json::{Value, json};
 
@@ -18,7 +20,7 @@ fn fixture_resources() -> (FontStore, FontChains, ImageMap) {
         ("carlito|0|1".to_string(), vec![id]),
         ("carlito|1|1".to_string(), vec![id]),
     ]);
-    let images = ImageMap::from([("rIdImage".to_string(), source_png())]);
+    let images = ImageMap::from([(scoped_image_key(ImageScope::Body, "rIdImage"), source_png())]);
     (fonts, chains, images)
 }
 
@@ -291,19 +293,9 @@ fn output_is_byte_deterministic() {
 }
 
 #[test]
-fn missing_resources_and_unsupported_effects_are_errors() {
+fn unsupported_visual_fields_are_errors() {
     let (fonts, chains, images) = fixture_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
-
-    let missing_image = list(
-        20.0,
-        20.0,
-        vec![json!({"kind":"image","relId":"missing","x":0,"y":0,"w":20,"h":20})],
-    );
-    assert_eq!(
-        render_png(&missing_image, 0, &resources).unwrap_err(),
-        "missing image bytes for relationship `missing`"
-    );
 
     let filtered = list(
         20.0,

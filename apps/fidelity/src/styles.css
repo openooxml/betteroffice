@@ -1,0 +1,351 @@
+@import 'tailwindcss' source('.');
+
+@custom-variant light (&:where([data-theme='light'], [data-theme='light'] *));
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --breakpoint-lg: 68.75rem;
+  --radius-panel: 14px;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-solid: var(--solid);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-fg: var(--fg);
+  --color-ink: var(--ink);
+  --color-dim: var(--dim);
+  --color-faint: var(--faint);
+  --color-bo: var(--bo);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-track: var(--track);
+  --color-hover: var(--hover);
+  --color-tip: var(--tip-bg);
+  --color-accent: var(--accent);
+  --color-series: var(--c);
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --bg: #050608;
+    --panel: rgba(255, 255, 255, 0.022);
+    --solid: #0b0c0e;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-2: rgba(255, 255, 255, 0.14);
+    --fg: #f4f4f5;
+    --ink: #a1a1aa;
+    --dim: #71717a;
+    --faint: #3f3f46;
+    --bo: #3ddc97;
+    --lo: #a3a6ff;
+    --docx: #5f9fff;
+    --pptx: #ff8b66;
+    --xlsx: #34c77b;
+    --e2e: #d4d4d8;
+    --warn: #f5c451;
+    --bad: #ff6b7d;
+    --grid: rgba(255, 255, 255, 0.04);
+    --grid-strong: rgba(255, 255, 255, 0.085);
+    --band: rgba(255, 255, 255, 0.014);
+    --track: rgba(255, 255, 255, 0.065);
+    --hover: rgba(255, 255, 255, 0.03);
+    --cell-high: #1e8a60;
+    --cell-none: #25262b;
+    --over-frame: rgba(245, 196, 81, 0.035);
+    --tip-bg: rgba(15, 17, 21, 0.96);
+    --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    --header: 56px;
+  }
+  :root[data-theme='light'] {
+    color-scheme: light;
+    --bg: #ffffff;
+    --panel: #ffffff;
+    --solid: #ffffff;
+    --line: #e7e7ea;
+    --line-2: #d4d4d9;
+    --fg: #111114;
+    --ink: #4e4e56;
+    --dim: #75757d;
+    --faint: #b4b4bb;
+    --bo: #0c9467;
+    --lo: #5d5fe0;
+    --docx: #2463eb;
+    --pptx: #e25a1c;
+    --xlsx: #178a4c;
+    --e2e: #55555d;
+    --warn: #c98a07;
+    --bad: #db2f4a;
+    --grid: rgba(0, 0, 0, 0.05);
+    --grid-strong: rgba(0, 0, 0, 0.1);
+    --band: rgba(0, 0, 0, 0.02);
+    --track: rgba(0, 0, 0, 0.07);
+    --hover: rgba(0, 0, 0, 0.03);
+    --cell-high: #86d3b0;
+    --cell-none: #e7e7ea;
+    --over-frame: rgba(201, 138, 7, 0.06);
+    --tip-bg: rgba(255, 255, 255, 0.98);
+    --shadow: 0 10px 30px rgba(17, 17, 20, 0.1);
+  }
+  .viewer {
+    --bg: #0b0b0c;
+    --panel: #141416;
+    --line: #26262a;
+    --fg: #e9e9ea;
+    --dim: #8c8c93;
+    --hover: #1c1c20;
+    --warn: #d98b6a;
+    --accent: #6aa6ff;
+  }
+  html {
+    scroll-padding-top: calc(var(--header) + 16px);
+  }
+}
+
+@layer components {
+  .c-commit { --c: var(--bo); }
+  .c-ours { --c: var(--bo); }
+  .c-libreoffice { --c: var(--lo); }
+  .f-docx { --c: var(--docx); }
+  .f-pptx { --c: var(--pptx); }
+  .f-xlsx { --c: var(--xlsx); }
+  .f-e2e { --c: var(--e2e); }
+  .muted { --c: var(--faint); }
+
+  .chart {
+    display: block;
+    overflow: visible;
+    font-family: var(--font-mono);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .chart .grid line {
+    stroke: var(--grid);
+  }
+  .chart .grid line.major {
+    stroke: var(--grid-strong);
+  }
+  .chart .grid line.lane {
+    stroke: var(--grid-strong);
+    stroke-dasharray: 2 3;
+  }
+  .chart .axis {
+    fill: var(--dim);
+    font-size: 10px;
+  }
+  .chart .band {
+    fill: var(--band);
+  }
+  .series-label {
+    fill: var(--fg);
+    font: 500 12.5px var(--font-sans);
+  }
+  .series-sub {
+    fill: var(--dim);
+    font: 10.5px var(--font-mono);
+  }
+  .dots .dot {
+    fill: var(--c);
+    fill-opacity: 0.88;
+    transition: opacity 0.15s;
+  }
+  .dots.hollow .dot {
+    fill: var(--bg);
+    stroke: var(--c);
+    stroke-width: 1.3;
+  }
+  .swarm.focused .dot {
+    opacity: 0.22;
+  }
+  .mean {
+    stroke: var(--c);
+    stroke-width: 1.2;
+    stroke-dasharray: 2 3;
+  }
+  .mean-label {
+    fill: var(--c);
+    font-size: 10.5px;
+    paint-order: stroke;
+    stroke: var(--bg);
+    stroke-width: 4px;
+    stroke-linejoin: round;
+  }
+  .focus .ring {
+    fill: var(--c);
+    fill-opacity: 0.18;
+    stroke: var(--c);
+    stroke-width: 1.6;
+  }
+  .focus .trace {
+    fill: none;
+    stroke: var(--ink);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+  }
+  .cdf .line {
+    fill: none;
+    stroke: var(--c);
+    stroke-width: 1.8;
+    stroke-linejoin: round;
+  }
+  .cdf .area {
+    fill: var(--c);
+    fill-opacity: 0.05;
+  }
+  .cdf .median {
+    fill: var(--bg);
+    stroke: var(--c);
+    stroke-width: 2;
+  }
+  .cdf .guide {
+    stroke: var(--ink);
+    stroke-dasharray: 2 3;
+  }
+  .frame {
+    stroke: var(--warn);
+    stroke-width: 1.2;
+    stroke-dasharray: 3 4;
+  }
+  .frame-label {
+    fill: var(--warn);
+    font-size: 10.5px;
+  }
+  .spectrum .over-frame {
+    fill: var(--over-frame);
+  }
+  .spectrum .hit {
+    fill: transparent;
+  }
+  .spectrum .op:hover .hit {
+    fill: var(--hover);
+  }
+  .spectrum .op-name {
+    fill: var(--fg);
+    font-size: 11.5px;
+  }
+  .spectrum .op-count {
+    fill: var(--dim);
+    font-size: 10px;
+  }
+  .spectrum .range {
+    fill: var(--c);
+    fill-opacity: 0.32;
+  }
+  .spectrum .p50 {
+    fill: var(--c);
+    stroke: var(--bg);
+    stroke-width: 2;
+  }
+  .spectrum .op-value {
+    fill: var(--ink);
+    font-size: 11px;
+  }
+  .dumbbell .rail {
+    stroke: var(--track);
+    stroke-width: 2;
+    stroke-linecap: round;
+  }
+  .dumbbell .gain {
+    stroke: var(--bo);
+    stroke-width: 2;
+  }
+  .dumbbell .loss {
+    stroke: var(--bad);
+    stroke-width: 2;
+  }
+  .dumbbell .from {
+    fill: var(--bg);
+    stroke: var(--lo);
+    stroke-width: 1.5;
+  }
+  .dumbbell .to {
+    fill: var(--bo);
+  }
+
+  .waffle {
+    display: grid;
+    grid-template-columns: repeat(var(--columns), minmax(0, 1fr));
+    gap: 3px;
+    cursor: pointer;
+  }
+  .cell {
+    position: relative;
+    display: block;
+    aspect-ratio: 1;
+    background: var(--s);
+    border-radius: 3px;
+    transition: transform 0.12s;
+  }
+  .cell.lit {
+    z-index: 1;
+    transform: scale(1.4);
+    box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--fg);
+  }
+  .s-exact { --s: var(--bo); }
+  .s-high { --s: var(--cell-high); }
+  .s-near { --s: var(--warn); }
+  .s-far { --s: var(--bad); }
+  .s-none { --s: var(--cell-none); }
+
+  .sheet {
+    position: relative;
+    isolation: isolate;
+    background: #fff;
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .sheet img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  #ours {
+    position: absolute;
+    inset: 0;
+    clip-path: inset(0 0 0 var(--split));
+  }
+  #handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--split);
+    width: 11px;
+    margin-left: -5px;
+    cursor: ew-resize;
+    z-index: 2;
+  }
+  #handle::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 5px;
+    width: 1px;
+    background: var(--accent);
+  }
+  #stage[data-mode='difference'][data-pair='true'] .sheet {
+    background: #000;
+    filter: brightness(2.4);
+  }
+  #stage[data-mode='difference'] #ours {
+    clip-path: none;
+  }
+  #stage[data-mode='difference'][data-pair='true'] #render {
+    mix-blend-mode: difference;
+  }
+  #stage:not([data-pair='true']) #handle,
+  #stage[data-mode='difference'] #handle {
+    display: none;
+  }
+  #stage[data-blink='true'] #ours {
+    visibility: hidden;
+  }
+  [data-absent='true'] {
+    display: none;
+  }
+}

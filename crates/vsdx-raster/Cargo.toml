@@ -1,0 +1,28 @@
+[package]
+name = "betteroffice-vsdx-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "Server-side raster backend (tiny-skia) for the VSDX display list."
+readme = "README.md"
+keywords = ["vsdx", "visio", "raster", "rendering", "png"]
+categories = ["rendering", "graphics"]
+
+[lib]
+name = "vsdx_raster"
+
+[dependencies]
+ooxml-drawingml.workspace = true
+ooxml-text.workspace = true
+vsdx-parse.workspace = true
+vsdx-render.workspace = true
+tiny-skia = "0.12"
+png = "0.18"
+rustybuzz = "0.20"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[dev-dependencies]
+serde_json = "1"

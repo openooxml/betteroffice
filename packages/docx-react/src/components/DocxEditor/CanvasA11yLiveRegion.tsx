@@ -1,7 +1,7 @@
 /** Announces canvas selection and caret transitions. */
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { YrsSelectionContext, YrsSession } from '@betteroffice/docx/yrs';
 import { useTranslation } from '../../i18n';
 import {
   computeA11yAnnouncements,
@@ -14,7 +14,8 @@ export interface CanvasA11yLiveRegionProps {
   /** announcements only run while the canvas actually paints */
   active: boolean;
   /** body or HF Yrs session, whichever owns the selection */
-  getYrsSession: () => YrsSession | null | undefined;
+  getYrsSession?: () => YrsSession | null | undefined;
+  getSelectionContext?: () => YrsSelectionContext | null | undefined;
   /** the host stores the notifier here and calls it on every selection change */
   notifyRef: RefObject<(() => void) | null>;
 }
@@ -22,6 +23,7 @@ export interface CanvasA11yLiveRegionProps {
 export function CanvasA11yLiveRegion({
   active,
   getYrsSession,
+  getSelectionContext,
   notifyRef,
 }: CanvasA11yLiveRegionProps) {
   const { t } = useTranslation();
@@ -32,9 +34,10 @@ export function CanvasA11yLiveRegion({
   const tickRef = useRef(false);
 
   const notify = useCallback(() => {
-    const session = getYrsSession();
+    const session = getYrsSession?.();
     const yrsContext = (() => {
       try {
+        if (getSelectionContext) return getSelectionContext();
         const range = session ? currentYrsSelectionRange(session) : null;
         return session && range ? session.selectionContext(range) : null;
       } catch {
@@ -64,7 +67,7 @@ export function CanvasA11yLiveRegion({
     const text = messages.map((m) => t(`a11y.${m.key}`, m.vars)).join(', ');
     tickRef.current = !tickRef.current;
     setAnnouncement(tickRef.current ? `${text} ` : text);
-  }, [getYrsSession, t]);
+  }, [getYrsSession, getSelectionContext, t]);
 
   useEffect(() => {
     if (!active) {

@@ -5,7 +5,7 @@ returns its inverse, so history is replay rather than a stack of snapshots.
 
 - `Op` / `Transaction` / `CellState` — the operation vocabulary and the cell
   state an op reads and writes
-- `apply` / `apply_ops` — application, each returning an `InvertedOp`
+- `apply` / `apply_ops` — return `InvertedOp` / `Vec<Op>` respectively
 - `UndoStack` — history built from those inverses
 - `Provenance` — who authored an op, which is what lets a human and an agent
   edit the same sheet distinguishably

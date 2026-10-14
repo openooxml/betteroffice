@@ -14,11 +14,18 @@ categories = ["rendering", "graphics"]
 [lib]
 name = "pptx_render"
 
+[features]
+fuzzing = []
+
 [dependencies]
 ooxml-drawingml.workspace = true
+ooxml-metafile.workspace = true
 ooxml-text.workspace = true
 pptx-edit.workspace = true
 pptx-parse.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+ooxml-opc.workspace = true

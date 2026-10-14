@@ -8,6 +8,19 @@ import type {
   CollaborationReplica,
   CollaborationUser,
 } from '@betteroffice/docx/collaboration';
+import type { PointPosition } from '@betteroffice/docx/plugin-api';
+import type { DocxTextRange } from '@betteroffice/docx/yrs';
+
+/**
+ * The text under a client point in the rendered layout of `version`. `position`, `pageIndex`
+ * and `region` locate the hit in that layout. `target` is the collapsed accepted-view range at
+ * the point, keyed by session paragraph keys: an edit batch step can use it as its `target`
+ * (`insertText` at `'start'` inserts at the point) with `expectVersion: version`.
+ */
+export interface DocxPointPosition extends PointPosition {
+  version: string;
+  target: { kind: 'range' } & DocxTextRange;
+}
 
 export interface DocxEditorCollaborationOptions {
   clientId?: number;
@@ -18,7 +31,10 @@ export interface DocxEditorCollaborationOptions {
   presence?: CollaborationPresence;
 }
 
-/** Framework-neutral selection state published by the Yrs-backed editor. */
+/**
+ * Framework-neutral selection state published by the Yrs-backed editor.
+ * In a viewer session formatting is empty and paragraph indices are -1; read the selection with the editor ref's `readSelectionInfo`.
+ */
 export interface SelectionState {
   hasSelection: boolean;
   isMultiParagraph: boolean;

@@ -9,21 +9,51 @@
 //!
 //! # 1. Font-unit line height (single spacing) — [`single_line_box`]
 //!
-//! Word derives the default line height from `OS/2` **usWinAscent +
-//! usWinDescent** (the GDI `tmHeight` lineage), *not* from hhea
-//! ascender/descender and *not* from sTypo values — which is why
-//! [`crate::font_store::FontMetrics`] carries all three families. External
-//! leading follows GDI's `tmExternalLeading`:
+//! Word takes the default line height from the **`hhea`** family — the same
+//! ascent, descent and leading CoreText reports — and ignores both the
+//! `OS/2` usWin box and the sTypo family:
 //!
 //! ```text
-//! tmExternalLeading = MAX(0, hhea(ascender − descender + lineGap)
-//!                            − (usWinAscent + usWinDescent))
+//! pitch  = hhea.ascender − hhea.descender + hhea.lineGap
+//! ascent = hhea.ascender + hhea.lineGap      (the whole gap sits above)
 //! ```
 //!
-//! scaled to the requested size, and Word places it *below* the descent
-//! (line pitch = ascent + descent + external leading, baseline hugging the
-//! top of the pitch). The `w:noLeading` compatibility flag (`w:compat`,
-//! ECMA-376 §17.15.3) drops that external leading entirely.
+//! The `w:noLeading` compatibility flag (`w:compat`, ECMA-376 §17.15.3)
+//! drops the lineGap, leaving the bare ascender-to-descender span.
+//!
+//! Measured on Word 16.113 and PowerPoint 16.113 (macOS); both applications
+//! read the same family, so this rule is shared, not per-format. Verified on
+//! Latin and script-neutral faces only. Arabic faces are **unverified** —
+//! neither application could be made to lay out an Arabic-script face under
+//! test here.
+//!
+//! The usWin family stays on [`crate::font_store::FontMetrics`] because the
+//! opt-in experiments below still read it.
+//!
+//! ## 1a. East Asian faces — [`EAST_ASIAN_CODE_PAGES`]
+//!
+//! A face whose `OS/2` ulCodePageRange1 claims one of the four East Asian
+//! code pages — 932 Shift-JIS (bit 17), 936 GB2312 (18), 949 Wansung (19),
+//! 950 Big5 (20) — takes a different pitch entirely:
+//!
+//! ```text
+//! pitch = 1.3 x (hhea.ascender - hhea.descender)
+//! ```
+//!
+//! with the extra 0.3 split evenly above the ascender and below the
+//! descender. `usWinAscent`/`usWinDescent`, `hhea.lineGap` and the sTypo
+//! family are all ignored, including when `USE_TYPO_METRICS` is set.
+//!
+//! Measured against Word 16.113 on macOS across 65 installed faces and 30
+//! synthesized ones. The gate is causal, not correlational: giving Arial a
+//! single East Asian code page bit switches it to the East Asian pitch,
+//! and clearing those bits on Arial Unicode MS switches it back, while
+//! adding CJK cmap coverage, CJK `ulUnicodeRange` bits or a `vhea` table
+//! changes nothing. Code page bit 21 (1361 Johab) does *not* gate.
+//!
+//! The 1.3 factor holds to 1e-4 on faces at 2048 units per em; faces at
+//! 256 units per em measure 0.24% under it and faces at 1024 units per em
+//! 0.08% over, a residual that no font-table field accounts for.
 //!
 //! # 2. Auto / exact / atLeast spacing — [`apply_spacing_rule`]
 //!
@@ -38,11 +68,15 @@
 //!   that undercut ascent+descent shrink ascent/descent proportionally.
 //! - `exact`: fixes the line box at the given height regardless of content —
 //!   taller glyphs are *clipped* (at render time; measurement never grows
-//!   the line). The baseline is placed preserving the content descent from
-//!   the bottom of the fixed box, matching Word: shrink eats the ascent
-//!   side first.
+//!   the line). The baseline sits at [`EXACT_BASELINE_RATIO`] of the box, a
+//!   constant depending on neither the font nor the size.
 //! - `atLeast`: a floor — the measured content height wins when larger;
-//!   when the floor wins, the extra space is leading below the descent.
+//!   when the floor wins the slack lands *above* the ascent, so the content
+//!   descent is preserved from the bottom of the box.
+//!
+//! Both fixed rules are measured against Word 16.112. Word quantizes to a
+//! 0.25pt device grid; this model is continuous, so an off-grid split differs
+//! from Word's raster by up to an eighth of a point.
 //!
 //! Both fixed rules interact with inline objects (images taller than an
 //! exact box also clip).
@@ -60,19 +94,46 @@
 //! happens at line layout, after shaping: shaped cluster advances stay
 //! fixed, only space-cluster advances grow.
 //!
-//! # 4. Snap-to-grid — not applied
+//! # 4. Snap-to-grid — [`snap_line_height`], [`snap_line_box`]
 //!
-//! Where a section defines a document grid (`w:docGrid`, §17.6.5), Word snaps
-//! each line's height up to the next grid multiple unless the paragraph or
-//! run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2). Measurement
-//! here never snaps: the input carries no grid pitch, so a line's height is
-//! whatever rules 1 and 2 compute and nothing more. CJK documents relying on
-//! the grid measure slightly short as a result.
+//! Where a section defines a document grid (`w:docGrid`, §17.6.5) with an
+//! activating type, Word fits each line's *content* box to the grid — the
+//! single-spaced box, before rule 2's multiple — unless the paragraph or
+//! run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2, defaulting to
+//! on). The grid quantizes the line pitch; `auto` spacing then scales that
+//! quantized pitch, so a 1.5-spaced line on a one-row grid is 1.5 grid rows
+//! tall, not two. Callers thread the section's grid pitch and the
+//! paragraph/run opt-outs in as inputs; this rule only rounds. It applies
+//! after rule 1 and before rule 2, keeping ascent/descent put so the extra
+//! lands below the descent, matching how rule 2 treats growth. Only
+//! automatically-determined heights snap: pinned `exact` boxes are fixed
+//! regardless of content and `atLeast` floors are author-set, so Word snaps
+//! neither (measured against Word 16.112: an `atLeast`-ruled body under an
+//! active grid keeps its natural pitch, not a grid multiple).
+//!
+//! The box rounds up to a *whole* number of rows. Measured off Word's own
+//! exported references: on the `linesAndChars` grids of two Chinese theses
+//! (326 and 312 twips) baseline gaps cluster at 1.00 and 1.50 rows for body
+//! text and at exactly 2.00 for lines whose content outgrows a row, and a
+//! Japanese `lines` grid at 360 twips puts its tallest lines at 3.00.
+//!
+//! This rounded up to one row only until the substituted faces carried the
+//! requested face's metrics ([`crate::word_fonts`]). `linePitch` is authored
+//! against the real East Asian face, so a substitute measuring a few percent
+//! tall straddled the row boundary and a `ceil` turned that metric error into
+//! a doubled line; capping at one row bought the fill the grid is for without
+//! betting page counts on a metric the engine did not have. It has it now.
+//!
+//! Activation is narrow: only grid types `lines`, `linesAndChars` and
+//! `snapToChars` snap. `default` (or a bare `linePitch` with no type) never
+//! does. Callers enforce that; [`snap_line_height`] trusts a `Some` pitch.
 //!
 //! # 5. Kerning threshold — [`kern_enabled`], [`kern_features`]
 //!
 //! Word applies pair kerning only when the run's `w:kern` half-point
 //! threshold (rPr, §17.3.2) is nonzero and the font size is at or above it.
+//! An absent `w:kern` reads as zero — kerning off, not "unspecified, shape
+//! however the font prefers".
 //! [`mod@crate::shape`] applies default OpenType features (which include GPOS
 //! pair kerning via the `kern` feature) unconditionally; callers gate it
 //! per run by passing [`kern_features`]`(kern_enabled(..))` as the feature
@@ -90,6 +151,12 @@
 //! `w:balanceSingleByteDoubleByteWidth`, so a document setting them measures
 //! as though they were off.
 
+//!
+//! [`CompatFlags::gdi_line_metrics`] and [`CompatFlags::typo_line_spacing`]
+//! are independent, opt-in experiments. GDI rounds ppem and components; typo
+//! spacing selects version-4 `USE_TYPO_METRICS` with a signed gap. Both remain
+//! unavailable to paragraph input because observed Word output did not quantize.
+
 use crate::font_store::FontMetrics;
 use crate::shape::ShapeFeature;
 
@@ -100,6 +167,10 @@ pub struct CompatFlags {
     pub no_leading: bool,
     /// w:doNotExpandShiftReturn — lines ended by a soft return are NOT justified.
     pub do_not_expand_shift_return: bool,
+    /// Off-by-default experiment that quantizes ppem and metric components.
+    pub gdi_line_metrics: bool,
+    /// Off-by-default experiment that selects version-4 `USE_TYPO_METRICS`.
+    pub typo_line_spacing: bool,
 }
 
 /// w:spacing lineRule + line value, pre-converted to px by the host where applicable.
@@ -113,13 +184,19 @@ pub enum LineSpacingRule {
     AtLeast { px: f32 },
 }
 
+/// Fraction of an `exact` line box that sits above the baseline. Constant in
+/// Word — neither the font nor the size moves it.
+pub const EXACT_BASELINE_RATIO: f32 = 0.8;
+
 /// One line box in px: total height = ascent + descent + leading. Leading
 /// always sits *below* the descent, so the baseline hugs the top of the box.
+/// Single spacing folds the font's own lineGap into `ascent` and leaves
+/// `leading` at zero; rule 2's growth is what lands here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineBox {
     pub ascent: f32,
     pub descent: f32,
-    /// External leading distributed per Word's rules; 0.0 under no_leading.
+    /// Leading below the descent; 0.0 from the font-unit box alone.
     pub leading: f32,
 }
 
@@ -129,46 +206,127 @@ impl LineBox {
     }
 }
 
-/// Word single-spacing line box for a font at `size_px` (rule 1).
+/// Word single-spacing line box for a font at `size_px`.
 ///
-/// - `ascent` / `descent` come from `OS/2` usWinAscent / usWinDescent (the
-///   GDI `tmHeight` lineage Word uses), scaled by `size_px / units_per_em`.
-/// - `leading` is GDI `tmExternalLeading`: `max(0, hhea(ascender − descender
-///   + lineGap) − (usWinAscent + usWinDescent))` scaled, placed below the
-///   descent. Dropped entirely under [`CompatFlags::no_leading`].
-///
-/// Panic-free on malformed metrics: a zero `units_per_em` (or a NaN /
-/// non-positive `size_px`) yields an all-zero box rather than NaN/negative
-/// geometry — font bytes are attacker-controlled and a degenerate line box
-/// is the safe downstream value.
+/// The default path preserves design metrics; experiments bound them to 16 ems.
+/// All paths reject degenerate inputs and cap line boxes at Word's 1638pt limit;
+/// glyph advances remain uncapped.
 pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> LineBox {
-    if m.units_per_em == 0 || size_px.is_nan() || size_px <= 0.0 {
+    if m.units_per_em == 0 || !size_px.is_finite() || size_px <= 0.0 {
         return LineBox {
             ascent: 0.0,
             descent: 0.0,
             leading: 0.0,
         };
     }
-    let scale = size_px / m.units_per_em as f32;
+    let size_px = size_px.min(MAX_SIZE_PX);
 
-    let ascent = m.os2_win_ascent as f32 * scale;
-    let descent = m.os2_win_descent as f32 * scale;
-
-    let leading = if compat.no_leading {
-        0.0
-    } else {
-        // i32 arithmetic: i16/u16 sums cannot overflow, and hhea descender
-        // is negative by convention (hence the subtraction).
-        let hhea_total = m.hhea_ascender as i32 - m.hhea_descender as i32 + m.hhea_line_gap as i32;
-        let win_total = m.os2_win_ascent as i32 + m.os2_win_descent as i32;
-        (hhea_total - win_total).max(0) as f32 * scale
-    };
-
-    LineBox {
-        ascent,
-        descent,
-        leading,
+    if !compat.gdi_line_metrics && !compat.typo_line_spacing {
+        let scale = size_px / m.units_per_em as f32;
+        if let Some(line) = east_asian_line_box(m, scale) {
+            return line;
+        }
+        let gap = if compat.no_leading {
+            0
+        } else {
+            m.hhea_line_gap as i32
+        };
+        return LineBox {
+            ascent: (m.hhea_ascender as i32 + gap).max(0) as f32 * scale,
+            descent: (-(m.hhea_descender as i32)).max(0) as f32 * scale,
+            leading: 0.0,
+        };
     }
+
+    let (ascent, descent, leading) = experimental_metric_family(m, compat.typo_line_spacing);
+    let leading = if compat.no_leading { 0 } else { leading };
+
+    if compat.gdi_line_metrics {
+        let ppem = (size_px.round() as i32).max(1) as f64;
+        let upm = m.units_per_em as f64;
+        let px = |design: i32| (design as f64 * ppem / upm).round() as f32;
+        LineBox {
+            ascent: px(ascent),
+            descent: px(descent),
+            leading: px(leading),
+        }
+    } else {
+        let scale = size_px / m.units_per_em as f32;
+        LineBox {
+            ascent: ascent as f32 * scale,
+            descent: descent as f32 * scale,
+            leading: leading as f32 * scale,
+        }
+    }
+}
+
+/// `OS/2` ulCodePageRange1 bits 17-20 — code pages 932, 936, 949 and 950.
+/// Any one of them switches Word to the East Asian line pitch; bit 21
+/// (1361 Johab) does not.
+pub const EAST_ASIAN_CODE_PAGES: u32 = 0x001E_0000;
+
+/// Word's East Asian pitch as a multiple of the hhea ascent-to-descent span.
+const EAST_ASIAN_PITCH: f32 = 1.3;
+
+/// Per-component ceiling for the bounded experiments.
+const MAX_METRIC_EMS: i32 = 16;
+
+/// Word's 1638pt size limit in px at 96 DPI.
+const MAX_SIZE_PX: f32 = 2184.0;
+
+/// Slack on the grid row count, so a box that lands on a row boundary in
+/// exact arithmetic is not pushed to the next row by float error.
+const GRID_ROW_SLACK: f32 = 1e-3;
+
+/// Rule 1a: the East Asian line box, or `None` for a face Word measures the
+/// Latin way. The extra 0.3 em-span is half-leading, so the baseline sits
+/// where Word puts it rather than at the top of the box.
+fn east_asian_line_box(m: &FontMetrics, scale: f32) -> Option<LineBox> {
+    if !m.east_asian_line_metrics() {
+        return None;
+    }
+    let span = m.hhea_ascender as i32 - m.hhea_descender as i32;
+    if span <= 0 {
+        return None;
+    }
+    let half_leading = span as f32 * (EAST_ASIAN_PITCH - 1.0) / 2.0;
+    Some(LineBox {
+        ascent: (m.hhea_ascender as f32 + half_leading) * scale,
+        descent: (-(m.hhea_descender as f32) + half_leading) * scale,
+        leading: 0.0,
+    })
+}
+
+/// hhea line height in excess of the win box, in design units.
+fn win_external_leading(m: &FontMetrics) -> i32 {
+    let hhea_total = m.hhea_ascender as i32 - m.hhea_descender as i32 + m.hhea_line_gap as i32;
+    let win_total = m.os2_win_ascent as i32 + m.os2_win_descent as i32;
+    (hhea_total - win_total).max(0)
+}
+
+/// Bounded design metrics for the opt-in experiments.
+fn experimental_metric_family(m: &FontMetrics, allow_typo: bool) -> (i32, i32, i32) {
+    let cap = MAX_METRIC_EMS * m.units_per_em as i32;
+
+    if allow_typo && m.use_typo_metrics() {
+        let ascent = m.os2_typo_ascender as i32;
+        let descent = -(m.os2_typo_descender as i32);
+        let leading = m.os2_typo_line_gap as i32;
+        let usable = ascent > 0
+            && descent > 0
+            && ascent <= cap
+            && descent <= cap
+            && leading.abs() <= cap
+            && ascent + descent + leading > 0;
+        if usable {
+            return (ascent, descent, leading);
+        }
+    }
+    (
+        (m.os2_win_ascent as i32).min(cap),
+        (m.os2_win_descent as i32).min(cap),
+        win_external_leading(m).min(cap),
+    )
 }
 
 /// Apply `w:spacing` lineRule to a measured content line box (rule 2).
@@ -177,42 +335,49 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 ///   *full* box including leading is scaled (Word scales line pitch).
 ///   Ascent/descent are preserved and the delta goes to leading below the
 ///   descent, so the baseline stays at the top of a taller line box exactly
-///   as Word places it (cursor/selection rects hug the text). If the target
-///   undercuts ascent + descent (sub-single spacing), ascent and descent
-///   shrink proportionally and leading is 0.
-/// - `Exact`: the box is fixed at `px` regardless of content; the baseline
-///   is placed so the content **descent is preserved bottom-up** (Word's
-///   behavior — shrinking eats the ascent side first) and clipping happens
-///   at render time. A box smaller than the descent clamps descent to the
-///   box and zeroes the ascent; leading is always 0.
+///   as Word places it (cursor/selection rects hug the text). Single spacing
+///   is an identity. If the target undercuts ascent + descent (sub-single
+///   spacing), ascent and descent shrink proportionally and leading is 0.
+/// - `Exact`: the box is fixed at `px` regardless of content and split
+///   [`EXACT_BASELINE_RATIO`] above the baseline, the rest below. The split
+///   is a constant of Word's, not a property of the content, so the box
+///   ignores the font entirely; clipping happens at render time.
 /// - `AtLeast`: floor — the content box passes through when taller,
-///   otherwise the shortfall is added as leading below the descent.
+///   otherwise the slack goes *above* the ascent and the content descent is
+///   preserved from the bottom of the box.
+///
+/// `Exact` and a floor-active `AtLeast` leave no leading — `ascent + descent
+/// == px` exactly — so a consumer centering half-leading and one hanging the
+/// baseline off the box top agree. A content-winning `AtLeast` returns the
+/// content box untouched, natural leading included.
 pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     match *rule {
         LineSpacingRule::Auto { line_240ths } => {
+            if line_240ths == 240 {
+                return content;
+            }
             let target = content.height() * (line_240ths as f32 / 240.0);
             let core = content.ascent + content.descent;
-            if target >= core {
-                LineBox {
-                    ascent: content.ascent,
-                    descent: content.descent,
-                    leading: target - core,
-                }
-            } else {
+            if target < core && line_240ths < 240 {
                 let scale = if core > 0.0 { target / core } else { 0.0 };
                 LineBox {
                     ascent: content.ascent * scale,
                     descent: content.descent * scale,
                     leading: 0.0,
                 }
+            } else {
+                LineBox {
+                    ascent: content.ascent,
+                    descent: content.descent,
+                    leading: target - core,
+                }
             }
         }
         LineSpacingRule::Exact { px } => {
             let px = px.max(0.0);
-            let descent = content.descent.min(px);
             LineBox {
-                ascent: px - descent,
-                descent,
+                ascent: px * EXACT_BASELINE_RATIO,
+                descent: px - px * EXACT_BASELINE_RATIO,
                 leading: 0.0,
             }
         }
@@ -221,11 +386,57 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
                 content
             } else {
                 LineBox {
-                    leading: content.leading + (px - content.height()),
-                    ..content
+                    ascent: px - content.descent,
+                    descent: content.descent,
+                    leading: 0.0,
                 }
             }
         }
+    }
+}
+
+/// Rule 4: round a height up to a whole number of rows of the section's
+/// grid pitch (`w:docGrid w:linePitch`, §17.6.5), never below one row.
+///
+/// `grid_pitch_px` must already be gated by the caller to an activating grid
+/// type (`lines`, `linesAndChars`, `snapToChars`) with a finite positive
+/// pitch; `None` (or a non-positive/non-finite pitch) is the identity.
+/// Non-finite or non-positive heights pass through untouched.
+///
+/// Line boxes go through [`snap_line_box`], which fills the content box so
+/// that rule 2's multiple scales the filled pitch. This scalar form is for
+/// heights that no longer carry a spacing rule, such as an image-dictated
+/// box.
+pub fn snap_line_height(line_height_px: f32, grid_pitch_px: f32) -> f32 {
+    if !line_height_px.is_finite() || line_height_px <= 0.0 {
+        return line_height_px;
+    }
+    if !grid_pitch_px.is_finite() || grid_pitch_px <= 0.0 {
+        return line_height_px;
+    }
+    let rows = (line_height_px / grid_pitch_px - GRID_ROW_SLACK)
+        .ceil()
+        .max(1.0);
+    (rows * grid_pitch_px).max(line_height_px)
+}
+
+/// Rule 4 for a line box: fill the content height up to one grid row,
+/// keeping ascent and descent put so the growth lands in leading below the
+/// descent.
+///
+/// The caller applies this to the *content* box, before rule 2, so that an
+/// `auto` multiple scales the filled grid pitch — Word renders a 1.5-spaced
+/// line on a one-row grid at 1.5 rows, not two.
+pub fn snap_line_box(content: LineBox, grid_pitch_px: f32) -> LineBox {
+    let height = content.height();
+    let snapped = snap_line_height(height, grid_pitch_px);
+    if snapped <= height {
+        return content;
+    }
+    LineBox {
+        ascent: content.ascent,
+        descent: content.descent,
+        leading: content.leading + (snapped - height),
     }
 }
 
@@ -294,5 +505,78 @@ pub fn kern_features(enabled: bool) -> Vec<ShapeFeature> {
             tag: *b"kern",
             value: 0,
         }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LineBox, LineSpacingRule, apply_spacing_rule, snap_line_box, snap_line_height};
+
+    #[test]
+    fn snap_rounds_up_to_whole_rows() {
+        // 354 twips at 150 DPI is 36.875px; the technical-sample body mean.
+        assert_eq!(snap_line_height(30.5, 36.875), 36.875);
+        assert_eq!(snap_line_height(36.875, 36.875), 36.875);
+        assert_eq!(snap_line_height(37.0, 36.875), 73.75);
+        assert_eq!(snap_line_height(80.0, 36.875), 110.625);
+    }
+
+    /// Word rounds the *content* box to whole rows and the `auto` multiple
+    /// then scales that quantized pitch: measured off Word's own raster of
+    /// a 326-twip `linesAndChars` grid (33.98px rows at 150 DPI), a
+    /// `w:line="360"` body line sits at 1.5 rows, not the 2 rows a ruled
+    /// snap would give.
+    #[test]
+    fn multiple_spacing_scales_the_snapped_row() {
+        let row = 33.958_332_f32;
+        let content = LineBox {
+            ascent: 22.0,
+            descent: 6.0,
+            leading: 1.6,
+        };
+        let snapped = snap_line_box(content, row);
+        assert!((snapped.height() - row).abs() < 1e-3);
+        assert_eq!(snapped.ascent, content.ascent);
+        assert_eq!(snapped.descent, content.descent);
+        assert_eq!(snapped.leading, content.leading + (row - content.height()));
+        let ruled = apply_spacing_rule(snapped, &LineSpacingRule::Auto { line_240ths: 360 });
+        assert!((ruled.height() - 1.5 * row).abs() < 1e-3);
+    }
+
+    /// A content box past one row takes the next whole row, with the growth
+    /// in leading so ascent and descent stay where the font put them.
+    #[test]
+    fn snap_line_box_grows_a_taller_content_box_to_two_rows() {
+        let row = 33.958_332_f32;
+        let content = LineBox {
+            ascent: 30.0,
+            descent: 8.0,
+            leading: 2.0,
+        };
+        let snapped = snap_line_box(content, row);
+        assert_eq!(snapped.ascent, content.ascent);
+        assert_eq!(snapped.descent, content.descent);
+        assert!((snapped.height() - 2.0 * row).abs() < 1e-3);
+    }
+
+    /// An exact-multiple content box is untouched.
+    #[test]
+    fn snap_line_box_is_identity_on_a_whole_row() {
+        let row = 24.0_f32;
+        let content = LineBox {
+            ascent: 18.0,
+            descent: 4.0,
+            leading: 2.0,
+        };
+        assert_eq!(snap_line_box(content, row).height(), 24.0);
+        assert_eq!(snap_line_box(content, 0.0).height(), content.height());
+    }
+
+    #[test]
+    fn snap_guards_are_identity() {
+        assert_eq!(snap_line_height(18.5, 0.0), 18.5);
+        assert_eq!(snap_line_height(18.5, -24.0), 18.5);
+        assert_eq!(snap_line_height(18.5, f32::NAN), 18.5);
+        assert_eq!(snap_line_height(0.0, 24.0), 0.0);
     }
 }

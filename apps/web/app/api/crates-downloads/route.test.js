@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { officialCrateNames, rollingDownloads } from "./route.ts";
+import { officialCrateNames, rollingDownloads } from "../../../lib/crates-downloads.ts";
 
 describe("crates.io downloads", () => {
   test("keeps only BetterOffice crates from this repository", () => {

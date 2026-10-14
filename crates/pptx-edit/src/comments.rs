@@ -1,0 +1,567 @@
+use pptx_parse::{CommentFlavor, PptxPackage};
+use sha2::{Digest, Sha256};
+use yrs::{Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
+
+use crate::deck::{SourceImport, map_bool, map_number, map_string, required_map};
+use crate::{
+    BOOTSTRAP_CLIENT_ID, COMMENTS, CommentReceipt, CommentSnapshot, DeckSession, EditCtx,
+    EditError, EditResult, META, MIGRATE_ORIGIN, SLIDES, doc_with_client_id, hydrate_doc,
+};
+
+pub(crate) fn seeded_comment_id(index: usize, source_id: &str) -> String {
+    format!("comment:{index}:{source_id}")
+}
+
+pub(crate) fn seed_comments(
+    txn: &mut TransactionMut<'_>,
+    package: &PptxPackage,
+    slide_id_by_part: &dyn Fn(&str) -> Option<String>,
+) -> EditResult<()> {
+    let comments = txn.get_or_insert_map(COMMENTS);
+    for (index, comment) in package.comments.iter().enumerate() {
+        let Some(slide_id) = slide_id_by_part(&comment.slide_part_path) else {
+            continue;
+        };
+        let author = package
+            .comment_authors
+            .iter()
+            .find(|author| author.id == comment.author_id);
+        let id = seeded_comment_id(index, &comment.id);
+        let entry = comments.insert(txn, id.as_str(), MapPrelim::default());
+        entry.insert(txn, "id", id.as_str());
+        entry.insert(txn, "slideId", slide_id.as_str());
+        entry.insert(
+            txn,
+            "author",
+            author.map(|author| author.name.as_str()).unwrap_or(""),
+        );
+        entry.insert(
+            txn,
+            "initials",
+            author.map(|author| author.initials.as_str()).unwrap_or(""),
+        );
+        entry.insert(txn, "text", comment.text.as_str());
+        if let Some(created) = &comment.created {
+            entry.insert(txn, "created", created.as_str());
+        }
+        entry.insert(txn, "x", comment.x_emu as f64);
+        entry.insert(txn, "y", comment.y_emu as f64);
+        if let Some(parent) = &comment.parent_id {
+            let parent_index = package
+                .comments
+                .iter()
+                .position(|candidate| &candidate.id == parent);
+            if let Some(parent_index) = parent_index {
+                entry.insert(
+                    txn,
+                    "parentId",
+                    seeded_comment_id(parent_index, parent).as_str(),
+                );
+            }
+        }
+        entry.insert(
+            txn,
+            "resolved",
+            comment.status.as_deref() == Some("resolved"),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn import_source_comments(
+    session: &DeckSession,
+    import: &mut SourceImport<'_>,
+) -> EditResult<()> {
+    {
+        let txn = session.doc.transact();
+        let meta = required_map(&txn, META)?;
+        if map_bool(&meta, &txn, "commentsPendingSource") != Some(true) {
+            return Ok(());
+        }
+    }
+    let bootstrap = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
+    hydrate_doc(&bootstrap, &session.encode_state_as_update_v1())?;
+    let slide_ids: std::collections::HashMap<_, _> = import
+        .source
+        .presentation
+        .slides
+        .iter()
+        .enumerate()
+        .map(|(index, slide)| {
+            (
+                slide.part_path.as_str(),
+                format!("slide:{index}:{}", slide.id),
+            )
+        })
+        .collect();
+    seed_comments(
+        &mut bootstrap.transact_mut_with(MIGRATE_ORIGIN),
+        import.source,
+        &|part| slide_ids.get(part).cloned(),
+    )?;
+    let update = bootstrap
+        .transact()
+        .encode_diff_v1(&session.doc.transact().state_vector());
+    hydrate_doc(&session.doc, &update)?;
+    import.package.comments.clone_from(&import.source.comments);
+    import
+        .package
+        .comment_authors
+        .clone_from(&import.source.comment_authors);
+    import.package.comment_flavor = import.source.comment_flavor;
+    let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(
+        &mut txn,
+        "commentFlavor",
+        flavor_key(import.source.comment_flavor.unwrap_or_default()),
+    );
+    meta.insert(&mut txn, "commentsPendingSource", false);
+    Ok(())
+}
+
+pub(crate) fn snapshot_comments<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentSnapshot>> {
+    let comments = required_map(txn, COMMENTS)?;
+    comment_keys(txn)?
+        .iter()
+        .map(|key| snapshot_comment(&comments, txn, &key.id))
+        .collect()
+}
+
+/// A live comment's place in [`snapshot_comments`] order.
+pub(crate) struct CommentKey {
+    pub id: String,
+    pub slide_id: String,
+}
+
+/// The live comments, ordered by creation time and id, without reading their text.
+pub(crate) fn comment_keys<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentKey>> {
+    let comments = required_map(txn, COMMENTS)?;
+    let slides = required_map(txn, SLIDES)?;
+    let mut keys = Vec::new();
+    for (id, value) in comments.iter(txn) {
+        let Ok(entry) = value.cast::<MapRef>() else {
+            return Err(EditError::InvalidState(format!(
+                "comment {id} is not a map"
+            )));
+        };
+        let slide_id = map_string(&entry, txn, "slideId").unwrap_or_default();
+        if !slides.contains_key(txn, &slide_id) {
+            continue;
+        }
+        keys.push((map_string(&entry, txn, "created"), id.to_owned(), slide_id));
+    }
+    keys.sort();
+    Ok(keys
+        .into_iter()
+        .map(|(_, id, slide_id)| CommentKey { id, slide_id })
+        .collect())
+}
+
+pub(crate) fn snapshot_comment<T: ReadTxn>(
+    comments: &MapRef,
+    txn: &T,
+    id: &str,
+) -> EditResult<CommentSnapshot> {
+    let entry = comments
+        .get(txn, id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::InvalidState(format!("comment {id} is not a map")))?;
+    Ok(CommentSnapshot {
+        id: id.to_owned(),
+        slide_id: map_string(&entry, txn, "slideId").unwrap_or_default(),
+        author: map_string(&entry, txn, "author").unwrap_or_default(),
+        initials: map_string(&entry, txn, "initials").unwrap_or_default(),
+        text: map_string(&entry, txn, "text").unwrap_or_default(),
+        created: map_string(&entry, txn, "created"),
+        x_emu: map_number(&entry, txn, "x").unwrap_or(0.0) as i64,
+        y_emu: map_number(&entry, txn, "y").unwrap_or(0.0) as i64,
+        parent_id: live_parent(comments, &entry, txn),
+        resolved: map_bool(&entry, txn, "resolved").unwrap_or(false),
+    })
+}
+
+/// Promotes alternating levels so undo cannot create nested replies.
+fn live_parent<T: ReadTxn>(comments: &MapRef, entry: &MapRef, txn: &T) -> Option<String> {
+    let parent_id = map_string(entry, txn, "parentId")?;
+    let mut next = Some(parent_id.clone());
+    let mut seen = std::collections::HashSet::new();
+    let mut depth = 0;
+    while let Some(id) = next {
+        if !seen.insert(id.clone()) || depth == 128 {
+            return None;
+        }
+        let Some(parent) = comments
+            .get(txn, &id)
+            .and_then(|value| value.cast::<MapRef>().ok())
+        else {
+            break;
+        };
+        depth += 1;
+        next = map_string(&parent, txn, "parentId");
+    }
+    (depth % 2 == 1).then_some(parent_id)
+}
+
+/// The comments `snapshot_comments` returns for a doc `seed_comments` wrote,
+/// computed without materializing a scratch document.
+pub(crate) fn baseline_comments(
+    package: &PptxPackage,
+    slide_id_by_part: &dyn Fn(&str) -> Option<String>,
+) -> Vec<CommentSnapshot> {
+    let mut parents: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut comments = Vec::new();
+    for (index, comment) in package.comments.iter().enumerate() {
+        let Some(slide_id) = slide_id_by_part(&comment.slide_part_path) else {
+            continue;
+        };
+        let author = package
+            .comment_authors
+            .iter()
+            .find(|author| author.id == comment.author_id);
+        let id = seeded_comment_id(index, &comment.id);
+        let parent_id = comment.parent_id.as_ref().and_then(|parent| {
+            package
+                .comments
+                .iter()
+                .position(|candidate| &candidate.id == parent)
+                .map(|parent_index| seeded_comment_id(parent_index, parent))
+        });
+        parents.insert(id.clone(), parent_id.clone());
+        comments.push(CommentSnapshot {
+            id,
+            slide_id,
+            author: author.map(|author| author.name.clone()).unwrap_or_default(),
+            initials: author
+                .map(|author| author.initials.clone())
+                .unwrap_or_default(),
+            text: comment.text.clone(),
+            created: comment.created.clone(),
+            x_emu: comment.x_emu as f64 as i64,
+            y_emu: comment.y_emu as f64 as i64,
+            parent_id,
+            resolved: comment.status.as_deref() == Some("resolved"),
+        });
+    }
+    for comment in &mut comments {
+        if let Some(parent_id) = comment.parent_id.take() {
+            comment.parent_id = baseline_parent(&parents, parent_id);
+        }
+    }
+    comments.sort_by(|left, right| {
+        left.created
+            .cmp(&right.created)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    comments
+}
+
+/// `live_parent` over the seeded map: a reply keeps its parent only when the
+/// chain depth above it is odd.
+fn baseline_parent(
+    parents: &std::collections::HashMap<String, Option<String>>,
+    parent_id: String,
+) -> Option<String> {
+    let mut next = Some(parent_id.clone());
+    let mut seen = std::collections::HashSet::new();
+    let mut depth = 0;
+    while let Some(id) = next {
+        if !seen.insert(id.clone()) || depth == 128 {
+            return None;
+        }
+        let Some(parent) = parents.get(&id) else {
+            break;
+        };
+        depth += 1;
+        next = parent.clone();
+    }
+    (depth % 2 == 1).then_some(parent_id)
+}
+
+pub(crate) fn snapshot_flavor<T: ReadTxn>(txn: &T) -> EditResult<CommentFlavor> {
+    let meta = required_map(txn, META)?;
+    Ok(match map_string(&meta, txn, "commentFlavor").as_deref() {
+        Some("modern") => CommentFlavor::Modern,
+        _ => CommentFlavor::Legacy,
+    })
+}
+
+pub(crate) fn flavor_key(flavor: CommentFlavor) -> &'static str {
+    match flavor {
+        CommentFlavor::Legacy => "legacy",
+        CommentFlavor::Modern => "modern",
+    }
+}
+
+pub(crate) fn derived_guid(seed: &str) -> String {
+    let digest = Sha256::digest(seed.as_bytes());
+    let hex: String = digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02X}"))
+        .collect();
+    format!(
+        "{{{}-{}-{}-{}-{}}}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+impl DeckSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_comment(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+        x_emu: i64,
+        y_emu: i64,
+    ) -> EditResult<CommentReceipt> {
+        validate_fields(author, initials, text, created)?;
+        if text.is_empty() {
+            return Err(EditError::InvalidComment("comment text is empty".into()));
+        }
+        let comments = {
+            let txn = self.doc.transact();
+            crate::deck::slide_ref(&txn, slide_id)?;
+            required_map(&txn, COMMENTS)?
+        };
+        self.automatic_undo_barrier();
+        let comment_id = self.next_id("comment");
+        let mut txn = self.transact_for(context);
+        let entry = comments.insert(&mut txn, comment_id.as_str(), MapPrelim::default());
+        entry.insert(&mut txn, "id", comment_id.as_str());
+        entry.insert(&mut txn, "slideId", slide_id);
+        entry.insert(&mut txn, "author", author);
+        entry.insert(&mut txn, "initials", initials);
+        entry.insert(&mut txn, "text", text);
+        entry.insert(&mut txn, "created", created);
+        entry.insert(&mut txn, "x", x_emu as f64);
+        entry.insert(&mut txn, "y", y_emu as f64);
+        entry.insert(&mut txn, "resolved", false);
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(CommentReceipt {
+            comment_id,
+            slide_id: slide_id.to_owned(),
+            parent_id: None,
+            resolved: false,
+        })
+    }
+
+    pub fn reply_to_comment(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+    ) -> EditResult<CommentReceipt> {
+        validate_fields(author, initials, text, created)?;
+        if text.is_empty() {
+            return Err(EditError::InvalidComment("reply text is empty".into()));
+        }
+        let (comments, slide_id) = {
+            let txn = self.doc.transact();
+            require_modern(&txn)?;
+            let comments = required_map(&txn, COMMENTS)?;
+            let parent = comment_ref(&comments, &txn, comment_id)?;
+            if live_parent(&comments, &parent, &txn).is_some() {
+                return Err(EditError::InvalidComment(
+                    "replies cannot be nested below a reply".into(),
+                ));
+            }
+            let slide_id = map_string(&parent, &txn, "slideId").unwrap_or_default();
+            (comments, slide_id)
+        };
+        self.automatic_undo_barrier();
+        let reply_id = self.next_id("comment");
+        let mut txn = self.transact_for(context);
+        let entry = comments.insert(&mut txn, reply_id.as_str(), MapPrelim::default());
+        entry.insert(&mut txn, "id", reply_id.as_str());
+        entry.insert(&mut txn, "slideId", slide_id.as_str());
+        entry.insert(&mut txn, "author", author);
+        entry.insert(&mut txn, "initials", initials);
+        entry.insert(&mut txn, "text", text);
+        entry.insert(&mut txn, "created", created);
+        entry.insert(&mut txn, "x", 0.0);
+        entry.insert(&mut txn, "y", 0.0);
+        entry.insert(&mut txn, "parentId", comment_id);
+        entry.insert(&mut txn, "resolved", false);
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(CommentReceipt {
+            comment_id: reply_id,
+            slide_id,
+            parent_id: Some(comment_id.to_owned()),
+            resolved: false,
+        })
+    }
+
+    pub fn set_comment_position(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        x_emu: i64,
+        y_emu: i64,
+    ) -> EditResult<CommentReceipt> {
+        const MAX_COORDINATE: u64 = (1_u64 << 53) - 1;
+        if x_emu.unsigned_abs() > MAX_COORDINATE || y_emu.unsigned_abs() > MAX_COORDINATE {
+            return Err(EditError::InvalidComment(
+                "coordinates exceed safe integer range".into(),
+            ));
+        }
+        let (entry, slide_id, resolved) = {
+            let txn = self.doc.transact();
+            let comments = required_map(&txn, COMMENTS)?;
+            let entry = comment_ref(&comments, &txn, comment_id)?;
+            if live_parent(&comments, &entry, &txn).is_some() {
+                return Err(EditError::InvalidComment(
+                    "replies share their root comment position".into(),
+                ));
+            }
+            let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
+            let resolved = map_bool(&entry, &txn, "resolved").unwrap_or(false);
+            (entry, slide_id, resolved)
+        };
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
+        entry.insert(&mut txn, "x", x_emu as f64);
+        entry.insert(&mut txn, "y", y_emu as f64);
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(CommentReceipt {
+            comment_id: comment_id.to_owned(),
+            slide_id,
+            parent_id: None,
+            resolved,
+        })
+    }
+
+    pub fn set_comment_status(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        resolved: bool,
+    ) -> EditResult<CommentReceipt> {
+        let (entry, slide_id, parent_id) = {
+            let txn = self.doc.transact();
+            require_modern(&txn)?;
+            let comments = required_map(&txn, COMMENTS)?;
+            let entry = comment_ref(&comments, &txn, comment_id)?;
+            let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
+            let parent_id = live_parent(&comments, &entry, &txn);
+            (entry, slide_id, parent_id)
+        };
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
+        entry.insert(&mut txn, "resolved", resolved);
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(CommentReceipt {
+            comment_id: comment_id.to_owned(),
+            slide_id,
+            parent_id,
+            resolved,
+        })
+    }
+
+    pub fn remove_comment(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+    ) -> EditResult<CommentReceipt> {
+        let txn = self.doc.transact();
+        let comments = required_map(&txn, COMMENTS)?;
+        let entry = comment_ref(&comments, &txn, comment_id)?;
+        let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
+        let parent_id = live_parent(&comments, &entry, &txn);
+        let resolved = map_bool(&entry, &txn, "resolved").unwrap_or(false);
+        let mut replies: Vec<String> = comments
+            .iter(&txn)
+            .filter_map(|(id, value)| {
+                let entry = value.cast::<MapRef>().ok()?;
+                (map_string(&entry, &txn, "parentId").as_deref() == Some(comment_id))
+                    .then(|| id.to_owned())
+            })
+            .collect();
+        replies.sort();
+        drop(txn);
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
+        for reply in replies {
+            comments.remove(&mut txn, &reply);
+        }
+        comments.remove(&mut txn, comment_id);
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(CommentReceipt {
+            comment_id: comment_id.to_owned(),
+            slide_id,
+            parent_id,
+            resolved,
+        })
+    }
+
+    pub fn set_comment_flavor(
+        &self,
+        context: &EditCtx,
+        flavor: CommentFlavor,
+    ) -> EditResult<CommentFlavor> {
+        let meta = {
+            let txn = self.doc.transact();
+            let comments = required_map(&txn, COMMENTS)?;
+            if comments.len(&txn) > 0 {
+                return Err(EditError::InvalidComment(
+                    "the comment flavour is fixed once a deck has comments".into(),
+                ));
+            }
+            required_map(&txn, META)?
+        };
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
+        meta.insert(&mut txn, "commentFlavor", flavor_key(flavor));
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(flavor)
+    }
+
+    pub fn comments(&self) -> EditResult<Vec<CommentSnapshot>> {
+        snapshot_comments(&self.doc.transact())
+    }
+
+    pub fn comment_flavor(&self) -> EditResult<CommentFlavor> {
+        snapshot_flavor(&self.doc.transact())
+    }
+}
+
+fn validate_fields(author: &str, initials: &str, text: &str, created: &str) -> EditResult<()> {
+    for value in [author, initials, text, created] {
+        crate::model::validate_xml_text(value)?;
+    }
+    Ok(())
+}
+
+fn require_modern<T: ReadTxn>(txn: &T) -> EditResult<()> {
+    match snapshot_flavor(txn)? {
+        CommentFlavor::Modern => Ok(()),
+        CommentFlavor::Legacy => Err(EditError::InvalidComment(
+            "legacy comments carry no replies or status; switch the deck to modern comments".into(),
+        )),
+    }
+}
+
+fn comment_ref<T: ReadTxn>(comments: &MapRef, txn: &T, comment_id: &str) -> EditResult<MapRef> {
+    comments
+        .get(txn, comment_id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::CommentNotFound(comment_id.to_owned()))
+}

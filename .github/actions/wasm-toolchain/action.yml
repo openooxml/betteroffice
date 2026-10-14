@@ -1,0 +1,43 @@
+name: Wasm toolchain
+description: Puts a pinned wasm-opt on PATH so wasm-pack never downloads binaryen mid-build, and caches its tool downloads.
+
+inputs:
+  binaryen:
+    description: Binaryen release tag.
+    default: version_132
+  sha256:
+    description: Checksum of the x86_64-linux tarball.
+    default: 195ddc94f9bc89f45abdabb0b9eea86023d727ba90eac8b35b80f2544fc30572
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      id: binaryen
+      with:
+        path: ~/.cache/binaryen/${{ inputs.binaryen }}
+        key: binaryen-${{ runner.os }}-${{ inputs.binaryen }}
+
+    - if: steps.binaryen.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        if [ "$(uname -m)" != "x86_64" ]; then
+          echo "::error::no pinned binaryen for $(uname -m); add its checksum to .github/actions/wasm-toolchain"
+          exit 1
+        fi
+        tarball="$RUNNER_TEMP/binaryen.tar.gz"
+        curl -fsSL --retry 5 --retry-all-errors -o "$tarball" \
+          "https://github.com/WebAssembly/binaryen/releases/download/${{ inputs.binaryen }}/binaryen-${{ inputs.binaryen }}-x86_64-linux.tar.gz"
+        echo "${{ inputs.sha256 }}  $tarball" | sha256sum -c -
+        mkdir -p "$HOME/.cache/binaryen/${{ inputs.binaryen }}"
+        tar -xzf "$tarball" -C "$HOME/.cache/binaryen/${{ inputs.binaryen }}" --strip-components=1
+
+    - shell: bash
+      run: echo "$HOME/.cache/binaryen/${{ inputs.binaryen }}/bin" >> "$GITHUB_PATH"
+
+    # wasm-pack's own tool cache: uncached, it recompiles the wasm-bindgen CLI every run.
+    - uses: actions/cache@v4
+      with:
+        path: ~/.cache/.wasm-pack
+        key: wasm-pack-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: wasm-pack-tools-${{ runner.os }}-

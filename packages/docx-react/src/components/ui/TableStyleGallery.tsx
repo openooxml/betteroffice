@@ -401,7 +401,6 @@ export function TableStyleGallery({
   const [hoveredBtn, setHoveredBtn] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Close on outside click
   useEffect(() => {
     if (!isOpen) return;
     function handleClickOutside(e: MouseEvent) {
@@ -409,8 +408,15 @@ export function TableStyleGallery({
         setIsOpen(false);
       }
     }
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === 'Escape') setIsOpen(false);
+    }
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEscape);
+    };
   }, [isOpen]);
 
   const handleApply = useCallback(
@@ -462,6 +468,7 @@ export function TableStyleGallery({
 
       {isOpen && (
         <div
+          data-docx-escape-layer="true"
           style={{
             position: 'absolute',
             top: '100%',

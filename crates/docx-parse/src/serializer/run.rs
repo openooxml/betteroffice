@@ -1,15 +1,16 @@
 //! Run, text-formatting, image, and shape serializers.
 
+use crate::block::BlockContent;
 use crate::drawingml::{ShapeFill, ShapeOutline};
 use crate::formatting::TextFormatting;
 use crate::image::{Image, ImagePosition, ImageWrap};
 use crate::inline::{Run, RunContent, RunPropertyChange};
-use crate::paragraph::Paragraph;
 use crate::scalars::{ColorValue, ShadingProperties};
 use crate::shape::Shape;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
+use super::raw::{validate_raw_subtree, validate_replayed_fragment};
 use super::xml_writer::{XmlWriter, int_attr, js_number};
 
 const VALID_HIGHLIGHT_COLORS: &[&str] = &[
@@ -51,6 +52,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
             fonts.h_ansi_theme.as_deref(),
             fonts.east_asia_theme.as_deref(),
             fonts.cs_theme.as_deref(),
+            fonts.hint.as_deref(),
         ]
         .into_iter()
         .any(|value| nonempty(value).is_some());
@@ -68,6 +70,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 fonts.east_asia_theme.as_deref(),
             );
             optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
     }
@@ -134,6 +137,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     }
     on_off(&mut body, "w:rtl", formatting.rtl);
     on_off(&mut body, "w:cs", formatting.cs);
+    on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
 
     let body = body.finish();
     if body.is_empty() {
@@ -329,11 +333,54 @@ fn serialize_run_content(
         }
         RunContent::Drawing { image } => return serialize_drawing_content(image, context),
         RunContent::Shape { shape } => return serialize_shape_content(shape, context),
-        RunContent::CommentReference { .. }
-        | RunContent::Chart { .. }
-        | RunContent::OpaqueDrawing { .. } => {}
+        RunContent::HorizontalRule { rule } => {
+            validate_replayed_fragment(&rule.xml)?;
+            return Ok(rule.xml.clone());
+        }
+        RunContent::CommentReference { id } => {
+            writer.start_element("w:commentReference");
+            if let Some(id) = id {
+                writer.attribute("w:id", &js_number(*id));
+            }
+            writer.end_element();
+        }
+        RunContent::Chart { chart } => {
+            if let Some(xml) = chart.drawing_xml.as_deref() {
+                validate_raw_subtree(xml, "w", "drawing")?;
+                return Ok(xml.to_owned());
+            }
+            if let Some(xml) = chart
+                .relationship_id
+                .as_deref()
+                .and_then(|id| context.chart_drawing(id))
+            {
+                validate_raw_subtree(xml, "w", "drawing")?;
+                return Ok(xml.to_owned());
+            }
+            context.warn(format!(
+                "chart run carries no drawing to replay{}; keeping the run out of the output",
+                chart
+                    .relationship_id
+                    .as_deref()
+                    .map(|id| format!(" (rId {id})"))
+                    .unwrap_or_default()
+            ));
+            return Ok(String::new());
+        }
+        RunContent::OpaqueDrawing { xml, .. } => {
+            validate_replayed_fragment(xml)?;
+            return Ok(xml.clone());
+        }
     }
     Ok(writer.finish())
+}
+
+/// The authored z-order when the anchor carried one; Word's default otherwise.
+fn relative_height_attr(position: Option<&crate::image::ImagePosition>) -> String {
+    position
+        .and_then(|position| position.relative_height)
+        .map(|value| int_attr(Some(value)))
+        .unwrap_or_else(|| "251658240".to_owned())
 }
 
 /// Serializes one image as WordprocessingDrawing XML.
@@ -344,9 +391,10 @@ pub fn serialize_drawing_content(
     let floating = image.wrap.wrap_type != "inline";
     let id = drawing_id(image.id.as_deref(), context);
     let name = image
-        .title
+        .name
         .as_deref()
         .filter(|value| !value.is_empty())
+        .or_else(|| image.title.as_deref().filter(|value| !value.is_empty()))
         .or_else(|| image.filename.as_deref().filter(|value| !value.is_empty()))
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Picture {id}"));
@@ -354,14 +402,14 @@ pub fn serialize_drawing_content(
     let mut writer = XmlWriter::with_capacity(1024 + graphic.len());
     writer.start_element("w:drawing");
     if floating {
+        writer.start_element("wp:anchor");
+        write_distances(&mut writer, Some(&image.wrap));
         writer
-            .start_element("wp:anchor")
-            .attribute("distT", &int_attr(image.wrap.dist_t))
-            .attribute("distB", &int_attr(image.wrap.dist_b))
-            .attribute("distL", &int_attr(image.wrap.dist_l))
-            .attribute("distR", &int_attr(image.wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(image.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if image.wrap.wrap_type == "behind" {
@@ -397,12 +445,8 @@ pub fn serialize_drawing_content(
         write_effect_extent(&mut writer, image.padding.as_ref());
         write_wrap(&mut writer, &image.wrap);
     } else {
-        writer
-            .start_element("wp:inline")
-            .attribute("distT", &int_attr(image.wrap.dist_t))
-            .attribute("distB", &int_attr(image.wrap.dist_b))
-            .attribute("distL", &int_attr(image.wrap.dist_l))
-            .attribute("distR", &int_attr(image.wrap.dist_r));
+        writer.start_element("wp:inline");
+        write_distances(&mut writer, Some(&image.wrap));
         write_extent(&mut writer, image.size.width, image.size.height);
         write_effect_extent(&mut writer, image.padding.as_ref());
     }
@@ -438,7 +482,7 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let is_text_box = shape.shape_type == "textBox";
+    let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
         .wrap
         .as_ref()
@@ -479,7 +523,7 @@ pub fn serialize_shape_content(
         .start_element("a:prstGeom")
         .attribute(
             "prst",
-            if is_text_box {
+            if shape.shape_type == "textBox" {
                 "rect"
             } else {
                 &shape.shape_type
@@ -496,10 +540,20 @@ pub fn serialize_shape_content(
         let mut body_properties = XmlWriter::with_capacity(160);
         body_properties
             .start_element("wps:bodyPr")
-            .attribute("rot", "0")
-            .attribute("vert", "horz");
-        if let Some(anchor) = nonempty(text_body.anchor.as_deref()) {
-            body_properties.attribute("anchor", if anchor == "middle" { "ctr" } else { anchor });
+            .attribute(
+                "rot",
+                &int_attr(Some(text_body.rotation.unwrap_or(0.0) * 60_000.0)),
+            )
+            .attribute("vert", vertical_token(shape));
+        if let Some(wrap) = shape
+            .text_body_properties
+            .as_ref()
+            .and_then(|properties| nonempty(properties.wrap.as_deref()))
+        {
+            body_properties.attribute("wrap", wrap);
+        }
+        if let Some(anchor) = nonempty(text_body.anchor.as_deref()).and_then(anchor_token) {
+            body_properties.attribute("anchor", anchor);
         }
         if text_body.anchor_center == Some(true) {
             body_properties.attribute("anchorCtr", "1");
@@ -510,20 +564,22 @@ pub fn serialize_shape_content(
             optional_int_attr(&mut body_properties, "rIns", margins.right);
             optional_int_attr(&mut body_properties, "bIns", margins.bottom);
         }
+        write_auto_fit(&mut body_properties, shape);
         body_properties.end_element();
-        if is_text_box {
+        if is_text_box || !text_body.content.is_empty() {
             graphic
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");
             for value in &text_body.content {
-                let paragraph: Paragraph =
-                    serde_json::from_value(value.clone()).map_err(|error| {
+                let block: BlockContent = serde_json::to_string(&(value.clone()))
+                    .and_then(|s| serde_json::from_str(&s))
+                    .map_err(|error| {
                         ParseError::Canonical(format!(
-                            "shape text body contains an invalid paragraph: {error}"
+                            "shape text body contains an invalid block: {error}"
                         ))
                     })?;
-                let paragraph = super::paragraph::serialize_paragraph(&paragraph, context)?;
-                append_generated(&mut graphic, &paragraph);
+                let block = super::sdt::serialize_block_content(&block, context)?;
+                append_generated(&mut graphic, &block);
             }
             graphic.end_element().end_element();
         }
@@ -536,14 +592,14 @@ pub fn serialize_shape_content(
     writer.start_element("w:drawing");
     if floating {
         let wrap = wrap.expect("floating shapes always have wrap properties");
+        writer.start_element("wp:anchor");
+        write_distances(&mut writer, Some(wrap));
         writer
-            .start_element("wp:anchor")
-            .attribute("distT", &int_attr(wrap.dist_t))
-            .attribute("distB", &int_attr(wrap.dist_b))
-            .attribute("distL", &int_attr(wrap.dist_l))
-            .attribute("distR", &int_attr(wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(shape.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if wrap.wrap_type == "behind" { "1" } else { "0" },
@@ -558,17 +614,20 @@ pub fn serialize_shape_content(
             .end_element();
         write_position(&mut writer, shape.position.as_ref());
         write_extent(&mut writer, shape.size.width, shape.size.height);
-        write_zero_effect_extent(&mut writer);
+        write_effect_extent(&mut writer, shape.effect_extent.as_ref());
         write_wrap(&mut writer, wrap);
     } else {
-        writer
-            .start_element("wp:inline")
-            .attribute("distT", &int_attr(wrap.and_then(|value| value.dist_t)))
-            .attribute("distB", &int_attr(wrap.and_then(|value| value.dist_b)))
-            .attribute("distL", &int_attr(wrap.and_then(|value| value.dist_l)))
-            .attribute("distR", &int_attr(wrap.and_then(|value| value.dist_r)));
+        writer.start_element("wp:inline");
+        match wrap {
+            Some(wrap) => write_distances(&mut writer, Some(wrap)),
+            None => {
+                for name in ["distT", "distB", "distL", "distR"] {
+                    writer.attribute(name, "0");
+                }
+            }
+        }
         write_extent(&mut writer, shape.size.width, shape.size.height);
-        write_zero_effect_extent(&mut writer);
+        write_effect_extent(&mut writer, shape.effect_extent.as_ref());
     }
     writer
         .start_element("wp:docPr")
@@ -580,6 +639,72 @@ pub fn serialize_shape_content(
     append_generated(&mut writer, &graphic);
     writer.end_element().end_element();
     Ok(writer.finish())
+}
+
+/// `ST_TextAnchoringType` for the canonical anchor the parser reads it into.
+fn anchor_token(anchor: &str) -> Option<&'static str> {
+    match anchor {
+        "top" => Some("t"),
+        "middle" => Some("ctr"),
+        "bottom" => Some("b"),
+        "distributed" => Some("dist"),
+        "justified" => Some("just"),
+        _ => None,
+    }
+}
+
+fn vertical_token(shape: &Shape) -> &'static str {
+    match shape
+        .text_body_properties
+        .as_ref()
+        .and_then(|properties| properties.vertical.as_deref())
+    {
+        Some("vertical") => "vert",
+        Some("vertical270") => "vert270",
+        Some("wordArtVertical") => "wordArtVert",
+        Some("eastAsianVertical") => "eaVert",
+        Some("mongolianVertical") => "mongolianVert",
+        Some("horizontal") => "horz",
+        _ if shape
+            .text_body
+            .as_ref()
+            .is_some_and(|body| body.vertical == Some(true)) =>
+        {
+            "vert"
+        }
+        _ => "horz",
+    }
+}
+
+fn write_auto_fit(writer: &mut XmlWriter, shape: &Shape) {
+    let properties = shape.text_body_properties.as_ref();
+    let auto_fit = shape
+        .text_body
+        .as_ref()
+        .and_then(|body| body.auto_fit.as_deref());
+    match auto_fit {
+        Some("none") => {
+            writer.start_element("a:noAutofit").end_element();
+        }
+        Some("normal") => {
+            writer.start_element("a:normAutofit");
+            optional_int_attr(
+                writer,
+                "fontScale",
+                properties.and_then(|properties| properties.font_scale),
+            );
+            optional_int_attr(
+                writer,
+                "lnSpcReduction",
+                properties.and_then(|properties| properties.line_spacing_reduction),
+            );
+            writer.end_element();
+        }
+        Some("shape") => {
+            writer.start_element("a:spAutoFit").end_element();
+        }
+        _ => {}
+    }
 }
 
 fn serialize_picture_graphic(image: &Image, id: &str) -> String {
@@ -615,9 +740,6 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
         .start_element("pic:cNvPr")
         .attribute("id", id)
         .attribute("name", &name);
-    if let Some(alt) = nonempty(image.alt.as_deref()) {
-        writer.attribute("descr", alt);
-    }
     writer
         .end_element()
         .start_element("pic:cNvPicPr")
@@ -663,7 +785,7 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
     );
     writer
         .start_element("a:prstGeom")
-        .attribute("prst", "rect")
+        .attribute("prst", image.shape_type.as_deref().unwrap_or("rect"))
         .start_element("a:avLst")
         .end_element()
         .end_element();
@@ -972,23 +1094,33 @@ fn write_extent(writer: &mut XmlWriter, width: f64, height: f64) {
         .end_element();
 }
 
-fn write_effect_extent(writer: &mut XmlWriter, padding: Option<&crate::image::ImagePadding>) {
-    writer
-        .start_element("wp:effectExtent")
-        .attribute("l", &int_attr(padding.and_then(|value| value.left)))
-        .attribute("t", &int_attr(padding.and_then(|value| value.top)))
-        .attribute("r", &int_attr(padding.and_then(|value| value.right)))
-        .attribute("b", &int_attr(padding.and_then(|value| value.bottom)))
-        .end_element();
+/// The wrap distances the drawing authored; an absent one stays absent.
+fn write_distances(writer: &mut XmlWriter, wrap: Option<&ImageWrap>) {
+    let Some(wrap) = wrap else {
+        return;
+    };
+    for (name, value) in [
+        ("distT", wrap.dist_t),
+        ("distB", wrap.dist_b),
+        ("distL", wrap.dist_l),
+        ("distR", wrap.dist_r),
+    ] {
+        if value.is_some_and(f64::is_finite) {
+            writer.attribute(name, &int_attr(value));
+        }
+    }
 }
 
-fn write_zero_effect_extent(writer: &mut XmlWriter) {
+fn write_effect_extent(writer: &mut XmlWriter, padding: Option<&crate::image::ImagePadding>) {
+    let Some(padding) = padding else {
+        return;
+    };
     writer
         .start_element("wp:effectExtent")
-        .attribute("l", "0")
-        .attribute("t", "0")
-        .attribute("r", "0")
-        .attribute("b", "0")
+        .attribute("l", &int_attr(padding.left))
+        .attribute("t", &int_attr(padding.top))
+        .attribute("r", &int_attr(padding.right))
+        .attribute("b", &int_attr(padding.bottom))
         .end_element();
 }
 
@@ -1094,6 +1226,120 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn picture_presets_survive_drawing_serialization() {
+        for preset in [None, Some("ellipse"), Some("roundRect")] {
+            let mut value = serde_json::to_value(crate::image::placeholder_image("rId1")).unwrap();
+            if let Some(preset) = preset {
+                value["shapeType"] = serde_json::json!(preset);
+            }
+            let image: Image = serde_json::from_value(value).unwrap();
+            let xml = serialize_drawing_content(&image, &mut context()).unwrap();
+            assert!(xml.contains(&format!(
+                r#"<a:prstGeom prst="{}">"#,
+                preset.unwrap_or("rect")
+            )));
+            let limits = crate::xml::ParseLimits::default();
+            let parsed = crate::xml::parse_xml(
+                xml.as_bytes(),
+                "drawing.xml",
+                &mut crate::xml::ParseBudget::new(&limits),
+            )
+            .unwrap();
+            let image = crate::image::parse_drawing(parsed.root().unwrap(), None, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(image).unwrap()["shapeType"].as_str(),
+                preset
+            );
+        }
+    }
+
+    fn drawing_root(xml: &str) -> crate::xml::XmlElement {
+        let limits = crate::xml::ParseLimits::default();
+        crate::xml::parse_xml(
+            xml.as_bytes(),
+            "drawing.xml",
+            &mut crate::xml::ParseBudget::new(&limits),
+        )
+        .unwrap()
+        .root()
+        .unwrap()
+        .clone()
+    }
+
+    fn start_tag<'a>(xml: &'a str, name: &str) -> &'a str {
+        let start = xml.find(&format!("<{name}")).unwrap();
+        &xml[start..start + xml[start..].find('>').unwrap() + 1]
+    }
+
+    #[test]
+    fn drawings_write_only_the_wrap_distances_and_effect_extent_they_hold() {
+        let picture = r#"<wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>"#;
+        for (container, effect, expected) in [
+            ("<wp:inline>", "", "<wp:inline>"),
+            (
+                r#"<wp:inline distT="0" distB="0" distL="0" distR="0">"#,
+                r#"<wp:effectExtent l="0" t="0" r="0" b="0"/>"#,
+                r#"<wp:inline distT="0" distB="0" distL="0" distR="0">"#,
+            ),
+            (
+                r#"<wp:inline distL="114300" distR="114300">"#,
+                r#"<wp:effectExtent l="19050" t="0" r="0" b="0"/>"#,
+                r#"<wp:inline distL="114300" distR="114300">"#,
+            ),
+        ] {
+            let source = format!(
+                r#"<w:drawing>{container}<wp:extent cx="2194560" cy="822960"/>{effect}{picture}</wp:inline></w:drawing>"#
+            );
+            let image = crate::image::parse_drawing(&drawing_root(&source), None, None).unwrap();
+            let xml = serialize_drawing_content(&image, &mut context()).unwrap();
+            assert_eq!(start_tag(&xml, "wp:inline"), expected);
+            if effect.is_empty() {
+                assert!(!xml.contains("wp:effectExtent"), "{xml}");
+            } else {
+                assert_eq!(start_tag(&xml, "wp:effectExtent"), effect);
+            }
+        }
+
+        let source = format!(
+            r#"<w:drawing><wp:anchor distL="114300" simplePos="0" relativeHeight="3" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="2194560" cy="822960"/><wp:wrapSquare wrapText="bothSides"/>{picture}</wp:anchor></w:drawing>"#
+        );
+        let image = crate::image::parse_drawing(&drawing_root(&source), None, None).unwrap();
+        let xml = serialize_drawing_content(&image, &mut context()).unwrap();
+        let anchor = start_tag(&xml, "wp:anchor");
+        assert!(
+            anchor.starts_with(r#"<wp:anchor distL="114300" simplePos="0""#),
+            "{anchor}"
+        );
+        assert!(!xml.contains("wp:effectExtent"), "{xml}");
+    }
+
+    #[test]
+    fn inline_shapes_keep_their_effect_extent_and_zero_wrap_distances() {
+        let graphic = r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic>"#;
+        for (effect, expected) in [
+            ("", None),
+            (
+                r#"<wp:effectExtent l="19050" t="0" r="0" b="0"/>"#,
+                Some(r#"<wp:effectExtent l="19050" t="0" r="0" b="0"/>"#),
+            ),
+        ] {
+            let source = format!(
+                r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>{effect}<wp:docPr id="7" name="Shape 7"/>{graphic}</wp:inline></w:drawing>"#
+            );
+            let shape = crate::shape::parse_shape_from_drawing(&drawing_root(&source)).unwrap();
+            let xml = serialize_shape_content(&shape, &mut context()).unwrap();
+            assert_eq!(
+                start_tag(&xml, "wp:inline"),
+                r#"<wp:inline distT="0" distB="0" distL="0" distR="0">"#
+            );
+            match expected {
+                Some(expected) => assert_eq!(start_tag(&xml, "wp:effectExtent"), expected),
+                None => assert!(!xml.contains("wp:effectExtent"), "{xml}"),
+            }
+        }
     }
 
     #[test]

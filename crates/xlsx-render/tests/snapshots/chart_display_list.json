@@ -1,7 +1,21 @@
 {
   "charts": [
     {
-      "label": "Revenue, pie chart, 1 series, 1 categories"
+      "clip": {
+        "h": 120.0,
+        "w": 200.0,
+        "x": 10.0,
+        "y": 20.0
+      },
+      "id": "xl/drawings/drawing1.xml#0",
+      "label": "Revenue, pie chart, 1 series, 1 categories",
+      "movable": false,
+      "rect": {
+        "h": 120.0,
+        "w": 200.0,
+        "x": 10.0,
+        "y": 20.0
+      }
     }
   ],
   "commands": [
@@ -20,22 +34,22 @@
       "y": 20.0
     },
     {
-      "align": "left",
+      "align": "center",
       "bold": true,
       "chart": true,
       "clip": {
         "h": 16.25,
-        "w": 184.0,
-        "x": 18.0,
-        "y": 25.0
+        "w": 181.0,
+        "x": 19.5,
+        "y": 28.849998474121094
       },
       "color": "#222222",
       "fontFamily": "Calibri, sans-serif",
       "fontSize": 9.75,
       "op": "text",
       "text": "Revenue",
-      "x": 18.0,
-      "y": 38.0
+      "x": 110.0,
+      "y": 41.849998474121094
     },
     {
       "clip": {
@@ -48,8 +62,8 @@
       "fill": "#4472C4",
       "first": {
         "type": "move",
-        "x": 86.0,
-        "y": 90.32
+        "x": 110.0,
+        "y": 98.68
       },
       "last": {
         "type": "close"

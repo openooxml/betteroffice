@@ -71,7 +71,8 @@ export function remotePresencePageWindow(
   metrics: RemotePresencePageMetrics,
   columnTop: number,
   viewportTop: number,
-  viewportBottom: number
+  viewportBottom: number,
+  maxPages = REMOTE_PRESENCE_MAX_PAGES
 ): RemotePresencePageWindow | null {
   if (
     metrics.tops.length === 0 ||
@@ -89,7 +90,7 @@ export function remotePresencePageWindow(
 
   const start = Math.max(0, firstVisible - REMOTE_PRESENCE_PAGE_BUFFER);
   const end = Math.min(metrics.tops.length - 1, lastVisible + REMOTE_PRESENCE_PAGE_BUFFER);
-  if (end - start + 1 <= REMOTE_PRESENCE_MAX_PAGES) return { start, end };
+  if (end - start + 1 <= maxPages) return { start, end };
 
   const viewportCenter = (top + bottom) / 2;
   const nextCenter = lowerBound(metrics.centers, viewportCenter);
@@ -101,12 +102,12 @@ export function remotePresencePageWindow(
       ? previousCenter
       : nextCenter;
   const centeredStart = Math.min(
-    Math.max(0, center - Math.floor((REMOTE_PRESENCE_MAX_PAGES - 1) / 2)),
-    metrics.tops.length - REMOTE_PRESENCE_MAX_PAGES
+    Math.max(0, center - Math.floor((maxPages - 1) / 2)),
+    metrics.tops.length - maxPages
   );
   return {
     start: centeredStart,
-    end: centeredStart + REMOTE_PRESENCE_MAX_PAGES - 1,
+    end: centeredStart + maxPages - 1,
   };
 }
 

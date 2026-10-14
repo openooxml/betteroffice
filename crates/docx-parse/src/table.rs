@@ -166,12 +166,9 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
     let mut shading = ShadingProperties::default();
     if let Some(fill) = element
         .attribute(Some("w"), "fill")
-        .filter(|value| !value.is_empty() && *value != "auto")
+        .filter(|value| !value.is_empty())
     {
-        shading.fill = Some(ColorValue {
-            rgb: Some(fill.to_owned()),
-            ..ColorValue::default()
-        });
+        shading.fill = Some(ColorValue::from_attribute(fill));
     }
     if let Some(theme_fill) = element
         .attribute(Some("w"), "themeFill")
@@ -192,12 +189,9 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
     }
     if let Some(color) = element
         .attribute(Some("w"), "color")
-        .filter(|value| !value.is_empty() && *value != "auto")
+        .filter(|value| !value.is_empty())
     {
-        shading.color = Some(ColorValue {
-            rgb: Some(color.to_owned()),
-            ..ColorValue::default()
-        });
+        shading.color = Some(ColorValue::from_attribute(color));
     }
     if let Some(theme_color) = element
         .attribute(Some("w"), "themeColor")
@@ -246,7 +240,7 @@ pub fn parse_document_table_look(element: Option<&XmlElement>) -> Option<TableLo
             *slot = Some(!matches_ci(raw, &["0", "false", "off"]));
         }
     }
-    (look != TableLook::default()).then_some(look)
+    Some(look)
 }
 
 pub fn parse_conditional_format_style(
@@ -785,6 +779,17 @@ mod tests {
     }
 
     #[test]
+    fn auto_shading_color_is_authored_content() {
+        let element = root(r#"<w:shd w:val="clear" w:color="auto" w:fill="FBE4D5"/>"#);
+        let shading = parse_document_shading(Some(&element)).unwrap();
+        assert_eq!(shading.color.as_ref().unwrap().auto, Some(true));
+        assert_eq!(
+            shading.fill.as_ref().unwrap().rgb.as_deref(),
+            Some("FBE4D5")
+        );
+    }
+
+    #[test]
     fn pins_document_measurement_grid_span_and_vmerge_normalization() {
         let properties = root(
             r#"<w:tcPr xmlns:w="w"><w:tcW w:type="bogus"/><w:gridSpan w:val="1"/><w:vMerge w:val="bogus"/><w:noWrap w:val="0"/></w:tcPr>"#,
@@ -800,6 +805,28 @@ mod tests {
         assert_eq!(parsed.grid_span, None);
         assert_eq!(parsed.v_merge.as_deref(), Some("continue"));
         assert_eq!(parsed.no_wrap, None);
+    }
+
+    #[test]
+    fn empty_table_look_remains_distinct_from_an_omitted_look() {
+        for (xml, expected) in [
+            ("<w:tblPr/>", None),
+            (
+                "<w:tblPr><w:tblLook/></w:tblPr>",
+                Some(TableLook::default()),
+            ),
+        ] {
+            let properties = root(xml);
+            assert_eq!(
+                parse_document_table_properties(Some(&properties)).and_then(|value| value.look),
+                expected
+            );
+            assert_eq!(
+                crate::formatting::parse_table_properties(Some(&properties))
+                    .and_then(|value| value.look),
+                expected
+            );
+        }
     }
 
     #[test]

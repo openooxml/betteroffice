@@ -5,8 +5,8 @@ use crate::settings::is_valid_utf8_xml_text;
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
 pub use ooxml_drawingml::{
-    Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme, get_default_theme, get_major_font,
-    get_minor_font, get_theme_color, get_theme_fonts, resolve_theme_font_ref,
+    ColorMap, Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme, get_default_theme,
+    get_major_font, get_minor_font, get_theme_color, get_theme_fonts, resolve_theme_font_ref,
 };
 
 pub fn parse_theme(
@@ -40,6 +40,7 @@ pub fn parse_theme_element(root: Option<&XmlElement>) -> Theme {
         font_scheme: parse_font_scheme(
             theme_elements.and_then(|element| element.child("a", "fontScheme")),
         ),
+        color_map: ColorMap::default(),
     }
 }
 

@@ -1,15 +1,16 @@
 # betteroffice-pptx
 
-Read, edit, and lay out PPTX presentations from Python. The engine is the Rust
-[BetterOffice](https://betteroffice.dev) PPTX core, compiled into the wheel —
+Read, edit, and lay out PPTX presentations from Python. `python-pptx` reads a
+deck and writes one back; this also *lays slides out* — line breaking, text
+metrics, a display list — and merges edits across replicas, because the Rust
+[BetterOffice](https://betteroffice.dev) PPTX core is compiled into the wheel:
 no PowerPoint, no LibreOffice subprocess, no COM.
-
-Editing is in-memory today: see [Writing](#writing) before you reach for
-`save()`.
 
 ```bash
 pip install betteroffice-pptx
 ```
+
+The distribution is hyphenated, the module is not: `import betteroffice_pptx`.
 
 ## Read a deck
 
@@ -21,8 +22,9 @@ deck = Presentation.open_path("quarterly.pptx")
 for slide in deck:
     print(slide.index, slide.name, repr(slide.text))
 
-shape = deck[0].shapes[0]
-print(shape.kind, shape.geometry, shape.x, shape.y, shape.width, shape.height)
+shape = next((s for slide in deck for s in slide.shapes), None)
+if shape is not None:
+    print(shape.kind, shape.geometry, shape.x, shape.y, shape.width, shape.height)
 ```
 
 Geometry is in English Metric Units — 914400 to the inch. The module exports
@@ -69,26 +71,155 @@ UTF-16 code units, and every paragraph ends with a pilcrow occupying one of
 them.
 
 ```python
-story = deck[0].shapes[0].stories[0]
-print(story.text, story.length)
+story = next(
+    (s for slide in deck for shape in slide.shapes for s in shape.stories), None
+)
+if story is not None:
+    print(story.text, story.length)
 
-deck.insert_text(story.id, 0, "Q3 ", bold=True)
-deck.format_text(story.id, 0, 3, color="#dc2626")
-deck.insert_paragraph_break(story.id, 3)
-removed = deck.delete_text(story.id, 0, 3)
-print(removed.text)          # 'Q3 '
+    deck.insert_text(story.id, 0, "Q3 ", bold=True)
+    deck.format_text(story.id, 0, 3, color="#dc2626")
+    deck.insert_paragraph_break(story.id, 3)
+    removed = deck.delete_text(story.id, 0, 3)
+    print(removed.text)      # 'Q3 '
 ```
+
+A shape with no text has no story, so a deck of pictures alone yields none.
+`deck.story(id)` looks one up directly and raises `KeyError` if it is gone.
 
 `format_text` patches only the arguments you pass, and a range spanning several
 paragraphs styles each of them as a single undoable edit. `delete_text` is the
 strict one: a range crossing a paragraph boundary raises `RangeError` rather
 than silently swallowing the break.
 
-## Lay a slide out
+## Agent proposals
+
+Proposals stage a group of edits without modifying the deck, its saved file, or
+its undo history:
 
 ```python
-deck.register_font("Inter", open("Inter-Regular.ttf", "rb").read())
-deck.register_font("Inter", open("Inter-Bold.ttf", "rb").read(), bold=True)
+proposal = deck.propose("editor-agent", [{
+    "type": "setSlideNotes",
+    "slideId": deck.slide_ids[0],
+    "text": "Explain the customer outcome first.",
+}], note="Clarify the opening")
+
+preview = deck.preview_proposal(proposal.id)
+deck.accept_proposal(proposal.id)
+deck.undo()
+```
+
+Register fonts before `render_proposal`, just as for `render_slide`.
+`proposals()` returns `Proposal` values with agent attribution, notes,
+`ProposalChange` values, and current `stale_targets`. `preview_proposal` returns
+a `ProposalPreview` containing fresh changes and the proposed deck snapshot.
+Snapshot and edit dictionaries use the core's camelCase JSON fields; the
+dataclass attributes use Python snake_case.
+
+Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
+`setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`, and
+`setSlideNotes`. They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
+Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
+geometry uses EMU. A group has 1–256 edits, applied in order, with up to 64
+pending groups per session.
+
+`accept_proposal` applies the entire validated group as one local undo step,
+regardless of the current `origin` setting. A changed target raises
+`StaleProposalError` with a `targets` list. Review the fresh preview before
+retrying with `force=True`. Deleted targets and invalid ranges remain errors.
+`reject_proposal(id)` removes the proposal without changing the deck.
+
+Pending proposals are local to the open session and are excluded from saved
+PPTX files and collaboration updates. Accepted edits save and synchronize
+normally, and Undo preserves unrelated peer edits.
+
+## Edit in version-checked batches
+
+`read_content` returns the slides and each story's text with the session
+version it was read at; `apply_edits` applies a batch against that version as
+one transaction and one undo step, or returns a typed refusal with nothing
+changed:
+
+```python
+read = deck.read_content()
+story = read["stories"][0]
+within = {key: story[key] for key in ("slideId", "shapeId", "storyId")}
+result = deck.apply_edits({
+    "expectVersion": read["version"],
+    "steps": [
+        {"op": "replaceText", "target": {"kind": "search", "within": within, "text": "Q3"},
+         "text": "Q4"},
+        {"op": "setSlideNotes", "target": {"slideId": story["slideId"]}, "text": "Updated"},
+    ],
+})
+if not result["ok"]:
+    print(result["failure"]["code"], result["failure"].get("stepIndex"))
+```
+
+Requests and results are the dictionaries of the
+[TypeScript batch contract](../../packages/pptx/src/edits.ts), typed here as
+`PptxEditRequest`, `PptxEditResult` and friends. A story reads as its
+paragraphs joined by `\n`, with story-local UTF-16 offsets. `find_text`
+searches exactly and within paragraphs, and `validate_edits` runs every check
+without changing anything. Steps insert, replace and delete text within one
+paragraph, format and align text, replace speaker notes, and set a top-level
+shape's rectangle, fill or outline. `"history": "none"` keeps a batch out of
+undo history; `"source": "agent"` records provenance only. Policy failures come
+back with `"ok": False` and a `code`; a malformed request raises `ValueError`.
+Only an applied batch sets `is_edited`. Versions and ids belong to the open
+session.
+
+## Export structured content
+
+`export_structured` returns the committed deck as structured content with the
+version it was read at, and `export_markdown` renders that same read as
+Markdown; neither changes anything:
+
+```python
+read = deck.export_structured(include_notes=True)
+for slide in read["content"]["slides"]:
+    for shape in slide["shapes"]:
+        for story in shape["stories"]:
+            for paragraph in story["paragraphs"]:
+                print(slide["index"], paragraph["list"], paragraph["anchor"])
+
+markdown = deck.export_markdown()["content"]["markdown"]
+```
+
+The dictionaries are the
+[TypeScript export contract](../../packages/pptx/src/structuredExport.ts):
+slides in deck order, shapes in shape-tree order, paragraphs with levels,
+resolved list markers, runs, fields and links, tables with merges, and
+placeholders with alternative text for pictures, media, charts, SmartArt and
+embedded objects. Every record carries an anchor and, when it was read from the
+file, its source part, SHA-256 and element path. A `range` anchor is a batch
+text target: pass it as a step's `"target"` at the version it was read at.
+Hidden slides and shapes, notes and comments are keyword options, and every
+omission is listed in `diagnostics`; a slide whose visibility an older collaboration update does not
+record is exported with `hidden: None` and a `visibility-unknown` diagnostic. Unusable limits come back with `"ok": False`.
+`export_pptx_structured(data, options=...)` and `export_pptx_markdown` read
+bytes with the camelCase wire options and return the content alone,
+`render_pptx_markdown(content)` renders content read earlier, and these raise
+`ExportError` (its `failure` is the refusal) for unusable limits and
+`ParseError` for bytes that are not a PPTX.
+
+## Lay a slide out
+
+Register a face before laying out slide text; until then, `render_slide` raises:
+
+```python
+deck.render_slide(0)
+# RenderError: no font has been registered for slide text
+```
+
+Register the faces the deck uses — one call per family, weight, and slant — and
+it lays out:
+
+```python
+from pathlib import Path
+
+deck.register_font("Inter", Path("Inter-Regular.ttf").read_bytes())
+deck.register_font("Inter", Path("Inter-Bold.ttf").read_bytes(), bold=True)
 
 layout = deck.render_slide(0)
 print(layout.width, layout.height, len(layout))   # 1280.0 720.0 42
@@ -96,12 +227,24 @@ layout.write("slide-0.json")
 scene = layout.to_dict()
 ```
 
-`render_slide` returns the display list — the same drawing contract the browser
-editor paints, as JSON. There is no PPTX rasterizer yet, so this is a scene
-description rather than pixels; feed it to your own canvas or renderer.
+Font selection tries the requested family's style, then that family without
+italic, without bold and plain, then the closest style in the first registered
+family. Known requested families supply their measured metrics.
 
-No font is compiled into the wheel, so families you do not register fall back
-to the engine's metrics-only path. Register the faces you actually use.
+`render_slide` returns the display list — the same drawing contract the browser
+editor paints, as JSON — for hosts that paint it themselves. `render_png`
+rasterizes a slide instead, resolving pictures out of the package so only fonts
+need registering:
+
+```python
+png = deck.render_png(0, scale=2.0)
+print(png.width, png.height, png.skipped_images)   # 2560 1440 0
+png.write("slide-0.png")
+```
+
+`background` picks what fills the pixels the slide leaves uncovered: `"slide"`
+(the default, opaque white under the slide's own background), `"transparent"`,
+or a `#rrggbb` color.
 
 ## Collaboration
 
@@ -109,14 +252,13 @@ to the engine's metrics-only path. Register the faces you actually use.
 order to converge:
 
 ```python
+data = deck.save()
 left = Presentation.open_collaborative(data)
 right = Presentation.open_collaborative(data)
-
-left.move_shape(0, left[0].shapes[0].id, 100000, 100000)
-right.apply_update(left.diff(right.state_vector()))   # right now agrees
-
+left.add_text_box(0, x=INCH, y=INCH, width=4 * INCH, height=INCH, text="Q3")
+right.apply_update(left.diff(right.state_vector()))
 joiner = Presentation.open_collaborative(data)
-joiner.apply_update(left.state_as_update())           # catch up from nothing
+joiner.apply_update(left.state_as_update())
 ```
 
 A deck from `open` or `open_path` is *not* a replica: it has no client ID of its
@@ -141,7 +283,8 @@ oversized payload is refused before it is copied.
 
 ```python
 deck.author = "ana"
-deck.move_shape(0, shape_id, 0, 0)
+edit = deck.add_text_box(0, x=INCH, y=INCH, width=INCH, height=INCH, text="Q3")
+deck.move_shape(0, edit.shape_id, 0, 0)
 deck.add_undo_barrier()      # the next edit starts a new undo step
 deck.undo()
 deck.redo()
@@ -157,44 +300,36 @@ an agent's write is not something the user undoes by accident.
 
 ## Writing
 
-**Edits do not reach a saved file yet.** The engine serializes the parsed
-package, not the edited model, so `save()` on a deck you have edited would
-silently drop every change. Rather than hand you a file that quietly lost your
-work, `save()` and `save_path()` refuse once anything has been edited:
+`save()` and `save_path()` serialize the deck with every accepted edit
+applied. Slides you did not touch keep their exact source part bytes; edited
+slides are patched at the XML level, so unmodeled markup survives:
 
 ```python
 deck = Presentation.open(data)
-deck.save_path("copy.pptx")        # fine: nothing was edited
-
 deck.insert_slide(1)
 deck.is_edited                     # True
-deck.save()                        # UnsupportedWriteError
+deck.save_path("copy.pptx")        # edits included
+
+reopened = Presentation.open_path("copy.pptx")
+reopened.slide_count               # one more than the source
 ```
 
-`UnsupportedWriteError` is its own `PptxError` subclass, so "cannot write edits
-yet" is distinguishable from a zip or filesystem failure without matching on a
-message, and `is_edited` lets a pipeline branch before it does expensive work
-rather than discovering the refusal at the end. Only an edit the engine
-*accepted* sets it: an edit that raised leaves the deck saveable.
-
-Reading, laying out, and collaborative editing are fully usable today; treat
-this release as read, render, and edit-in-memory. Write-back is the next thing
-to land, and the refusal disappears when it does.
+`is_edited` reports whether the engine has accepted an edit since the deck was
+opened. Only an edit the engine *accepted* sets it: an edit that raised leaves
+the flag untouched.
 
 ## Compared with python-pptx
 
 | | `python-pptx` | `betteroffice-pptx` |
 | --- | --- | --- |
 | Read shapes and text | yes | yes |
-| Write shapes and text back to a file | yes | not yet — see *Writing* |
+| Write shapes and text back to a file | yes | yes — see *Writing* |
 | Lay slides out (line breaking, text metrics) | no | yes, display list |
 | Collaborative editing (CRDT) | no | yes, Yrs |
 | Undo/redo | no | yes |
 | Engine | pure Python | Rust, compiled |
 
-`python-pptx` is a far broader library and covers plenty this does not —
-charts, tables, and templating in particular. If you need slides laid out, or
-edits that merge across replicas, that is the gap this fills.
+Use `betteroffice-pptx` for slide layout and collaborative editing.
 
 ## API
 
@@ -205,24 +340,32 @@ edits that merge across replicas, that is the gap this fills.
 | `deck.snapshot()` | the whole deck as plain data |
 | `deck[key]` / `deck.slide(key)` | a `Slide` by index or ID |
 | `deck.slide_ids` / `slide_count` / `layouts` | deck metadata |
+| `deck.width_emu` / `height_emu` | slide size in EMU |
+| `deck.author` / `deck.origin` | who an edit is attributed to, and how |
 | `deck.story(id)` | one text flow |
 | `deck.media()` | embedded images and other binary parts |
 | `insert_slide` / `delete_slide` / `move_slide` | slide order |
 | `add_text_box` / `add_shape` / `remove_shape` | shape lifecycle |
-| `move_shape` / `resize_shape` | shape geometry |
+| `move_shape` / `resize_shape` / `set_shape_rect` | shape geometry |
 | `set_shape_fill` / `set_shape_stroke` / `set_shape_adjust` | shape styling |
 | `insert_text` / `delete_text` / `format_text` | text editing |
 | `insert_paragraph_break` | split a paragraph |
-| `register_font` / `render_slide` | layout |
+| `add_comment` / `reply_to_comment` / `set_comment_status` / `remove_comment` | comment threads |
+| `comments` / `comment_flavor` / `set_comment_flavor` | read comments, pick the comment system |
+| `export_structured` / `export_markdown` | versioned structured content and Markdown |
+| `export_pptx_structured` / `export_pptx_markdown` / `render_pptx_markdown` | export bytes, render content |
+| `propose` / `proposals` / `preview_proposal` / `render_proposal` | stage and preview agent edits |
+| `accept_proposal` / `reject_proposal` | apply or drop a proposal |
+| `register_font` / `render_slide` / `render_png` | layout and PNG export |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
-| `deck.is_collaborative` | whether this deck may exchange updates |
-| `deck.is_edited` | whether an accepted edit has made `save` refuse |
+| `deck.is_collaborative` / `deck.client_id` | whether this deck may exchange updates, and as whom |
+| `deck.is_edited` | whether the engine has accepted an edit since open |
 | `undo` / `redo` / `add_undo_barrier` / `can_undo` / `can_redo` | history |
 | `deck.save()` / `save_path(path)` | serialize to PPTX — see *Writing* |
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`NotCollaborativeError`, `UnsupportedWriteError`.
+`NotCollaborativeError`, `StaleProposalError`, `ExportError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.
@@ -230,7 +373,7 @@ raises `ValueError`.
 Parser bounds can be tightened for untrusted input:
 
 ```python
-Presentation.open(untrusted, limits={"max_shapes": 5_000, "max_runs": 50_000})
+Presentation.open_path("untrusted.pptx", limits={"max_shapes": 5_000, "max_runs": 50_000})
 ```
 
 An unknown limit name raises `ValueError` rather than being ignored.
@@ -254,8 +397,9 @@ The leak is easy to hit by accident, because the release does not have to be an
 explicit `del`:
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
 with ThreadPoolExecutor() as pool:
-    decks = [f.result() for f in [pool.submit(load, p) for p in paths]]
+    decks = list(pool.map(Presentation.open_path, ["deck.pptx", "quarterly.pptx"]))
 # every deck was opened on a worker and is now dropped on the main thread
 ```
 
@@ -267,16 +411,15 @@ its own; the deck must also become garbage on its owning thread. Open, use, and
 drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
-Engine calls hold the GIL for their duration, unlike `betteroffice-xlsx`. Only
-the file I/O releases it: `open_path`'s read, and the writes in `save_path`,
-`Media.write` and `DisplayList.write`.
+The heavy operations release the GIL while they run — `open`, `open_path`,
+`open_collaborative`, `render_slide`, `render_png`, `save`, `save_path`,
+`register_font`, and `apply_update` — as do the file writes in `Media.write`,
+`DisplayList.write`, and `Png.write`. `render_proposal` holds the GIL.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`. `save` re-zips the parts the
-model retained; part bytes survive unchanged but the container is rebuilt, so
-output is not byte-identical to the source, and it refuses on an edited deck —
-see *Writing*.
+Pre-1.0: the API may change between minor versions. Saving patches edited XML,
+preserves untouched parts and rebuilds the ZIP container.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.
@@ -284,7 +427,7 @@ Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 ## Links
 
 - [BetterOffice](https://betteroffice.dev) — the project
-- [Documentation](https://docs.betteroffice.dev)
+- [Documentation](https://docs.betteroffice.dev/docs/python)
 - [Source](https://github.com/openooxml/betteroffice) — `bindings/python-pptx`
 - [betteroffice-pptx on crates.io](https://crates.io/crates/betteroffice-pptx) — the engine this wraps
 

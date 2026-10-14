@@ -5,11 +5,14 @@ compile_error!("betteroffice-docx-raster is server-side only");
 
 mod font;
 
-pub use font::measure_text;
+pub use font::{GlyphCache, measure_text};
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{BuildHasher, Hasher};
 use std::io::Cursor;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine as _;
 use docx_layout::display_list::{
@@ -20,18 +23,105 @@ use docx_layout::display_list::{
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask,
-    Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, Rect, SpreadMode, Stroke,
-    StrokeDash, Transform,
+    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin,
+    LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
+    RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-use font::{GlyphCache, PaintContext};
+use font::{FontSpecCache, PaintContext};
 
 /// Layout font chains keyed as `"<family lowercase>|<bold>|<italic>"`.
 pub type FontChains = HashMap<String, Vec<FontId>>;
 
 /// Embedded image bytes keyed by display-list relationship ID.
 pub type ImageMap = HashMap<String, Vec<u8>>;
+
+/// One decoded image, at twice the surface a page may allocate.
+pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+/// Every image decoded for one page, at four times that surface.
+pub const MAX_PAGE_IMAGE_PIXELS: u64 = 67_108_864;
+/// One decoded image's source buffer plus the pixmap it converts to, at
+/// [`MAX_IMAGE_PIXELS`] of RGBA8. A deeper source costs more per pixel, so
+/// pixels alone do not bound the memory a decode needs.
+pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
+/// The same, summed across every image one page decodes.
+pub const MAX_PAGE_IMAGE_BYTES: u64 = 536_870_912;
+/// One `data:` payload, matching the bytes a facade registers for a
+/// relationship id.
+pub const MAX_DATA_URL_BYTES: u64 = 33_554_432;
+/// One rendered page's longest side.
+pub const MAX_PAGE_DIM: u32 = 16_384;
+/// One rendered page's surface.
+pub const MAX_PAGE_PIXELS: u64 = 16_777_216;
+/// Scratch one page render may allocate for crop masks, clip surfaces and
+/// generated paths, per pixel of the page being drawn. A mask and a clip
+/// surface are both page-sized, so the page is what their cost scales with:
+/// the crop-mask cache accounts for 8 of these bytes, a clip surface 5, the one
+/// mask live outside the cache 1, and generated paths the rest.
+pub const MAX_PAGE_SCRATCH_BYTES_PER_PIXEL: u64 = 32;
+/// The floor under that, so a small page still affords its clips and paths.
+pub const MIN_PAGE_SCRATCH_BYTES: u64 = 33_554_432;
+/// Glyphs one page render may paint across every run on it.
+pub const MAX_PAGE_GLYPHS: u64 = 1_000_000;
+
+const MASK_BYTES_PER_PIXEL: u64 = 1;
+const CLIP_BYTES_PER_PIXEL: u64 = 5;
+// Keeps the affordable wave step count under f32 stagnation: raising the scratch
+// budget per pixel or lowering this turns `paint_wave`'s loop into a hang.
+const PATH_SEGMENT_BYTES: u64 = 40;
+const MAX_CACHED_CROP_MASKS: usize = 16;
+const MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL: u64 = 8;
+const CLIP_SURFACE_SLACK: u64 = 4;
+/// Decoded-pixel cap for one export's [`ImageCache`], at RGBA8.
+pub const MAX_IMAGE_CACHE_BYTES: u64 = 268_435_456;
+/// Bookkeeping one cached image costs beyond its pixels.
+const IMAGE_CACHE_ENTRY_BYTES: u64 = 128;
+/// Process-monotonic decode counter for benchmarks and cache tests.
+#[doc(hidden)]
+pub static IMAGE_DECODE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// The part whose relationships own a display-list relationship id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageScope<'a> {
+    /// `word/document.xml`.
+    Body,
+    /// A header or footer part, named by its `HfRegion` `r_id`.
+    HeaderFooter(&'a str),
+    /// `word/footnotes.xml` or `word/endnotes.xml`.
+    Notes(NoteKind),
+}
+
+/// The notes part a `NoteRegion` belongs to. The display list leaves `kind`
+/// out for footnotes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteKind {
+    Footnote,
+    Endnote,
+}
+
+impl NoteKind {
+    fn from_region(kind: Option<&str>) -> Self {
+        match kind {
+            Some("endnote") => Self::Endnote,
+            _ => Self::Footnote,
+        }
+    }
+}
+
+/// Separates a scope from the relationship id it owns.
+const SCOPE_SEPARATOR: char = '\u{1f}';
+
+/// Part-scoped [`ImageMap`] key. A header and the body can both use `rId9` for
+/// different media, so bytes are keyed by owning part and resolve in that part
+/// alone.
+pub fn scoped_image_key(scope: ImageScope<'_>, rel_id: &str) -> String {
+    match scope {
+        ImageScope::Body => format!("{SCOPE_SEPARATOR}{rel_id}"),
+        ImageScope::HeaderFooter(part) => format!("hf:{part}{SCOPE_SEPARATOR}{rel_id}"),
+        ImageScope::Notes(NoteKind::Footnote) => format!("footnotes{SCOPE_SEPARATOR}{rel_id}"),
+        ImageScope::Notes(NoteKind::Endnote) => format!("endnotes{SCOPE_SEPARATOR}{rel_id}"),
+    }
+}
 
 /// Shared resources used by layout and rasterization.
 pub struct RenderResources<'a> {
@@ -51,23 +141,62 @@ impl<'a> RenderResources<'a> {
     }
 }
 
+/// A rendered page and the image references it left undrawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedPage {
+    pub bytes: Vec<u8>,
+    pub skipped_images: usize,
+}
+
 /// Renders one display-list page to deterministic PNG bytes.
 pub fn render_png(
     display_list: &DisplayList,
     page_ordinal: usize,
     resources: &RenderResources<'_>,
 ) -> Result<Vec<u8>, String> {
+    render_page(display_list, page_ordinal, resources).map(|page| page.bytes)
+}
+
+/// Renders one display-list page, reporting the image references it skipped.
+/// Each call starts from a fresh glyph cache; pass a shared one to
+/// [`render_page_cached`] when rendering many pages of one export.
+pub fn render_page(
+    display_list: &DisplayList,
+    page_ordinal: usize,
+    resources: &RenderResources<'_>,
+) -> Result<RenderedPage, String> {
+    render_page_cached(
+        display_list,
+        page_ordinal,
+        resources,
+        &mut GlyphCache::default(),
+        &mut ImageCache::default(),
+    )
+}
+
+/// Renders one display-list page into caches shared across an export's renders.
+pub fn render_page_cached(
+    display_list: &DisplayList,
+    page_ordinal: usize,
+    resources: &RenderResources<'_>,
+    glyphs: &mut GlyphCache,
+    images: &mut ImageCache,
+) -> Result<RenderedPage, String> {
     let page = display_list
         .pages
         .get(page_ordinal)
         .ok_or_else(|| format!("page ordinal {page_ordinal} is out of range"))?;
     let width = page_dimension(&page.width, "page width")?;
     let height = page_dimension(&page.height, "page height")?;
+    validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer::new(width, height, glyphs, images);
     renderer.paint_page(&mut pixmap, page, resources)?;
-    encode_png(pixmap, width, height)
+    Ok(RenderedPage {
+        bytes: encode_png(pixmap, width, height)?,
+        skipped_images: renderer.scratch.images.skipped,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,17 +207,207 @@ pub(crate) struct FRect {
     h: f32,
 }
 
-#[derive(Default)]
-struct Renderer {
-    clips: ClipSurface,
-    glyphs: GlyphCache,
+/// What one page render may spend beyond the page surface itself. Masks, clip
+/// surfaces and generated paths are charged in the bytes they are about to
+/// allocate, which is the one unit they share; glyphs keep their own counter,
+/// since a glyph costs its rasterization rather than its footprint. Both are
+/// charged before the allocation, so a page cannot overspend and then refuse.
+///
+/// A surface is held rather than consumed: one clip surface and one crop-mask
+/// cache are alive at a time, so they are charged their high-water mark and
+/// refilling one allocates nothing further. A generated path is charged every
+/// time it is built, because one primitive expands into an unbounded one.
+pub(crate) struct PageBudget {
+    scratch: u64,
+    limit: u64,
+    masks: u64,
+    clips: u64,
+    glyphs: u64,
 }
 
-impl Renderer {
+impl PageBudget {
+    fn new(width: u32, height: u32) -> Self {
+        let limit = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(MAX_PAGE_SCRATCH_BYTES_PER_PIXEL)
+            .max(MIN_PAGE_SCRATCH_BYTES);
+        Self {
+            scratch: 0,
+            limit,
+            masks: 0,
+            clips: 0,
+            glyphs: 0,
+        }
+    }
+
+    fn charge_scratch(&mut self, bytes: u64) -> Result<(), String> {
+        let spent = self.scratch.saturating_add(bytes);
+        if spent > self.limit {
+            return Err(format!(
+                "page exceeds its {} byte render work budget",
+                self.limit
+            ));
+        }
+        self.scratch = spent;
+        Ok(())
+    }
+
+    /// Charges the growth of a held surface, leaving what it already cost
+    /// charged once.
+    fn charge_high_water(&mut self, held: u64, bytes: u64) -> Result<u64, String> {
+        let growth = bytes.saturating_sub(held);
+        if growth == 0 {
+            return Ok(held);
+        }
+        self.charge_scratch(growth)?;
+        Ok(bytes)
+    }
+
+    fn charge_masks(&mut self, bytes: u64) -> Result<(), String> {
+        self.masks = self.charge_high_water(self.masks, bytes)?;
+        Ok(())
+    }
+
+    fn charge_clips(&mut self, bytes: u64) -> Result<(), String> {
+        self.clips = self.charge_high_water(self.clips, bytes)?;
+        Ok(())
+    }
+
+    fn charge_path(&mut self, segments: u64) -> Result<(), String> {
+        self.charge_scratch(segments.saturating_mul(PATH_SEGMENT_BYTES))
+    }
+
+    pub(crate) fn charge_glyphs(&mut self, glyphs: u64) -> Result<(), String> {
+        self.glyphs = self.glyphs.saturating_add(glyphs);
+        if self.glyphs > MAX_PAGE_GLYPHS {
+            return Err(format!(
+                "page exceeds the {MAX_PAGE_GLYPHS} painted glyph budget"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The geometry a crop mask was filled for. A mask covers the whole page
+/// whatever it crops, so identical geometry has to reuse one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CropMaskKey {
+    size: (u32, u32),
+    frame: [u32; 4],
+    transform: [u32; 6],
+}
+
+impl CropMaskKey {
+    fn new(pixmap: &Pixmap, frame: FRect, transform: Transform) -> Self {
+        Self {
+            size: (pixmap.width(), pixmap.height()),
+            frame: [
+                frame.x.to_bits(),
+                frame.y.to_bits(),
+                frame.w.to_bits(),
+                frame.h.to_bits(),
+            ],
+            transform: [
+                transform.sx.to_bits(),
+                transform.kx.to_bits(),
+                transform.ky.to_bits(),
+                transform.sy.to_bits(),
+                transform.tx.to_bits(),
+                transform.ty.to_bits(),
+            ],
+        }
+    }
+}
+
+/// Filled crop masks, most recently used first. A page walks its geometries in
+/// whatever order the display list lists them, so a cache that evicts by age of
+/// insertion drops the entry a round-robin is about to ask for again.
+struct MaskCache {
+    entries: Vec<(CropMaskKey, Rc<Mask>)>,
+    bytes: u64,
+    limit: u64,
+}
+
+impl MaskCache {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            entries: Vec::new(),
+            bytes: 0,
+            limit: u64::from(width)
+                .saturating_mul(u64::from(height))
+                .saturating_mul(MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL),
+        }
+    }
+
+    fn take(&mut self, key: CropMaskKey) -> Option<Rc<Mask>> {
+        let index = self.entries.iter().position(|(cached, _)| *cached == key)?;
+        let entry = self.entries.remove(index);
+        let mask = entry.1.clone();
+        self.entries.insert(0, entry);
+        Some(mask)
+    }
+
+    fn remember(&mut self, key: CropMaskKey, mask: Rc<Mask>, bytes: u64) {
+        if bytes > self.limit {
+            return;
+        }
+        self.entries.insert(0, (key, mask));
+        self.bytes += bytes;
+        while self.entries.len() > MAX_CACHED_CROP_MASKS || self.bytes > self.limit {
+            let Some((key, _)) = self.entries.pop() else {
+                break;
+            };
+            self.bytes = self
+                .bytes
+                .saturating_sub(mask_bytes(key.size.0, key.size.1));
+        }
+    }
+}
+
+fn mask_bytes(width: u32, height: u32) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(MASK_BYTES_PER_PIXEL)
+}
+
+/// Everything one page render accumulates: the caches that keep repeated work
+/// from repeating, and the budget that bounds the work left over.
+struct Scratch<'k> {
+    glyphs: &'k mut GlyphCache,
+    specs: FontSpecCache,
+    images: PageImages<'k>,
+    masks: MaskCache,
+    budget: PageBudget,
+}
+
+struct Renderer<'k> {
+    clips: ClipSurface,
+    scratch: Scratch<'k>,
+}
+
+impl<'k> Renderer<'k> {
+    fn new(
+        width: u32,
+        height: u32,
+        glyphs: &'k mut GlyphCache,
+        images: &'k mut ImageCache,
+    ) -> Self {
+        Self {
+            clips: ClipSurface::default(),
+            scratch: Scratch {
+                glyphs,
+                specs: FontSpecCache::default(),
+                images: PageImages::new(images),
+                masks: MaskCache::new(width, height),
+                budget: PageBudget::new(width, height),
+            },
+        }
+    }
+
     fn paint_page(
         &mut self,
         pixmap: &mut Pixmap,
-        page: &DisplayPage,
+        page: &'k DisplayPage,
         resources: &RenderResources<'_>,
     ) -> Result<(), String> {
         if let Some(background) = &page.background {
@@ -103,22 +422,32 @@ impl Renderer {
             .iter()
             .filter(|border| border.z_order == Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border)?;
+            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
         }
-        for primitive in &page.primitives {
-            self.paint_primitive(pixmap, primitive, resources)?;
-        }
-        for area in &page.note_areas {
-            for primitive in &area.separator_primitives {
-                self.paint_primitive(pixmap, primitive, resources)?;
-            }
-            for primitive in &area.primitives {
-                self.paint_primitive(pixmap, primitive, resources)?;
-            }
+        let (watermark, body) = page.primitives.split_at(
+            page.watermark_primitive_count
+                .unwrap_or(0)
+                .min(page.primitives.len()),
+        );
+        for primitive in watermark {
+            self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
         for region in [&page.header, &page.footer].into_iter().flatten() {
+            let scope = ImageScope::HeaderFooter(&region.r_id);
             for primitive in &region.primitives {
-                self.paint_primitive(pixmap, primitive, resources)?;
+                self.paint_primitive(pixmap, primitive, resources, scope)?;
+            }
+        }
+        for primitive in body {
+            self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
+        }
+        for area in &page.note_areas {
+            let scope = ImageScope::Notes(NoteKind::from_region(area.kind.as_deref()));
+            for primitive in &area.separator_primitives {
+                self.paint_primitive(pixmap, primitive, resources, scope)?;
+            }
+            for primitive in &area.primitives {
+                self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
         for border in page
@@ -126,7 +455,7 @@ impl Renderer {
             .iter()
             .filter(|border| border.z_order != Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border)?;
+            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
         }
         Ok(())
     }
@@ -134,19 +463,20 @@ impl Renderer {
     fn paint_primitive(
         &mut self,
         pixmap: &mut Pixmap,
-        primitive: &Primitive,
+        primitive: &'k Primitive,
         resources: &RenderResources<'_>,
+        scope: ImageScope<'k>,
     ) -> Result<(), String> {
         let attrs = primitive_attrs(primitive);
         validate_visual_attrs(primitive, attrs)?;
         let opacity = primitive_opacity(primitive)?;
         let clip = clip_rect(attrs)?;
         let clips = &mut self.clips;
-        let glyphs = &mut self.glyphs;
+        let scratch = &mut self.scratch;
         if let Some(clip) = clip {
-            clips.paint(pixmap, clip, |target, transform, mask| {
+            clips.paint(pixmap, clip, scratch, |target, scratch, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, glyphs, transform, mask, opacity,
+                    target, primitive, resources, scratch, transform, mask, opacity, scope,
                 )
             })
         } else {
@@ -154,55 +484,76 @@ impl Renderer {
                 pixmap,
                 primitive,
                 resources,
-                glyphs,
+                scratch,
                 Transform::identity(),
                 None,
                 opacity,
+                scope,
             )
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint_primitive_core(
+fn paint_primitive_core<'k>(
     pixmap: &mut Pixmap,
-    primitive: &Primitive,
+    primitive: &'k Primitive,
     resources: &RenderResources<'_>,
-    glyphs: &mut GlyphCache,
+    scratch: &mut Scratch<'k>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    scope: ImageScope<'k>,
 ) -> Result<(), String> {
     match primitive {
         Primitive::Text(run) => {
+            let retained_mask_bytes = scratch.masks.bytes;
             let mut context = PaintContext {
                 pixmap,
                 resources,
-                cache: glyphs,
+                cache: &mut *scratch.glyphs,
+                specs: &mut scratch.specs,
+                budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
+                retained_mask_bytes,
                 opacity,
             };
             font::paint_text(&mut context, run)
         }
         Primitive::GlyphRun(run) => {
+            let retained_mask_bytes = scratch.masks.bytes;
             let mut context = PaintContext {
                 pixmap,
                 resources,
-                cache: glyphs,
+                cache: &mut *scratch.glyphs,
+                specs: &mut scratch.specs,
+                budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
+                retained_mask_bytes,
                 opacity,
             };
             font::paint_glyph_run(&mut context, run)
         }
         Primitive::Rect(rect) => paint_rect(pixmap, rect, transform, mask, opacity),
-        Primitive::Line(line) => paint_line_primitive(pixmap, line, transform, mask, opacity),
-        Primitive::Image(image) => paint_image(pixmap, image, resources, transform, mask, opacity),
-        Primitive::Shape(shape) => paint_shape(pixmap, shape, transform, mask, opacity),
-        Primitive::Decoration(decoration) => {
-            paint_decoration(pixmap, decoration, transform, mask, opacity)
+        Primitive::Line(line) => {
+            paint_line_primitive(pixmap, line, transform, mask, opacity, &mut scratch.budget)
         }
+        Primitive::Image(image) => paint_image(
+            pixmap, image, resources, scratch, transform, mask, opacity, scope,
+        ),
+        Primitive::Shape(shape) => {
+            paint_shape(pixmap, shape, transform, mask, opacity, &mut scratch.budget)
+        }
+        Primitive::Decoration(decoration) => paint_decoration(
+            pixmap,
+            decoration,
+            transform,
+            mask,
+            opacity,
+            &mut scratch.budget,
+        ),
     }
 }
 
@@ -233,6 +584,7 @@ fn paint_line_primitive(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let x1 = number_f32(&line.x1)?;
     let y1 = number_f32(&line.y1)?;
@@ -251,6 +603,7 @@ fn paint_line_primitive(
         transform,
         mask,
         opacity,
+        budget,
     )
 }
 
@@ -260,6 +613,7 @@ fn paint_decoration(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let x = number_f32(&decoration.x)?;
     let y = number_f32(&decoration.y)?;
@@ -287,6 +641,7 @@ fn paint_decoration(
             transform,
             mask,
             opacity,
+            budget,
         );
     }
     if decoration.dashed || decoration.dotted {
@@ -316,6 +671,7 @@ fn paint_decoration(
             mask,
             opacity,
             StrokeStyle::default(),
+            budget,
         );
     }
     let rect =
@@ -333,18 +689,23 @@ fn paint_shape(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     if !shape.attrs.effects.is_empty() {
         return Err("unsupported shape field: effects".to_string());
     }
+    budget.charge_path(shape.geometry_path.len() as u64)?;
     let path = build_shape_path(&shape.geometry_path)?;
     let visual = shape_transform(shape)?;
     let transform = transform.pre_concat(visual);
     if let Some(paint) = shape_fill(shape, opacity)? {
         pixmap.fill_path(&path, &paint, FillRule::Winding, transform, mask);
     }
-    if let Some((paint, stroke)) = shape_stroke(shape, opacity)? {
-        pixmap.stroke_path(&path, &paint, &stroke, transform, mask);
+    if let Some(stroked) = shape_stroke(shape, opacity)? {
+        if let Some(dash) = &stroked.dash {
+            budget.charge_path(dash_segments(path_length(&path), dash))?;
+        }
+        pixmap.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
     }
     Ok(())
 }
@@ -584,10 +945,15 @@ fn gradient_stops(
         .collect())
 }
 
-fn shape_stroke(
-    shape: &ShapePrimitive,
-    opacity: f32,
-) -> Result<Option<(Paint<'static>, Stroke)>, String> {
+/// A resolved shape stroke, keeping the dash array the [`Stroke`] hides so the
+/// path it expands into can be charged.
+struct ShapeStroke {
+    paint: Paint<'static>,
+    stroke: Stroke,
+    dash: Option<Vec<f32>>,
+}
+
+fn shape_stroke(shape: &ShapePrimitive, opacity: f32) -> Result<Option<ShapeStroke>, String> {
     let mut color = shape.stroke.as_ref().map(|stroke| stroke.color.as_str());
     let mut width = shape
         .stroke
@@ -691,7 +1057,11 @@ fn shape_stroke(
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
     let stroke = stroke_style(width, dash.as_deref(), style)?;
-    Ok(Some((paint, stroke)))
+    Ok(Some(ShapeStroke {
+        paint,
+        stroke,
+        dash,
+    }))
 }
 
 fn shape_transform(shape: &ShapePrimitive) -> Result<Transform, String> {
@@ -766,13 +1136,16 @@ fn build_shape_path(commands: &[ShapePathCommand]) -> Result<Path, String> {
         .ok_or_else(|| "shape path has no drawable commands".to_string())
 }
 
-fn paint_image(
+#[allow(clippy::too_many_arguments)]
+fn paint_image<'k>(
     pixmap: &mut Pixmap,
-    image: &ImagePrimitive,
+    image: &'k ImagePrimitive,
     resources: &RenderResources<'_>,
+    scratch: &mut Scratch<'k>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    scope: ImageScope<'k>,
 ) -> Result<(), String> {
     if image.filter.is_some() {
         return Err("unsupported image field: filter".to_string());
@@ -780,8 +1153,14 @@ fn paint_image(
     if !image.attrs.effects.is_empty() {
         return Err("unsupported image field: effects".to_string());
     }
-    let source_bytes = image_bytes(&image.rel_id, resources)?;
-    let source = decode_image(&source_bytes, &image.rel_id)?;
+    let Some(source_bytes) = image_source(&image.rel_id, scope, resources) else {
+        scratch.images.skipped += 1;
+        return Ok(());
+    };
+    let Some(decoded) = scratch.images.resolve(source_bytes) else {
+        return Ok(());
+    };
+    let source: &Pixmap = &decoded;
     let frame = image_frame(image)?;
     if frame.w == 0.0 || frame.h == 0.0 {
         return Ok(());
@@ -824,7 +1203,16 @@ fn paint_image(
     );
     let mut frame_mask = crop
         .is_some()
-        .then(|| transformed_rect_mask(pixmap, frame, image_transform, mask))
+        .then(|| {
+            crop_mask(
+                pixmap,
+                frame,
+                image_transform,
+                mask,
+                &mut scratch.masks,
+                &mut scratch.budget,
+            )
+        })
         .transpose()?;
     let paint = PixmapPaint {
         opacity,
@@ -837,59 +1225,334 @@ fn paint_image(
         source.as_ref(),
         &paint,
         image_transform.pre_concat(source_to_frame),
-        frame_mask.as_ref().or(mask),
+        frame_mask.as_deref().or(mask),
     );
     frame_mask.take();
-    paint_image_border(pixmap, image, frame, image_transform, mask, opacity)?;
-    paint_image_revision(pixmap, image, frame, image_transform, mask, opacity)
+    paint_image_border(
+        pixmap,
+        image,
+        frame,
+        image_transform,
+        mask,
+        opacity,
+        &mut scratch.budget,
+    )?;
+    paint_image_revision(
+        pixmap,
+        image,
+        frame,
+        image_transform,
+        mask,
+        opacity,
+        &mut scratch.budget,
+    )
 }
 
-fn image_bytes<'a>(
-    rel_id: &'a str,
-    resources: &'a RenderResources<'_>,
-) -> Result<Cow<'a, [u8]>, String> {
+/// Where a reference's bytes come from. A `data:` payload stays encoded so the
+/// cache is consulted before base64 expands it.
+enum ImageSource<'k, 'b> {
+    Data(&'k str),
+    Registered(&'b [u8]),
+}
+
+/// The bytes a reference resolves to, or `None` when it resolves to nothing.
+fn image_source<'k, 'b>(
+    rel_id: &'k str,
+    scope: ImageScope<'_>,
+    resources: &RenderResources<'b>,
+) -> Option<ImageSource<'k, 'b>> {
     if rel_id.starts_with("data:") {
-        let (metadata, payload) = rel_id
-            .split_once(',')
-            .ok_or_else(|| "invalid image data URL".to_string())?;
+        let (metadata, payload) = rel_id.split_once(',')?;
         if !metadata.ends_with(";base64") {
-            return Err("unsupported non-base64 image data URL".to_string());
+            return None;
         }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(payload)
-            .map_err(|error| format!("invalid image data URL: {error}"))?;
-        return Ok(Cow::Owned(bytes));
+        return Some(ImageSource::Data(payload));
     }
-    resources
-        .images
-        .get(rel_id)
-        .map(|bytes| Cow::Borrowed(bytes.as_slice()))
-        .ok_or_else(|| format!("missing image bytes for relationship `{rel_id}`"))
+    let key = scoped_image_key(scope, rel_id);
+    if let Some(bytes) = resources.images.get(&key) {
+        return Some(ImageSource::Registered(bytes.as_slice()));
+    }
+    let bytes = legacy_body_image(rel_id, scope, resources)?;
+    Some(ImageSource::Registered(bytes))
 }
 
-fn decode_image(bytes: &[u8], rel_id: &str) -> Result<Pixmap, String> {
-    use image::ImageDecoder as _;
-
-    let reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|error| format!("failed to inspect image `{rel_id}`: {error}"))?;
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|error| format!("failed to decode image `{rel_id}`: {error}"))?;
-    let orientation = decoder
-        .orientation()
-        .map_err(|error| format!("failed to read image orientation `{rel_id}`: {error}"))?;
-    let mut decoded = image::DynamicImage::from_decoder(decoder)
-        .map_err(|error| format!("failed to decode image `{rel_id}`: {error}"))?;
-    decoded.apply_orientation(orientation);
-    let decoded = decoded.to_rgba8();
-    let (width, height) = decoded.dimensions();
-    let mut pixmap =
-        Pixmap::new(width, height).ok_or_else(|| format!("invalid image size for `{rel_id}`"))?;
-    for (target, source) in pixmap.pixels_mut().iter_mut().zip(decoded.pixels()) {
-        *target = ColorU8::from_rgba(source[0], source[1], source[2], source[3]).premultiply();
+/// [`ImageMap`] shipped keyed by bare relationship id, so a body image still
+/// resolves that way. The body alone: a header reaching a bare key is the
+/// cross-part lookup scoping exists to prevent. A relationship id carrying the
+/// separator would spell another part's scoped key, so it resolves to nothing.
+fn legacy_body_image<'b>(
+    rel_id: &str,
+    scope: ImageScope<'_>,
+    resources: &RenderResources<'b>,
+) -> Option<&'b [u8]> {
+    if !matches!(scope, ImageScope::Body) || rel_id.contains(SCOPE_SEPARATOR) {
+        return None;
     }
-    Ok(pixmap)
+    resources.images.get(rel_id).map(Vec::as_slice)
+}
+
+/// What resolving one source charged a page's image budget, in check order.
+#[derive(Clone, Copy, Default)]
+struct ImageCharge {
+    bytes_pre: u64,
+    pixels: u64,
+    bytes_post: u64,
+}
+
+/// What a decode learned about a source.
+enum Decode {
+    Decoded(Pixmap),
+    Refused,
+    OverBudget,
+}
+
+/// A decoded image and what resolving it cost the page that decoded it.
+struct CachedImage {
+    outcome: Option<Arc<Pixmap>>,
+    charge: ImageCharge,
+    weight: u64,
+    stamp: u64,
+}
+
+/// Decoded page images shared across an export's renders, keyed by seeded
+/// content digest and bounded by [`MAX_IMAGE_CACHE_BYTES`] with LRU eviction.
+pub struct ImageCache {
+    entries: HashMap<u64, CachedImage>,
+    recency: BTreeMap<(u64, u64), ()>,
+    clock: u64,
+    bytes: u64,
+    hasher: std::hash::RandomState,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImageCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: BTreeMap::new(),
+            clock: 0,
+            bytes: 0,
+            hasher: std::hash::RandomState::new(),
+        }
+    }
+
+    /// Content digest of one source's bytes, namespaced by source kind.
+    fn key(&self, source: &ImageSource<'_, '_>) -> u64 {
+        let mut hasher = self.hasher.build_hasher();
+        match source {
+            ImageSource::Data(payload) => {
+                hasher.write_u8(0);
+                hasher.write(payload.as_bytes());
+            }
+            ImageSource::Registered(bytes) => {
+                hasher.write_u8(1);
+                hasher.write(bytes);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// A cached outcome, renewed as the cache's most recently resolved.
+    fn get(&mut self, key: u64) -> Option<(Option<Arc<Pixmap>>, ImageCharge)> {
+        let entry = self.entries.get_mut(&key)?;
+        self.recency.remove(&(entry.stamp, key));
+        self.clock += 1;
+        entry.stamp = self.clock;
+        self.recency.insert((self.clock, key), ());
+        Some((entry.outcome.clone(), entry.charge))
+    }
+
+    /// Caches one decode, evicting least-recently-resolved entries until under budget.
+    fn insert(&mut self, key: u64, outcome: Option<Arc<Pixmap>>, charge: ImageCharge) {
+        let weight = outcome
+            .as_ref()
+            .map_or(0, |pixmap| pixmap.data().len() as u64)
+            + IMAGE_CACHE_ENTRY_BYTES;
+        if let Some(old) = self.entries.get(&key) {
+            self.recency.remove(&(old.stamp, key));
+            self.bytes -= old.weight;
+        }
+        self.clock += 1;
+        self.entries.insert(
+            key,
+            CachedImage {
+                outcome,
+                charge,
+                weight,
+                stamp: self.clock,
+            },
+        );
+        self.recency.insert((self.clock, key), ());
+        self.bytes += weight;
+        while self.bytes > MAX_IMAGE_CACHE_BYTES {
+            let Some(&(stamp, evicted)) = self.recency.keys().next() else {
+                break;
+            };
+            self.recency.remove(&(stamp, evicted));
+            if let Some(entry) = self.entries.remove(&evicted) {
+                self.bytes -= entry.weight;
+            }
+        }
+    }
+}
+
+/// One page's view over a shared [`ImageCache`]: the first reference to a
+/// source pays this page's decode budget, later references resolve free.
+struct PageImages<'c> {
+    cache: &'c mut ImageCache,
+    resolved: HashMap<u64, Option<Arc<Pixmap>>>,
+    pixels: u64,
+    bytes: u64,
+    skipped: usize,
+}
+
+impl<'c> PageImages<'c> {
+    fn new(cache: &'c mut ImageCache) -> Self {
+        Self {
+            cache,
+            resolved: HashMap::new(),
+            pixels: 0,
+            bytes: 0,
+            skipped: 0,
+        }
+    }
+
+    fn resolve(&mut self, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+        let key = self.cache.key(&source);
+        if let Some(outcome) = self.resolved.get(&key) {
+            self.skipped += usize::from(outcome.is_none());
+            return outcome.clone();
+        }
+        let outcome = match self.cache.get(key) {
+            Some((cached, charge)) if self.charge(charge) => cached,
+            Some(_) => None,
+            None => self.materialize(key, source),
+        };
+        self.resolved.insert(key, outcome.clone());
+        self.skipped += usize::from(outcome.is_none());
+        outcome
+    }
+
+    /// Charges this page what the cached decode spent; `false` means this
+    /// page's budget is spent and nothing is written back.
+    fn charge(&mut self, charge: ImageCharge) -> bool {
+        if self.bytes + charge.bytes_pre > MAX_PAGE_IMAGE_BYTES {
+            return false;
+        }
+        self.bytes += charge.bytes_pre;
+        if self.pixels + charge.pixels > MAX_PAGE_IMAGE_PIXELS {
+            return false;
+        }
+        if self.bytes + charge.bytes_post > MAX_PAGE_IMAGE_BYTES {
+            return false;
+        }
+        self.pixels += charge.pixels;
+        self.bytes += charge.bytes_post;
+        true
+    }
+
+    /// The bytes behind a source the shared cache has not seen. A `data:`
+    /// payload is bounded and charged from its encoded length, before base64
+    /// expands it into a buffer. Only `Decoded` and `Refused` are cached: an
+    /// over-budget refusal is this page's, and the next page spends its own
+    /// budget to retry.
+    fn materialize(&mut self, key: u64, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+        let mut charge = ImageCharge::default();
+        let decoded = match source {
+            ImageSource::Registered(bytes) => self.decode(bytes, &mut charge),
+            ImageSource::Data(payload) => {
+                let declared = payload.len() as u64 / 4 * 3;
+                if declared > MAX_DATA_URL_BYTES {
+                    Decode::Refused
+                } else if self.bytes + declared > MAX_PAGE_IMAGE_BYTES {
+                    Decode::OverBudget
+                } else {
+                    self.bytes += declared;
+                    charge.bytes_pre = declared;
+                    match base64::engine::general_purpose::STANDARD.decode(payload) {
+                        Ok(bytes) => self.decode(&bytes, &mut charge),
+                        Err(_) => Decode::Refused,
+                    }
+                }
+            }
+        };
+        match decoded {
+            Decode::Decoded(pixmap) => {
+                let pixmap = Arc::new(pixmap);
+                self.cache.insert(key, Some(pixmap.clone()), charge);
+                Some(pixmap)
+            }
+            Decode::Refused => {
+                self.cache.insert(key, None, charge);
+                None
+            }
+            Decode::OverBudget => None,
+        }
+    }
+
+    /// `Decoded` pixels, `Refused` for content this backend will not draw
+    /// (bytes it cannot decode, or an image past [`MAX_IMAGE_PIXELS`] or
+    /// [`MAX_IMAGE_BYTES`]), or `OverBudget` when the page has no decode
+    /// budget left. Declared pixels are charged before the decoder allocates,
+    /// so a stream that fails late still costs what it claimed.
+    fn decode(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
+        use image::ImageDecoder as _;
+
+        let Some(mut decoder) = image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|reader| reader.into_decoder().ok())
+        else {
+            return Decode::Refused;
+        };
+        let (declared_width, declared_height) = decoder.dimensions();
+        let declared = u64::from(declared_width) * u64::from(declared_height);
+        if declared > MAX_IMAGE_PIXELS {
+            return Decode::Refused;
+        }
+        if self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
+            return Decode::OverBudget;
+        }
+        let cost = decoder
+            .total_bytes()
+            .saturating_add(declared.saturating_mul(4));
+        if cost > MAX_IMAGE_BYTES {
+            return Decode::Refused;
+        }
+        if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
+            return Decode::OverBudget;
+        }
+        self.pixels += declared;
+        self.bytes += cost;
+        charge.pixels = declared;
+        charge.bytes_post = cost;
+        IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let Ok(orientation) = decoder.orientation() else {
+            return Decode::Refused;
+        };
+        let Ok(mut decoded) = image::DynamicImage::from_decoder(decoder) else {
+            return Decode::Refused;
+        };
+        decoded.apply_orientation(orientation);
+        let Some(size) = IntSize::from_wh(decoded.width(), decoded.height()) else {
+            return Decode::Refused;
+        };
+        let mut data = decoded.into_rgba8().into_raw();
+        let (pixels, _) = data.as_chunks_mut::<4>();
+        for pixel in pixels {
+            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
+            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
+        }
+        match Pixmap::from_vec(data, size) {
+            Some(pixmap) => Decode::Decoded(pixmap),
+            None => Decode::Refused,
+        }
+    }
 }
 
 fn image_frame(image: &ImagePrimitive) -> Result<FRect, String> {
@@ -949,6 +1612,35 @@ fn image_transform(image: &ImagePrimitive, frame: FRect) -> Result<Transform, St
     Ok(transform)
 }
 
+/// The crop mask for one image reference, reused where the geometry repeats.
+/// An outer clip mixes into the fill, so a clipped crop is built fresh rather
+/// than shared. Only one mask is ever live outside the cache, so the page is
+/// charged what the cache holds plus that one, not one charge per reference.
+fn crop_mask(
+    pixmap: &Pixmap,
+    frame: FRect,
+    transform: Transform,
+    outer: Option<&Mask>,
+    masks: &mut MaskCache,
+    budget: &mut PageBudget,
+) -> Result<Rc<Mask>, String> {
+    let bytes = mask_bytes(pixmap.width(), pixmap.height());
+    if outer.is_some() {
+        budget.charge_masks(masks.bytes.saturating_add(bytes))?;
+        return Ok(Rc::new(transformed_rect_mask(
+            pixmap, frame, transform, outer,
+        )?));
+    }
+    let key = CropMaskKey::new(pixmap, frame, transform);
+    if let Some(mask) = masks.take(key) {
+        return Ok(mask);
+    }
+    budget.charge_masks(masks.bytes.saturating_add(bytes))?;
+    let mask = Rc::new(transformed_rect_mask(pixmap, frame, transform, None)?);
+    masks.remember(key, mask.clone(), bytes);
+    Ok(mask)
+}
+
 fn transformed_rect_mask(
     pixmap: &Pixmap,
     frame: FRect,
@@ -969,6 +1661,7 @@ fn transformed_rect_mask(
     Ok(mask)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_image_border(
     pixmap: &mut Pixmap,
     image: &ImagePrimitive,
@@ -976,6 +1669,7 @@ fn paint_image_border(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let Some(value) = &image.attrs.border else {
         return Ok(());
@@ -1008,10 +1702,14 @@ fn paint_image_border(
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
     let stroke = stroke_style(width, dash.as_deref(), StrokeStyle::default())?;
+    if let Some(dash) = &dash {
+        budget.charge_path(dash_segments((frame.w + frame.h) * 2.0, dash))?;
+    }
     pixmap.stroke_path(&path, &paint, &stroke, transform, mask);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_image_revision(
     pixmap: &mut Pixmap,
     image: &ImagePrimitive,
@@ -1019,6 +1717,7 @@ fn paint_image_revision(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let Some(revision) = &image.attrs.revision else {
         return Ok(());
@@ -1059,6 +1758,7 @@ fn paint_image_revision(
             mask,
             opacity,
             StrokeStyle::default(),
+            budget,
         )?;
     }
     Ok(())
@@ -1101,6 +1801,7 @@ fn paint_border_recipe(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     match style {
         DisplayBorderStyle::Wave | DisplayBorderStyle::DoubleWave => paint_wave(
@@ -1112,12 +1813,13 @@ fn paint_border_recipe(
             transform,
             mask,
             opacity,
+            budget,
         ),
         DisplayBorderStyle::Double
         | DisplayBorderStyle::Triple
         | DisplayBorderStyle::ThinThick
         | DisplayBorderStyle::ThickThin => paint_compound_border(
-            pixmap, segment, width, color, style, transform, mask, opacity,
+            pixmap, segment, width, color, style, transform, mask, opacity, budget,
         ),
         DisplayBorderStyle::Groove
         | DisplayBorderStyle::Ridge
@@ -1149,6 +1851,7 @@ fn paint_border_recipe(
                 mask,
                 opacity,
                 StrokeStyle::default(),
+                budget,
             )
         }
     }
@@ -1165,7 +1868,12 @@ fn stroke_segment(
     mask: Option<&Mask>,
     opacity: f32,
     style: StrokeStyle,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
+    let stroke = stroke_style(width, dash, style)?;
+    if let Some(dash) = dash {
+        budget.charge_path(dash_segments(segment_length(segment), dash))?;
+    }
     let mut builder = PathBuilder::new();
     builder.move_to(segment.x1, segment.y1);
     builder.line_to(segment.x2, segment.y2);
@@ -1175,9 +1883,67 @@ fn stroke_segment(
     let mut paint = Paint::default();
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
-    let stroke = stroke_style(width, dash, style)?;
     pixmap.stroke_path(&path, &paint, &stroke, transform, mask);
     Ok(())
+}
+
+fn segment_length(segment: Segment) -> f32 {
+    (segment.x2 - segment.x1).hypot(segment.y2 - segment.y1)
+}
+
+/// Subpaths a dash pattern expands a path of this length into, counted the way
+/// tiny-skia counts them before it builds them. The length comes off the
+/// display list, so it is charged before the expansion allocates.
+fn dash_segments(length: f32, dash: &[f32]) -> u64 {
+    let period = f64::from(dash.iter().sum::<f32>());
+    let intervals = (dash.len() / 2).max(1) as f64;
+    let count = (f64::from(length) * intervals / period).ceil();
+    if count.is_nan() || count == f64::INFINITY {
+        return u64::MAX;
+    }
+    if count <= 0.0 {
+        return 0;
+    }
+    count.min(u64::MAX as f64) as u64
+}
+
+/// An upper bound on the length a stroke walks, since a curve is no longer
+/// than the control polygon it is drawn from.
+fn path_length(path: &Path) -> f32 {
+    let mut total = 0.0;
+    let mut cursor = Point::zero();
+    let mut start = Point::zero();
+    let mut step = |from: Point, to: Point| {
+        total += (to.x - from.x).hypot(to.y - from.y);
+    };
+    for segment in path.segments() {
+        match segment {
+            PathSegment::MoveTo(point) => {
+                cursor = point;
+                start = point;
+            }
+            PathSegment::LineTo(point) => {
+                step(cursor, point);
+                cursor = point;
+            }
+            PathSegment::QuadTo(control, point) => {
+                step(cursor, control);
+                step(control, point);
+                cursor = point;
+            }
+            PathSegment::CubicTo(first, second, point) => {
+                step(cursor, first);
+                step(first, second);
+                step(second, point);
+                cursor = point;
+            }
+            PathSegment::Close => {
+                step(cursor, start);
+                cursor = start;
+            }
+        }
+    }
+    total
 }
 
 fn stroke_style(width: f32, dash: Option<&[f32]>, style: StrokeStyle) -> Result<Stroke, String> {
@@ -1226,6 +1992,7 @@ fn paint_compound_border(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let (normal_x, normal_y) = segment_normal(segment);
     let strokes = match style {
@@ -1264,6 +2031,7 @@ fn paint_compound_border(
             mask,
             opacity,
             StrokeStyle::default(),
+            budget,
         )?;
     }
     Ok(())
@@ -1279,6 +2047,7 @@ fn paint_wave(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let dx = segment.x2 - segment.x1;
     let dy = segment.y2 - segment.y1;
@@ -1293,6 +2062,7 @@ fn paint_wave(
     let wavelength = (width * 4.0).max(4.0);
     let amplitude = width.max(1.0);
     let lanes: &[f32] = if double { &[-1.0, 1.0] } else { &[0.0] };
+    budget.charge_path(wave_segments(length, wavelength).saturating_mul(lanes.len() as u64))?;
     let mut paint = Paint::default();
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
@@ -1329,6 +2099,21 @@ fn paint_wave(
         );
     }
     Ok(())
+}
+
+/// Quadratics one lane of a wave expands into. The length is a number off the
+/// display list, so it is charged before the path builder grows to hold it.
+/// Two individually finite coordinates subtract to an infinite length, which
+/// nothing can afford: the loop that walks it never reaches its end.
+fn wave_segments(length: f32, wavelength: f32) -> u64 {
+    let steps = (f64::from(length) / f64::from(wavelength / 2.0)).ceil();
+    if steps.is_nan() || steps == f64::INFINITY {
+        return u64::MAX;
+    }
+    if steps <= 0.0 {
+        return 0;
+    }
+    steps.min(u64::MAX as f64) as u64
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1447,7 +2232,11 @@ fn shape_dash_pattern(name: Option<&str>, width: f32) -> Result<Option<Vec<f32>>
     Ok((!pattern.is_empty()).then_some(pattern))
 }
 
-fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Result<(), String> {
+fn paint_page_border(
+    pixmap: &mut Pixmap,
+    border: &PageBorderPrimitive,
+    budget: &mut PageBudget,
+) -> Result<(), String> {
     let x = number_f32(&border.x)?;
     let y = number_f32(&border.y)?;
     let w = number_f32(&border.w)?;
@@ -1462,6 +2251,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y,
             },
             side,
+            budget,
         )?;
     }
     if let Some(side) = &border.right {
@@ -1474,6 +2264,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y + h,
             },
             side,
+            budget,
         )?;
     }
     if let Some(side) = &border.bottom {
@@ -1486,6 +2277,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y + h,
             },
             side,
+            budget,
         )?;
     }
     if let Some(side) = &border.left {
@@ -1498,6 +2290,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y + h,
             },
             side,
+            budget,
         )?;
     }
     Ok(())
@@ -1507,6 +2300,7 @@ fn paint_page_border_side(
     pixmap: &mut Pixmap,
     segment: Segment,
     side: &PageBorderSide,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let style = match side.style.as_str() {
         "solid" => DisplayBorderStyle::Solid,
@@ -1530,6 +2324,7 @@ fn paint_page_border_side(
         Transform::identity(),
         None,
         1.0,
+        budget,
     )
 }
 
@@ -1659,14 +2454,38 @@ fn clip_rect(attrs: &DocAttrs) -> Result<Option<FRect>, String> {
 struct ClipSurface {
     rect: Option<FRect>,
     origin: (i32, i32),
+    size: (u32, u32),
     pixmap: Option<Pixmap>,
     mask: Option<Mask>,
 }
 
 impl ClipSurface {
-    fn paint<F>(&mut self, target: &mut Pixmap, clip: FRect, painter: F) -> Result<(), String>
+    /// The surface to allocate for a clip this size, or `None` to keep the one
+    /// already there. Every clipped primitive clears and blits the whole
+    /// surface, so a surface kept far larger than the clip it now serves costs
+    /// more than reallocating it: one page-sized clip early on would otherwise
+    /// charge every small clip after it for the whole page.
+    fn resize(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let Some(pixmap) = &self.pixmap else {
+            return Some((width, height));
+        };
+        if self.size.0 < width || self.size.1 < height {
+            return Some((self.size.0.max(width), self.size.1.max(height)));
+        }
+        let held = u64::from(pixmap.width()).saturating_mul(u64::from(pixmap.height()));
+        let needed = u64::from(width).saturating_mul(u64::from(height));
+        (held > needed.saturating_mul(CLIP_SURFACE_SLACK)).then_some((width, height))
+    }
+
+    fn paint<'k, F>(
+        &mut self,
+        target: &mut Pixmap,
+        clip: FRect,
+        scratch: &mut Scratch<'k>,
+        painter: F,
+    ) -> Result<(), String>
     where
-        F: FnOnce(&mut Pixmap, Transform, Option<&Mask>) -> Result<(), String>,
+        F: FnOnce(&mut Pixmap, &mut Scratch<'k>, Transform, Option<&Mask>) -> Result<(), String>,
     {
         let Some(clip) = clipped_to_target(clip, target.width(), target.height()) else {
             return Ok(());
@@ -1676,8 +2495,25 @@ impl ClipSurface {
             let origin_y = clip.y.floor() as i32;
             let width = ((clip.x + clip.w).ceil() as i32 - origin_x) as u32;
             let height = ((clip.y + clip.h).ceil() as i32 - origin_y) as u32;
-            let mut mask =
-                Mask::new(width, height).ok_or_else(|| "invalid clip mask size".to_string())?;
+            if let Some(size) = self.resize(width, height) {
+                scratch.budget.charge_clips(
+                    u64::from(size.0)
+                        .saturating_mul(u64::from(size.1))
+                        .saturating_mul(CLIP_BYTES_PER_PIXEL),
+                )?;
+                self.pixmap = Some(
+                    Pixmap::new(size.0, size.1).ok_or_else(|| "invalid clip size".to_string())?,
+                );
+                self.mask = Some(
+                    Mask::new(size.0, size.1)
+                        .ok_or_else(|| "invalid clip mask size".to_string())?,
+                );
+                self.size = size;
+            }
+            let mask = self
+                .mask
+                .as_mut()
+                .ok_or_else(|| "clip mask is unavailable".to_string())?;
             let rect = Rect::from_xywh(
                 clip.x - origin_x as f32,
                 clip.y - origin_y as f32,
@@ -1686,12 +2522,10 @@ impl ClipSurface {
             )
             .ok_or_else(|| "invalid clip rectangle".to_string())?;
             let path = PathBuilder::from_rect(rect);
+            mask.clear();
             mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
             self.rect = Some(clip);
             self.origin = (origin_x, origin_y);
-            self.pixmap =
-                Some(Pixmap::new(width, height).ok_or_else(|| "invalid clip size".to_string())?);
-            self.mask = Some(mask);
         }
         let pixmap = self
             .pixmap
@@ -1699,7 +2533,7 @@ impl ClipSurface {
             .ok_or_else(|| "clip surface is unavailable".to_string())?;
         pixmap.fill(Color::TRANSPARENT);
         let transform = Transform::from_translate(-(self.origin.0 as f32), -(self.origin.1 as f32));
-        painter(pixmap, transform, self.mask.as_ref())?;
+        painter(pixmap, scratch, transform, self.mask.as_ref())?;
         target.draw_pixmap(
             self.origin.0,
             self.origin.1,
@@ -1806,6 +2640,22 @@ fn value_number_array(value: &Value) -> Result<Vec<f32>, String> {
         .iter()
         .map(value_f32)
         .collect()
+}
+
+/// The surface cap the published entry points enforce for themselves, so a
+/// consumer of this crate is bounded without a facade in front of it.
+fn validate_page_surface(width: u32, height: u32) -> Result<(), String> {
+    if width > MAX_PAGE_DIM || height > MAX_PAGE_DIM {
+        return Err(format!(
+            "page is {width}x{height}px, past the {MAX_PAGE_DIM}px per-side cap"
+        ));
+    }
+    if u64::from(width) * u64::from(height) > MAX_PAGE_PIXELS {
+        return Err(format!(
+            "page is {width}x{height}px, past the {MAX_PAGE_PIXELS}-pixel surface cap"
+        ));
+    }
+    Ok(())
 }
 
 fn page_dimension(number: &Number, name: &str) -> Result<u32, String> {
@@ -1939,4 +2789,125 @@ fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String
             .map_err(|error| error.to_string())?;
     }
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(x: f32, y: f32, w: f32, h: f32) -> FRect {
+        FRect { x, y, w, h }
+    }
+
+    /// Every clipped primitive clears its surface and blits it whole, so a
+    /// surface grown to a running maximum makes one page-sized clip charge
+    /// every small clip after it for the whole page.
+    #[test]
+    fn a_clip_surface_shrinks_back_to_the_clip_it_serves() {
+        let mut pixmap = Pixmap::new(800, 1120).expect("page");
+        let mut glyphs = GlyphCache::default();
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(800, 1120, &mut glyphs, &mut images);
+        let mut surface = ClipSurface::default();
+        for rect in [clip(0.0, 0.0, 800.0, 1120.0), clip(8.0, 8.0, 64.0, 16.0)] {
+            surface
+                .paint(
+                    &mut pixmap,
+                    rect,
+                    &mut renderer.scratch,
+                    |_, _, _, _| Ok(()),
+                )
+                .expect("clipped paint");
+        }
+        assert_eq!(surface.size, (64, 16));
+    }
+
+    /// The surface is one reused allocation, so a page that keeps resizing it
+    /// is charged its high-water mark rather than every resize.
+    #[test]
+    fn a_resized_clip_surface_is_charged_once_at_its_high_water_mark() {
+        let mut pixmap = Pixmap::new(400, 560).expect("page");
+        let mut glyphs = GlyphCache::default();
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(400, 560, &mut glyphs, &mut images);
+        let mut surface = ClipSurface::default();
+        for index in 0..32 {
+            let rect = if index % 2 == 0 {
+                clip(0.0, 0.0, 400.0, 560.0)
+            } else {
+                clip(8.0, index as f32, 64.0, 16.0)
+            };
+            surface
+                .paint(
+                    &mut pixmap,
+                    rect,
+                    &mut renderer.scratch,
+                    |_, _, _, _| Ok(()),
+                )
+                .expect("clipped paint");
+        }
+        assert_eq!(
+            renderer.scratch.budget.scratch,
+            400 * 560 * CLIP_BYTES_PER_PIXEL
+        );
+    }
+
+    /// One entry past the byte budget evicts the least recently resolved
+    /// entries, oldest stamp first, not every entry or the newest one.
+    #[test]
+    fn the_cache_evicts_least_recently_resolved_first() {
+        let mut cache = ImageCache::new();
+        let put = |cache: &mut ImageCache, key: u64, weight: u64| {
+            cache.clock += 1;
+            cache.entries.insert(
+                key,
+                CachedImage {
+                    outcome: None,
+                    charge: ImageCharge::default(),
+                    weight,
+                    stamp: cache.clock,
+                },
+            );
+            cache.recency.insert((cache.clock, key), ());
+            cache.bytes += weight;
+        };
+        put(&mut cache, 1, MAX_IMAGE_CACHE_BYTES / 2);
+        put(&mut cache, 2, MAX_IMAGE_CACHE_BYTES / 2);
+        put(&mut cache, 3, 1);
+        cache.get(1).expect("key 1 still cached");
+        put(&mut cache, 4, MAX_IMAGE_CACHE_BYTES / 2);
+        // `put` bypasses `insert`, so drive the same eviction loop by hand.
+        while cache.bytes > MAX_IMAGE_CACHE_BYTES {
+            let (stamp, evicted) = *cache.recency.keys().next().expect("an entry");
+            cache.recency.remove(&(stamp, evicted));
+            cache.bytes -= cache.entries.remove(&evicted).expect("entry").weight;
+        }
+        assert!(cache.entries.contains_key(&1), "recently resolved");
+        assert!(cache.entries.contains_key(&4), "newest");
+        assert!(
+            cache.entries.keys().all(|key| matches!(key, 1 | 4)),
+            "evicted the oldest-resolved keys first: {:?}",
+            cache.entries.keys().collect::<Vec<_>>()
+        );
+        assert!(cache.bytes <= MAX_IMAGE_CACHE_BYTES);
+    }
+
+    /// A page's budget is its own: replaying a cached decode spends exactly
+    /// the charge the fresh decode recorded, in the same check order.
+    #[test]
+    fn a_replayed_charge_spends_exactly_what_the_decode_spent() {
+        let mut cache = ImageCache::new();
+        let mut page = PageImages::new(&mut cache);
+        let charge = ImageCharge {
+            bytes_pre: 100,
+            pixels: 64,
+            bytes_post: 1_000,
+        };
+        assert!(page.charge(charge));
+        assert_eq!(page.bytes, 1_100);
+        assert_eq!(page.pixels, 64);
+        let mut broke = PageImages::new(&mut cache);
+        broke.bytes = MAX_PAGE_IMAGE_BYTES;
+        assert!(!broke.charge(charge));
+    }
 }

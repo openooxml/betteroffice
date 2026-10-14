@@ -5,6 +5,7 @@ export {
   useCollabRoom,
   useDemoIdentity,
   useDemoRoom,
+  useLeaveRoom,
 } from "./useCollabRoom";
 export type { DemoCollaborationUser } from "./useCollabRoom";
 export type {

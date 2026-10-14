@@ -2,6 +2,11 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
+import { headerFooterStory } from './sessionInternals';
+import { createStyleResolver, type StyleResolver } from '../styles';
+import { hasTrackedControlContent } from '../utils/trackedControlContent';
+import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
 import {
   applyContentControlValue,
@@ -23,10 +28,13 @@ import type {
   BlockContent,
   Paragraph,
   ParagraphContent,
+  ParagraphFormatting,
   Run,
   RunContent,
+  HorizontalRuleContent,
   TextFormatting,
   Hyperlink,
+  HyperlinkContent,
   TrackedChangeInfo,
   Table,
   TableRow,
@@ -35,14 +43,20 @@ import type {
   SimpleField,
   ComplexField,
   FieldType,
+  FieldInlineContent,
   MathEquation,
   Image,
+  ColorValue,
   Shape,
+  Chart,
   InlineSdt,
   SdtProperties,
   Comment,
+  Footnote,
+  Endnote,
+  HeaderFooter,
 } from '../types/document';
-import type { YrsSession } from './index';
+import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
 
 type Attrs = Record<string, unknown>;
 
@@ -60,11 +74,13 @@ interface YrsImageAttrs {
   distLeft?: number;
   distRight?: number;
   position?: {
+    relativeHeight?: number;
     horizontal?: { relativeTo?: string; posOffset?: number; align?: string };
     vertical?: { relativeTo?: string; posOffset?: number; align?: string };
   };
   borderWidth?: number;
   borderColor?: string;
+  borderColorValue?: ColorValue;
   borderStyle?: string;
   wrapText?: string;
   hlinkHref?: string;
@@ -72,6 +88,7 @@ interface YrsImageAttrs {
   cropRight?: number;
   cropBottom?: number;
   cropLeft?: number;
+  shapeType?: string;
   opacity?: number;
   layoutInCell?: boolean;
   allowOverlap?: boolean;
@@ -129,7 +146,11 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   renderedPageBreakBefore: null,
   keepNext: null,
   keepLines: null,
+  widowControl: null,
   contextualSpacing: null,
+  snapToGrid: null,
+  autoSpaceDE: null,
+  autoSpaceDN: null,
   defaultTextFormatting: null,
   sectionBreakType: null,
   bidi: null,
@@ -200,9 +221,18 @@ interface BookmarkBoundary extends CommentBoundary {
 
 interface OriginalRunBoundary {
   text: string;
+  noteMarks?: string[];
+  /** Flow breaks the run held, at their offsets into `text`. */
+  breaks?: Array<{ offset: number; type: 'page' | 'column' }>;
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
+}
+
+interface LiveParagraphBreaks {
+  leading: readonly BlockBreakKind[];
+  trailing: readonly BlockBreakKind[];
+  leadingPage: boolean;
 }
 
 interface TableCellPayload {
@@ -287,17 +317,13 @@ function formattingAttrs(attributes: Attrs): Attrs {
 function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const formatting: TextFormatting = {};
 
-  if (attributes.bold) {
-    formatting.bold = true;
-    formatting.boldCs = true;
-  }
-  if (attributes.italic) {
-    formatting.italic = true;
-    formatting.italicCs = true;
-  }
+  if (attributes.bold) formatting.bold = true;
+  if (attributes.italic) formatting.italic = true;
+  if (attributes.boldCs) formatting.boldCs = true;
+  if (attributes.italicCs) formatting.italicCs = true;
 
   const underline = asObject(attributes.underline);
-  if (underline) {
+  if (underline && underline.inheritedHyperlink !== true) {
     formatting.underline = {
       style: (asString(underline.style) || 'single') as NonNullable<
         TextFormatting['underline']
@@ -313,7 +339,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const textColor = asObject(attributes.textColor);
-  if (textColor) {
+  if (textColor && textColor.inheritedHyperlink !== true) {
     formatting.color = {
       rgb: (asString(textColor.rgb) ?? null) as string | undefined,
       themeColor: (textColor.themeColor ?? null) as NonNullable<
@@ -324,14 +350,13 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
     };
   }
 
-  if (typeof attributes.highlight === 'string') {
-    formatting.highlight = attributes.highlight as TextFormatting['highlight'];
-  }
+  const highlight = asString(attributes.highlight) ?? asString(asObject(attributes.highlight)?.color);
+  if (highlight !== undefined) formatting.highlight = highlight as TextFormatting['highlight'];
 
   const fontSize = asObject(attributes.fontSize);
   if (fontSize) {
     const size = asFiniteNumber(fontSize.size);
-    const sizeCs = asFiniteNumber(fontSize.sizeCs) ?? size;
+    const sizeCs = asFiniteNumber(fontSize.sizeCs);
     if (size !== undefined) formatting.fontSize = size;
     if (sizeCs !== undefined) formatting.fontSizeCs = sizeCs;
   }
@@ -343,7 +368,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
       ascii: (ascii ?? null) as string | undefined,
       hAnsi: (asString(fontFamily.hAnsi) ?? null) as string | undefined,
       eastAsia: asString(fontFamily.eastAsia),
-      cs: asString(fontFamily.cs) || ascii,
+      cs: asString(fontFamily.cs),
       asciiTheme: (fontFamily.asciiTheme ?? null) as NonNullable<
         TextFormatting['fontFamily']
       >['asciiTheme'],
@@ -401,6 +426,49 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   return formatting;
 }
 
+/** The run properties a run with these attributes saves with. */
+type RunFormatter = (attributes: Attrs) => TextFormatting;
+
+const directFormatting: RunFormatter = (attributes) =>
+  attrsToTextFormatting(formattingAttrs(attributes));
+
+const ON_OFF_RUN_PROPERTIES = new Set<string>([
+  'bold', 'italic', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
+  'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
+]);
+
+const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs'] as const;
+
+const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
+
+/** Writes differences from inherited run formatting, including explicit resets. */
+function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextFormatting {
+  const formatting = directFormatting(attributes);
+  const result: Attrs = {};
+  for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
+    if ((key === 'boldCs' || key === 'italicCs') && typeof attributes[key] !== 'boolean') continue;
+    const value = formatting[key as keyof TextFormatting];
+    if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
+    if (value !== undefined) result[key] = value;
+    else if (ON_OFF_RUN_PROPERTIES.has(key)) result[key] = false;
+    else if (key === 'color' && !lentByLinkStyle(attributes.textColor)) result[key] = { auto: true };
+    else if (key === 'underline' && !lentByLinkStyle(attributes.underline)) {
+      result[key] = { style: 'none' };
+    }
+  }
+  const source = asObject(attributes._sourceRunFormatting);
+  for (const key of SOURCE_RUN_PROPERTIES) {
+    const value = source?.[key];
+    if (value === undefined) continue;
+    const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
+    if (sameJson(value, live) ||
+      ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
+      result[key] = value;
+    }
+  }
+  return result as TextFormatting;
+}
+
 function runContentForText(text: string, formatting: TextFormatting): RunContent[] {
   const content: RunContent[] = [];
   let plainText = '';
@@ -443,12 +511,12 @@ function runContentForText(text: string, formatting: TextFormatting): RunContent
   return content;
 }
 
-function createTextRun(text: string, attributes: Attrs): Run {
-  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+function createTextRun(text: string, attributes: Attrs, format: RunFormatter): Run {
+  const formatting = format(attributes);
   return {
     type: 'run',
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
-    content: runContentForText(text, formatting),
+    content: runContentForText(text, directFormatting(attributes)),
   };
 }
 
@@ -479,16 +547,34 @@ function revisionId(value: unknown): number {
   return 0;
 }
 
-function trackedInfo(raw: unknown, _pmShape = false): TrackedChangeInfo | null {
+function trackedInfo(raw: unknown, _pmShape = false, id?: number): TrackedChangeInfo | null {
   const value = asObject(raw);
   if (!value) return null;
   const author = asString(value.author) || 'Unknown';
   const date = asString(value.date);
   return {
-    id: revisionId(value.revisionId ?? value.id),
+    id: id ?? revisionId(value.revisionId ?? value.id),
     author,
     ...(date ? { date } : {}),
   };
+}
+
+/** Serialized ids for a session revision's deletion and insertion. */
+export interface RevisionNumbers {
+  insertion?: number;
+  deletion?: number;
+}
+
+type RevisionIds = ReadonlyMap<string, RevisionNumbers>;
+
+function mappedRevisionId(
+  raw: unknown,
+  kind: keyof RevisionNumbers,
+  revisionIds: RevisionIds | undefined
+): number | undefined {
+  const value = asObject(raw);
+  const id = value?.revisionId ?? value?.id;
+  return typeof id === 'string' ? revisionIds?.get(id)?.[kind] : undefined;
 }
 
 function createHyperlink(attributes: Attrs): Hyperlink | null {
@@ -517,11 +603,16 @@ function hyperlinkKey(attributes: Attrs): string | null {
   return link ? asString(link.href) || '' : null;
 }
 
-function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | ComplexField {
+function fieldFromPayload(
+  payload: Attrs,
+  attributes: Attrs,
+  format: RunFormatter
+): SimpleField | ComplexField {
   const fieldData = asString(payload.fieldData);
   if (fieldData && fieldData.length <= 2_000_000) {
     try {
       const stored = JSON.parse(fieldData) as SimpleField | ComplexField;
+      if (fieldData.includes('"media:')) resolveMediaSrcs(stored);
       const children = stored.type === 'simpleField' ? stored.content : stored.fieldResult;
       if (
         (stored.type === 'simpleField' || stored.type === 'complexField') &&
@@ -537,7 +628,7 @@ function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | Comp
     }
   }
 
-  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  const formatting = format(attributes);
   const displayRun: Run = {
     type: 'run',
     content: [{ type: 'text', text: asString(payload.displayText) || '' }],
@@ -580,7 +671,54 @@ function mathFromPayload(payload: Attrs): MathEquation {
   };
 }
 
-function imageRunFromPayload(payload: Attrs): Run {
+function horizontalRuleRun(payload: Attrs, attributes: Attrs, format: RunFormatter): Run {
+  const value = asObject(payload.rule);
+  const height = asFiniteNumber(value?.height);
+  if (
+    !value || height === undefined ||
+    (value.width != null && asFiniteNumber(value.width) === undefined) ||
+    (value.widthPercent != null && asFiniteNumber(value.widthPercent) === undefined) ||
+    typeof value.alignment !== 'string' || typeof value.noShade !== 'boolean' ||
+    typeof value.color !== 'string' || typeof value.xml !== 'string'
+  ) throw new Error('Malformed horizontalRule embed payload');
+  const rule: HorizontalRuleContent['rule'] = {
+    width: asFiniteNumber(value.width) ?? null,
+    widthPercent: asFiniteNumber(value.widthPercent) ?? null,
+    height,
+    alignment: value.alignment,
+    noShade: value.noShade,
+    color: value.color,
+    xml: value.xml,
+  };
+  const formatting = format(attributes);
+  return {
+    type: 'run',
+    content: [{ type: 'horizontalRule', rule }],
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+  };
+}
+
+/** Reads the `media:{n}` image sources of the projection under way as `data:` URLs. */
+let projectedMedia: ((token: string) => string | null) | null = null;
+
+function mediaSrc(src: string): string {
+  return projectedMedia && src.startsWith('media:') ? (projectedMedia(src) ?? src) : src;
+}
+
+function resolveMediaSrcs(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) resolveMediaSrcs(item);
+    return;
+  }
+  const object = asObject(value);
+  if (!object) return;
+  for (const [key, field] of Object.entries(object)) {
+    if (key === 'src' && typeof field === 'string') object[key] = mediaSrc(field);
+    else resolveMediaSrcs(field);
+  }
+}
+
+function imageFromPayload(payload: Attrs): Image {
   const attrs = payload as YrsImageAttrs & Attrs;
   const wrap: Image['wrap'] = {
     type: (asString(attrs.wrapType) || 'inline') as Image['wrap']['type'],
@@ -594,9 +732,10 @@ function imageRunFromPayload(payload: Attrs): Run {
   const image: Image = {
     type: 'image',
     rId: asString(attrs.rId) || '',
-    src: asString(attrs.src) || '',
+    src: mediaSrc(asString(attrs.src) || ''),
     alt: asString(attrs.alt) || undefined,
     title: asString(attrs.title) || undefined,
+    shapeType: asString(attrs.shapeType) || undefined,
     size: {
       width: pixelsToEmu(Number(attrs.width) || 0),
       height: pixelsToEmu(Number(attrs.height) || 0),
@@ -615,6 +754,7 @@ function imageRunFromPayload(payload: Attrs): Run {
 
   if (attrs.position?.horizontal && attrs.position.vertical) {
     image.position = {
+      relativeHeight: attrs.position.relativeHeight,
       horizontal: {
         relativeTo: (attrs.position.horizontal.relativeTo || 'column') as NonNullable<
           Image['position']
@@ -666,25 +806,94 @@ function imageRunFromPayload(payload: Attrs): Run {
   if (attrs.allowOverlap != null) image.allowOverlap = attrs.allowOverlap;
 
   const padding: NonNullable<Image['padding']> = {};
-  if (attrs.effectExtentTop) padding.top = pixelsToEmu(attrs.effectExtentTop);
-  if (attrs.effectExtentBottom) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
-  if (attrs.effectExtentLeft) padding.left = pixelsToEmu(attrs.effectExtentLeft);
-  if (attrs.effectExtentRight) padding.right = pixelsToEmu(attrs.effectExtentRight);
+  if (attrs.effectExtentTop != null) padding.top = pixelsToEmu(attrs.effectExtentTop);
+  if (attrs.effectExtentBottom != null) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
+  if (attrs.effectExtentLeft != null) padding.left = pixelsToEmu(attrs.effectExtentLeft);
+  if (attrs.effectExtentRight != null) padding.right = pixelsToEmu(attrs.effectExtentRight);
   if (Object.keys(padding).length > 0) image.padding = padding;
 
-  return { type: 'run', content: [{ type: 'drawing', image }] };
+  return image;
+}
+
+function imageRunFromPayload(payload: Attrs): Run {
+  return { type: 'run', content: [{ type: 'drawing', image: imageFromPayload(payload) }] };
+}
+
+/** The seeded shape, carrying the text body and everything else no payload field describes. */
+function storedShape(value: unknown): Shape | undefined {
+  const json = asString(value);
+  if (!json || json.length > 2_000_000) return undefined;
+  try {
+    const parsed = JSON.parse(json) as Shape;
+    if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
+    if (!asObject(parsed.size)) parsed.size = { width: 0, height: 0 };
+    if (json.includes('"media:')) resolveMediaSrcs(parsed);
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function chartRunFromPayload(payload: Attrs, recovery: ChartRecovery): Run | null {
+  const json = asString(payload.chartJson);
+  if (!json) {
+    recovery.warn('chart run carries no chart payload; keeping the run out of the output');
+    return null;
+  }
+  try {
+    const chart = JSON.parse(json) as Chart;
+    if (json.includes('"media:')) resolveMediaSrcs(chart);
+    if (chart?.type !== 'chart' || typeof chart.chartType !== 'string') {
+      recovery.warn('chart run carries a malformed chart payload; keeping the run out of the output');
+      return null;
+    }
+    if (!chart.drawingXml) {
+      const drawingXml = recovery.drawingFor(chart.rId, chart.path);
+      if (!drawingXml) {
+        recovery.unrecoverable(chart.rId, chart.path);
+        return null;
+      }
+      chart.drawingXml = drawingXml;
+    }
+    return { type: 'run', content: [{ type: 'chart', chart }] };
+  } catch {
+    recovery.warn('chart run carries an unreadable chart payload; keeping the run out of the output');
+    return null;
+  }
+}
+
+function opaqueDrawingRunFromPayload(
+  payload: Attrs,
+  attributes: Attrs,
+  format: RunFormatter
+): Run | null {
+  const kind = asString(payload.kind);
+  const xml = asString(payload.xml);
+  if (!kind || !xml) return null;
+  const preview = asObject(payload.preview);
+  const formatting = format(attributes);
+  return {
+    type: 'run',
+    content: [{
+      type: 'opaqueDrawing', kind, xml,
+      ...(preview ? { preview: imageFromPayload(preview) } : {}),
+    }],
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+  };
 }
 
 function shapeRunFromPayload(payload: Attrs): Run {
-  const shape: Shape = {
+  const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
-    shapeType: (asString(payload.shapeType) || 'rect') as Shape['shapeType'],
-    id: asString(payload.shapeId) || undefined,
-    size: {
-      width: payload.width ? pixelsToEmu(Number(payload.width)) : 0,
-      height: payload.height ? pixelsToEmu(Number(payload.height)) : 0,
-    },
+    shapeType: 'rect',
+    size: { width: 0, height: 0 },
   };
+  const shapeType = asString(payload.shapeType);
+  if (shapeType) shape.shapeType = shapeType as Shape['shapeType'];
+  const shapeId = asString(payload.shapeId);
+  if (shapeId) shape.id = shapeId;
+  if (payload.width) shape.size = { ...shape.size, width: pixelsToEmu(Number(payload.width)) };
+  if (payload.height) shape.size = { ...shape.size, height: pixelsToEmu(Number(payload.height)) };
   if (Array.isArray(payload.geometryPath) && payload.geometryPath.length > 0) {
     shape.geometryPath = payload.geometryPath as NonNullable<Shape['geometryPath']>;
   }
@@ -755,12 +964,17 @@ function shapeRunFromPayload(payload: Attrs): Run {
   return { type: 'run', content: [{ type: 'shape', shape }] };
 }
 
-function inlineSdtFromPayload(payload: Attrs): InlineSdt {
+function inlineSdtFromPayload(
+  payload: Attrs,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): InlineSdt {
   let properties: SdtProperties = sdtAttrsToProps(payload);
   const propertiesJson = asString(payload.propertiesJson);
   if (propertiesJson && propertiesJson.length <= 1_000_000) {
     try {
       const parsed = JSON.parse(propertiesJson) as SdtProperties;
+      if (propertiesJson.includes('"media:')) resolveMediaSrcs(parsed);
       if (parsed && typeof parsed === 'object' && typeof parsed.sdtType === 'string') {
         properties = parsed;
       }
@@ -786,7 +1000,7 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
       attributes,
     });
   }
-  let content = inlineSdtContent(buildParagraphContent(items));
+  let content = inlineSdtContent(buildParagraphContent(items, recovery, format, undefined, true));
   const authoredValue = contentControlValue(payload.value);
   if (authoredValue) {
     try {
@@ -805,6 +1019,22 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
 function inlineSdtContent(content: ParagraphContent[]): InlineSdt['content'] {
   return content.filter(
     (child): child is InlineSdt['content'][number] =>
+      child.type === 'run' ||
+      child.type === 'hyperlink' ||
+      child.type === 'simpleField' ||
+      child.type === 'complexField' ||
+      child.type === 'inlineSdt' ||
+      child.type === 'mathEquation' ||
+      child.type === 'insertion' ||
+      child.type === 'deletion' ||
+      child.type === 'moveFrom' ||
+      child.type === 'moveTo'
+  );
+}
+
+function fieldInlineContent(content: ParagraphContent[]): FieldInlineContent[] {
+  return content.filter(
+    (child): child is FieldInlineContent =>
       child.type === 'run' ||
       child.type === 'hyperlink' ||
       child.type === 'simpleField' ||
@@ -837,25 +1067,36 @@ function commentReferenceFromPayload(payload: Attrs): Run | null {
   };
 }
 
-function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
-  if (item.kind === 'text') return createTextRun(item.text, item.attributes);
+function ordinaryContentForItem(
+  item: InlineItem,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): ParagraphContent | null {
+  if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
       return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
     case 'tab':
-      return { type: 'run', content: [{ type: 'tab' }] };
+      return tabRun(item.attributes, format);
     case 'image':
       return imageRunFromPayload(item.payload);
+    case 'horizontalRule':
+      return horizontalRuleRun(item.payload, item.attributes, format);
     case 'shape':
       return shapeRunFromPayload(item.payload);
+    case 'chart':
+      return chartRunFromPayload(item.payload, recovery);
+    case 'opaqueDrawing':
+      return opaqueDrawingRunFromPayload(item.payload, item.attributes, format);
     case 'field':
       return (
-        commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes)
+        commentReferenceFromPayload(item.payload) ??
+        fieldFromPayload(item.payload, item.attributes, format)
       );
     case 'math':
       return mathFromPayload(item.payload);
     case 'sdt':
-      return inlineSdtFromPayload(item.payload);
+      return inlineSdtFromPayload(item.payload, recovery, format);
     case 'noteRef': {
       const footnote = item.payload.footnoteRefId;
       const endnote = item.payload.endnoteRefId;
@@ -873,55 +1114,192 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   }
 }
 
-function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
-  let run: Run;
-  if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
+function tabRun(attributes: Attrs, format: RunFormatter): Run {
+  const formatting = format(attributes);
+  return {
+    type: 'run',
+    content: [{ type: 'tab' }],
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+  };
+}
+
+function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inControl: boolean, recovery: ChartRecovery, format: RunFormatter): ParagraphContent | null {
+  let child: TrackedWrapper['content'][number];
+  if (inControl) {
+    const ordinary = ordinaryContentForItem(item, recovery, format);
+    child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run', content: [] };
+  } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery, format);
+  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes, format);
+  else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
+    child = horizontalRuleRun(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
-    run = shapeRunFromPayload(item.payload);
-  else if (item.kind === 'text') {
-    const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
-    run = {
-      type: 'run',
-      content: [{ type: 'text', text: item.text }],
-      ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
-    };
-  } else run = { type: 'run', content: [] };
+    child = shapeRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'chart')
+    child = chartRunFromPayload(item.payload, recovery) ?? { type: 'run', content: [] };
+  else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
+    child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? { type: 'run', content: [] };
+  else if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
+  else child = { type: 'run', content: [] };
+
+  if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
+  const hyperlink = createHyperlink(item.attributes);
+  if (hyperlink && (child.type === 'run' || child.type === 'mathEquation' || child.type === 'inlineSdt' || child.type === 'simpleField' || child.type === 'complexField')) {
+    if (child.type === 'run') hyperlink.children.push(child);
+    else hyperlink.structuredChildren = [child];
+    child = hyperlink;
+  }
 
   const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
   const isMovePair = raw?.isMovePair === true;
   if (item.attributes.ins) {
     return isMovePair
-      ? { type: 'moveTo', info, content: [run] }
-      : { type: 'insertion', info, content: [run] };
+      ? { type: 'moveTo', info, content: [child] }
+      : { type: 'insertion', info, content: [child] };
   }
   return isMovePair
-    ? { type: 'moveFrom', info, content: [run] }
-    : { type: 'deletion', info, content: [run] };
+    ? { type: 'moveFrom', info, content: [child] }
+    : { type: 'deletion', info, content: [child] };
 }
 
-function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
-  if (item.kind === 'text') {
-    hyperlink.children.push(createTextRun(item.text, item.attributes));
-    return;
+/**
+ * Adds an item to a hyperlink: a run to its children, and every child, in
+ * order, to its structured children once it has them.
+ */
+function addToHyperlink(
+  hyperlink: Hyperlink,
+  item: InlineItem,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): void {
+  let child: HyperlinkContent | undefined;
+  if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
+  else if (item.embedKind === 'break') {
+    child = { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+  } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
+  else if (item.embedKind === 'horizontalRule') {
+    child = horizontalRuleRun(item.payload, item.attributes, format);
+  } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
+  else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload);
+  else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
+  else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? undefined;
+  else if (item.embedKind === 'field') {
+    child =
+      commentReferenceFromPayload(item.payload) ??
+      fieldFromPayload(item.payload, item.attributes, format);
+  } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
+  else if (item.embedKind === 'sdt') {
+    const control = inlineSdtFromPayload(item.payload, recovery, format);
+    if (item.attributes.ins || item.attributes.del || hasTrackedControlContent(control)) child = control;
   }
-  if (item.embedKind === 'break') {
-    hyperlink.children.push({
-      type: 'run',
-      content: [{ type: 'break', breakType: 'textWrapping' }],
-    });
-  } else if (item.embedKind === 'tab') {
-    hyperlink.children.push({ type: 'run', content: [{ type: 'tab' }] });
-  } else if (item.embedKind === 'field') {
-    const child =
-      commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
-    if (child.type === 'run') hyperlink.children.push(child);
-    else (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
-  } else if (item.embedKind === 'math') {
-    (hyperlink.structuredChildren ??= [...hyperlink.children]).push(mathFromPayload(item.payload));
+  if (!child) return;
+  if (child.type === 'run') hyperlink.children.push(child);
+  if (child.type !== 'run' || hyperlink.structuredChildren) {
+    (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
   }
 }
 
-function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
+function projectionSignature(items: InlineItem[]): string {
+  const normalized: InlineItem[] = [];
+  for (const source of items) {
+    const attributes = { ...source.attributes };
+    delete attributes.fieldResult;
+    const item: InlineItem = source.kind === 'embed' && source.embedKind === 'tab'
+      ? { kind: 'text', text: '\t', attributes }
+      : { ...source, attributes };
+    const previous = normalized.at(-1);
+    if (item.kind === 'text' && previous?.kind === 'text' && stableStringify(previous.attributes) === stableStringify(attributes)) {
+      previous.text += item.text;
+    } else normalized.push(item);
+  }
+  return stableStringify(normalized);
+}
+
+function restoreProjectedFieldResults(
+  items: InlineItem[],
+  recovery: ChartRecovery,
+  format: RunFormatter
+): InlineItem[] {
+  const owners: { id: number; owner: EmbedItem; position: number }[] = [];
+  for (const [position, item] of items.entries()) {
+    if (item.kind !== 'embed' || item.embedKind !== 'field') continue;
+    const id = asFiniteNumber(asObject(item.payload.resultProjection)?.id);
+    if (id !== undefined) owners.push({ id, owner: item, position });
+  }
+  if (owners.length === 0) return items;
+  const groups = new Map<EmbedItem, Map<number, InlineItem[]>>();
+  const remaining = items.filter((item, position) => {
+    const marker = asObject(item.attributes.fieldResult);
+    const id = asFiniteNumber(marker?.id);
+    const index = asFiniteNumber(marker?.index);
+    const owner = owners.find((entry) => entry.id === id && entry.position > position)?.owner;
+    if (index === undefined || !owner) return true;
+    const children = groups.get(owner) ?? new Map<number, InlineItem[]>();
+    const group = children.get(index) ?? [];
+    const attributes = { ...item.attributes };
+    delete attributes.fieldResult;
+    group.push({ ...item, attributes });
+    children.set(index, group);
+    groups.set(owner, children);
+    return false;
+  });
+  for (const { owner } of owners) {
+    const stored = fieldFromPayload(owner.payload, owner.attributes, format);
+    if (stored.type !== 'complexField') continue;
+    const projection = asObject(owner.payload.resultProjection);
+    const originals = Array.isArray(projection?.children) ? projection.children : [];
+    const replacements = new Map<number, FieldInlineContent[]>();
+    for (const raw of originals) {
+      const child = asObject(raw);
+      const index = asFiniteNumber(child?.index);
+      if (index === undefined || !Array.isArray(child?.items)) continue;
+      const current = groups.get(owner)?.get(index) ?? [];
+      if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
+      const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format));
+      const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
+      if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
+        rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+      }
+      replacements.set(index, rebuilt);
+    }
+    if (replacements.size === 0) continue;
+    const inline = (stored.structuredResult?.inline ?? []).flatMap((child, index) => replacements.get(index) ?? [child]);
+    const code = stored.structuredCode?.inline?.flatMap((child, index) => replacements.get(-index - 1) ?? [child]);
+    stored.structuredResult = { ...stored.structuredResult, inline };
+    if (code) stored.structuredCode = { ...stored.structuredCode, inline: code };
+    if (stored.fieldTree) {
+      stored.fieldTree.result = { ...stored.fieldTree.result, inline };
+      if (code) stored.fieldTree.code = { ...stored.fieldTree.code, inline: code };
+    }
+    stored.fieldResult = inline.flatMap((child) => child.type === 'run' ? [child]
+      : child.type === 'hyperlink' ? child.children.filter((entry): entry is Run => entry.type === 'run') : []);
+    owner.payload = { ...owner.payload, fieldData: JSON.stringify(stored) };
+  }
+  return remaining;
+}
+
+type TrackedWrapper = Extract<
+  ParagraphContent,
+  { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }
+>;
+
+function isTrackedWrapper(content: ParagraphContent | undefined): content is TrackedWrapper {
+  return (
+    content?.type === 'insertion' ||
+    content?.type === 'deletion' ||
+    content?.type === 'moveFrom' ||
+    content?.type === 'moveTo'
+  );
+}
+
+function buildParagraphContent(
+  items: InlineItem[],
+  recovery: ChartRecovery,
+  format: RunFormatter,
+  revisionIds?: RevisionIds,
+  inControl = false
+): ParagraphContent[] {
+  items = restoreProjectedFieldResults(items, recovery, format);
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
@@ -942,16 +1320,35 @@ function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
     if (item.kind === 'embed' && item.embedKind === 'noteRef') {
       flushRun();
       flushHyperlink();
-      const note = ordinaryContentForItem(item);
+      const note = ordinaryContentForItem(item, recovery, format);
       if (note) content.push(note);
       continue;
     }
 
-    const revision = trackedInfo(item.attributes.ins ?? item.attributes.del);
+    const raw = item.attributes.ins ?? item.attributes.del;
+    const revision = trackedInfo(
+      raw,
+      false,
+      mappedRevisionId(raw, item.attributes.ins ? 'insertion' : 'deletion', revisionIds)
+    );
     if (revision) {
       flushRun();
       flushHyperlink();
-      content.push(trackedContentForItem(item, revision));
+      const tracked = trackedContentForItem(item, revision, inControl, recovery, format);
+      if (!tracked) continue;
+      const previous = content[content.length - 1];
+      if (
+        isTrackedWrapper(previous) &&
+        isTrackedWrapper(tracked) &&
+        previous.type === tracked.type &&
+        previous.info.id === tracked.info.id &&
+        previous.info.author === tracked.info.author &&
+        previous.info.date === tracked.info.date
+      ) {
+        previous.content.push(...tracked.content);
+      } else {
+        content.push(tracked);
+      }
       continue;
     }
 
@@ -965,14 +1362,14 @@ function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
         flushHyperlink();
         currentHyperlink = createHyperlink(item.attributes);
       }
-      if (currentHyperlink) addToHyperlink(currentHyperlink, item);
+      if (currentHyperlink) addToHyperlink(currentHyperlink, item, recovery, format);
       continue;
     }
 
     flushHyperlink();
     if (item.kind === 'text') {
       const key = stableStringify(formattingAttrs(item.attributes));
-      const nextRun = createTextRun(item.text, item.attributes);
+      const nextRun = createTextRun(item.text, item.attributes, format);
       if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
       else {
         flushRun();
@@ -983,7 +1380,7 @@ function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
     }
 
     flushRun();
-    const child = ordinaryContentForItem(item);
+    const child = ordinaryContentForItem(item, recovery, format);
     if (child) content.push(child);
   }
 
@@ -1009,6 +1406,7 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
     }
     if (name === 'comment' || name === 'footnoteRef') continue;
     if (BOOLEAN_MARKS.has(name)) attrs[name] = true;
+    else if (name === 'boldCs' || name === 'italicCs') attrs[name] = value.value;
     else if (name === 'highlight') attrs.highlight = value.color;
     else if (name === 'insertion' || name === 'deletion') {
       attrs[name === 'insertion' ? 'ins' : 'del'] = dropNulls({
@@ -1022,36 +1420,205 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
   return attrs;
 }
 
+/** Rebuilds the note number marks a run held; they occupy no story unit. */
+function noteMarkContent(boundary: OriginalRunBoundary): RunContent[] | null {
+  if (!boundary.noteMarks?.length) return null;
+  return boundary.noteMarks.map((mark) => ({
+    type: mark === 'endnote' ? 'endnoteRefMark' : 'footnoteRefMark',
+  }));
+}
+
+/**
+ * Rebuilds a run from its recorded boundary. Flow breaks occupy no story unit,
+ * so without their recorded offsets an authored page break would not be saved.
+ */
+function boundaryContent(boundary: OriginalRunBoundary, formatting: TextFormatting): RunContent[] {
+  const notes = noteMarkContent(boundary);
+  if (notes) return notes;
+  if (!boundary.breaks?.length) return runContentForText(boundary.text, formatting);
+  const content: RunContent[] = [];
+  let cursor = 0;
+  for (const entry of boundary.breaks) {
+    const at = Math.min(Math.max(entry.offset, cursor), boundary.text.length);
+    if (at > cursor) {
+      content.push(...runContentForText(boundary.text.slice(cursor, at), formatting));
+    }
+    content.push({ type: 'break', breakType: entry.type });
+    cursor = at;
+  }
+  if (cursor < boundary.text.length) {
+    content.push(...runContentForText(boundary.text.slice(cursor), formatting));
+  }
+  return content;
+}
+
+function sourceBreakBoundaries(paragraph: Paragraph | undefined): OriginalRunBoundary[] {
+  const recorded = paragraph && projectedBlocks.get(paragraph)?.sourceRuns;
+  if (recorded) return recorded;
+  const boundaries: OriginalRunBoundary[] = [];
+  for (const child of paragraph?.content ?? []) {
+    if (child.type !== 'run') {
+      if (
+        child.type === 'commentRangeStart' || child.type === 'commentRangeEnd' ||
+        child.type === 'bookmarkStart' || child.type === 'bookmarkEnd' || child.type === 'rawXml'
+      ) continue;
+      return [];
+    }
+    let text = '';
+    const breaks: NonNullable<OriginalRunBoundary['breaks']> = [];
+    for (const entry of child.content) {
+      if (entry.type === 'text') text += entry.text;
+      else if (entry.type === 'commentReference') text += '\uFFFC';
+      else if (entry.type === 'break' && (entry.breakType === 'page' || entry.breakType === 'column')) {
+        breaks.push({ offset: text.length, type: entry.breakType });
+      } else return [];
+    }
+    boundaries.push({ text, breaks });
+  }
+  return boundaries;
+}
+
+function liveRunBoundaries(
+  boundaries: OriginalRunBoundary[],
+  live: LiveParagraphBreaks
+): OriginalRunBoundary[] {
+  const count = boundaries.reduce((sum, boundary) =>
+    sum + (noteMarkContent(boundary) ? 0 : (boundary.breaks?.length ?? 0)), 0);
+  if (count === 0) return boundaries;
+  const source = boundaries.map((boundary): ParagraphContent => ({
+    type: 'run', content: boundaryContent(boundary, {}),
+  }));
+  const hoisted = count - trailingBlockBreaks({ type: 'paragraph', content: source }).length;
+  const visible = flowTokens(source).includes('visible');
+  let index = 0;
+  let leading = 0;
+  let trailing = 0;
+  return boundaries.map(boundary => {
+    if (!boundary.breaks?.length || noteMarkContent(boundary)) return boundary;
+    const breaks = boundary.breaks.filter(entry => {
+      const before = index++ < hoisted;
+      if (before && visible && entry.type === 'page') return live.leadingPage;
+      if (before) {
+        if (entry.type !== live.leading[leading]) return false;
+        leading += 1;
+      } else {
+        if (entry.type !== live.trailing[trailing]) return false;
+        trailing += 1;
+      }
+      return true;
+    });
+    return breaks.length === boundary.breaks.length ? boundary : { ...boundary, breaks };
+  });
+}
+
+function paragraphBreaksAreLive(content: ParagraphContent[], live: LiveParagraphBreaks): boolean {
+  const paragraph: Paragraph = { type: 'paragraph', content };
+  const tokens = flowTokens(content);
+  return (!(tokens[0] === 'page' && tokens.includes('visible')) || live.leadingPage) &&
+    leadingBlockBreaks(paragraph).every((kind, index) => kind === live.leading[index]) &&
+    trailingBlockBreaks(paragraph).every((kind, index) => kind === live.trailing[index]);
+}
+
+function restoreRecordedBreaks(
+  content: ParagraphContent[],
+  items: InlineItem[],
+  boundaries: OriginalRunBoundary[],
+  liveBreaks: LiveParagraphBreaks
+): ParagraphContent[] {
+  const breaks: { offset: number; type: BlockBreakKind }[] = [];
+  let start = 0;
+  for (const boundary of boundaries) {
+    let cursor = 0;
+    for (const entry of noteMarkContent(boundary) ? [] : (boundary.breaks ?? [])) {
+      cursor = Math.min(Math.max(entry.offset, cursor), boundary.text.length);
+      breaks.push({ offset: start + cursor, type: entry.type });
+    }
+    start += boundary.text.length;
+  }
+  if (breaks.length === 0) return content;
+  const source = boundaries.map((boundary): ParagraphContent => ({
+    type: 'run',
+    content: boundaryContent(boundary, {}),
+  }));
+  const trailing = trailingBlockBreaks({ type: 'paragraph', content: source });
+  const hoisted = breaks.length - trailing.length;
+  const visible = flowTokens(source).includes('visible');
+  const kept = breaks.filter(
+    (entry, index) => index >= hoisted || (visible && entry.type === 'page')
+  );
+  const recorded = boundaries.map((boundary) => boundary.text).join('');
+  const live = items
+    .map((item) => (item.kind === 'text' ? item.text : isBlockBreak(item) ? '' : '\uFFFC'))
+    .join('');
+  let prefix = 0;
+  const shared = Math.min(recorded.length, live.length);
+  while (prefix < shared && recorded[prefix] === live[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < shared - prefix &&
+    recorded[recorded.length - 1 - suffix] === live[live.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const placed = insertBoundaries(
+    content,
+    kept.map(({ offset }, id) => {
+      const mapped = offset <= prefix
+        ? offset
+        : offset >= recorded.length - suffix
+          ? offset + live.length - recorded.length
+          : Math.min(offset, live.length - suffix);
+      return { id, kind: 'start', offset: Math.min(Math.max(mapped, 0), length) };
+    }),
+    (boundary) => ({ type: 'run', content: [{ type: 'break', breakType: kept[boundary.id]!.type }] })
+  );
+  const placedTrailing = trailingBlockBreaks({ type: 'paragraph', content: placed });
+  return placedTrailing.length === trailing.length &&
+    placedTrailing.every((kind, index) => kind === trailing[index]) &&
+    paragraphBreaksAreLive(placed, liveBreaks)
+    ? placed
+    : content;
+}
+
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
-  boundaries: OriginalRunBoundary[] | undefined
+  boundaries: OriginalRunBoundary[] | undefined,
+  baseParagraph: Paragraph | undefined,
+  liveBreaks: LiveParagraphBreaks
 ): ParagraphContent[] {
+  if (!boundaries?.length) {
+    return restoreRecordedBreaks(content, items,
+      liveRunBoundaries(sourceBreakBoundaries(baseParagraph), liveBreaks), liveBreaks);
+  }
+  const recorded = liveRunBoundaries(boundaries, liveBreaks);
+  const fallback = (): ParagraphContent[] => restoreRecordedBreaks(content, items, recorded, liveBreaks);
   if (
-    !boundaries?.length ||
     !content.every(
       (child) => child.type === 'run' && child.content.every((entry) => entry.type === 'text')
     ) ||
-    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink)
+    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink) ||
+    recorded.some((boundary) => boundary.noteMarks?.length && boundary.text.length > 0)
   ) {
-    return content;
+    return fallback();
   }
   const fullText = items.map((item) => (item.kind === 'text' ? item.text : '')).join('');
-  if (fullText !== boundaries.map((boundary) => boundary.text).join('')) return content;
+  if (fullText !== recorded.map((boundary) => boundary.text).join('')) return fallback();
 
   let itemIndex = 0;
   let itemOffset = 0;
   const restoredAttrs: Attrs[] = [];
-  for (const boundary of boundaries) {
+  for (const boundary of recorded) {
     const expected = marksKeyToYrsAttrs(boundary.marksKey);
-    if (!expected) return content;
+    if (!expected) return fallback();
     restoredAttrs.push(expected);
     let remaining = boundary.text.length;
     while (remaining > 0) {
-      const item = items[itemIndex] as TextItem | undefined;
-      if (!item) return content;
+      const item = items[itemIndex];
+      if (item?.kind !== 'text') return fallback();
       if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
-        return content;
+        return fallback();
       }
       const available = item.text.length - itemOffset;
       const consumed = Math.min(remaining, available);
@@ -1064,85 +1631,183 @@ function restoreOriginalRuns(
     }
   }
 
-  return boundaries.map((boundary, index) => {
-    // restoreOriginalRuns restores the original segmentation/property-change
-    // cache, but non-empty runs keep formatting reconstructed from their live
-    // marks. Only empty runs have no node and therefore take cached formatting.
-    const formatting =
-      boundary.text.length === 0
-        ? boundary.formatting
-        : attrsToTextFormatting(restoredAttrs[index]);
+  if (itemIndex !== items.length || itemOffset !== 0) return fallback();
+
+  const restored = recorded.map((boundary, index) => {
     const run: Run = {
       type: 'run',
-      content: runContentForText(boundary.text, formatting ?? {}),
+      content: boundaryContent(boundary, attrsToTextFormatting(restoredAttrs[index])),
     };
+    const formatting = boundary.formatting;
     if (formatting && Object.keys(formatting).length > 0) run.formatting = formatting;
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
     return run;
   });
+  return paragraphBreaksAreLive(restored, liveBreaks) ? restored : content;
+}
+
+/** The story units a run entry projects from: one per UTF-16 unit of text, one per inline embed. */
+function runContentLength(content: RunContent): number {
+  if (content.type === 'text' || content.type === 'instrText') return content.text.length;
+  if (content.type === 'symbol') return content.char.length;
+  if (
+    content.type === 'tab' ||
+    content.type === 'softHyphen' ||
+    content.type === 'noBreakHyphen' ||
+    content.type === 'footnoteRef' ||
+    content.type === 'endnoteRef' ||
+    content.type === 'horizontalRule' ||
+    content.type === 'commentReference' ||
+    content.type === 'drawing' ||
+    content.type === 'shape' ||
+    content.type === 'chart' ||
+    content.type === 'opaqueDrawing' ||
+    (content.type === 'break' &&
+      (content.breakType === undefined || content.breakType === 'textWrapping'))
+  ) {
+    return 1;
+  }
+  return 0;
 }
 
 function runTextLength(run: Run): number {
-  return run.content.reduce((length, content) => {
-    if (content.type === 'text' || content.type === 'instrText')
-      return length + content.text.length;
-    if (content.type === 'symbol') return length + content.char.length;
-    if (
-      content.type === 'tab' ||
-      content.type === 'softHyphen' ||
-      content.type === 'noBreakHyphen'
-    ) {
-      return length + 1;
-    }
-    return length;
-  }, 0);
+  return run.content.reduce((length, content) => length + runContentLength(content), 0);
 }
 
+/** The story units a hyperlink child spans: its text, or one for a field or an equation. */
+function linkChildLength(child: HyperlinkContent): number {
+  if (child.type === 'run') return runTextLength(child);
+  return child.type === 'simpleField' ||
+    child.type === 'complexField' ||
+    child.type === 'inlineSdt' ||
+    child.type === 'mathEquation'
+    ? 1
+    : 0;
+}
+
+/**
+ * The story units projected content spans. Fields, controls and equations
+ * are one embed each; a complex field's hyperlinks and simple fields are
+ * seeded ahead of it.
+ */
 function paragraphContentLength(content: ParagraphContent): number {
   switch (content.type) {
     case 'run':
       return runTextLength(content);
     case 'hyperlink':
-      return content.children.reduce(
-        (sum, child) => sum + (child.type === 'run' ? runTextLength(child) : 0),
+      return (content.structuredChildren ?? content.children).reduce(
+        (sum, child) => sum + linkChildLength(child),
         0
       );
-    case 'simpleField':
-      return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
     case 'complexField':
-      return content.fieldResult.reduce((sum, run) => sum + runTextLength(run), 0);
+      return [
+        ...(content.structuredCode?.inline ?? []),
+        ...(content.structuredResult?.inline ?? []),
+      ]
+        .filter((child) => child.type === 'hyperlink' || child.type === 'simpleField')
+        .reduce((sum, child) => sum + paragraphContentLength(child), 1);
+    case 'simpleField':
     case 'inlineSdt':
-      return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+    case 'mathEquation':
+      return 1;
     case 'insertion':
     case 'deletion':
     case 'moveFrom':
     case 'moveTo':
-      return content.content.reduce(
-        (sum, child) => sum + (child.type === 'run' ? runTextLength(child) : 0),
-        0
-      );
-    case 'mathEquation':
-      return content.plainText?.length ?? 0;
+      return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
     default:
       return 0;
   }
 }
 
-function splitTextRun(run: Run, offset: number): [Run | null, Run | null] {
-  if (!run.content.every((content) => content.type === 'text')) return [run, null];
-  const text = run.content.map((content) => (content.type === 'text' ? content.text : '')).join('');
-  const make = (part: string): Run | null =>
-    part
-      ? {
-          type: 'run',
-          ...(run.formatting ? { formatting: run.formatting } : {}),
-          ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
-          content: [{ type: 'text', text: part }],
-        }
-      : null;
-  return [make(text.slice(0, offset)), make(text.slice(offset))];
+type Split<T> = [T | null, T | null];
+
+/** Splits `items` `at` story units in, or null when an item there cannot be split. */
+function splitItems<T>(
+  items: readonly T[],
+  at: number,
+  length: (item: T) => number,
+  split: (item: T, at: number) => Split<T> | null
+): [T[], T[]] | null {
+  const left: T[] = [];
+  const right: T[] = [];
+  let offset = 0;
+  for (const item of items) {
+    const width = length(item);
+    if (offset >= at) right.push(item);
+    else if (offset + width <= at) left.push(item);
+    else {
+      const parts = split(item, at - offset);
+      if (!parts) return null;
+      if (parts[0]) left.push(parts[0]);
+      if (parts[1]) right.push(parts[1]);
+    }
+    offset += width;
+  }
+  return [left, right];
 }
 
+function splitRunContent(content: RunContent, at: number): Split<RunContent> | null {
+  if (content.type !== 'text' && content.type !== 'instrText') return null;
+  return [
+    { ...content, text: content.text.slice(0, at) },
+    { ...content, text: content.text.slice(at) },
+  ];
+}
+
+/** One side of a split hyperlink, holding `children` in order. */
+function linkPart(link: Hyperlink, children: HyperlinkContent[]): Hyperlink | null {
+  if (children.length === 0) return null;
+  const legacy = children.filter(
+    (child): child is Hyperlink['children'][number] =>
+      child.type === 'run' || child.type === 'bookmarkStart' || child.type === 'bookmarkEnd'
+  );
+  return link.structuredChildren
+    ? { ...link, children: legacy, structuredChildren: children }
+    : { ...link, children: legacy };
+}
+
+/**
+ * Splits content `at` story units in: runs between their units, hyperlinks
+ * and tracked changes into two halves. Null for content that holds no
+ * position there, such as a field.
+ */
+function splitContent(content: ParagraphContent, at: number): Split<ParagraphContent> | null {
+  if (content.type === 'run') {
+    const parts = splitItems(content.content, at, runContentLength, splitRunContent);
+    return parts && [
+      parts[0].length > 0 ? { ...content, content: parts[0] } : null,
+      parts[1].length > 0 ? { ...content, content: parts[1] } : null,
+    ];
+  }
+  if (content.type === 'hyperlink') {
+    const children: readonly HyperlinkContent[] = content.structuredChildren ?? content.children;
+    const parts = splitItems(children, at, linkChildLength, (child, offset) =>
+      child.type === 'run' ? (splitContent(child, offset) as Split<Run> | null) : null
+    );
+    return parts && [linkPart(content, parts[0]), linkPart(content, parts[1])];
+  }
+  if (isTrackedWrapper(content)) {
+    const parts = splitItems(
+      content.content,
+      at,
+      paragraphContentLength,
+      (child, offset) => splitContent(child, offset) as Split<TrackedWrapper['content'][number]> | null
+    );
+    return parts && [
+      parts[0].length > 0 ? { ...content, content: parts[0] } : null,
+      parts[1].length > 0 ? { ...content, content: parts[1] } : null,
+    ];
+  }
+  return null;
+}
+
+/**
+ * Inserts zero-width markers at story offsets into paragraph content,
+ * splitting runs, hyperlinks and tracked changes where one falls inside
+ * them. Markers inside content that cannot be split go around it: starts
+ * before, ends after.
+ */
 function insertBoundaries(
   content: ParagraphContent[],
   boundaries: CommentBoundary[],
@@ -1152,47 +1817,61 @@ function insertBoundaries(
       : { type: 'commentRangeEnd', id: boundary.id }
 ): ParagraphContent[] {
   if (boundaries.length === 0) return content;
+  const carets = new Set(
+    boundaries
+      .filter(
+        (boundary) =>
+          boundary.kind === 'end' &&
+          boundaries.some(
+            (other) =>
+              other.kind === 'start' && other.id === boundary.id && other.offset === boundary.offset
+          )
+      )
+      .map((boundary) => `${boundary.offset}:${boundary.id}`)
+  );
+  // At one offset: ranges closing, then carets opening and closing, then ranges opening.
+  const rank = (boundary: CommentBoundary): number =>
+    carets.has(`${boundary.offset}:${boundary.id}`) ? 1 : boundary.kind === 'end' ? 0 : 2;
   const sorted = [...boundaries].sort(
     (left, right) =>
       left.offset - right.offset ||
-      (left.kind === right.kind ? left.id - right.id : left.kind === 'end' ? -1 : 1)
+      rank(left) - rank(right) ||
+      left.id - right.id ||
+      (left.kind === right.kind ? 0 : left.kind === 'start' ? -1 : 1)
   );
   const result: ParagraphContent[] = [];
   let cursor = 0;
   let boundaryIndex = 0;
   const emit = (offset: number): void => {
-    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset === offset) {
-      const boundary = sorted[boundaryIndex++];
-      result.push(makeMarker(boundary));
+    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset <= offset) {
+      result.push(makeMarker(sorted[boundaryIndex++]));
     }
   };
 
   emit(0);
-  for (const item of content) {
-    const length = paragraphContentLength(item);
-    const inside = sorted
-      .slice(boundaryIndex)
-      .map((boundary) => boundary.offset)
-      .filter((offset) => offset > cursor && offset < cursor + length);
-    if (item.type === 'run' && item.content.every((entry) => entry.type === 'text')) {
-      let remaining: Run | null = item;
-      let localCursor = 0;
-      for (const absolute of inside) {
-        if (!remaining) break;
-        const [left, right] = splitTextRun(remaining, absolute - cursor - localCursor);
-        if (left) result.push(left);
-        emit(absolute);
-        remaining = right;
-        localCursor = absolute - cursor;
-      }
-      if (remaining) result.push(remaining);
-    } else {
-      result.push(item);
+  for (const child of content) {
+    const end = cursor + paragraphContentLength(child);
+    let item: ParagraphContent | null = child;
+    while (item && boundaryIndex < sorted.length && sorted[boundaryIndex].offset < end) {
+      const offset = sorted[boundaryIndex].offset;
+      const parts = splitContent(item, offset - cursor);
+      if (!parts) break;
+      if (parts[0]) result.push(parts[0]);
+      cursor = offset;
+      emit(cursor);
+      item = parts[1];
     }
-    cursor += length;
+    const inside: CommentBoundary[] = [];
+    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset < end) {
+      inside.push(sorted[boundaryIndex++]);
+    }
+    for (const boundary of inside) if (boundary.kind === 'start') result.push(makeMarker(boundary));
+    if (item) result.push(item);
+    for (const boundary of inside) if (boundary.kind === 'end') result.push(makeMarker(boundary));
+    cursor = end;
     emit(cursor);
   }
-  emit(cursor);
+  emit(Number.POSITIVE_INFINITY);
   return result;
 }
 
@@ -1219,6 +1898,46 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
   return result;
 }
 
+/** Paragraphs nested in inline content, such as text-box paragraphs, in document order. */
+function nestedParagraphs(value: unknown, found: Record<string, unknown>[] = []): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    for (const item of value) nestedParagraphs(item, found);
+  } else if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (record.type === 'paragraph') found.push(record);
+    for (const child of Object.values(record)) nestedParagraphs(child, found);
+  }
+  return found;
+}
+
+/**
+ * Gives nested paragraphs the source occurrences their base counterparts
+ * carry, so a save applies IDs prepared for them; only when the paragraph
+ * still holds the same number of nested paragraphs.
+ */
+function restoreNestedOrdinals(content: ParagraphContent[], base: readonly ParagraphContent[]): void {
+  const sources = nestedParagraphs(base);
+  if (!sources.some((paragraph) => typeof paragraph.sourceOrdinal === 'number')) return;
+  const targets = nestedParagraphs(content);
+  if (targets.length !== sources.length) return;
+  targets.forEach((target, index) => {
+    const ordinal = sources[index]!.sourceOrdinal;
+    if (typeof ordinal === 'number') target.sourceOrdinal = ordinal;
+  });
+}
+
+function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
+  if (!base) return content;
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const boundaries: CommentBoundary[] = [];
+  let offset = 0;
+  for (const [index, child] of base.content.entries()) {
+    if (child.type === 'rawXml') boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    offset += paragraphContentLength(child);
+  }
+  return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
+}
+
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   const attrs = { ...PARAGRAPH_ATTR_DEFAULTS, ...properties } as Attrs;
   attrs.styleId = properties.pStyle ?? null;
@@ -1228,22 +1947,192 @@ function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   return attrs as ParagraphSaveAttrs;
 }
 
+function sourceRuns(content: readonly ParagraphContent[]): OriginalRunBoundary[] {
+  return content.flatMap((child): OriginalRunBoundary[] => {
+    if (child.type === 'run') {
+      return [{
+        text: child.content.map((entry) => {
+          if (entry.type === 'text' || entry.type === 'instrText') return entry.text;
+          if (entry.type === 'symbol') return entry.char;
+          if (entry.type === 'tab') return '\t';
+          if (entry.type === 'softHyphen') return '\u00ad';
+          if (entry.type === 'noBreakHyphen') return '\u2011';
+          return '\ufffc'.repeat(runContentLength(entry));
+        }).join(''),
+        formatting: child.formatting,
+      }];
+    }
+    if (child.type === 'hyperlink') return sourceRuns(child.children as ParagraphContent[]);
+    if (isTrackedWrapper(child) || child.type === 'inlineSdt') {
+      return sourceRuns(child.content as ParagraphContent[]);
+    }
+    return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
+  });
+}
+
+/** A midpoint of the shortest edit path, in UTF-16 units. */
+function editMidpoint(original: string, current: string): [number, number] | null {
+  const distanceLimit = Math.ceil((original.length + current.length) / 2);
+  const offset = distanceLimit + 1;
+  const forward = new Int32Array(2 * distanceLimit + 3).fill(-1);
+  const backward = new Int32Array(forward.length).fill(-1);
+  forward[offset + 1] = 0;
+  backward[offset + 1] = 0;
+  const delta = original.length - current.length;
+  const odd = delta % 2 !== 0;
+  let forwardStart = 0;
+  let forwardEnd = 0;
+  let backwardStart = 0;
+  let backwardEnd = 0;
+  for (let distance = 0; distance <= distanceLimit; distance += 1) {
+    for (let diagonal = -distance + forwardStart; diagonal <= distance - forwardEnd; diagonal += 2) {
+      const index = offset + diagonal;
+      let x = diagonal === -distance ||
+        (diagonal !== distance && forward[index - 1]! < forward[index + 1]!)
+        ? forward[index + 1]! : forward[index - 1]! + 1;
+      let y = x - diagonal;
+      while (x < original.length && y < current.length && original[x] === current[y]) {
+        x += 1;
+        y += 1;
+      }
+      forward[index] = x;
+      if (x > original.length) forwardEnd += 2;
+      else if (y > current.length) forwardStart += 2;
+      else if (odd && backward[offset + delta - diagonal]! >= 0 &&
+        x >= original.length - backward[offset + delta - diagonal]!) return [x, y];
+    }
+    for (let diagonal = -distance + backwardStart; diagonal <= distance - backwardEnd; diagonal += 2) {
+      const index = offset + diagonal;
+      let x = diagonal === -distance ||
+        (diagonal !== distance && backward[index - 1]! < backward[index + 1]!)
+        ? backward[index + 1]! : backward[index - 1]! + 1;
+      let y = x - diagonal;
+      while (x < original.length && y < current.length &&
+        original[original.length - x - 1] === current[current.length - y - 1]) {
+        x += 1;
+        y += 1;
+      }
+      backward[index] = x;
+      if (x > original.length) backwardEnd += 2;
+      else if (y > current.length) backwardStart += 2;
+      else if (!odd && forward[offset + delta - diagonal]! >= 0 &&
+        forward[offset + delta - diagonal]! >= original.length - x) {
+        const start = forward[offset + delta - diagonal]!;
+        return [start, start - delta + diagonal];
+      }
+    }
+  }
+  return null;
+}
+
+interface SourceTextMatch {
+  original: number;
+  current: number;
+  length: number;
+}
+
+function sourceTextMatches(original: string, current: string): SourceTextMatch[] {
+  const matches: SourceTextMatch[] = [];
+  const visit = (before: string, after: string, sourceOffset: number, liveOffset: number): void => {
+    let prefix = 0;
+    while (prefix < Math.min(before.length, after.length) && before[prefix] === after[prefix]) prefix += 1;
+    if (prefix > 0) matches.push({ original: sourceOffset, current: liveOffset, length: prefix });
+    let suffix = 0;
+    while (suffix < Math.min(before.length, after.length) - prefix &&
+      before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix += 1;
+    const oldMiddle = before.slice(prefix, before.length - suffix);
+    const newMiddle = after.slice(prefix, after.length - suffix);
+    if (oldMiddle.length > 0 && newMiddle.length > 0) {
+      const split = editMidpoint(oldMiddle, newMiddle);
+      if (split && (split[0] > 0 || split[1] > 0) &&
+        (split[0] < oldMiddle.length || split[1] < newMiddle.length)) {
+        visit(oldMiddle.slice(0, split[0]), newMiddle.slice(0, split[1]), sourceOffset + prefix, liveOffset + prefix);
+        visit(oldMiddle.slice(split[0]), newMiddle.slice(split[1]), sourceOffset + prefix + split[0], liveOffset + prefix + split[1]);
+      }
+    }
+    if (suffix > 0) matches.push({
+      original: sourceOffset + before.length - suffix,
+      current: liveOffset + after.length - suffix,
+      length: suffix,
+    });
+  };
+  visit(original, current, 0, 0);
+  return matches;
+}
+
+function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
+  if (!sources.some((source) => SOURCE_RUN_PROPERTIES.some((key) => source.formatting?.[key] !== undefined))) {
+    return items;
+  }
+  const original = sources.map((source) => source.text).join('');
+  const current = items.map((item) => item.kind === 'text' ? item.text
+    : item.embedKind === 'tab' ? '\t' : '\ufffc').join('');
+  const matches = sourceTextMatches(original, current);
+  const mapped = (offset: number): number => {
+    if (offset === 0) return 0;
+    let sourceEnd = 0;
+    let liveEnd = 0;
+    for (const match of matches) {
+      if (offset < match.original) return offset === sourceEnd ? liveEnd : match.current;
+      if (offset <= match.original + match.length) return match.current + offset - match.original;
+      sourceEnd = match.original + match.length;
+      liveEnd = match.current + match.length;
+    }
+    return offset === sourceEnd ? liveEnd : current.length;
+  };
+  let sourceOffset = 0;
+  const spans = sources.map((source, index) => {
+    const start = mapped(sourceOffset);
+    sourceOffset += source.text.length;
+    return { start, end: index + 1 === sources.length ? current.length : mapped(sourceOffset), formatting: source.formatting };
+  }).filter((span) => span.end > span.start);
+  let offset = 0;
+  return items.flatMap((item): InlineItem[] => {
+    const end = offset + (item.kind === 'text' ? item.text.length : 1);
+    const slices: InlineItem[] = [];
+    while (offset < end) {
+      const span = spans.find((span) => span.start <= offset && offset < span.end);
+      const next = Math.min(end, span?.end ?? end);
+      const source = Object.fromEntries(SOURCE_RUN_PROPERTIES
+        .filter((key) => span?.formatting?.[key] !== undefined)
+        .map((key) => [key, span!.formatting![key]]));
+      const attributes = { ...item.attributes, _sourceRunFormatting: source };
+      slices.push(item.kind === 'text'
+        ? { ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes }
+        : { ...item, attributes });
+      offset = next;
+    }
+    return slices;
+  });
+}
+
 function paragraphFromStory(
   paraId: string,
   properties: Attrs,
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
-  baseParagraph: Paragraph | undefined
+  baseParagraph: Paragraph | undefined,
+  liveBreaks: LiveParagraphBreaks,
+  recovery: ChartRecovery,
+  format: RunFormatter,
+  revisionIds?: RevisionIds,
+  inherited?: ParagraphFormatting
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
-  let content = buildParagraphContent(items);
+  const sources = baseParagraph ? sourceRuns(baseParagraph.content)
+    : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[] : [];
+  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources), recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,
     Array.isArray(attrs._originalRunBoundaries)
       ? (attrs._originalRunBoundaries as OriginalRunBoundary[])
-      : undefined
+      : undefined,
+    baseParagraph,
+    liveBreaks
   );
+  content = restoreRawInlines(content, baseParagraph);
+  if (baseParagraph) restoreNestedOrdinals(content, baseParagraph.content);
   content = insertBoundaries(content, commentBoundaries);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
@@ -1273,7 +2162,9 @@ function paragraphFromStory(
     type: 'paragraph',
     paraId: paraId || undefined,
     textId: baseParagraph?.textId,
-    formatting: paragraphAttrsToFormatting(attrs),
+    ...(baseParagraph?.extraAttributes ? { extraAttributes: baseParagraph.extraAttributes } : {}),
+    ...(baseParagraph?.paraIdAttribute ? { paraIdAttribute: baseParagraph.paraIdAttribute } : {}),
+    formatting: paragraphAttrsToFormatting(attrs, inherited),
     content,
   };
   if (baseParagraph?.renderedPageBreakBefore) paragraph.renderedPageBreakBefore = true;
@@ -1297,30 +2188,26 @@ function paragraphFromStory(
   return paragraph;
 }
 
+/**
+ * Lifts a `w:tblBorders` back out of the per-cell edges seeding pushed down:
+ * outer sides come from the cells owning the table's boundary, `insideH`/
+ * `insideV` from an interior edge. Sides no cell authors stay absent.
+ */
 function inferTableBorders(rows: TableRow[]): TableBorders | undefined {
-  for (const row of rows) {
-    for (const cell of row.cells) {
-      const borders = cell.formatting?.borders;
-      if (!borders) continue;
-      const base =
-        borders.top ||
-        borders.left ||
-        borders.right ||
-        borders.bottom ||
-        borders.insideH ||
-        borders.insideV;
-      if (!base) return undefined;
-      return {
-        top: borders.top ?? base,
-        bottom: borders.bottom ?? base,
-        left: borders.left ?? base,
-        right: borders.right ?? base,
-        insideH: borders.insideH ?? borders.bottom ?? base,
-        insideV: borders.insideV ?? borders.right ?? base,
-      };
-    }
-  }
-  return undefined;
+  const firstRow = rows[0]?.cells;
+  const lastRow = rows[rows.length - 1]?.cells;
+  const corner = firstRow?.[0]?.formatting?.borders;
+  if (!firstRow || !lastRow || !corner) return undefined;
+  const borders: TableBorders = {
+    top: corner.top,
+    left: corner.left,
+    bottom: lastRow[0]?.formatting?.borders?.bottom,
+    right: firstRow[firstRow.length - 1]?.formatting?.borders?.right,
+    insideH: rows.length > 1 ? corner.bottom : undefined,
+    insideV: firstRow.length > 1 ? corner.right : undefined,
+  };
+  const authored = Object.entries(borders).filter(([, value]) => value !== undefined);
+  return authored.length > 0 ? (Object.fromEntries(authored) as TableBorders) : undefined;
 }
 
 function normalizeVMergeRuns(rows: TableRow[]): void {
@@ -1375,18 +2262,10 @@ function normalizeVMergeRuns(rows: TableRow[]): void {
 }
 
 function tableCellFromPayload(context: SaveContext, payload: TableCellPayload): TableCell {
-  const attrs = {
-    ...TABLE_CELL_ATTR_DEFAULTS,
-    ...(payload.tcPr ?? {}),
-  } as unknown as TableCellSaveAttrs;
+  const attrs = context.cellAttrs(payload);
   const content =
     payload.story && context.storyIds.has(payload.story)
-      ? context
-          .storyToBlocks(payload.story)
-          .filter(
-            (block): block is Paragraph | Table =>
-              block.type === 'paragraph' || block.type === 'table'
-          )
+      ? context.storyToBlocks(payload.story)
       : [];
   const cell: TableCell = {
     type: 'tableCell',
@@ -1515,8 +2394,9 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     ...(payload.tblPr ?? {}),
     columnWidths: grid.length > 0 ? grid : undefined,
   } as TableSaveAttrs;
+  context.applyTableBaseline(payload, attrs);
   let formatting = tableAttrsToFormatting(attrs);
-  if (!formatting?.borders) {
+  if (!formatting?.borders && !attrs._originalFormatting) {
     const borders = inferTableBorders(rows);
     if (borders) formatting = { ...(formatting ?? {}), borders };
   }
@@ -1539,33 +2419,89 @@ function pageBreakParagraph(): Paragraph {
   };
 }
 
-function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
+/** A note number mark run, or a tracked-change wrapper holding only those. */
+function isNoteMark(content: ParagraphContent): boolean {
+  if (
+    content.type === 'insertion' ||
+    content.type === 'deletion' ||
+    content.type === 'moveFrom' ||
+    content.type === 'moveTo'
+  ) {
+    return content.content.length > 0 && content.content.every(isNoteMark);
+  }
+  return (
+    content.type === 'run' &&
+    content.content.length > 0 &&
+    content.content.every(
+      (entry) => entry.type === 'footnoteRefMark' || entry.type === 'endnoteRefMark'
+    )
+  );
+}
+
+function hasNoteMark(blocks: readonly BlockContent[]): boolean {
+  return blocks.some((block) => block.type === 'paragraph' && block.content.some(isNoteMark));
+}
+
+/**
+ * Reinstates the `w:footnoteRef` / `w:endnoteRef` number mark on a projected
+ * note. The mark carries no story unit, so an edit that invalidates the run
+ * boundary cache would otherwise drop it; the source note is the only record.
+ */
+function restoreNoteMarks(
+  projected: BlockContent[],
+  base: readonly BlockContent[]
+): BlockContent[] {
+  if (hasNoteMark(projected)) return projected;
+  const opening = base.find((block) => block.type === 'paragraph')?.content ?? [];
+  const end = opening.findIndex((child) => !isNoteMark(child));
+  const marks = opening.slice(0, end < 0 ? opening.length : end);
+  if (marks.length === 0) return projected;
+  const index = projected.findIndex((block) => block.type === 'paragraph');
+  if (index < 0) return projected;
+  const target = projected[index] as Paragraph;
+  const restored = [...projected];
+  restored[index] = { ...target, content: [...marks, ...target.content] };
+  return restored;
+}
+
+/**
+ * Base paragraphs by session key: the key a projection recorded, else the key
+ * seeding gives a source paragraph (its `paraId` unless an earlier paragraph
+ * holds it, else its story position).
+ */
+function collectBaseParagraphs(
+  stories: ReadonlyMap<string, readonly BlockContent[]>
+): Map<string, Paragraph> {
   const paragraphs = new Map<string, Paragraph>();
-  const visit = (blocks: readonly BlockContent[]): void => {
+  for (const [storyId, blocks] of stories) {
+    let index = 0;
     for (const block of blocks) {
-      if (block.type === 'paragraph') {
-        if (block.paraId && !paragraphs.has(block.paraId)) paragraphs.set(block.paraId, block);
-      } else if (block.type === 'table') {
-        for (const row of block.rows) for (const cell of row.cells) visit(cell.content);
-      } else {
-        visit(block.content);
-      }
+      if (block.type !== 'paragraph') continue;
+      const key =
+        projectedBlocks.get(block)?.sessionKey ??
+        ((!block.repeatedParaId && block.paraId) || `${storyId}:p${index}`);
+      index += 1;
+      if (!paragraphs.has(key)) paragraphs.set(key, block);
     }
-  };
-  visit(document.package.document.content);
-  for (const part of document.package.headers?.values() ?? []) visit(part.content);
-  for (const part of document.package.footers?.values() ?? []) visit(part.content);
-  for (const note of document.package.footnotes ?? []) visit(note.content);
-  for (const note of document.package.endnotes ?? []) visit(note.content);
+  }
   return paragraphs;
 }
 
-function collectBaseStories(document: Document): Map<string, readonly BlockContent[]> {
+function collectBaseStories(
+  session: YrsSession,
+  document: Document
+): Map<string, readonly BlockContent[]> {
   const stories = new Map<string, readonly BlockContent[]>();
   const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
+    if (stories.has(storyId)) return;
     stories.set(storyId, blocks);
     let tableIndex = 0;
+    let sdtIndex = 0;
     for (const block of blocks) {
+      if (block.type === 'blockSdt') {
+        visit(`${storyId}:sdt${sdtIndex++}`, block.content);
+        continue;
+      }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
       block.rows.forEach((row, rowIndex) => {
@@ -1577,21 +2513,27 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   };
 
   visit('body', document.package.document.content);
-  for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content);
-  for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content);
+  for (const [rId, part] of document.package.headers ?? []) {
+    visit(headerFooterStory(session, rId), part.content);
+  }
+  for (const [rId, part] of document.package.footers ?? []) {
+    visit(headerFooterStory(session, rId), part.content);
+  }
   for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content);
+  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content);
   return stories;
 }
 
 function commentRanges(
   session: YrsSession,
-  comments: readonly Comment[] | undefined
+  comments: readonly Comment[] | undefined,
+  sessionIds: ReadonlyMap<number, string> | undefined
 ): Map<string, Array<{ id: number; start: number; end: number }>> {
   const byStory = new Map<string, Array<{ id: number; start: number; end: number }>>();
   for (const comment of comments ?? []) {
     let anchors: ReturnType<YrsSession['resolveComment']>;
     try {
-      anchors = session.resolveComment(String(comment.id));
+      anchors = session.resolveComment(sessionIds?.get(comment.id) ?? String(comment.id));
     } catch {
       continue;
     }
@@ -1613,40 +2555,607 @@ function commentRanges(
   return byStory;
 }
 
+/** Chart placements recoverable from the base document, keyed per story. */
+interface ChartRecovery {
+  drawingFor(rId: string | undefined, path: string | undefined): string | undefined;
+  unrecoverable(rId: string | undefined, path: string | undefined): void;
+  warn(message: string): void;
+}
+
+function collectChartDrawings(blocks: readonly BlockContent[], into: Map<string, string>): void {
+  for (const block of blocks) {
+    if (block.type === 'paragraph') {
+      for (const run of paragraphChartRuns(block.content)) {
+        for (const content of run.content) {
+          if (content.type !== 'chart' || !content.chart.drawingXml) continue;
+          if (content.chart.rId !== undefined) {
+            const key = `rId:${content.chart.rId}`;
+            if (!into.has(key)) into.set(key, content.chart.drawingXml);
+          }
+          if (content.chart.path !== undefined) {
+            const key = `path:${content.chart.path}`;
+            if (!into.has(key)) into.set(key, content.chart.drawingXml);
+          }
+        }
+      }
+    } else if (block.type === 'table') {
+      for (const row of block.rows) for (const cell of row.cells) collectChartDrawings(cell.content, into);
+    } else if (block.type === 'blockSdt') {
+      collectChartDrawings(block.content, into);
+    }
+  }
+}
+
+function paragraphChartRuns(content: readonly ParagraphContent[]): Run[] {
+  const runs: Run[] = [];
+  const visitInline = (child: ParagraphContent | HyperlinkContent): void => {
+    if (child.type === 'run') runs.push(child);
+    else if (child.type === 'hyperlink') {
+      for (const inline of child.structuredChildren ?? child.children) visitInline(inline);
+    } else if (child.type === 'inlineSdt') {
+      for (const inline of child.content) visitInline(inline);
+    } else if (child.type === 'simpleField') {
+      for (const run of child.content) if (run.type === 'run') runs.push(run);
+    } else if (child.type === 'complexField') {
+      for (const run of [...child.fieldCode, ...child.fieldResult]) runs.push(run);
+    } else if (
+      child.type === 'insertion' || child.type === 'deletion' ||
+      child.type === 'moveFrom' || child.type === 'moveTo'
+    ) {
+      for (const inline of child.content) visitInline(inline as ParagraphContent);
+    }
+  };
+  for (const child of content) visitInline(child);
+  return runs;
+}
+
+function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[]): BlockContent[] {
+  let offset = 0;
+  for (let index = 0; index < base.length; index += 1) {
+    const block = base[index]!;
+    if (!isRawXml(block)) continue;
+    const following = base.slice(index + 1).find((candidate) =>
+      candidate.type === 'paragraph' && candidate.paraId && projected.some((entry) =>
+        entry.type === 'paragraph' && entry.paraId === candidate.paraId));
+    const anchor = following?.type === 'paragraph'
+      ? projected.findIndex((entry) => entry.type === 'paragraph' && entry.paraId === following.paraId)
+      : -1;
+    const position = anchor >= 0 ? anchor : Math.min(index + offset, projected.length);
+    projected.splice(position, 0, block);
+    offset = Math.max(0, position - index);
+  }
+  return projected;
+}
+
+/** A projected block plus a fingerprint of the story inputs it was built from. */
+interface ProjectedBlockMemo {
+  tableBaseline?: YrsTableInheritance;
+  tableSourcePrefix?: string;
+  /** Bucket key for locating same-container candidates (first cell story / child story). */
+  key?: string;
+  /** Snapshot of the raw story inputs the block was built from. */
+  inputs?: readonly unknown[];
+  /** Container cell/child content arrays in payload order (tables, block SDTs). */
+  children?: readonly BlockContent[][];
+  /** Session key of the pilcrow a paragraph was projected from. */
+  sessionKey?: string;
+  /** The breaks of a projected paragraph that seeding moves behind it as block embeds. */
+  trailing?: readonly BlockBreakKind[];
+  sourceRuns?: OriginalRunBoundary[];
+}
+
+interface ProjectedStory {
+  commentsKey: string;
+  blocks: BlockContent[];
+}
+
+/** Per-session projection reuse state shared across `yrsToDocument` calls. */
+interface SessionProjectionMemo {
+  /** An op without story scope ran; every story counts dirty except `clean` ones. */
+  wholesale: boolean;
+  clean: Set<string>;
+  dirty: Set<string>;
+  stories: Map<string, ProjectedStory>;
+  /** The story each nested story was last projected inside. */
+  parents: Map<string, string>;
+}
+
+const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
+
+/** The session key of the pilcrow a projected paragraph was built from. @internal */
+export function projectedSessionKey(paragraph: Paragraph): string | undefined {
+  return projectedBlocks.get(paragraph)?.sessionKey;
+}
+
+/**
+ * A content-control value's display blocks, each paragraph taking the Word
+ * paragraph ID and session key of the child paragraph it replaces in order.
+ */
+function carryParagraphIdentities(
+  replacement: BlockContent[],
+  replaced: readonly BlockContent[]
+): BlockContent[] {
+  const previous = replaced.filter((block): block is Paragraph => block.type === 'paragraph');
+  let index = 0;
+  return replacement.map((block) => {
+    if (block.type !== 'paragraph') return block;
+    const source = previous[index++];
+    if (!source?.paraId) return block;
+    const carried: Paragraph = { ...block, paraId: source.paraId };
+    const memo = projectedBlocks.get(source);
+    if (memo?.sessionKey) projectedBlocks.set(carried, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
+    return carried;
+  });
+}
+
+/**
+ * `blocks` with paragraphs of their own, in table cells too, each still the
+ * session paragraph it was projected from: a save edits these, not the
+ * projection the next one reuses. @internal
+ */
+export function ownProjectedParagraphs(blocks: readonly BlockContent[]): BlockContent[] {
+  return blocks.map((block) => {
+    if (block.type === 'paragraph') {
+      const own: Paragraph = { ...block };
+      const memo = projectedBlocks.get(block);
+      if (memo?.sessionKey) projectedBlocks.set(own, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
+      return own;
+    }
+    if (block.type !== 'table') return block;
+    const own: Table = {
+      ...block,
+      rows: block.rows.map((row) => ({
+        ...row,
+        cells: row.cells.map((cell) => ({ ...cell, content: ownProjectedParagraphs(cell.content) })),
+      })),
+    };
+    const prior = projectedBlocks.get(block);
+    if (prior) {
+      projectedBlocks.set(own, {
+        tableBaseline: prior.tableBaseline,
+        tableSourcePrefix: prior.tableSourcePrefix,
+      });
+    }
+    return own;
+  });
+}
+const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
+
+function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
+  let memo = sessionProjectionMemos.get(session);
+  if (!memo) {
+    memo = {
+      wholesale: true,
+      clean: new Set(),
+      dirty: new Set(),
+      stories: new Map(),
+      parents: new Map(),
+    };
+    sessionProjectionMemos.set(session, memo);
+  }
+  return memo;
+}
+
+/** Structural equality over JSON-shaped story inputs — allocation-free sig check. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((entry, index) => sameJson(entry, b[index]));
+  }
+  const left = asObject(a);
+  const right = asObject(b);
+  if (!left || !right) return false;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => key in right && sameJson(left[key], right[key]))
+  );
+}
+
+const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
+
+/** Page and column breaks the layout gives a block of their own, ahead of a paragraph. */
+const isBlockBreak = (item: InlineItem): boolean =>
+  item.kind === 'embed' && blockBreakKind(item.embedKind) !== null;
+
+type BlockBreakKind = 'page' | 'column';
+
+function blockBreakKind(embedKind: string): BlockBreakKind | null {
+  return embedKind === 'pageBreak' ? 'page' : embedKind === 'columnBreak' ? 'column' : null;
+}
+
+type FlowToken = BlockBreakKind | 'visible';
+
+function runFlowTokens(run: Run, tokens: FlowToken[]): void {
+  for (const content of run.content) {
+    if (content.type === 'break' && (content.breakType === 'page' || content.breakType === 'column')) {
+      tokens.push(content.breakType);
+    } else if (content.type !== 'text' || content.text.length > 0) tokens.push('visible');
+  }
+}
+
+function flowTokens(content: readonly ParagraphContent[], tokens: FlowToken[] = []): FlowToken[] {
+  for (const item of content) {
+    if (item.type === 'run') runFlowTokens(item, tokens);
+    else if (item.type === 'hyperlink') {
+      for (const child of item.children) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'simpleField') {
+      for (const child of item.content) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'complexField') {
+      for (const child of [...item.fieldCode, ...item.fieldResult]) runFlowTokens(child, tokens);
+    } else if (item.type === 'inlineSdt') flowTokens(item.content as ParagraphContent[], tokens);
+    else if (item.type === 'insertion' || item.type === 'deletion' || item.type === 'moveFrom' || item.type === 'moveTo') {
+      for (const child of item.content) if (child.type === 'run') runFlowTokens(child, tokens);
+    } else if (item.type === 'mathEquation') tokens.push('visible');
+  }
+  return tokens;
+}
+
+function leadingBlockBreaks(paragraph: Paragraph): BlockBreakKind[] {
+  const tokens = flowTokens(paragraph.content);
+  if (!tokens.includes('visible')) return tokens.slice(0, tokens.lastIndexOf('column') + 1) as BlockBreakKind[];
+  return tokens[0] === 'column' ? ['column'] : [];
+}
+
+/** The breaks of `paragraph` that seeding moves behind it as block embeds, in order. */
+function trailingBlockBreaks(paragraph: Paragraph): BlockBreakKind[] {
+  const tokens = flowTokens(paragraph.content);
+  if (!tokens.includes('visible')) return tokens.slice(tokens.lastIndexOf('column') + 1) as BlockBreakKind[];
+  const trailing: BlockBreakKind[] = [];
+  let leading = false;
+  let visible = false;
+  for (const token of tokens) {
+    if (token === 'visible') visible = true;
+    else if (visible || leading) trailing.push(token);
+    else leading = true;
+  }
+  return trailing;
+}
+
+/** Stories a committed op touched; `all` invalidates the whole session. */
+export function noteYrsStoriesDirty(
+  session: YrsSession,
+  stories: 'all' | string | Iterable<string>
+): void {
+  const memo = sessionProjectionMemo(session);
+  if (stories === 'all') {
+    memo.wholesale = true;
+    memo.clean.clear();
+    memo.dirty.clear();
+    memo.stories.clear();
+    memo.parents.clear();
+    return;
+  }
+  const queue = typeof stories === 'string' ? [stories] : [...stories];
+  const queued = new Set(queue);
+  for (let index = 0; index < queue.length; index += 1) {
+    const story = queue[index]!;
+    memo.dirty.add(story);
+    memo.clean.delete(story);
+    memo.stories.delete(story);
+    const parent = memo.parents.get(story) ?? NESTED_STORY_ID.exec(story)?.[1];
+    if (parent && !queued.has(parent)) {
+      queued.add(parent);
+      queue.push(parent);
+    }
+  }
+}
+
+const EMPTY_BLOCKS: BlockContent[] = [];
+
 class SaveContext {
   readonly storyIds: Set<string>;
+  readonly warnings: string[] = [];
   private readonly baseParagraphs: Map<string, Paragraph>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
+  private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
+  private readonly subtreeComments = new Map<string, Map<string, unknown>>();
+  private readonly memo: SessionProjectionMemo;
+  private readonly styles: StyleResolver;
+  private readonly syntheticDefaults: boolean;
+  private readonly inherited = new Map<string, ParagraphFormatting | undefined>();
+  private readonly styleDefinitions: Document['package']['styles'];
+  private runInheritance: YrsRunInheritance | null = null;
+  private readonly inheritedRuns = new Map<string, TextFormatting>();
+  private readonly sourceTables = new Map<string, Table>();
+  private readonly tableBaselines = new Map<Table, YrsTableInheritance>();
+  private readonly payloadBaselines = new WeakMap<TablePayload, YrsTableInheritance>();
+  private readonly sourceCells = new Map<string, YrsTableInheritance['rows'][number][number]>();
+  private readonly cellParagraphs = new Map<string, ParagraphFormatting | undefined>();
+  private readonly cellRuns = new Map<string, TextFormatting | undefined>();
 
   constructor(
     private readonly session: YrsSession,
-    base: Document
+    base: Document,
+    commentIds?: ReadonlyMap<number, string>,
+    private readonly revisionIds?: RevisionIds
   ) {
     this.storyIds = new Set(session.storyIds());
-    this.baseParagraphs = collectBaseParagraphs(base);
-    this.baseStories = collectBaseStories(base);
-    this.comments = commentRanges(session, base.package.document.comments);
+    this.baseStories = collectBaseStories(session, base);
+    for (const [storyId, blocks] of this.baseStories) {
+      let tableIndex = 0;
+      for (const block of blocks) {
+        if (block.type !== 'table') continue;
+        const prefix = projectedBlocks.get(block)?.tableSourcePrefix ?? `${storyId}:t${tableIndex}`;
+        this.sourceTables.set(prefix, block);
+        tableIndex += 1;
+      }
+      const scoped = new Map<string, string>();
+      collectChartDrawings(blocks, scoped);
+      if (scoped.size > 0) this.baseChartDrawings.set(storyId, scoped);
+    }
+    this.baseParagraphs = collectBaseParagraphs(this.baseStories);
+    this.comments = commentRanges(session, base.package.document.comments, commentIds);
+    this.memo = sessionProjectionMemo(session);
+    this.styleDefinitions = base.package.styles;
+    this.styles = createStyleResolver(base.package.styles);
+    const defaultStyle = this.styles.getDefaultParagraphStyle();
+    this.syntheticDefaults =
+      defaultStyle !== undefined && !(base.package.styles?.styles ?? []).includes(defaultStyle);
+    for (const [story, ranges] of this.comments) {
+      const seen = new Set<string>();
+      for (
+        let owner: string | undefined = story;
+        owner !== undefined && !seen.has(owner);
+        owner = this.memo.parents.get(owner) ?? NESTED_STORY_ID.exec(owner)?.[1]
+      ) {
+        seen.add(owner);
+        const nested = this.subtreeComments.get(owner) ?? new Map<string, unknown>();
+        nested.set(story, ranges);
+        this.subtreeComments.set(owner, nested);
+      }
+    }
+  }
+
+  private storyIsClean(storyId: string): boolean {
+    return this.memo.wholesale
+      ? this.memo.clean.has(storyId)
+      : !this.memo.dirty.has(storyId);
+  }
+
+  private inheritance(): YrsRunInheritance {
+    return (this.runInheritance ??= this.session.runInheritance(this.styleDefinitions));
+  }
+
+  private prepareTable(payload: TablePayload, parent: string): void {
+    const cells = (Array.isArray(payload.rows) ? payload.rows : [])
+      .flatMap((row) => Array.isArray(row.cells) ? row.cells : []);
+    let source: { prefix: string; table: Table } | undefined;
+    const candidates = payload.tblPr?._originalFormatting ? cells : [];
+    for (const cell of candidates) {
+      const story = asString(cell.tcPr?._sourceCellStory) ?? asString(cell.story);
+      const prefix = story?.match(/^(.*:t\d+):r\d+c\d+$/)?.[1];
+      const table = prefix ? this.sourceTables.get(prefix) : undefined;
+      if (prefix && table) {
+        source = { prefix, table };
+        break;
+      }
+    }
+    if (source) {
+      let baseline = this.tableBaselines.get(source.table);
+      if (!baseline) {
+        baseline = projectedBlocks.get(source.table)?.tableBaseline ??
+          this.inheritance().tableAttributes(source.table);
+        this.tableBaselines.set(source.table, baseline);
+      }
+      this.payloadBaselines.set(payload, baseline);
+      const prefix = source.prefix;
+      baseline.rows.forEach((row, rowIndex) => {
+        row.forEach((cell, cellIndex) => {
+          this.sourceCells.set(`${prefix}:r${rowIndex}c${cellIndex}`, cell);
+        });
+      });
+    }
+    for (const cell of cells) {
+      if (typeof cell.story !== 'string') continue;
+      this.memo.parents.set(cell.story, parent);
+      const source = asString(cell.tcPr?._sourceCellStory) ?? cell.story;
+      this.cellParagraphs.set(cell.story, this.sourceCells.get(source)?.paragraphFormatting ?? undefined);
+      this.cellRuns.set(cell.story, this.sourceCells.get(source)?.runFormatting ?? undefined);
+    }
+  }
+
+  applyTableBaseline(payload: TablePayload, attrs: TableSaveAttrs): void {
+    const baseline = this.payloadBaselines.get(payload);
+    if (baseline) {
+      attrs._originalResolvedMargins = baseline.attributes.cellMargins as TableSaveAttrs['cellMargins'];
+    }
+  }
+
+  cellAttrs(payload: TableCellPayload): TableCellSaveAttrs {
+    const attrs = {
+      ...TABLE_CELL_ATTR_DEFAULTS,
+      ...(payload.tcPr ?? {}),
+    } as unknown as TableCellSaveAttrs;
+    const origin = asString(payload.tcPr?._sourceCellStory);
+    const source = origin ?? asString(payload.story);
+    const baseline = source !== undefined ? this.sourceCells.get(source) : undefined;
+    if (baseline) {
+      attrs._originalResolvedBorders = baseline.attributes.borders as TableCellSaveAttrs['borders'];
+      attrs._originalResolvedMargins = baseline.attributes.margins as TableCellSaveAttrs['margins'];
+      const original = asObject(baseline.attributes._originalFormatting);
+      if (origin && original && !attrs._originalFormatting) {
+        const formatting = { ...original };
+        delete formatting.gridSpan;
+        delete formatting.vMerge;
+        attrs._originalFormatting = formatting as TableCellSaveAttrs['_originalFormatting'];
+      }
+    }
+    return attrs;
+  }
+
+  private cellContents(payload: TablePayload, parent: string): BlockContent[][] {
+    const contents: BlockContent[][] = [];
+    for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
+      for (const cell of Array.isArray(row.cells) ? row.cells : []) {
+        if (cell.story !== undefined) this.memo.parents.set(cell.story, parent);
+        contents.push(
+          cell.story !== undefined && this.storyIds.has(cell.story)
+            ? this.storyToBlocks(cell.story)
+            : EMPTY_BLOCKS
+        );
+      }
+    }
+    return contents;
+  }
+
+  private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
+    const cell = this.cellParagraphs.has(storyId);
+    if (
+      (NESTED_STORY_ID.test(storyId) && !cell) ||
+      (this.syntheticDefaults && !cell) || properties.numPr != null
+    ) {
+      return undefined;
+    }
+    const style = typeof properties.pStyle === 'string' ? properties.pStyle : '';
+    const tableFormatting = this.cellParagraphs.get(storyId);
+    const key = cell ? JSON.stringify([style, tableFormatting]) : style;
+    if (!this.inherited.has(key)) {
+      const resolved = cell
+        ? this.inheritance().paragraphFormatting(style || null, tableFormatting)
+        : this.styles.resolveParagraphStyle(style || null).paragraphFormatting;
+      if (resolved === undefined || resolved.numPr != null) {
+        this.inherited.set(key, undefined);
+      } else {
+        const formatting = { ...resolved };
+        delete formatting.indentLeft;
+        delete formatting.indentRight;
+        this.inherited.set(key, formatting);
+      }
+    }
+    return this.inherited.get(key);
+  }
+
+  /**
+   * How the runs of a paragraph with pilcrow `properties` save: relative to
+   * what seeding merged into their marks under the styles the package saves.
+   */
+  private runFormatter(story: string, properties: Attrs): RunFormatter {
+    const paragraphStyle = typeof properties.pStyle === 'string' ? properties.pStyle : null;
+    return (attributes) =>
+      relativeFormatting(
+        attributes,
+        this.inheritedRun(paragraphStyle, asString(asObject(attributes.runStyle)?.styleId) || null, this.cellRuns.get(story))
+      );
+  }
+
+  private inheritedRun(paragraphStyle: string | null, runStyle: string | null, tableRun: TextFormatting | undefined): TextFormatting {
+    const key = JSON.stringify([paragraphStyle, runStyle, tableRun]);
+    let inherited = this.inheritedRuns.get(key);
+    if (inherited === undefined) {
+      const inheritance = this.inheritance();
+      inherited = attrsToTextFormatting(inheritance.attributes(paragraphStyle, runStyle, tableRun));
+      this.inheritedRuns.set(key, inherited);
+    }
+    return inherited;
+  }
+
+  dispose(): void {
+    this.runInheritance?.dispose();
+    this.runInheritance = null;
+  }
+
+  recovery(storyId: string): ChartRecovery {
+    const scoped = this.baseChartDrawings.get(storyId);
+    return {
+      drawingFor: (rId, path) =>
+        (rId !== undefined ? scoped?.get(`rId:${rId}`) : undefined) ??
+        (path !== undefined ? scoped?.get(`path:${path}`) : undefined),
+      unrecoverable: (rId, path) => {
+        const identity = rId !== undefined ? ` (rId ${rId})` : path !== undefined ? ` (path ${path})` : '';
+        this.warnings.push(
+          `chart run carries no drawing to replay${identity}; keeping the run out of the output`
+        );
+      },
+      warn: (message) => {
+        this.warnings.push(message);
+      },
+    };
   }
 
   storyToBlocks(storyId: string): BlockContent[] {
-    const blocks: BlockContent[] = [];
     const baseBlocks = this.baseStories.get(storyId);
-    const segments = this.session.storySegments(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
+    const nestedComments = this.subtreeComments.get(storyId);
+    const commentsKey = nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '';
+    const priorStory = this.memo.stories.get(storyId);
+    // Nested stories are mapped positionally, so a different array means
+    // drift, not divergence — mutation paths mark them dirty anyway. A root
+    // story on a different array is genuine divergence and forces a fresh
+    // projection.
+    if (
+      priorStory !== undefined &&
+      priorStory.commentsKey === commentsKey &&
+      this.storyIsClean(storyId) &&
+      (NESTED_STORY_ID.test(storyId) ||
+        baseBlocks === undefined ||
+        baseBlocks === priorStory.blocks)
+    ) {
+      return priorStory.blocks;
+    }
+    const blocks: BlockContent[] = [];
+    const paragraphIds = this.session.storyParagraphIds(storyId);
+    const segments = this.session.storySegments(storyId);
+    const trailingByParagraph = new Map<string, BlockBreakKind[]>();
+    let closing: string | undefined;
+    for (const segment of segments) {
+      if (segment.kind === 'pilcrow') {
+        closing = segment.paraId;
+        trailingByParagraph.set(closing, []);
+      } else {
+        const kind = segment.kind === 'embed' ? blockBreakKind(segment.embedKind) : null;
+        if (kind && closing !== undefined) trailingByParagraph.get(closing)!.push(kind);
+        else closing = undefined;
+      }
+    }
     let items: InlineItem[] = [];
     let paragraphStart = 0;
+    let inlineStart = 0;
     let paragraphIndex = 0;
     let storyOffset = 0;
+    let candidatesByKey: Map<string, BlockContent[]> | null = null;
+
+    const candidatesFor = (key: string): BlockContent[] => {
+      if (!candidatesByKey) {
+        candidatesByKey = new Map();
+        for (const block of baseBlocks ?? []) {
+          const blockKey = projectedBlocks.get(block)?.key;
+          if (blockKey === undefined) continue;
+          const bucket = candidatesByKey.get(blockKey);
+          if (bucket) bucket.push(block);
+          else candidatesByKey.set(blockKey, [block]);
+        }
+      }
+      return candidatesByKey.get(key) ?? [];
+    };
+
+    const reuseContainer = (
+      key: string,
+      inputs: readonly unknown[],
+      children: readonly BlockContent[][]
+    ): BlockContent | undefined =>
+      candidatesFor(key).find((block) => {
+        const memo = projectedBlocks.get(block);
+        return (
+          memo?.inputs !== undefined &&
+          memo.children !== undefined &&
+          sameJson(memo.inputs, inputs) &&
+          memo.children.length === children.length &&
+          memo.children.every((child, index) => child === children[index])
+        );
+      });
 
     const paragraphCommentBoundaries = (end: number): CommentBoundary[] => {
       const boundaries: CommentBoundary[] = [];
       for (const range of storyComments) {
         if (range.start >= paragraphStart && range.start <= end) {
-          boundaries.push({ id: range.id, kind: 'start', offset: range.start - paragraphStart });
+          const offset = Math.max(0, range.start - inlineStart);
+          boundaries.push({ id: range.id, kind: 'start', offset });
         }
         if (range.end >= paragraphStart && range.end <= end) {
-          boundaries.push({ id: range.id, kind: 'end', offset: range.end - paragraphStart });
+          boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, range.end - inlineStart) });
         }
       }
       return boundaries;
@@ -1664,63 +3173,153 @@ class SaveContext {
       if (cursor < text.length) items.push({ kind: 'text', text: text.slice(cursor), attributes });
     };
 
+    // Block breaks the previous paragraph's own content carries, and those only the stream does.
+    let witnesses: BlockBreakKind[] = [];
+    let breaks: BlockBreakKind[] = [];
     for (const segment of segments) {
       if (segment.kind === 'text') {
         pushText(segment.text, segment.attributes);
         storyOffset += segment.text.length;
+        witnesses = [];
         continue;
       }
       if (segment.kind === 'pilcrow') {
-        const generatedId = `${storyId}:p${paragraphIndex}`;
-        const savedParaId =
-          segment.paraId === generatedId && !this.baseParagraphs.has(segment.paraId)
-            ? ''
-            : segment.paraId;
-        blocks.push(
-          paragraphFromStory(
+        const liveTrailing = trailingByParagraph.get(segment.paraId)!;
+        const savedParaId = paragraphIds[paragraphIndex] ?? '';
+        const baseParagraph = this.baseParagraphs.get(segment.paraId);
+        const boundaries = paragraphCommentBoundaries(storyOffset);
+        const source = sourceBreakBoundaries(baseParagraph);
+        const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
+        const inputs = [
+          segment.paraId,
+          savedParaId,
+          segment.properties,
+          segment.attributes,
+          items,
+          boundaries,
+          breaks,
+          liveTrailing,
+          sourceRuns,
+        ] as const;
+        const priorMemo =
+          baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
+        let paragraph: Paragraph;
+        if (
+          baseParagraph !== undefined &&
+          priorMemo?.inputs !== undefined &&
+          sameJson(priorMemo.inputs, inputs)
+        ) {
+          paragraph = baseParagraph;
+          witnesses = [...(priorMemo.trailing ?? trailingBlockBreaks(baseParagraph))];
+        } else {
+          // Projection mutates `item.payload`; pin the pre-mutation inputs.
+          const snapshot = inputs.map((input, index) =>
+            index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
+          );
+          paragraph = paragraphFromStory(
             savedParaId,
             segment.properties,
             items,
-            paragraphCommentBoundaries(storyOffset),
-            this.baseParagraphs.get(segment.paraId)
-          )
-        );
+            boundaries,
+            baseParagraph,
+            { leading: breaks, trailing: liveTrailing, leadingPage: segment.properties.pageBreakBeforeRun === true },
+            this.recovery(storyId),
+            this.runFormatter(storyId, segment.properties),
+            this.revisionIds,
+            this.inheritedFormatting(storyId, segment.properties)
+          );
+          const trailing = trailingBlockBreaks(paragraph);
+          const leading = leadingBlockBreaks(paragraph);
+          const consumed = leading.every((kind, index) => kind === breaks[index]) ? leading.length : 0;
+          const pending = breaks.slice(consumed);
+          if (pending.length) paragraph = { ...paragraph, content: [...pending.map((breakType): ParagraphContent => ({
+            type: 'run', content: [{ type: 'break', breakType }],
+          })), ...paragraph.content] };
+          projectedBlocks.set(paragraph, { inputs: snapshot, sessionKey: segment.paraId, trailing, sourceRuns });
+          witnesses = [...trailing];
+        }
+        blocks.push(paragraph);
         items = [];
+        breaks = [];
         paragraphIndex += 1;
         storyOffset += 1;
         paragraphStart = storyOffset;
+        inlineStart = storyOffset;
         continue;
       }
 
       if (segment.embedKind === 'table') {
-        blocks.push(tableFromPayload(this, segment.payload as TablePayload));
+        const payload = segment.payload as TablePayload;
+        this.prepareTable(payload, storyId);
+        const inputs = [segment.attributes, payload] as const;
+        const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
+        const key = `T${firstCell?.story ?? ''}`;
+        const contents =
+          candidatesFor(key).length > 0 ? this.cellContents(payload, storyId) : undefined;
+        const reused =
+          contents !== undefined
+            ? (reuseContainer(key, inputs, contents) as Table | undefined)
+            : undefined;
+        let table: Table;
+        if (reused) {
+          table = reused;
+        } else {
+          table = tableFromPayload(this, payload);
+          projectedBlocks.set(table, {
+            key,
+            inputs,
+            tableBaseline: this.payloadBaselines.get(payload),
+            tableSourcePrefix: asString(firstCell?.story)?.match(/^(.*:t\d+):r\d+c\d+$/)?.[1],
+            children: contents ?? this.cellContents(payload, storyId),
+          });
+        }
+        blocks.push(table);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
-        let properties = sdtAttrsToProps(segment.payload);
-        let content =
-          childStory && this.storyIds.has(childStory) ? this.storyToBlocks(childStory) : [];
-        const authoredValue = contentControlValue(segment.payload.value);
-        if (authoredValue) {
-          try {
-            const applied = applyContentControlValue(properties, authoredValue);
-            properties = applied.properties;
-            content = applied.content;
-          } catch {
-            // Retain the child story if the authored value is invalid.
+        if (childStory) this.memo.parents.set(childStory, storyId);
+        const childContent =
+          childStory && this.storyIds.has(childStory)
+            ? this.storyToBlocks(childStory)
+            : EMPTY_BLOCKS;
+        const inputs = [segment.attributes, segment.payload] as const;
+        const reused = reuseContainer(`S${childStory ?? ''}`, inputs, [childContent]);
+        if (reused) {
+          blocks.push(reused);
+        } else {
+          let properties = sdtAttrsToProps(segment.payload);
+          let content = childContent;
+          const authoredValue = contentControlValue(segment.payload.value);
+          if (authoredValue) {
+            try {
+              const applied = applyContentControlValue(properties, authoredValue);
+              properties = applied.properties;
+              content = carryParagraphIdentities(applied.content, childContent);
+            } catch {
+              // Retain the child story if the authored value is invalid.
+            }
           }
+          const block: BlockContent = {
+            type: 'blockSdt',
+            properties,
+            content: content === EMPTY_BLOCKS ? [] : content,
+          };
+          // Rebind the child's entry to the embedded array for the next projection.
+          if (content !== childContent && childStory !== undefined) {
+            const childEntry = this.memo.stories.get(childStory);
+            if (childEntry) childEntry.blocks = block.content;
+          }
+          projectedBlocks.set(block, {
+            key: `S${childStory ?? ''}`,
+            inputs,
+            children: [block.content],
+          });
+          blocks.push(block);
         }
-        blocks.push({
-          type: 'blockSdt',
-          properties,
-          content,
-        });
       } else if (segment.embedKind === 'opaque') {
         const blob = asObject(segment.payload.blob);
         if (blob?.type === 'pageBreak') blocks.push(pageBreakParagraph());
         else {
-          // Opaque authored blocks have no editable yrs sub-story yet. Carry a
-          // same-position base block when it is still structurally compatible;
-          // this keeps block SDTs lossless until they become native.
+          // Carry a same-position base block while block SDTs stay opaque.
           const baseBlock = baseBlocks?.[blocks.length];
           if (blob?.type === 'blockSdt' && baseBlock?.type === 'blockSdt') {
             blocks.push(baseBlock);
@@ -1732,14 +3331,48 @@ class SaveContext {
       } else {
         items.push(segment as EmbedItem);
       }
+      const kind = blockBreakKind(segment.embedKind);
+      if (!kind) witnesses = [];
+      else if (witnesses.includes(kind)) witnesses.splice(witnesses.indexOf(kind), 1);
+      else breaks.push(kind);
       storyOffset += 1;
+      if (items.every(isBlockBreak)) inlineStart = storyOffset;
     }
 
+    const pendingBreaks = breaks.map((breakType): ParagraphContent => ({
+      type: 'run', content: [{ type: 'break', breakType }],
+    }));
     // Defensive recovery for malformed/legacy stories without a final pilcrow.
     if (items.length > 0) {
-      blocks.push({ type: 'paragraph', content: buildParagraphContent(items) });
+      const trailing = buildParagraphContent(
+        items,
+        this.recovery(storyId),
+        directFormatting,
+        this.revisionIds
+      );
+      if (trailing.length > 0) {
+        blocks.push({ type: 'paragraph', content: breaks.length ? [...pendingBreaks, ...trailing] : trailing });
+        breaks = [];
+      }
     }
-    return blocks;
+    if (breaks.length > 0) {
+      let index = blocks.length - 1;
+      while (index >= 0 && blocks[index]!.type !== 'paragraph') index -= 1;
+      const previous = blocks[index];
+      if (previous?.type === 'paragraph') {
+        const paragraph: Paragraph = { ...previous, content: [...previous.content, ...pendingBreaks] };
+        const memo = projectedBlocks.get(previous);
+        if (memo?.sessionKey) projectedBlocks.set(paragraph, { sessionKey: memo.sessionKey, sourceRuns: memo.sourceRuns });
+        blocks[index] = paragraph;
+      } else {
+        blocks.push({ type: 'paragraph', content: pendingBreaks });
+      }
+    }
+    const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
+    this.memo.stories.set(storyId, { commentsKey, blocks: projected });
+    this.memo.dirty.delete(storyId);
+    this.memo.clean.add(storyId);
+    return projected;
   }
 }
 
@@ -1753,6 +3386,11 @@ export interface YrsToDocumentOptions {
    * projection includes its nested table/content-control stories.
    */
   storyIds?: ReadonlySet<string>;
+  /**
+   * The session comment id of each comment in `base` whose OOXML id is not
+   * that id, such as one added with {@link YrsSession.addComment}. @internal
+   */
+  commentIds?: ReadonlyMap<number, string>;
 }
 
 export function yrsToDocument(
@@ -1760,63 +3398,129 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  const context = new SaveContext(session, base);
+  return projectDocument(session, base, options);
+}
+
+/**
+ * {@link yrsToDocument} of the body alone, writing each session revision with the serialized
+ * ids `revisionIds` gives its deletion and insertion.
+ */
+export function yrsBodyToDocumentWithRevisionIds(
+  session: YrsSession,
+  base: Document,
+  revisionIds: ReadonlyMap<string, RevisionNumbers>
+): Document {
+  return projectDocument(session, base, { storyIds: new Set(['body']) }, revisionIds);
+}
+
+function projectDocument(
+  session: YrsSession,
+  base: Document,
+  options: YrsToDocumentOptions,
+  revisionIds?: RevisionIds
+): Document {
+  const previous = projectedMedia;
+  projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
+  let context: SaveContext | undefined;
+  try {
+    context = new SaveContext(session, base, options.commentIds, revisionIds);
+    return projectStories(context, session, base, options);
+  } finally {
+    context?.dispose();
+    projectedMedia = previous;
+  }
+}
+
+function projectStories(
+  context: SaveContext,
+  session: YrsSession,
+  base: Document,
+  options: YrsToDocumentOptions
+): Document {
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
   const bodyContent = context.storyIds.has('body') && shouldProject('body')
     ? context.storyToBlocks('body')
     : base.package.document.content;
 
-  let headers = base.package.headers;
-  if (
-    headers &&
-    (options.storyIds === undefined || [...headers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
-  ) {
-    headers = new Map(
-      [...headers].map(([rId, part]) => {
-        const storyId = `hf:${rId}`;
-        return [
-          rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
-            : part,
-        ];
+  const selectedHeaderFooterStories = new Set(
+    [...(base.package.headers?.keys() ?? []), ...(base.package.footers?.keys() ?? [])]
+      .filter((rId) => shouldProject(`hf:${rId}`))
+      .map((rId) => headerFooterStory(session, rId))
+  );
+  const shouldProjectHeaderFooter = (storyId: string): boolean =>
+    shouldProject(storyId) || selectedHeaderFooterStories.has(storyId);
+
+  const headerFooterContents = new Map<string, BlockContent[]>();
+  const projectHeaderFooter = (storyId: string): BlockContent[] => {
+    let content = headerFooterContents.get(storyId);
+    if (!content) {
+      content = context.storyToBlocks(storyId);
+      headerFooterContents.set(storyId, content);
+    }
+    return content;
+  };
+
+  const canonicalFor = (rId: string, storyId: string): string | undefined =>
+    storyId === `hf:${rId}` ? undefined : storyId.slice(3);
+  const projectHeaderFooters = (
+    entries: Map<string, HeaderFooter> | undefined
+  ): Map<string, HeaderFooter> | undefined => {
+    if (!entries) return entries;
+    const routes = [...entries].map(
+      ([rId, part]) => [rId, part, headerFooterStory(session, rId)] as const
+    );
+    const project =
+      options.storyIds === undefined ||
+      routes.some(([, , storyId]) => shouldProjectHeaderFooter(storyId));
+    const remark = routes.some(
+      ([rId, part, storyId]) => headerFooterAliasOf(part) !== canonicalFor(rId, storyId)
+    );
+    if (!project && !remark) return entries;
+    return new Map(
+      routes.map(([rId, part, storyId]) => {
+        const canonical = canonicalFor(rId, storyId);
+        const next =
+          context.storyIds.has(storyId) && shouldProjectHeaderFooter(storyId)
+            ? { ...part, content: projectHeaderFooter(storyId) }
+            : headerFooterAliasOf(part) === canonical
+              ? part
+              : { ...part };
+        if (canonical !== undefined) markHeaderFooterAlias(next, canonical);
+        return [rId, next];
       })
     );
-  }
+  };
+  const headers = projectHeaderFooters(base.package.headers);
+  const footers = projectHeaderFooters(base.package.footers);
 
-  let footers = base.package.footers;
-  if (
-    footers &&
-    (options.storyIds === undefined || [...footers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
-  ) {
-    footers = new Map(
-      [...footers].map(([rId, part]) => {
-        const storyId = `hf:${rId}`;
-        return [
-          rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
-            : part,
-        ];
-      })
-    );
-  }
-
-  const shouldProjectFootnotes =
-    options.storyIds === undefined ||
-    base.package.footnotes?.some((note) => shouldProject(`fn:${note.id}`));
-  const footnotes = shouldProjectFootnotes
-    ? base.package.footnotes?.map((note) => {
-        const storyId = `fn:${note.id}`;
-        return context.storyIds.has(storyId) && shouldProject(storyId)
-          ? { ...note, content: context.storyToBlocks(storyId), verbatimXml: undefined }
-          : note;
-      })
-    : base.package.footnotes;
+  const projectNotes = <T extends Footnote | Endnote>(
+    notes: T[] | undefined,
+    prefix: string
+  ): T[] | undefined => {
+    const shouldProjectNotes =
+      options.storyIds === undefined ||
+      notes?.some((note) => shouldProject(`${prefix}${note.id}`));
+    if (!shouldProjectNotes) return notes;
+    return notes?.map((note) => {
+      const storyId = `${prefix}${note.id}`;
+      return context.storyIds.has(storyId) && shouldProject(storyId)
+        ? {
+            ...note,
+            content: restoreNoteMarks(context.storyToBlocks(storyId), note.content),
+            verbatimXml: undefined,
+          }
+        : note;
+    });
+  };
+  const footnotes = projectNotes(base.package.footnotes, 'fn:');
+  const endnotes = projectNotes(base.package.endnotes, 'en:');
 
   return {
     ...base,
+    ...(context.warnings.length > 0
+      ? { warnings: [...(base.warnings ?? []), ...context.warnings] }
+      : {}),
     package: {
       ...base.package,
       document: {
@@ -1826,6 +3530,7 @@ export function yrsToDocument(
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),
       ...(footnotes ? { footnotes } : {}),
+      ...(endnotes ? { endnotes } : {}),
     },
   };
 }

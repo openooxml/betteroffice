@@ -12,6 +12,8 @@ const cases = [
   ["docx", "../../../apps/demo/public/betteroffice-demo.docx"],
   ["xlsx", "../../../apps/demo/public/sample.xlsx"],
   ["pptx", "../../../apps/demo/public/betteroffice-demo.pptx"],
+  ["vsdx", "../../../apps/demo/public/betteroffice-demo.vsdx"],
+  ["vstx", "../../../crates/vsdx-parse/tests/fixtures/template.vstx"],
 ] as const;
 
 test("generated OPC WASM sanitizes all real demo formats", () => {

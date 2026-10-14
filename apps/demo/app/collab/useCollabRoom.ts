@@ -76,7 +76,8 @@ export function useDemoIdentity(): DemoCollaborationUser | null {
   return user;
 }
 
-export function useDemoRoom(): string | null {
+/** `enabled` false while the tab holds an unshared document: no room, none minted. */
+export function useDemoRoom(enabled = true): string | null {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -84,14 +85,28 @@ export function useDemoRoom(): string | null {
   const generatedRoom = useRef<string | null>(null);
 
   useEffect(() => {
-    if (room) return;
+    if (!enabled || room) return;
     generatedRoom.current ??= crypto.randomUUID();
     const next = new URLSearchParams(searchParams.toString());
     next.set("room", generatedRoom.current);
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
-  }, [pathname, room, router, searchParams]);
+  }, [enabled, pathname, room, router, searchParams]);
 
-  return room;
+  return enabled ? room : null;
+}
+
+/** Drops the room from the URL, so the link stops advertising a document it no longer shows. */
+export function useLeaveRoom(): () => void {
+  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  return useCallback(() => {
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("room");
+    const query = next.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }, [pathname, router, searchParams]);
 }
 
 export interface CollabRoomState<
@@ -122,7 +137,9 @@ export function useCollabRoom<Provider extends CollaborationProvider>(
   const transportRef = useRef<RoomTransport | null>(null);
   const cleanupRef = useRef<Array<() => void>>([]);
 
-  useEffect(() => setClientId(createClientId()), []);
+  // Per room: a client id only identifies a replica within one room, and
+  // carrying one across rooms collides with item ids the new peers already hold.
+  useEffect(() => setClientId(roomId ? createClientId() : null), [roomId]);
 
   const teardown = useCallback(() => {
     for (const cleanup of cleanupRef.current.splice(0)) cleanup();
