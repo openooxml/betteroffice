@@ -177,12 +177,13 @@ function DefaultToolbarItems() {
   const { t } = useTranslation();
   return (
     <>
-      <ToolbarGroup label={t('toolbar.groups.search')}>
-        <ToolbarCommand id="searchMenus" />
-      </ToolbarGroup>
       <ToolbarGroup label={t('toolbar.groups.history')}>
         <ToolbarCommand id="undo" />
         <ToolbarCommand id="redo" />
+      </ToolbarGroup>
+      <ToolbarSeparator />
+      <ToolbarGroup label={t('toolbar.groups.search')}>
+        <ToolbarCommand id="searchMenus" />
       </ToolbarGroup>
       <ToolbarGroup label={t('toolbar.groups.print')}>
         <ToolbarCommand id="print" />
@@ -190,16 +191,9 @@ function DefaultToolbarItems() {
       <ToolbarGroup label={t('toolbar.groups.paintFormat')}>
         <ToolbarCommand id="paintFormat" />
       </ToolbarGroup>
+      <ToolbarSeparator />
       <ToolbarGroup label={t('toolbar.groups.zoom')}>
         <ToolbarCommand id="zoom" />
-      </ToolbarGroup>
-      <ToolbarSeparator />
-      <ToolbarGroup label={t('toolbar.groups.number')}>
-        <NumberShortcut value="currency" />
-        <NumberShortcut value="percent" />
-        <ToolbarCommand id="decimalPlaces" args={{ direction: 'decrease' }} />
-        <ToolbarCommand id="decimalPlaces" args={{ direction: 'increase' }} />
-        <ToolbarCommand id="numberFormat" />
       </ToolbarGroup>
       <ToolbarSeparator />
       <ToolbarGroup label={t('toolbar.groups.font')}>
@@ -220,16 +214,26 @@ function DefaultToolbarItems() {
         <ToolbarCommand id="textColor" />
         <ToolbarCommand id="fillColor" />
       </ToolbarGroup>
+      <ToolbarSeparator />
+      <ToolbarGroup label={t('toolbar.groups.alignment')}>
+        <ToolbarCommand id="horizontalAlignment" />
+        <ToolbarCommand id="verticalAlignment" />
+        <ToolbarCommand id="textWrapping" />
+      </ToolbarGroup>
+      <ToolbarSeparator />
+      <ToolbarGroup label={t('toolbar.groups.number')}>
+        <NumberShortcut value="currency" />
+        <NumberShortcut value="percent" />
+        <ToolbarCommand id="decimalPlaces" args={{ direction: 'decrease' }} />
+        <ToolbarCommand id="decimalPlaces" args={{ direction: 'increase' }} />
+        <ToolbarCommand id="numberFormat" />
+      </ToolbarGroup>
+      <ToolbarSeparator />
       <ToolbarGroup label={t('toolbar.groups.borders')}>
         <ToolbarCommand id="borderPreset" />
       </ToolbarGroup>
       <ToolbarGroup label={t('toolbar.groups.merge')}>
         <ToolbarCommand id="merge" />
-      </ToolbarGroup>
-      <ToolbarGroup label={t('toolbar.groups.alignment')}>
-        <ToolbarCommand id="horizontalAlignment" />
-        <ToolbarCommand id="verticalAlignment" />
-        <ToolbarCommand id="textWrapping" />
       </ToolbarGroup>
       <XlsxPluginToolbar />
     </>

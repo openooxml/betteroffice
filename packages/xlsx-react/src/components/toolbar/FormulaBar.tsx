@@ -1,5 +1,6 @@
 import { createContext, useContext, useLayoutEffect, useRef } from 'react';
 import type { CSSProperties, KeyboardEvent, Ref } from 'react';
+import { toolbarTheme } from '../../../../../shared/react-toolbar/theme';
 import { useTranslation } from '../../i18n';
 
 /** The editor's formula input, shared with whichever chrome renders the formula bar. */
@@ -33,7 +34,7 @@ const styles: Record<string, CSSProperties> = {
     flex: '1 1 320px',
     minWidth: 240,
     padding: '0 6px',
-    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
+    borderRight: `1px solid ${toolbarTheme.line}`,
   },
   nameBox: {
     appearance: 'none',
@@ -41,13 +42,13 @@ const styles: Record<string, CSSProperties> = {
     height: 28,
     flex: '0 0 auto',
     boxSizing: 'border-box',
-    border: '1px solid #e2e8f0',
+    border: `1px solid ${toolbarTheme.line}`,
     borderRadius: 6,
-    background: '#f8fafc',
-    color: '#0f172a',
-    font: '600 12px ui-monospace, SFMono-Regular, Menlo, monospace',
+    background: toolbarTheme.rail,
+    color: toolbarTheme.ink,
+    font: '500 12px ui-monospace, SFMono-Regular, Menlo, monospace',
     textAlign: 'center',
-    outlineColor: '#2563eb',
+    outlineColor: toolbarTheme.accent,
   },
   mark: {
     display: 'grid',
@@ -55,7 +56,7 @@ const styles: Record<string, CSSProperties> = {
     width: 20,
     height: 28,
     flex: '0 0 auto',
-    color: '#64748b',
+    color: toolbarTheme.inkMuted,
     font: 'italic 700 12px Georgia, serif',
     userSelect: 'none',
   },
@@ -65,13 +66,13 @@ const styles: Record<string, CSSProperties> = {
     minWidth: 140,
     height: 28,
     boxSizing: 'border-box',
-    border: '1px solid #e2e8f0',
+    border: `1px solid ${toolbarTheme.line}`,
     borderRadius: 6,
     padding: '0 8px',
-    background: '#ffffff',
-    color: '#0f172a',
+    background: toolbarTheme.surface,
+    color: toolbarTheme.ink,
     font: '13px ui-sans-serif, system-ui, sans-serif',
-    outlineColor: '#2563eb',
+    outlineColor: toolbarTheme.accent,
   },
 };
 
