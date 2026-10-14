@@ -52,6 +52,8 @@ export function createFramePresentation(
   let identity = { ...options.viewStore.getSnapshot().identity };
   let requests = FULL_FRAME_REQUESTS;
   let outstanding = 0;
+  /** Newest revision whose failure waited on a pending request. */
+  let missed: number | undefined;
   let stalled = false;
   let reported = false;
 
@@ -62,6 +64,7 @@ export function createFramePresentation(
   }
 
   function request(): void {
+    missed = undefined;
     let open = true;
     outstanding += 1;
     options.requestFullFrame(() => {
@@ -72,7 +75,10 @@ export function createFramePresentation(
   }
 
   function fail(frame: DocxCommandFrame): false {
-    if (outstanding > 0) return reject(frame);
+    if (outstanding > 0) {
+      missed = Math.max(missed ?? frame.revision, frame.revision);
+      return reject(frame);
+    }
     if (requests > 0) {
       requests -= 1;
       request();
@@ -140,6 +146,7 @@ export function createFramePresentation(
       coverage = -1;
       revision = undefined;
       identity = { ...current };
+      missed = undefined;
       rearm();
       options.echoPainter.installContext(undefined);
     }
@@ -240,6 +247,11 @@ export function createFramePresentation(
     coverage = frame.coversThroughSeq;
     revision = frame.revision;
     rearm();
+    if (missed !== undefined && missed <= frame.revision) missed = undefined;
+    if (missed !== undefined && outstanding === 0) {
+      requests -= 1;
+      request();
+    }
     return true;
   }
 
