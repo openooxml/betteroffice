@@ -29,6 +29,8 @@ export interface UsePeerlessEditSessionOptions {
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
   canEchoFont?(family: string): boolean;
   onError?(error: Error): void;
+  /** Failures the editor survives, such as pages that cannot be painted until the viewport or zoom changes. */
+  onRecoverableError?(error: Error): void;
 }
 
 /** @internal */
@@ -124,18 +126,20 @@ export function usePeerlessEditSession(
         cleanups.push(() => echoPainter.dispose());
         const presentation = createFramePresentation({
           viewStore, echoPainter, canvasForPage, prepareGeometry: (frame) => callbacks.current.prepareGeometry(frame),
-          requestFullFrame: () => {
-            if (!connection || controller.signal.aborted) return;
+          requestFullFrame: (settled) => {
+            if (!connection || controller.signal.aborted) { settled(); return; }
             const resident = connection;
             void resident.requestFullFrame().then((ack) => {
+              settled();
               if (!ack.frame) return;
               if (!controller.signal.aborted && resident === connection && receiveRequestedFrame) receiveRequestedFrame(ack.frame);
               else discardCommandPresentation(ack.frame);
             }).catch((error: unknown) => {
+              settled();
               if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
             });
           },
-          onError: (error) => { if (!controller.signal.aborted) callbacks.current.onError?.(error); },
+          onError: (error) => { if (!controller.signal.aborted) callbacks.current.onRecoverableError?.(error); },
         });
         cleanups.push(() => presentation.dispose());
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({

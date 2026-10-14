@@ -21,7 +21,8 @@ export interface PeerlessFramePresentationOptions {
   echoPainter: PeerlessEchoPainter;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
-  requestFullFrame(): void;
+  /** Calls `settled` once, before the requested frame is delivered or when none will be. */
+  requestFullFrame(settled: () => void): void;
   onError?(error: Error): void;
 }
 
@@ -50,6 +51,7 @@ export function createFramePresentation(
   const owner = {};
   let identity = { ...options.viewStore.getSnapshot().identity };
   let requests = FULL_FRAME_REQUESTS;
+  let outstanding = 0;
   let stalled = false;
   let reported = false;
 
@@ -59,10 +61,21 @@ export function createFramePresentation(
     reported = false;
   }
 
+  function request(): void {
+    let open = true;
+    outstanding += 1;
+    options.requestFullFrame(() => {
+      if (!open) return;
+      open = false;
+      outstanding -= 1;
+    });
+  }
+
   function fail(frame: DocxCommandFrame): false {
+    if (outstanding > 0) return reject(frame);
     if (requests > 0) {
       requests -= 1;
-      options.requestFullFrame();
+      request();
       return reject(frame);
     }
     stalled = true;
@@ -240,7 +253,7 @@ export function createFramePresentation(
     invalidate() {
       if (disposed || !stalled) return;
       stalled = false;
-      options.requestFullFrame();
+      request();
     },
     dispose() {
       disposed = true;

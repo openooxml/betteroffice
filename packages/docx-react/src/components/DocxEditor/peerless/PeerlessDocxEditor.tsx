@@ -615,6 +615,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
 
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
     source, openConnection, canvasForPage, prepareGeometry, onError: reportError,
+    onRecoverableError: error => errorHandler.current?.(error),
     canEchoFont: family => !workerOnlyFonts.current.has(getPrimaryFontFamily(family).toLowerCase()),
   } : null, [source, openConnection, canvasForPage, prepareGeometry, reportError]);
   const onClipboard = useCallback(async (cut: boolean) => {
