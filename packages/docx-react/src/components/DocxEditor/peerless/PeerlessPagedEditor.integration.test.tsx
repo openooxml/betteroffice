@@ -420,9 +420,12 @@ test('a press outside the pages ends their click sequence', async () => {
   expect(counts).toEqual([1, 2, 1, 2, 1]);
 });
 
+test('single_cell selection keeps the worker caret next to its highlight', async () => {
+  const editor = await mount(true, false, true);
+  await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2));
+});
+
 test('multi_cell selection hides the worker caret but keeps its highlight', async () => {
-  const single = await mount(true, false, true);
-  await waitFor(() => expect(single.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2));
-  const multi = await mount(true, false, true, undefined, () => 10, {}, true);
-  await waitFor(() => expect(multi.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1));
+  const editor = await mount(true, false, true, undefined, () => 10, {}, true);
+  await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1));
 });

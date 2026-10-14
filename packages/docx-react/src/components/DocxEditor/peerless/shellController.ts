@@ -129,8 +129,9 @@ export function createPeerlessShellController(initial: Options) {
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
       sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage',
+      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
         ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
+      tableActions: new Set(['selectTable', 'selectRow', 'selectColumn']),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
@@ -315,6 +316,15 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'indent' || id === 'outdent') return format({ kind: 'changeIndent', payload: { direction: id === 'indent' ? 'increase' : 'decrease' } });
       if (id === 'paragraphStyle') return format({ kind: 'applyParagraphStyle', payload: { styleId: (args as DocxCommandArgs['paragraphStyle']).styleId } });
       if (id === 'insertTable') return submit({ kind: 'insertTable', payload: args as DocxCommandArgs['insertTable'] });
+      if (id === 'tableAction') {
+        const key = typeof args === 'string' ? args : (args as { type?: string } | undefined)?.type;
+        const target: 'table' | 'row' | 'column' | null = key === 'selectTable' ? 'table' : key === 'selectRow' ? 'row' : key === 'selectColumn' ? 'column' : null;
+        if (target) {
+          const current = ready();
+          return settleCommand(current, current.commands.submit({ kind: 'selectTableCells', payload: { target } },
+            { source: 'selection', fence: true }));
+        }
+      }
       if (id === 'insertImage' && options.pickImage) {
         const picker = commands.defer('insertImage', null, 'selection');
         options.pickImage(image => picker.complete(() => submit({ kind: 'insertImage', payload: { image } })));

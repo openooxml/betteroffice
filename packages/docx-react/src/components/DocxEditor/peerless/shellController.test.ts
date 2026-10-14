@@ -347,10 +347,10 @@ test('table selection dispatches selectTableCells as fenced selection input', as
   expect(await controller.commands.store.execute('tableAction', 'selectTable')).toMatchObject({ ok: true, status: 'noop' });
   expect(await controller.commands.store.execute('tableAction', 'selectRow')).toMatchObject({ ok: true });
   expect(await controller.commands.store.execute('tableAction', 'selectColumn')).toMatchObject({ ok: true });
-  expect(submit.mock.calls).toEqual([
-    [{ kind: 'selectTableCells', payload: { target: 'table' } }, { source: 'selection', fence: true }],
-    [{ kind: 'selectTableCells', payload: { target: 'row' } }, { source: 'selection', fence: true }],
-    [{ kind: 'selectTableCells', payload: { target: 'column' } }, { source: 'selection', fence: true }],
+  expect(submit.mock.calls.map(([intent, options]) => ({ intent, options }))).toEqual([
+    { intent: { kind: 'selectTableCells', payload: { target: 'table' } }, options: { source: 'selection', fence: true } },
+    { intent: { kind: 'selectTableCells', payload: { target: 'row' } }, options: { source: 'selection', fence: true } },
+    { intent: { kind: 'selectTableCells', payload: { target: 'column' } }, options: { source: 'selection', fence: true } },
   ]);
   expect(await controller.commands.store.execute('tableAction', 'deleteRow')).toMatchObject({ ok: false });
 });
