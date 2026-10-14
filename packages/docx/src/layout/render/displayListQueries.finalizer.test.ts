@@ -77,6 +77,7 @@ describe('display-list handle finalization', () => {
     const first = createDisplayListQueries({ pages: [shared] }, engine);
     first.prime();
     const second = createDisplayListQueries({ pages: [shared] }, engine, first);
+    expect(registered.size).toBe(1);
     second.rangeRects(0, 1);
     expect(open.size).toBe(1);
     expect(registered.size).toBe(1);
@@ -121,6 +122,29 @@ describe('display-list handle finalization', () => {
     expect(open.size).toBe(0);
     expect(registered.size).toBe(0);
     expect(second.rangeRects(0, 1)).toEqual([]);
+    expect(open.size).toBe(0);
+  });
+
+  test('a query method kept past its collected facade opens no handle', async () => {
+    const { engine, open } = fakeEngine();
+    const line = {};
+    const { prime, facade } = (() => {
+      const queries = createDisplayListQueries({ pages: [page(0)] }, engine, null, line);
+      return { prime: queries.prime, facade: new WeakRef(queries) };
+    })();
+    for (let i = 0; i < 20 && facade.deref(); i++) {
+      await new Promise<void>((resolve) =>
+        setTimeout(() => {
+          Bun.gc(true);
+          resolve();
+        }, 0)
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(facade.deref()).toBeUndefined();
+
+    prime();
+    endDisplayListQueriesLine(line);
     expect(open.size).toBe(0);
   });
 });
