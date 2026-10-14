@@ -7,7 +7,9 @@ use xlsx_model::{SheetId, Workbook};
 
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
-use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
+use crate::xml::{
+    attr, bom_len, find_part, local_name, next_event, reader, resolve_part_path, xml_err,
+};
 use crate::{MAX_DEPTH, ParseError};
 
 /// Source package data retained for ownership-aware writes.
@@ -495,8 +497,9 @@ impl XmlTemplate {
         changes: &[(&str, Option<String>)],
     ) -> Result<Vec<u8>, ParseError> {
         let mut template = self.clone();
-        let mut reader = Reader::from_reader(self.prefix.as_slice());
-        let mut writer = Writer::new(Vec::new());
+        let bom = bom_len(&self.prefix);
+        let mut reader = Reader::from_reader(&self.prefix[bom..]);
+        let mut writer = Writer::new(self.prefix[..bom].to_vec());
         loop {
             match reader.read_event().map_err(xml_err)? {
                 Event::Start(element) => {
@@ -523,7 +526,8 @@ impl XmlTemplate {
     }
 
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
-        let mut reader = NsReader::from_reader(data);
+        let bom = bom_len(data);
+        let mut reader = NsReader::from_reader(&data[bom..]);
         let config = reader.config_mut();
         config.expand_empty_elements = false;
         config.check_end_names = true;
@@ -539,10 +543,10 @@ impl XmlTemplate {
         let mut spans = Vec::new();
 
         loop {
-            let before = reader.buffer_position() as usize;
+            let before = bom + reader.buffer_position() as usize;
             let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
             let namespace = resolved_namespace(namespace);
-            let after = reader.buffer_position() as usize;
+            let after = bom + reader.buffer_position() as usize;
             match event {
                 Event::Start(element) => {
                     if depth == 0 {
@@ -938,12 +942,13 @@ impl XmlTemplate {
         if changes.is_empty() {
             return Ok(self.prefix.clone());
         }
-        let mut reader = Reader::from_reader(self.prefix.as_slice());
+        let bom = bom_len(&self.prefix);
+        let mut reader = Reader::from_reader(&self.prefix[bom..]);
         loop {
-            let before = reader.buffer_position() as usize;
+            let before = bom + reader.buffer_position() as usize;
             match reader.read_event().map_err(xml_err)? {
                 Event::Start(element) => {
-                    let after = reader.buffer_position() as usize;
+                    let after = bom + reader.buffer_position() as usize;
                     let mut attributes = attributes(&element)?;
                     for (name, value) in changes {
                         set_attribute(&mut attributes, name, name, value.clone());
