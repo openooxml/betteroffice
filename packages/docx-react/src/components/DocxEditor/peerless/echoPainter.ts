@@ -12,6 +12,10 @@ import type {
 } from '@betteroffice/docx/yrs';
 import type { PeerlessTextIntent } from './inputEvents';
 
+const echoEncoder = new TextEncoder();
+type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache };
+type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoGlyphs>>; cache: GlyphCache };
+
 /** @internal Display-only drafts retain counts of original admissions after merging. */
 export interface PeerlessEchoIntent {
   intent: PeerlessTextIntent;
@@ -50,10 +54,13 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   let disposed = false;
   let originalIntents = 0;
   let paintedPage: string | undefined;
+  let paintedRect: { x: number; y: number; width: number; height: number } | undefined;
   let draft: EchoDraft | undefined;
+  let baseline: { context: DocxCommandEchoContext; set: GlyphSetEntry; end: number } | undefined;
+  let prepared: { context: DocxCommandEchoContext; set: GlyphSetEntry; text: string; value: EchoLayout } | undefined;
   let coverage = -1;
   const closed = new WeakSet<ImageBitmap>();
-  const glyphSets = new Map<string, { glyphs: EchoGlyphIndex; cache: GlyphCache }>();
+  const glyphSets = new Map<string, GlyphSetEntry>();
   const requested = new Set<string>();
 
   function receiveGlyphSets(sets: readonly DocxEchoGlyphSet[] | undefined): void {
@@ -78,20 +85,32 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     return set;
   }
 
+  function currentEnd(next: DocxCommandEchoContext, set: GlyphSetEntry): number | undefined {
+    if (baseline?.context === next && baseline.set === set) return baseline.end;
+    const line = next.glyphs;
+    const placement = line && placeEchoGlyphs(set.glyphs, next.text, line.next, line.x);
+    if (!placement) return undefined;
+    baseline = { context: next, set, end: placement.end };
+    return placement.end;
+  }
+
   /** The draft line exactly as the engine will place it, or undefined when that cannot be known here. */
-  function layout(text: string) {
+  function layout(text: string): EchoLayout | undefined {
     const line = context?.glyphs;
     const set = context && contextGlyphSet(context);
     if (!context || !line || !set) return undefined;
     if (!text && line.canEmpty === false) return undefined;
+    if (prepared?.context === context && prepared.set === set && prepared.text === text) return prepared.value;
     const placement = placeEchoGlyphs(set.glyphs, text, line.next, line.x);
-    const current = placeEchoGlyphs(set.glyphs, context.text, line.next, line.x);
-    if (!placement || !current) return undefined;
-    if (placement.end > current.end && placement.end > line.right - 1) return undefined;
-    if (placement.end < current.end && line.nextWord !== undefined && line.nextWord <= line.right - placement.end + 1) return undefined;
+    const current = currentEnd(context, set);
+    if (!placement || current === undefined) return undefined;
+    if (placement.end > current && placement.end > line.right - 1) return undefined;
+    if (placement.end < current && line.nextWord !== undefined && line.nextWord <= line.right - placement.end + 1) return undefined;
     if (line.previousSlack !== undefined && leadingWordWidth(text, placement.advances) <= line.previousSlack + 1) return undefined;
     try { for (const id of placement.glyphIds) set.cache.get(line.fontId, id); } catch { return undefined; }
-    return { placement, cache: set.cache };
+    const value = { placement, cache: set.cache };
+    prepared = { context, set, text, value };
+    return value;
   }
 
   function restorePages(): void {
@@ -103,11 +122,18 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       ctx.save();
       try {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(item.bitmap, 0, 0, canvas.width, canvas.height);
+        if (paintedRect && canvas.width === item.bitmap.width && canvas.height === item.bitmap.height) {
+          const { x, y, width, height } = paintedRect;
+          ctx.clearRect(x, y, width, height);
+          ctx.drawImage(item.bitmap, x, y, width, height, x, y, width, height);
+        } else {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(item.bitmap, 0, 0, canvas.width, canvas.height);
+        }
       } finally { ctx.restore(); }
     }
     paintedPage = undefined;
+    paintedRect = undefined;
   }
 
   function closeStaged(keep?: DocxCommandFrame['payload']['stagedPresentation']): void {
@@ -131,17 +157,23 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   function prunePages(): void {
     if (!staged) return;
     closeStaged({ ...staged, pages: staged.pages.filter((item) => options.canvasForPage(item.page)) });
-    if (!staged?.pages.some((item) => item.page.pageId === paintedPage)) paintedPage = undefined;
+    if (!staged?.pages.some((item) => item.page.pageId === paintedPage)) {
+      paintedPage = undefined;
+      paintedRect = undefined;
+    }
   }
 
   function installContext(next: DocxCommandEchoContext | undefined): void {
     if (disposed) return;
     context = next;
+    baseline = undefined;
+    prepared = undefined;
     draft = next ? contextDraft(next) : undefined;
     disabled = !next || next.shaping !== 'simple-ltr' || next.serializedBytes > 16 * 1024 ||
-      new TextEncoder().encode(JSON.stringify(next)).byteLength > 16 * 1024 || !contextGlyphSet(next);
+      echoEncoder.encode(JSON.stringify(next)).byteLength > 16 * 1024 || !contextGlyphSet(next);
     originalIntents = 0;
     if (disabled) restorePages();
+    else if (next) currentEnd(next, contextGlyphSet(next)!);
   }
 
   /** Copies a staged background back onto its page canvas pixel for pixel. */
@@ -161,12 +193,16 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     const ratio = background.bitmap.width / background.rect.width;
     const x = Math.round(background.rect.x * ratio);
     const y = Math.round(background.rect.y * ratio);
+    if (paintedPage !== undefined && (paintedPage !== page.pageId || !paintedRect ||
+      paintedRect.x !== x || paintedRect.y !== y || paintedRect.width !== background.bitmap.width ||
+      paintedRect.height !== background.bitmap.height)) restorePages();
     ctx.save();
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(x, y, background.bitmap.width, background.bitmap.height);
       ctx.drawImage(background.bitmap, x, y);
       paintedPage = page.pageId;
+      paintedRect = { x, y, width: background.bitmap.width, height: background.bitmap.height };
       return true;
     } finally { ctx.restore(); }
   }
@@ -212,9 +248,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       disable('intent-cap');
       return;
     }
-    restorePages();
     draft = contextDraft(context);
-    if (!pending.length) return;
+    if (!pending.length) { restorePages(); return; }
     if (!draft) { disable('missing-boundary'); return; }
     for (const entry of pending) {
       const intent = entry.value.intent;
@@ -224,7 +259,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       const next = applyIntent(draft, intent);
       if (!next) { disable('unsupported'); return; }
       draft = next;
-      if (new TextEncoder().encode(draft.text).byteLength > 16 * 1024) { disable('context-cap'); return; }
+      if (echoEncoder.encode(draft.text).byteLength > 16 * 1024) { disable('context-cap'); return; }
     }
     const line = context.glyphs;
     const placed = line && layout(draft.text);
@@ -243,12 +278,12 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       ctx.rect(line.device.x, line.device.y, line.device.width, line.device.height);
       ctx.clip();
       ctx.setTransform(line.pixelRatio, 0, 0, line.pixelRatio, 0, 0);
-      [...draft.text].forEach((char, index) => {
+      if (glyphs.glyphIds.length) {
         const run: GlyphRunPrimitive = { kind: 'glyphRun', fontId: line.fontId, size: line.size, color: line.color,
-          text: char, glyphs: [{ id: glyphs.glyphIds[index]!, x: glyphs.xs[index]!, y: line.y, cluster: 0,
-            advance: glyphs.advances[index]! }] };
+          text: draft.text, glyphs: glyphs.glyphIds.map((id, index) => ({ id, x: glyphs.xs[index]!, y: line.y,
+            cluster: 0, advance: glyphs.advances[index]! })) };
         drawGlyphRunPrimitive(ctx, run, { glyphCache: placed.cache });
-      });
+      }
     } finally { ctx.restore(); }
   }
 
@@ -280,7 +315,10 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       const reset = staged !== undefined && frame.revision <= staged.frameEpoch;
       const retainContext = !reset && frame.coversThroughSeq === coverage && context !== undefined &&
         !replaced.has(context.page.pageId) && frame.payload.echoContext === undefined;
-      if (reset || (paintedPage !== undefined && replaced.has(paintedPage))) paintedPage = undefined;
+      if (reset || (paintedPage !== undefined && replaced.has(paintedPage))) {
+        paintedPage = undefined;
+        paintedRect = undefined;
+      }
       closeStaged(next ? { ...next, pages: [
         ...(reset ? [] : staged?.pages.filter((item) => !replaced.has(item.page.pageId) &&
           !removed.has(item.page.pageId) && (fullPages === undefined || fullPages.has(item.page.pageId)) &&
@@ -299,6 +337,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       restorePages();
       closeStaged();
       context = undefined;
+      baseline = undefined;
+      prepared = undefined;
       disposed = true;
     },
   };

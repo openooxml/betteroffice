@@ -54,7 +54,7 @@ export type PageCanvasBuffer = HTMLCanvasElement | OffscreenCanvas;
 type PageCanvasContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 /**
- * Raster a complete page into a detached backing surface. Callers can prepare
+ * Raster a page or damage band into a detached backing surface. Callers can prepare
  * every damaged page concurrently, then present the finished buffers in one
  * synchronous pass without ever exposing the renderer's initial clear.
  */
@@ -64,22 +64,18 @@ export async function rasterizeDisplayPageToBackBuffer(
   options: DrawPageOptions = {},
   devicePixelRatio: number = 1,
   zoom: number = 1,
-  /** Device-pixel rect to raster; the pixels inside equal an unclipped raster's. */
+  /** Device-pixel crop; its pixels equal the corresponding full-page raster. */
   clip?: { x: number; y: number; width: number; height: number }
 ): Promise<PageCanvasBuffer> {
   const ctx = canvas.getContext('2d') as PageCanvasContext | null;
   if (!ctx) throw new Error('Canvas 2D context is unavailable');
   const scale = devicePixelRatio * zoom;
-  const width = Math.ceil(page.width * scale);
-  const height = Math.ceil(page.height * scale);
+  const width = clip?.width ?? Math.ceil(page.width * scale);
+  const height = clip?.height ?? Math.ceil(page.height * scale);
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   ctx.resetTransform();
-  if (clip) {
-    ctx.beginPath();
-    ctx.rect(clip.x, clip.y, clip.width, clip.height);
-    ctx.clip();
-  }
+  if (clip) ctx.translate(-clip.x, -clip.y);
   ctx.scale(scale, scale);
   await drawDisplayPage(ctx as unknown as CanvasRenderingContext2D, page, options);
   return canvas;

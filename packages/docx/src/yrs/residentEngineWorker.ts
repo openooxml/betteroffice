@@ -672,11 +672,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             const buffer = new OffscreenCanvas(1, 1);
             await rasterizeDisplayPageToBackBuffer(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
               pixelRatio, 1, { x: device[0], y: device[1], width: device[2], height: device[3] });
-            const crop = new OffscreenCanvas(device[2], device[3]);
-            const ctx = crop.getContext('2d');
-            if (!ctx) throw new Error('Command background canvas is unavailable');
-            ctx.drawImage(buffer, ...device, 0, 0, device[2], device[3]);
-            return crop.transferToImageBitmap();
+            return buffer.transferToImageBitmap();
           },
         }).finally(() => { for (const image of images.values()) image.close(); });
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);

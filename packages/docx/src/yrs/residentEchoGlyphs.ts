@@ -82,6 +82,7 @@ export function placeEchoGlyphs(glyphs: EchoGlyphIndex, text: string, next: stri
     if (right !== undefined && glyphs.unsafe.has(left * count + right)) return undefined;
     const units = glyphs.set.advances[left]! + (right === undefined ? 0 : glyphs.kerning.get(left * count + right) ?? 0);
     const advance = glyphs.advance(units);
+    if (!Number.isFinite(advance) || advance < 0) return undefined;
     placement.glyphIds.push(glyphs.set.glyphIds[left]!);
     placement.xs.push(echoRound3(pen));
     placement.advances.push(advance);

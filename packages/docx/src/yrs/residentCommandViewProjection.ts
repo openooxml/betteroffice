@@ -14,6 +14,13 @@ import { echoRound3, placeEchoGlyphs, type EchoGlyphIndex } from './residentEcho
 /** @internal */
 export const DOCX_ECHO_MAX_CONTEXT_BYTES = 16 * 1024;
 
+const echoEncoder = new TextEncoder();
+
+function utf8CodePointBytes(character: string): number {
+  const point = character.codePointAt(0)!;
+  return point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+}
+
 /** @internal A glyph set with the ink extent of its glyphs, in font units. */
 export interface EchoGlyphSource {
   key: string;
@@ -59,7 +66,7 @@ export function projectCommandEchoContext(
   const read = engine.proposalEngine.readParagraphs({ story: 'body', paraIds: [selection.focus.paraId], view: 'accepted' });
   const paragraph = read.ok ? read.paragraphs[0] : undefined;
   if (!paragraph || paragraph.paraId !== selection.focus.paraId || paragraph.atoms.length || !paragraph.text ||
-    new TextEncoder().encode(paragraph.text).byteLength > DOCX_ECHO_MAX_CONTEXT_BYTES ||
+    echoEncoder.encode(paragraph.text).byteLength > DOCX_ECHO_MAX_CONTEXT_BYTES ||
     /[\u0000-\u001f\u007f\u0590-\u109f\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u.test(paragraph.text)) return undefined;
   const starts = new Set<number>();
   let retainedBytes = 0;
@@ -77,7 +84,7 @@ export function projectCommandEchoContext(
     let utf16 = 0;
     for (const character of primitive.text) {
       byteToUtf16.set(byte, utf16);
-      byte += new TextEncoder().encode(character).byteLength;
+      byte += utf8CodePointBytes(character);
       utf16 += character.length;
     }
     byteToUtf16.set(byte, utf16);
@@ -133,7 +140,7 @@ export function projectCommandEchoContext(
       let utf16 = 0;
       for (const character of run.text) {
         byteToUtf16.set(byte, utf16);
-        byte += new TextEncoder().encode(character).byteLength;
+        byte += utf8CodePointBytes(character);
         utf16 += character.length;
       }
       byteToUtf16.set(byte, utf16);
@@ -215,10 +222,10 @@ export function projectCommandEchoContext(
         omittedPrimitiveIds: [...omitted].sort((a, b) => a - b).map((index) => retained.primitiveIds[index]!.toString()) }],
       ...(glyphLine ? { glyphs: glyphLine } : {}),
     };
-    let bytes = new TextEncoder().encode(JSON.stringify(context)).byteLength;
+    let bytes = echoEncoder.encode(JSON.stringify(context)).byteLength;
     while (bytes !== context.serializedBytes) {
       context.serializedBytes = bytes;
-      bytes = new TextEncoder().encode(JSON.stringify(context)).byteLength;
+      bytes = echoEncoder.encode(JSON.stringify(context)).byteLength;
     }
     return bytes <= DOCX_ECHO_MAX_CONTEXT_BYTES ? context : undefined;
   }
@@ -291,7 +298,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
       if (!placed || placed.cluster !== byte || run.glyphs[glyph + 1]?.cluster === byte) return undefined;
       glyphIds.push(placed.id);
       xs.push(placed.x);
-      byte += new TextEncoder().encode(char).byteLength;
+      byte += utf8CodePointBytes(char);
       glyph += 1;
     }
     if (glyph !== run.glyphs.length) return undefined;
