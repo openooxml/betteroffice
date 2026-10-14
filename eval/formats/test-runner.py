@@ -472,10 +472,12 @@ class RunnerTests(unittest.TestCase):
         ]
         changes = [{'path': 'edit.py', 'kind': 'update', 'diff': '+ text = open("/etc/passwd").read()'}]
         cases = [{'FAKE_COMMAND': command} for command in commands] + [{'FAKE_CHANGE': json.dumps(change)} for change in changes]
+        home = self.root / 'home'
+        home.mkdir()
         for index, values in enumerate(cases):
             results = self.root / f'generic-task-code-{index}'
             results.mkdir()
-            with self.subTest(values=values), self.generic_environment(FAKE_MODE='path', **values):
+            with self.subTest(values=values), self.generic_environment(FAKE_MODE='path', HOME=str(home), **values):
                 record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
                 runner.checker.check(runner.checker.tasks()[0], results / record['task'] / 'output.xlsx')
                 self.assertEqual(record['agent_exit_code'], 0)
@@ -541,6 +543,8 @@ class RunnerTests(unittest.TestCase):
             f'{shlex.quote(str(self.python))} edit.py',
             f'python3 -c \'open("{library}/python3.14/pathlib.py")\'',
             f'python3 -c \'open("{library}/python3.14/site-packages/docx/__init__.py")\'',
+            f'cat {shlex.quote(str(runner.REPO) + "-copy/input.xlsx")}',
+            f'cat {shlex.quote("/srv/x" + str(runner.REPO) + "/input.xlsx")}',
         ]
         for command in commands:
             with self.subTest(command=command):
