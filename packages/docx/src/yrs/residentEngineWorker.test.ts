@@ -701,6 +701,18 @@ test('command echo refreshes its scale when rounded page dimensions stay equal',
     expect([refreshed.bitmap.width, refreshed.bitmap.height]).toEqual([1020, 1320]);
     expect(refreshed.backgrounds).toHaveLength(1);
     expect(w.harness.rasterized).toEqual([1, 1]);
+    w.harness.projectEchoContext = null;
+    await client.requestViewport({ start: 0, end: 1, frameEpoch: frames[0]!.revision, rasterScale: 1.25 });
+    expect(frames).toHaveLength(2);
+    expect(frames[1]!.payload.echoContext).toBeUndefined();
+    expect(frames[1]!.payload.stagedPresentation!.pages).toHaveLength(1);
+    expect(frames[1]!.payload.stagedPresentation!.pages[0]!.backgrounds).toBeUndefined();
+    expect(w.harness.rasterized).toEqual([1, 1, 1]);
+    w.resetCalls();
+    await client.requestViewport({ start: 0, end: 1, frameEpoch: frames[1]!.revision, rasterScale: 1.25 });
+    expect(frames).toHaveLength(3);
+    expect(frames[2]!.payload.stagedPresentation!.pages).toEqual([]);
+    expect(w.harness.rasterized).toEqual([]);
   } finally { client.destroy(); }
 });
 

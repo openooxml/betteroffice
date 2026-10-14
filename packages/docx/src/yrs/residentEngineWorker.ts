@@ -136,6 +136,7 @@ let commandFrameChanges: {
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
+  echoRaster?: { pageId: string; pixelRatio: number };
   layoutPreviewVersion?: number;
 } | null = null;
 
@@ -682,6 +683,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (changes.window && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
         if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
         const pixelRatio = offscreenDpr * offscreenZoom;
+        const echoRaster = changes.echoRaster;
+        if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
         const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
@@ -716,6 +719,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         const center = caretPage ?? 0;
         if (caretPage !== undefined) visiblePages.add(center);
         if (echoContext) visiblePages.add(echoContext.page.pageIndex);
+        if (echoRaster && pendingOffscreenPageIds.has(echoRaster.pageId)) {
+          const retained = retainedPageByKey(layout.frame, echoRaster.pageId);
+          if (retained) visiblePages.add(retained.pageIndex);
+        }
         for (const index of pages) visiblePages.add(index);
         if (changes.window) {
           for (let index = changes.window[0]; index < Math.min(changes.window[1], layout.frame.pages.length); index += 1) visiblePages.add(index);
@@ -758,6 +765,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             return buffer.transferToImageBitmap();
           },
         }).finally(() => { for (const image of images.values()) image.close(); });
+        if (echoContext) changes.echoRaster = { pageId: echoContext.page.pageId, pixelRatio };
+        else if (stagedPages.some((page) => page.pageId === echoRaster?.pageId)) changes.echoRaster = undefined;
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
         const shown: ReturnType<typeof presentLayout> = init.provisionalPages === undefined ? {} : presentLayout();
         const selected = hooks.selection();
