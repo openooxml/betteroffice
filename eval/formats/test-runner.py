@@ -502,7 +502,8 @@ class RunnerTests(unittest.TestCase):
         for name in ['check.py', 'validate-checkers.py', 'tasks.json', 'fixtures.json']:
             (workspace / name).write_text('pass')
         for command in ['python3 ../other/eval/formats/check.py', 'cat eval/formats/tasks.json',
-                        'cat eval/other.py', 'python3 -c "import eval"', 'python3 -c "from eval import formats"']:
+                        'cat eval/other.py', 'python3 -c "import eval"', 'python3 -c "from eval import formats"',
+                        'python3 -m eval.formats.check']:
             with self.subTest(command=command):
                 self.assertIn('forbidden path access', runner.path_violation(command, workspace))
 
