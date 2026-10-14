@@ -147,6 +147,14 @@ elif mode == 'path':
     item = {'id': 'outside-1', 'type': 'command_execution', 'command': command} if 'FAKE_COMMAND' in os.environ else {
         'id': 'outside-1', 'type': 'file_change', 'changes': [json.loads(os.environ['FAKE_CHANGE'])]}
     print(json.dumps({'type': 'item.completed', 'item': item}))
+elif mode == 'task-file':
+    name = os.environ['FAKE_TASK_FILE']
+    (workspace / name).write_text('pass')
+    if os.environ['FAKE_REPORT_CHANGE'] == '1':
+        print(json.dumps({'type': 'item.completed', 'item': {
+            'id': 'task-file-1', 'type': 'file_change', 'changes': [{'path': name, 'kind': 'add'}]}}))
+    print(json.dumps({'type': 'item.completed', 'item': {
+        'id': 'local-1', 'type': 'command_execution', 'command': os.environ['FAKE_COMMAND']}}))
 '''
 
 
@@ -378,11 +386,13 @@ class RunnerTests(unittest.TestCase):
         home_relative = os.path.relpath(runner.REPO, Path.home())
         commands = [
             'cat eval/formats/check.py',
+            'python3 ../other/eval/formats/check.py',
             f'cat {shlex.quote(str(ROOT / "check.py"))}',
             f'ls {shlex.quote(str(runner.REPO))}',
             'python3 -c "import eval.formats.check"',
             'python3 -c "from eval.formats import check"',
             'cat validate-checkers.py tasks.json fixtures.json',
+            'cat tasks.json',
             f'cat {shlex.quote(str(runner.REPO / "AGENTS.md"))}',
             f'cat ~/{shlex.quote(home_relative + "/eval/formats/tasks.json")}',
             f'cat ~/{shlex.quote(home_relative + "/AGENTS.md")}',
@@ -409,6 +419,8 @@ class RunnerTests(unittest.TestCase):
 
     def test_generic_task_code_and_unrelated_paths_pass_with_correct_output(self):
         commands = [
+            "python3 - <<'PY'\nwb.save('eval.xlsx')\nPY",
+            "python3 - <<'PY'\nx = eval('1+1')\nPY",
             "python3 - <<'PY'\nxml = b'<a:t>Draft results</a:t>'\nPY",
             "python3 - <<'PY'\nxml = b'<c r=\"B5\" s=\"1\">...</c>'\nPY",
             "python3 - <<'PY'\nformula = f'=(C{r}-B{r})/B{r}'\nPY",
@@ -434,6 +446,31 @@ class RunnerTests(unittest.TestCase):
                 runner.checker.check(runner.checker.tasks()[0], results / record['task'] / 'output.xlsx')
                 self.assertEqual(record['agent_exit_code'], 0)
                 self.assertTrue(record['pass'], record['check_message'])
+
+    def test_generic_task_local_evaluation_names_pass_with_correct_output(self):
+        names = ['check.py', 'validate-checkers.py', 'tasks.json', 'fixtures.json']
+        for name in names:
+            for report_change in ('0', '1'):
+                results = self.root / f'generic-local-{name}-{report_change}'
+                results.mkdir()
+                command = f'python3 {name}' if name.endswith('.py') else f'cat {name}'
+                with self.subTest(name=name, report_change=report_change), self.generic_environment(
+                        FAKE_MODE='task-file', FAKE_TASK_FILE=name, FAKE_REPORT_CHANGE=report_change, FAKE_COMMAND=command):
+                    record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
+                    runner.checker.check(runner.checker.tasks()[0], results / record['task'] / 'output.xlsx')
+                    self.assertEqual(record['agent_exit_code'], 0)
+                    self.assertTrue(record['pass'], record['check_message'])
+                    self.assertEqual(record['tool_calls'], 3 + int(report_change))
+
+    def test_generic_local_file_names_do_not_allow_evaluation_paths(self):
+        workspace = self.root / 'workspace'
+        workspace.mkdir()
+        for name in ['check.py', 'validate-checkers.py', 'tasks.json', 'fixtures.json']:
+            (workspace / name).write_text('pass')
+        for command in ['python3 ../other/eval/formats/check.py', 'cat eval/formats/tasks.json',
+                        'cat eval/other.py', 'python3 -c "import eval"', 'python3 -c "from eval import formats"']:
+            with self.subTest(command=command):
+                self.assertIn('forbidden path access', runner.path_violation(command, workspace))
 
     def test_generic_path_audit_checks_repository_spellings_anywhere(self):
         workspace = self.root / 'workspace'
