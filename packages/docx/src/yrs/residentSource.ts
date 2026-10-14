@@ -11,6 +11,8 @@ export type ResidentSourceOpenRequest = (
   | { bytes: Uint8Array; document?: never }
 ) & {
   preview?: boolean | ResidentSourcePreviewOptions;
+  /** @internal No preview here: the first command frame shows the font-ready first pages instead. */
+  deferPreview?: boolean;
   mediaTokens?: boolean;
   heapLimitBytes?: number;
   generation?: string;
