@@ -25,6 +25,8 @@ export function testScope(realAct: Act) {
     if (previous) {
       previous.ended = true;
       await Promise.allSettled([...previous.polls, ...previous.acts]);
+      // A macrotask turn lets the ended body's continuation (finally blocks, follow-up calls) run while its scope is current.
+      await new Promise((done) => setTimeout(done, 0));
     }
     if (current === previous) {
       current = { test: ++started, ended: false, polls: new Set(), acts: new Set() };

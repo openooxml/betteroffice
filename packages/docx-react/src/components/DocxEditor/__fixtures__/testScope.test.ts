@@ -90,3 +90,18 @@ test('an act called from an ended scope rejects without calling the real act', (
     outcome: expect.stringMatching(/^act\(\) from test #7 of this file ran after that test ended/),
   });
 });
+
+let followUp: Promise<string | null> = Promise.resolve(null);
+test('a body can call act again as soon as its leftover act rejects', () => {
+  followUp = scopedAct(async () => {
+    await new Promise((done) => setTimeout(done, 30));
+  }).then(
+    () => null,
+    () => outcome(scopedAct(async () => {}))
+  );
+});
+
+test('that follow-up call still belongs to the ended test and never reaches the real act', async () => {
+  expect(await followUp).toStartWith('act() from test #9 of this file ran after that test ended');
+  expect(act.mock.calls.length).toBe(actsAtEnd);
+});
