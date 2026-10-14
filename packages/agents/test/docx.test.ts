@@ -220,9 +220,11 @@ test('table row edits refuse vertical merges without applying earlier batch edit
 test('delete_table_row refuses the last row without changing the document', async () => {
   const doc = await open();
   await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_table_row', row: hit(doc, 'Q1').ref }] });
-  const version = doc.list().version;
+  const outline = doc.list({ limit: 100 });
+  const header = outline.items.find(item => item.text === 'Quarter')!;
+  const version = outline.version;
   const baseline = await paragraphs(await doc.export());
-  const error = await refusal(doc.edit({ version, edits: [{ op: 'delete_table_row', row: hit(doc, 'Quarter').ref }] }));
+  const error = await refusal(doc.edit({ version, edits: [{ op: 'delete_table_row', row: header.ref }] }));
   expect(error.code).toBe('UNSUPPORTED_TARGET');
   expect(doc.list().version).toBe(version);
   expect(await paragraphs(await doc.export())).toEqual(baseline);
