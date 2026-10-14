@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'bun:test';
 import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
-import { createYrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
 
 function fixture(readOnly = false) {
   const selection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
@@ -68,7 +68,7 @@ test('copy and cut project raw selection offsets across tracked deletions in the
   }
 });
 
-function sliceFixture(fragment: unknown) {
+function sliceFixture(fragment: DocxClipboardFragment | null) {
   return { text: 'A\tB', fragment };
 }
 
@@ -116,7 +116,7 @@ test('copy with empty slice text writes nothing', async () => {
 
 test('cut in cells mode copies but deletes nothing', async () => {
   const { binding, readSelection, submit } = fixture();
-  (binding.viewStore.getSnapshot() as { editState: Record<string, unknown> }).editState = {
+  (binding.viewStore.getSnapshot() as unknown as { editState: Record<string, unknown> }).editState = {
     readOnly: false,
     tableContext: { hasMultiCellSelection: true },
   };
