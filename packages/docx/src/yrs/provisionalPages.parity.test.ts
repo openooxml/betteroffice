@@ -729,6 +729,25 @@ test('selectPoint on a certified page acknowledges the exact prefix with echo co
   } finally { f.destroy(); full.destroy(); }
 });
 
+test('selectPoint rebuilds a released certified page without completing layout', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    for (const fixture of [f, full]) {
+      await fixture.w.send({ type: 'commandViewport', request: { start: 0, end: 1, frameEpoch: fixture.frame.frameEpoch } });
+      expect(commandFramesAfter(fixture.frame, fixture.w.frames).pages[1]!.page.unbuilt).toBe(true);
+    }
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f, 1));
+    const reference = await sendCommand(full, 1, 'selectPoint', commandPoint(full, 1));
+    expect(ack.frame!.payload.layoutProvisional).toBe(true);
+    expect(ack.frame!.payload.finalizedPages).toBe(3);
+    expect(f.calls).toEqual([]);
+    const frame = commandFramesAfter(f.frame, [...f.w.frames, ...f.acks].sort((a, b) => a.revision - b.revision));
+    expect(frame.pages[1]!.page).toEqual(f.full.pages[1]!.page);
+    expectSelectionParity(ack, reference);
+  } finally { f.destroy(); full.destroy(); }
+});
+
 for (const unit of ['character', 'word', 'line'] as const) {
   for (const direction of ['backward', 'forward'] as const) {
     test(`navigate ${unit} ${direction} on a certified page acknowledges the exact prefix with echo context`, async () => {
