@@ -944,6 +944,10 @@ export class EditSession {
      * Author and date stamps for the requested revision ids.
      */
     revision_stamps_json(ids_json: string): string;
+    /**
+     * Resolves what runs inherit under `styles_json`, a package's style definitions or `null`.
+     */
+    run_inheritance(styles_json: string): RunInheritance;
     search_text(query: string, case_sensitive: boolean, limit?: number | null): string;
     section_margins_json(): string;
     /**
@@ -1331,6 +1335,22 @@ export class RetainedLayoutMeta {
 }
 
 /**
+ * What runs inherit under one package's styles; see [`EditSession::run_inheritance`].
+ */
+export class RunInheritance {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * The attributes, as a JSON object, that seeding merges into the marks of a run of
+     * `run_style` in a paragraph of `paragraph_style` before the run's direct formatting.
+     */
+    attributes(paragraph_style?: string | null, run_style?: string | null, table_run_json?: string | null): string;
+    paragraph_formatting(paragraph_style: string | null | undefined, table_formatting_json: string): string;
+    table_attributes(table_json: string): string;
+}
+
+/**
  * wasm compatibility wrapper. Resident engine users call
  * [`build_display_list_value`] and keep the typed result.
  */
@@ -1634,6 +1654,7 @@ export interface InitOutput {
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly __wbg_retainedlayoutmeta_free: (a: number, b: number) => void;
+    readonly __wbg_runinheritance_free: (a: number, b: number) => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
@@ -1792,6 +1813,7 @@ export interface InitOutput {
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_retained_layout_json: (a: number) => [number, number, number, number];
     readonly editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_section_margins_json: (a: number) => [number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1891,6 +1913,9 @@ export interface InitOutput {
     readonly retainedlayoutmeta_page_sizes: (a: number) => [number, number];
     readonly retainedlayoutmeta_partial: (a: number) => number;
     readonly retainedlayoutmeta_provisional: (a: number) => number;
+    readonly runinheritance_attributes: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly runinheritance_paragraph_formatting: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly runinheritance_table_attributes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];

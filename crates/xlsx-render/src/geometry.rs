@@ -307,11 +307,17 @@ impl PrintMetrics {
 }
 
 const SIZE_CHUNK_LEN: usize = 256;
+const _: () = assert!(
+    (MAX_ROWS as usize).is_multiple_of(SIZE_CHUNK_LEN)
+        && (MAX_COLS as usize).is_multiple_of(SIZE_CHUNK_LEN)
+);
 
 #[derive(Debug, Clone)]
 struct SizeChunk {
     sum: f64,
     count: u32,
+    /// stored values above zero.
+    sized: u32,
     values: [f32; SIZE_CHUNK_LEN],
 }
 
@@ -320,6 +326,7 @@ impl Default for SizeChunk {
         Self {
             sum: 0.0,
             count: 0,
+            sized: 0,
             values: [f32::NAN; SIZE_CHUNK_LEN],
         }
     }
@@ -363,12 +370,14 @@ impl Sizes {
             chunk.values[index as usize % SIZE_CHUNK_LEN] = value;
             chunk.sum += f64::from(value);
             chunk.count += 1;
+            chunk.sized += u32::from(value > 0.0);
         }
         for index in 1..=chunks.len() {
             let parent = index + index.isolate_lowest_one();
             if parent <= chunks.len() {
                 chunks[parent - 1].sum += chunks[index - 1].sum;
                 chunks[parent - 1].count += chunks[index - 1].count;
+                chunks[parent - 1].sized += chunks[index - 1].sized;
             }
         }
         Self {
@@ -380,18 +389,20 @@ impl Sizes {
         }
     }
 
-    fn prefix(&self, count: usize) -> (f64, u32) {
+    fn prefix(&self, count: usize) -> (f64, u32, u32) {
         let mut index = count.min(self.chunks.len());
         let mut sum = 0.0;
         let mut count = 0;
+        let mut sized = 0;
         while index > 0 {
             #[cfg(feature = "test-counters")]
             PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
             sum += self.chunks[index - 1].sum;
             count += self.chunks[index - 1].count;
+            sized += self.chunks[index - 1].sized;
             index &= index - 1;
         }
-        (sum, count)
+        (sum, count, sized)
     }
 
     fn grow(&mut self, count: usize) {
@@ -399,7 +410,7 @@ impl Sizes {
             return;
         }
         let old_len = self.chunks.len();
-        let (sum, active) = self.prefix(old_len);
+        let (sum, active, sized) = self.prefix(old_len);
         let count = count
             .next_power_of_two()
             .min((self.limit as usize).div_ceil(SIZE_CHUNK_LEN));
@@ -411,9 +422,10 @@ impl Sizes {
         for index in old_len..count {
             let start = index & (index + 1);
             if start < old_len {
-                let (before, preceding) = self.prefix(start);
+                let (before, preceding, sized_before) = self.prefix(start);
                 self.chunks[index].sum = sum - before;
                 self.chunks[index].count = active - preceding;
+                self.chunks[index].sized = sized - sized_before;
             }
         }
     }
@@ -427,6 +439,8 @@ impl Sizes {
         let delta = f64::from(value.unwrap_or(0.0)) - f64::from(old.unwrap_or(0.0));
         let added = u32::from(value.is_some() && old.is_none());
         let removed = u32::from(value.is_none() && old.is_some());
+        let was_sized = old.is_some_and(|size| size > 0.0);
+        let is_sized = value.is_some_and(|size| size > 0.0);
         let mut current = chunk + 1;
         while current <= self.chunks.len() {
             #[cfg(feature = "test-counters")]
@@ -434,6 +448,8 @@ impl Sizes {
             self.chunks[current - 1].sum += delta;
             self.chunks[current - 1].count += added;
             self.chunks[current - 1].count -= removed;
+            self.chunks[current - 1].sized += u32::from(is_sized && !was_sized);
+            self.chunks[current - 1].sized -= u32::from(was_sized && !is_sized);
             current += current.isolate_lowest_one();
         }
         self.count += added;
@@ -470,6 +486,45 @@ impl Sizes {
         (index * SIZE_CHUNK_LEN + last + 1) as u32
     }
 
+    /// index of the last track with a nonzero size. tracks past the last
+    /// stored value take the default, so they decide unless it is zero.
+    fn last_sized(&self) -> Option<u32> {
+        let implicit = self.default > 0.0;
+        if implicit && self.end < self.limit {
+            return Some(self.limit - 1);
+        }
+        let sized = |node: usize| {
+            let chunk = &self.chunks[node - 1];
+            let unset = (node.isolate_lowest_one() * SIZE_CHUNK_LEN) as u32 - chunk.count;
+            chunk.sized + if implicit { unset } else { 0 }
+        };
+        let mut total = 0;
+        let mut index = self.chunks.len();
+        while index > 0 {
+            total += sized(index);
+            index &= index - 1;
+        }
+        if total == 0 {
+            return None;
+        }
+        let mut index = 0;
+        let mut below = 0;
+        let mut step = 1 << self.chunks.len().ilog2();
+        while step > 0 {
+            let next = index + step;
+            if next <= self.chunks.len() && below + sized(next) < total {
+                below += sized(next);
+                index = next;
+            }
+            step >>= 1;
+        }
+        let within = self.chunks[index]
+            .values
+            .iter()
+            .rposition(|&size| size > 0.0 || (implicit && size.is_nan()))?;
+        Some((index * SIZE_CHUNK_LEN + within) as u32)
+    }
+
     fn value(&self, index: u32) -> Option<f32> {
         let chunk = self.chunks.get(index as usize / SIZE_CHUNK_LEN)?;
         let value = chunk.values[index as usize % SIZE_CHUNK_LEN];
@@ -478,7 +533,7 @@ impl Sizes {
 
     fn offset(&self, index: u32) -> f32 {
         let chunk = index as usize / SIZE_CHUNK_LEN;
-        let (mut sum, mut count) = self.prefix(chunk);
+        let (mut sum, mut count, _) = self.prefix(chunk);
         if let Some(chunk) = self.chunks.get(chunk) {
             #[cfg(feature = "test-counters")]
             PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
@@ -509,7 +564,7 @@ impl Sizes {
             if self.default == 0.0 {
                 return self.end;
             }
-            let (sum, count) = self.prefix(self.chunks.len());
+            let (sum, count, _) = self.prefix(self.chunks.len());
             let mut index = self
                 .end
                 .saturating_add(((position - edge) / self.default) as u32);
@@ -748,29 +803,36 @@ impl GridGeometry {
         self.rows.at(y)
     }
 
-    /// half-open (row, col) ranges of cells intersecting the viewport.
+    /// last row with a nonzero height; hidden trailing rows end the grid early.
+    pub fn last_row_with_height(&self) -> Option<RowId> {
+        self.rows.last_sized()
+    }
+
+    /// last column with a nonzero width; hidden trailing columns end the grid early.
+    pub fn last_col_with_width(&self) -> Option<ColId> {
+        self.columns.last_sized()
+    }
+
+    /// half-open (row, col) ranges of cells intersecting the viewport, ending at
+    /// the last track with extent.
     pub fn viewport_range(&self, vp: &Viewport) -> (Range<RowId>, Range<ColId>) {
         let bottom = self.row_y(MAX_ROWS);
         let right = self.col_x(MAX_COLS);
-        let rows = if bottom - vp.y <= 0.0 {
-            MAX_ROWS..MAX_ROWS
-        } else {
-            let r0 = self.row_at_y(vp.y).min(MAX_ROWS - 1);
-            let r1 = self
-                .row_at_y((vp.y + vp.height).min(bottom))
-                .saturating_add(1)
-                .min(MAX_ROWS);
-            r0..r1
+        let rows = match self.last_row_with_height() {
+            Some(last) if bottom - vp.y > 0.0 => {
+                let r0 = self.row_at_y(vp.y).min(last);
+                let r1 = self.row_at_y((vp.y + vp.height).min(bottom)).min(last);
+                r0..r1 + 1
+            }
+            _ => MAX_ROWS..MAX_ROWS,
         };
-        let cols = if right - vp.x <= 0.0 {
-            MAX_COLS..MAX_COLS
-        } else {
-            let c0 = self.col_at_x(vp.x).min(MAX_COLS - 1);
-            let c1 = self
-                .col_at_x((vp.x + vp.width).min(right))
-                .saturating_add(1)
-                .min(MAX_COLS);
-            c0..c1
+        let cols = match self.last_col_with_width() {
+            Some(last) if right - vp.x > 0.0 => {
+                let c0 = self.col_at_x(vp.x).min(last);
+                let c1 = self.col_at_x((vp.x + vp.width).min(right)).min(last);
+                c0..c1 + 1
+            }
+            _ => MAX_COLS..MAX_COLS,
         };
         (rows, cols)
     }
@@ -1250,7 +1312,103 @@ mod tests {
                 height: 20.0,
             })
             .1,
-            1..6
+            1..4
+        );
+    }
+
+    #[test]
+    fn last_sized_tracks_mutations() {
+        const LIMIT: u32 = 4 * SIZE_CHUNK_LEN as u32;
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for default in [0.0_f32, 20.0] {
+            for round in 0..48 {
+                let mut values = BTreeMap::new();
+                for _ in 0..next() % 12 {
+                    let index = next() % LIMIT;
+                    values.insert(index, if next() % 3 == 0 { 0.0 } else { 7.0 });
+                }
+                if round % 2 == 0 {
+                    for index in next() % LIMIT..LIMIT {
+                        values.insert(index, 0.0);
+                    }
+                }
+                let pairs: Vec<_> = values.iter().map(|(&index, &size)| (index, size)).collect();
+                let mut sizes = Sizes::from_values(LIMIT, default, &pairs);
+                let mut model: Vec<_> = (0..LIMIT)
+                    .map(|index| values.get(&index).copied())
+                    .collect();
+                let expected = |model: &[Option<f32>]| {
+                    model
+                        .iter()
+                        .rposition(|size| size.unwrap_or(default) > 0.0)
+                        .map(|index| index as u32)
+                };
+                assert_eq!(sizes.last_sized(), expected(&model), "round {round}");
+                for step in 0..32 {
+                    let index = if next() % 2 == 0 {
+                        next() % LIMIT
+                    } else {
+                        (expected(&model).unwrap_or(0) + next() % 5)
+                            .saturating_sub(2)
+                            .min(LIMIT - 1)
+                    };
+                    let size = match next() % 3 {
+                        0 => None,
+                        1 => Some(0.0),
+                        _ => Some(5.0),
+                    };
+                    sizes.set(index, size);
+                    model[index as usize] = size;
+                    assert_eq!(
+                        sizes.last_sized(),
+                        expected(&model),
+                        "default {default} round {round} step {step}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn viewport_range_ends_at_the_last_track_with_extent() {
+        let mut sheet = Sheet::new("S");
+        for col in 8..MAX_COLS {
+            sheet.col_widths.insert(col, 0.0);
+        }
+        for row in 20..MAX_ROWS {
+            sheet.row_heights.insert(row, 0.0);
+        }
+        let g = GridGeometry::new(&sheet, &styles());
+        let right = g.col_x(MAX_COLS);
+        let bottom = g.row_y(MAX_ROWS);
+        let screen = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1600.0,
+            height: 1000.0,
+        };
+        assert_eq!(g.viewport_range(&screen), (0..20, 0..8));
+        let corner = Viewport {
+            x: right - 1.0,
+            y: bottom - 1.0,
+            width: 500.0,
+            height: 500.0,
+        };
+        assert_eq!(g.viewport_range(&corner), (19..20, 7..8));
+        let beyond = Viewport {
+            x: right,
+            y: bottom,
+            ..screen
+        };
+        assert_eq!(
+            g.viewport_range(&beyond),
+            (MAX_ROWS..MAX_ROWS, MAX_COLS..MAX_COLS)
         );
     }
 }

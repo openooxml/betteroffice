@@ -473,7 +473,7 @@ struct BodyParagraph {
     source: SourceParagraph,
     /// Effective run formatting per text unit, when the paragraph holds only text runs.
     formats: Option<Formats>,
-    /// Each text unit's own complex-script bold and italic.
+    /// Each text unit's resolved complex-script bold and italic.
     complex_script: ComplexScript,
     text: String,
     atoms: Vec<TextAtom>,

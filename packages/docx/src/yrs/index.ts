@@ -16,7 +16,7 @@
 
 import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
-import type { Document } from '../types/document';
+import type { Document, ParagraphFormatting, Table, TextFormatting } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import type {
   DocxParagraphAnchor,
@@ -960,6 +960,30 @@ export interface YrsWorkerDocumentMirror {
   proposals: DocxProposalRegistryState;
 }
 
+/** What runs inherit under one package's styles. @internal */
+export interface YrsRunInheritance {
+  /**
+   * The attributes seeding merges into the marks of a run of `runStyle` in a
+   * paragraph of `paragraphStyle` before the run's direct formatting.
+   */
+  attributes(paragraphStyle: string | null, runStyle: string | null, tableRun?: TextFormatting): Record<string, unknown>;
+  paragraphFormatting(
+    paragraphStyle: string | null,
+    tableFormatting: ParagraphFormatting | undefined
+  ): ParagraphFormatting | undefined;
+  tableAttributes(table: Table): YrsTableInheritance;
+  dispose(): void;
+}
+
+export interface YrsTableInheritance {
+  attributes: Record<string, unknown>;
+  rows: Array<Array<{
+    attributes: Record<string, unknown>;
+    paragraphFormatting: ParagraphFormatting | null;
+    runFormatting: TextFormatting | null;
+  }>>;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -1443,6 +1467,8 @@ export interface YrsSession extends CollaborationReplica {
    * order and upper case. Reads only. @internal
    */
   writtenParagraphIds(bytes: Uint8Array): Record<string, string[]>;
+  /** Resolves what runs inherit under a package's `styles`. Reads only. @internal */
+  runInheritance(styles: Document['package']['styles']): YrsRunInheritance;
 
   // -- version-checked host edits --
 

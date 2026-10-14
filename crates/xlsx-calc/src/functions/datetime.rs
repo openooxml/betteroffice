@@ -176,8 +176,10 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// ISOWEEKNUM(serial): ISO 8601 — weeks start monday, week 1 holds the first
 /// thursday of the year.
 pub(crate) fn isoweeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
     match serial_arg(args, ctx, 0) {
-        Ok(_) if args.len() != 1 => err(ErrorValue::Value),
         Ok(n) => iso_week(n.floor() as i64),
         Err(e) => err(e),
     }

@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { DEMO, DOCS, REPO, SITE } from "./app/content";
 import { MARKDOWN_MEDIA_TYPE, homepageMarkdown } from "./app/markdown";
+import { publishedFidelity } from "./lib/fidelity";
 import { prefersMarkdown } from "../../shared/accept";
 
 export const config = { matcher: "/" };
@@ -21,7 +22,7 @@ export function middleware(request: NextRequest) {
     return response;
   }
 
-  const body = homepageMarkdown();
+  const body = homepageMarkdown(publishedFidelity());
   return new NextResponse(body, {
     headers: {
       "Content-Type": MARKDOWN_MEDIA_TYPE,

@@ -1504,6 +1504,43 @@ mod tests {
     }
 
     #[test]
+    fn display_lists_render_sheets_with_hidden_unused_columns() {
+        let mut sheet = Sheet::new("Form");
+        for row in 0..20 {
+            for col in 0..8 {
+                sheet.set_cell(
+                    CellRef::new(row, col),
+                    Cell {
+                        value: CellValue::Text {
+                            value: format!("r{row}c{col}"),
+                        },
+                        ..Cell::default()
+                    },
+                );
+            }
+        }
+        for col in 8..xlsx_model::MAX_COLS {
+            sheet.col_widths.insert(col, 0.0);
+        }
+        let model = WorkbookModel {
+            sheets: vec![sheet],
+            ..WorkbookModel::default()
+        };
+        let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let session = Session::open(&bytes, None).unwrap();
+        let viewport = r#"{"x":0,"y":0,"width":1600,"height":1000}"#;
+        for result in [
+            session.display_list_json(viewport),
+            session.display_list_for_json(0, viewport),
+        ] {
+            let frame: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+            assert_eq!(frame["grid"]["colOffsets"].as_array().unwrap().len(), 9);
+            assert!(frame.to_string().contains("r19c7"));
+        }
+    }
+
+    #[test]
     fn preserves_display_and_sheet_info_wire_shapes() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let display = session

@@ -324,6 +324,11 @@ fn write_docx_s13_parts_with_warnings(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
+    context.set_document_source(
+        package
+            .original_bytes(&package.document_path)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+    );
     context.set_chart_drawings(chart_drawings_in_part(
         &package.text(&package.document_path).unwrap_or_default(),
     ));

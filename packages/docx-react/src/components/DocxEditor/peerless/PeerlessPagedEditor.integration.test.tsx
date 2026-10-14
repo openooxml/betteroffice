@@ -10,7 +10,7 @@ import {
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import * as composition from './composition';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
-import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import { PeerlessPagedEditor, type PeerlessPagedEditorProps } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -69,7 +69,8 @@ function frame(revision: number, coverage: number, text = ''): DocxCommandFrame 
 }
 
 async function mount(selection = false, accessible = false, table = false,
-  prepare?: UsePeerlessEditSessionOptions['prepareGeometry'], caretX: (revision: number) => number = () => 10) {
+  prepare?: UsePeerlessEditSessionOptions['prepareGeometry'], caretX: (revision: number) => number = () => 10,
+  props: Partial<PeerlessPagedEditorProps> = {}) {
   const events: string[] = [];
   restorers.push(installGlyphPaths());
   const canvas = document.createElement('canvas');
@@ -126,7 +127,7 @@ async function mount(selection = false, accessible = false, table = false,
     },
   };
   let binding: PeerlessEditSessionBinding | undefined;
-  const view = render(<PeerlessPagedEditor sessionOptions={sessionOptions} onReady={(ready) => { binding = ready; }} />);
+  const view = render(<PeerlessPagedEditor {...props} sessionOptions={sessionOptions} onReady={(ready) => { binding = ready; }} />);
   await waitFor(() => { expect(binding).toBeDefined(); });
   return { ...view, binding: binding!, commands, canvas, events,
     textarea: view.getByRole('textbox', { name: 'Document input' }) as HTMLTextAreaElement,
@@ -395,4 +396,26 @@ test('worker caret blinks on the hybrid interval only while the input is focused
   expect(caret().opacity).toBe('0');
   act(() => { editor.textarea.focus(); });
   expect(caret().opacity).toBe('1');
+});
+
+test('a press outside the pages ends their click sequence', async () => {
+  const counts: number[] = [];
+  const editor = await mount(false, false, false, undefined, undefined, {
+    onPartPoint: ({ clickCount }) => { counts.push(clickCount); return true; },
+    pageOverlays: <button type="button">Close header editing</button>,
+  });
+  const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  Object.defineProperty(host, 'getBoundingClientRect', { value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }) });
+  const press = (target: Element) => {
+    fireEvent.pointerDown(target, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
+    fireEvent.pointerUp(target, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
+  };
+  press(host);
+  press(host);
+  press(editor.getByRole('button', { name: 'Close header editing' }));
+  press(host);
+  press(host);
+  press(document.body);
+  press(host);
+  expect(counts).toEqual([1, 2, 1, 2, 1]);
 });

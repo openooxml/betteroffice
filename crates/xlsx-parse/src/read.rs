@@ -24,6 +24,8 @@ use crate::{
 
 /// excel's row-height ceiling in points.
 const MAX_ROW_HEIGHT_PT: f64 = 409.5;
+/// excel's column-width ceiling in characters.
+const MAX_COL_WIDTH_CHARS: f64 = 255.0;
 
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
@@ -586,7 +588,9 @@ fn parse_worksheet(
                         }
                         sheet.row_styles.insert(row, style);
                     }
-                    let height = attr(&e, b"ht")?.and_then(|v| v.parse::<f64>().ok());
+                    let height = attr(&e, b"ht")?
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .map(|h| h.min(MAX_ROW_HEIGHT_PT));
                     if let Some(height) = height {
                         legacy.row_heights.insert(row, height);
                     }
@@ -813,8 +817,9 @@ fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
 /// sheet bounds). widths are stored per-column since the model has no
 /// column-range concept; the style keeps its run, which a whole-sheet `<col>`
 /// spans 16,384 columns wide. a negative authored width has no extent to
-/// render, so it narrows to zero the way a hidden column does; the authored
-/// value stays in `legacy` and the source span is reused verbatim on save.
+/// render, so it narrows to zero the way a hidden column does, and one past
+/// excel's ceiling opens at the ceiling; the authored value stays in `legacy`
+/// and the source span is reused verbatim on save.
 fn parse_col(
     e: &quick_xml::events::BytesStart,
     sheet: &mut Sheet,
@@ -849,7 +854,7 @@ fn parse_col(
     }
     let width = match authored {
         _ if hidden => 0.0,
-        Some(w) => w.max(0.0),
+        Some(w) => w.clamp(0.0, MAX_COL_WIDTH_CHARS),
         None => return Ok(()),
     };
     for col in min..=max {

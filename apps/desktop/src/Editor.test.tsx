@@ -23,13 +23,24 @@ let save: (props: DocxProps) => Promise<ArrayBuffer | null> = async () =>
   null;
 let workbookProps: XlsxAsyncEditorProps;
 let workbookSave: (props: XlsxAsyncEditorProps) => Promise<XlsxCommandResult>;
+let deferWorkbookReady = false;
+let readyWorkbook: (() => void) | undefined;
+let disposeWorkbookApi: (() => void) | undefined;
 mock.module("@betteroffice/xlsx-react", () => ({
   XlsxEditor: (props: XlsxAsyncEditorProps) => {
     workbookProps = props;
-    useEffect(() => props.onReady?.({
-      focus() {},
-      commands: { execute: () => workbookSave(workbookProps) },
-    } as unknown as XlsxAsyncEditorApi), []);
+    useEffect(() => {
+      let dispose: void | (() => void);
+      readyWorkbook = () => {
+        dispose = props.onReady?.({
+          focus() {},
+          commands: { execute: () => workbookSave(workbookProps) },
+        } as unknown as XlsxAsyncEditorApi);
+        disposeWorkbookApi = typeof dispose === "function" ? dispose : undefined;
+      };
+      if (!deferWorkbookReady) readyWorkbook();
+      return () => { if (typeof dispose === "function") dispose(); };
+    }, []);
     return null;
   },
 }));
@@ -47,7 +58,7 @@ const presentationReplica = {
 const providerReplicas: unknown[] = [];
 let presentationProps: PptxAsyncEditorProps;
 const presentationOptions: PptxAsyncEditorProps['collaboration'][] = [];
-let savePresentation = async () => Uint8Array.of(3);
+let savePresentation: () => Promise<Uint8Array> = async () => Uint8Array.of(3);
 let deferPresentationReady = false;
 let readyPresentation: (() => void) | undefined;
 let disposePresentation: (() => void) | undefined;
@@ -106,6 +117,9 @@ const { default: Editor, prepareFile } = await import("./Editor");
 
 afterEach(() => {
   cleanup();
+  deferWorkbookReady = false;
+  readyWorkbook = undefined;
+  disposeWorkbookApi = undefined;
   deferPresentationReady = false;
   readyPresentation = undefined;
   disposePresentation = undefined;
@@ -168,7 +182,7 @@ async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = 
   return { api: ready.api!, errors, saved, view };
 }
 
-function presentationClock() {
+function readinessClock() {
   let now = 0;
   const timers = new Map<unknown, { at: number; run(): void }>();
   const schedule = globalThis.setTimeout;
@@ -321,100 +335,132 @@ test("presentation serialization uses the async default and preserves save failu
   expect(saved).toEqual([]);
 });
 
-test("presentation serialization waits for the editor API before saving", async () => {
-  deferPresentationReady = true;
-  savePresentation = mock(async () => Uint8Array.of(5));
-  const { api, saved } = await mount("pptx");
-  const result = api.serialize().catch((cause: Error) => cause);
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-  expect(savePresentation).not.toHaveBeenCalled();
-  await act(async () => { readyPresentation!(); });
-  expect(await result).toEqual(Uint8Array.of(5));
-  expect(savePresentation).toHaveBeenCalledTimes(1);
-  expect(saved).toEqual([]);
-});
+const asyncFormats = {
+  xlsx: {
+    disposed: "The workbook editor was disposed.",
+    defer() { deferWorkbookReady = true; },
+    ready() { readyWorkbook!(); },
+    dispose() { disposeWorkbookApi!(); },
+    props: () => workbookProps,
+    saves(bytes: Uint8Array) {
+      const saving = mock(async (props: XlsxAsyncEditorProps) => {
+        props.onSave?.(bytes);
+        return { ok: true, status: "executed" } as XlsxCommandResult;
+      });
+      workbookSave = saving;
+      return saving;
+    },
+  },
+  pptx: {
+    disposed: "The presentation editor was disposed.",
+    defer() { deferPresentationReady = true; },
+    ready() { readyPresentation!(); },
+    dispose() { disposePresentation!(); },
+    props: () => presentationProps,
+    saves(bytes: Uint8Array) {
+      const saving = mock(async () => bytes);
+      savePresentation = saving;
+      return saving;
+    },
+  },
+};
 
-test("presentation readiness timeout drains queued serializations", async () => {
-  deferPresentationReady = true;
-  savePresentation = mock(async () => Uint8Array.of(9));
-  const { api } = await mount("pptx");
-  const clock = presentationClock();
-  const flush = async () => {
+for (const [format, editor] of Object.entries(asyncFormats)) {
+  test(`${format} serialization waits for the editor API before saving`, async () => {
+    editor.defer();
+    const saving = editor.saves(Uint8Array.of(5));
+    const { api, saved } = await mount(format as "xlsx" | "pptx");
+    const result = api.serialize().catch((cause: Error) => cause);
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-  };
-  const opening = "The editor is still opening the file. Try again in a moment.";
-  const results: (Uint8Array | string)[] = ["pending", "pending"];
-  try {
-    void api.serialize().then((bytes) => { results[0] = bytes; }, (cause: Error) => { results[0] = cause.message; });
-    void api.serialize().then((bytes) => { results[1] = bytes; }, (cause: Error) => { results[1] = cause.message; });
-    await flush();
-    clock.advance(29_999);
-    await flush();
-    expect(results).toEqual(["pending", "pending"]);
-    expect(savePresentation).not.toHaveBeenCalled();
-    clock.advance(1);
-    await flush();
-    expect(results).toEqual([opening, opening]);
-    expect(clock.pending).toBe(0);
-    expect(savePresentation).not.toHaveBeenCalled();
-    await act(async () => { readyPresentation!(); });
-    expect(await api.serialize()).toEqual(Uint8Array.of(9));
-  } finally {
-    clock.restore();
-  }
-});
-
-test("unmount rejects waiting, queued, and subsequent presentation saves", async () => {
-  deferPresentationReady = true;
-  savePresentation = mock(async () => Uint8Array.of(6));
-  const { api, view } = await mount("pptx");
-  const first = api.serialize().catch((cause: Error) => cause.message);
-  const second = api.serialize().catch((cause: Error) => cause.message);
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(saving).not.toHaveBeenCalled();
+    await act(async () => { editor.ready(); });
+    expect(await result).toEqual(Uint8Array.of(5));
+    expect(saving).toHaveBeenCalledTimes(1);
+    expect(saved).toEqual([]);
   });
-  view.unmount();
-  expect(await first).toBe("The presentation editor was disposed.");
-  expect(await second).toBe("The presentation editor was disposed.");
-  await expect(api.serialize()).rejects.toThrow("The presentation editor was disposed.");
-  expect(savePresentation).not.toHaveBeenCalled();
-});
 
-test("presentation opening errors reject waiting saves and readiness allows retry", async () => {
-  deferPresentationReady = true;
-  savePresentation = mock(async () => Uint8Array.of(7));
-  const { api, errors } = await mount("pptx");
-  const result = api.serialize().catch((cause: Error) => cause);
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  test(`${format} readiness timeout drains queued serializations`, async () => {
+    editor.defer();
+    const saving = editor.saves(Uint8Array.of(9));
+    const { api } = await mount(format as "xlsx" | "pptx");
+    const clock = readinessClock();
+    const flush = async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    const opening = "The editor is still opening the file. Try again in a moment.";
+    const results: (Uint8Array | string)[] = ["pending", "pending"];
+    try {
+      void api.serialize().then((bytes) => { results[0] = bytes; }, (cause: Error) => { results[0] = cause.message; });
+      void api.serialize().then((bytes) => { results[1] = bytes; }, (cause: Error) => { results[1] = cause.message; });
+      await flush();
+      clock.advance(29_999);
+      await flush();
+      expect(results).toEqual(["pending", "pending"]);
+      expect(saving).not.toHaveBeenCalled();
+      clock.advance(1);
+      await flush();
+      expect(results).toEqual([opening, opening]);
+      expect(clock.pending).toBe(0);
+      expect(saving).not.toHaveBeenCalled();
+      await act(async () => { editor.ready(); });
+      expect(await api.serialize()).toEqual(Uint8Array.of(9));
+    } finally {
+      clock.restore();
+    }
   });
-  const failure = new Error("Worker failed to open");
-  presentationProps.onError?.(failure);
-  expect(await result).toBe(failure);
-  await expect(api.serialize()).rejects.toThrow("Worker failed to open");
-  expect(savePresentation).not.toHaveBeenCalled();
-  await act(async () => { readyPresentation!(); });
-  expect(await api.serialize()).toEqual(Uint8Array.of(7));
-  expect(errors).toEqual(["Worker failed to open"]);
-});
 
-test("presentation API disposal rejects saves until a replacement is ready", async () => {
-  savePresentation = mock(async () => Uint8Array.of(8));
-  const { api } = await mount("pptx");
-  disposePresentation!();
-  await expect(api.serialize()).rejects.toThrow("The presentation editor was disposed.");
-  expect(savePresentation).not.toHaveBeenCalled();
-  await act(async () => { readyPresentation!(); });
-  expect(await api.serialize()).toEqual(Uint8Array.of(8));
-});
+  test(`unmount rejects waiting, queued, and subsequent ${format} saves`, async () => {
+    editor.defer();
+    const saving = editor.saves(Uint8Array.of(6));
+    const { api, view } = await mount(format as "xlsx" | "pptx");
+    const first = api.serialize().catch((cause: Error) => cause.message);
+    const second = api.serialize().catch((cause: Error) => cause.message);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    view.unmount();
+    expect(await first).toBe(editor.disposed);
+    expect(await second).toBe(editor.disposed);
+    await expect(api.serialize()).rejects.toThrow(editor.disposed);
+    expect(saving).not.toHaveBeenCalled();
+  });
+
+  test(`${format} opening errors reject waiting saves and readiness allows retry`, async () => {
+    editor.defer();
+    const saving = editor.saves(Uint8Array.of(7));
+    const { api, errors } = await mount(format as "xlsx" | "pptx");
+    const result = api.serialize().catch((cause: Error) => cause);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const failure = new Error("Worker failed to open");
+    editor.props().onError?.(failure);
+    expect(await result).toBe(failure);
+    await expect(api.serialize()).rejects.toThrow("Worker failed to open");
+    expect(saving).not.toHaveBeenCalled();
+    await act(async () => { editor.ready(); });
+    expect(await api.serialize()).toEqual(Uint8Array.of(7));
+    expect(errors).toEqual(["Worker failed to open"]);
+  });
+
+  test(`${format} API disposal rejects saves until a replacement is ready`, async () => {
+    const saving = editor.saves(Uint8Array.of(8));
+    const { api } = await mount(format as "xlsx" | "pptx");
+    editor.dispose();
+    await expect(api.serialize()).rejects.toThrow(editor.disposed);
+    expect(saving).not.toHaveBeenCalled();
+    await act(async () => { editor.ready(); });
+    expect(await api.serialize()).toEqual(Uint8Array.of(8));
+  });
+}
 
 test("presentation collaboration connects the async replica and presence provider", async () => {
   providerReplicas.length = 0;

@@ -1,7 +1,7 @@
 //! table-driven coverage for the function library: each case parses a formula,
 //! evaluates it against a shared in-memory workbook, and asserts the value.
 
-use xlsx_calc::{EvalContext, evaluate, parse_formula};
+use xlsx_calc::{EvalContext, evaluate, evaluate_array, parse_formula};
 use xlsx_model::{Cell, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook};
 
 fn n(v: f64) -> CellValue {
@@ -270,6 +270,8 @@ fn math_functions() {
         ("ISOWEEKNUM(44200)", n(1.0)),
         ("ISOWEEKNUM(44196)", n(53.0)),
         ("ISOWEEKNUM(46286)", n(39.0)),
+        ("ISOWEEKNUM()", e(ErrorValue::Value)),
+        ("ISOWEEKNUM(46023, 2)", e(ErrorValue::Value)),
         ("WEEKNUM(46023, 21)", n(1.0)),
         ("WEEKNUM(44196, 21)", n(53.0)),
         ("WEEKNUM(46023)", n(1.0)),
@@ -1460,4 +1462,80 @@ fn mixed_numbers_coerce() {
         // the clock reading the same helper does is untouched
         ("\"0:15\"+0", n(0.010416666666666666)),
     ]);
+}
+
+/// every name the two dispatch tables spell, read from the tables themselves
+/// so a new builtin is swept without listing it here.
+fn builtin_names() -> Vec<&'static str> {
+    let tables = [
+        include_str!("../src/functions/mod.rs"),
+        include_str!("../src/array.rs"),
+    ];
+    let mut names: Vec<&str> = tables
+        .iter()
+        .flat_map(|src| src.lines())
+        .filter(|line| line.contains("=> "))
+        .flat_map(|line| line.split('"').skip(1).step_by(2))
+        .filter(|name| {
+            name.starts_with(|c: char| c.is_ascii_uppercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.')
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// a stored formula can call any builtin with any argument list; a wrong count
+/// or type is an error value, never a panic.
+#[test]
+fn every_builtin_survives_any_argument_list() {
+    const SHAPES: &[&str] = &[
+        "",
+        "1",
+        "1,2",
+        "1,2,3",
+        "1,2,3,4",
+        "1,2,3,4,5",
+        "1,2,3,4,5,6",
+        "1,2,3,4,5,6,7",
+        ",",
+        ",,",
+        "\"a\"",
+        "\"\",\"\"",
+        "-1",
+        "0,0",
+        "#N/A",
+        "TRUE,FALSE,0",
+        "A1:C3",
+        "A1:C3,1",
+        "A1:C3,1,1",
+        "A1:A3,B1:B3",
+        "{1,2;3,4}",
+    ];
+    let names = builtin_names();
+    for name in ["ISOWEEKNUM", "SEQUENCE", "LAMBDA", "WORKDAY.INTL"] {
+        assert!(names.contains(&name), "{name} missing from the sweep");
+    }
+    let wb = fixture();
+    let ctx = EvalContext::new(&wb, SheetId(0));
+    let mut panicked = Vec::new();
+    for name in &names {
+        for shape in SHAPES {
+            let src = format!("{name}({shape})");
+            let Ok(expr) = parse_formula(&src) else {
+                continue;
+            };
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                evaluate(&expr, &ctx);
+                evaluate_array(&expr, &ctx);
+            }));
+            if run.is_err() {
+                panicked.push(src);
+            }
+        }
+    }
+    assert!(panicked.is_empty(), "panicked: {panicked:?}");
 }

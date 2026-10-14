@@ -203,6 +203,7 @@ impl StoryPlan {
 
 struct ProjectedCell<'a> {
     paragraph_formatting: Option<Value>,
+    run_formatting: Option<Value>,
     attrs: JsonObject,
     content: Cow<'a, [Value]>,
 }
@@ -347,12 +348,9 @@ impl SourceMetadata {
         let formatting = style_id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
         let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
         let attrs = paragraph_attrs(&paragraph, &self.styles, &[], &[], None);
-        let run = marks_to_attrs(&formatting_to_marks(
-            paragraph_style_formatting(&paragraph, &self.styles, None).as_deref(),
-        ));
         Ok(StyledParagraph {
             properties: payload(para_attrs_to_ppr(attrs))?,
-            run: payload(run)?,
+            run: payload(inherited_run_attrs(&self.styles, style_id, None))?,
         })
     }
 
@@ -367,7 +365,7 @@ impl SourceMetadata {
         let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
         let style = paragraph_style_formatting(&paragraph, &self.styles, None);
         let run_style = self.styles.run_style_own(string(field(control, "styleId")));
-        let inherited = merge_text_formatting(style.as_deref(), run_style);
+        let inherited = merge_style_run_formatting(style.as_deref(), run_style);
         let merged = merge_text_formatting(inherited.as_ref(), control);
         payload(marks_to_attrs(&formatting_to_marks(merged.as_ref())))
     }
@@ -594,7 +592,7 @@ impl<'de> Deserialize<'de> for OrderedValue {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StyleResolver {
+pub(crate) struct StyleResolver {
     enabled: bool,
     styles: BTreeMap<String, Value>,
     #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
@@ -607,6 +605,8 @@ struct StyleResolver {
     default_character: Option<String>,
     #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     table_paragraph_formatting: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table_run_formatting: Option<Value>,
     #[serde(skip)]
     memo: StyleMemo,
 }
@@ -1183,6 +1183,33 @@ fn merge_text_formatting_owned(target: Option<Value>, source: Option<&Value>) ->
     Some(Value::Object(result))
 }
 
+fn merge_style_run_formatting(target: Option<&Value>, source: Option<&Value>) -> Option<Value> {
+    let mut result = merge_text_formatting(target, source)?;
+    for key in [
+        "bold",
+        "boldCs",
+        "italic",
+        "italicCs",
+        "allCaps",
+        "smallCaps",
+        "strike",
+        "doubleStrike",
+        "outline",
+        "shadow",
+        "emboss",
+        "imprint",
+        "hidden",
+    ] {
+        if let Some(value) = field(source, key).and_then(Value::as_bool) {
+            result.as_object_mut()?.insert(
+                key.to_owned(),
+                Value::Bool(truthy(field(target, key)) ^ value),
+            );
+        }
+    }
+    Some(result)
+}
+
 fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) -> Option<Value> {
     let Some(source) = object(source) else {
         return target.cloned();
@@ -1222,7 +1249,7 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
 }
 
 impl StyleResolver {
-    fn new(definitions: Option<&Value>) -> Self {
+    pub(crate) fn new(definitions: Option<&Value>) -> Self {
         let Some(definitions) = object(definitions) else {
             return Self::default();
         };
@@ -1287,6 +1314,14 @@ impl StyleResolver {
         let _ = self.set_table_paragraph_formatting(state);
     }
 
+    fn set_table_run_formatting(&mut self, formatting: Option<Value>) -> Option<Value> {
+        let previous = std::mem::replace(&mut self.table_run_formatting, formatting);
+        if previous != self.table_run_formatting {
+            self.memo = StyleMemo::default();
+        }
+        previous
+    }
+
     fn resolve_paragraph_style(&self, style_id: Option<&str>) -> Arc<ResolvedParagraphStyle> {
         let defined_id = style_id.filter(|id| self.style(id).is_some());
         let mut memo = self
@@ -1308,7 +1343,7 @@ impl StyleResolver {
             .default_style("character")
             .and_then(|style| field(Some(style), "rPr"));
         let default_run = if default_character.is_some() {
-            merge_text_formatting(run.as_deref(), default_character).map(Arc::new)
+            merge_style_run_formatting(run.as_deref(), default_character).map(Arc::new)
         } else {
             run.clone()
         };
@@ -1352,19 +1387,22 @@ impl StyleResolver {
             field(self.doc_defaults.as_ref(), "pPr"),
             self.table_paragraph_formatting.as_ref(),
         );
-        let mut run = field(self.doc_defaults.as_ref(), "rPr").cloned();
+        let mut run = merge_style_run_formatting(
+            field(self.doc_defaults.as_ref(), "rPr"),
+            self.table_run_formatting.as_ref(),
+        );
         let style = style_id
             .and_then(|id| self.style(id))
             .or_else(|| self.default_style("paragraph"));
         if let Some(style) = style {
             paragraph = merge_paragraph_formatting(paragraph.as_ref(), field(Some(style), "pPr"));
-            run = merge_text_formatting(run.as_ref(), field(Some(style), "rPr"));
+            run = merge_style_run_formatting(run.as_ref(), field(Some(style), "rPr"));
         }
         if style_id.is_some() && style.is_none() {
             if let Some(style) = self.default_style("paragraph") {
                 paragraph =
                     merge_paragraph_formatting(paragraph.as_ref(), field(Some(style), "pPr"));
-                run = merge_text_formatting(run.as_ref(), field(Some(style), "rPr"));
+                run = merge_style_run_formatting(run.as_ref(), field(Some(style), "rPr"));
             }
         }
         if style_id.is_none() && style.is_none() && self.doc_defaults.is_none() {
@@ -1427,6 +1465,25 @@ impl StyleResolver {
         style_id
             .and_then(|id| self.style(id))
             .and_then(|style| field(Some(style), "rPr"))
+    }
+
+    fn run_formatting(
+        &self,
+        paragraph_run: Option<&Value>,
+        direct: Option<&Value>,
+    ) -> Option<Value> {
+        let style_id = string(field(direct, "styleId"));
+        let inherited = merge_style_run_formatting(paragraph_run, self.run_style_own(style_id));
+        merge_text_formatting_owned(inherited, direct)
+    }
+
+    pub(crate) fn effective_run_formatting(
+        &self,
+        paragraph_style: Option<&str>,
+        direct: Option<&Value>,
+    ) -> Option<Value> {
+        let paragraph = self.resolve_paragraph_style(paragraph_style);
+        self.run_formatting(paragraph.run.as_deref(), direct)
     }
 }
 
@@ -1718,8 +1775,7 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
-    let inherited = merge_text_formatting(style_formatting, run_style);
-    let merged = merge_text_formatting_owned(inherited, formatting);
+    let merged = styles.run_formatting(style_formatting, formatting);
     let mut marks = formatting_to_marks(merged.as_ref());
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
         || style_id
@@ -1738,6 +1794,99 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
         }
     }
     marks
+}
+
+/// What seeding gives an unformatted run carrying only `run_style` in a paragraph of
+/// `paragraph_style`, without the run style reference.
+fn inherited_run_attrs(
+    styles: &StyleResolver,
+    paragraph_style: Option<&str>,
+    run_style: Option<&str>,
+) -> JsonObject {
+    let styled = |id: Option<&str>| id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
+    let paragraph = json!({ "type": "paragraph", "formatting": styled(paragraph_style) });
+    let run = json!({ "type": "run", "formatting": styled(run_style) });
+    let style = paragraph_style_formatting(&paragraph, styles, None);
+    let mut attrs = marks_to_attrs(&run_marks(&run, style.as_deref(), styles));
+    attrs.remove("runStyle");
+    attrs
+}
+
+/// What runs inherit under one package's styles.
+#[cfg(any(test, feature = "wasm"))]
+pub(crate) struct RunInheritance(StyleResolver);
+
+#[cfg(any(test, feature = "wasm"))]
+impl RunInheritance {
+    pub(crate) fn new(definitions: Option<&Value>) -> Self {
+        Self(StyleResolver::new(definitions))
+    }
+
+    /// What seeding merges into the marks of a run of `run_style` in a paragraph of
+    /// `paragraph_style` before the run's direct formatting.
+    pub(crate) fn run_attrs(
+        &self,
+        paragraph_style: Option<&str>,
+        run_style: Option<&str>,
+    ) -> JsonObject {
+        let mut attrs = inherited_run_attrs(&self.0, paragraph_style, run_style);
+        let direct = run_style.map(|id| json!({ "styleId": id }));
+        let resolved = self
+            .0
+            .effective_run_formatting(paragraph_style, direct.as_ref());
+        for key in ["boldCs", "italicCs"] {
+            if let Some(value) = field(resolved.as_ref(), key).and_then(Value::as_bool) {
+                attrs.insert(key.to_owned(), Value::Bool(value));
+            }
+        }
+        attrs
+    }
+
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn table_run_attrs(
+        &mut self,
+        paragraph_style: Option<&str>,
+        run_style: Option<&str>,
+        table_formatting: Value,
+    ) -> JsonObject {
+        let previous = self.0.set_table_run_formatting(Some(table_formatting));
+        let attrs = self.run_attrs(paragraph_style, run_style);
+        self.0.set_table_run_formatting(previous);
+        attrs
+    }
+
+    pub(crate) fn paragraph_formatting(
+        &mut self,
+        paragraph_style: Option<&str>,
+        table_formatting: Option<Value>,
+    ) -> Option<Value> {
+        let previous = self.0.set_table_paragraph_formatting(table_formatting);
+        let resolved = self.0.resolve_paragraph_style(paragraph_style);
+        let formatting = resolved.paragraph.clone();
+        self.0.restore_table_paragraph_formatting(previous);
+        formatting
+    }
+
+    pub(crate) fn table_attrs(&self, table: &Value) -> Value {
+        let projected = project_table(table, &self.0, None, 12);
+        let rows: Vec<Vec<Value>> = projected
+            .rows
+            .into_iter()
+            .map(|row| {
+                row.cells
+                    .into_iter()
+                    .map(|cell| {
+                        json!({
+                            "attributes": cell.attrs,
+                            "paragraphFormatting": cell.paragraph_formatting,
+                            "runFormatting": cell.run_formatting
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        json!({ "attributes": projected.attrs, "rows": rows })
+    }
 }
 
 fn is_hyperlink_style_name(name: &str) -> bool {
@@ -4083,6 +4232,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
     let content = array(field(Some(cell), "content"));
     ProjectedCell {
         paragraph_formatting: None,
+        run_formatting: None,
         attrs,
         content: if content.is_empty() {
             Cow::Owned(vec![json!({ "type": "paragraph", "content": [] })])
@@ -4121,17 +4271,34 @@ fn table_column_count(table: &Value) -> usize {
         .max(array(field(Some(table), "columnWidths")).len())
 }
 
-fn table_cell_paragraph_formatting(
+fn table_cell_style_formatting(
     table: &Value,
     style: Option<&Value>,
     row_index: usize,
     start_column: usize,
     end_column: usize,
     columns: usize,
+    property: &str,
 ) -> Option<Value> {
-    let mut result = field(style, "pPr").cloned();
+    let merge = |target: Option<&Value>, source: Option<&Value>| {
+        if property == "rPr" {
+            merge_text_formatting(target, source)
+        } else {
+            merge_paragraph_formatting(target, source)
+        }
+    };
+    let mut result = field(style, property).cloned();
     let parts = array(field(style, "tblStylePr"));
-    if !parts.iter().any(|part| field(Some(part), "pPr").is_some()) {
+    if property == "rPr" {
+        let whole = parts
+            .iter()
+            .find(|part| string(field(Some(part), "type")) == Some("wholeTable"));
+        result = merge(result.as_ref(), field(whole, property));
+    }
+    if !parts
+        .iter()
+        .any(|part| field(Some(part), property).is_some())
+    {
         return result;
     }
     let formatting = field(Some(table), "formatting");
@@ -4200,7 +4367,7 @@ fn table_cell_paragraph_formatting(
         let conditional = parts
             .iter()
             .find(|part| string(field(Some(part), "type")) == Some(region));
-        result = merge_paragraph_formatting(result.as_ref(), field(conditional, "pPr"));
+        result = merge(result.as_ref(), field(conditional, property));
     }
     result
 }
@@ -4292,13 +4459,23 @@ fn project_row<'a>(
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
         );
-        projected.paragraph_formatting = table_cell_paragraph_formatting(
+        projected.paragraph_formatting = table_cell_style_formatting(
             table,
             style_context.style,
             row_index,
             start_column,
             column,
             style_context.column_count,
+            "pPr",
+        );
+        projected.run_formatting = table_cell_style_formatting(
+            table,
+            style_context.style,
+            row_index,
+            start_column,
+            column,
+            style_context.column_count,
+            "rPr",
         );
         cells.push(projected);
     }
@@ -4336,13 +4513,23 @@ fn project_row<'a>(
             },
         );
         cells.push(ProjectedCell {
-            paragraph_formatting: table_cell_paragraph_formatting(
+            paragraph_formatting: table_cell_style_formatting(
                 table,
                 style_context.style,
                 row_index,
                 0,
                 total_columns,
                 style_context.column_count,
+                "pPr",
+            ),
+            run_formatting: table_cell_style_formatting(
+                table,
+                style_context.style,
+                row_index,
+                0,
+                total_columns,
+                style_context.column_count,
+                "rPr",
             ),
             attrs: projected.attrs,
             content: Cow::Owned(projected.content.into_owned()),
@@ -5175,12 +5362,14 @@ fn visit_story(
                     .units
                     .push(embed_unit("table", payload, &[], 1));
                 let previous_table_state = context.styles.set_table_paragraph_formatting(None);
+                let previous_run_state = context.styles.set_table_run_formatting(None);
                 let sources = source_cells(block);
                 for (row_index, row) in rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
                         context
                             .styles
                             .set_table_paragraph_formatting(cell.paragraph_formatting);
+                        context.styles.set_table_run_formatting(cell.run_formatting);
                         let source_cell = sources
                             .get(row_index)
                             .and_then(|cells| cells.get(cell_index))
@@ -5219,6 +5408,7 @@ fn visit_story(
                 context
                     .styles
                     .restore_table_paragraph_formatting(previous_table_state);
+                context.styles.set_table_run_formatting(previous_run_state);
                 last_kind = Some("table");
             }
             _ => {
@@ -7310,6 +7500,100 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("structuredResult")
+        );
+    }
+
+    #[test]
+    fn run_inheritance_is_what_seeding_gives_an_unformatted_run() {
+        let definitions = json!({
+            "docDefaults": { "rPr": { "fontFamily": { "ascii": "DejaVu Sans" }, "fontSize": 22 } },
+            "styles": [
+                { "type": "paragraph", "styleId": "Normal", "default": true },
+                { "type": "paragraph", "styleId": "Heading1", "rPr": { "bold": true, "fontSize": 32 } },
+                { "type": "character", "styleId": "Link", "name": "Hyperlink",
+                  "rPr": { "color": { "rgb": "0563C1" }, "underline": { "style": "single" } } }
+            ]
+        });
+        let styles = StyleResolver::new(Some(&definitions));
+        let inheritance = RunInheritance::new(Some(&definitions));
+        let styled = |id: Option<&str>| id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
+        for (paragraph_style, run_style) in [
+            (None, None),
+            (Some("Heading1"), None),
+            (Some("Heading1"), Some("Link")),
+            (Some("Missing"), Some("Missing")),
+        ] {
+            let paragraph = json!({
+                "type": "paragraph",
+                "formatting": styled(paragraph_style),
+                "content": [{
+                    "type": "run",
+                    "formatting": styled(run_style),
+                    "content": [{ "type": "text", "text": "x" }]
+                }]
+            });
+            let units = paragraph_units(&paragraph, &styles, None, &BTreeMap::new()).units;
+            let mut seeded = units[0].attrs.clone();
+            seeded.remove("runStyle");
+            assert_eq!(inheritance.run_attrs(paragraph_style, run_style), seeded);
+        }
+        let linked = inheritance.run_attrs(Some("Heading1"), Some("Link"));
+        assert_eq!(linked["bold"], json!(true));
+        assert_eq!(linked["fontSize"]["size"], json!(32));
+        assert_eq!(linked["textColor"]["inheritedHyperlink"], json!(true));
+    }
+
+    #[test]
+    fn save_inheritance_reads_table_seeding_without_leaking_cell_paragraph_defaults() {
+        let definitions = json!({
+            "docDefaults": {
+                "pPr": { "spaceBefore": 20, "spaceAfter": 160, "lineSpacing": 259 },
+                "rPr": { "fontSize": 22 }
+            },
+            "styles": [
+                { "type": "paragraph", "styleId": "Normal", "default": true },
+                { "type": "paragraph", "styleId": "Heading", "pPr": { "spaceAfter": 80 } },
+                { "type": "table", "styleId": "Grid",
+                  "pPr": { "spaceAfter": 0, "lineSpacing": 240 },
+                  "tblPr": {
+                      "borders": { "top": { "style": "single", "size": 4 } },
+                      "cellMargins": { "left": { "value": 108, "type": "dxa" } }
+                  },
+                  "tblStylePr": [
+                      { "type": "firstRow", "pPr": { "spaceBefore": 40 } }
+                  ]
+                }
+            ]
+        });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Grid", "look": { "firstRow": true } },
+            "rows": [{ "cells": [{ "type": "tableCell", "content": [] }] }]
+        });
+        let mut inheritance = RunInheritance::new(Some(&definitions));
+        let baseline = inheritance.table_attrs(&table);
+        assert_eq!(baseline["attributes"]["cellMargins"]["left"], json!(108));
+        assert!(baseline["attributes"]["_originalFormatting"]["cellMargins"].is_null());
+        let cell = &baseline["rows"][0][0];
+        assert_eq!(cell["attributes"]["borders"]["top"]["size"], json!(4));
+        assert!(cell["attributes"]["_originalFormatting"]["borders"].is_null());
+        let extra = Some(cell["paragraphFormatting"].clone());
+        let paragraph = inheritance
+            .paragraph_formatting(None, extra.clone())
+            .unwrap();
+        assert_eq!(paragraph["spaceBefore"], json!(40));
+        assert_eq!(paragraph["spaceAfter"], json!(0));
+        assert_eq!(paragraph["lineSpacing"], json!(240));
+        let styled = inheritance
+            .paragraph_formatting(Some("Heading"), extra)
+            .unwrap();
+        assert_eq!(styled["spaceAfter"], json!(80));
+        let body = inheritance.paragraph_formatting(None, None).unwrap();
+        assert_eq!(body["spaceBefore"], json!(20));
+        assert_eq!(body["spaceAfter"], json!(160));
+        assert_eq!(
+            inheritance.run_attrs(None, None)["fontSize"]["size"],
+            json!(22)
         );
     }
 

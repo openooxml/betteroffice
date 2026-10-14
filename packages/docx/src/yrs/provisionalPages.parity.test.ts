@@ -15,7 +15,10 @@ import { preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import { echoBackgroundPage } from './residentCommandPresentation';
-import type { DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type {
+  DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandSelection,
+  DocxSelectionPointIntent, ResidentCommandInitRequest,
+} from './residentCommandProtocol';
 import type { DocxPageExportOptions, DocxPageFragment } from './pagedExport';
 import type {
   ResidentEngineWorkerRequest,
@@ -73,7 +76,12 @@ beforeAll(async () => {
     }],
   });
   if (!result.success) throw new AggregateError(result.logs, 'Worker test bundle failed');
-  startWorker = new Function('self', 'testHarness', 'MessageChannel', await result.outputs[0].text()) as typeof startWorker;
+  startWorker = new Function('self', 'testHarness', 'MessageChannel', `
+    const performance = testHarness.clock ?? globalThis.performance;
+    const setTimeout = testHarness.setTimer ?? globalThis.setTimeout;
+    const clearTimeout = testHarness.clearTimer ?? globalThis.clearTimeout;
+    ${await result.outputs[0].text()}
+  `) as typeof startWorker;
 });
 
 function syntheticDocx(feature = 'plain'): Uint8Array {
@@ -93,8 +101,10 @@ function syntheticDocx(feature = 'plain'): Uint8Array {
   ));
   const body = Array.from({ length: 80 }, (_, index) =>
     `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}">` +
-    '<w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>' +
-    `Paragraph ${index + 1}. ${'alpha beta gamma delta epsilon zeta eta theta '.repeat(8 + index % 5)}` +
+    '<w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:rPr>' +
+    (feature === 'echo' ? '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/>' : '') +
+    '<w:sz w:val="22"/></w:rPr><w:t>' +
+    `Paragraph ${index + 1}. ${feature === 'echo' ? 'alpha beta gamma' : 'alpha beta gamma delta epsilon zeta eta theta '.repeat(8 + index % 5)}` +
     '</w:t></w:r></w:p>'
   ).join('');
   parts.set('word/document.xml', toBytes(
@@ -117,7 +127,7 @@ function syntheticDocx(feature = 'plain'): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-function worker(session: ResidentEngineSession, controlled = false) {
+function worker(session: ResidentEngineSession, controlled = false, virtualTime = false) {
   const turns: (() => void)[] = [];
   const frames: DocxCommandFrame[] = [];
   let nextId = 0;
@@ -130,7 +140,21 @@ function worker(session: ResidentEngineSession, controlled = false) {
       replies.delete(reply.id);
     },
   };
-  const harness = { session, echoBackgroundPage, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine };
+  let now = 0;
+  let timerId = 0;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  const harness = { session, echoBackgroundPage, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine,
+    loadedRustDisplayListQueryEngine,
+    ...(virtualTime ? {
+      clock: { now: () => now },
+      setTimer(callback: () => void, ms: number) {
+        const id = ++timerId;
+        timers.set(id, { at: now + ms, callback });
+        return id;
+      },
+      clearTimer(id: number) { timers.delete(id); },
+    } : {}),
+  };
   startWorker(scope, harness, controlled ? class {
     port1 = { onmessage: () => {} };
     port2 = { postMessage: () => turns.push(() => this.port1.onmessage()) };
@@ -140,6 +164,16 @@ function worker(session: ResidentEngineSession, controlled = false) {
     replaceSession(next: ResidentEngineSession) { harness.session = next; },
     async turn() { turns.shift()?.(); await new Promise<void>((resolve) => setTimeout(resolve, 0)); },
     async drain() { for (let i = 0; i < 2000 && turns.length; i += 1) { turns.shift()!(); await new Promise<void>((resolve) => setTimeout(resolve, 0)); } },
+    async advance(ms: number) {
+      await this.drain();
+      now += ms;
+      for (const [id, timer] of timers) {
+        if (timer.at > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+      await this.drain();
+    },
     send(request: ResidentEngineWorkerRequestWithoutId): Promise<ResidentEngineWorkerResponse> {
       const id = ++nextId;
       return new Promise((resolve) => {
@@ -344,6 +378,9 @@ function flowDocx(feature: string): Uint8Array {
   const types: string[] = [];
   let body: string;
   switch (feature) {
+    case 'flow-selection':
+      body = flowParagraph(4, 'alpha beta gamma delta epsilon') + tail('Tail') + flowSection();
+      break;
     case 'flow-paragraph':
       body = opening + flowParagraph(120, 'Long', third) + tail('Tail') + flowSection();
       break;
@@ -364,11 +401,12 @@ function flowDocx(feature: string): Uint8Array {
         Array.from({ length: 10 }, (_, index) => flowParagraph(1, `Chain ${index}`, '<w:keepNext/>')).join('') +
         flowParagraph(1, 'Chain end') + tail('Tail') + flowSection();
       break;
+    case 'flow-inline-image':
     case 'flow-image':
       types.push('<Default Extension="png" ContentType="image/png"/>');
       relationships.push('<Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>');
       parts.set('word/media/image1.png', PNG);
-      body = opening + flowParagraph(48, 'Filler', third) +
+      body = (feature === 'flow-inline-image' ? flowParagraph(1, 'Before image') : opening + flowParagraph(48, 'Filler', third)) +
         '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
         '<wp:extent cx="1905000" cy="1428750"/><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
         '<pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>' +
@@ -484,18 +522,24 @@ FLOW_STRADDLES['flow-landscape-bare'] = (pages) => {
   expect(pages.at(-1)!.width).toBeLessThan(pages[2]!.width);
 };
 
+/** The pass a plain text edit relayouts through, on engines that keep it apart from the full retained pass. */
+const EDIT_LAYOUT = 'layoutDocumentWithRegionsAfterEdit';
+
 const MEASUREMENT = {
   defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
   compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true as const,
 };
 
 /** `exportable` registers the font for the default family too, as an export requires. */
-async function commandFixture(feature = 'plain', exportable = false) {
+async function commandFixture(feature = 'plain', exportable = false, options: {
+  full?: boolean; virtualTime?: boolean; prepare?: (engine: ResidentEngineSession) => void;
+} = {}) {
   const bytes = syntheticDocx(feature);
   const cold = await createResidentEngineSession();
   const engine = await createResidentEngineSession();
-  const w = worker(engine, true);
+  const w = worker(engine, true, options.virtualTime);
   const host = decodeDocxHostJson(cold.openDocx(bytes), bytes);
+  options.prepare?.(cold);
   const request = buildResidentRegionLayoutRequest(host.document, 24, {});
   if (feature === 'footnote' || feature === 'endnote') {
     request.notes = { contents: [{ id: 1, noteKind: feature, height: 0 }] } as typeof request.notes;
@@ -515,22 +559,27 @@ async function commandFixture(feature = 'plain', exportable = false) {
   const extras = JSON.stringify({ fontChains, headersFooters: JSON.parse(cold.retainedHeadersFootersJson() ?? 'null') });
   const full = applyFrameDelta(null, decodeFrameDelta(cold.buildDisplayListFrame(extras, 0)));
   await w.send({ type: 'open', bytes: bytes.slice().buffer });
-  const methods = ['layoutDocumentWithRegionsRetained', 'layoutDocumentWithRegionsRetainedJson', 'beginRegionLayout', 'resumeRegionLayout'] as const;
+  options.prepare?.(engine);
+  const editLayout = EDIT_LAYOUT in engine ? EDIT_LAYOUT : 'layoutDocumentWithRegionsRetained';
+  const methods = new Set([
+    'layoutDocumentWithRegionsRetained', 'layoutDocumentWithRegionsRetainedJson', 'beginRegionLayout', 'resumeRegionLayout', editLayout,
+  ]);
   const calls: string[] = [];
+  const spied = engine as unknown as Record<string, (...args: never[]) => unknown>;
   for (const method of methods) {
-    const original = engine[method].bind(engine) as (...args: never[]) => unknown;
-    (engine as unknown as Record<string, unknown>)[method] = (...args: never[]) => { calls.push(method); return original(...args); };
+    const original = spied[method].bind(engine);
+    spied[method] = (...args: never[]) => { calls.push(method); return original(...args); };
   }
   const init: ResidentCommandInitRequest = {
     session: 'viewport-first', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [FONT], layoutInput, layoutWithRegions: true, layoutRevision: 1, extras,
-    displayWindow: [0, 3], ...{ provisionalPages: 3 },
+    displayWindow: [0, 3], ...(options.full ? {} : { provisionalPages: 3 }),
   };
   const reply = await w.send({ type: 'commandInit', request: init });
   if (!reply.ok || !reply.commandInitial) throw new Error(JSON.stringify(reply));
   const initial = reply.commandInitial;
   const frame = applyFrameDelta(null, decodeFrameDelta(initial.frame.payload.frame));
-  return { cold, engine, w, init, initial, frame, full, calls,
+  return { cold, engine, w, init, initial, frame, full, calls, editLayout, acks: [] as DocxCommandFrame[],
     destroy() { engine.destroy(); cold.destroy(); },
     async present() {
       return w.send({ type: 'commandViewport', request: { start: 0, end: 3, frameEpoch: frame.frameEpoch } });
@@ -632,6 +681,416 @@ test('command viewport beyond the prefix completes before painting and cancels s
     const count = f.w.frames.length;
     await f.w.drain();
     expect(f.w.frames).toHaveLength(count);
+  } finally { f.destroy(); }
+});
+
+type CommandFixture = Awaited<ReturnType<typeof commandFixture>>;
+
+function commandPoint(f: CommandFixture, pageIndex = 0, offset = 8): DocxSelectionPointIntent {
+  const page = f.full.pages[pageIndex]!;
+  const run = page.page.primitives.find((primitive) => primitive.kind === 'glyphRun');
+  if (!run || run.kind !== 'glyphRun') throw new Error('Missing text');
+  const glyph = run.glyphs[Math.min(offset, run.glyphs.length - 1)]!;
+  return {
+    page: { pageId: page.pageId.toString(), pageIndex }, x: glyph.x, y: glyph.y - run.size / 2,
+    frameEpoch: f.frame.frameEpoch, layoutRevision: 1, clickCount: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  };
+}
+
+async function sendCommand(f: CommandFixture, seq: number, kind: string, payload: DocxCommandEnvelope['payload']): Promise<DocxCommandAck> {
+  const reply = await f.w.interleave({ type: 'edit', command: {
+    session: f.init.session, incarnation: 1, seq, basis: { epoch: 1, version: 0 }, kind, payload,
+    ...(seq > 1 ? { afterSeq: seq - 1 } : {}),
+  } });
+  if (!reply.ok || !reply.commandAck?.frame) throw new Error(JSON.stringify(reply));
+  expect(reply.commandAck.outcomes[0]?.status).toBe(kind === 'insertText' ? 'applied' : 'noop');
+  f.acks.push(reply.commandAck.frame);
+  return reply.commandAck;
+}
+
+function selectionPositions(selection: DocxCommandSelection | null | undefined) {
+  const position = (at: DocxCommandSelection['focus']) => ({ story: at.story, paraId: at.paraId, offset: at.offset });
+  return selection && { anchor: position(selection.anchor), focus: position(selection.focus) };
+}
+
+function expectPrefixSelection(f: CommandFixture, ack: DocxCommandAck, calls: string[]) {
+  expect(ack.frame!.payload.layoutProvisional).toBe(true);
+  expect(ack.frame!.payload.finalizedPages).toBe(3);
+  expect(f.calls).toEqual(calls);
+  const frame = commandFramesAfter(f.frame, [...f.w.frames, ...f.acks].sort((a, b) => a.revision - b.revision));
+  expect(frame.pages).toHaveLength(3);
+  for (const { page, pageIndex } of frame.pages) expect(page).toEqual(f.full.displayList.pages[pageIndex]);
+}
+
+function expectSelectionParity(ack: DocxCommandAck, full: DocxCommandAck, requiresEcho = true) {
+  expect(selectionPositions(ack.selection)).toEqual(selectionPositions(full.selection));
+  const echo = ack.frame!.payload.echoContext;
+  const completedEcho = full.frame!.payload.echoContext;
+  if (!requiresEcho) {
+    expect(echo).toEqual(completedEcho);
+    return;
+  }
+  expect(echo).toBeDefined();
+  expect(completedEcho).toBeDefined();
+  expect(echo!.page).toEqual(completedEcho!.page);
+  expect(echo!.text).toBe(completedEcho!.text);
+  expect(echo!.selection).toEqual(completedEcho!.selection);
+  expect(echo!.boundaries).toEqual(completedEcho!.boundaries);
+  expect(echo!.styleRuns).toEqual(completedEcho!.styleRuns);
+}
+
+function expectAnsweredSelectionParity(ack: DocxCommandAck, full: DocxCommandAck, completed = true) {
+  expect(selectionPositions(ack.selection)).toEqual(selectionPositions(full.selection));
+  const payload = ack.frame!.payload;
+  const reference = full.frame!.payload;
+  expect(payload.caret.caretRect).toEqual(reference.caret.caretRect);
+  expect(payload.caret.selection).toEqual(reference.caret.selection);
+  expect(payload.selectionRects).toEqual(reference.selectionRects);
+  expect(payload.parts).toEqual(reference.parts);
+  if (completed) {
+    const geometry = (value: typeof payload.geometry) => value && {
+      selection: value.selection,
+      objects: value.objects.map(({ kind, story, rects }) => ({ kind, story, rects })),
+      unbuiltPages: value.unbuiltPages,
+    };
+    expect(payload.geometry).toBeDefined();
+    expect(geometry(payload.geometry)).toEqual(geometry(reference.geometry));
+  } else {
+    expect(payload.caret.caretRect).not.toBeNull();
+    expect(payload.selectionRects).toEqual([]);
+    expect(payload.geometry?.selection ?? []).toEqual(reference.geometry!.selection);
+  }
+}
+
+for (const [clickCount, label] of [[2, 'word'], [3, 'paragraph']] as const) {
+  test(`prefix ${label} click answers the full selection frame`, async () => {
+    const f = await commandFixture('flow-selection', false, { virtualTime: true });
+    const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
+    try {
+      expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+      const ack = await sendCommand(f, 1, 'selectPoint', { ...commandPoint(f), clickCount });
+      const reference = await sendCommand(full, 1, 'selectPoint', { ...commandPoint(full), clickCount });
+      expect(reference.frame!.payload.selectionRects!.length).toBeGreaterThan(0);
+      expectAnsweredSelectionParity(ack, reference);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+for (const gesture of ['shift click', 'shift right', 'shift down'] as const) {
+  test(`prefix ${gesture} answers the full selection frame`, async () => {
+    const f = await commandFixture('flow-selection', false, { virtualTime: true });
+    const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
+    try {
+      await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+      await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+      const kind = gesture === 'shift click' ? 'extendSelection' : 'navigate';
+      const point = commandPoint(f, 0, 24);
+      const payload = gesture === 'shift click' ? { ...point, modifiers: { ...point.modifiers, shift: true } }
+        : gesture === 'shift right' ? { unit: 'character' as const, direction: 'forward' as const, extend: true }
+          : { unit: 'line' as const, direction: 'down' as const, extend: true, goalX: point.x };
+      const ack = await sendCommand(f, 2, kind, payload);
+      const reference = await sendCommand(full, 2, kind, payload);
+      expect(reference.frame!.payload.selectionRects!.length).toBeGreaterThan(0);
+      expectAnsweredSelectionParity(ack, reference);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+test('prefix mid-line shift click then shift down preserves the full focus column', async () => {
+  const f = await commandFixture('flow-selection', false, { virtualTime: true });
+  const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
+  try {
+    await sendCommand(f, 1, 'selectPoint', commandPoint(f, 0, 4));
+    await sendCommand(full, 1, 'selectPoint', commandPoint(full, 0, 4));
+    const shifted = await sendCommand(f, 2, 'extendSelection', commandPoint(f, 0, 24));
+    const shiftedFull = await sendCommand(full, 2, 'extendSelection', commandPoint(full, 0, 24));
+    const goal = (ack: DocxCommandAck, fixture: CommandFixture) => {
+      const payload = ack.frame!.payload;
+      const rect = payload.selectionRects?.at(-1);
+      return payload.caret.caretRect?.x ?? (rect ? rect.x + rect.width : fixture.full.pages[0]!.page.contentBounds!.x);
+    };
+    const ack = await sendCommand(f, 3, 'navigate', {
+      unit: 'line', direction: 'down', extend: true, goalX: goal(shifted, f),
+    });
+    const reference = await sendCommand(full, 3, 'navigate', {
+      unit: 'line', direction: 'down', extend: true, goalX: goal(shiftedFull, full),
+    });
+    expect(reference.selection!.focus.paraId).toBe(shiftedFull.selection!.focus.paraId);
+    expect(reference.selection!.focus.offset).toBeGreaterThan(shiftedFull.selection!.focus.offset);
+    expectAnsweredSelectionParity(ack, reference);
+    expectAnsweredSelectionParity(shifted, shiftedFull);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('prefix inline image click answers with full object geometry', async () => {
+  const f = await commandFixture('flow-inline-image', false, { virtualTime: true });
+  const full = await commandFixture('flow-inline-image', false, { full: true, virtualTime: true });
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const image = f.full.pages[0]!.page.primitives.find(primitive => primitive.kind === 'image');
+    if (!image || image.kind !== 'image') throw new Error('Missing inline image');
+    const point = { ...commandPoint(f), x: image.x + image.w / 2, y: image.y + image.h / 2 };
+    const ack = await sendCommand(f, 1, 'selectPoint', point);
+    const reference = await sendCommand(full, 1, 'selectPoint', point);
+    expect(reference.frame!.payload.geometry!.objects.some(object => object.kind === 'image')).toBe(true);
+    expectAnsweredSelectionParity(ack, reference);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('prefix part click answers with full part geometry', async () => {
+  const f = await commandFixture('header-PAGE', false, { virtualTime: true });
+  const full = await commandFixture('header-PAGE', false, { full: true, virtualTime: true });
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const header = f.full.pages[0]!.page.header!;
+    const run = header.primitives.find(primitive => primitive.kind === 'glyphRun');
+    if (!run || run.kind !== 'glyphRun') throw new Error('Missing header text');
+    const point = { ...commandPoint(f), x: run.glyphs[0]!.x, y: run.glyphs[0]!.y - run.size / 2 };
+    const ack = await sendCommand(f, 1, 'selectPoint', point);
+    const reference = await sendCommand(full, 1, 'selectPoint', point);
+    expect(reference.frame!.payload.parts!.length).toBeGreaterThan(0);
+    expectAnsweredSelectionParity(ack, reference);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('prefix queued click waits for the layout after an identity assigning save', async () => {
+  const prepare = (engine: ResidentEngineSession) => {
+    const paragraph = engine.geometryReader.paragraphs('body').at(-1)!;
+    engine.splitParagraph({ story: 'body', paraId: paragraph.paraId, offset: 1 });
+  };
+  const f = await commandFixture('echo', false, { virtualTime: true, prepare });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true, prepare });
+  const native = await loadRustDisplayListQueryEngine();
+  const hit = native.hitTestRegionsByHandle;
+  if (!hit) throw new Error('Missing retained hit testing');
+  const completedBeforeHit: boolean[] = [];
+  native.hitTestRegionsByHandle = (...args) => {
+    completedBeforeHit.push(f.calls.includes('layoutDocumentWithRegionsRetained'));
+    return hit.apply(native, args);
+  };
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const before = f.engine.proposalEngine.version();
+    const saved = f.w.send({ type: 'save', comments: [] });
+    const clicked = sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const [save, ack] = await Promise.all([saved, clicked]);
+    if (!save.ok || !save.saved) throw new Error(JSON.stringify(save));
+    expect(save.version).not.toBe(before);
+    expect(completedBeforeHit.length).toBeGreaterThan(0);
+    expect(completedBeforeHit.every(Boolean)).toBe(true);
+    native.hitTestRegionsByHandle = hit;
+    const fullSave = full.w.send({ type: 'save', comments: [] });
+    const referenceClick = sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    const [savedFull, reference] = await Promise.all([fullSave, referenceClick]);
+    expect(savedFull.ok).toBe(true);
+    expectAnsweredSelectionParity(ack, reference);
+    expect(ack.frame!.payload.documentVersion).toBe(save.version);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+  } finally { native.hitTestRegionsByHandle = hit; f.destroy(); full.destroy(); }
+});
+
+test('prefix text caret click and character and word moves retain complete caret frames without completion', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const reference = await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    expectPrefixSelection(f, ack, []);
+    expectAnsweredSelectionParity(ack, reference, false);
+    for (const [index, unit] of (['character', 'word'] as const).entries()) {
+      const payload = { unit, direction: 'forward' as const, extend: false };
+      const moved = await sendCommand(f, index + 2, 'navigate', payload);
+      const movedFull = await sendCommand(full, index + 2, 'navigate', payload);
+      expectPrefixSelection(f, moved, []);
+      expectAnsweredSelectionParity(moved, movedFull, false);
+    }
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('selectPoint on a certified page acknowledges the exact prefix with echo context without completion', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const reference = await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    expectPrefixSelection(f, ack, []);
+    expectSelectionParity(ack, reference);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('selectPoint rebuilds a released certified page without completing layout', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    for (const fixture of [f, full]) {
+      await fixture.w.send({ type: 'commandViewport', request: { start: 0, end: 1, frameEpoch: fixture.frame.frameEpoch } });
+      expect(commandFramesAfter(fixture.frame, fixture.w.frames).pages[1]!.page.unbuilt).toBe(true);
+    }
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f, 1));
+    const reference = await sendCommand(full, 1, 'selectPoint', commandPoint(full, 1));
+    expect(ack.frame!.payload.layoutProvisional).toBe(true);
+    expect(ack.frame!.payload.finalizedPages).toBe(3);
+    expect(f.calls).toEqual([]);
+    const frame = commandFramesAfter(f.frame, [...f.w.frames, ...f.acks].sort((a, b) => a.revision - b.revision));
+    expect(frame.pages[1]!.page).toEqual(f.full.pages[1]!.page);
+    expectSelectionParity(ack, reference);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+for (const unit of ['character', 'word', 'line'] as const) {
+  for (const direction of ['backward', 'forward'] as const) {
+    test(`navigate ${unit} ${direction} on a certified page acknowledges the exact prefix with echo context`, async () => {
+      const f = await commandFixture('echo', false, { virtualTime: true });
+      const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+      try {
+        await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+        await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+        const calls = f.calls.slice();
+        const navigation = { unit, direction, extend: false };
+        const ack = await sendCommand(f, 2, 'navigate', navigation);
+        const reference = await sendCommand(full, 2, 'navigate', navigation);
+        expectPrefixSelection(f, ack, calls);
+        expectSelectionParity(ack, reference);
+      } finally { f.destroy(); full.destroy(); }
+    });
+  }
+}
+
+test('extendSelection on certified pages completes before answering the full selection frame', async () => {
+  const f = await commandFixture('flow-selection', false, { virtualTime: true });
+  const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
+  try {
+    await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    const ack = await sendCommand(f, 2, 'extendSelection', commandPoint(f, 0, 24));
+    const reference = await sendCommand(full, 2, 'extendSelection', commandPoint(full, 0, 24));
+    expect(reference.selection!.anchor.offset).not.toBe(reference.selection!.focus.offset);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    expectAnsweredSelectionParity(ack, reference);
+    expectSelectionParity(ack, reference, false);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+for (const kind of ['selectPoint', 'extendSelection', 'line down', 'document end'] as const) {
+  test(`${kind} beyond the certified prefix completes before acknowledging selection`, async () => {
+    const f = await commandFixture('echo', false, { virtualTime: true });
+    const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+    try {
+      await sendCommand(f, 1, 'selectPoint', commandPoint(f, 2));
+      await sendCommand(full, 1, 'selectPoint', commandPoint(full, 2));
+      const commandKind = kind === 'line down' || kind === 'document end' ? 'navigate' : kind;
+      const payload = kind === 'line down' ? { unit: 'line' as const, direction: 'down' as const, extend: false, goalX: commandPoint(f, 2).x }
+        : kind === 'document end' ? { unit: 'document-boundary' as const, direction: 'forward' as const, extend: false }
+        : { ...commandPoint(f), page: { pageId: '0', pageIndex: 3 } };
+      const ack = await sendCommand(f, 2, commandKind, payload);
+      const reference = await sendCommand(full, 2, commandKind, payload);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(commandFramesAfter(f.frame, f.acks).pages).toHaveLength(f.full.pages.length);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+      expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+test('a computed paragraph boundary outside the prefix completes and recomputes selection', async () => {
+  const f = await commandFixture('flow-paragraph', false, { virtualTime: true });
+  const full = await commandFixture('flow-paragraph', false, { full: true, virtualTime: true });
+  try {
+    await sendCommand(f, 1, 'selectPoint', commandPoint(f, 2));
+    await sendCommand(full, 1, 'selectPoint', commandPoint(full, 2));
+    const navigation = { unit: 'paragraph' as const, direction: 'forward' as const, extend: true };
+    const ack = await sendCommand(f, 2, 'navigate', navigation);
+    const reference = await sendCommand(full, 2, 'navigate', navigation);
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+  } finally { f.destroy(); full.destroy(); }
+});
+
+for (const unit of ['character', 'word'] as const) {
+  test(`a computed ${unit} result beyond the prefix completes and recomputes`, async () => {
+    const f = await commandFixture('echo', false, { virtualTime: true });
+    const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+    try {
+      const selected = await sendCommand(f, 1, 'selectPoint', commandPoint(f, 2));
+      await sendCommand(full, 1, 'selectPoint', commandPoint(full, 2));
+      expectPrefixSelection(f, selected, []);
+      const end = { unit: 'line' as const, direction: 'forward' as const, extend: false };
+      const boundary = await sendCommand(f, 2, 'navigate', end);
+      await sendCommand(full, 2, 'navigate', end);
+      expectPrefixSelection(f, boundary, []);
+      const navigation = { unit, direction: 'forward' as const, extend: true };
+      const ack = await sendCommand(f, 3, 'navigate', navigation);
+      const reference = await sendCommand(full, 3, 'navigate', navigation);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+      expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
+test('a triple click whose paragraph crosses the prefix completes and recomputes', async () => {
+  const f = await commandFixture('flow-paragraph', false, { virtualTime: true });
+  const full = await commandFixture('flow-paragraph', false, { full: true, virtualTime: true });
+  try {
+    const ack = await sendCommand(f, 1, 'selectPoint', { ...commandPoint(f, 2), clickCount: 3 });
+    const reference = await sendCommand(full, 1, 'selectPoint', { ...commandPoint(full, 2), clickCount: 3 });
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
+    expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('insertText after a prefix selection completes before editing and matches a full open', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  try {
+    const selected = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    const selectedFull = await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    expectPrefixSelection(f, selected, []);
+    const ack = await sendCommand(f, 2, 'insertText', { text: 'Edit ' });
+    const reference = await sendCommand(full, 2, 'insertText', { text: 'Edit ' });
+    expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+    expect(f.calls.filter(call => call === 'layoutDocumentWithRegionsRetained' || call === f.editLayout))
+      .toEqual(['layoutDocumentWithRegionsRetained', f.editLayout]);
+    const document = f.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' });
+    const referenceDocument = full.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' });
+    expect(document.ok).toBe(true);
+    expect(referenceDocument.ok).toBe(true);
+    expect(document.ok && document.paragraphs).toEqual(referenceDocument.ok && referenceDocument.paragraphs);
+    const frame = commandFramesAfter(f.frame, [selected.frame!, ack.frame!]);
+    const referenceFrame = commandFramesAfter(full.frame, [selectedFull.frame!, reference.frame!]);
+    expect(frame.displayList.pages).toEqual(referenceFrame.displayList.pages);
+    expectSelectionParity(ack, reference);
+  } finally { f.destroy(); full.destroy(); }
+});
+
+test('background completion resumes after a prefix selection without restarting', async () => {
+  const f = await commandFixture('echo', false, { virtualTime: true });
+  try {
+    await f.present();
+    await f.w.turn();
+    expect(f.calls).toEqual(['beginRegionLayout']);
+    const ack = await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    expectPrefixSelection(f, ack, ['beginRegionLayout']);
+    await f.w.advance(INPUT_IDLE_HOLD_MS);
+    expect(f.calls.filter(call => call === 'beginRegionLayout')).toHaveLength(1);
+    expect(f.calls).not.toContain('layoutDocumentWithRegionsRetained');
+    expect(f.calls.filter(call => call === 'resumeRegionLayout').length).toBeGreaterThan(1);
+    expect(f.w.frames.at(-1)!.payload.layoutProvisional).not.toBe(true);
+    const frames = [...f.w.frames, ack.frame!].sort((a, b) => a.revision - b.revision);
+    const completed = commandFramesAfter(f.frame, frames);
+    expect(completed.pages).toHaveLength(f.full.pages.length);
+    expect(completed.displayList.pages).toEqual(f.full.displayList.pages);
   } finally { f.destroy(); }
 });
 

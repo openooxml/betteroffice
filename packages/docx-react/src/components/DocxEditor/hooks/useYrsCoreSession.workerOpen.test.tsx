@@ -6271,6 +6271,12 @@ test('a failed empty hand-over releases the mirror before using the main replica
   })).toMatchObject({ ok: true });
 });
 
+const openingInputQueries: WeakRef<DisplayListQueries>[] = [];
+afterEach(() => {
+  for (const queries of openingInputQueries) queries.deref()?.dispose();
+  openingInputQueries.length = 0;
+});
+
 async function openingEditor(workerPreview = true, viewer = false, options: {
   delayQueries?: boolean;
   source?: Uint8Array;
@@ -6319,6 +6325,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
       });
       try {
         facade = createDisplayListQueries(queries.displayList, undefined, previousInputQueries, harness.core.session);
+        openingInputQueries.push(new WeakRef(facade));
       } finally {
         loaded.mockRestore();
         loading.mockRestore();
