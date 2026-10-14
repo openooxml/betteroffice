@@ -439,6 +439,7 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextF
   const formatting = directFormatting(attributes);
   const result: Attrs = {};
   for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
+    if ((key === 'boldCs' || key === 'italicCs') && typeof attributes[key] !== 'boolean') continue;
     const value = formatting[key as keyof TextFormatting];
     if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
     if (value !== undefined) result[key] = value;
@@ -446,6 +447,13 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextF
     else if (key === 'color' && !lentByLinkStyle(attributes.textColor)) result[key] = { auto: true };
     else if (key === 'underline' && !lentByLinkStyle(attributes.underline)) {
       result[key] = { style: 'none' };
+    }
+  }
+  const source = asObject(attributes._sourceComplexScript);
+  for (const key of ['boldCs', 'italicCs'] as const) {
+    const value = source?.[key];
+    if (typeof value === 'boolean' && (attributes[key] === undefined || attributes[key] === value)) {
+      result[key] = value;
     }
   }
   return result as TextFormatting;
@@ -1792,6 +1800,74 @@ function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   return attrs as ParagraphSaveAttrs;
 }
 
+function complexScriptSources(content: readonly ParagraphContent[]): OriginalRunBoundary[] {
+  return content.flatMap((child): OriginalRunBoundary[] => {
+    if (child.type === 'run') {
+      return [{
+        text: child.content.map((entry) => {
+          if (entry.type === 'text' || entry.type === 'instrText') return entry.text;
+          if (entry.type === 'symbol') return entry.char;
+          if (entry.type === 'tab') return '\t';
+          if (entry.type === 'softHyphen') return '\u00ad';
+          if (entry.type === 'noBreakHyphen') return '\u2011';
+          return '\ufffc'.repeat(runContentLength(entry));
+        }).join(''),
+        formatting: child.formatting,
+      }];
+    }
+    if (child.type === 'hyperlink') return complexScriptSources(child.children as ParagraphContent[]);
+    if (isTrackedWrapper(child) || child.type === 'inlineSdt') {
+      return complexScriptSources(child.content as ParagraphContent[]);
+    }
+    return [{ text: '\ufffc'.repeat(paragraphContentLength(child)) }];
+  });
+}
+
+function preserveSourceComplexScript(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
+  if (!sources.some((source) => source.formatting?.boldCs !== undefined || source.formatting?.italicCs !== undefined)) {
+    return items;
+  }
+  const original = sources.map((source) => source.text).join('');
+  const current = items.map((item) => item.kind === 'text' ? item.text : '\ufffc').join('');
+  let prefix = 0;
+  while (prefix < Math.min(original.length, current.length) && original[prefix] === current[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < Math.min(original.length, current.length) - prefix &&
+    original[original.length - suffix - 1] === current[current.length - suffix - 1]) suffix += 1;
+  const originalEnd = original.length - suffix;
+  const currentEnd = current.length - suffix;
+  const mapped = (offset: number): number => {
+    if (offset === 0 || offset < prefix) return offset;
+    if (offset >= originalEnd) return offset + current.length - original.length;
+    return currentEnd;
+  };
+  let sourceOffset = 0;
+  const spans = sources.map((source, index) => {
+    const start = mapped(sourceOffset);
+    sourceOffset += source.text.length;
+    return { start, end: index + 1 === sources.length ? current.length : mapped(sourceOffset), formatting: source.formatting };
+  }).filter((span) => span.end > span.start);
+  let offset = 0;
+  return items.flatMap((item): InlineItem[] => {
+    const end = offset + (item.kind === 'text' ? item.text.length : 1);
+    const slices: InlineItem[] = [];
+    while (offset < end) {
+      const span = spans.find((span) => span.start <= offset && offset < span.end);
+      const next = Math.min(end, span?.end ?? end);
+      const script = {
+        ...(span?.formatting?.boldCs !== undefined ? { boldCs: span.formatting.boldCs } : {}),
+        ...(span?.formatting?.italicCs !== undefined ? { italicCs: span.formatting.italicCs } : {}),
+      };
+      const attributes = { ...item.attributes, _sourceComplexScript: script };
+      slices.push(item.kind === 'text'
+        ? { ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes }
+        : { ...item, attributes });
+      offset = next;
+    }
+    return slices;
+  });
+}
+
 function paragraphFromStory(
   paraId: string,
   properties: Attrs,
@@ -1804,7 +1880,9 @@ function paragraphFromStory(
   inherited?: ParagraphFormatting
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
-  let content = buildParagraphContent(items, recovery, format, revisionIds);
+  const sources = baseParagraph ? complexScriptSources(baseParagraph.content)
+    : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[] : [];
+  let content = buildParagraphContent(preserveSourceComplexScript(items, sources), recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,

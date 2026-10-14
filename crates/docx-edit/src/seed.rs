@@ -592,7 +592,7 @@ impl<'de> Deserialize<'de> for OrderedValue {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StyleResolver {
+pub(crate) struct StyleResolver {
     enabled: bool,
     styles: BTreeMap<String, Value>,
     #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
@@ -1249,7 +1249,7 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
 }
 
 impl StyleResolver {
-    fn new(definitions: Option<&Value>) -> Self {
+    pub(crate) fn new(definitions: Option<&Value>) -> Self {
         let Some(definitions) = object(definitions) else {
             return Self::default();
         };
@@ -1466,6 +1466,21 @@ impl StyleResolver {
             .and_then(|id| self.style(id))
             .and_then(|style| field(Some(style), "rPr"))
     }
+
+    fn run_formatting(&self, paragraph_run: Option<&Value>, direct: Option<&Value>) -> Option<Value> {
+        let style_id = string(field(direct, "styleId"));
+        let inherited = merge_style_run_formatting(paragraph_run, self.run_style_own(style_id));
+        merge_text_formatting_owned(inherited, direct)
+    }
+
+    pub(crate) fn effective_run_formatting(
+        &self,
+        paragraph_style: Option<&str>,
+        direct: Option<&Value>,
+    ) -> Option<Value> {
+        let paragraph = self.resolve_paragraph_style(paragraph_style);
+        self.run_formatting(paragraph.run.as_deref(), direct)
+    }
 }
 
 fn mark(name: &str, attrs: Vec<(String, Value)>) -> Mark {
@@ -1485,11 +1500,6 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
     }
     if truthy(formatting.get("italic")) {
         marks.push(mark("italic", vec![]));
-    }
-    for key in ["boldCs", "italicCs"] {
-        if let Some(value) = formatting.get(key).and_then(Value::as_bool) {
-            marks.push(mark(key, vec![("value".to_owned(), Value::Bool(value))]));
-        }
     }
     if let Some(underline) = object(formatting.get("underline"))
         && string(underline.get("style")) != Some("none")
@@ -1678,10 +1688,6 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
         }
         if boolean_marks.contains(&mark.name.as_str()) {
             attrs.insert(mark.name.clone(), Value::Bool(true));
-        } else if matches!(mark.name.as_str(), "boldCs" | "italicCs") {
-            if let Some((_, value)) = mark.attrs.iter().find(|(key, _)| key == "value") {
-                attrs.insert(mark.name.clone(), value.clone());
-            }
         } else if mark.name == "snapToGrid" {
             attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
         } else if mark.name == "highlight" {
@@ -1765,8 +1771,7 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
-    let inherited = merge_style_run_formatting(style_formatting, run_style);
-    let merged = merge_text_formatting_owned(inherited, formatting);
+    let merged = styles.run_formatting(style_formatting, formatting);
     let mut marks = formatting_to_marks(merged.as_ref());
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
         || style_id
@@ -1820,7 +1825,15 @@ impl RunInheritance {
         paragraph_style: Option<&str>,
         run_style: Option<&str>,
     ) -> JsonObject {
-        inherited_run_attrs(&self.0, paragraph_style, run_style)
+        let mut attrs = inherited_run_attrs(&self.0, paragraph_style, run_style);
+        let direct = run_style.map(|id| json!({ "styleId": id }));
+        let resolved = self.0.effective_run_formatting(paragraph_style, direct.as_ref());
+        for key in ["boldCs", "italicCs"] {
+            if let Some(value) = field(resolved.as_ref(), key).and_then(Value::as_bool) {
+                attrs.insert(key.to_owned(), Value::Bool(value));
+            }
+        }
+        attrs
     }
 
     pub(crate) fn table_run_attrs(

@@ -169,14 +169,11 @@ pub(crate) fn slice(text: &str, range: Range<u32>) -> &str {
 /// Formatting attributes of one unit in the story vocabulary, without revision or link marks.
 pub(crate) type UnitAttrs = Arc<BTreeMap<String, Any>>;
 
-/// The formatting of each UTF-16 unit of `paragraph`, read from `doc`'s body story.
-/// Session attributes stating complex-script bold and italic, which a save otherwise derives from
-/// bold and italic.
+/// Independent complex-script run attributes for compare edits.
 pub(crate) const COMPLEX_SCRIPT_BOLD: &str = "boldCs";
 pub(crate) const COMPLEX_SCRIPT_ITALIC: &str = "italicCs";
 
-/// States each unit's own complex-script bold and italic on `paragraph` of `story`, outside undo
-/// history.
+/// States resolved complex-script values outside undo history.
 pub(crate) fn state_complex_script(
     doc: &EditingDoc,
     story: &str,

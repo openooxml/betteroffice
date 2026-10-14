@@ -543,7 +543,16 @@ describe('S1b toggle inheritance and independent complex-script saves', () => {
       const paragraph = '<w:p><w:pPr><w:pStyle w:val="Script"/></w:pPr>' +
         `<w:r><w:rPr><w:${property}Cs/></w:rPr><w:t>قديم</w:t></w:r></w:p>`;
       const xml = await saveTableEdit(path, runFixture(styles, paragraph),
-        (engine) => editFirstRun(engine, 'body', false));
+        (engine) => {
+          const stories = editFirstRun(engine, 'body', false);
+          const read = engine.readParagraphs({ story: 'body', view: 'accepted' });
+          if (!read.ok) throw new Error(`read refused: ${JSON.stringify(read)}`);
+          const paraId = read.paragraphs[0]!.paraId;
+          engine.formatRange({
+            story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 },
+          }, property === 'b' ? { bold: false } : { italic: false });
+          return stories;
+        });
       expect(text(xml)).toBe('جديد');
       const properties = xml.match(/<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/)?.[0] ?? '';
       expect(properties).toContain(`<w:${property}Cs/>`);

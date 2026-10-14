@@ -484,6 +484,9 @@ describe('compareDocx', () => {
         run(`The ${word} clause`, '<w:rStyle w:val="BoldCharacter"/><w:b/>')),
       styles,
     });
+    const result = await compareDocx(styled('old'), styled('new'), OPTIONS);
+    expect(result.ok).toBe(true);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.code === 'roundtrip-mismatch')).toBe(false);
     await expectRedline(styled('old'), styled('new'));
   });
 

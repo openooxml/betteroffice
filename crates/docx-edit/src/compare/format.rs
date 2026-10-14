@@ -14,8 +14,7 @@ use super::xml::{Namespaces, run_text};
 /// [`RunStyles::effective`]'s.
 pub(crate) type Formats = Vec<(u32, [TextFormatting; 2])>;
 
-/// Whether each unit's own run properties set complex-script bold and italic, as runs of equal
-/// values: `(units, [bold, italic])`.
+/// Resolved complex-script values as `(units, [bold, italic])` runs.
 pub(crate) type ComplexScript = Vec<(u32, [bool; 2])>;
 
 /// Which revisions a paragraph read keeps.
@@ -57,6 +56,7 @@ pub(crate) struct RunStyles {
     chains: HashMap<String, Chain>,
     default_paragraph: Option<String>,
     theme: Theme,
+    resolver: crate::seed::StyleResolver,
 }
 
 /// A style's run properties along its `basedOn` chain: other properties override root first,
@@ -102,6 +102,15 @@ impl RunStyles {
         )
         .map_err(failed)?;
         docx_parse::apply_theme_font_lang(&mut theme, settings.theme_font_lang.as_ref());
+        let definitions = part("word/styles.xml")
+            .filter(|xml| !xml.is_empty())
+            .map(|xml| {
+                docx_parse::parse_style_definitions(xml, Some(&theme), "word/styles.xml", &mut budget)
+                    .map_err(failed)
+                    .and_then(|styles| serde_json::to_value(styles).map_err(|error| error.to_string()))
+            })
+            .transpose()?;
+        let resolver = crate::seed::StyleResolver::new(definitions.as_ref());
         let mut levels = HashMap::new();
         let mut defaults = None;
         let mut default_paragraph = None;
@@ -178,6 +187,7 @@ impl RunStyles {
             chains,
             default_paragraph,
             theme,
+            resolver,
         })
     }
 
@@ -316,10 +326,19 @@ impl Read<'_> {
             .styles
             .effective(self.style.as_deref(), direct.as_ref());
         push(&mut self.formats, units, effective);
-        let own = direct.as_ref().map_or([false; 2], |direct| {
-            [direct.bold_cs == Some(true), direct.italic_cs == Some(true)]
+        let direct = direct.as_ref().and_then(|direct| serde_json::to_value(direct).ok());
+        let resolved = self
+            .styles
+            .resolver
+            .effective_run_formatting(self.style.as_deref(), direct.as_ref());
+        let script = ["boldCs", "italicCs"].map(|key| {
+            resolved
+                .as_ref()
+                .and_then(|value| value.get(key))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
         });
-        push(&mut self.complex_script, units, own);
+        push(&mut self.complex_script, units, script);
         true
     }
 }

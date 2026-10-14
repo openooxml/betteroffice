@@ -238,9 +238,6 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
 
   if (formatting.bold) add('bold');
   if (formatting.italic) add('italic');
-  for (const key of ['boldCs', 'italicCs'] as const) {
-    if (typeof formatting[key] === 'boolean') add(key, { value: formatting[key] });
-  }
   if (formatting.underline && formatting.underline.style !== 'none') {
     add('underline', {
       style: formatting.underline.style,
@@ -335,8 +332,6 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
     if (mark.name === 'comment' || mark.name === 'footnoteRef') continue;
     if (BOOLEAN_MARKS.has(mark.name)) {
       attrs[mark.name] = true;
-    } else if (mark.name === 'boldCs' || mark.name === 'italicCs') {
-      attrs[mark.name] = mark.attrs.value;
     } else if (mark.name === 'snapToGrid') {
       attrs.snapToGrid = false;
     } else if (mark.name === 'highlight') {
