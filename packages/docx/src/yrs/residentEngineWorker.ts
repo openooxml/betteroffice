@@ -18,9 +18,13 @@ import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
 import { ResidentSessionFonts, type ResidentFontEnvironment } from './residentFontEnvironment';
 import type {
+  DocxCommandApplyContext,
+  DocxCommandEnvelope,
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
+  DocxCommandSelection,
   DocxNavigationIntent,
+  DocxSelectionPointIntent,
   ResidentCommandHooksFactory,
   ResidentCommandHost,
   ResidentCommandInitRequest,
@@ -233,6 +237,36 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     }
     return selectionQueries.queries;
   };
+  const readSelectionFrame = () => {
+    const version = engine.proposalEngine.version();
+    if (layoutDirty || !retainedFrame) {
+      if (!selectionLayout || selectionLayout.version !== version) {
+        const extras = JSON.stringify({
+          ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
+        });
+        selectionLayout = { version, frame: applyFrameDelta(null, decodeFrameDelta(engine.buildDisplayListFrame(extras, 0))) };
+      }
+      return selectionLayout;
+    }
+    return { frame: retainedFrame, version };
+  };
+  const selectionPageOf = (selected: DocxCommandSelection['focus'], limit = Infinity): number | undefined => {
+    const at = selected.sticky
+      ? engine.resolveStickyPosition({ story: selected.story, encoded: selected.sticky }) : selected;
+    if (!at || (at.story !== 'body' && !at.story.startsWith('body:'))) return undefined;
+    const position = displayPositionIndex(engine).positionOf(at, 'body');
+    if (position === null) return undefined;
+    const { frame, version } = readSelectionFrame();
+    const queries = queriesFor(frame, version);
+    const forward = queries.rangeRects(position, position + 1).find((rect) =>
+      rect.height > 0 && rect.pageIndex < limit && frame.pages[rect.pageIndex] && !frame.pages[rect.pageIndex]!.page.unbuilt);
+    if (forward) return forward.pageIndex;
+    const paragraph = engine.geometryReader.locateParagraph(at.story, at.paraId);
+    if (at.offset !== paragraph.end - paragraph.start) return undefined;
+    const caret = queries.caretRect(position);
+    return caret && caret.height > 0 && caret.pageIndex < limit && frame.pages[caret.pageIndex] &&
+      !frame.pages[caret.pageIndex]!.page.unbuilt ? caret.pageIndex : undefined;
+  };
   const hooks = commandHooksFactory(engine, init, {
     setRenderEnvironment(environment) {
       const input = JSON.parse(init.layoutInput);
@@ -246,19 +280,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
     supportsFontEnvironment: true,
     readSelectionLayout() {
-      const version = engine.proposalEngine.version();
-      let frame: RetainedFrame;
-      if (layoutDirty || !retainedFrame) {
-        if (!selectionLayout || selectionLayout.version !== version) {
-          const extras = JSON.stringify({
-            ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
-          });
-          selectionLayout = { version, frame: applyFrameDelta(null, decodeFrameDelta(engine.buildDisplayListFrame(extras, 0))) };
-        }
-        frame = selectionLayout.frame;
-      } else {
-        frame = retainedFrame;
-      }
+      const { version, frame: selectedFrame } = readSelectionFrame();
+      let frame = selectedFrame;
       const target = selectionPage;
       const pages = new Set<number>();
       const installSelectionFrame = (bytes: Uint8Array) => {
@@ -357,6 +380,42 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   });
   const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [] };
   commandFrameChanges = changes;
+  const prefixNavigation = {
+    character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
+    word: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
+    line: { backward: 'result', forward: 'result', up: 'interior', down: 'interior' },
+    paragraph: { backward: 'interior', forward: 'interior', up: 'complete', down: 'complete' },
+    'document-boundary': { backward: 'result', forward: 'complete', up: 'complete', down: 'complete' },
+  } satisfies Record<DocxNavigationIntent['unit'], Record<DocxNavigationIntent['direction'], 'result' | 'interior' | 'complete'>>;
+  const canUsePrefix = (
+    command: DocxCommandEnvelope, context: DocxCommandApplyContext, result?: DocxCommandSelection | null
+  ): boolean => {
+    if (!prefix) return false;
+    if (result !== undefined && (!result || selectionPageOf(result.anchor, prefix.pages) === undefined ||
+      selectionPageOf(result.focus, prefix.pages) === undefined)) return false;
+    const base = context.predecessorSelection ?? hooks.selection();
+    switch (command.kind) {
+      case 'selectPoint': case 'extendSelection': {
+        const point = command.payload as DocxSelectionPointIntent | null;
+        const index = point?.page?.pageIndex;
+        if (index === undefined || !Number.isSafeInteger(index) || index < 0 || index >= prefix.pages ||
+          typeof point?.page?.pageId !== 'string') return false;
+        const page = retainedPageByKey(readSelectionFrame().frame, point.page.pageId);
+        if (!page || page.page.unbuilt || page.pageIndex !== index) return false;
+        return (command.kind !== 'extendSelection' && !point.modifiers?.shift) ||
+          (!!base && selectionPageOf(base.anchor, prefix.pages) !== undefined);
+      }
+      case 'navigate': {
+        const navigation = command.payload as DocxNavigationIntent | null;
+        const policy = navigation && prefixNavigation[navigation.unit]?.[navigation.direction];
+        if (!policy || policy === 'complete' || !base) return false;
+        const focus = selectionPageOf(base.focus, prefix.pages);
+        if (focus === undefined || selectionPageOf(base.anchor, prefix.pages) === undefined) return false;
+        return policy === 'result' || focus < prefix.pages - 1;
+      }
+      default: return false;
+    }
+  };
   let revision = 0;
   const host = createResidentCommandHost({
     init,
@@ -364,10 +423,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     hooks: {
       ...hooks,
       async preflight(command, context) {
-        if (prefix) await completeCommandPrefix(host);
         if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
           await loadRustDisplayListQueryEngine();
         }
+        if (prefix && !canUsePrefix(command, context)) await completeCommandPrefix(host);
         selectionPage = command.kind === 'selectPoint' || command.kind === 'extendSelection'
           ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
         const navigation = command.kind === 'navigate' ? command.payload as DocxNavigationIntent : undefined;
@@ -392,7 +451,16 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           };
         }
         try {
-          const checked = await hooks.preflight(command, context);
+          let checked = await hooks.preflight(command, context);
+          if (prefix && checked.status === 'ready' && !canUsePrefix(command, context, checked.prepared.selection)) {
+            await completeCommandPrefix(host);
+            checked = await hooks.preflight(command, context);
+          }
+          if (checked.status === 'ready' && checked.prepared.selection &&
+            (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate')) {
+            const page = selectionPageOf(checked.prepared.selection.focus);
+            if (page !== undefined) changes.pages.add(page);
+          }
           if (command.kind === 'setFontEnvironment' && checked.status === 'ready') {
             try {
               preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as ResidentFontEnvironment));
