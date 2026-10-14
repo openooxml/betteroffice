@@ -6,6 +6,7 @@ import { createWorkerEditSession } from '../../../../../../shared/office-session
 import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from '@betteroffice/docx/peerless';
 import { createEchoPainter, type PeerlessEchoIntent, type PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessTextIntent } from './inputEvents';
+import { testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 
 const page = { pageId: '1', pageIndex: 0 };
 const rect = { x: 0, y: 0, width: 100, height: 20 };
@@ -118,6 +119,61 @@ test('a backspace that lets the line rewrap onto the previous one declines', () 
   expect(painter.preview({ kind: 'deleteBackward', payload: {} })).toBeDefined();
   painter.installContext({ ...line, glyphs: { ...glyphs, previousSlack: 0.2 } });
   expect(painter.preview({ kind: 'deleteBackward', payload: {} })).toBeUndefined();
+});
+
+function wrappedSetup(offset: number, focus = offset, text = 'aaa bb ', next = 'c') {
+  const result = setup();
+  const echo: DocxCommandEchoContext = { ...context(), frameEpoch: 2, text,
+    boundaries: Array.from({ length: text.length + 1 }, (_, utf16) => ({ utf16, grapheme: utf16, caret: rect })),
+    selection: { anchorGrapheme: offset, focusGrapheme: focus },
+    glyphs: testEchoGlyphLine({ right: 100, next, nextWord: 80 }),
+  };
+  result.painter.reconcile({ ...result.frame, revision: 2, payload: { ...result.frame.payload,
+    echoContext: echo, echoGlyphSets: [testEchoGlyphSet], stagedPresentation: { frameEpoch: 2,
+      pages: result.frame.payload.stagedPresentation!.pages.map((item) => ({ ...item, frameEpoch: 2 })),
+    },
+  } }, [], []);
+  return result;
+}
+
+test('echo declines deleting the space separating a soft wrapped next word', () => {
+  const { painter, texts } = wrappedSetup(6);
+  expect(painter.preview({ kind: 'deleteForward', payload: {} })).toBeUndefined();
+  expect(texts).toEqual([]);
+});
+
+test('echo declines replacing or backspacing the soft wrap separator', () => {
+  for (const [offset, focus, intent] of [
+    [7, 7, { kind: 'deleteBackward', payload: {} }],
+    [6, 7, { kind: 'replaceSelection', payload: { text: 'x' } }],
+    [6, 7, { kind: 'replaceSelection', payload: { text: '' } }],
+  ] satisfies [number, number, PeerlessTextIntent][]) {
+    const { painter } = wrappedSetup(offset, focus);
+    expect(painter.preview(intent)).toBeUndefined();
+  }
+});
+
+test('echo declines appending a word that joins the next line first word', () => {
+  const { painter } = wrappedSetup(7);
+  expect(painter.preview({ kind: 'insertText', payload: { text: 'x' } })).toBeUndefined();
+});
+
+test('echo declines changing a break opportunity adjacent to the soft wrap', () => {
+  const { painter } = wrappedSetup(7, 7, 'aaa bb  ');
+  expect(painter.preview({ kind: 'deleteForward', payload: {} })).toBeUndefined();
+});
+
+test('echo keeps mid line insertions and deletions with a stable soft wrap separator', () => {
+  for (const [offset, intent, expected] of [
+    [1, { kind: 'insertText', payload: { text: 'a' } }, 'aaaa bb '],
+    [2, { kind: 'deleteBackward', payload: {} }, 'aa bb '],
+  ] satisfies [number, PeerlessTextIntent, string][]) {
+    const { painter, texts } = wrappedSetup(offset);
+    const preview = painter.preview(intent);
+    expect(preview).toBeDefined();
+    painter.paint([entry(1, preview!)]);
+    expect(texts.at(-1)).toBe(expected);
+  }
 });
 
 function sessionWithHeldReplies(painter: PeerlessEchoPainter) {

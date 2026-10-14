@@ -502,4 +502,156 @@ mod tests {
             "ffi must decline even when ff and fi shape independently"
         );
     }
+
+    fn contextual_positioning_font(kind: u16, extension: bool, feature: &[u8; 4]) -> Vec<u8> {
+        let (store, font) = store();
+        let a = store.glyph_id(font, 'A').unwrap().unwrap();
+        let context: Vec<u16> = if kind == 7 {
+            vec![3, 3, 1, 16, 16, 16, 1, 1, 1, 1, a]
+        } else {
+            vec![3, 1, 20, 1, 20, 1, 20, 1, 0, 1, 1, 1, a]
+        };
+        let mut gpos = Vec::new();
+        for value in [1u16, 0, 10, 30, 44, 1] {
+            gpos.extend(value.to_be_bytes());
+        }
+        gpos.extend(b"DFLT");
+        for value in [8u16, 4, 0, 0, 0xffff, 1, 0, 1] {
+            gpos.extend(value.to_be_bytes());
+        }
+        gpos.extend(feature);
+        let second = 6 + 8 + context.len() as u16 * 2 + if extension { 8 } else { 0 };
+        for value in [
+            8u16,
+            0,
+            1,
+            0,
+            2,
+            6,
+            second,
+            if extension { 9 } else { kind },
+            0,
+            1,
+            8,
+        ] {
+            gpos.extend(value.to_be_bytes());
+        }
+        if extension {
+            gpos.extend(1u16.to_be_bytes());
+            gpos.extend(kind.to_be_bytes());
+            gpos.extend(8u32.to_be_bytes());
+        }
+        for value in context {
+            gpos.extend(value.to_be_bytes());
+        }
+        for value in [1u16, 0, 1, 8, 1, 8, 4, (-128i16) as u16, 1, 1, a] {
+            gpos.extend(value.to_be_bytes());
+        }
+        let mut bytes = LIBERATION_SANS.to_vec();
+        let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        let entry = (0..count)
+            .map(|index| 12 + index * 16)
+            .find(|&offset| &bytes[offset..offset + 4] == b"GPOS")
+            .unwrap();
+        let offset = bytes.len() as u32;
+        bytes[entry + 8..entry + 12].copy_from_slice(&offset.to_be_bytes());
+        bytes[entry + 12..entry + 16].copy_from_slice(&(gpos.len() as u32).to_be_bytes());
+        bytes.extend(gpos);
+        bytes
+    }
+
+    fn assert_contextual_positioning_declines(kind: u16, extension: bool, feature: &[u8; 4]) {
+        let mut store = FontStore::new();
+        let font = store
+            .register(contextual_positioning_font(kind, extension, feature))
+            .unwrap();
+        let alphabet = ['A', 'B'];
+        let size = 16.0;
+        let shape = |text| {
+            shape_with_direction(
+                &store,
+                font,
+                text,
+                size,
+                &kern_features(true),
+                ShapeDirection::Ltr,
+            )
+            .unwrap()
+        };
+        let isolated = shape("A")[0].x_advance;
+        for text in ["AA", "AABBA"] {
+            assert_eq!(
+                shape(text)
+                    .iter()
+                    .map(|glyph| glyph.x_advance)
+                    .collect::<Vec<_>>(),
+                text.chars()
+                    .map(|ch| shape(&ch.to_string())[0].x_advance)
+                    .collect::<Vec<_>>()
+            );
+        }
+        let triple = shape("AAA");
+        assert_eq!(triple.len(), 3);
+        assert_eq!(triple[0].x_advance, isolated);
+        assert_ne!(triple[1].x_advance, isolated);
+        assert_eq!(triple[2].x_advance, isolated);
+        let set = echo_glyph_set(&store, font, size, true, &alphabet).unwrap();
+        assert!(
+            set.glyph_ids.iter().all(|&id| id == 0),
+            "contextual positioning must decline the font"
+        );
+    }
+
+    #[test]
+    fn contextual_kern_positioning_declines_echo() {
+        assert_contextual_positioning_declines(7, false, b"kern");
+    }
+
+    #[test]
+    fn chained_contextual_kern_positioning_declines_echo() {
+        assert_contextual_positioning_declines(8, false, b"kern");
+    }
+
+    #[test]
+    fn extension_contextual_positioning_declines_echo() {
+        for kind in [7, 8] {
+            assert_contextual_positioning_declines(kind, true, b"kern");
+        }
+    }
+
+    #[test]
+    fn contextual_mark_positioning_declines_echo_without_kerning() {
+        assert_contextual_positioning_declines(7, false, b"mark");
+        let mut store = FontStore::new();
+        let font = store
+            .register(contextual_positioning_font(7, false, b"mark"))
+            .unwrap();
+        let set = echo_glyph_set(&store, font, 16.0, false, &['A', 'B']).unwrap();
+        assert!(set.glyph_ids.iter().all(|&id| id == 0));
+    }
+
+    #[test]
+    fn disabled_contextual_kern_positioning_keeps_echo() {
+        for kind in [7, 8] {
+            let mut store = FontStore::new();
+            let font = store
+                .register(contextual_positioning_font(kind, true, b"kern"))
+                .unwrap();
+            let set = echo_glyph_set(&store, font, 16.0, false, &['A', 'B']).unwrap();
+            assert!(set.glyph_ids.iter().all(|&id| id != 0));
+            let shaped: Vec<f32> = shape_with_direction(
+                &store,
+                font,
+                "AAA",
+                16.0,
+                &kern_features(false),
+                ShapeDirection::Ltr,
+            )
+            .unwrap()
+            .iter()
+            .map(|glyph| glyph.x_advance)
+            .collect();
+            assert_eq!(advance(&set, &['A', 'B'], "AAA"), shaped);
+        }
+    }
 }
