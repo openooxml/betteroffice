@@ -2380,9 +2380,30 @@ fn seed(
     model: &WorkbookModel,
     keys: &[String],
 ) -> Result<(), String> {
+    seed_with_format_entries(doc, base, model, keys, style_entry)
+}
+
+type FormatEntryWriter = fn(&Stylesheet, u32) -> Result<(String, String), String>;
+
+fn seed_with_format_entries(
+    doc: &Doc,
+    base: &WorkbookBase,
+    model: &WorkbookModel,
+    keys: &[String],
+    entry: FormatEntryWriter,
+) -> Result<(), String> {
     let mut txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
     let cell_formats = txn.get_or_insert_map(CELL_FORMATS);
-    sync_cell_formats(&cell_formats, &mut txn, &model.styles)?;
+    let (key, payload) = cell_format_entry(&CellFormat::default())?;
+    cell_formats.try_update(&mut txn, key, payload);
+    let mut style_keys = Vec::with_capacity(model.styles.cell_xfs.len());
+    for index in 0..model.styles.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        let (key, payload) = entry(&model.styles, index)?;
+        style_keys.push(key.clone());
+        cell_formats.try_update(&mut txn, key, payload);
+    }
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
@@ -2392,7 +2413,12 @@ fn seed(
     let sheets = txn.get_or_insert_map(SHEETS);
     for (key, sheet) in keys.iter().zip(&model.sheets) {
         let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-        sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
+        sync_sheet_with_style_key(&sheet_map, &mut txn, sheet, |style| {
+            style_keys
+                .get(style as usize)
+                .cloned()
+                .ok_or_else(|| format!("cell style index {style} is out of range"))
+        })?;
     }
     Ok(())
 }
@@ -3361,6 +3387,15 @@ fn sync_sheet(
     sheet: &Sheet,
     stylesheet: &Stylesheet,
 ) -> Result<(), String> {
+    sync_sheet_with_style_key(sheet_map, txn, sheet, |style| style_key(stylesheet, style))
+}
+
+fn sync_sheet_with_style_key(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    style_key: impl Fn(u32) -> Result<String, String>,
+) -> Result<(), String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     sheet_map.try_update(txn, FREEZE_PANE, freeze_pane_to_any(sheet.freeze_pane));
@@ -3377,7 +3412,7 @@ fn sync_sheet(
     sync_numbers(&col_widths, txn, &sheet.col_widths);
     sync_contents(&contents, txn, sheet);
     sync_numbers(&row_heights, txn, &sheet.row_heights);
-    sync_styles(&styles, txn, sheet, stylesheet)?;
+    sync_styles(&styles, txn, sheet, style_key)?;
     Ok(())
 }
 
@@ -3393,12 +3428,12 @@ fn sync_styles(
     map: &MapRef,
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
-    stylesheet: &Stylesheet,
+    style_key: impl Fn(u32) -> Result<String, String>,
 ) -> Result<(), String> {
     let desired = sheet
         .iter_cells()
         .filter_map(|(at, cell)| cell.style.map(|style| (at, style)))
-        .map(|(at, style)| style_key(stylesheet, style).map(|key| (cell_key(at), Any::from(key))))
+        .map(|(at, style)| style_key(style).map(|key| (cell_key(at), Any::from(key))))
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     sync_map(map, txn, desired);
     Ok(())
@@ -3730,6 +3765,18 @@ fn migrate_pre_facet_formats(
     let catalog = txn
         .get_map(CELL_FORMATS)
         .ok_or_else(|| "missing cell format catalog".to_string())?;
+    let legacy_readings = catalog
+        .iter(&*txn)
+        .map(|(key, value)| {
+            let payload = value
+                .cast::<String>()
+                .map_err(|_| format!("cell format {key} is not a string"))?;
+            let stored = serde_json::from_str::<StoredCellFormat>(&payload)
+                .map_err(|error| format!("invalid cell format {key}: {error}"))?;
+            let (reading, _) = cell_format_entry(&stored.format)?;
+            Ok((key.to_string(), reading))
+        })
+        .collect::<Result<HashMap<_, _>, String>>()?;
     let keys = sheets.keys(&*txn).map(str::to_string).collect::<Vec<_>>();
     let mut used = HashSet::new();
     for key in keys {
@@ -3751,14 +3798,17 @@ fn migrate_pre_facet_formats(
             .filter_map(|(cell, value)| Some((cell.to_string(), value.cast::<String>().ok()?)))
             .collect::<Vec<_>>();
         for (cell, released) in cells {
+            let released_reading = legacy_readings.get(&released).unwrap_or(&released);
             let counterpart = counterparts
                 .as_ref()
                 .zip(source.as_ref())
                 .and_then(|(styles, source)| styles.get(source, &cell))
                 .and_then(|value| value.cast::<String>().ok());
             let target = match counterpart {
-                Some(counterpart) if readings.get(&counterpart) == Some(&released) => counterpart,
-                _ => match first.get(&released) {
+                Some(counterpart) if readings.get(&counterpart) == Some(released_reading) => {
+                    counterpart
+                }
+                _ => match first.get(released_reading) {
                     Some(&index) => entries[index].0.clone(),
                     None => continue,
                 },
@@ -3775,9 +3825,9 @@ fn migrate_pre_facet_formats(
         }
     }
     let (default, _) = cell_format_entry(&CellFormat::default())?;
-    for released in first.keys() {
-        if !readings.contains_key(released) && *released != default {
-            catalog.remove(txn, released);
+    for (key, reading) in &legacy_readings {
+        if first.contains_key(reading) && !readings.contains_key(key) && *key != default {
+            catalog.remove(txn, key);
         }
     }
     Ok(())
@@ -4489,11 +4539,6 @@ fn model_with_legacy_dimensions(
 /// `model`, which must already hold that release's reading of its styles.
 #[cfg(test)]
 pub(crate) fn pre_facet_state_for_test(model: &WorkbookModel) -> Vec<u8> {
-    let mut model = model.clone();
-    for index in 0..model.styles.cell_xfs.len() {
-        model.styles.mark_generated_format(index as u32);
-    }
-    let model = &model;
     let mut base = WorkbookBase::from_model(model).unwrap();
     (base.fingerprint, base.bootstrap_client_id) =
         fingerprint_model_with_schema(model, 6, true, true).unwrap();
@@ -4501,7 +4546,10 @@ pub(crate) fn pre_facet_state_for_test(model: &WorkbookModel) -> Vec<u8> {
     let keys = (0..model.sheets.len())
         .map(|index| format!("sheet:{index}"))
         .collect::<Vec<_>>();
-    seed(&doc, &base, model, &keys).unwrap();
+    seed_with_format_entries(&doc, &base, model, &keys, |styles, index| {
+        cell_format_entry(&styles.cell_format(Some(index)))
+    })
+    .unwrap();
     doc.transact()
         .encode_state_as_update_v1(&StateVector::default())
 }
