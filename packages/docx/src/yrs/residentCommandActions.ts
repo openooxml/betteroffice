@@ -11,7 +11,7 @@ import { resolveDocxSelectionIntent } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
 import {
   ancestorTableLocs, applyTableCommand, isTableCommandKind, nearTable,
-  preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
+  preflightTableCommand, resolveTableSelectionEnds, syncCellSelectionWithCaret, type TableCommandIntent,
 } from './residentCommandTables';
 import { validPartTarget, resolvePart, ensurePartDocument, removePartDocument } from './residentParts';
 import { validControlValue, resolveControlHandle } from './residentControls';
@@ -477,6 +477,25 @@ export function preflightDocxCommand(
   }
   if (isTableCommandKind(command.kind)) {
     if (state.readOnly) return refuse('read-only');
+    const explicit = (command.payload as { selection?: DocxCommandSelection }).selection;
+    if (explicit && explicit.anchor.story !== explicit.focus.story) {
+      if (!command.basis || !Number.isSafeInteger(command.basis.epoch) || command.basis.epoch < 0 ||
+        !Number.isSafeInteger(command.basis.version) || command.basis.version < 0 ||
+        command.basis.epoch !== context.basis.epoch || command.basis.version !== context.basis.version ||
+        command.basis.version > context.currentVersion) return refuse('stale-anchor');
+      const ends = resolveTableSelectionEnds(engine, state, explicit);
+      if (!ends.ok) return refuse(ends.reason);
+      const tabled = preflightTableCommand(engine, command as TableCommandIntent, ends.selection);
+      if ('reason' in tabled) return refuse(tabled.reason);
+      const focus = ends.selection.focus;
+      const collapsed = { anchor: focus, focus };
+      const at = { story: focus.story, paraId: focus.paraId, offset: focus.offset };
+      return { status: 'ready', prepared: {
+        command: structuredClone(command), selection: collapsed,
+        range: { story: focus.story, start: at, end: at }, table: tabled.target,
+      } };
+    }
+    if (!resolved.ok) return refuse(resolved.reason);
     const tabled = preflightTableCommand(engine, command as TableCommandIntent, resolved.selection);
     if ('reason' in tabled) return refuse(tabled.reason);
     return { status: 'ready', prepared: {

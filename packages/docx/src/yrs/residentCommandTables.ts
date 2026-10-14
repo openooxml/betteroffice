@@ -1,4 +1,5 @@
 import type { YrsCellLoc, YrsLoc, YrsTableLoc, YrsTableRange } from './index';
+import { stickyPositionKey } from './residentCommandAnchors';
 import { createYrsPositionProjection } from './yrsPositionProjection';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import type {
@@ -110,8 +111,7 @@ export function nearTable(engine: ResidentDocxCommandEngine, table: YrsTableLoc)
     : null;
 }
 
-export function ancestorTableLocs(story: string): YrsTableLoc[] {
-  const locs: { loc: YrsTableLoc; row: number; column: number }[] = [];
+export function ancestorTableLocs(story: string): YrsTableLoc[] {  const locs: { loc: YrsTableLoc; row: number; column: number }[] = [];
   for (const match of story.matchAll(/:t(\d+):r(\d+)c(\d+)(?=:|$)/g)) {
     if (match.index === undefined) continue;
     const tableIndex = Number(match[1]);
@@ -121,6 +121,49 @@ export function ancestorTableLocs(story: string): YrsTableLoc[] {
     locs.push({ loc: { story: story.slice(0, match.index), tableIndex }, row, column });
   }
   return locs.map(({ loc }) => loc);
+}
+
+export type ResolvedTableSelection =
+  | { ok: true; selection: DocxCommandSelection }
+  | { ok: false; reason: string };
+
+function resolveTableSelectionEnd(
+  engine: ResidentDocxCommandEngine,
+  state: ResidentDocxCommandState,
+  at: unknown
+): YrsLoc | 'stale' | null {
+  if (!at || typeof at !== 'object' || Array.isArray(at)) return null;
+  const loc = at as Record<string, unknown>;
+  if (typeof loc.story !== 'string' || !loc.story || typeof loc.paraId !== 'string' || !loc.paraId ||
+    !Number.isSafeInteger(loc.offset) || (loc.offset as number) < 0 || (loc.offset as number) > 0xffffffff) return null;
+  let resolved: YrsLoc = { story: loc.story, paraId: loc.paraId, offset: loc.offset as number };
+  if (loc.sticky !== undefined) {
+    if (!(loc.sticky instanceof Uint8Array)) return null;
+    const issued = state.stickyPositions.get(stickyPositionKey(resolved.story, loc.sticky));
+    if (!issued || issued.story !== resolved.story || !engine.geometryReader.hasStory(issued.story)) return 'stale';
+    const position = engine.resolveStickyPosition(issued);
+    if (!position || position.story !== resolved.story) return 'stale';
+    resolved = position;
+  }
+  if (!engine.geometryReader.hasStory(resolved.story)) return null;
+  if (engine.geometryReader.paragraphIdCount(resolved.story, resolved.paraId) !== 1) return null;
+  const span = engine.geometryReader.locateParagraph(resolved.story, resolved.paraId);
+  if (resolved.offset > span.end - span.start) return null;
+  return resolved;
+}
+
+export function resolveTableSelectionEnds(
+  engine: ResidentDocxCommandEngine,
+  state: ResidentDocxCommandState,
+  selection: DocxCommandSelection
+): ResolvedTableSelection {
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection)) return { ok: false, reason: 'invalid-selection' };
+  const anchor = resolveTableSelectionEnd(engine, state, selection.anchor);
+  if (anchor === 'stale') return { ok: false, reason: 'stale-anchor' };
+  const focus = resolveTableSelectionEnd(engine, state, selection.focus);
+  if (focus === 'stale') return { ok: false, reason: 'stale-anchor' };
+  if (!anchor || !focus) return { ok: false, reason: 'invalid-selection' };
+  return { ok: true, selection: { anchor, focus } };
 }
 
 export function preflightTableCommand(
@@ -241,10 +284,12 @@ export function applyTableCommand(
       place(caretInCellStory(engine, liveCellStory(engine, surviving) ?? surviving.story, keep));
       break;
     }
-    case 'splitTableCell':
+    case 'splitTableCell': {
+      const topLeft = liveCellStory(engine, target.focused) ?? target.focused.story;
       engine.splitCell(target.focused, command.payload.rows, command.payload.columns);
-      place(caretInCellStory(engine, liveCellStory(engine, target.focused) ?? target.focused.story, keep));
+      place(caretInCellStory(engine, topLeft, keep));
       break;
+    }
     case 'setTableCellShading':
       engine.setCellShading(target.range, command.payload.color);
       break;
