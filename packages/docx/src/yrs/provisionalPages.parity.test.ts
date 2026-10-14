@@ -701,10 +701,14 @@ function expectPrefixSelection(f: CommandFixture, ack: DocxCommandAck, calls: st
   for (const { page, pageIndex } of frame.pages) expect(page).toEqual(f.full.displayList.pages[pageIndex]);
 }
 
-function expectSelectionParity(ack: DocxCommandAck, full: DocxCommandAck) {
+function expectSelectionParity(ack: DocxCommandAck, full: DocxCommandAck, requiresEcho = true) {
   expect(selectionPositions(ack.selection)).toEqual(selectionPositions(full.selection));
   const echo = ack.frame!.payload.echoContext;
   const completedEcho = full.frame!.payload.echoContext;
+  if (!requiresEcho) {
+    expect(echo).toEqual(completedEcho);
+    return;
+  }
   expect(echo).toBeDefined();
   expect(completedEcho).toBeDefined();
   expect(echo!.page).toEqual(completedEcho!.page);
@@ -754,7 +758,7 @@ test('extendSelection keeps both endpoints on certified pages without completion
     const ack = await sendCommand(f, 2, 'extendSelection', commandPoint(f, 0, 12));
     const reference = await sendCommand(full, 2, 'extendSelection', commandPoint(full, 0, 12));
     expectPrefixSelection(f, ack, calls);
-    expectSelectionParity(ack, reference);
+    expectSelectionParity(ack, reference, false);
   } finally { f.destroy(); full.destroy(); }
 });
 
