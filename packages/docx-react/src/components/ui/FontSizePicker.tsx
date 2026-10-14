@@ -234,7 +234,7 @@ export function FontSizePicker({
         size="icon-sm"
         className={cn(
           'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-r-none',
-          disabled && 'opacity-30 cursor-not-allowed'
+          disabled && 'opacity-[0.38] cursor-not-allowed'
         )}
         onMouseDown={handleDecrease}
         onClick={(event) => {
@@ -274,7 +274,7 @@ export function FontSizePicker({
               'hover:border-input hover:bg-doc-bg-hover',
               'focus:outline-none focus:ring-1 focus:ring-ring',
               'rounded-none',
-              disabled && 'opacity-50 cursor-not-allowed'
+              disabled && 'opacity-[0.38] cursor-not-allowed'
             )}
             {...reason.triggerProps}
             title={reason.title}
@@ -332,7 +332,7 @@ export function FontSizePicker({
         size="icon-sm"
         className={cn(
           'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-l-none',
-          disabled && 'opacity-30 cursor-not-allowed'
+          disabled && 'opacity-[0.38] cursor-not-allowed'
         )}
         onMouseDown={handleIncrease}
         onClick={(event) => {
