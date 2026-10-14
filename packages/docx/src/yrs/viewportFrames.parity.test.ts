@@ -238,8 +238,11 @@ const coverage = {
   excluded: [] as string[],
 };
 
-for (const fixture of fixtures()) {
-  test(`viewport frames match a cold rebuild after every resident edit and scroll: ${fixture.name}`, async () => {
+const FIXTURES = [...fixtures()];
+const TITLE = 'viewport frames match a cold rebuild after every resident edit and scroll';
+
+for (const fixture of FIXTURES) {
+  test(`${TITLE}: ${fixture.name}`, async () => {
     coverage.started ||= performance.now();
     const { name, bytes, seed, corpus, noWindow = false } = fixture;
     coverage.attempted += 1;
@@ -494,8 +497,9 @@ for (const fixture of fixtures()) {
   }, DOCUMENT_TIMEOUT_MS);
 }
 
-test('viewport frame parity covers every document', () => {
+test(`${TITLE}: coverage`, () => {
   const { documents, corpusDocuments, smallDocuments, totalSteps, positionFrames, rangeFrames } = coverage;
+  expect(coverage.attempted, 'the per-document tests of this file feed the totals; run them with it').toBe(FIXTURES.length);
   console.info(
     `viewport frames: ${documents}/${coverage.attempted} documents (${corpusDocuments} corpus, ${smallDocuments} small at ${SMALL_FIXTURE_STEPS} steps, others at ${STEPS}), ${totalSteps} steps, ${positionFrames} position frames (${rangeFrames} with range shifts), ${(
       (performance.now() - coverage.started) / 1000
