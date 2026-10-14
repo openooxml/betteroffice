@@ -953,13 +953,13 @@ for (const unit of ['character', 'word', 'line'] as const) {
 }
 
 test('extendSelection on certified pages completes before answering the full selection frame', async () => {
-  const f = await commandFixture('echo', false, { virtualTime: true });
-  const full = await commandFixture('echo', false, { full: true, virtualTime: true });
+  const f = await commandFixture('flow-selection', false, { virtualTime: true });
+  const full = await commandFixture('flow-selection', false, { full: true, virtualTime: true });
   try {
-    await sendCommand(f, 1, 'selectPoint', commandPoint(f, 0, 0));
-    await sendCommand(full, 1, 'selectPoint', commandPoint(full, 0, 0));
-    const ack = await sendCommand(f, 2, 'extendSelection', commandPoint(f, 0, 8));
-    const reference = await sendCommand(full, 2, 'extendSelection', commandPoint(full, 0, 8));
+    await sendCommand(f, 1, 'selectPoint', commandPoint(f));
+    await sendCommand(full, 1, 'selectPoint', commandPoint(full));
+    const ack = await sendCommand(f, 2, 'extendSelection', commandPoint(f, 0, 24));
+    const reference = await sendCommand(full, 2, 'extendSelection', commandPoint(full, 0, 24));
     expect(reference.selection!.anchor.offset).not.toBe(reference.selection!.focus.offset);
     expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
     expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
