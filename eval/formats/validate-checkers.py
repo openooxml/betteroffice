@@ -1213,6 +1213,16 @@ def without_word_space(index):
     return edit
 
 
+def default_word_space(package):
+    text = word_paragraph(package, 'Collect the remaining feedback forms.').find('w:r/w:t', NS)
+    text.text = 'alpha '
+    text.set('{http://www.w3.org/XML/1998/namespace}space', 'default')
+
+
+def without_default_word_space(package):
+    word_paragraph(package, 'alpha ').find('w:r/w:t', NS).attrib.pop('{http://www.w3.org/XML/1998/namespace}space')
+
+
 def explicit_normal(package):
     paragraph = word_paragraph(package, 'The steering group meets on 20 October.')
     word_style(paragraph, 'Normal')
@@ -1328,6 +1338,9 @@ def validate_docx(directory):
         expect(name, docx[number], variant(directory, f'word-{slug}', output[number], edit), accept, reason=reason)
     expect('docx-09 note kept as a tracked deletion', docx[9],
            variant(directory, 'word-tracked-deletion', checker.fixture(docx[9]), tracked_run(NOTE, 'del')), False, reason=tracked)
+    source = variant(directory, 'word-default-space-input', checker.fixture(docx[1]), default_word_space)
+    result = variant(directory, 'word-default-space-output', source, lambda package: correct_docx(package, 1), without_default_word_space)
+    expect('docx-01 default whitespace attribute omitted', docx[1], result, True, source)
     source = variant(directory, 'word-empty-input', checker.fixture(docx[1]), word_empty_run)
     result = variant(directory, 'word-empty-output', source, lambda package: correct_docx(package, 1))
     expect('docx-01 empty formatted run kept', docx[1], result, True, source)
