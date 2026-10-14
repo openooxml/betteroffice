@@ -1,10 +1,10 @@
-import type { YrsCellLoc, YrsLoc, YrsStickyPosition, YrsStorySegment } from './index';
+import type { YrsCellLoc, YrsLoc, YrsStickyPosition, YrsStorySegment, YrsTableRange } from './index';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelection } from './residentCommandProtocol';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import { createYrsPositionProjection } from './yrsPositionProjection';
 import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
-import { deriveDisplayListSelectedCellRects, type DisplayListTableRegion } from '../layout/render/displayListTables';
+import { deriveDisplayListSelectedCellRects, type DisplayListSelectedCellSpec, type DisplayListTableRegion } from '../layout/render/displayListTables';
 import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
 import type { DisplayPrimitive } from '../layout/render/displayList';
 
@@ -154,6 +154,56 @@ function builtStoryRanges(frame: RetainedFrame): Map<string, Array<[number, numb
     }
   }
   return roots;
+}
+
+/** Page-local boxes of a multi-cell range; null when no multi-cell range is active. */
+export function readResidentCellSelectionRects(
+  engine: ResidentEngineSession, frame: RetainedFrame, range: YrsTableRange | null
+): DisplayListRect[] | null {
+  if (!range || range.anchor.story !== range.head.story || range.anchor.tableIndex !== range.head.tableIndex ||
+    (range.anchor.row === range.head.row && range.anchor.column === range.head.column)) return null;
+  const root = range.anchor.story === 'body' || range.anchor.story.startsWith('body:') ? 'body'
+    : range.anchor.story.split(':').slice(0, 2).join(':');
+  if (root !== 'body' || !engine.geometryReader.hasStory(root)) return [];
+  const table = createYrsPositionProjection(engine.geometryReader, root)?.allTables()
+    .find((entry) => entry.story === range.anchor.story && entry.tableIndex === range.anchor.tableIndex);
+  const covering = (at: YrsCellLoc) => table?.cells.find((cell) => cell.row <= at.row && at.row < cell.row + cell.rowspan &&
+    cell.column <= at.column && at.column < cell.column + cell.colspan);
+  const anchorCell = covering(range.anchor);
+  const headCell = covering(range.head);
+  if (!anchorCell || !headCell) return [];
+  const ranges: Array<[number, number]> = [];
+  for (const page of frame.displayList.pages) {
+    if (page.unbuilt) continue;
+    let from = Infinity;
+    let to = -Infinity;
+    for (const primitive of page.primitives) {
+      from = Math.min(from, primitive.fragmentDocStart ?? primitive.docStart ?? Infinity);
+      to = Math.max(to, primitive.fragmentDocEnd ?? primitive.docEnd ?? primitive.docStart ?? -Infinity);
+    }
+    if (Number.isFinite(from) && Number.isFinite(to)) ranges.push([from, to]);
+  }
+  if (!ranges.length) return [];
+  const projected = engine.residentGeometry(root, ranges);
+  const display = projected.tables.find((entry) =>
+    entry.cells.some((cell) => cell.story === anchorCell.story) &&
+    entry.cells.some((cell) => cell.story === headCell.story));
+  if (!display) return [];
+  const top = Math.min(range.anchor.row, range.head.row);
+  const bottom = Math.max(range.anchor.row, range.head.row);
+  const left = Math.min(range.anchor.column, range.head.column);
+  const right = Math.max(range.anchor.column, range.head.column);
+  const specs: DisplayListSelectedCellSpec[] = [];
+  for (let row = top; row <= bottom; row += 1) {
+    for (let column = left; column <= right; column += 1) {
+      specs.push({ tableKey: String(display.from), row, col: column, rowSpan: 1, colSpan: 1 });
+    }
+  }
+  const tableKeyOf = (position: number | undefined) => position === undefined ? null
+    : projected.tables.find((entry) => entry.from <= position && position < entry.to)?.from.toString() ?? null;
+  return deriveDisplayListSelectedCellRects(frame.displayList, specs, tableKeyOf, { kind: 'body' })
+    .filter((box) => frame.pages[box.pageIndex] && !frame.pages[box.pageIndex]!.page.unbuilt)
+    .map((box) => ({ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h }));
 }
 
 export async function readResidentFrameGeometry(

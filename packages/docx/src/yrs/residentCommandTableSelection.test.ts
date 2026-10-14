@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
+import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import type { TextRunPrimitive } from '../layout/render/displayList';
 import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions';
@@ -59,6 +60,8 @@ function pointPayload(arm: CommandArm, text: string, shift = false) {
 
 afterEach(closeCommandEngines);
 
+beforeAll(loadRustDisplayListQueryEngine);
+
 test('select_table_cells_covers_table_row_and_column_without_version_change', async () => {
   const arm = await inCell();
   const vector = arm.engine.encodeStateVector();
@@ -91,8 +94,10 @@ test('select_table_cells_reports_merged_spans_and_targets_the_innermost_table', 
   const arm = await inCell(merged, 'Merged');
   const row = execute(arm, command(arm, 'selectTableCells', { target: 'row' }));
   expect(row.status).toBe('noop');
-  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 0, column: 1 } });
-  expect(row.editState?.tableContext).toMatchObject({ rowIndex: 0, columnIndex: 1, columnSpan: 2, hasMultiCellSelection: true });
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 0, column: 0 } });
+  expect(row.editState?.tableContext).toMatchObject({ rowIndex: 0, columnIndex: 0, columnSpan: 2, hasMultiCellSelection: false });
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 1, column: 1 } });
   const nested = paragraph('Before') + table([
     cell('Outer') + `<w:tc>${paragraph('Host')}${table([cell('Inner A') + cell('Inner B'), cell('Inner C') + cell('Inner D')])}</w:tc>`,
   ]) + paragraph('After');

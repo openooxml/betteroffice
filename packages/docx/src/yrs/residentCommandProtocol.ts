@@ -33,8 +33,8 @@ import type {
   YrsSession,
   YrsStickyPosition,
   YrsStoryRange,
-} from './index';
-import type { LayoutMetaV1 } from './layoutMeta';
+  YrsTableRange,
+} from './index';import type { LayoutMetaV1 } from './layoutMeta';
 import type { DecodedFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
@@ -70,6 +70,8 @@ export interface DocxCommandTableContext {
   columnCount: number;
   hasMultiCellSelection: boolean;
   canSplitCell: boolean;
+  rowSpan?: number;
+  columnSpan?: number;
   justification?: string;
   cellBorderColor?: ColorValue;
   cellBackgroundColor?: string;
@@ -307,6 +309,7 @@ export interface DocxCommandPayloads {
   setProposalStates: DocxProposalStateRequest;
   withdrawProposals: DocxProposalWithdrawRequest;
   navigateCell: DocxSelectionIntent & { direction: 'forward' | 'backward'; extend: boolean; createLastRow: boolean };
+  selectTableCells: DocxSelectionIntent & { target: 'table' | 'row' | 'column' };
   select: { selection: DocxCommandSelection };
   navigate: DocxNavigationIntent;
   selectPoint: DocxSelectionPointIntent;
@@ -393,6 +396,7 @@ export interface PreparedDocxCommand {
   selection: DocxCommandSelection | null;
   range: YrsStoryRange | null;
   cellNavigation?: DocxCellNavigationPlan;
+  cells?: YrsTableRange | null;
   table?: DocxTableCommandTarget;
   paragraphChanges?: Array<{ range: YrsStoryRange; attrs: YrsParagraphAttrs }>;
   sectionBreakProperties?: SectionProperties;
