@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -143,12 +144,17 @@ def mcp_ready(cli, required):
 
 def python_ready(python):
     try:
-        result = subprocess.run([str(python), '-c', 'import openpyxl, pptx, docx'], stdin=subprocess.DEVNULL,
+        result = subprocess.run([str(python), '-c', 'import openpyxl, pptx, docx; import json, sysconfig; print(json.dumps(sysconfig.get_paths()))'], stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=STARTUP_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(f'{python} cannot import openpyxl, pptx and docx: {error}') from None
     if result.returncode != 0:
         raise RuntimeError(f'{python} cannot import openpyxl, pptx and docx: {result.stderr.strip()[-2000:]}')
+    try:
+        paths = json.loads(result.stdout)
+        return list(dict.fromkeys(Path(paths[key]).resolve() for key in ('stdlib', 'platstdlib', 'purelib', 'platlib')))
+    except (ValueError, KeyError, TypeError) as error:
+        raise RuntimeError(f'{python} did not report its library paths: {error}') from None
 
 
 def command_line(cli, workspace, model, prompt, arm='betteroffice'):
@@ -161,7 +167,9 @@ def command_line(cli, workspace, model, prompt, arm='betteroffice'):
                 '-c', 'web_search="disabled"',
                 '-c', 'sandbox_workspace_write.network_access=false',
                 prompt + ' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
-                ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.']
+                ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.'
+                ' Access only this directory, the Python interpreter and its standard library/site-packages.'
+                ' Outside path references disqualify the task.']
     return ['codex', 'exec', '-m', model, '--sandbox', 'read-only', '--skip-git-repo-check',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '-C', str(workspace),
             *[argument for feature in DISABLED_FEATURES for argument in ('--disable', feature)],
@@ -206,7 +214,68 @@ def tool_calls(log, arm='betteroffice'):
     return len(identities) + anonymous if available else None
 
 
-def access_violation(log, arm='betteroffice'):
+def referenced_paths(text):
+    pending, seen, paths = [text], set(), set()
+    quoted = re.compile(r'''(['"])(.*?)\1''', re.DOTALL)
+    absolute = re.compile(r'''(?<![\w./:])/(?!/)[^\s'"`<>;|&(){}\[\],\\]+''')
+    while pending:
+        source = pending.pop()
+        if source in seen:
+            continue
+        seen.add(source)
+        try:
+            tokens = shlex.split(source)
+        except ValueError:
+            tokens = []
+        for token in tokens:
+            if token == '/' and re.search(r'\s/\s', source) and re.search(r'[=()]', source):
+                continue
+            if re.match(r'^[A-Za-z][\w+.-]*://', token):
+                if token.startswith('file://'):
+                    paths.add(token[7:])
+                continue
+            if token.startswith('/') or not re.search(r'''[\s'"`(){}=]''', token):
+                paths.add(token)
+            elif token != source:
+                pending.append(token)
+        for match in quoted.finditer(source):
+            value = match[2]
+            if value.startswith('/') and '\n' not in value:
+                paths.add(value)
+                source = source.replace(match[0], '')
+        paths.update(match[0] for match in absolute.finditer(source))
+    return paths
+
+
+def path_violation(text, workspace, python, libraries):
+    if re.search(r'''(?<![\w.])\.\.(?![\w.])''', text):
+        return 'forbidden path access: parent traversal (..)'
+    if re.search(r'(?<![\w.-])(?:check\.py|validate-checkers\.py|tasks\.json|fixtures\.json)(?![\w.-])', text) or \
+            re.search(r'\beval(?:[./\\]|\s+import\b)|\bfrom\s+eval\b', text):
+        return 'forbidden path access: evaluation sources or task metadata'
+    text = text.replace('${PWD}', str(workspace)).replace('$PWD', str(workspace))
+    if re.search(r'''(?:^|[\s'"=])~|\$(?:\{[^}]+\}|[A-Za-z_][A-Za-z_0-9]*)[/\\]''', text):
+        return 'forbidden path access: path outside the task directory via environment or home expansion'
+    interpreters = {Path(value).resolve() for name in ('sh', 'bash', 'zsh') if (value := shutil.which(name))}
+    if python is not None:
+        interpreters.add(Path(python).resolve())
+    for reference in sorted(referenced_paths(text)):
+        try:
+            path = Path(reference)
+            path = (path if path.is_absolute() else workspace / path).resolve()
+        except (OSError, RuntimeError, ValueError):
+            return f'forbidden path access: cannot resolve {reference}'
+        if path.is_relative_to(REPO):
+            return f'forbidden path access: repository path {reference}'
+        if path.is_relative_to(workspace):
+            continue
+        if path in interpreters or any(path.is_relative_to(library) for library in libraries):
+            continue
+        return f'forbidden path access: outside task directory: {reference}'
+    return None
+
+
+def access_violation(log, arm='betteroffice', workspace=None, python=None, libraries=()):
     for event in events(log):
         item = event.get('item')
         if not isinstance(item, dict):
@@ -217,6 +286,33 @@ def access_violation(log, arm='betteroffice'):
                 return f'forbidden tool call: MCP server {item.get("server", "<missing>")}'
         elif kind not in ALLOWED_ITEMS[arm]:
             return f'forbidden tool call: {kind}'
+        elif arm == 'generic' and kind in ('command_execution', 'file_change'):
+            if workspace is None:
+                return 'forbidden path access: task directory unavailable for audit'
+            if kind == 'command_execution':
+                command = item.get('command')
+                if not isinstance(command, str) or not command:
+                    return 'forbidden path access: command text unavailable for audit'
+                violation = path_violation(command, workspace, python, libraries)
+                if violation:
+                    return violation
+            else:
+                changes = item.get('changes')
+                if not isinstance(changes, list):
+                    return 'forbidden path access: file changes unavailable for audit'
+                for change in changes:
+                    if not isinstance(change, dict) or not isinstance(change.get('path'), str):
+                        return 'forbidden path access: changed path unavailable for audit'
+                    try:
+                        path = Path(change['path'])
+                        path = (path if path.is_absolute() else workspace / path).resolve()
+                    except (OSError, RuntimeError, ValueError):
+                        return f'forbidden path access: cannot resolve changed path {change["path"]}'
+                    if not path.is_relative_to(workspace):
+                        return f'forbidden path access: file change outside task directory: {change["path"]}'
+                    violation = path_violation(json.dumps(change), workspace, python, libraries)
+                    if violation:
+                        return violation
     return None
 
 
@@ -228,14 +324,21 @@ def stop_process(process):
     process.wait()
 
 
-def run_task(task, cli, model, results, arm='betteroffice', python=None):
+def run_task(task, cli, model, results, arm='betteroffice', python=None, libraries=None):
+    if libraries is None:
+        libraries = python_ready(python) if arm == 'generic' and python is not None else []
     environment = None if python is None else dict(os.environ, PATH=str(python.parent) + os.pathsep + os.environ.get('PATH', ''))
     directory = results / task['id']
     directory.mkdir()
     log, errors = directory / 'codex.jsonl', directory / 'codex.stderr'
     started = time.monotonic()
     exit_code, timed_out, failure = None, False, None
-    with tempfile.TemporaryDirectory(prefix='office-format-') as temporary:
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    if temporary_root.is_relative_to(REPO):
+        temporary_root = Path('/tmp').resolve()
+    if temporary_root.is_relative_to(REPO):
+        raise RuntimeError('task temporary directory must be outside the repository')
+    with tempfile.TemporaryDirectory(prefix='office-format-', dir=temporary_root) as temporary:
         workspace = Path(temporary).resolve()
         source = workspace / task['input']
         shutil.copyfile(checker.fixture(task), source)
@@ -268,7 +371,7 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None):
         if runtime_error:
             message = runtime_error + ('; ' + message if not passed else '')
             passed = False
-        violation = access_violation(log, arm)
+        violation = access_violation(log, arm, workspace, python, libraries)
         if violation:
             message = violation + ('; ' + message if not passed else '')
             passed = False
@@ -331,9 +434,10 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     tasks = [task for task in checker.tasks() if task['format'] in args.formats]
+    libraries = []
     try:
         if generic:
-            python_ready(python)
+            libraries = python_ready(python)
             metadata = {'python': str(python)}
         else:
             metadata = {'mcp_startup_seconds': mcp_ready(cli, required_tools(tasks))}
@@ -343,7 +447,7 @@ def main():
     records = []
     write_results(results, model, records, args.arm, args.formats, **metadata)
     for task in tasks:
-        record = run_task(task, cli, model, results, args.arm, python)
+        record = run_task(task, cli, model, results, args.arm, python, libraries)
         records.append(record)
         write_results(results, model, records, args.arm, args.formats, **metadata)
         print(f'{record["task"]}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)
