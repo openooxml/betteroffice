@@ -3,7 +3,6 @@ import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   applyFrameDelta,
-  applyFrameDeltaOwned,
   CANVAS_PAGE_GAP_PX,
   decodeFrameDelta,
   type RetainedFrame,
@@ -524,8 +523,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (cached) return cached;
     try {
       let next = retained.current;
-      for (const bytes of frame.payload.pageFrames ?? []) next = applyFrameDeltaOwned(next, decodeFrameDelta(bytes));
-      next = applyFrameDeltaOwned(next, decodeFrameDelta(frame.payload.frame));
+      for (const bytes of frame.payload.pageFrames ?? []) next = applyFrameDelta(next, decodeFrameDelta(bytes));
+      next = applyFrameDelta(next, decodeFrameDelta(frame.payload.frame));
       const caret = residentCaretSnapshotForFrame(frame.payload.caret, next);
       if (!caret) return undefined;
       let y = 0;
