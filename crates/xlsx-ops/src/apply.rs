@@ -422,13 +422,8 @@ fn apply_range_formats(
     {
         let sheet_ref = &wb.sheets[sheet.0 as usize];
         let styles = &mut wb.styles;
-        let unstyled_shows_base = !partial || {
-            let base = styles.cell_format(Some(0));
-            xlsx_model::CellFormat {
-                font: base.font.clone(),
-                ..styles.cell_format(None)
-            } == base
-        };
+        let unstyled_shows_base = !partial
+            || styles.cell_format(Some(0)).number_format == styles.cell_format(None).number_format;
         let mut occupied = sheet_ref
             .iter_cells_in_rect(
                 range.start.row..range.end.row.saturating_add(1),
