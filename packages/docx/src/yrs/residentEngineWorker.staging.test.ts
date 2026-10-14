@@ -175,14 +175,18 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
   const ownership = new Function('closeCommandBitmap',
     new Bun.Transpiler({ loader: 'ts' }).transformSync(ownershipSource) + '\nreturn { retainBitmap, releaseBitmap };'
   )(closeCommandBitmap) as Record<'retainBitmap' | 'releaseBitmap', (bitmap: ImageBitmap, holder: object) => void>;
+  const deltasSource = peerless('frameDeltas.ts').replace(/^import .*$/gm, '').replaceAll('export function ', 'function ');
+  const { decodeCommandFrameDeltas } = new Function('decodeFrameDelta',
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(deltasSource) + '\nreturn { decodeCommandFrameDeltas };'
+  )(decodeFrameDelta) as { decodeCommandFrameDeltas: unknown };
   const source = peerless('echoPainter.ts');
   const painterSource = source.slice(source.indexOf('export function createEchoPainter('))
     .replace('export function createEchoPainter(', 'function createEchoPainter(');
-  const painter = new Function('decodeFrameDelta', 'canvasForPage', 'retainBitmap', 'releaseBitmap', 'drawGlyphRunPrimitive',
+  const painter = new Function('decodeCommandFrameDeltas', 'canvasForPage', 'retainBitmap', 'releaseBitmap', 'drawGlyphRunPrimitive',
     'GlyphCache', 'indexEchoGlyphSet', 'leadingWordWidth', 'placeEchoGlyphs',
     new Bun.Transpiler({ loader: 'ts' }).transformSync(painterSource) + '\nreturn createEchoPainter({ canvasForPage });'
-  )(decodeFrameDelta, () => canvas, ownership.retainBitmap, ownership.releaseBitmap, drawGlyphRunPrimitive, GlyphCache, indexEchoGlyphSet,
-    leadingWordWidth, placeEchoGlyphs) as {
+  )(decodeCommandFrameDeltas, () => canvas, ownership.retainBitmap, ownership.releaseBitmap, drawGlyphRunPrimitive, GlyphCache,
+    indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs) as {
     preview(intent: { kind: 'insertText'; payload: { text: string } }): object | undefined;
     reconcile(frame: DocxCommandFrame, retired: readonly unknown[], remaining: readonly unknown[]): void;
     paint(entries: readonly unknown[]): void;
