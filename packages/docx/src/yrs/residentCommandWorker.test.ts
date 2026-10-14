@@ -3,13 +3,17 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
+import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
 import { preloadEditWasm } from './wasm/index';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createResidentEngineSession } from './residentEngineSession';
+import * as projectionModule from './yrsToDocument';
+import * as facadeModule from './yrsSessionFacade';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
 
 const TIMEOUT = 20_000;
@@ -31,7 +35,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 
-function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, comments?: string): Uint8Array {
+function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -67,22 +71,31 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     parts.set('word/_rels/document.xml.rels', toBytes(xml.replace('</Relationships>', '<Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>')));
     parts.set('word/footnotes.xml', toBytes('<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>'));
   }
-  if (comments) {
+  if (commentsXml) {
     parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>',
       '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')));
-    const relationships = parts.get('word/_rels/document.xml.rels');
-    const xml = relationships ? new TextDecoder().decode(relationships) : '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
-    parts.set('word/_rels/document.xml.rels', toBytes(xml.replace('</Relationships>', '<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>')));
-    parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
+    const related = '<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>';
+    const rels = parts.get('word/_rels/document.xml.rels');
+    parts.set('word/_rels/document.xml.rels', toBytes(rels
+      ? new TextDecoder().decode(rels).replace('</Relationships>', `${related}</Relationships>`)
+      : `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${related}</Relationships>`));
+    parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">${commentsXml}</w:comments>`));
+  }
+  if (commentsExtendedXml) {
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>',
+      '<Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/></Types>')));
+    parts.set('word/_rels/document.xml.rels', toBytes(new TextDecoder().decode(parts.get('word/_rels/document.xml.rels')!).replace('</Relationships>',
+      '<Relationship Id="rIdCommentsEx" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/></Relationships>')));
+    parts.set('word/commentsExtended.xml', toBytes(`<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">${commentsExtendedXml}</w15:commentsEx>`));
   }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number } } = {}) {
+export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = new ResidentEngineWorkerClient(worker);
   try {
-    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.comments), { generation: 'd1-command-worker' });
+    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml), { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
     if (options.propertyImages || options.objects) engine.applyRawOps('body', [1, 2].map(index => ({
       op: 'insertEmbed', index, kind: 'image', payload: {
@@ -551,6 +564,10 @@ test('worker handles order control values and repeating item lifecycle with save
     const checkbox = read.value.controls.find(control => control.control.tag === 'check')!;
     const item = read.value.controls.find(control => control.control.tag === 'item')!;
     expect(checkbox.handle).not.toBe(item.handle);
+    expect(read.value.frameEpoch).toBe(initial.frame.payload.caret.frameEpoch);
+    expect(checkbox.rects.length).toBeGreaterThan(0);
+    expect(item.rects.length).toBeGreaterThan(0);
+    expect(checkbox.widget).toEqual({ kind: 'checkbox', checked: false });
     const checked = await client.edit(intent(1, 0, 'setContentControlValue', {
       handle: checkbox.handle, value: { kind: 'checkbox', checked: true }, expectVersion: read.version,
     }));
@@ -561,6 +578,7 @@ test('worker handles order control values and repeating item lifecycle with save
     const items = after.value.controls.filter(control => control.control.tag === 'item');
     expect(items).toHaveLength(2);
     expect(new Set(items.map(control => control.handle)).size).toBe(2);
+    expect(items.every(control => control.rects.length > 0)).toBe(true);
     expect(items.some(control => control.handle === item.handle)).toBe(true);
     const newItem = items.find(control => control.handle !== item.handle)!;
     const removed = await client.edit(intent(3, 2, 'removeRepeatingItem', { handle: newItem.handle, expectVersion: after.version }));
@@ -574,6 +592,46 @@ test('worker handles order control values and repeating item lifecycle with save
     const stale = await client.edit(intent(5, 4, 'setContentControlValue', { handle: checkbox.handle, value: { kind: 'checkbox', checked: false }, expectVersion: read.version }));
     expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-version' });
     expect((await client.documentRead({ kind: 'contentControlHandles' })).version).toBe(last);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker widgets of one shared-id paragraph each paint and save checkbox dropdown and date values in turn', async () => {
+  const w15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
+  const checkbox = '<w:sdt><w:sdtPr><w:id w:val="7"/><w:alias w:val="Flag"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>☐</w:t></w:r></w:sdtContent></w:sdt>';
+  const dropdown = '<w:sdt><w:sdtPr><w:id w:val="7"/><w:alias w:val="Choose option"/><w:dropDownList><w:listItem w:displayText="First" w:value="one"/><w:listItem w:displayText="Second" w:value="two"/></w:dropDownList></w:sdtPr><w:sdtContent><w:r><w:t>First</w:t></w:r></w:sdtContent></w:sdt>';
+  const date = '<w:sdt><w:sdtPr><w:id w:val="7"/><w:alias w:val="Choose date"/><w:date w:fullDate="2026-10-12T00:00:00Z"><w:dateFormat w:val="yyyy-MM-dd"/></w:date></w:sdtPr><w:sdtContent><w:r><w:t>2026-10-12</w:t></w:r></w:sdtContent></w:sdt>';
+  const repeat = `<w:sdt><w:sdtPr><w:id w:val="8"/><w15:repeatingSection ${w15}/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w:id w:val="9"/><w:alias w:val="Line"/><w15:repeatingSectionItem ${w15}/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Item text</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>`;
+  const { client } = await openWorker({ bodyXml: `<w:p w14:paraId="00000001">${checkbox}<w:r><w:t>gap</w:t></w:r>${checkbox}${dropdown}${date}</w:p>${repeat}` });
+  try {
+    const widgets = async () => {
+      const read = await client.documentRead({ kind: 'contentControlHandles' });
+      return { version: read.version, controls: read.value.controls.filter(control => control.widget) };
+    };
+    const summary = (controls: Awaited<ReturnType<typeof widgets>>['controls']) => controls.map(control => ({ alias: control.control.alias, kind: control.widget!.kind,
+      painted: control.rects.length > 0, editable: control.control.effectiveLock.known && !control.control.effectiveLock.content && !control.control.dataBound }));
+    const kinds = ['checkbox', 'checkbox', 'dropdown', 'date', 'repeatingItem'] as const;
+    const expected: ReturnType<typeof summary> = ['Flag', 'Flag', 'Choose option', 'Choose date', 'Line'].map((alias, index) => ({ alias,
+      kind: kinds[index]!, painted: true, editable: true }));
+    let current = await widgets();
+    expect(summary(current.controls)).toEqual(expected);
+    const set = async (seq: number, alias: string, nth: number, value: YrsContentControlValue) => {
+      const target = current.controls.filter(control => control.control.alias === alias)[nth]!;
+      const applied = await client.edit(intent(seq, seq - 1, 'setContentControlValue', { handle: target.handle, value, expectVersion: current.version }));
+      expect(applied.outcomes[0]).toMatchObject({ status: 'applied' });
+      current = await widgets();
+      expect(summary(current.controls)).toEqual(expected);
+    };
+    await set(1, 'Flag', 1, { kind: 'checkbox', checked: true });
+    expect(current.controls.find(control => control.control.alias === 'Choose option')!.widget).toMatchObject({ kind: 'dropdown', value: 'one',
+      items: [{ value: 'one', displayText: 'First' }, { value: 'two', displayText: 'Second' }] });
+    await set(2, 'Choose option', 0, { kind: 'dropdown', value: 'two' });
+    expect(current.controls.find(control => control.control.alias === 'Choose option')!.widget).toMatchObject({ value: 'two' });
+    await set(3, 'Choose date', 0, { kind: 'date', date: '2026-11-03' });
+    const { unzipContainer } = await import('../docx/wasm');
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array((await client.save({ comments: [] })).bytes))['word/document.xml']);
+    expect([...xml.matchAll(/w14:checked w14:val="(\d)"/g)].map(match => match[1])).toEqual(['0', '1']);
+    expect(xml).toContain('Second');
+    expect(xml).toContain('2026-11-03');
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -735,6 +793,49 @@ test('worker property image handles distinguish shared ids and refuse deleted ta
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker image property reads normalize adjacent image ranges in either direction', async () => {
+  const { client, initial, point } = await openWorker({ propertyImages: true });
+  try {
+    const version = initial.frame.payload.documentVersion!;
+    const first = await client.documentReadAt({ kind: 'properties', target: { kind: 'object', at: { ...point, offset: 1 } } }, version);
+    if (first.status !== 'ok' || first.value?.kind !== 'object') throw new Error('Image unavailable');
+    for (const [anchor, focus] of [[1, 2], [2, 1]]) {
+      const selected = await client.documentReadAt<'properties'>({ kind: 'properties', target: { kind: 'objectSelection', selection: {
+        anchor: { ...point, offset: anchor! }, focus: { ...point, offset: focus! },
+      } } } as never, version);
+      expect(selected).toMatchObject({ status: 'ok', value: { kind: 'object', handle: first.value.handle } });
+    }
+    const multiple = await client.documentReadAt<'properties'>({ kind: 'properties', target: { kind: 'objectSelection', selection: {
+      anchor: { ...point, offset: 1 }, focus: { ...point, offset: 3 },
+    } } } as never, version);
+    expect(multiple).toMatchObject({ status: 'ok', value: null });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker point reads use the native pointer mapping without selecting', async () => {
+  const { client, initial, engine } = await openWorker();
+  try {
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const page = frame.displayList.pages[0]!;
+    const glyph = page.primitives.find(primitive => primitive.kind === 'glyphRun' || primitive.kind === 'text');
+    if (!glyph) throw new Error('Glyph unavailable');
+    const box = displayPrimitiveRect(glyph);
+    const point = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
+      frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+    const version = initial.frame.payload.documentVersion!;
+    const before = JSON.stringify(engine.selection());
+    const query = await client.documentReadAt<'pointPosition'>({ kind: 'pointPosition', expectVersion: version,
+      hit: { position: -1, pageIndex: 0, region: 'body' }, nativePoint: point } as never, version);
+    expect(JSON.stringify(engine.selection())).toBe(before);
+    expect(engine.proposalEngine.version()).toBe(version);
+    const ack = await client.edit(intent(1, 0, 'selectPoint', point));
+    const selected = ack.selection!.focus;
+    const text = engine.selectionText({ story: selected.story, start: selected, end: selected });
+    expect(query).toMatchObject({ status: 'ok', value: { target: { story: selected.story, start: { paraId: selected.paraId, offset: text.before.length } } } });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker object properties preserve dialog units borders and native size', async () => {
   const { client, engine, initial, point } = await openWorker({ propertyImages: true });
   try {
@@ -875,6 +976,181 @@ test('review_commands_own_comment_crud_and_versioned_snapshots', async () => {
     const removed = await client.edit(intent(3, 2, 'removeComment', { id, expectVersion: current.version }));
     expect(removed.outcomes[0]?.status).toBe('applied');
     expect((await client.documentRead({ kind: 'reviewSnapshot' })).value).toMatchObject({ comments: [] });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker native comment save retains the body and the same range ID across repeated saves', async () => {
+  const { client, engine, point } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>Seed</w:t></w:r></w:p>' });
+  try {
+    const range = { story: 'body', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 4 } };
+    const added = await client.edit(intent(1, 0, 'addComment', { ranges: [range], author: 'A', date: '2026-01-01',
+      body: 'Saved note', expectVersion: engine.proposalEngine.version() }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    const { parseDocx } = await import('../docx/parser');
+    const { unzipContainer } = await import('../docx/wasm');
+    let previous: number | undefined;
+    for (let save = 0; save < 2; save++) {
+      const bytes = (await client.save({ comments: [] })).bytes;
+      const reopened = await parseDocx(bytes);
+      const comments = reopened.package.document.comments!;
+      expect(comments).toHaveLength(1);
+      const id = comments[0]!.id;
+      expect(JSON.stringify(comments[0]!.content)).toContain('Saved note');
+      if (previous !== undefined) expect(id).toBe(previous);
+      previous = id;
+      const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(bytes))['word/document.xml']);
+      expect(xml).toContain(`<w:commentRangeStart w:id="${id}"`);
+      expect(xml).toContain(`<w:commentRangeEnd w:id="${id}"`);
+      expect(xml).toContain('<w:highlight w:val="yellow"');
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker save retains untouched source highlights across repeated saves', async () => {
+  const { client } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>Seed</w:t></w:r></w:p>' });
+  try {
+    const { unzipContainer } = await import('../docx/wasm');
+    for (let save = 0; save < 2; save++) {
+      const bytes = (await client.save({ comments: [] })).bytes;
+      const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(bytes))['word/document.xml']);
+      expect(xml).toContain('<w:highlight w:val="yellow"');
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const SOURCE_COMMENT = {
+  body: '<w:p w14:paraId="00000001"><w:commentRangeStart w:id="0"/><w:r><w:t>Seed</w:t></w:r><w:commentRangeEnd w:id="0"/>' +
+    '<w:r><w:commentReference w:id="0"/></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>',
+  comments: '<w:comment w:id="0" w:author="A" w:date="2026-01-01T00:00:00Z"><w:p><w:r><w:t>Parent</w:t></w:r></w:p></w:comment>',
+};
+
+async function savedWorkerDocumentXml(client: ResidentEngineWorkerClient): Promise<string> {
+  const { unzipContainer } = await import('../docx/wasm');
+  return new TextDecoder().decode(unzipContainer(new Uint8Array((await client.save({ comments: [] })).bytes))['word/document.xml']);
+}
+
+test('worker reply saves write the same comment range markers on every save', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const other = engine.paragraphs('body')[1]!.paraId;
+    const range = { story: 'body', start: { paraId: other, offset: 0 }, end: { paraId: other, offset: 5 } };
+    const added = await client.edit(intent(1, 0, 'addComment', { ranges: [range], author: 'B', date: '2026-01-02', body: 'Reply', expectVersion: engine.proposalEngine.version() }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    const reply = engine.listComments().find(comment => comment.id !== parent.id)!.id;
+    const linked = await client.edit(intent(2, 1, 'updateComment', { id: reply, patch: { parentId: parent.id }, expectVersion: engine.proposalEngine.version() }));
+    expect(linked.outcomes[0]?.status).toBe('applied');
+    expect(engine.listComments().find(comment => comment.id === reply)?.parentId).toBe(parent.id);
+    const markers = async () => (await savedWorkerDocumentXml(client)).match(/<w:comment(?:RangeStart|RangeEnd|Reference)\b[^>]*\bw:id="\d+"/g);
+    const first = await markers();
+    expect(first?.length).toBeGreaterThan(0);
+    expect(await markers()).toEqual(first);
+    expect(await markers()).toEqual(first);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker comment saves keep command page and column breaks in commented paragraphs', async () => {
+  const { client, engine, point } = await openWorker({
+    bodyXml: '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>',
+    prepare(engine) {
+      engine.applyRawOps('body', [{ op: 'insertEmbed', index: 5, kind: 'columnBreak', payload: {} }]);
+      return { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 };
+    },
+  });
+  try {
+    const breaks = async () => {
+      const xml = await savedWorkerDocumentXml(client);
+      return [/<w:br w:type="page"\/>/g, /<w:br w:type="column"\/>/g, /<w:commentRangeStart\b/g].map(pattern => xml.match(pattern)?.length ?? 0);
+    };
+    const inserted = await client.edit(intent(1, 0, 'insertPageBreak', { selection: { anchor: point, focus: point } }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    const [first, second] = engine.paragraphs('body').map(paragraph => paragraph.paraId);
+    const ranges = [{ paraId: first!, end: 5 }, { paraId: second!, end: 6 }]
+      .map(({ paraId, end }) => ({ story: 'body', start: { paraId, offset: 1 }, end: { paraId, offset: end } }));
+    for (const [index, range] of ranges.entries()) {
+      const added = await client.edit(intent(index + 2, index + 1, 'addComment', { ranges: [range], author: 'A', date: '2026-01-01',
+        body: `Note ${index}`, expectVersion: engine.proposalEngine.version() }));
+      expect(added.outcomes[0]?.status).toBe('applied');
+    }
+    expect(await breaks()).toEqual([1, 1, 2]);
+    const id = engine.listComments()[0]!.id;
+    const updated = await client.edit(intent(4, 3, 'updateComment', { id, patch: { body: 'Edited' }, expectVersion: engine.proposalEngine.version() }));
+    expect(updated.outcomes[0]?.status).toBe('applied');
+    expect(await breaks()).toEqual([1, 1, 2]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const RESOLVED_THREAD = {
+  comments: '<w:comment w:id="0" w:author="A" w:date="2026-01-01T00:00:00Z"><w:p w14:paraId="0C000001"><w:r><w:t>Parent</w:t></w:r></w:p></w:comment>' +
+    '<w:comment w:id="1" w:author="B" w:date="2026-01-02T00:00:00Z"><w:p w14:paraId="0C000002"><w:r><w:t>Reply</w:t></w:r></w:p></w:comment>',
+  extended: '<w15:commentEx w15:paraId="0C000001" w15:done="1"/><w15:commentEx w15:paraId="0C000002" w15:paraIdParent="0C000001" w15:done="1"/>',
+  bodies: [
+    '<w:p w14:paraId="00000001"><w:commentRangeStart w:id="0"/><w:r><w:t>Seed</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>',
+    '<w:p w14:paraId="00000001"><w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/><w:r><w:t>Seed</w:t></w:r><w:commentRangeEnd w:id="0"/>' +
+      '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="0"/></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p>',
+  ],
+};
+
+test('worker saves an untouched resolved source thread with its reply', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  for (const bodyXml of RESOLVED_THREAD.bodies) {
+    const { client } = await openWorker({ bodyXml, commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended });
+    try {
+      const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
+      const comments = reopened.package.document.comments ?? [];
+      const parent = comments.find(comment => JSON.stringify(comment.content).includes('Parent'));
+      const reply = comments.find(comment => JSON.stringify(comment.content).includes('Reply'));
+      expect(parent).toMatchObject({ id: 0, done: true });
+      expect(reply).toMatchObject({ parentId: parent!.id });
+    } finally { client.destroy(); }
+  }
+}, TIMEOUT);
+
+test('worker comment acknowledgements carry the assigned id after an identity-assigning save', async () => {
+  const { client, engine, point } = await openWorker();
+  try {
+    expect((await client.edit(intent(1, 0, 'paragraphBreak', {}))).outcomes[0]?.status).toBe('applied');
+    await client.save({ comments: [] });
+    const read = engine.proposalEngine.readParagraphs({ view: 'accepted' });
+    const seed = read.ok ? read.paragraphs.find(paragraph => paragraph.text === 'Seed')!.paraId : point.paraId;
+    const range = { story: 'body', start: { paraId: seed, offset: 0 }, end: { paraId: seed, offset: 4 } };
+    const added = await client.edit(intent(2, 1, 'addComment', { ranges: [range], author: 'A', date: '2026-01-01', body: 'Note', expectVersion: engine.proposalEngine.version() }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    const comment = added.editState?.comment;
+    const id = comment?.id;
+    expect(comment?.seq).toBe(2);
+    expect(typeof id).toBe('number');
+    expect(comment!.comments.map(entry => [entry.id, entry.author])).toEqual([[id!, 'A']]);
+    const { parseDocx } = await import('../docx/parser');
+    const saved = await parseDocx((await client.save({ comments: [] })).bytes);
+    expect(saved.package.document.comments?.map(entry => entry.id)).toContain(id);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker command saves without comments keep the incremental story projection', async () => {
+  const { client } = await openWorker({ headersFooters: true });
+  try {
+    expect((await client.edit(intent(1, 0, 'insertText', { text: 'X' }))).outcomes[0]?.status).toBe('applied');
+    const wrap = facadeModule.wrapOpenedEditSession;
+    const read: string[] = [];
+    const opened = spyOn(facadeModule, 'wrapOpenedEditSession').mockImplementation((...args) => {
+      const result = wrap(...args);
+      const paragraphIds = result.session.storyParagraphIds;
+      result.session.storyParagraphIds = story => { read.push(story); return paragraphIds(story); };
+      return result;
+    });
+    const project = spyOn(projectionModule, 'yrsToDocument');
+    try {
+      await client.save({ comments: [] });
+      const selected = project.mock.calls[0]?.[2]?.storyIds;
+      expect(selected).toEqual(new Set(['body']));
+      expect(read).toContain('body');
+      expect(read.filter(story => !selected?.has(story))).toEqual([]);
+    } finally {
+      project.mockRestore();
+      opened.mockRestore();
+    }
   } finally { client.destroy(); }
 }, TIMEOUT);
 

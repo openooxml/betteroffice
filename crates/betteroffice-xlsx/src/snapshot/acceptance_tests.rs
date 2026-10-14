@@ -3049,6 +3049,8 @@ fn builtins_applied_after_a_schema_6_restore_survive_save_and_reopen() {
             columns: 1,
             formats: vec![builtin],
             kept: Vec::new(),
+            source_styles: Vec::new(),
+            source_formats: Vec::new(),
         },
         context(),
     )

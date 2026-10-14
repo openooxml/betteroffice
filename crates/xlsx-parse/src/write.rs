@@ -33,6 +33,8 @@ use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
 mod source_coordinates;
+mod style_derivation;
+mod views;
 
 /// A saved workbook's parts: generated entries are owned, entries the source
 /// package already held are borrowed from it.
@@ -286,6 +288,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         ));
     }
     let edited = edits.changed;
+    let claimed = claimed_origins(package, origins);
+    let view_plan = views::ViewPlan::new(package, &claimed, active_sheet)?;
     if !edited
         && origins.len() == package.sheets.len()
         && origins
@@ -326,7 +330,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         .collect::<HashSet<_>>();
     let sheets = plan_sheets(
         package,
-        origins,
+        &claimed,
         &mut used_relationship_ids,
         &mut used_paths,
         &worksheet_relationship_type,
@@ -395,7 +399,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     patch_chart_parts(wb, package, origins, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
-    let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles);
+    let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
+    let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles)
+        .with_derived(style_plan.pairs.clone());
     let empty_provenance = SharedStringCells::new();
     let axes_changed = sheet_axes.iter().flatten().any(|axes| !axes.is_identity());
     let defined_names = package
@@ -505,7 +511,16 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         }
     }
 
-    let workbook = workbook_xml_with_template(wb, package, &sheets, edited, active_sheet)?;
+    if let Some(view_plan) = &view_plan {
+        for (index, sheet) in sheets.iter().enumerate() {
+            if let Some(bytes) = parts.get(&sheet.path)
+                && let Some(patched) = view_plan.patch_sheet(bytes, index)?
+            {
+                parts.set(sheet.path.clone(), patched)?;
+            }
+        }
+    }
+    let workbook = workbook_xml_with_template(wb, package, &sheets, edited, view_plan.as_ref())?;
     parts.set("xl/workbook.xml".to_owned(), workbook)?;
     parts.set(
         "xl/_rels/workbook.xml.rels".to_owned(),
@@ -544,17 +559,19 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         main_namespace,
         shared_string_plan.as_ref(),
     )?;
-    let styles_retained = matches!(
-        (package.styles.as_ref(), styles.as_ref()),
-        (Some(source), Some(planned)) if source.path == planned.path
-    ) && retains_source_styles(&wb.styles, &package.original_workbook.styles);
+    let styles_retained =
+        matches!(
+            (package.styles.as_ref(), styles.as_ref()),
+            (Some(source), Some(planned)) if source.path == planned.path
+        ) && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
                 Some(template) => styles_xml_with_template(
-                    &wb.styles,
+                    &style_plan.styles,
                     &package.original_workbook.styles,
                     template,
+                    &style_plan.overrides,
                 ),
                 None => styles_xml_with_namespace(&wb.styles, main_namespace),
             }
@@ -1020,21 +1037,30 @@ impl SheetIds {
     }
 }
 
+/// The source sheet each sheet keeps: the first in-range claim of a source
+/// index keeps it, later claims are new sheets.
+fn claimed_origins(package: &PreservedPackage, origins: &[Option<usize>]) -> Vec<Option<usize>> {
+    let mut claimed = HashSet::new();
+    origins
+        .iter()
+        .map(|origin| {
+            origin.filter(|origin| *origin < package.sheets.len() && claimed.insert(*origin))
+        })
+        .collect()
+}
+
 fn plan_sheets(
     package: &PreservedPackage,
-    origins: &[Option<usize>],
+    claimed_origins: &[Option<usize>],
     used_relationship_ids: &mut HashSet<String>,
     used_paths: &mut HashSet<String>,
     worksheet_relationship_type: &str,
 ) -> Result<Vec<PlannedSheet>, ParseError> {
-    let mut claimed_origins = HashSet::new();
     let mut sheet_ids = SheetIds::new(package);
-    origins
+    claimed_origins
         .iter()
         .map(|origin| {
-            let origin = origin
-                .filter(|origin| *origin < package.sheets.len() && claimed_origins.insert(*origin));
-            if let Some(origin) = origin {
+            if let Some(origin) = *origin {
                 let source = &package.sheets[origin];
                 let source_relationship = source.relationship_id.as_deref().and_then(|id| {
                     package
@@ -1398,6 +1424,14 @@ impl<'a> PartStore<'a> {
                 Slot::Removed => None,
             })
             .collect()
+    }
+
+    fn get(&self, path: &str) -> Option<&[u8]> {
+        match &self.slots[*self.positions.get(&normalized_part_name(path))?] {
+            Slot::Source(_, bytes) => Some(bytes),
+            Slot::Owned(_, bytes) => Some(bytes),
+            Slot::Removed => None,
+        }
     }
 
     fn finish(self) -> Vec<(String, Cow<'a, [u8]>)> {
@@ -1979,7 +2013,7 @@ fn workbook_xml_with_template(
     package: &PreservedPackage,
     sheets: &[PlannedSheet],
     edited: bool,
-    active_sheet: SheetId,
+    view_plan: Option<&views::ViewPlan>,
 ) -> Result<Vec<u8>, ParseError> {
     let workbook_pr =
         if package.workbook_pr_attributes.is_some() || wb.date_system == DateSystem::V1904 {
@@ -2050,127 +2084,25 @@ fn workbook_xml_with_template(
         ("sheets", sheets_fragment),
         ("calcPr", calc_pr),
     ];
-    if active_sheet != package.active_sheet {
-        replacements.push((
-            "bookViews",
-            render_book_views(
-                package
-                    .workbook_template
-                    .child("bookViews")
-                    .map(|child| child.bytes.as_slice()),
-                active_sheet,
-            )?,
-        ));
-    }
     if let Some(child) = package.workbook_template.child("definedNames") {
         replacements.push((
             "definedNames",
             render_defined_names(&child.bytes, wb, package)?,
         ));
     }
-    package
-        .workbook_template
-        .render(replacements, workbook_child_rank)
-}
-
-fn render_book_views(
-    source: Option<&[u8]>,
-    active_sheet: SheetId,
-) -> Result<Option<Vec<u8>>, ParseError> {
-    let Some(source) = source else {
-        return Ok(Some(fragment(|writer| {
-            let active_tab = active_sheet.0.to_string();
-            writer
-                .create_element("bookViews")
-                .write_inner_content(|writer| {
-                    writer
-                        .create_element("workbookView")
-                        .with_attribute(("activeTab", active_tab.as_str()))
-                        .write_empty()?;
-                    Ok(())
-                })?;
-            Ok(())
-        })?));
-    };
-
-    let mut reader = Reader::from_reader(source);
-    loop {
-        let before = reader.buffer_position() as usize;
-        match reader.read_event().map_err(xml_err)? {
-            Event::Start(element) if element.name().local_name().as_ref() == b"workbookView" => {
-                let after = reader.buffer_position() as usize;
-                return replace_workbook_view(source, before, after, &element, active_sheet, false)
-                    .map(Some);
-            }
-            Event::Empty(element) if element.name().local_name().as_ref() == b"workbookView" => {
-                let after = reader.buffer_position() as usize;
-                return replace_workbook_view(source, before, after, &element, active_sheet, true)
-                    .map(Some);
-            }
-            Event::Eof => {
-                let view = workbook_view_fragment(active_sheet)?;
-                return XmlTemplate::capture(source)?
-                    .render(vec![("workbookView", Some(view))], book_views_child_rank)
-                    .map(Some);
-            }
-            _ => {}
+    let mut template = package.workbook_template.clone();
+    if let Some(view_plan) = view_plan {
+        if let Some(index) = template
+            .children
+            .iter()
+            .position(|child| template.is_root_child_named(child, "bookViews"))
+        {
+            template.children[index].bytes = view_plan.book_views.clone();
+        } else {
+            replacements.push(("bookViews", Some(view_plan.book_views.clone())));
         }
     }
-}
-
-fn replace_workbook_view(
-    source: &[u8],
-    before: usize,
-    after: usize,
-    element: &BytesStart<'_>,
-    active_sheet: SheetId,
-    empty: bool,
-) -> Result<Vec<u8>, ParseError> {
-    let mut attributes = attributes_from_fragment(&source[before..after])?;
-    set_attribute(
-        &mut attributes,
-        "activeTab",
-        "activeTab",
-        active_sheet.0.to_string(),
-    );
-    let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-    let mut replacement = BytesStart::new(name);
-    for attribute in &attributes {
-        replacement.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
-    }
-    let mut writer = Writer::new(Vec::new());
-    if empty {
-        writer
-            .write_event(Event::Empty(replacement))
-            .map_err(xml_err)?;
-    } else {
-        writer
-            .write_event(Event::Start(replacement))
-            .map_err(xml_err)?;
-    }
-    let mut output = source[..before].to_vec();
-    output.extend_from_slice(&writer.into_inner());
-    output.extend_from_slice(&source[after..]);
-    Ok(output)
-}
-
-fn workbook_view_fragment(active_sheet: SheetId) -> Result<Vec<u8>, ParseError> {
-    fragment(|writer| {
-        let active_tab = active_sheet.0.to_string();
-        writer
-            .create_element("workbookView")
-            .with_attribute(("activeTab", active_tab.as_str()))
-            .write_empty()?;
-        Ok(())
-    })
-}
-
-fn book_views_child_rank(name: &str) -> usize {
-    if name == "workbookView" {
-        0
-    } else {
-        usize::MAX
-    }
+    template.render(replacements, workbook_child_rank)
 }
 
 /// Patches retained `definedName` elements from the model, which the sheet ops
@@ -3302,6 +3234,7 @@ fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Ve
 /// Reuses each source pool entry `kept` says the model left alone, so font
 /// schemes, `gray125` fills and `xf` attributes the model does not carry
 /// survive an edit that only appends new entries.
+#[allow(clippy::too_many_arguments)]
 fn patched_pool<T>(
     template: &XmlTemplate,
     pool_name: &str,
@@ -3310,6 +3243,7 @@ fn patched_pool<T>(
     kept: impl Fn(usize, &T) -> bool,
     write_item: impl Fn(&mut Writer<Vec<u8>>, &T) -> io::Result<()>,
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
+    overrides: Option<&HashMap<usize, Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
     if values.is_empty() {
         return Ok(None);
@@ -3321,6 +3255,10 @@ fn patched_pool<T>(
     let sources = pool.children_named(item_name).collect::<Vec<_>>();
     let mut items = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
+        if let Some(bytes) = overrides.and_then(|values| values.get(&index)) {
+            items.push(pool.qualify_fragment(bytes)?);
+            continue;
+        }
         match sources.get(index).filter(|_| kept(index, value)) {
             Some(source) => items.push(source.bytes.clone()),
             None => {
@@ -3337,6 +3275,7 @@ fn styles_xml_with_template(
     stylesheet: &Stylesheet,
     original: &Stylesheet,
     template: &XmlTemplate,
+    overrides: &style_derivation::StyleOverrides,
 ) -> Result<Vec<u8>, ParseError> {
     let num_fmts = patched_pool(
         template,
@@ -3353,6 +3292,7 @@ fn styles_xml_with_template(
             Ok(())
         },
         || fragment(|writer| write_num_fmts(writer, stylesheet)),
+        None,
     )?;
     let fonts = patched_pool(
         template,
@@ -3362,6 +3302,7 @@ fn styles_xml_with_template(
         |index, value| original.fonts.get(index) == Some(value),
         write_font,
         || fragment(|writer| write_fonts(writer, stylesheet)),
+        Some(&overrides.fonts),
     )?;
     let fills = patched_pool(
         template,
@@ -3371,6 +3312,7 @@ fn styles_xml_with_template(
         |index, value| original.fills.get(index) == Some(value),
         write_fill,
         || fragment(|writer| write_fills(writer, stylesheet)),
+        Some(&overrides.fills),
     )?;
     let borders = patched_pool(
         template,
@@ -3380,6 +3322,7 @@ fn styles_xml_with_template(
         |index, value| original.borders.get(index) == Some(value),
         write_border,
         || fragment(|writer| write_borders(writer, stylesheet)),
+        Some(&overrides.borders),
     )?;
     let cell_xfs = patched_pool(
         template,
@@ -3389,6 +3332,7 @@ fn styles_xml_with_template(
         |index, _| keeps_source_xf(stylesheet, original, index),
         write_xf,
         || fragment(|writer| write_cell_xfs(writer, stylesheet)),
+        Some(&overrides.xfs),
     )?;
     let mut replacements = vec![
         ("numFmts", num_fmts),

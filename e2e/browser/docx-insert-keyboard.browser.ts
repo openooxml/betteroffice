@@ -5,8 +5,8 @@ import JSZip from 'jszip';
 
 const root = resolve(import.meta.dirname, '../..');
 
-async function open(page: Page) {
-  await page.goto('/?format=docx');
+async function open(page: Page, arm: string) {
+  await page.goto('/?format=docx' + arm);
   await page
     .locator('input[type=file]')
     .last()
@@ -18,10 +18,10 @@ async function open(page: Page) {
 }
 
 async function focusDocument(page: Page) {
-  await page.locator('.canvas-page canvas').first().click({
+  await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({
     position: { x: 150, y: 150 },
   });
-  const input = page.getByTestId('yrs-input');
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
 }
@@ -47,8 +47,11 @@ function insertTrigger(page: Page) {
   return page.getByRole('menubar').getByRole('menuitem', { name: 'Insert' });
 }
 
-test('docx Insert menu opens from Enter, Space, ArrowDown, and ArrowUp', async ({ page }) => {
-  await open(page);
+for (const arm of ['', '&peerless=1']) {
+const label = arm ? 'worker' : 'default';
+
+test(`docx Insert menu opens from Enter, Space, ArrowDown, and ArrowUp (${label})`, async ({ page }) => {
+  await open(page, arm);
   const trigger = insertTrigger(page);
   const menu = page.getByRole('menu', { name: 'Insert' });
 
@@ -64,10 +67,10 @@ test('docx Insert menu opens from Enter, Space, ArrowDown, and ArrowUp', async (
   }
 });
 
-test('docx Insert table grid supports keyboard navigation and inserts its dimensions', async ({
+test(`docx Insert table grid supports keyboard navigation and inserts its dimensions (${label})`, async ({
   page,
 }, info) => {
-  await open(page);
+  await open(page, arm);
   await focusDocument(page);
   const trigger = insertTrigger(page);
   await trigger.focus();
@@ -94,8 +97,8 @@ test('docx Insert table grid supports keyboard navigation and inserts its dimens
   expect(await savedTableShape(page, info)).toEqual([3, 3]);
 });
 
-test('docx Break submenu supports keyboard opening and arrow navigation', async ({ page }) => {
-  await open(page);
+test(`docx Break submenu supports keyboard opening and arrow navigation (${label})`, async ({ page }) => {
+  await open(page, arm);
   const trigger = insertTrigger(page);
   const menu = page.getByRole('menu', { name: 'Insert' });
   const submenu = page.getByRole('menu', { name: 'Break' });
@@ -123,8 +126,8 @@ test('docx Break submenu supports keyboard opening and arrow navigation', async 
   await expect(trigger).toBeFocused();
 });
 
-test('docx Insert submenus continue to open on mouse hover', async ({ page }) => {
-  await open(page);
+test(`docx Insert submenus continue to open on mouse hover (${label})`, async ({ page }) => {
+  await open(page, arm);
   await insertTrigger(page).click();
   const menu = page.getByRole('menu', { name: 'Insert' });
   const grid = page.getByRole('grid', { name: 'Table size selector' });
@@ -139,8 +142,8 @@ test('docx Insert submenus continue to open on mouse hover', async ({ page }) =>
   await expect(breakMenu).toBeVisible();
 });
 
-test('docx menubar arrows move between triggers with a single tab stop', async ({ page }) => {
-  await open(page);
+test(`docx menubar arrows move between triggers with a single tab stop (${label})`, async ({ page }) => {
+  await open(page, arm);
   const menubar = page.getByRole('menubar');
   const triggers = menubar.getByRole('menuitem');
   await expect(menubar.locator('[tabindex="0"]')).toHaveCount(1);
@@ -157,8 +160,8 @@ test('docx menubar arrows move between triggers with a single tab stop', async (
   await expect(menubar.locator('[tabindex="0"]')).toHaveCount(1);
 });
 
-test('docx table grid keeps row and boundary navigation inside the picker', async ({ page }) => {
-  await open(page);
+test(`docx table grid keeps row and boundary navigation inside the picker (${label})`, async ({ page }) => {
+  await open(page, arm);
   await insertTrigger(page).focus();
   await page.keyboard.press('Enter');
   const menu = page.getByRole('menu', { name: 'Insert' });
@@ -191,8 +194,8 @@ test('docx table grid keeps row and boundary navigation inside the picker', asyn
   await expect(table).toBeFocused();
 });
 
-test('docx Tab and Shift+Tab leave Insert submenus and close the menu tree', async ({ page }) => {
-  await open(page);
+test(`docx Tab and Shift+Tab leave Insert submenus and close the menu tree (${label})`, async ({ page }) => {
+  await open(page, arm);
   for (const key of ['Tab', 'Shift+Tab']) {
     await insertTrigger(page).focus();
     await page.keyboard.press('Enter');
@@ -205,3 +208,4 @@ test('docx Tab and Shift+Tab leave Insert submenus and close the menu tree', asy
     await expect(page.getByRole('menubar').locator(':focus')).toHaveCount(0);
   }
 });
+}

@@ -1182,6 +1182,8 @@ fn cascade_standalone_copied_plain_format_shares_and_recovers_faithfully() {
                         columns: 1,
                         formats: vec![xlsx_model::CellFormat::default()],
                         kept: Vec::new(),
+                        source_styles: Vec::new(),
+                        source_formats: Vec::new(),
                     },
                 }],
                 CalculationOptions::default(),

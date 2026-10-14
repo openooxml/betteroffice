@@ -15,6 +15,7 @@ import type {
   ResidentDocxCommandState,
 } from './residentCommandProtocol';
 import type { EditSession } from './wasm/index';
+import type { ResidentEngineSession } from './residentEngineSession';
 
 export const TIMEOUT = 20_000;
 const owned: ResidentDocxCommandEngine[] = [];
@@ -50,10 +51,14 @@ export interface CommandArm {
   seq: number;
 }
 
+export interface OpenedCommandArm extends CommandArm {
+  resident: ResidentEngineSession;
+}
+
 export async function openCommandEngine(
   texts = ['Alpha beta', 'Second'],
-  options: { editState?: boolean; bodyXml?: string; clientId?: number; checkpoint?: Uint8Array } = {}
-): Promise<CommandArm> {
+  options: { editState?: boolean; bodyXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
+): Promise<OpenedCommandArm> {
   const initial = stateAt(null);
   const unloaded = {} as ResidentDocxCommandEngine;
   expect(() => options.editState
@@ -144,6 +149,8 @@ export async function openCommandEngine(
   if (options.checkpoint) {
     raw.open_docx(bytes, false, undefined, undefined);
     engine.loadState(options.checkpoint);
+  } else if (options.preview !== undefined) {
+    if (engine.openDocxPreview(bytes, options.preview) === null) throw new Error('Synthetic preview was refused');
   } else {
     engine.openDocx(bytes, undefined, 'd1-synthetic');
   }
@@ -160,7 +167,7 @@ export async function openCommandEngine(
     measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
     renderEnv: {},
   }));
-  return { engine, native: raw, state: stateAt(selected), version: 0, seq: 0 };
+  return { engine, resident: engine, native: raw, state: stateAt(selected), version: 0, seq: 0 };
 }
 
 export function command<K extends DocxCommandKind>(

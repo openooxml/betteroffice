@@ -4,6 +4,8 @@ import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession
 import type { createPeerlessShellController } from './shellController';
 import { workerPageAtViewport } from './pageNavigation';
 import type { DocxOutlineHeading } from '@betteroffice/docx/yrs';
+import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
+import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
 export function useWorkerNavigation(controller: ReturnType<typeof createPeerlessShellController>,
   binding: () => PeerlessEditSessionBinding | null, scroller: RefObject<HTMLDivElement | null>,
@@ -57,10 +59,10 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (!page || !element) return;
     element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + page.bounds.y * latest.current.zoom;
   }, [controller, host, scroller]);
-  const scrollToParagraph = useCallback(async (paraId: string) => {
+  const scrollToParagraph = useCallback(async (paraId: string, story = 'body') => {
     const current = binding();
     if (!current) return false;
-    const target = await controller.read({ kind: 'navigationTarget', story: 'body', paraId });
+    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
     if (typeof target === 'string' || current !== binding()) return false;
     const result = current.commands.submit({ kind: 'select', payload: { selection: { anchor: target.loc, focus: target.loc } } }, { source: 'selection', fence: true });
     if (result.status !== 'submitted') return false;
@@ -71,5 +73,44 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (caret && scroller.current) scroller.current.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - scroller.current.getBoundingClientRect().top + caret.y * latest.current.zoom - 24;
     return true;
   }, [binding, controller, host, scroller]);
-  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph };
+  const revealParagraph = useCallback(async (paraId: string, story: string, focus = false) => {
+    if (focus) return scrollToParagraph(paraId, story);
+    const current = binding();
+    if (!current || !host.current || !scroller.current) return false;
+    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
+    if (typeof target === 'string' || current !== binding()) return false;
+    const native = await loadRustDisplayListQueryEngine();
+    const deadline = Date.now() + 30000;
+    while (current === binding() && Date.now() < deadline) {
+      const frame = current.viewStore.getSnapshot().geometry;
+      if (!frame || !host.current || !scroller.current) return false;
+      const queries = createDisplayListQueries({ pages: frame.pages.map(page => page.displayPage!).filter(Boolean) }, native);
+      try {
+        const rect = queries.anchorRect(target.position);
+        const point = rect && createCanvasHostProjector(host.current, queries, latest.current.zoom).projectRect(rect);
+        if (point) {
+          scroller.current.scrollTop += host.current.getBoundingClientRect().top - scroller.current.getBoundingClientRect().top + point.y * latest.current.zoom - 24;
+          return true;
+        }
+      } finally { queries.dispose(); }
+      const page = frame.pages.find(({ displayPage }) => displayPage?.positionSpan &&
+        displayPage.positionSpan[0] <= target.position && target.position <= displayPage.positionSpan[1]);
+      if (!page || !current.setDisplayWindow) return false;
+      const presented = new Promise<boolean>(resolve => {
+        let remove = () => {};
+        const timer = setTimeout(() => { remove(); resolve(false); }, Math.max(0, deadline - Date.now()));
+        const check = () => {
+          if (current === binding() && current.viewStore.getSnapshot().geometry === frame) return;
+          clearTimeout(timer); remove(); resolve(current === binding());
+        };
+        remove = controller.subscribe(check);
+        check();
+      });
+      scrollToPage(page.page.pageIndex + 1);
+      current.setDisplayWindow(page.page.pageIndex, page.page.pageIndex + 1);
+      if (!await presented) return false;
+    }
+    return false;
+  }, [binding, controller, host, scroller, scrollToPage, scrollToParagraph]);
+  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, revealParagraph };
 }

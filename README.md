@@ -60,8 +60,6 @@
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
-Unrecognized drawing markup inside DOCX runs survives editor saves.
-
 ### Spreadsheets — `.xlsx`
 
 | package | registry | what it does |
@@ -86,9 +84,11 @@ VSDX packages build from this repository; see the [VSDX guide](https://docs.bett
 
 ### Agent tools
 
-[`@betteroffice/agents`](packages/agents) lets agents find, read and edit DOCX, with tracked
-changes and previews, through a TypeScript SDK or the `betteroffice-mcp` server.
-XLSX cells and PPTX slide text are early prototypes.
+[`@betteroffice/agents`](packages/agents) lets agents find, read and edit DOCX text with tracked
+changes; edit XLSX values, formulas and formatting, sort ranges and manage rows, columns and
+sheets; and edit PPTX text, bullets and speaker notes, manage slides and add text boxes, shapes
+and images, with previews for all three, through a TypeScript SDK or the `betteroffice-mcp`
+server.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),

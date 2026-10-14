@@ -17,6 +17,7 @@ export type ResidentPropertyTarget =
   | { kind: 'section'; section: string }
   | { kind: 'watermark' }
   | { kind: 'hyperlink'; selection: DocxCommandSelection }
+  | { kind: 'objectSelection'; selection: DocxCommandSelection }
   | { kind: 'object'; at: YrsLoc };
 
 export type ResidentPropertySnapshot =
@@ -121,11 +122,14 @@ export function readResidentProperties(engine: ResidentEngineSession, target: Re
     const hyperlink = segment?.attributes.hyperlink as YrsHyperlinkAttrs | undefined;
     return { kind: 'hyperlink', range, hyperlink: hyperlink ?? null };
   }
-  const properties = imageAt(engine, target.at);
+  const range = target.kind === 'objectSelection' ? commandSelectionRange(engine, target.selection) : null;
+  if (target.kind === 'objectSelection' && (!range || range.start.paraId !== range.end.paraId || range.end.offset - range.start.offset !== 1)) return null;
+  const at = target.kind === 'objectSelection' ? { story: range!.story, ...range!.start } : target.at;
+  const properties = imageAt(engine, at);
   if (!properties) return null;
   let handles = images.get(engine);
   if (!handles) { handles = new Map(); images.set(engine, handles); }
-  const position = engine.encodeStickyPosition(target.at);
+  const position = engine.encodeStickyPosition(at);
   const existing = [...handles].find(([, entry]) => entry.position.story === position.story && String(entry.position.encoded) === String(position.encoded));
   const handle = existing?.[0] ?? crypto.randomUUID();
   if (!existing) handles.set(handle, { position });

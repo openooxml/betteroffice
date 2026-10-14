@@ -13,7 +13,7 @@ use xlsx_model::{
     MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
     Workbook as WorkbookModel,
 };
-use xlsx_ops::{CellState, Op};
+use xlsx_ops::{CellState, Op, PreservedCellFormat as StoredCellFormat};
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
     BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
@@ -1052,6 +1052,9 @@ impl WorkbookAuthority {
         if self.base.defined_names != model.defined_names {
             Arc::make_mut(&mut self.base).defined_names = model.defined_names.clone();
         }
+        if self.base.tables != model.tables {
+            Arc::make_mut(&mut self.base).tables = model.tables.clone();
+        }
         self.sync_model(&model, ops, origin, &authored_styles)
             .map_err(AuthorityError::InvalidState)?;
         if let [Op::SetCell { at, cell, .. }] = ops
@@ -1231,7 +1234,7 @@ impl WorkbookAuthority {
             if format.fill.released_layout() && format.border.released_layout() {
                 continue;
             }
-            let (key, payload) = cell_format_entry(&format)?;
+            let (key, payload) = style_entry(base, index)?;
             sources.entry(key).or_insert((format, payload));
         }
         if sources.is_empty() {
@@ -2352,6 +2355,10 @@ impl WorkbookAuthority {
                     let key = self.allocate_sheet_key();
                     keys.insert(*index, key);
                 }
+                Op::MoveSheet { from, to } => {
+                    let key = keys.remove(*from);
+                    keys.insert(*to, key);
+                }
                 Op::RemoveSheet { index } => {
                     if *index >= keys.len() {
                         return Err(format!("sheet removal index {index} is out of range"));
@@ -2427,6 +2434,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::UnmergeCells { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
+            | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
             | Op::SetCharts { .. }
@@ -2440,9 +2448,30 @@ fn seed(
     model: &WorkbookModel,
     keys: &[String],
 ) -> Result<(), String> {
+    seed_with_format_entries(doc, base, model, keys, style_entry)
+}
+
+type FormatEntryWriter = fn(&Stylesheet, u32) -> Result<(String, String), String>;
+
+fn seed_with_format_entries(
+    doc: &Doc,
+    base: &WorkbookBase,
+    model: &WorkbookModel,
+    keys: &[String],
+    entry: FormatEntryWriter,
+) -> Result<(), String> {
     let mut txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
     let cell_formats = txn.get_or_insert_map(CELL_FORMATS);
-    sync_cell_formats(&cell_formats, &mut txn, &model.styles)?;
+    let (key, payload) = cell_format_entry(&CellFormat::default())?;
+    cell_formats.try_update(&mut txn, key, payload);
+    let mut style_keys = Vec::with_capacity(model.styles.cell_xfs.len());
+    for index in 0..model.styles.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        let (key, payload) = entry(&model.styles, index)?;
+        style_keys.push(key.clone());
+        cell_formats.try_update(&mut txn, key, payload);
+    }
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
@@ -2452,7 +2481,12 @@ fn seed(
     let sheets = txn.get_or_insert_map(SHEETS);
     for (key, sheet) in keys.iter().zip(&model.sheets) {
         let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-        sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
+        sync_sheet_with_style_key(&sheet_map, &mut txn, sheet, |style| {
+            style_keys
+                .get(style as usize)
+                .cloned()
+                .ok_or_else(|| format!("cell style index {style} is out of range"))
+        })?;
     }
     Ok(())
 }
@@ -3230,6 +3264,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
+            | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
     )
@@ -3268,6 +3303,11 @@ fn targeted_sheet_keys(
                     return Err(format!("sheet removal index {index} is out of range"));
                 }
                 tokens.remove(*index);
+                targets.push(None);
+            }
+            Op::MoveSheet { from, to } => {
+                let token = tokens.remove(*from);
+                tokens.insert(*to, token);
                 targets.push(None);
             }
             Op::SetDefinedNames { .. } => targets.push(None),
@@ -3331,7 +3371,10 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::ApplyRangeFormat { sheet, .. }
         | Op::RenameSheet { sheet, .. }
         | Op::RestoreSheet { sheet, .. } => Some(*sheet),
-        Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::SetDefinedNames { .. } => None,
+        Op::AddSheet { .. }
+        | Op::RemoveSheet { .. }
+        | Op::MoveSheet { .. }
+        | Op::SetDefinedNames { .. } => None,
     }
 }
 
@@ -3414,6 +3457,15 @@ fn sync_sheet(
     sheet: &Sheet,
     stylesheet: &Stylesheet,
 ) -> Result<(), String> {
+    sync_sheet_with_style_key(sheet_map, txn, sheet, |style| style_key(stylesheet, style))
+}
+
+fn sync_sheet_with_style_key(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    style_key: impl Fn(u32) -> Result<String, String>,
+) -> Result<(), String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     if !sheet.row_styles.is_empty() || sheet_map.get(txn, ROW_STYLES).is_some() {
@@ -3450,7 +3502,7 @@ fn sync_sheet(
     sync_numbers(&col_widths, txn, &sheet.col_widths);
     sync_contents(&contents, txn, sheet);
     sync_numbers(&row_heights, txn, &sheet.row_heights);
-    sync_styles(&styles, txn, sheet, stylesheet)?;
+    sync_styles(&styles, txn, sheet, style_key)?;
     Ok(())
 }
 
@@ -3466,12 +3518,12 @@ fn sync_styles(
     map: &MapRef,
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
-    stylesheet: &Stylesheet,
+    style_key: impl Fn(u32) -> Result<String, String>,
 ) -> Result<(), String> {
     let desired = sheet
         .iter_cells()
         .filter_map(|(at, cell)| cell.style.map(|style| (at, style)))
-        .map(|(at, style)| style_key(stylesheet, style).map(|key| (cell_key(at), Any::from(key))))
+        .map(|(at, style)| style_key(style).map(|key| (cell_key(at), Any::from(key))))
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     sync_map(map, txn, desired);
     Ok(())
@@ -3546,8 +3598,7 @@ fn sync_cell_formats(
     for index in 0..stylesheet.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        let format = stylesheet.cell_format(Some(index));
-        let (key, payload) = cell_format_entry(&format)?;
+        let (key, payload) = style_entry(stylesheet, index)?;
         map.try_update(txn, key, payload);
     }
     Ok(())
@@ -3566,16 +3617,17 @@ fn materialize_cell_formats<T: ReadTxn>(
         if payload.len() > MAX_CELL_FORMAT_BYTES {
             return Err(format!("cell format {key} exceeds its size limit"));
         }
-        let format = serde_json::from_str::<CellFormat>(&payload)
+        let stored = serde_json::from_str::<StoredCellFormat>(&payload)
             .map_err(|error| format!("invalid cell format {key}: {error}"))?;
-        let (expected, canonical) = cell_format_entry(&format)?;
+        let (expected, canonical) = stored_format_entry(&stored)?;
         if key != expected || *payload != canonical {
             return Err(format!("cell format {key} is not canonical"));
         }
-        catalog.insert(key.to_string(), format);
+        catalog.insert(key.to_string(), stored);
     }
 
     let mut styles = base.clone();
+    styles.preserve_style_identity();
     let mut known = BTreeMap::new();
     for index in 0..base.cell_xfs.len() {
         let index =
@@ -3583,13 +3635,26 @@ fn materialize_cell_formats<T: ReadTxn>(
         known.entry(style_key(base, index)?).or_insert(Some(index));
     }
     let mut indices = BTreeMap::new();
-    for (key, format) in catalog {
+    for (key, stored) in catalog {
         let index = match known.get(&key) {
             Some(index) => *index,
             None => {
-                let index = styles
-                    .intern_cell_format(&format)
-                    .map_err(|_| "number format table is full".to_string())?;
+                let index = match stored.derived_from {
+                    Some(source) => Some(
+                        styles
+                            .intern_derived_cell_format(source, &stored.format)
+                            .map_err(|_| "number format table is full".to_string())?,
+                    ),
+                    None => styles
+                        .intern_cell_format(&stored.format)
+                        .map_err(|_| "number format table is full".to_string())?,
+                };
+                if stored.source_xf.is_none()
+                    && stored.derived_from.is_none()
+                    && let Some(index) = index
+                {
+                    styles.mark_generated_format(index);
+                }
                 known.insert(key.clone(), index);
                 index
             }
@@ -3617,18 +3682,28 @@ fn remap_styles<'a>(
             return Err(format!("cell style index {index} is out of range"));
         }
         let format = source.cell_format(Some(index));
-        let resolved = if target.xf(index).is_some() && target.cell_format(Some(index)) == format {
+        let source_key = style_key(source, index)?;
+        let resolved = if target.xf(index).is_some() && style_key(target, index)? == source_key {
             Some(index)
         } else if target.binds_plain() && format == CellFormat::default() {
             Some(target.plain_edit_xf())
         } else {
-            let found = (0..target.cell_xfs.len() as u32)
-                .find(|&candidate| target.cell_format(Some(candidate)) == format);
-            let found = match found {
+            let found = match (0..target.cell_xfs.len() as u32)
+                .find(|&candidate| style_key(target, candidate).is_ok_and(|key| key == source_key))
+            {
                 Some(found) => Some(found),
-                None => target
-                    .intern_cell_format(&format)
-                    .map_err(|_| "number format table is full".to_string())?,
+                None => match source.format_source(index).1 {
+                    Some(source) => Some(
+                        target
+                            .intern_derived_cell_format(source, &format)
+                            .map_err(|_| "number format table is full".to_string())?,
+                    ),
+                    None if format == CellFormat::default() => (0..target.cell_xfs.len() as u32)
+                        .find(|&candidate| target.cell_format(Some(candidate)) == format),
+                    None => target
+                        .intern_cell_format(&format)
+                        .map_err(|_| "number format table is full".to_string())?,
+                },
             };
             Some(found.unwrap_or_else(|| target.plain_xf()))
         };
@@ -3699,11 +3774,28 @@ fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
     if style != 0 && stylesheet.xf(style).is_none() {
         return Err(format!("cell style index {style} is out of range"));
     }
-    cell_format_entry(&stylesheet.cell_format(Some(style))).map(|(key, _)| key)
+    style_entry(stylesheet, style).map(|(key, _)| key)
+}
+
+fn style_entry(stylesheet: &Stylesheet, index: u32) -> Result<(String, String), String> {
+    let (source_xf, derived_from) = stylesheet.format_source(index);
+    stored_format_entry(&StoredCellFormat {
+        format: stylesheet.cell_format(Some(index)),
+        source_xf,
+        derived_from,
+    })
 }
 
 fn cell_format_entry(format: &CellFormat) -> Result<(String, String), String> {
-    let payload = serde_json::to_string(format)
+    stored_format_entry(&StoredCellFormat {
+        format: format.clone(),
+        source_xf: None,
+        derived_from: None,
+    })
+}
+
+fn stored_format_entry(stored: &StoredCellFormat) -> Result<(String, String), String> {
+    let payload = serde_json::to_string(stored)
         .map_err(|error| format!("cannot encode cell format: {error}"))?;
     let digest = Sha256::digest(payload.as_bytes());
     Ok((format!("{digest:x}"), payload))
@@ -3751,7 +3843,7 @@ fn migrate_pre_facet_formats(
             released_format(&pre_facet)
         };
         let (released, _) = cell_format_entry(&released)?;
-        let entry = cell_format_entry(&format)?;
+        let entry = style_entry(styles, index)?;
         first.entry(released.clone()).or_insert(entries.len());
         readings.insert(entry.0.clone(), released);
         entries.push(entry);
@@ -3766,6 +3858,18 @@ fn migrate_pre_facet_formats(
     let catalog = txn
         .get_map(CELL_FORMATS)
         .ok_or_else(|| "missing cell format catalog".to_string())?;
+    let legacy_readings = catalog
+        .iter(&*txn)
+        .map(|(key, value)| {
+            let payload = value
+                .cast::<String>()
+                .map_err(|_| format!("cell format {key} is not a string"))?;
+            let stored = serde_json::from_str::<StoredCellFormat>(&payload)
+                .map_err(|error| format!("invalid cell format {key}: {error}"))?;
+            let (reading, _) = cell_format_entry(&stored.format)?;
+            Ok((key.to_string(), reading))
+        })
+        .collect::<Result<HashMap<_, _>, String>>()?;
     let keys = sheets.keys(&*txn).map(str::to_string).collect::<Vec<_>>();
     let mut used = HashSet::new();
     for key in keys {
@@ -3787,14 +3891,17 @@ fn migrate_pre_facet_formats(
             .filter_map(|(cell, value)| Some((cell.to_string(), value.cast::<String>().ok()?)))
             .collect::<Vec<_>>();
         for (cell, released) in cells {
+            let released_reading = legacy_readings.get(&released).unwrap_or(&released);
             let counterpart = counterparts
                 .as_ref()
                 .zip(source.as_ref())
                 .and_then(|(styles, source)| styles.get(source, &cell))
                 .and_then(|value| value.cast::<String>().ok());
             let target = match counterpart {
-                Some(counterpart) if readings.get(&counterpart) == Some(&released) => counterpart,
-                _ => match first.get(&released) {
+                Some(counterpart) if readings.get(&counterpart) == Some(released_reading) => {
+                    counterpart
+                }
+                _ => match first.get(released_reading) {
                     Some(&index) => entries[index].0.clone(),
                     None => continue,
                 },
@@ -3811,9 +3918,9 @@ fn migrate_pre_facet_formats(
         }
     }
     let (default, _) = cell_format_entry(&CellFormat::default())?;
-    for released in first.keys() {
-        if !readings.contains_key(released) && *released != default {
-            catalog.remove(txn, released);
+    for (key, reading) in &legacy_readings {
+        if first.contains_key(reading) && !readings.contains_key(key) && *key != default {
+            catalog.remove(txn, key);
         }
     }
     Ok(())
@@ -4612,7 +4719,10 @@ pub(crate) fn pre_facet_state_for_test(model: &WorkbookModel) -> Vec<u8> {
     let keys = (0..model.sheets.len())
         .map(|index| format!("sheet:{index}"))
         .collect::<Vec<_>>();
-    seed(&doc, &base, model, &keys).unwrap();
+    seed_with_format_entries(&doc, &base, model, &keys, |styles, index| {
+        cell_format_entry(&styles.cell_format(Some(index)))
+    })
+    .unwrap();
     doc.transact()
         .encode_state_as_update_v1(&StateVector::default())
 }
