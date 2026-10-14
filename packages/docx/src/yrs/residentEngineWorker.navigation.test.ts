@@ -172,11 +172,12 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   };
   const worker = new Function(...Object.keys(dependencies),
     new Bun.Transpiler({ loader: 'ts' }).transformSync(binding) +
-    '\nconst hooks = bindResidentCommands(init); return { hooks, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
-  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
+    '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
+  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; rebind(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
   return {
     builds, releases, queryFrames, navigationQueryFrames, caretHints, focus, caretPage, neighbour, position, changes: worker.changes,
     frame: () => read!,
+    rebind: () => worker.rebind(),
     probeDisplayList(pageIndex: number) {
       return { pages: frame.displayList.pages.map((page) => page.pageIndex === pageIndex
         ? { ...page, unbuilt: false, primitives: primitives(pageIndex) } : page) };
@@ -200,6 +201,19 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     evictNeighbour() { worker.install(changePages([neighbour], true, frame.frameEpoch)); },
   };
 }
+
+test('rebinding_command_host_disposes_selection_queries', async () => {
+  const engine = await loadRustDisplayListQueryEngine();
+  const worker = splitRowWorker('down', engine, undefined, false, { productionHooks: true });
+  await worker.navigate();
+  expect(worker.navigationQueryFrames.length).toBeGreaterThan(0);
+  const previous = [...worker.queryFrames];
+  expect(previous.some((entry) => !entry.disposed)).toBe(true);
+  worker.rebind();
+  expect(previous.every((entry) => entry.disposed)).toBe(true);
+  await worker.navigate();
+  expect(worker.queryFrames.at(-1)!.disposed).toBe(false);
+});
 
 test('long_split_row_arrows_stop_after_caret_and_neighbour', async () => {
   for (const direction of ['down', 'up'] as const) {
