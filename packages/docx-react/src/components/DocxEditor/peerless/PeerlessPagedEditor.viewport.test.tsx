@@ -263,7 +263,11 @@ function scrapedPrepareGeometry(dependencies: Record<string, unknown>) {
   const end = source.indexOf('\n  }, []);', start);
   const body = new Bun.Transpiler({ loader: 'tsx' }).transformSync(`function prepare(frame) {${source.slice(start, end)} }`);
   const all = { identity: { current: identity }, retained: { current: null }, prepared: { current: new WeakMap() },
-    pageIndexes: { current: new Map() }, CANVAS_PAGE_GAP_PX, commandPageGeometry, ...dependencies };
+    pageIndexes: { current: new Map() }, CANVAS_PAGE_GAP_PX, commandPageGeometry,
+    decodeCommandFrameDeltas: (candidate: DocxCommandFrame) =>
+      [...(candidate.payload.pageFrames ?? []), candidate.payload.frame].map((bytes) =>
+        (dependencies.decodeFrameDelta as (bytes: unknown) => unknown)(bytes)),
+    ...dependencies };
   return new Function(...Object.keys(all), `${body}\nreturn prepare;`)(...Object.values(all)) as
     (candidate: DocxCommandFrame) => PeerlessFrameGeometry;
 }

@@ -1,5 +1,5 @@
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
-import { decodeFrameDelta, drawGlyphRunPrimitive, GlyphCache, type GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
+import { drawGlyphRunPrimitive, GlyphCache, type GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
 import {
   indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, type EchoGlyphIndex,
 } from '@betteroffice/docx/peerless';
@@ -11,6 +11,7 @@ import type {
   DocxEchoRect,
 } from '@betteroffice/docx/yrs';
 import { releaseBitmap, retainBitmap } from './bitmapOwnership';
+import { decodeCommandFrameDeltas } from './frameDeltas';
 import type { PeerlessTextIntent } from './inputEvents';
 
 type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache };
@@ -295,9 +296,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       receiveGlyphSets(frame.payload.echoGlyphSets);
       const removed = new Set<string>();
       let fullPages: Set<string> | undefined;
-      for (const bytes of [...(frame.payload.pageFrames ?? []), frame.payload.frame]) {
-        if (!bytes.byteLength) continue;
-        const delta = decodeFrameDelta(bytes);
+      for (const delta of decodeCommandFrameDeltas(frame, true)) {
         if (delta.full && delta.operations.length) fullPages = new Set<string>();
         for (const operation of delta.operations) {
           if (operation.kind === 'remove') {

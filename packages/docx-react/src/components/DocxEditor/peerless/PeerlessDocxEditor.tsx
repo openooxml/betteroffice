@@ -34,6 +34,7 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import type { PagedEditorRef } from '../PagedEditor';
 import { openPrintWindow } from '@betteroffice/docx';
 import { createWorkerPrintCapture, printBitmap } from './printPages';
+import { decodeCommandFrameDeltas } from './frameDeltas';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createWorkerSearch } from './workerSearch';
@@ -527,8 +528,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (cached) return cached;
     try {
       let next = retained.current;
-      for (const bytes of frame.payload.pageFrames ?? []) next = applyFrameDelta(next, decodeFrameDelta(bytes));
-      next = applyFrameDelta(next, decodeFrameDelta(frame.payload.frame));
+      for (const delta of decodeCommandFrameDeltas(frame)) next = applyFrameDelta(next, delta);
       const caret = residentCaretSnapshotForFrame(frame.payload.caret, next);
       if (!caret) return undefined;
       const pages = commandPageGeometry(next, frame.payload);
