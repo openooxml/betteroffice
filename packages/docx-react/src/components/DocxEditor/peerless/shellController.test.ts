@@ -333,6 +333,28 @@ test('table navigation uses the controller admission and creates a final row onl
   expect(submit.mock.calls.at(-1)![0]).toMatchObject({ payload: { createLastRow: false } });
 });
 
+test('table selection dispatches selectTableCells as fenced selection input', async () => {
+  const { controller, binding, viewStore } = fixture();
+  const state = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection: null,
+    editState: { ...state.editState!, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0, columnIndex: 0,
+      rowCount: 2, columnCount: 2, hasMultiCellSelection: false, canSplitCell: true } } });
+  const submit = mock(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'noop' }) } }));
+  binding.commands = { submit } as never;
+  controller.attach(binding);
+  expect(controller.environment().supportedCommands?.has('tableAction')).toBe(true);
+  expect(controller.environment().tableActions).toEqual(new Set(['selectTable', 'selectRow', 'selectColumn']));
+  expect(await controller.commands.store.execute('tableAction', 'selectTable')).toMatchObject({ ok: true, status: 'noop' });
+  expect(await controller.commands.store.execute('tableAction', 'selectRow')).toMatchObject({ ok: true });
+  expect(await controller.commands.store.execute('tableAction', 'selectColumn')).toMatchObject({ ok: true });
+  expect(submit.mock.calls).toEqual([
+    [{ kind: 'selectTableCells', payload: { target: 'table' } }, { source: 'selection', fence: true }],
+    [{ kind: 'selectTableCells', payload: { target: 'row' } }, { source: 'selection', fence: true }],
+    [{ kind: 'selectTableCells', payload: { target: 'column' } }, { source: 'selection', fence: true }],
+  ]);
+  expect(await controller.commands.store.execute('tableAction', 'deleteRow')).toMatchObject({ ok: false });
+});
+
 test('internal modes remain switchable after viewing and update mutation author context', async () => {
   const { controller, binding } = fixture();
   const author = mock((_name: string | null) => {});
