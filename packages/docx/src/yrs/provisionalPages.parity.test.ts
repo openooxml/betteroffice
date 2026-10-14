@@ -677,7 +677,7 @@ function commandPoint(f: CommandFixture, pageIndex = 0, offset = 8): DocxSelecti
 }
 
 async function sendCommand(f: CommandFixture, seq: number, kind: string, payload: DocxCommandEnvelope['payload']): Promise<DocxCommandAck> {
-  const reply = await f.w.send({ type: 'edit', command: {
+  const reply = await f.w.interleave({ type: 'edit', command: {
     session: f.init.session, incarnation: 1, seq, basis: { epoch: 1, version: 0 }, kind, payload,
     ...(seq > 1 ? { afterSeq: seq - 1 } : {}),
   } });
