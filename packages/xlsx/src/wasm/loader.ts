@@ -209,6 +209,8 @@ export interface CapturedFormat<TFormat = unknown> {
   rows: number;
   columns: number;
   formats: TFormat[];
+  sourceStyles?: (number | null)[];
+  sourceFormats?: unknown[];
 }
 
 export type CapturedColor = 'Auto' | { Rgb: string } | { Indexed: number }

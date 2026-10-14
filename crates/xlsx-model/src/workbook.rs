@@ -1,7 +1,7 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use crate::value::CellValue;
 #[cfg(feature = "test-counters")]
 thread_local! {
     static USED_RANGE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static COL_STYLE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(feature = "test-counters")]
@@ -27,6 +28,18 @@ pub fn used_range_scans() -> u64 {
 #[doc(hidden)]
 pub fn reset_used_range_scans() {
     USED_RANGE_SCANS.set(0);
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn col_style_scans() -> u64 {
+    COL_STYLE_SCANS.get()
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn reset_col_style_scans() {
+    COL_STYLE_SCANS.set(0);
 }
 
 /// upper bound on the cells one array formula may fill. a malformed or hostile
@@ -141,7 +154,7 @@ pub struct SheetFormat {
     pub zero_height: bool,
 }
 
-/// a `<col>` run's style: the `cellXfs` index its columns give a cell that names none.
+/// A column run's default style for missing cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColStyle {
     pub first: ColId,
@@ -160,12 +173,127 @@ pub struct Sheet {
     pub row_heights: BTreeMap<RowId, f64>,
     /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
     pub format: SheetFormat,
-    /// `<col>` style runs in source order; read by the renderer, never the writer.
+    /// Column defaults in source order.
     pub col_styles: Vec<ColStyle>,
+    pub row_styles: BTreeMap<RowId, u32>,
     pub charts: Vec<SheetChart>,
     /// anchors of `t="array"` formulas mapped to the rectangle their result
     /// occupies. authored from the file, then kept current by recalc.
     array_formulas: BTreeMap<(RowId, ColId), CellRange>,
+}
+
+pub const MAX_ROW_STYLES: usize = 65_536;
+
+/// [`Sheet::effective_style`] for many cells of one sheet, scanning the column
+/// runs once per column.
+pub struct ColumnDefaults<'a> {
+    sheet: &'a Sheet,
+    cols: HashMap<ColId, Option<u32>>,
+}
+
+/// Column defaults as ascending, disjoint runs, built one source run at a time;
+/// later runs win.
+#[derive(Debug, Clone, Default)]
+pub struct ColumnRuns {
+    runs: BTreeMap<ColId, ColStyle>,
+}
+
+impl ColumnRuns {
+    pub fn push(&mut self, run: ColStyle) {
+        if run.first > run.last {
+            return;
+        }
+        let runs = &mut self.runs;
+        let after = run.last.saturating_add(1);
+        let before = runs.range(..run.first).next_back().map(|(_, &prior)| prior);
+        if let Some(before) = before
+            && before.last >= run.first
+        {
+            runs.insert(
+                before.first,
+                ColStyle {
+                    last: run.first - 1,
+                    ..before
+                },
+            );
+            if before.last > run.last {
+                runs.insert(
+                    after,
+                    ColStyle {
+                        first: after,
+                        ..before
+                    },
+                );
+            }
+        }
+        let inside = runs
+            .range(run.first..=run.last)
+            .map(|(&first, _)| first)
+            .collect::<Vec<_>>();
+        for first in inside {
+            let Some(old) = runs.remove(&first) else {
+                continue;
+            };
+            if old.last > run.last {
+                runs.insert(
+                    after,
+                    ColStyle {
+                        first: after,
+                        ..old
+                    },
+                );
+            }
+        }
+        runs.insert(run.first, run);
+    }
+
+    pub fn style(&self, col: ColId) -> Option<u32> {
+        self.runs
+            .range(..=col)
+            .next_back()
+            .filter(|(_, run)| run.last >= col)
+            .map(|(_, run)| run.xf)
+    }
+
+    fn into_runs(self) -> Vec<ColStyle> {
+        let mut out: Vec<ColStyle> = Vec::with_capacity(self.runs.len());
+        for run in self.runs.into_values() {
+            match out.last_mut() {
+                Some(last) if last.xf == run.xf && last.last.saturating_add(1) == run.first => {
+                    last.last = run.last;
+                }
+                _ => out.push(run),
+            }
+        }
+        out
+    }
+}
+
+impl<'a> ColumnDefaults<'a> {
+    pub fn new(sheet: &'a Sheet) -> Self {
+        Self {
+            sheet,
+            cols: HashMap::new(),
+        }
+    }
+
+    pub fn effective_style(&mut self, at: CellRef) -> Option<u32> {
+        let sheet = self.sheet;
+        sheet.effective_style_with(at, |col| self.col_style(col))
+    }
+
+    pub fn inherited_style(&mut self, at: CellRef) -> Option<u32> {
+        let sheet = self.sheet;
+        sheet.inherited_style_with(at, |col| self.col_style(col))
+    }
+
+    fn col_style(&mut self, col: ColId) -> Option<u32> {
+        let sheet = self.sheet;
+        if sheet.col_styles.is_empty() {
+            return None;
+        }
+        *self.cols.entry(col).or_insert_with(|| sheet.col_style(col))
+    }
 }
 
 impl Sheet {
@@ -212,14 +340,61 @@ impl Sheet {
         self.cells.get(&(at.row, at.col))
     }
 
-    /// the style a `<col>` run gives a cell that names none; later runs win.
-    /// only the fill and the row fit consult it; other facets read `Cell::style`.
+    /// Column default; later runs win.
     pub fn col_style(&self, col: ColId) -> Option<u32> {
+        #[cfg(feature = "test-counters")]
+        COL_STYLE_SCANS.set(COL_STYLE_SCANS.get().wrapping_add(1));
         self.col_styles
             .iter()
             .rev()
             .find(|run| (run.first..=run.last).contains(&col))
             .map(|run| run.xf)
+    }
+
+    /// Column defaults as ascending, disjoint runs; later runs win.
+    pub fn col_style_runs(&self) -> Vec<ColStyle> {
+        let mut runs = ColumnRuns::default();
+        for &run in &self.col_styles {
+            runs.push(run);
+        }
+        runs.into_runs()
+    }
+
+    /// The default a missing cell takes: its row's, then its column's.
+    pub fn inherited_style(&self, at: CellRef) -> Option<u32> {
+        self.inherited_style_with(at, |col| self.col_style(col))
+    }
+
+    /// [`Sheet::inherited_style`] with the column defaults `columns` holds.
+    pub fn inherited_style_in(&self, at: CellRef, columns: &ColumnRuns) -> Option<u32> {
+        self.inherited_style_with(at, |col| columns.style(col))
+    }
+
+    /// Existing cells use their own xf; missing cells inherit.
+    pub fn effective_style(&self, at: CellRef) -> Option<u32> {
+        self.effective_style_with(at, |col| self.col_style(col))
+    }
+
+    fn inherited_style_with(
+        &self,
+        at: CellRef,
+        col_style: impl FnOnce(ColId) -> Option<u32>,
+    ) -> Option<u32> {
+        match self.row_styles.get(&at.row) {
+            Some(&style) => Some(style),
+            None => col_style(at.col),
+        }
+    }
+
+    fn effective_style_with(
+        &self,
+        at: CellRef,
+        col_style: impl FnOnce(ColId) -> Option<u32>,
+    ) -> Option<u32> {
+        match self.cell(at) {
+            Some(cell) => cell.style,
+            None => self.inherited_style_with(at, col_style),
+        }
     }
 
     pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {

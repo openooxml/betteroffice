@@ -140,12 +140,21 @@ export interface TextCmd {
   dashedUnderline?: boolean;
   /** css/font family from the style font; the backend falls back to its default. */
   fontFamily?: string;
+  numberFormat?: NumberFormatLayout;
   /**
    * Preview text that is not the cell's committed value (a proposal ghost's
    * `new` text). Painted normally, but excluded from a11y text recovery.
    */
   ghost?: boolean;
   chart?: boolean;
+}
+
+export interface NumberFormatLayout {
+  left: number;
+  width: number;
+  parts: { offset: number; kind: 'padding' | 'fill'; character: string }[];
+  general?: number;
+  overflow?: boolean;
 }
 
 /**

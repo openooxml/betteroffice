@@ -344,6 +344,8 @@ fn format_facets_clear_format_keeps_cell_contents() {
                 columns: 1,
                 formats: vec![CellFormat::default()],
                 kept: Vec::new(),
+                source_styles: Vec::new(),
+                source_formats: Vec::new(),
             },
             options(),
         )

@@ -685,7 +685,14 @@ export function createPeerlessWorkerInputCoordinator(
           await lease.wait(Promise.all(earlier));
           if (rejected.length) throw new XlsxCommandAdmissionError('input-failed');
         }
-        await invoke();
+        const previousPumping = pumping;
+        const previousInsertion = insertion;
+        pumping = true;
+        insertion = 0;
+        let completion: void | Promise<void>;
+        try { completion = invoke(); }
+        finally { insertion = previousInsertion; pumping = previousPumping; }
+        await completion;
       };
       enqueue({ reject: result.reject, recoveryInput: () => {
         if (!composition || compositionSubmitted || readOnly ||

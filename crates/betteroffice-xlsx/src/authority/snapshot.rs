@@ -1284,7 +1284,16 @@ impl Codec for ChartAnchor {
     }
 }
 
-const BASE_SECTIONS: usize = 16;
+const BASE_SECTIONS: usize = 17;
+/// The sections a manifest tagged with section 0 counts: those before row
+/// defaults.
+const RELEASED_BASE_SECTIONS: usize = 16;
+const ROW_STYLE_SECTION: usize = 17;
+/// Tags the manifest of a base with row defaults, which also counts their
+/// section.
+const ROW_STYLE_MANIFEST_TAG: u8 = 20;
+const ROW_STYLE_TAG: u8 = 21;
+
 const XF_SECTION: usize = 13;
 /// Tags an `XF_SECTION` record laid out with format facets; a record tagged
 /// with the section itself predates them.
@@ -1294,10 +1303,29 @@ const BORDER_RECORD: usize = 19;
 
 fn base_section(tag: usize) -> usize {
     match tag {
+        20 => 0,
+        21 => ROW_STYLE_SECTION,
         XF_V2_TAG => XF_SECTION,
         FILL_RECORD => 11,
         BORDER_RECORD => 12,
-        tag => tag,
+        tag if tag <= RELEASED_BASE_SECTIONS => tag,
+        _ => BASE_SECTIONS + 1,
+    }
+}
+
+fn manifest_tag(base: &WorkbookBase) -> u8 {
+    if base.row_styles.is_empty() {
+        0
+    } else {
+        ROW_STYLE_MANIFEST_TAG
+    }
+}
+
+fn manifest_counts(tag: usize) -> usize {
+    if tag == usize::from(ROW_STYLE_MANIFEST_TAG) {
+        BASE_SECTIONS
+    } else {
+        RELEASED_BASE_SECTIONS
     }
 }
 
@@ -1331,6 +1359,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         freeze_panes,
         formats,
         col_styles,
+        row_styles,
         hyperlinks,
         charts,
         hidden_dimensions,
@@ -1355,6 +1384,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         styles.num_fmts.len(),
         styles.indexed_colors.len(),
         tables.len(),
+        row_styles.len(),
     ]
 }
 
@@ -1368,6 +1398,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
         freeze_panes: _,
         formats: _,
         col_styles: _,
+        row_styles: _,
         hyperlinks: _,
         charts: _,
         hidden_dimensions: _,
@@ -1379,7 +1410,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
     date_system.write(w);
     fingerprint.write(w);
     styles.theme.write(w);
-    for count in base_counts(base) {
+    for count in &base_counts(base)[..manifest_counts(usize::from(manifest_tag(base)))] {
         count.write(w);
     }
 }
@@ -1416,6 +1447,7 @@ impl BaseCursor {
             freeze_panes,
             formats,
             col_styles,
+            row_styles,
             hyperlinks,
             charts,
             hidden_dimensions,
@@ -1426,6 +1458,8 @@ impl BaseCursor {
         let released = self.section == XF_SECTION && styles.is_released_xf(self.index);
         let mut w = Writer::new();
         w.u8(match self.section {
+            0 => usize::from(manifest_tag(base)),
+            ROW_STYLE_SECTION => usize::from(ROW_STYLE_TAG),
             11 => FILL_RECORD,
             12 => BORDER_RECORD,
             XF_SECTION if !released => XF_V2_TAG,
@@ -1462,6 +1496,7 @@ impl BaseCursor {
             14 => styles.num_fmts[index].write(&mut w),
             15 => styles.indexed_colors[index].write(&mut w),
             16 => tables[index].write(&mut w),
+            17 => row_styles[index].write(&mut w),
             _ => unreachable!(),
         }
         if self.section == 0 {
@@ -1715,6 +1750,7 @@ enum BaseRecord {
     FreezePane(Option<FreezePane>),
     Format(SheetFormat),
     Columns(Vec<ColStyle>),
+    Rows(BTreeMap<u32, u32>),
     Hyperlinks(Vec<Hyperlink>),
     Charts(Vec<SheetChart>),
     Hidden(HiddenDimensions),
@@ -1732,12 +1768,12 @@ enum BaseRecord {
 impl BaseRecord {
     fn preflight_cost(tag: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
         match tag {
-            0 => {
+            0 | 20 => {
                 r.value::<u64>()?;
                 r.value::<DateSystem>()?;
                 r.value::<String>()?;
                 r.value::<Theme>()?;
-                for _ in 0..BASE_SECTIONS {
+                for _ in 0..manifest_counts(tag) {
                     r.value::<usize>()?;
                 }
                 r.cost = r.cost.max(std::mem::size_of::<BaseManifest>());
@@ -1758,6 +1794,7 @@ impl BaseRecord {
             XF_V2_TAG => r.value::<Xf>()?,
             14 => r.value::<(u16, String)>()?,
             16 => r.value::<Table>()?,
+            21 => r.value::<BTreeMap<u32, u32>>()?,
             FILL_RECORD => r.value::<Fill>()?,
             BORDER_RECORD => r.value::<Border>()?,
             _ => return Err(SnapshotError::new("invalid authority base section")),
@@ -1768,7 +1805,7 @@ impl BaseRecord {
     #[cfg(test)]
     fn decode_cost(tag: usize) -> SnapshotResult<usize> {
         Ok(match tag {
-            0 => std::mem::size_of::<BaseManifest>()
+            0 | 20 => std::mem::size_of::<BaseManifest>()
                 .max(u64::decode_cost())
                 .max(DateSystem::decode_cost())
                 .max(String::decode_cost())
@@ -1790,6 +1827,7 @@ impl BaseRecord {
             XF_V2_TAG => Xf::decode_cost(),
             14 => <(u16, String)>::decode_cost(),
             16 => Table::decode_cost(),
+            21 => <BTreeMap<u32, u32>>::decode_cost(),
             FILL_RECORD => Fill::decode_cost(),
             BORDER_RECORD => Border::decode_cost(),
             _ => return Err(SnapshotError::new("invalid authority base section")),
@@ -1798,13 +1836,13 @@ impl BaseRecord {
 
     fn read(r: &mut BoundedReader<'_>, tag: usize) -> SnapshotResult<Self> {
         Ok(match tag {
-            0 => {
+            0 | 20 => {
                 let start = r.position;
                 r.prepare::<u64>()?;
                 r.prepare::<DateSystem>()?;
                 r.prepare::<String>()?;
                 r.prepare::<Theme>()?;
-                for _ in 0..BASE_SECTIONS {
+                for _ in 0..manifest_counts(tag) {
                     r.prepare::<usize>()?;
                 }
                 let cost = std::mem::size_of::<BaseManifest>();
@@ -1820,7 +1858,7 @@ impl BaseRecord {
                 let fingerprint = r.take()?;
                 let theme = r.take()?;
                 let mut counts = [0; BASE_SECTIONS];
-                for count in &mut counts {
+                for count in counts.iter_mut().take(manifest_counts(tag)) {
                     *count = r.take()?;
                 }
                 Self::Manifest(Box::new(BaseManifest {
@@ -1848,6 +1886,7 @@ impl BaseRecord {
             14 => Self::NumberFormat(r.value()?),
             15 => Self::Color(r.value()?),
             16 => Self::Table(r.value()?),
+            21 => Self::Rows(r.value()?),
             FILL_RECORD => Self::Fill(r.value()?),
             BORDER_RECORD => Self::Border(r.value()?),
             _ => return Err(SnapshotError::new("invalid authority base section")),
@@ -1944,6 +1983,7 @@ impl BaseBuilder {
                     freeze_panes: Vec::new(),
                     formats: Vec::new(),
                     col_styles: Vec::new(),
+                    row_styles: Vec::new(),
                     hyperlinks: Vec::new(),
                     charts: Vec::new(),
                     hidden_dimensions: Vec::new(),
@@ -1963,6 +2003,7 @@ impl BaseBuilder {
                     BaseRecord::FreezePane(value) => base.freeze_panes.push(value),
                     BaseRecord::Format(value) => base.formats.push(value),
                     BaseRecord::Columns(value) => base.col_styles.push(value),
+                    BaseRecord::Rows(value) => base.row_styles.push(value),
                     BaseRecord::Hyperlinks(value) => base.hyperlinks.push(value),
                     BaseRecord::Charts(value) => base.charts.push(value),
                     BaseRecord::Hidden(value) => base.hidden_dimensions.push(value),
@@ -2012,7 +2053,7 @@ impl BaseBuilder {
             let fingerprint = Codec::read(&mut r)?;
             let theme = Codec::read(&mut r)?;
             let mut styles = Stylesheet::default();
-            for count in &mut self.counts {
+            for count in self.counts.iter_mut().take(manifest_counts(tag)) {
                 *count = r.var_usize()?;
             }
             styles.theme = theme;
@@ -2025,6 +2066,7 @@ impl BaseBuilder {
                 freeze_panes: Vec::new(),
                 formats: Vec::new(),
                 col_styles: Vec::new(),
+                row_styles: Vec::new(),
                 hyperlinks: Vec::new(),
                 charts: Vec::new(),
                 hidden_dimensions: Vec::new(),
@@ -2072,6 +2114,7 @@ impl BaseBuilder {
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
+                21 => base.row_styles.push(Codec::read(&mut r)?),
                 FILL_RECORD => base.styles.fills.push(Codec::read(&mut r)?),
                 BORDER_RECORD => base.styles.borders.push(Codec::read(&mut r)?),
                 _ => return Err(SnapshotError::new("invalid authority base section")),
@@ -2111,6 +2154,7 @@ impl BaseBuilder {
             14 => g.ensure(base, |b| Ok(&mut b.styles.num_fmts), budget),
             15 => g.ensure(base, |b| Ok(&mut b.styles.indexed_colors), budget),
             16 => g.ensure(base, |b| Ok(&mut b.tables), budget),
+            17 => g.ensure(base, |b| Ok(&mut b.row_styles), budget),
             _ => Ok(true),
         }
     }
@@ -2725,7 +2769,7 @@ mod tests {
         authority.base.date_system.write(&mut writer);
         authority.base.fingerprint.write(&mut writer);
         authority.base.styles.theme.write(&mut writer);
-        for index in 1..=BASE_SECTIONS {
+        for index in 1..=RELEASED_BASE_SECTIONS {
             writer.var_usize(if index == section { count } else { 0 });
         }
         let payload = writer.into_bytes();
@@ -2745,6 +2789,54 @@ mod tests {
         assert!(completed);
         assert_eq!(builder.ordinal, 1);
         builder
+    }
+
+    #[test]
+    fn authority_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
+        let charts = vec![SheetChart {
+            part: "p".repeat(2048),
+            drawing: "drawing.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell::default(),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        }];
+        let mut writer = Writer::new();
+        writer.u8(7);
+        charts.write(&mut writer);
+        let mut payload = writer.into_bytes();
+        let budget = SnapshotBudget::new(1, 1024).unwrap();
+        assert!(payload.len() > budget.max_bytes());
+        let mut bounded = builder_for_section(7, 1);
+        assert!(!bounded.push_bounded(&payload, budget).unwrap());
+        while !bounded.push_bounded(&payload, budget).unwrap() {}
+        assert_eq!(bounded.base.unwrap().charts, vec![charts]);
+
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.u8().unwrap(), 7);
+        assert_eq!(reader.var_usize().unwrap(), 1);
+        reader.str().unwrap();
+        reader.str().unwrap();
+        reader.var_usize().unwrap();
+        let anchor_offset = payload.len() - reader.clone().rest().len();
+        assert_eq!(reader.u8().unwrap(), 0);
+        payload[anchor_offset] = 20;
+
+        let error = builder_for_section(7, 1)
+            .push(&payload)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "invalid snapshot chart anchor");
+        assert_eq!(
+            builder_for_section(7, 1)
+                .push_bounded(&payload, budget)
+                .unwrap_err()
+                .to_string(),
+            error
+        );
     }
 
     #[test]
@@ -2978,7 +3070,7 @@ mod tests {
         a.base.date_system.write(&mut manifest);
         a.base.fingerprint.write(&mut manifest);
         a.base.styles.theme.write(&mut manifest);
-        for section in 0..BASE_SECTIONS {
+        for section in 0..RELEASED_BASE_SECTIONS {
             manifest.var_usize(if section == 8 { 50_000_000 } else { 0 });
         }
         let mut payload = Writer::new();
@@ -3036,7 +3128,11 @@ mod tests {
         base.date_system.write(&mut hostile);
         base.fingerprint.write(&mut hostile);
         base.styles.theme.write(&mut hostile);
-        for (section, count) in base_counts(&base).into_iter().enumerate() {
+        for (section, count) in base_counts(&base)
+            .into_iter()
+            .take(RELEASED_BASE_SECTIONS)
+            .enumerate()
+        {
             hostile.var_usize(if section == 4 { 50_000_000 } else { count });
         }
         builder.push(&hostile.into_bytes()).unwrap();
@@ -3840,6 +3936,106 @@ mod tests {
         }
     }
 
+    fn styled_defaults_model(rows: BTreeMap<u32, u32>) -> WorkbookModel {
+        let mut model = model();
+        model.styles.cell_xfs = vec![Xf::default(); 2];
+        model.sheets[0].col_styles = vec![ColStyle {
+            first: 1,
+            last: 3,
+            xf: 1,
+        }];
+        model.sheets[0].row_styles = rows;
+        model
+    }
+
+    /// The manifest as releases before row defaults wrote it.
+    fn released_manifest(base: &WorkbookBase) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(0);
+        base.bootstrap_client_id.write(&mut w);
+        base.date_system.write(&mut w);
+        base.fingerprint.write(&mut w);
+        base.styles.theme.write(&mut w);
+        for count in [
+            base.defined_names.len(),
+            base.fingerprints.len(),
+            base.freeze_panes.len(),
+            base.formats.len(),
+            base.col_styles.len(),
+            base.hyperlinks.len(),
+            base.charts.len(),
+            base.hidden_dimensions.len(),
+            base.shared_strings.len(),
+            base.styles.fonts.len(),
+            base.styles.fills.len(),
+            base.styles.borders.len(),
+            base.styles.cell_xfs.len(),
+            base.styles.num_fmts.len(),
+            base.styles.indexed_colors.len(),
+            base.tables.len(),
+        ] {
+            count.write(&mut w);
+        }
+        w.into_bytes()
+    }
+
+    fn decoded_bases(records: &[Vec<u8>]) -> [WorkbookBase; 2] {
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        let mut bounded = BaseBuilder::default();
+        let mut whole = BaseBuilder::default();
+        for record in records {
+            while !bounded.push_bounded(record, budget).unwrap() {}
+            whole.push(record).unwrap();
+        }
+        [bounded.finish().unwrap(), whole.finish().unwrap()]
+    }
+
+    #[test]
+    fn base_records_without_row_defaults_keep_the_released_layout() {
+        let base = WorkbookBase::from_model(&styled_defaults_model(BTreeMap::new())).unwrap();
+        let records = base_records(&base);
+        assert_eq!(records[0], released_manifest(&base));
+        assert!(
+            records
+                .iter()
+                .all(|record| base_section(usize::from(record[0])) <= RELEASED_BASE_SECTIONS)
+        );
+        for decoded in decoded_bases(&records) {
+            assert!(decoded.row_styles.is_empty());
+            assert_eq!(base_records(&decoded), records);
+        }
+    }
+
+    #[test]
+    fn row_default_base_records_carry_their_own_tags() {
+        let rows = BTreeMap::from([(2, 1), (5, 0)]);
+        let base = WorkbookBase::from_model(&styled_defaults_model(rows.clone())).unwrap();
+        let records = base_records(&base);
+        assert!(
+            records[0][0] > 16,
+            "a manifest counting row defaults must not carry a released tag"
+        );
+        let row_records = &records[records.len() - base.row_styles.len()..];
+        assert!(row_records.iter().all(|record| record[0] > 16));
+        for decoded in decoded_bases(&records) {
+            assert_eq!(decoded.row_styles[0], rows);
+            assert_eq!(base_records(&decoded), records);
+        }
+        let mut released_tag = records[0].clone();
+        released_tag[0] = 0;
+        assert!(BaseBuilder::default().push(&released_tag).is_err());
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        let mut bounded = BaseBuilder::default();
+        let mut outcome = bounded.push_bounded(&released_tag, budget);
+        for _ in 0..64 {
+            if !matches!(outcome, Ok(false)) {
+                break;
+            }
+            outcome = bounded.push_bounded(&released_tag, budget);
+        }
+        assert!(outcome.is_err());
+    }
+
     #[test]
     fn base_xf_records_released_before_format_facets_still_decode() {
         let mut a = source();
@@ -3907,7 +4103,7 @@ mod tests {
 impl WorkbookAuthority {
     pub(crate) fn validate_snapshot_model(
         &self,
-        model: &WorkbookModel,
+        model: &mut WorkbookModel,
         validation: &mut super::snapshot_validation::SnapshotValidation,
         keys: &mut crate::snapshot::yrs_split::SnapshotKeys,
         budget: SnapshotBudget,

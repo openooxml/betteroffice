@@ -14,7 +14,6 @@ use yrs::{Doc, Origin, ReadTxn, Transact};
 
 use crate::{COMMENTS, EditError, EditResult, META, SHAPES, SLIDE_ORDER, SLIDES, STORIES};
 
-#[cfg(any(feature = "wasm", test))]
 use crate::DeckSession;
 
 const CAPTURE_TIMEOUT_MS: u64 = 500;
@@ -41,6 +40,7 @@ struct CaptureClock {
 
 struct CaptureClockState {
     mode: UndoCaptureMode,
+    holds: usize,
     ticks: u64,
     last_source: u64,
 }
@@ -50,6 +50,7 @@ impl CaptureClock {
         Self {
             state: Mutex::new(CaptureClockState {
                 mode: UndoCaptureMode::Auto,
+                holds: 0,
                 ticks: 1,
                 last_source: source.now(),
             }),
@@ -70,13 +71,37 @@ impl Clock for CaptureClock {
     fn now(&self) -> u64 {
         let mut state = self.state.lock().unwrap();
         let now = self.source.now();
-        let elapsed = match state.mode {
-            UndoCaptureMode::Auto => now.saturating_sub(state.last_source),
-            UndoCaptureMode::Manual => 0,
+        let elapsed = match (state.mode, state.holds) {
+            (UndoCaptureMode::Auto, 0) => now.saturating_sub(state.last_source),
+            _ => 0,
         };
         state.last_source = now;
         state.ticks = state.ticks.saturating_add(elapsed);
         state.ticks
+    }
+}
+
+struct CaptureClockHold(Arc<CaptureClock>);
+
+impl Drop for CaptureClockHold {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().holds -= 1;
+    }
+}
+
+impl DeckSession {
+    pub(crate) fn with_undo_capture<T>(
+        &self,
+        operation: impl FnOnce() -> EditResult<T>,
+    ) -> EditResult<T> {
+        self.automatic_undo_barrier();
+        let clock = self.undo.borrow().clock.clone();
+        clock.state.lock().unwrap().holds += 1;
+        let hold = CaptureClockHold(clock);
+        let result = operation();
+        drop(hold);
+        self.automatic_undo_barrier();
+        result
     }
 }
 

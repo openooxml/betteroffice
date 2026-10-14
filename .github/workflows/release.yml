@@ -227,3 +227,52 @@ jobs:
             fi
           done
           exit $status
+
+  # npm Trusted Publishers name publish-native.yml, so dispatch it with this run's
+  # commit and wait. Repository roots are private so changeset publish leaves
+  # them to that workflow.
+  native-npm:
+    name: Publish native packages
+    needs: release
+    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
+    runs-on: ubuntu-latest
+    # Covers native-dist (45 minutes) and publishing (15 minutes) with dispatch overhead.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Dispatch a publish per format, then wait for each
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          pending=$(node scripts/native-bindings.mjs --pending)
+          bindings=$(printf '%s' "$pending" | jq -er '.[]' || [ "$pending" = '[]' ])
+          status=0
+          runs=""
+          for binding in $bindings; do
+            if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/$GH_REPO/actions/workflows/publish-native.yml/dispatches" \
+              -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+              -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+              runs="$runs $binding:$run"
+            else
+              echo "::error::Dispatching @betteroffice/$binding-native failed."
+              status=1
+            fi
+          done
+
+          for entry in $runs; do
+            binding=${entry%%:*}
+            run=${entry#*:}
+            if ! gh run watch "$run" --exit-status; then
+              echo "::error::@betteroffice/$binding-native did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+              status=1
+            fi
+          done
+          exit $status

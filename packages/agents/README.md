@@ -245,5 +245,5 @@ bun test packages/agents
 
 Tests use real DOCX/WASM sessions, including a 1,500-paragraph search fixture,
 format-preserving export, stale proposals, tracked changes, isolated undo,
-page images, and an MCP subprocess. See [the evaluation guide](eval/README.md)
+page images, and an MCP subprocess. See [the evaluation guide](../../eval/README.md)
 for testing agent ergonomics on the installed package.

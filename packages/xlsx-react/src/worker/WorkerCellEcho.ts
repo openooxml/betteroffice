@@ -298,7 +298,8 @@ export class WorkerCellEcho {
     const echoes: TextCmd[] = [];
     for (const [id, cell] of latest) {
       const appearance = this.appearance.get(id);
-      if (appearance) echoes.push({ ...appearance.text, text: cell.text });
+      // a number layout indexes the frame's formatted text, never the typed input
+      if (appearance) echoes.push({ ...appearance.text, text: cell.text, numberFormat: undefined });
     }
     const list = this.frame.displayList;
     const viewport = { x: 0, y: 0, w: list.width, h: list.height };

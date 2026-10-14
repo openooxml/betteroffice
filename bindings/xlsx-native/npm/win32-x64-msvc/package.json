@@ -1,0 +1,40 @@
+{
+  "name": "@betteroffice/xlsx-native-win32-x64-msvc",
+  "version": "0.3.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "betteroffice-xlsx-native.win32-x64-msvc.node",
+  "files": [
+    "betteroffice-xlsx-native.win32-x64-msvc.node"
+  ],
+  "description": "Native Rust bindings for the BetterOffice XLSX engine in Node.js, Bun and Deno.",
+  "keywords": [
+    "xlsx",
+    "excel",
+    "spreadsheet",
+    "ooxml",
+    "nodejs",
+    "node-api",
+    "bun",
+    "deno",
+    "native",
+    "rust"
+  ],
+  "homepage": "https://betteroffice.dev/",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "bindings/xlsx-native"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "win32"
+  ]
+}

@@ -244,6 +244,7 @@ window.__xlsxWorkerEditor = {
   ready, errors, previews, previewFrames, commitOrder, peerEntries, replayEntries,
   mainThreadEngines: () => mainThreadEngines,
   peerless: peerless ? {
+    get editor() { return peerlessApi!; },
     async cells(sheet, range) {
       const result = await activeSession!.call.cellInputs(sheet, range);
       return result.cells.map((row) => row.map((cell) => cell.input));

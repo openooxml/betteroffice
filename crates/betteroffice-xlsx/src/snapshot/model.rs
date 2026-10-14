@@ -35,12 +35,18 @@ const COL_STYLE: u8 = 17;
 const CHART: u8 = 18;
 const CHART_REF: u8 = 19;
 const ARRAY: u8 = 20;
+const ROW_STYLE: u8 = 24;
+/// A sheet record that also counts its row defaults; a sheet without any keeps
+/// the `SHEET` layout.
+const STYLED_SHEET: u8 = 25;
+
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
 const BORDER_V2: u8 = 23;
 
 fn run_tag(tag: u8) -> u8 {
     match tag {
+        STYLED_SHEET => SHEET,
         XF_V2 => XF,
         FILL_V2 => FILL,
         BORDER_V2 => BORDER,
@@ -174,7 +180,7 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
     ]
 }
 
-fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 8]> {
+fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 9]> {
     Ok([
         sheet.hyperlinks.len(),
         sheet.merges.len(),
@@ -184,6 +190,7 @@ fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 8]> {
         sheet.charts.len(),
         exact_len(sheet.array_formulas())?,
         exact_len(sheet.iter_cells())?,
+        sheet.row_styles.len(),
     ])
 }
 
@@ -217,6 +224,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         for count in &counts[..7] {
             add_count(&mut records, *count)?;
         }
+        add_count(&mut records, counts[8])?;
         add_count(&mut cells, counts[7])?;
         for chart in &sheet.charts {
             add_count(&mut records, chart.refs.len())?;
@@ -354,13 +362,14 @@ impl MetadataCursor {
                 COL_STYLE => sheet.col_styles.len(),
                 CHART => sheet.charts.len(),
                 ARRAY => exact_len(sheet.array_formulas())?,
+                ROW_STYLE => sheet.row_styles.len(),
                 _ => return Ok(false),
             };
             if self.index == length {
-                self.sheet_phase = if self.sheet_phase == CHART {
-                    ARRAY
-                } else {
-                    self.sheet_phase + 1
+                self.sheet_phase = match self.sheet_phase {
+                    CHART => ARRAY,
+                    ARRAY => ROW_STYLE,
+                    phase => phase + 1,
                 };
                 self.index = 0;
                 self.map_key = None;
@@ -369,6 +378,8 @@ impl MetadataCursor {
             }
             w.u8(if self.sheet_phase == CHART && self.child != 0 {
                 CHART_REF
+            } else if self.sheet_phase == SHEET && !sheet.row_styles.is_empty() {
+                STYLED_SHEET
             } else {
                 self.sheet_phase
             });
@@ -377,8 +388,10 @@ impl MetadataCursor {
                     w.str(&sheet.name);
                     w.option(sheet.freeze_pane.as_ref(), write_pane);
                     write_format(w, &sheet.format);
-                    for count in sheet_counts(sheet)? {
-                        w.var_usize(count);
+                    let counts = sheet_counts(sheet)?;
+                    let count = if sheet.row_styles.is_empty() { 8 } else { 9 };
+                    for value in &counts[..count] {
+                        w.var_usize(*value);
                     }
                 }
                 HYPERLINK => write_hyperlink(w, &sheet.hyperlinks[self.index]),
@@ -403,6 +416,17 @@ impl MetadataCursor {
                     w.var_u32(*first);
                     w.var_u32(*last);
                     w.var_u32(*xf);
+                }
+                ROW_STYLE => {
+                    let lower = self.map_key.map_or(Unbounded, Excluded);
+                    let (&row, &xf) = sheet
+                        .row_styles
+                        .range((lower, Unbounded))
+                        .next()
+                        .ok_or_else(|| SnapshotError::new("snapshot row style cursor is stale"))?;
+                    w.var_u32(row);
+                    w.var_u32(xf);
+                    self.map_key = Some(row);
                 }
                 CHART => {
                     let chart = &sheet.charts[self.index];
@@ -838,7 +862,7 @@ impl ModelSnapshotBuilder {
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
             TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
             TABLE_COLUMN => g.ensure(m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget),
-            SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
+            SHEET | STYLED_SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
             HYPERLINK => g.ensure(
                 m,
                 |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks),
@@ -1018,7 +1042,7 @@ impl ModelSnapshotBuilder {
                 .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
                 .columns
                 .push(r.str()?.to_owned()),
-            SHEET => self.read_sheet(r)?,
+            SHEET | STYLED_SHEET => self.read_sheet(r, raw == STYLED_SHEET)?,
             _ => self.read_sheet_record(tag, r)?,
         }
         self.validate_counts()?;
@@ -1037,12 +1061,12 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_sheet(&mut self, r: &mut Reader<'_>) -> SnapshotResult<()> {
+    fn read_sheet(&mut self, r: &mut Reader<'_>, styled: bool) -> SnapshotResult<()> {
         let mut sheet = Sheet::new(r.str()?);
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
-        let mut counts = [0; 8];
-        for count in &mut counts {
+        let mut counts = [0; 9];
+        for count in &mut counts[..if styled { 9 } else { 8 }] {
             *count = r.var_usize()?;
         }
         add_count(&mut self.declared_cells, counts[7])?;
@@ -1058,6 +1082,7 @@ impl ModelSnapshotBuilder {
         self.model.sheets.push(sheet);
         self.array_key = None;
         for (tag, count) in [
+            (ROW_STYLE, counts[8]),
             (ARRAY, counts[6]),
             (CHART, counts[5]),
             (COL_STYLE, counts[4]),
@@ -1103,6 +1128,22 @@ impl ModelSnapshotBuilder {
                 last: r.var_u32()?,
                 xf: r.var_u32()?,
             }),
+            ROW_STYLE => {
+                let row = r.var_u32()?;
+                let xf = r.var_u32()?;
+                if row >= xlsx_model::MAX_ROWS
+                    || sheet.row_styles.len() >= xlsx_parse::MAX_ROW_STYLES
+                    || sheet
+                        .row_styles
+                        .last_key_value()
+                        .is_some_and(|(&last, _)| row <= last)
+                {
+                    return Err(SnapshotError::new(
+                        "snapshot row styles are out of range or reordered",
+                    ));
+                }
+                sheet.row_styles.insert(row, xf);
+            }
             CHART => {
                 let (chart, refs) = read_chart(r)?;
                 sheet.charts.push(chart);
@@ -2105,6 +2146,94 @@ mod tests {
         builder.finish().unwrap()
     }
 
+    #[test]
+    fn model_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
+        let mut sheet = Sheet::new("Charts");
+        sheet.charts.push(SheetChart {
+            part: "p".repeat(2048),
+            drawing: "drawing.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell::default(),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        });
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        let whole_budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let bounded_budget = SnapshotBudget::new(1, 1024).unwrap();
+        let mut chunks = encode(&model, whole_budget);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(advance_all(&chunks, bounded_budget).unwrap(), model);
+
+        let chart = chunks
+            .iter_mut()
+            .find(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                kind == ChunkKind::Model && payload[0] == CHART
+            })
+            .unwrap();
+        assert!(packed_record(chart, 0).unwrap().is_none());
+        let (_, _, payload) = unframe(chart).unwrap();
+        assert!(payload.len() > bounded_budget.max_bytes());
+        assert!(chart.len() <= whole_budget.max_bytes());
+        let mut reader = Reader::new(payload);
+        assert_eq!(reader.u8().unwrap(), CHART);
+        reader.str().unwrap();
+        reader.str().unwrap();
+        reader.var_usize().unwrap();
+        let anchor_offset = chart.len() - reader.clone().rest().len();
+        assert_eq!(reader.u8().unwrap(), 0);
+        chart[anchor_offset] = 20;
+
+        let mut whole = ModelSnapshotBuilder::new();
+        let error = chunks
+            .iter()
+            .try_for_each(|chunk| whole.push(chunk))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "invalid snapshot chart anchor");
+        assert_eq!(
+            advance_all(&chunks, whole_budget).unwrap_err().to_string(),
+            error
+        );
+        assert_eq!(
+            advance_all(&chunks, bounded_budget)
+                .unwrap_err()
+                .to_string(),
+            error
+        );
+    }
+
+    #[test]
+    fn sparse_row_styles_roundtrip_with_small_snapshot_budgets() {
+        let mut sheet = Sheet::new("Rows");
+        sheet.row_styles = (0..4000).map(|row| (row * 2, row % 2)).collect();
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Default::default()
+        };
+        let budget = SnapshotBudget::new(3, 1024).unwrap();
+        let mut builder = ModelSnapshotBuilder::new();
+        for chunk in encode(&model, budget) {
+            loop {
+                super::super::step::reset();
+                let ready = builder.advance_bounded(&chunk, budget).unwrap().is_ready();
+                let work = super::super::step::current();
+                assert!(work.records <= budget.max_records());
+                assert!(work.bytes <= budget.max_bytes());
+                if ready {
+                    break;
+                }
+            }
+        }
+        assert_eq!(builder.finish().unwrap(), model);
+    }
+
     fn declared_header(records: usize, counts: [usize; 10]) -> Vec<u8> {
         let mut w = Writer::new();
         w.u8(HEADER);
@@ -2979,6 +3108,66 @@ mod tests {
         let decoded = decode(&chunks);
         assert_eq!(&decoded, opened.model());
         assert_eq!(encode(&decoded, budget), chunks);
+    }
+
+    #[test]
+    fn sheet_records_without_row_defaults_keep_the_released_layout() {
+        let model = sample_model();
+        assert!(model.sheets.iter().all(|sheet| sheet.row_styles.is_empty()));
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let chunks = encode(&model, budget);
+        let mut sheets = model.sheets.iter();
+        for chunk in &chunks {
+            let (kind, _, payload) = unframe(chunk).unwrap();
+            if kind != ChunkKind::Model || payload[0] != 12 {
+                continue;
+            }
+            let sheet = sheets.next().unwrap();
+            let mut w = Writer::new();
+            w.u8(12);
+            w.str(&sheet.name);
+            w.option(sheet.freeze_pane.as_ref(), write_pane);
+            write_format(&mut w, &sheet.format);
+            for count in [
+                sheet.hyperlinks.len(),
+                sheet.merges.len(),
+                sheet.col_widths.len(),
+                sheet.row_heights.len(),
+                sheet.col_styles.len(),
+                sheet.charts.len(),
+                sheet.array_formulas().count(),
+                sheet.iter_cells().count(),
+            ] {
+                w.var_usize(count);
+            }
+            assert_eq!(payload, w.into_bytes().as_slice());
+        }
+        assert!(sheets.next().is_none());
+        assert_eq!(decode(&chunks), model);
+
+        let mut styled = model.clone();
+        styled.sheets[0].row_styles = std::collections::BTreeMap::from([(1, 0)]);
+        let tags = encode(&styled, budget)
+            .iter()
+            .filter_map(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                if kind == ChunkKind::Model {
+                    Some(payload[0])
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags.iter().filter(|&&tag| tag == 12).count(),
+            model.sheets.len() - 1
+        );
+        assert_eq!(
+            tags.iter()
+                .filter(|&&tag| matches!(tag, ROW_STYLE | STYLED_SHEET))
+                .count(),
+            2
+        );
     }
 
     #[test]

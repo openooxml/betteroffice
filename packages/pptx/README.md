@@ -44,8 +44,8 @@ and registered with the Rust shaper through `openPresentation`.
 Beyond rendering, `PresentationHandle` covers editing: version-checked batches
 (`readContent` / `findText` / `validateEdits` / `applyEdits`), read-only
 structured export (`exportStructured` / `exportMarkdown`), text
-(`insertText` / `deleteText` / `formatText` / `setParagraphAlignment`), slides
-(`insertSlide` / `deleteSlide` / `moveSlide`), shapes
+(`insertText` / `deleteText` / `formatText` / `setParagraphAlignment` / `setStoryParagraphs`), slides
+(`insertSlide` / `duplicateSlide` / `deleteSlide` / `moveSlide`), shapes
 (`addTextBox` / `addShape` / `addPicture` / `moveShape` / `resizeShape` /
 `setShapeRect`), paint order (`bringShapeToFront` / `sendShapeToBack` /
 `bringShapeForward` / `sendShapeBackward`), comments
@@ -55,6 +55,13 @@ bytes with edits applied — untouched slides keep their exact source part bytes
 `addPicture` accepts common raster/vector MIME types (PNG, JPEG, GIF, BMP,
 TIFF, WebP, SVG) up to 8 MiB, rejecting anything past either limit before it
 reaches the deck.
+
+`layouts()` lists layout IDs and names for `insertSlide`. `fork()` creates an
+independently owned copy of the current state; dispose it after use.
+`duplicateSlide` copies slide content and speaker notes, excluding comments.
+`attachPptx` in `@betteroffice/agents` accepts a live `PresentationHandle` without
+taking ownership. Worker editor access lacks the state-fork/update APIs needed
+for attachment.
 
 ## Agent proposals
 

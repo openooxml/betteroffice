@@ -20,6 +20,1291 @@ fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
 }
 
+fn cascade_source() -> Vec<u8> {
+    use xlsx_model::{Border, BorderEdge, BorderStyle, CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let edge = BorderEdge {
+        style: BorderStyle::Thin,
+        color: Some(Color::Rgb("#123456".into())),
+    };
+    let mut row = CellFormat {
+        fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+        border: Border {
+            top: Some(edge.clone()),
+            bottom: Some(edge.clone()),
+            left: Some(edge.clone()),
+            right: Some(edge),
+        },
+        ..Default::default()
+    };
+    row.font.italic = true;
+    row.number_format = xlsx_model::NumberFormat::Builtin { id: 49 };
+    let row_style = model.styles.intern_cell_format(&row).unwrap().unwrap();
+    let col_style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="2" style="{col_style}"/></cols><sheetData><row r="3"><c r="B3" t="inlineStr"><is><t>plain column</t></is></c></row><row r="5" s="{row_style}" customFormat="1" outlineLevel="2"><c r="C5" t="inlineStr"><is><t>plain</t></is></c><c r="D5"/></row><row r="6" s="{row_style}" customFormat="0"/></sheetData></worksheet>"#
+    ).into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn cascade_fill(workbook: &Workbook, address: &str) -> Option<String> {
+    let at = cell(address);
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let x = geometry.col_x(at.col) + 2.0;
+    let y = geometry.row_y(at.row) + 2.0;
+    workbook
+        .display_list_for(SheetId(0), &chart_viewport())
+        .unwrap()
+        .commands
+        .into_iter()
+        .rev()
+        .find_map(|command| match command {
+            DrawCmd::FillRect {
+                x: left,
+                y: top,
+                w,
+                h,
+                color,
+                ..
+            } if x >= left && x < left + w && y >= top && y < top + h => Some(color.to_string()),
+            _ => None,
+        })
+}
+
+#[test]
+fn cascade_missing_cells_render_row_fill_and_borders_before_column() {
+    let workbook = Workbook::open(&cascade_source()).unwrap();
+    assert_eq!(cascade_fill(&workbook, "A5").as_deref(), Some("#ff0000"));
+    assert_eq!(cascade_fill(&workbook, "B5").as_deref(), Some("#ff0000"));
+    assert_eq!(cascade_fill(&workbook, "B6").as_deref(), Some("#00ff00"));
+    for at in ["C5", "D5", "A6"] {
+        assert_ne!(cascade_fill(&workbook, at).as_deref(), Some("#ff0000"));
+    }
+    assert_ne!(cascade_fill(&workbook, "B3").as_deref(), Some("#00ff00"));
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let x = geometry.col_x(1);
+    let y = geometry.row_y(4);
+    let commands = workbook
+        .display_list_for(SheetId(0), &chart_viewport())
+        .unwrap()
+        .commands;
+    assert!(
+        commands
+            .iter()
+            .any(|c| matches!(c, DrawCmd::Line { x1, y1, x2, y2, color, .. }
+        if *x1 == x && *x2 == x && *y1 == y && *y2 > y && &**color == "#123456"))
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|c| matches!(c, DrawCmd::Line { x1, x2, y1, color, .. }
+        if *x1 == x && *x2 == x && *y1 == y && &**color == "#123456"))
+            .count(),
+        1
+    );
+    assert_eq!(workbook.model().sheets[0].iter_cells().count(), 3);
+    let viewport = Viewport {
+        y: geometry.row_y(5),
+        ..chart_viewport()
+    };
+    assert!(workbook.display_list_for(SheetId(0), &viewport).unwrap().commands.iter().any(|command|
+        matches!(command, DrawCmd::Line { y1, y2, color, .. } if y1.abs() < 0.01 && y2.abs() < 0.01 && &**color == "#123456")));
+}
+
+#[test]
+fn cascade_value_formula_and_clear_keep_inherited_style_after_save() {
+    let mut workbook = Workbook::open(&cascade_source()).unwrap();
+    let options = CalculationOptions::default();
+    for (at, input) in [
+        ("A5", "0012"),
+        ("B5", "row text"),
+        ("B2", "=1+2"),
+        ("C5", ""),
+    ] {
+        workbook
+            .edit_cells(
+                SheetId(0),
+                &[CellInput {
+                    cell: cell(at),
+                    input: input.into(),
+                }],
+                options,
+            )
+            .unwrap();
+    }
+    assert!(
+        matches!(&workbook.model().sheets[0].cell(cell("A5")).unwrap().value, CellValue::Text { value } if value == "0012")
+    );
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(cell("B2"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some("1+2")
+    );
+    assert_eq!(cascade_fill(&workbook, "B2").as_deref(), Some("#00ff00"));
+    assert!(workbook.display_list_for(SheetId(0), &chart_viewport()).unwrap().commands.iter().any(|command|
+        matches!(command, DrawCmd::Text { text, italic, .. } if &**text == "0012" && *italic)));
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    for at in ["A5", "B5"] {
+        assert_eq!(cascade_fill(&reopened, at).as_deref(), Some("#ff0000"));
+    }
+    assert_ne!(cascade_fill(&reopened, "C5").as_deref(), Some("#ff0000"));
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[CellInput {
+                cell: cell("A5"),
+                input: String::new(),
+            }],
+            options,
+        )
+        .unwrap();
+    assert_eq!(cascade_fill(&workbook, "A5").as_deref(), Some("#ff0000"));
+    assert!(workbook.model().sheets[0].cell(cell("A5")).is_some());
+}
+
+#[test]
+fn cascade_bold_missing_column_cell_keeps_fill() {
+    let mut workbook = Workbook::open(&cascade_source()).unwrap();
+    workbook
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(cell("B2"), cell("B2")),
+            StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let style = workbook.model().sheets[0].cell(cell("B2")).unwrap().style;
+    assert!(workbook.model().styles.cell_format(style).font.bold);
+    assert_eq!(cascade_fill(&workbook, "B2").as_deref(), Some("#00ff00"));
+}
+
+#[test]
+fn cascade_missing_merged_anchor_keeps_its_fill_in_partial_prints() {
+    let source = Workbook::open(&cascade_source()).unwrap();
+    let mut model = source.model().clone();
+    model.sheets[0]
+        .merges
+        .push(CellRange::parse_a1("A5:B6").unwrap());
+    let workbook = Workbook::from_model(model).unwrap();
+    let metrics = betteroffice_xlsx::PrintMetrics {
+        dpi: 72.0,
+        max_digit_width: 6.0,
+        default_row_height_pt: 14.0,
+        default_column_width: None,
+        font_size_pt: 11.0,
+        font_family: "Calibri".into(),
+        font_ascent: 10.0,
+        font_descent: 3.0,
+    };
+    let list = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A6:B6").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    assert!(list.commands.iter().any(
+        |command| matches!(command, DrawCmd::FillRect { color, w, h, .. }
+        if &**color == "#ff0000" && *w > 100.0 && *h > 10.0)
+    ));
+    assert_eq!(workbook.model().sheets[0].iter_cells().count(), 3);
+}
+
+#[test]
+fn cascade_existing_cells_without_s_and_unstyled_missing_cells_use_xf_zero() {
+    let source = Workbook::open(&cascade_source()).unwrap();
+    let mut model = source.model().clone();
+    let font = model.styles.fonts.len() as u32;
+    model.styles.fonts.push(xlsx_model::Font {
+        bold: true,
+        ..Default::default()
+    });
+    model.styles.cell_xfs[0] = model.styles.cell_xfs[2].clone();
+    model.styles.cell_xfs[0].font = Some(font);
+    model.styles.cell_xfs[0].num_fmt_id = Some(49);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    for at in ["C5", "A2"] {
+        assert_eq!(cascade_fill(&workbook, at).as_deref(), Some("#00ff00"));
+    }
+    assert!(workbook.display_list_for(SheetId(0), &chart_viewport()).unwrap().commands.iter().any(|command|
+        matches!(command, DrawCmd::Text { text, bold, .. } if &**text == "plain" && *bold)));
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A2"),
+            "0012",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        matches!(&workbook.model().sheets[0].cell(cell("A2")).unwrap().value, CellValue::Text { value } if value == "0012")
+    );
+}
+
+#[test]
+fn cascade_structural_edits_shift_and_inherit_styles_with_undo() {
+    let mut workbook = Workbook::open(&cascade_source()).unwrap();
+    let options = CalculationOptions::default();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 5,
+                count: 2,
+            }],
+            options,
+        )
+        .unwrap();
+    assert_eq!(cascade_fill(&workbook, "A6").as_deref(), Some("#ff0000"));
+    assert_eq!(cascade_fill(&workbook, "A7").as_deref(), Some("#ff0000"));
+    workbook.undo(options).unwrap();
+    assert_ne!(cascade_fill(&workbook, "A6").as_deref(), Some("#ff0000"));
+    workbook.redo(options).unwrap();
+    assert_eq!(cascade_fill(&workbook, "A7").as_deref(), Some("#ff0000"));
+    workbook.undo(options).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            }],
+            options,
+        )
+        .unwrap();
+    assert_eq!(cascade_fill(&workbook, "A7").as_deref(), Some("#ff0000"));
+    workbook.undo(options).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 4,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
+    assert_ne!(cascade_fill(&workbook, "A5").as_deref(), Some("#ff0000"));
+    workbook.undo(options).unwrap();
+    assert_eq!(cascade_fill(&workbook, "A5").as_deref(), Some("#ff0000"));
+    workbook
+        .apply_ops(
+            vec![Op::InsertCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            }],
+            options,
+        )
+        .unwrap();
+    assert_eq!(cascade_fill(&workbook, "C2").as_deref(), Some("#00ff00"));
+    assert_eq!(cascade_fill(&workbook, "D2").as_deref(), Some("#00ff00"));
+    workbook.undo(options).unwrap();
+    assert_ne!(cascade_fill(&workbook, "C2").as_deref(), Some("#00ff00"));
+}
+
+#[test]
+fn cascade_saves_preserve_row_attributes_and_regenerate_defaults() {
+    let source = cascade_source();
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_eq!(workbook.save().unwrap(), source);
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[CellInput {
+                cell: cell("A1"),
+                input: "7".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    assert!(
+        test_part_text(&saved, "xl/worksheets/sheet1.xml")
+            .contains(r#"s="1" customFormat="1" outlineLevel="2""#)
+    );
+    let regenerated = Workbook::from_model(workbook.model().clone()).unwrap();
+    let reopened = Workbook::open(&regenerated.save().unwrap()).unwrap();
+    assert_eq!(cascade_fill(&reopened, "A5").as_deref(), Some("#ff0000"));
+    assert_eq!(cascade_fill(&reopened, "B6").as_deref(), Some("#00ff00"));
+}
+
+#[test]
+fn cascade_bounded_snapshot_and_collaborative_replay_keep_defaults() {
+    use betteroffice_xlsx::{SnapshotBudget, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder};
+    let source = cascade_source();
+    let mut workbook = Workbook::open(&source).unwrap();
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(cascade_fill(&restored, "A5").as_deref(), Some("#ff0000"));
+    assert_eq!(
+        restored.model().sheets[0].row_styles,
+        workbook.model().sheets[0].row_styles
+    );
+    let mut peer = Workbook::open_collaborative(&source, 811).unwrap();
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[CellInput {
+                cell: cell("A5"),
+                input: "text".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(cascade_fill(&peer, "A5").as_deref(), Some("#ff0000"));
+    workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 5,
+                    count: 1,
+                },
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 2,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = peer.model().clone();
+    assert!(matches!(
+        peer.apply_update_v1(
+            &workbook.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        ),
+        Err(Error::CollaborativeStructureChanged)
+    ));
+    assert_eq!(*peer.model(), before);
+    assert_eq!(cascade_fill(&peer, "A5").as_deref(), Some("#ff0000"));
+    let shifted = Workbook::from_model(workbook.model().clone()).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&shifted, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&shifted).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(
+        restored.model().sheets[0].row_styles,
+        workbook.model().sheets[0].row_styles
+    );
+    assert_eq!(
+        restored.model().sheets[0].col_styles,
+        workbook.model().sheets[0].col_styles
+    );
+    assert_eq!(cascade_fill(&restored, "A6").as_deref(), Some("#ff0000"));
+    assert_eq!(cascade_fill(&restored, "C2").as_deref(), Some("#00ff00"));
+}
+
+#[test]
+fn cascade_inserted_columns_save_their_inherited_style_in_column_order() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="2" style="{style}"/><col min="6" max="6" width="20" customWidth="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#
+    ).into_bytes());
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let xml = test_part_text(
+        &ooxml_opc::unzip_parts(&saved).unwrap(),
+        "xl/worksheets/sheet1.xml",
+    );
+    let ranges = xml
+        .match_indices("<col ")
+        .map(|(start, _)| {
+            let element = &xml[start..start + xml[start..].find('>').unwrap()];
+            let number = |name: &str| -> u32 {
+                let at = element.find(&format!(r#" {name}=""#)).unwrap() + name.len() + 3;
+                element[at..].split('"').next().unwrap().parse().unwrap()
+            };
+            (number("min"), number("max"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ranges, [(2, 2), (3, 4), (8, 8)], "{xml}");
+    let reopened = Workbook::open(&saved).unwrap();
+    for at in ["B2", "C2", "D2"] {
+        assert_eq!(
+            cascade_fill(&reopened, at).as_deref(),
+            Some("#00ff00"),
+            "{at}"
+        );
+    }
+    assert_ne!(cascade_fill(&reopened, "E2").as_deref(), Some("#00ff00"));
+}
+
+#[test]
+fn cascade_missing_cells_resolve_each_column_default_once_per_frame() {
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles = (0..xlsx_parse::MAX_COL_STYLES as u32)
+        .map(|index| ColStyle {
+            first: 100 + index % 2,
+            last: 100 + index % 2,
+            xf: 1 + index % 2,
+        })
+        .collect();
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs = vec![xlsx_model::Xf::default(); 3];
+    model.sheets.push(sheet);
+    xlsx_model::workbook::reset_col_style_scans();
+    let list = xlsx_render::build_display_list(&model, SheetId(0), &chart_viewport()).unwrap();
+    let columns = list.grid.col_offsets.len().saturating_sub(1) as u64;
+    let scans = xlsx_model::workbook::col_style_scans();
+    assert!(columns > 1);
+    assert!(
+        scans <= columns + 2,
+        "{scans} column-default scans for {columns} visible columns"
+    );
+}
+
+#[test]
+fn cascade_open_resolves_column_defaults_without_a_scan_per_empty_cell() {
+    let runs = 4_096_u32;
+    let rows = 2_000_u32;
+    let cols = (0..runs)
+        .map(|index| {
+            format!(
+                r#"<col min="{column}" max="{column}" style="{style}"/>"#,
+                column = index + 2,
+                style = 1 + index % 2
+            )
+        })
+        .collect::<String>();
+    let sheet_data = (1..=rows)
+        .map(|row| format!(r#"<row r="{row}"><c r="A{row}"/><c r="B{row}"/></row>"#))
+        .collect::<String>();
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs = vec![xlsx_model::Xf::default(); 3];
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>{cols}</cols><sheetData>{sheet_data}</sheetData></worksheet>"#
+    ).into_bytes());
+    xlsx_model::workbook::reset_col_style_scans();
+    let parsed = xlsx_parse::parse_workbook(&parts).unwrap();
+    let scans = xlsx_model::workbook::col_style_scans();
+    assert!(
+        scans <= 2,
+        "{scans} column run scans for {rows} empty cells in two columns under {runs} runs"
+    );
+    let sheet = &parsed.sheets[0];
+    for row in 0..rows {
+        assert!(sheet.cell(CellRef::new(row, 0)).is_none());
+        assert_eq!(
+            sheet.cell(CellRef::new(row, 1)).map(|cell| cell.style),
+            Some(Some(0))
+        );
+    }
+}
+
+fn styled_xf_zero_source(
+    fonts: Vec<xlsx_model::Font>,
+    cell_xfs: Vec<xlsx_model::Xf>,
+    sheet_data: &str,
+) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.fonts = fonts;
+    model.styles.cell_xfs = cell_xfs;
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{sheet_data}</sheetData></worksheet>"#
+    ).into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Italic xf 0 on `A1 s="0"`, and a bold default on row 2.
+fn italic_xf_zero_source() -> Vec<u8> {
+    styled_xf_zero_source(
+        vec![
+            xlsx_model::Font {
+                italic: true,
+                ..Default::default()
+            },
+            xlsx_model::Font {
+                bold: true,
+                ..Default::default()
+            },
+        ],
+        vec![
+            xlsx_model::Xf {
+                font: Some(0),
+                ..Default::default()
+            },
+            xlsx_model::Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ],
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c></row><row r="2" s="1" customFormat="1"/>"#,
+    )
+}
+
+fn resolved_format(workbook: &Workbook, address: &str) -> xlsx_model::CellFormat {
+    let model = workbook.model();
+    let style = model.sheets[0].effective_style(cell(address));
+    model.styles.cell_format(Some(style.unwrap_or(0)))
+}
+
+fn clear_style(workbook: &mut Workbook, range: &str, property: betteroffice_xlsx::StyleProperty) {
+    workbook
+        .patch_range_style(
+            SheetId(0),
+            CellRange::parse_a1(range).unwrap(),
+            StylePatch {
+                clear: vec![property],
+                ..StylePatch::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn cascade_collaborative_clear_over_an_italic_xf_zero_stays_plain_on_peers_and_after_save() {
+    let bytes = italic_xf_zero_source();
+    let mut left = Workbook::open_collaborative(&bytes, 831).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 832).unwrap();
+    let mut cleared = resolved_format(&left, "A1");
+    assert!(cleared.font.italic);
+    cleared.font.italic = false;
+    assert_eq!(cleared, xlsx_model::CellFormat::default());
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A1", betteroffice_xlsx::StyleProperty::Italic);
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A1"),
+            xlsx_model::CellFormat::default()
+        );
+        assert!(resolved_format(peer, "B1").font.italic);
+        let reopened = Workbook::open(&peer.save().unwrap()).unwrap();
+        assert_eq!(
+            resolved_format(&reopened, "A1"),
+            xlsx_model::CellFormat::default()
+        );
+        assert!(resolved_format(&reopened, "B1").font.italic);
+    }
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_plain_clears_reuse_one_plain_xf_across_save_and_reopen_cycles() {
+    let addresses = ["A1", "B1", "C1", "D1", "E1"];
+    let mut bytes = styled_xf_zero_source(
+        vec![xlsx_model::Font {
+            italic: true,
+            ..Default::default()
+        }],
+        vec![xlsx_model::Xf {
+            font: Some(0),
+            ..Default::default()
+        }],
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="0"><v>2</v></c><c r="C1" s="0"><v>3</v></c><c r="D1" s="0"><v>4</v></c><c r="E1" s="0"><v>5</v></c></row>"#,
+    );
+    let initial = Workbook::open(&bytes)
+        .unwrap()
+        .model()
+        .styles
+        .cell_xfs
+        .len();
+    for address in addresses {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        clear_style(
+            &mut workbook,
+            address,
+            betteroffice_xlsx::StyleProperty::Italic,
+        );
+        assert_eq!(
+            resolved_format(&workbook, address),
+            xlsx_model::CellFormat::default()
+        );
+        bytes = workbook.save().unwrap();
+    }
+    let reopened = Workbook::open(&bytes).unwrap();
+    for address in addresses {
+        assert_eq!(
+            resolved_format(&reopened, address),
+            xlsx_model::CellFormat::default(),
+            "{address}"
+        );
+    }
+    assert!(resolved_format(&reopened, "F1").font.italic);
+    let added = reopened.model().styles.cell_xfs.len() - initial;
+    assert!(
+        added <= 1,
+        "{added} plain xfs added over {} save and reopen cycles",
+        addresses.len()
+    );
+}
+
+const DEFAULT_FILLS_AND_BORDERS: &str = concat!(
+    r#"<fills count="1"><fill><patternFill patternType="none"/></fill></fills>"#,
+    r#"<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"#,
+);
+
+const UNLOCKED_XF: &str = r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyFont="1" applyProtection="1"><protection locked="0"/></xf>"#;
+
+/// A workbook whose styles part carries `styles` verbatim.
+fn styles_part_source(styles: &str, sheet_data: &str) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(&mut parts, "xl/styles.xml", format!(
+        r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{styles}</styleSheet>"#
+    ).into_bytes());
+    set_test_part(&mut parts, "xl/worksheets/sheet1.xml", format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{sheet_data}</sheetData></worksheet>"#
+    ).into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Italic (and locked) xf 0 on A1 and C1; on B1 an xf 1 the model reads as plain although
+/// its markup `xf` carries more.
+fn plain_reading_xf_source(cell_style_xfs: &str, xf: &str) -> Vec<u8> {
+    styles_part_source(
+        &format!(
+            r#"<fonts count="2"><font><i/></font><font/></fonts>{DEFAULT_FILLS_AND_BORDERS}{cell_style_xfs}<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyFont="1"/>{xf}</cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="1"><v>2</v></c><c r="C1" s="0"><v>3</v></c></row>"#,
+    )
+}
+
+fn index_attribute(tag: &str, name: &str) -> usize {
+    tag.split(&format!(r#" {name}=""#))
+        .nth(1)
+        .map_or(0, |rest| rest[..rest.find('"').unwrap()].parse().unwrap())
+}
+
+/// The markup of each `entry` in a styles part's `list`.
+fn style_entries(styles: &str, list: &str, entry: &str) -> Vec<String> {
+    let open = styles.find(&format!("<{list}")).unwrap();
+    let body = open + styles[open..].find('>').unwrap() + 1;
+    styles[body..styles.find(&format!("</{list}>")).unwrap()]
+        .split(&format!("<{entry}"))
+        .skip(1)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The saved markup of the cellXfs entry a cell names.
+fn saved_cell_xf(bytes: &[u8], address: &str) -> String {
+    let parts = package_map(bytes);
+    let sheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    let start = sheet.find(&format!(r#"<c r="{address}""#)).unwrap();
+    let tag = &sheet[start..start + sheet[start..].find('>').unwrap()];
+    let styles = String::from_utf8(parts["xl/styles.xml"].clone()).unwrap();
+    style_entries(&styles, "cellXfs", "xf").swap_remove(index_attribute(tag, "s"))
+}
+
+fn saved_cell_style(bytes: &[u8], address: &str) -> usize {
+    let parts = package_map(bytes);
+    let sheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    let start = sheet.find(&format!(r#"<c r="{address}""#)).unwrap();
+    let tag = &sheet[start..start + sheet[start..].find('>').unwrap()];
+    index_attribute(tag, "s")
+}
+
+fn nonzero_plain_clear_source(proven_plain: bool) -> Vec<u8> {
+    let plain = if proven_plain {
+        r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0"/>"#
+    } else {
+        ""
+    };
+    let count = if proven_plain { 5 } else { 4 };
+    let second = if proven_plain {
+        r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>"#
+    } else {
+        UNLOCKED_XF
+    };
+    styles_part_source(
+        &format!(
+            r#"<fonts count="3"><font><i/></font><font/><font><b/></font></fonts>{DEFAULT_FILLS_AND_BORDERS}<cellXfs count="{count}"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyFont="1"/>{second}<xf numFmtId="9" fontId="1" fillId="0" borderId="0"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0"/>{plain}</cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="2"><v>1</v></c><c r="B1" s="1"><v>2</v></c><c r="C1" s="0"><v>3</v></c><c r="D1" s="3"><v>4</v></c></row>"#,
+    )
+}
+
+#[test]
+fn cascade_collaborative_automatic_without_a_proven_plain_xf_saves_xf_zero() {
+    let bytes = nonzero_plain_clear_source(false);
+    let mut left = Workbook::open_collaborative(&bytes, 871).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 872).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    left.set_range_number_format(
+        SheetId(0),
+        CellRange::parse_a1("A1").unwrap(),
+        NumberFormatMutation::Automatic,
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        let saved = peer.save().unwrap();
+        assert_eq!(saved_cell_style(&saved, "A1"), 0);
+        assert_eq!(saved_cell_xf(&saved, "A1"), saved_cell_xf(&bytes, "C1"));
+        assert_eq!(
+            resolved_format(&Workbook::open(&saved).unwrap(), "A1").number_format,
+            xlsx_model::NumberFormat::Builtin { id: 0 }
+        );
+    }
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_plain_projection_keeps_main_saved_xfs_for_untouched_cells() {
+    let bytes = styles_part_source(
+        &format!(
+            r#"<fonts count="2"><font/><font/></fonts>{DEFAULT_FILLS_AND_BORDERS}<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>{UNLOCKED_XF}</cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" s="1"><v>2</v></c></row>"#,
+    );
+    let mut left = Workbook::open_collaborative(&bytes, 878).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 879).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    left.edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for (peer, index, source) in [(&left, 1, "B1"), (&right, 1, "B1")] {
+        let saved = peer.save().unwrap();
+        assert_eq!(saved_cell_style(&saved, "B1"), index);
+        assert_eq!(saved_cell_xf(&saved, "B1"), saved_cell_xf(&bytes, source));
+    }
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_batched_copies_of_a_fresh_plain_style_save_locked_locally_and_on_a_peer() {
+    let bytes = nonzero_plain_clear_source(false);
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::parse_a1("A1").unwrap(),
+            NumberFormatMutation::Automatic,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let sheet = &workbook.model().sheets[0];
+    let ops = ["C1", "A1"].map(|address| Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("B1"),
+        cell: CellState::from(sheet.cell(cell(address)).unwrap()),
+    });
+    workbook
+        .apply_ops(ops.to_vec(), CalculationOptions::default())
+        .unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 873).unwrap();
+    peer.apply_update_v1(
+        &workbook
+            .encode_diff_v1(&peer.encode_state_vector_v1())
+            .unwrap(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    for workbook in [&workbook, &peer] {
+        let saved = workbook.save().unwrap();
+        let markup = saved_cell_xf(&saved, "B1");
+        assert!(!markup.contains(r#"locked="0""#), "B1 saved on {markup}");
+        let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+        let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        assert_eq!(restored.save().unwrap(), saved);
+    }
+    assert_eq!(saved_cell_style(&peer.save().unwrap(), "B1"), 0);
+}
+
+#[test]
+fn cascade_nonzero_plain_clears_reuse_a_proven_plain_xf_locally_and_collaboratively() {
+    let bytes = nonzero_plain_clear_source(true);
+    for collaborative in [false, true] {
+        let mut workbook = if collaborative {
+            Workbook::open_collaborative(&bytes, 874).unwrap()
+        } else {
+            Workbook::open(&bytes).unwrap()
+        };
+        workbook
+            .set_range_number_format(
+                SheetId(0),
+                CellRange::parse_a1("A1").unwrap(),
+                NumberFormatMutation::Automatic,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        clear_style(&mut workbook, "D1", betteroffice_xlsx::StyleProperty::Bold);
+        let mut peer = Workbook::open_collaborative(&bytes, 875).unwrap();
+        peer.apply_update_v1(
+            &workbook
+                .encode_diff_v1(&peer.encode_state_vector_v1())
+                .unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        for saved in [workbook.save().unwrap(), peer.save().unwrap()] {
+            for address in ["A1", "D1"] {
+                assert_eq!(saved_cell_style(&saved, address), 4, "{address}");
+                assert_eq!(
+                    resolved_format(&Workbook::open(&saved).unwrap(), address),
+                    xlsx_model::CellFormat::default()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cascade_nonzero_plain_clears_without_a_proven_source_xf_use_zero_in_shared_state() {
+    let bytes = nonzero_plain_clear_source(false);
+    for collaborative in [false, true] {
+        let mut workbook = if collaborative {
+            Workbook::open_collaborative(&bytes, 876).unwrap()
+        } else {
+            Workbook::open(&bytes).unwrap()
+        };
+        clear_style(&mut workbook, "D1", betteroffice_xlsx::StyleProperty::Bold);
+        let mut peer = Workbook::open_collaborative(&bytes, 877).unwrap();
+        peer.apply_update_v1(
+            &workbook
+                .encode_diff_v1(&peer.encode_state_vector_v1())
+                .unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(saved_cell_style(&peer.save().unwrap(), "D1"), 0);
+        let saved = workbook.save().unwrap();
+        if collaborative {
+            assert_eq!(saved_cell_style(&saved, "D1"), 0);
+        } else {
+            assert_eq!(saved_cell_style(&saved, "D1"), 4);
+            assert_eq!(
+                resolved_format(&Workbook::open(&saved).unwrap(), "D1"),
+                xlsx_model::CellFormat::default()
+            );
+        }
+    }
+}
+
+/// Clears italic on A1, saves, reopens and clears it on C1: no cleared cell may pick up
+/// `marker` from xf 1's markup, B1 keeps it, and the second clear reuses the first's xf.
+fn assert_plain_clears_leave_source_markup_behind(cell_style_xfs: &str, xf: &str, marker: &str) {
+    let mut workbook = Workbook::open(&plain_reading_xf_source(cell_style_xfs, xf)).unwrap();
+    clear_style(
+        &mut workbook,
+        "A1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    let saved = workbook.save().unwrap();
+    let mut reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        resolved_format(&reopened, "A1"),
+        xlsx_model::CellFormat::default()
+    );
+    let xfs = reopened.model().styles.cell_xfs.len();
+    clear_style(
+        &mut reopened,
+        "C1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    assert_eq!(reopened.model().styles.cell_xfs.len(), xfs);
+    let resaved = reopened.save().unwrap();
+    for (bytes, cleared) in [(&saved, &["A1"][..]), (&resaved, &["A1", "C1"][..])] {
+        for address in cleared {
+            let markup = saved_cell_xf(bytes, address);
+            assert!(!markup.contains(marker), "{address} saved on {markup}");
+        }
+        assert!(saved_cell_xf(bytes, "B1").contains(marker));
+    }
+}
+
+#[test]
+fn cascade_plain_clears_leave_source_protection_behind() {
+    assert_plain_clears_leave_source_markup_behind("", UNLOCKED_XF, r#"locked="0""#);
+}
+
+#[test]
+fn cascade_plain_clears_leave_source_text_rotation_behind() {
+    assert_plain_clears_leave_source_markup_behind(
+        "",
+        r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyFont="1" applyAlignment="1"><alignment textRotation="90"/></xf>"#,
+        "textRotation",
+    );
+}
+
+#[test]
+fn cascade_plain_clears_leave_a_source_parent_style_behind() {
+    assert_plain_clears_leave_source_markup_behind(
+        r#"<cellStyleXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/></cellStyleXfs>"#,
+        r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="1" applyFont="1"/>"#,
+        r#"xfId="1""#,
+    );
+}
+
+#[test]
+fn cascade_plain_clear_names_no_source_font_whose_markup_the_model_drops() {
+    let bytes = styles_part_source(
+        &format!(
+            r#"<fonts count="2"><font><i/></font><font><vertAlign val="superscript"/></font></fonts>{DEFAULT_FILLS_AND_BORDERS}<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyFont="1"/></cellXfs>"#
+        ),
+        r#"<row r="1"><c r="A1" s="0"><v>1</v></c></row>"#,
+    );
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    clear_style(
+        &mut workbook,
+        "A1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    let saved = workbook.save().unwrap();
+    let xf = saved_cell_xf(&saved, "A1");
+    let styles = String::from_utf8(package_map(&saved)["xl/styles.xml"].clone()).unwrap();
+    let font = &style_entries(&styles, "fonts", "font")[index_attribute(&xf, "fontId")];
+    assert!(
+        !font.contains("vertAlign"),
+        "A1 saved on {xf} naming {font}"
+    );
+    assert_eq!(
+        resolved_format(&Workbook::open(&saved).unwrap(), "A1"),
+        xlsx_model::CellFormat::default()
+    );
+}
+
+/// Peers that cleared italic on A1 beside B1's plain-reading but unlocked xf 1.
+fn collaborative_plain_clear_beside_an_unlocked_xf() -> (Vec<u8>, Workbook, Workbook) {
+    let bytes = plain_reading_xf_source("", UNLOCKED_XF);
+    let mut left = Workbook::open_collaborative(&bytes, 861).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 862).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A1", betteroffice_xlsx::StyleProperty::Italic);
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(left.model(), right.model());
+    (bytes, left, right)
+}
+
+#[test]
+fn cascade_collaborative_plain_clear_leaves_source_protection_behind_on_every_peer() {
+    let (bytes, left, right) = collaborative_plain_clear_beside_an_unlocked_xf();
+    let source = saved_cell_xf(&bytes, "A1");
+    for peer in [&left, &right] {
+        let saved = peer.save().unwrap();
+        assert_eq!(saved_cell_style(&saved, "A1"), 0);
+        assert_eq!(saved_cell_xf(&saved, "A1"), source);
+        assert!(saved_cell_xf(&saved, "B1").contains(r#"locked="0""#));
+    }
+}
+
+#[test]
+#[ignore = "pre-existing on main: a collaborative plain clear without a proven-plain xf keeps the old format"]
+fn cascade_collaborative_plain_clear_without_a_proven_plain_xf_clears_italic_and_keeps_the_lock() {
+    let (_, left, right) = collaborative_plain_clear_beside_an_unlocked_xf();
+    for peer in [&left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A1"),
+            xlsx_model::CellFormat::default()
+        );
+        let saved = peer.save().unwrap();
+        let markup = saved_cell_xf(&saved, "A1");
+        assert!(!markup.contains(r#"locked="0""#), "A1 saved on {markup}");
+        assert!(saved_cell_xf(&saved, "B1").contains(r#"locked="0""#));
+    }
+}
+
+/// A standalone workbook that cleared italic on A1 beside B1's unlocked xf 1, then ran `edit`.
+fn standalone_after_plain_clear(edit: impl FnOnce(&mut Workbook)) -> Workbook {
+    let mut workbook = Workbook::open(&plain_reading_xf_source("", UNLOCKED_XF)).unwrap();
+    clear_style(
+        &mut workbook,
+        "A1",
+        betteroffice_xlsx::StyleProperty::Italic,
+    );
+    edit(&mut workbook);
+    workbook
+}
+
+/// The shared state, applied to a collaborative peer of the same source, keeps A1 and C1 on
+/// their source xf 0 and B1 on xf 1, as on main: it never puts the plain format on an xf not
+/// known to save plain. A recovery round trip saves what the workbook saved, with no cleared
+/// cell unlocked.
+fn assert_plain_edits_share_and_recover_faithfully(workbook: &Workbook) {
+    let source = plain_reading_xf_source("", UNLOCKED_XF);
+    let mut peer = Workbook::open_collaborative(&source, 863).unwrap();
+    let update = workbook
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    let shared = peer.save().unwrap();
+    for address in ["A1", "C1"] {
+        assert_eq!(saved_cell_style(&shared, address), 0, "{address}");
+        assert_eq!(
+            saved_cell_xf(&shared, address),
+            saved_cell_xf(&source, address),
+            "{address}"
+        );
+    }
+    assert!(saved_cell_xf(&shared, "B1").contains(r#"locked="0""#));
+    let saved = workbook.save().unwrap();
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    assert_eq!(restored.save().unwrap(), saved);
+    for address in ["A1", "C1"] {
+        let markup = saved_cell_xf(&saved, address);
+        assert!(
+            !markup.contains(r#"locked="0""#),
+            "{address} saved on {markup}"
+        );
+    }
+}
+
+#[test]
+fn cascade_standalone_plain_clear_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|_| {}));
+}
+
+#[test]
+fn cascade_standalone_value_edit_after_a_plain_clear_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
+        workbook
+            .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+            .unwrap();
+    }));
+}
+
+#[test]
+fn cascade_standalone_undo_and_redo_of_a_plain_clear_share_and_recover_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
+        workbook.undo(CalculationOptions::default()).unwrap();
+        workbook.redo(CalculationOptions::default()).unwrap();
+    }));
+}
+
+#[test]
+fn cascade_standalone_paste_of_a_cleared_cell_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
+        let style = workbook.model().sheets[0].cell(cell("A1")).unwrap().style;
+        workbook
+            .apply_ops(
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: cell("C1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 3.0 },
+                        style,
+                        ..CellState::default()
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }));
+}
+
+#[test]
+fn cascade_standalone_copied_plain_format_shares_and_recovers_faithfully() {
+    assert_plain_edits_share_and_recover_faithfully(&standalone_after_plain_clear(|workbook| {
+        workbook
+            .apply_ops(
+                vec![Op::ApplyRangeFormat {
+                    sheet: SheetId(0),
+                    range: CellRange::parse_a1("C1").unwrap(),
+                    format: betteroffice_xlsx::CapturedFormat {
+                        rows: 1,
+                        columns: 1,
+                        formats: vec![xlsx_model::CellFormat::default()],
+                        kept: Vec::new(),
+                        source_styles: Vec::new(),
+                        source_formats: Vec::new(),
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }));
+}
+
+#[test]
+fn cascade_collaborative_plain_result_under_a_row_default_over_an_italic_xf_zero_stays_plain() {
+    let bytes = italic_xf_zero_source();
+    let mut left = Workbook::open_collaborative(&bytes, 833).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 834).unwrap();
+    assert!(left.model().sheets[0].cell(cell("A2")).is_none());
+    let mut cleared = resolved_format(&left, "A2");
+    assert!(cleared.font.bold && !cleared.font.italic);
+    cleared.font.bold = false;
+    assert_eq!(cleared, xlsx_model::CellFormat::default());
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A2", betteroffice_xlsx::StyleProperty::Bold);
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A2"),
+            xlsx_model::CellFormat::default()
+        );
+        assert!(resolved_format(peer, "B2").font.bold);
+        let reopened = Workbook::open(&peer.save().unwrap()).unwrap();
+        assert_eq!(
+            resolved_format(&reopened, "A2"),
+            xlsx_model::CellFormat::default()
+        );
+    }
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn cascade_collaborative_clear_over_a_plain_xf_zero_adds_no_xf() {
+    let bytes = styled_xf_zero_source(
+        vec![
+            xlsx_model::Font::default(),
+            xlsx_model::Font {
+                italic: true,
+                ..Default::default()
+            },
+        ],
+        vec![
+            xlsx_model::Xf::default(),
+            xlsx_model::Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ],
+        r#"<row r="1"><c r="A1" s="1"><v>1</v></c></row>"#,
+    );
+    let mut local = Workbook::open(&bytes).unwrap();
+    let mut left = Workbook::open_collaborative(&bytes, 835).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 836).unwrap();
+    let xfs = local.model().styles.cell_xfs.len();
+    let baseline = right.encode_state_vector_v1();
+    for workbook in [&mut local, &mut left] {
+        clear_style(workbook, "A1:B2", betteroffice_xlsx::StyleProperty::Italic);
+    }
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let stored = local.model().sheets[0].cell(cell("A1")).unwrap().style;
+    assert!(matches!(stored, None | Some(0)));
+    for peer in [&local, &left, &right] {
+        assert_eq!(
+            resolved_format(peer, "A1"),
+            xlsx_model::CellFormat::default()
+        );
+        assert_eq!(
+            peer.model().sheets[0].cell(cell("A1")).unwrap().style,
+            stored
+        );
+        assert_eq!(peer.model().sheets[0].iter_cells().count(), 1);
+        assert_eq!(peer.model().styles.cell_xfs.len(), xfs);
+    }
+}
+
+#[test]
+fn cascade_collaborative_xf_zero_set_after_a_plain_clear_restores_italic() {
+    let bytes = italic_xf_zero_source();
+    let mut left = Workbook::open_collaborative(&bytes, 837).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 838).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    clear_style(&mut left, "A1", betteroffice_xlsx::StyleProperty::Italic);
+    left.apply_ops(
+        vec![Op::SetCell {
+            sheet: SheetId(0),
+            at: cell("A1"),
+            cell: CellState {
+                value: CellValue::Number { value: 2.0 },
+                style: Some(0),
+                ..CellState::default()
+            },
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&baseline).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for peer in [&left, &right] {
+        assert!(resolved_format(peer, "A1").font.italic);
+    }
+}
+
 #[test]
 fn text_search_uses_formatted_values_and_stable_cell_order() {
     let mut first = Sheet::new("Data");

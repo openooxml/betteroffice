@@ -488,6 +488,34 @@ fn search_offsets_use_original_unicode_positions() {
 }
 
 #[test]
+fn text_number_formats_are_width_free() {
+    check(&[
+        ("TEXT(12, \"_(€* #,##0_)\")", t(" €12 ")),
+        ("TEXT(12, \"0*x0\")", t("12")),
+        ("TEXT(1.2, \"??0.??\")", t("  1.2 ")),
+    ]);
+}
+
+#[test]
+fn text_formats_fraction_placeholders() {
+    check(&[
+        ("TEXT(2.75, \"# ?/?\")", t("2 3/4")),
+        ("TEXT(0.3, \"# ??/??\")", t("  3/10")),
+        ("TEXT(0.3, \"?/8\")", t("2/8")),
+    ]);
+}
+
+#[test]
+fn text_fixed_denominator_numerators_beyond_u64_show_general() {
+    check(&[("TEXT(1E18, \"?/32\")", t("1E+18"))]);
+}
+
+#[test]
+fn text_fraction_convergents_beyond_u64_show_general() {
+    check(&[("TEXT(1000000000000.75, \"?/?????????\")", t("1E+12"))]);
+}
+
+#[test]
 fn search_preserves_contextual_lowercasing() {
     check(&[
         ("SEARCH(\"ΟΣ\", \"ΟΣ\")", n(1.0)),

@@ -427,7 +427,7 @@ fn a_column_style_fills_the_cells_it_formats() {
     sheet.col_styles = vec![ColStyle {
         first: 0,
         last: 1,
-        xf: 0,
+        xf: 1,
     }];
     sheet.set_cell(
         CellRef::new(1, 0),
@@ -435,7 +435,7 @@ fn a_column_style_fills_the_cells_it_formats() {
             value: CellValue::Text {
                 value: "Plain".into(),
             },
-            style: Some(1),
+            style: Some(0),
             ..Cell::default()
         },
     );
@@ -443,11 +443,11 @@ fn a_column_style_fills_the_cells_it_formats() {
     styles.fills = vec![Fill::Solid(Color::Rgb("#204060".into())), Fill::None];
     styles.cell_xfs = vec![
         Xf {
-            fill: Some(0),
+            fill: Some(1),
             ..Xf::default()
         },
         Xf {
-            fill: Some(1),
+            fill: Some(0),
             ..Xf::default()
         },
     ];
