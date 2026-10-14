@@ -16,6 +16,14 @@ export interface ParagraphStyle { id: string; name?: string; isDefault: boolean 
 
 type Pilcrow = Extract<YrsStorySegment, { kind: 'pilcrow' }>;
 const PROTECTED = new Set(['ins', 'del', 'hyperlink']);
+const PARAGRAPH_PROPERTIES = new Set([
+  'pStyle', 'numPr', 'numPrFromStyle', '_originalFormatting', 'defaultTextFormatting',
+  'alignment', 'spaceBefore', 'spaceAfter', 'spaceBeforeLines', 'spaceAfterLines',
+  'beforeAutospacing', 'afterAutospacing', 'lineSpacing', 'lineSpacingRule', 'spacingExplicit',
+  'indentLeft', 'indentRight', 'indentFirstLine', 'hangingIndent', 'borders', 'shading', 'tabs',
+  'pageBreakBefore', 'keepNext', 'keepLines', 'widowControl', 'contextualSpacing', 'snapToGrid',
+  'autoSpaceDE', 'autoSpaceDN', 'outlineLevel', 'bidi',
+]);
 
 export function tableCells(story: string, segments: readonly YrsStorySegment[]): Map<string, TableCell> {
   const cells = new Map<string, TableCell>();
@@ -112,8 +120,10 @@ export function insertTableRow(draft: YrsSession, target: DocxParagraphTarget, p
     const paraId = receipt.newParaIds[column];
     const template = templates[column];
     const source: YrsStorySegment[] = template ? draft.storySegments(template) : [];
-    const alignment = source.find((segment): segment is Pilcrow => segment.kind === 'pilcrow')?.properties.alignment;
-    if (typeof alignment === 'string' && alignment !== 'left') draft.setParagraphAttr(paraId, 'alignment', alignment);
+    const properties = source.find((segment): segment is Pilcrow => segment.kind === 'pilcrow')?.properties;
+    for (const [key, value] of Object.entries(properties ?? {})) {
+      if (PARAGRAPH_PROPERTIES.has(key)) draft.setParagraphAttr(paraId, key, value);
+    }
     const run = source.find(segment => segment.kind === 'text');
     const attrs = Object.fromEntries(Object.entries(run?.attributes ?? {}).filter(([key]) => !PROTECTED.has(key)));
     if (texts[column]) draft.applyRawOps(cell, [{ op: 'insert', index: 0, text: texts[column], attrs }]);
