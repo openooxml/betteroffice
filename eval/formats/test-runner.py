@@ -61,6 +61,15 @@ if os.environ.get('FAKE_MODE') != 'missing':
     shutil.copyfile(source, workspace / task['output'])
 if os.environ.get('FAKE_MODE') == 'change-source':
     (workspace / task['input']).write_bytes(b'changed')
+mode = os.environ.get('FAKE_MODE')
+if mode == 'empty-log':
+    sys.exit(0)
+if mode == 'unstructured-log':
+    print('Done')
+    sys.exit(0)
+if mode == 'message-only':
+    print(json.dumps({'type': 'item.completed', 'item': {'id': 'message-1', 'type': 'agent_message', 'text': 'Done'}}))
+    sys.exit(0)
 print(json.dumps({'type': 'thread.started'}))
 mode = os.environ.get('FAKE_MODE')
 for event in [] if mode == 'no-tools' else ['item.started', 'item.completed']:
@@ -131,6 +140,15 @@ assert not any(value.startswith(('mcp_servers', 'sandbox_workspace_write.writabl
 assert args[-1].endswith(os.environ['FAKE_GENERIC_SUFFIX'])
 task = next(task for task in json.loads(Path(os.environ['FAKE_TASKS']).read_text()) if args[-1].startswith(task['prompt']))
 shutil.copyfile(Path(os.environ['FAKE_CORRECT']) / (task['id'] + '.' + task['format']), workspace / task['output'])
+mode = os.environ.get('FAKE_MODE')
+if mode == 'empty-log':
+    sys.exit(0)
+if mode == 'unstructured-log':
+    print('Done')
+    sys.exit(0)
+if mode == 'message-only':
+    print(json.dumps({'type': 'item.completed', 'item': {'id': 'message-1', 'type': 'agent_message', 'text': 'Done'}}))
+    sys.exit(0)
 print(json.dumps({'type': 'thread.started'}))
 for item in [] if os.environ.get('FAKE_MODE') == 'no-tools' else [
         {'id': 'shell-1', 'type': 'command_execution', 'command': 'python3 edit.py'},
@@ -298,6 +316,22 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(record['tool_calls'], 0)
         self.assertFalse(record['pass'])
         self.assertIn('no tool calls', record['check_message'])
+
+    def test_unavailable_tool_counts_fail_with_correct_output_in_both_arms(self):
+        task = runner.checker.tasks()[0]
+        for arm in ('betteroffice', 'generic'):
+            for mode in ('empty-log', 'unstructured-log', 'message-only'):
+                results = self.root / f'{arm}-{mode}'
+                results.mkdir()
+                environment = self.generic_environment(FAKE_MODE=mode) if arm == 'generic' else patch.dict(os.environ, {'FAKE_MODE': mode})
+                with self.subTest(arm=arm, mode=mode), environment:
+                    record = runner.run_task(task, self.cli if arm == 'betteroffice' else None, 'test-model', results,
+                                             arm=arm, python=self.python if arm == 'generic' else None)
+                    runner.checker.check(task, results / record['task'] / task['output'])
+                    self.assertEqual(record['agent_exit_code'], 0)
+                    self.assertIsNone(record['tool_calls'])
+                    self.assertFalse(record['pass'])
+                    self.assertEqual(record['check_message'], 'agent made no tool calls')
 
     def test_missing_output_crash_and_untouched_export_fail(self):
         for mode in ['missing', 'crash', 'untouched', 'change-source']:
