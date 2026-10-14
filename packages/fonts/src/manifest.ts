@@ -513,18 +513,23 @@ function looksSerif(family: string): boolean {
   );
 }
 
-/**
- * A family no clone matches, paired with the bundled face whose advance widths
- * come closest: Montserrat is within 0.3% of Verdana over a sentence of
- * mixed-case text, where Calibri is 24% too narrow, and it keeps the line
- * breaks the deck was written against. Measured the same way, Trebuchet MS,
- * Tahoma, Century Gothic, Tw Cen MT and Lucida Grande all scored worse on the
- * corpus than plain Calibri does, so they are deliberately left out — a closer
- * advance is not worth a letterform that far off (#797).
- */
-const WIDTH_MATCHED_SUBSTITUTES: Record<string, string> = {
-  verdana: 'Montserrat',
-};
+/** Matching total text widths does not guarantee matching individual digit widths. */
+const WIDTH_MATCHED_SUBSTITUTES = new Map<
+  string,
+  {
+    family: string;
+    digitAdvances: Partial<Record<'regular' | 'bold' | 'italic' | 'boldItalic', number>>;
+  }
+>([
+  ['verdana', {
+    family: 'Montserrat',
+    digitAdvances: { regular: 0.636, bold: 0.711, italic: 0.636, boldItalic: 0.711 },
+  }],
+]);
+
+function resolveWidthMatchedSubstitute(family: string) {
+  return WIDTH_MATCHED_SUBSTITUTES.get(family.trim().toLowerCase());
+}
 
 /**
  * `Calibri Light` and `Inter Light` are families of their own on the machine
@@ -619,12 +624,35 @@ export function resolveLastResortFace(
   if (looksMono(family)) {
     return resolveMetricCompatFace('Courier New', bold, italic)!;
   }
-  const matched = WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()];
+  const matched = resolveWidthMatchedSubstitute(family);
   if (matched) {
-    const face = resolveMetricCompatFace(matched, bold, italic);
+    const face = resolveMetricCompatFace(matched.family, bold, italic);
     if (face) return face;
   }
   const sans = office === 'word' ? 'Arial' : 'Calibri';
   const base = looksSerif(family) ? 'Times New Roman' : sans;
   return resolveMetricCompatFace(base, bold, italic)!;
+}
+
+/** Recorded widest digit advance in em for the requested family and style. */
+export function resolveDigitAdvance(
+  family: string,
+  bold = false,
+  italic = false,
+): number | undefined {
+  const style = bold ? (italic ? 'boldItalic' : 'bold') : (italic ? 'italic' : 'regular');
+  return resolveWidthMatchedSubstitute(family)?.digitAdvances[style];
+}
+
+/** Widest digit advance in whole pixels for spreadsheet column widths. */
+export function maxDigitWidth(
+  family: string,
+  sizePx: number,
+  measure: (digit: string) => number,
+  bold = false,
+  italic = false,
+): number {
+  const advance = resolveDigitAdvance(family, bold, italic);
+  if (advance !== undefined) return Math.round(advance * sizePx);
+  return Math.max(...[...'0123456789'].map((digit) => Math.round(measure(digit))));
 }

@@ -63,6 +63,7 @@ jobs:
 
       - name: Type check
         run: |
+          bun run typecheck:shared
           bun run typecheck:packages
           bun run --filter '@betteroffice/collaboration-relay' typecheck
 
@@ -234,3 +235,84 @@ jobs:
           for binding in $(node scripts/python-bindings.mjs --paths); do
             (cd "$binding" && pytest -q)
           done
+
+  native:
+    name: Native gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            bindings
+          key: native
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - name: Fingerprint the wasm inputs
+        id: wasm
+        run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: target/wasm-pack
+          key: wasm-pack-${{ steps.wasm.outputs.key }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: "v2.9.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build wasm for parity
+        run: |
+          bun run --filter @betteroffice/xlsx build:wasm
+          bun run --filter @betteroffice/pptx build:wasm
+
+      - name: Build and test
+        run: |
+          for package in $(node scripts/native-bindings.mjs --paths); do
+            bunx napi build --cwd "$package" --platform -- --locked
+            bun test "$package/index.test.ts"
+          done
+
+      - name: Check native and wasm parity
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts
+
+      - name: Check generated declarations
+        run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
+
+      - name: Check runtimes
+        run: |
+          node scripts/native-bindings-smoke.mjs
+          bun scripts/native-bindings-smoke.mjs
+          smoke_dir=$(mktemp -d)
+          trap 'rm -rf "$smoke_dir"' EXIT
+          for package in $(node scripts/native-bindings.mjs --paths); do
+            format=${package#bindings/}
+            package_dir="$smoke_dir/node_modules/@betteroffice/$format"
+            mkdir -p "$package_dir"
+            cp "$package/package.json" "$package/index.js" "$package/index.d.ts" "$package/"*.node "$package_dir/"
+          done
+          cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
+          deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"

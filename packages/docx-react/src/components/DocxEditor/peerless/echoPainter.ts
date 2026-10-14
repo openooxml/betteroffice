@@ -1,7 +1,7 @@
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
 import { decodeFrameDelta, drawGlyphRunPrimitive, GlyphCache, type GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
 import {
-  closeCommandBitmap, indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, type EchoGlyphIndex,
+  indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, type EchoGlyphIndex,
 } from '@betteroffice/docx/peerless';
 import type {
   DocxCommandEchoContext,
@@ -10,6 +10,7 @@ import type {
   DocxEchoGlyphSet,
   DocxEchoRect,
 } from '@betteroffice/docx/yrs';
+import { releaseBitmap, retainBitmap } from './bitmapOwnership';
 import type { PeerlessTextIntent } from './inputEvents';
 
 type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache };
@@ -59,7 +60,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   let baseline: { context: DocxCommandEchoContext; set: GlyphSetEntry; end: number } | undefined;
   let prepared: { context: DocxCommandEchoContext; set: GlyphSetEntry; text: string; value: EchoLayout } | undefined;
   let coverage = -1;
-  const closed = new WeakSet<ImageBitmap>();
+  const owner = {};
   const glyphSets = new Map<string, GlyphSetEntry>();
   const requested = new Set<string>();
 
@@ -142,15 +143,13 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       retained.add(item.bitmap);
       for (const background of item.backgrounds ?? []) retained.add(background.bitmap);
     }
+    for (const bitmap of retained) retainBitmap(bitmap, owner);
     const bitmaps = new Set<ImageBitmap>();
     for (const item of staged?.pages ?? []) {
       bitmaps.add(item.bitmap);
       for (const background of item.backgrounds ?? []) bitmaps.add(background.bitmap);
     }
-    for (const bitmap of bitmaps) if (!retained.has(bitmap) && !closed.has(bitmap)) {
-      closed.add(bitmap);
-      closeCommandBitmap(bitmap);
-    }
+    for (const bitmap of bitmaps) if (!retained.has(bitmap)) releaseBitmap(bitmap, owner);
     staged = keep;
   }
 

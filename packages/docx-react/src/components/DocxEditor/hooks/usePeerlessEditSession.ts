@@ -6,6 +6,7 @@ import type {
   DocxWorkerEditSession,
   DocxWorkerEditSessionOptions,
   ResidentCommandConnection,
+  ResidentCommandViewportRequest,
 } from '@betteroffice/docx/peerless';
 import { createPeerlessCommandBinding, type PeerlessCommandBinding } from '../peerless/commandBinding';
 import { createEchoPainter } from '../peerless/echoPainter';
@@ -21,7 +22,8 @@ export type PeerlessDocumentSource = Uint8Array | Document;
 
 export interface UsePeerlessEditSessionOptions {
   source: PeerlessDocumentSource;
-  openConnection(source: PeerlessDocumentSource, signal: AbortSignal): Promise<ResidentCommandConnection>;
+  rasterScale?: number;
+  openConnection(source: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection>;
   recovery?: DocxWorkerEditSessionOptions<PeerlessDocumentSource, PeerlessEchoIntent>['recovery'];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
@@ -37,6 +39,7 @@ export interface PeerlessEditSessionBinding {
   echoPainter: PeerlessEchoPainter;
   presentation: PeerlessFramePresentation;
   setDisplayWindow?(start: number, end: number): void;
+  setRasterScale?(scale: number): void;
 }
 
 /** @internal */
@@ -52,7 +55,8 @@ export function usePeerlessEditSession(
   const [result, setResult] = useState<UsePeerlessEditSessionResult>({ status: 'opening', binding: null, error: null });
   const callbacks = useRef(options);
   callbacks.current = options;
-  const { source } = options;
+  const { source, rasterScale = 1 } = options;
+  const appliedRasterScale = useRef(rasterScale);
   useEffect(() => {
     const controller = new AbortController();
     let binding: PeerlessEditSessionBinding | undefined;
@@ -96,7 +100,12 @@ export function usePeerlessEditSession(
     setResult({ status: 'opening', binding: null, error: null });
     void (async () => {
       try {
-        connection = await callbacks.current.openConnection(source, controller.signal);
+        const getRasterScale = () => {
+          appliedRasterScale.current = callbacks.current.rasterScale ?? 1;
+          return appliedRasterScale.current;
+        };
+        getRasterScale();
+        connection = await callbacks.current.openConnection(source, controller.signal, getRasterScale);
         if (controller.signal.aborted) {
           close();
           return;
@@ -167,7 +176,8 @@ export function usePeerlessEditSession(
         }
         const admission = createInputAdmission({ session, viewStore, echoPainter });
         cleanups.push(() => admission.dispose());
-        let viewport: { start: number; end: number } | undefined;
+        let displayWindow = { start: 0, end: 3 };
+        let viewport: Omit<ResidentCommandViewportRequest, 'frameEpoch'> | undefined;
         let viewportPending = false;
         const requestViewport = async () => {
           if (viewportPending || !connection?.requestViewport || controller.signal.aborted) return;
@@ -184,7 +194,12 @@ export function usePeerlessEditSession(
         };
         binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission), echoPainter, presentation,
           setDisplayWindow(start, end) {
-            viewport = { start, end };
+            displayWindow = { start, end };
+            viewport = { ...viewport, ...displayWindow };
+            void requestViewport();
+          },
+          setRasterScale(scale) {
+            viewport = { ...displayWindow, ...viewport, rasterScale: scale };
             void requestViewport();
           },
         };
@@ -200,5 +215,13 @@ export function usePeerlessEditSession(
       close();
     };
   }, [source]);
+  useEffect(() => {
+    if (result.status !== 'ready' || rasterScale === appliedRasterScale.current) return;
+    const timer = setTimeout(() => {
+      appliedRasterScale.current = rasterScale;
+      result.binding.setRasterScale?.(rasterScale);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [result.binding, rasterScale]);
   return result;
 }

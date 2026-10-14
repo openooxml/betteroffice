@@ -19,17 +19,27 @@ export function createWorkerPrintCapture(binding: PeerlessEditSessionBinding,
         for (const { page, bitmap } of frame.payload.stagedPresentation?.pages ?? []) images.set(page.pageIndex, render(bitmap));
       } catch (cause) { failure = cause instanceof Error ? cause : new Error(String(cause)); }
     },
-    async collect(buildPages: (pages: number[], frameEpoch: number) => Promise<unknown>) {
+    async collect(
+      buildPages: (pages: number[], frameEpoch: number) => Promise<unknown>,
+      complete: (frameEpoch: number) => Promise<unknown>,
+    ) {
       await binding.admission.whenCompositionSettled?.();
       await binding.session.flush();
       if (!isCurrent()) throw new Error('Document changed while printing');
+      const frameEpoch = () => binding.viewStore.getSnapshot().geometry?.frameEpoch ?? 0;
+      if (binding.viewStore.getSnapshot().geometry?.layoutProvisional) {
+        await complete(frameEpoch());
+        // The completed frame lands before the next page build answers.
+        await buildPages([0], frameEpoch());
+        if (!isCurrent()) throw new Error('Document changed while printing');
+      }
       const snapshot = binding.viewStore.getSnapshot();
       version = snapshot.version;
       const pages = snapshot.geometry?.pages;
-      if (!pages?.length) throw new Error('Worker print layout is unavailable');
+      if (!pages?.length || snapshot.geometry?.layoutProvisional) throw new Error('Worker print layout is unavailable');
       for (const { page } of pages) {
         assertCurrent();
-        await buildPages([page.pageIndex], binding.viewStore.getSnapshot().geometry?.frameEpoch ?? 0);
+        await buildPages([page.pageIndex], frameEpoch());
         assertCurrent();
         if (!images.has(page.pageIndex)) throw new Error(`Worker print pixels are unavailable for page ${page.pageIndex + 1}`);
       }

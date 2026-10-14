@@ -72,7 +72,8 @@
     "pretest:e2e:browser": "bun run build:packages && bun run --filter @betteroffice/desktop build",
     "test:e2e:browser": "playwright test --config e2e/browser/playwright.config.ts",
     "test:e2e:browser:plugins": "playwright test --config e2e/browser/plugin-host/playwright.config.ts",
-    "typecheck:e2e": "tsc -p e2e/tsconfig.json"
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json",
+    "typecheck:shared": "tsc --noEmit -p shared/office-session/tsconfig.json"
   },
   "license": "Apache-2.0",
   "homepage": "https://betteroffice.dev",
@@ -82,6 +83,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
+    "@napi-rs/cli": "^3.9.0",
     "jszip": "3.10.1",
     "vite": "8.1.4",
     "playwright": "1.61.1"

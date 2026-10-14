@@ -1,11 +1,22 @@
-import type { WorkbookHandle } from '@betteroffice/xlsx';
-import { XlsxAsyncApiSyncAccessError } from './asyncApiErrors';
+import type { Proposal, ProposalEdit, WorkbookHandle } from '@betteroffice/xlsx';
+import { guardAsyncEditorApi } from './guardAsyncEditorApi';
 import { XlsxCommandAdmissionError, xlsxCommandController } from '../commands/createXlsxCommandStore';
-import type { XlsxCommandStore } from '../commands/types';
-import type { PeerlessWorkerInputCoordinator } from '../commands/peerlessWorkerInputCoordinator';
+import type { XlsxCommandFailureCode, XlsxCommandResult, XlsxCommandStore } from '../commands/types';
+import { commandReason } from '../commands/evaluate';
+import { PeerlessWorkerCommandRefusal, type PeerlessWorkerInputCoordinator } from '../commands/peerlessWorkerInputCoordinator';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { AsyncCollaborationReplica } from '@betteroffice/xlsx/collaboration';
+
+export interface XlsxProposalRequest {
+  agentId: string;
+  note?: string | null;
+  edits: ProposalEdit[];
+}
+
+export type XlsxProposalResult =
+  | { ok: true; proposal: Proposal }
+  | Extract<XlsxCommandResult, { ok: false }>;
 
 /** @experimental */
 export interface XlsxAsyncEditorApi {
@@ -15,6 +26,8 @@ export interface XlsxAsyncEditorApi {
   recoverySave(): Promise<{ bytes: Uint8Array; recovery: true }>;
   readonly commands: XlsxCommandStore;
   readonly collaboration: AsyncCollaborationReplica | null;
+  /** Stages tracked cell edits after pending input drains; available on worker editors. */
+  proposeChanges?(request: XlsxProposalRequest): Promise<XlsxProposalResult>;
   focus(): void;
   renderPng(...args: Parameters<WorkbookHandle['renderPng']>): Promise<ReturnType<WorkbookHandle['renderPng']>>;
   renderRangePng(...args: Parameters<WorkbookHandle['renderRangePng']>): Promise<ReturnType<WorkbookHandle['renderRangePng']>>;
@@ -24,20 +37,6 @@ export interface XlsxAsyncEditorApi {
 }
 
 export { XlsxAsyncApiSyncAccessError } from './asyncApiErrors';
-
-const legacyAlternatives: Readonly<Record<string, string>> = {
-  save: 'commands.execute("save", null)', saveAsync: 'commands.execute("save", null)', handle: 'commands',
-  cell: 'plugin.read.readCells', cellAsync: 'plugin.read.readCells',
-  rangeCells: 'plugin.read.readCells', rangeCellsAsync: 'plugin.read.readCells',
-  readCells: 'plugin.read.readCells', readCellsSync: 'plugin.read.readCells',
-  editCell: 'plugin.edits.applyEdits', editCellAsync: 'plugin.edits.applyEdits', applyEdits: 'plugin.edits.applyEdits',
-  validateEdits: 'plugin.read.validateEdits', version: 'plugin.read.version', findText: 'plugin.read.findText',
-  selectCells: 'plugin.navigation.selectCells', selectCellsAsync: 'plugin.navigation.selectCells',
-  clearSelection: 'plugin.navigation.selectCells', getPositionAtPoint: 'plugin.geometry.getPositionAtPoint',
-  undo: 'commands.execute("undo", null)', redo: 'commands.execute("redo", null)',
-  refreshProposals: 'commands.execute("proposalsPanel", { open: true })',
-  flush: 'commands.execute("save", null)', flushPendingInput: 'commands.execute("save", null)',
-};
 
 export interface XlsxAsyncExportBridge {
   exportSheet(): number;
@@ -69,6 +68,13 @@ export function createAsyncEditorApi(
     } catch (error) { return Promise.reject(error); }
   };
   const replica = session.session.replica?.async;
+  const assertProposalReady = () => {
+    assertCurrent();
+    if (session.failure || !session.ready) throw new XlsxCommandAdmissionError('editor-unavailable');
+  };
+  const proposalRefusal = (code: XlsxCommandFailureCode): XlsxProposalResult => ({
+    ok: false, failure: commandReason(code, null),
+  });
   const call = async <T>(operation: () => Promise<T>): Promise<T> => {
     assertCurrent();
     if (session.failure) throw session.failure;
@@ -108,6 +114,37 @@ export function createAsyncEditorApi(
     recoverySave: () => session.recoverySave(),
     commands: xlsxCommandController(commands)!.guarded(assertCurrent),
     collaboration,
+    async proposeChanges(request) {
+      try {
+        assertProposalReady();
+        const captured = structuredClone(request);
+        const input = bridge().exportCoordinator?.();
+        if (!input) throw new XlsxCommandAdmissionError('editor-unavailable');
+        return await input.runAfterPendingInput(async () => {
+          assertProposalReady();
+          if (input.readOnly) return proposalRefusal('read-only');
+          const ticket = input.command({ kind: 'propose', payload: {
+            args: [captured.agentId, captured.note ?? null, captured.edits],
+          } });
+          const status = await ticket.result;
+          assertProposalReady();
+          return { ok: true as const, proposal: status.result as Proposal };
+        }, 'posted');
+      } catch (error) {
+        if (!session.current || session.retiring) return proposalRefusal('document-replaced');
+        if (session.failure || !session.ready) return proposalRefusal('editor-unavailable');
+        if (error instanceof PeerlessWorkerCommandRefusal) {
+          if (error.status.reason === 'read-only') return proposalRefusal('read-only');
+          if (error.status.reason === 'unsupported') return proposalRefusal('unsupported-command');
+          if (error.status.reason === 'invalid-command' || error.status.reason === 'invalid-step') {
+            return proposalRefusal('invalid-arguments');
+          }
+          return proposalRefusal('input-failed');
+        }
+        if (error instanceof XlsxCommandAdmissionError) return proposalRefusal(error.code);
+        return proposalRefusal('command-failed');
+      }
+    },
     renderPng: (viewport) => exported(() => {
       const captured = structuredClone(viewport);
       const sheet = bridge().exportSheet?.() ?? session.session.state.activeSheet;
@@ -135,11 +172,5 @@ export function createAsyncEditorApi(
       if (!session.failure) bridge().focus();
     },
   };
-  return new Proxy(api, {
-    get(target, key, receiver) {
-      const alternative = typeof key === 'string' && Object.hasOwn(legacyAlternatives, key) ? legacyAlternatives[key] : null;
-      if (alternative) throw new XlsxAsyncApiSyncAccessError(String(key), alternative);
-      return Reflect.get(target, key, receiver);
-    },
-  });
+  return guardAsyncEditorApi(api);
 }

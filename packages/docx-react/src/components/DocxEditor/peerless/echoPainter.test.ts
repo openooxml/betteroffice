@@ -406,9 +406,9 @@ test('echo painting allocates no encoders for pending input', () => {
   expect(constructors).toBe(0);
 });
 
-function scaledFrame(frame: DocxCommandFrame, echoContext: DocxCommandEchoContext | undefined) {
-  const raster = { width: 1000, height: 1250, close() {} } as ImageBitmap;
-  const crop = { width: 125, height: 27, close() {} } as ImageBitmap;
+function scaledFrame(frame: DocxCommandFrame, echoContext: DocxCommandEchoContext | undefined, scale = 1.25) {
+  const raster = { width: 800 * scale, height: 1000 * scale, close() {} } as ImageBitmap;
+  const crop = { width: Math.ceil(100 * scale), height: Math.ceil(21.6 * scale), close() {} } as ImageBitmap;
   const damage = { x: 40, y: 400, width: 100, height: 21.6 };
   const next: DocxCommandFrame = { ...frame, revision: 2, payload: { ...frame.payload, echoContext,
     stagedPresentation: { frameEpoch: 2, pages: [
@@ -419,21 +419,22 @@ function scaledFrame(frame: DocxCommandFrame, echoContext: DocxCommandEchoContex
 }
 
 test('echo restores and paints in raster device pixels and declines on a resized canvas', () => {
-  for (const zoom of [1, 1.1]) {
+  for (const [scale, zoom] of [[1.25, 1], [1.25, 1.1], [2, 1], [3, 1]] as const) {
     const { painter, frame, canvas, draws, transforms, texts } = setup();
     const echo = context();
     echo.frameEpoch = 2;
     echo.damage = [{ ...echo.damage[0]!, rect: { x: 40, y: 400, width: 100, height: 21.6 } }];
-    echo.glyphs = { ...echo.glyphs!, x: 40, y: 414, right: 140, device: { x: 50, y: 500, width: 125, height: 27 }, pixelRatio: 1.25 };
-    const { next, raster, crop } = scaledFrame(frame, echo);
+    const device = { x: 40 * scale, y: 400 * scale, width: Math.ceil(100 * scale), height: Math.ceil(21.6 * scale) };
+    echo.glyphs = { ...echo.glyphs!, x: 40, y: 414, right: 140, device, pixelRatio: scale };
+    const { next, raster, crop } = scaledFrame(frame, echo, scale);
     painter.reconcile(next, [], []);
     canvas.width = raster.width * zoom;
     canvas.height = raster.height * zoom;
     const pending = entry(1, painter.preview({ kind: 'insertText', payload: { text: 'c' } })!);
     painter.paint([pending]);
     if (zoom === 1) {
-      expect(draws.filter(([image]) => image === crop).at(-1)).toEqual([crop, 50, 500]);
-      expect(transforms.slice(-2)).toEqual([[1, 0, 0, 1, 0, 0], [1.25, 0, 0, 1.25, 0, 0]]);
+      expect(draws.filter(([image]) => image === crop).at(-1)).toEqual([crop, device.x, device.y]);
+      expect(transforms.slice(-2)).toEqual([[1, 0, 0, 1, 0, 0], [scale, 0, 0, scale, 0, 0]]);
       expect(texts.at(-1)).toBe('abc');
     } else {
       expect(draws.some(([image]) => image === crop)).toBe(false);

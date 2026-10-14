@@ -21,12 +21,12 @@ import { createPeerlessViewStore } from './viewStore';
 
 type ResidentCommandInitRequest = Parameters<ResidentEngineWorkerClient['commandInit']>[0];
 
-async function openFontConnection(hold = false, fontKeys: readonly string[] = ['face']) {
+async function openFontConnection(hold = false, fontKeys: readonly string[] = ['face'], getRasterScale?: () => number) {
   const source = readFileSync(`${import.meta.dir}/PeerlessDocxEditor.tsx`, 'utf8');
   const start = source.indexOf('    signal.throwIfAborted();', source.indexOf('const openConnection ='));
   const end = source.indexOf('\n  }, [controller]);', start);
   const transpiler = new Bun.Transpiler({ loader: 'tsx' });
-  const body = transpiler.transformSync(`async function open(input, signal) {${source.slice(start, end).replace(
+  const body = transpiler.transformSync(`async function open(input, signal, getRasterScale) {${source.slice(start, end).replace(
     'const fonts: YrsResidentFontRegistration[] = [];',
     'const fonts: YrsResidentFontRegistration[] = []; observeFonts(fonts);',
   )} }`);
@@ -93,13 +93,23 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     settings: { current: { readOnly: false } }, identity: {}, retained: {}, pageIndexes: {}, prepared: {},
   };
   const open = new Function(...Object.keys(dependencies), `${body}\nreturn open;`)(...Object.values(dependencies)) as
-    (bytes: Uint8Array, signal: AbortSignal) => Promise<typeof connection>;
-  const result = open(Uint8Array.of(1), controller.signal);
+    (bytes: Uint8Array, signal: AbortSignal, getRasterScale?: () => number) => Promise<typeof connection>;
+  const result = open(Uint8Array.of(1), controller.signal, getRasterScale);
   await initialized;
   return { result, controller, get init() { return init; }, registerFont, registerSubstituteFont,
     getRustTextEngine, get collector() { return collector; }, get collected() { return collected; },
     cleared: () => cleared, destroyed: () => destroyed };
 }
+
+test('command init receives the latest raster scale', async () => {
+  let scale = 2;
+  const opening = openFontConnection(false, ['face'], () => scale);
+  scale = 3;
+  const opened = await opening;
+  const connection = await opened.result;
+  try { expect(opened.init!.rasterScale).toBe(3); }
+  finally { await connection.client.dispose(); opened.controller.abort(); }
+});
 
 test('repeated_open_allocates_no_main_fonts', async () => {
   for (let cycle = 0; cycle < 2; cycle += 1) {

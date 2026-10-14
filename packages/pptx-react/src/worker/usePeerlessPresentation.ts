@@ -61,7 +61,15 @@ export function usePeerlessPresentation(
   props: PptxAsyncEditorProps, canvas: RefObject<HTMLCanvasElement | null>,
 ): { presentation: PeerlessPresentation | null; pending: PeerlessPresentation | null; failure: Error | null } {
   const fonts = useStableFonts(props.fonts);
-  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, props.collaboration]);
+  const collaboration = props.collaboration;
+  const initialUpdate = useRef(collaboration?.initialUpdate);
+  const update = collaboration?.initialUpdate;
+  if (initialUpdate.current !== update && (!initialUpdate.current || !update ||
+    initialUpdate.current.length !== update.length || !initialUpdate.current.every((byte, index) => byte === update[index]))) {
+    initialUpdate.current = update;
+  }
+  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, Boolean(collaboration),
+    collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
   const latestFile = useRef(fileGeneration);
   latestFile.current = fileGeneration;
   const callbacks = useRef(props);

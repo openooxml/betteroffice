@@ -1,13 +1,35 @@
+import type { Proposal, ProposalEdit, WorkbookHandle } from '../../../packages/xlsx/src/wasm/loader';
+
+type CommandResult = { ok: true } | { ok: false; failure: { code: string; message: string } };
+
+/** The part of XlsxAsyncEditorApi the specs drive, typed without the built xlsx-react package. */
+export interface WorkerEditorApiProbe {
+  readonly commands: {
+    getState(id: 'proposalsPanel'): { value: number };
+    execute(id: 'proposalsPanel', args: { open: boolean } | null): Promise<CommandResult>;
+    execute(id: 'proposalAccept' | 'proposalReject', args: { proposalId: string }): Promise<CommandResult>;
+  };
+  proposeChanges?(request: { agentId: string; note?: string | null; edits: ProposalEdit[] }):
+    Promise<{ ok: true; proposal: Proposal } | Extract<CommandResult, { ok: false }>>;
+  exportStructured(...args: Parameters<WorkbookHandle['exportStructured']>): Promise<ReturnType<WorkbookHandle['exportStructured']>>;
+}
+
 export interface WorkerEditorProbe {
   ready: Promise<void>;
   mainThreadEngines(): number;
   peerless: {
+    readonly editor: WorkerEditorApiProbe;
     cells(sheet: number, range: string): Promise<string[][]>;
     selection(): Promise<{
       sheetIndex: number;
       cells: { anchor: { row: number; col: number }; focus: { row: number; col: number } } | null;
     } | null>;
     failure(): string | null;
+    /** Cell rects of the painted frame in canvas CSS pixels, read through plugin geometry. */
+    cellRects(cells: [number, number][]): Promise<{
+      zoom: number;
+      rects: { x: number; y: number; width: number; height: number }[];
+    } | null>;
     workerCount(): number;
     saveAndReopen(): Promise<number>;
     recoverAndReopen(): Promise<number>;
@@ -20,6 +42,9 @@ export interface WorkerEditorProbe {
   readOnlyEditRefusal(): string;
   savedInputs(): Promise<string[]>;
   releaseHydration(): void;
+  holdCellInputs(): void;
+  heldCellInputs(): number;
+  releaseCellInputs(): void;
   flush(): Promise<void>;
   zoom(scale: number): Promise<void>;
   cellClip(): { x: number; y: number; width: number; height: number };

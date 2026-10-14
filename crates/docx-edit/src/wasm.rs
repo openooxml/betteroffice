@@ -1897,6 +1897,23 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// The retained region layout of exactly the first `pages` pages when no
+    /// later content can change them, and of the whole document otherwise; see
+    /// `EngineSession::layout_document_with_regions_exact_prefix_retained`.
+    /// Returns `{ provisional, pages, documentWidth? }` as JSON.
+    pub fn layout_document_with_regions_exact_prefix_retained(
+        &self,
+        input: &str,
+        pages: u32,
+    ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        let layout = self
+            .engine
+            .layout_document_with_regions_exact_prefix_retained(input, pages as usize)
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&layout).map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
     /// Begins `layout_document_with_regions_retained_json` as a pass measured a
     /// step at a time; see `EngineSession::begin_region_layout`. Returns the
     /// progress JSON, with `layoutJson` once the pass is complete.

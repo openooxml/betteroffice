@@ -185,7 +185,7 @@ async function installProbe(page: Page) {
   });
 }
 
-async function documentBytes(pageCount = 1) {
+async function documentBytes(pageCount = 1, feature = 'plain') {
   const zip = new JSZip();
   zip.file('[Content_Types].xml',
     '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -199,8 +199,14 @@ async function documentBytes(pageCount = 1) {
     '</Relationships>');
   zip.file('word/document.xml',
     '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
-    '<w:body>' + Array.from({ length: pageCount }, (_, index) =>
-      '<w:p>' + (index ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : '') +
+    '<w:body>' +
+    (feature === 'table' ? '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Table cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' : '') +
+    (feature === 'PAGE' ? '<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>' : '') +
+    Array.from({ length: pageCount }, (_, index) =>
+      (feature === 'section' && index === 32 ? '<w:p><w:pPr><w:sectPr><w:pgSz w:w="9000" w:h="15840"/></w:sectPr></w:pPr></w:p>' : '') +
+      '<w:p>' + (feature === 'keep' && (index === 0 || index === 31 || index === 32)
+        ? '<w:pPr><w:pStyle w:val="Heading1"/><w:outlineLvl w:val="0"/><w:keepNext/><w:keepLines/></w:pPr>'
+        : index ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : '') +
       '<w:r><w:t>' + (index ? `page ${index + 1}` : 'abcd') + '</w:t></w:r></w:p>'
     ).join('') + '<w:sectPr>' +
     '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>' +
@@ -1127,3 +1133,61 @@ test('table_tab_and_shift_tab_preserve_typing_with_acks_withheld', async ({ page
   expect(await savedText(page)).toBe('ZXAYB');
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBe(0);
 });
+
+async function openViewportFirst(page: Page, feature: string) {
+  await installProbe(page);
+  await page.goto('/?format=docx&peerless=1');
+  await page.evaluate(() => { window.__docxPeerlessInput.holdFrames = true; });
+  await page.locator('input[type=file]').last().setInputFiles({
+    name: 'generated-pages.docx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    buffer: await documentBytes(80, feature),
+  });
+  const canvas = documentCanvas(page);
+  await expect(canvas).toBeVisible();
+  await expect.poll(() => page.evaluate(() => !!window.__docxPeerlessInput.initial)).toBe(true);
+  return canvas;
+}
+
+async function releaseCertifiedGeometry(page: Page) {
+  const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
+  const prefixHeight = await scroller.evaluate((element) => element.scrollHeight);
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.heldFrames.some(({ message }) =>
+    message.ok && message.commandFrame?.frame.payload.layoutProvisional !== true))).toBe(true);
+  await page.evaluate(() => window.__docxPeerlessInput.releaseFrames());
+  await expect.poll(() => scroller.evaluate((element) => element.scrollHeight)).toBeGreaterThan(prefixHeight);
+}
+
+for (const feature of ['plain', 'table', 'keep', 'section', 'PAGE']) {
+test(`viewport-first ${feature} open preserves pixels and page position as certified geometry grows`, async ({ page }) => {
+  const canvas = await openViewportFirst(page, feature);
+  const initial = await page.evaluate(() => {
+    const payload = window.__docxPeerlessInput.initial!.frame!.payload;
+    return { provisional: payload.layoutProvisional, frame: Array.from(new Uint8Array(payload.frame)) };
+  });
+  expect(initial.provisional).toBe(true);
+  expect(applyFrameDelta(null, decodeFrameDelta(Uint8Array.from(initial.frame))).pages).toHaveLength(3);
+  const before = await canvas.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
+  });
+  await releaseCertifiedGeometry(page);
+  const after = await canvas.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { pixels: (element as HTMLCanvasElement).toDataURL(), x: rect.x, y: rect.y };
+  });
+  expect(after).toEqual(before);
+});
+
+test(`viewport-first ${feature} open paints later pages after certified geometry grows`, async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Viewport probes require DOCX_PEERLESS_HARNESS=1');
+  await openViewportFirst(page, feature);
+  await releaseCertifiedGeometry(page);
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
+  await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
+  await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
+  const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
+  await expect(later).toBeAttached();
+  await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);
+});
+}

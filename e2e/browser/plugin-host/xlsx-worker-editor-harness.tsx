@@ -7,6 +7,7 @@ import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src
 import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
 import { workbookSessionInternals, WORKBOOK_REPLAY_MUTATORS } from '../../../packages/xlsx/src/session/replay';
 import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
+import { addPatternSheet } from './xlsx-pattern-workbook';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -72,6 +73,7 @@ ${variant === 'merged-grid' ? '<mergeCells count="1"><mergeCell ref="B2:C3"/></m
 <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="1714500" cy="1143000"/><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Route chart"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>`);
   zip.file('xl/drawings/_rels/drawing1.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>');
   zip.file('xl/charts/chart1.xml', `<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:layout/><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>Route</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>`);
+  if (variant === 'patterns') addPatternSheet(zip);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -125,6 +127,8 @@ globalThis.Worker = new Proxy(NativeWorker, {
 let generation = 0;
 let activeSession: WorkbookSession | null = null;
 let latestFrame: WorkbookFrame | null = null;
+let cellInputHold: ReturnType<typeof deferred<void>> | null = null;
+let heldCellInputs = 0;
 const backendOpen = editableWorkbookSessionBackend.open;
 editableWorkbookSessionBackend.open = async (...args) => {
   const token = ++generation;
@@ -142,6 +146,15 @@ editableWorkbookSessionBackend.open = async (...args) => {
   session.call.frame = async (...input) => {
     const value = await frame(...input);
     if (token === generation) latestFrame = value;
+    return value;
+  };
+  const cellInputs = session.call.cellInputs;
+  session.call.cellInputs = async (...input) => {
+    const hold = cellInputHold;
+    const value = await cellInputs(...input);
+    if (!hold) return value;
+    heldCellInputs += 1;
+    try { await hold.promise; } finally { heldCellInputs -= 1; }
     return value;
   };
   return session;
@@ -196,12 +209,12 @@ let readOnly = false;
 let readyCount = 0;
 const open = (bytes: Uint8Array) => {
   source = bytes;
-  const editor = peerless ? <XlsxEditor asyncApi file={bytes} readOnly={readOnly} plugins={[plugin]}
+  const editor = peerless ? <XlsxEditor file={bytes} readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
     onSave={(bytes) => { savedBytes = bytes; }} onReady={(value) => {
       readyCount += 1;
       peerlessApi = value; peerlessCurrent.resolve(value);
-    }} /> : <XlsxEditor file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
+    }} /> : <XlsxEditor legacySyncApi file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
     onReady={(value) => {
       readyCount += 1;
@@ -231,6 +244,7 @@ window.__xlsxWorkerEditor = {
   ready, errors, previews, previewFrames, commitOrder, peerEntries, replayEntries,
   mainThreadEngines: () => mainThreadEngines,
   peerless: peerless ? {
+    get editor() { return peerlessApi!; },
     async cells(sheet, range) {
       const result = await activeSession!.call.cellInputs(sheet, range);
       return result.cells.map((row) => row.map((cell) => cell.input));
@@ -242,6 +256,23 @@ window.__xlsxWorkerEditor = {
       return selected;
     },
     failure: () => peerlessApi?.failure?.message ?? null,
+    async cellRects(cells) {
+      if (!context) throw new Error('Plugin is not active');
+      let placed: Awaited<ReturnType<NonNullable<WorkerEditorProbe['peerless']>['cellRects']>> = null;
+      await context.run(({ geometry }) => {
+        const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
+        const layer = rootElement.querySelector<HTMLElement>('[data-testid="plugin-overlays"]');
+        if (!geometry || !canvas || !layer) return;
+        const canvasBounds = canvas.getBoundingClientRect();
+        const layerBounds = layer.getBoundingClientRect();
+        const dx = layerBounds.left + layer.clientLeft - layer.scrollLeft - canvasBounds.left;
+        const dy = layerBounds.top + layer.clientTop - layer.scrollTop - canvasBounds.top;
+        const rects = cells.map(([row, col]) => geometry.getCellRect({ sheetId: geometry.layout.sheetId, row, col }));
+        if (rects.some((rect) => !rect)) return;
+        placed = { zoom: geometry.layout.zoom, rects: rects.map((rect) => ({ ...rect!, x: rect!.x + dx, y: rect!.y + dy })) };
+      });
+      return placed;
+    },
     workerCount: () => workers.length,
     async saveAndReopen() {
       savedBytes = null;
@@ -272,8 +303,11 @@ window.__xlsxWorkerEditor = {
     } finally { await session.dispose(); }
   },
   releaseHydration() { holdingHydration = false; hydrationRelease.resolve(); },
+  holdCellInputs() { cellInputHold = deferred<void>(); },
+  heldCellInputs: () => heldCellInputs,
+  releaseCellInputs() { cellInputHold?.resolve(); cellInputHold = null; },
   async flush() { await api!.flush(); },
-  async zoom(scale) { await api!.commands.execute('zoom', { scale }); },
+  async zoom(scale) { await (peerless ? peerlessApi : api)!.commands.execute('zoom', { scale }); },
   cellClip() {
     const grid = latestFrame?.displayList.grid;
     const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');

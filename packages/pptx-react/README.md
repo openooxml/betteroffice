@@ -47,6 +47,9 @@ Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `fileName`,
 `onChange` (deck snapshots), `onError`, `onSave` (receives the saved bytes;
 without it, saving downloads the file), `readOnly`, `toolbar`, and `showToolbar`.
 
+Plugins created with `definePptxPlugin` work on the default worker-owned editor
+through `plugins`, `pluginGrants`, and `onPluginError`.
+
 ## Compose the toolbar
 
 Every built-in control runs through one command store per editor,
@@ -172,10 +175,10 @@ replaced while input flushes.
 
 ## Host plugins
 
-Host-owned tools (review aids, checks, templates) install through the `plugins`
-prop. A plugin contributes a docked panel, an overlay and commands, and works
-through restricted clients rather than the editor API or the presentation
-handle:
+Host-owned tools (review aids, checks, templates) require `legacySyncApi={true}`
+and install through the `plugins` prop. A plugin contributes a docked panel, an
+overlay and commands, and works through restricted clients rather than the editor
+API or the presentation handle:
 
 ```tsx
 import { PptxEditor, definePptxPlugin } from '@betteroffice/pptx-react';
@@ -205,6 +208,7 @@ const review = definePptxPlugin<State>({
 });
 
 <PptxEditor
+  legacySyncApi
   file={bytes}
   fonts={fonts}
   plugins={[review]}
@@ -356,6 +360,9 @@ proposal list.
 Pass a `collaboration` prop to co-edit a deck live. `onReplica` hands you the
 session; drive it with a `CollaborationProvider` over any transport. Every peer
 must boot from the same `initialUpdate` seed.
+
+The default async editor keeps sessions open across equivalent options objects.
+Set optional `collaboration.roomId` to reopen when joining a different room.
 
 ```tsx
 import { CollaborationProvider } from '@betteroffice/pptx';

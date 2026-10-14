@@ -503,6 +503,19 @@ describe('command host', () => {
     expect(s.frames).toEqual([]);
   });
 
+  for (const mode of ['throws', 'rejects'] as const) {
+    it(`poisons an apply that ${mode} undefined with an unknown outcome`, async () => {
+      const s = model({ apply: mode === 'throws' ? () => { throw undefined; } : () => Promise.reject(undefined) });
+      const error = await edit(s.host, envelope(1)).catch((error: unknown) => error);
+      expect(isCommandOutcomeUnknownError(error)).toBe(true);
+      if (!isCommandOutcomeUnknownError(error)) throw new Error('Missing unknown-outcome error');
+      expect(error.refusal).toEqual({ seq: 1 });
+      expect(error.message).toBe('Command 1 has an unknown outcome: undefined');
+      expect(await edit(s.host, envelope(2)).catch((error: unknown) => error)).toBe(error);
+      expect(await s.host.checkpoint(null).catch((error: unknown) => error)).toBe(error);
+    });
+  }
+
   it('requires applied to advance version and noop to preserve it', async () => {
     for (const status of ['applied', 'noop'] as const) {
       let version = 10;
@@ -593,6 +606,35 @@ describe('command host', () => {
     expect(errors.every((error) => error === errors[0])).toBe(true);
     expect(s.calls).toEqual([]);
     expect(s.frames).toEqual([]);
+  });
+
+  it('reports an in-flight apply failure as unknown after capacity poisons the host', async () => {
+    const started = deferred<void>();
+    const held = deferred<void>();
+    const calls: number[] = [];
+    const s = model({
+      async apply(command) {
+        calls.push(command.seq);
+        started.resolve();
+        await held.promise;
+        throw new Error('mutation failed');
+      },
+    });
+    const first = s.host.handler(null, envelope(1)).catch((error: unknown) => error);
+    await started.promise;
+    const queued = Array.from({ length: 4096 }, (_, index) =>
+      s.host.handler(null, envelope(index + 2)).catch((error: unknown) => error));
+    const capacity = await queued[4095];
+    expect(capacity).toBeInstanceOf(SessionFailure);
+    expect(capacity).toMatchObject({ code: 'out-of-memory' });
+    held.resolve();
+    const error = await first;
+    expect(isCommandOutcomeUnknownError(error)).toBe(true);
+    if (!isCommandOutcomeUnknownError(error)) throw new Error('Missing unknown-outcome error');
+    expect(error.refusal).toEqual({ seq: 1 });
+    expect(error.message).toContain('mutation failed');
+    await Promise.all(queued);
+    expect(calls).toEqual([1]);
   });
 
   it('counts queued admissions and returns a frame only with the last settled edit', async () => {

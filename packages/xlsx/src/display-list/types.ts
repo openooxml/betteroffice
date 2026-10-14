@@ -38,6 +38,25 @@ export interface FillRectCmd {
   clip?: Rect;
 }
 
+export type PatternType =
+  | 'gray125' | 'gray0625' | 'mediumGray' | 'darkGray' | 'lightGray'
+  | 'darkHorizontal' | 'darkVertical' | 'darkDown' | 'darkUp' | 'darkGrid' | 'darkTrellis'
+  | 'lightHorizontal' | 'lightVertical' | 'lightDown' | 'lightUp' | 'lightGrid' | 'lightTrellis';
+
+export interface PatternFillCmd {
+  op: 'patternFill';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  pattern: PatternType;
+  fg: string;
+  bg: string;
+  originX: number;
+  originY: number;
+  clip?: Rect;
+}
+
 /**
  * Stroke a straight line — gridlines, cell borders, frozen-pane dividers.
  */
@@ -54,7 +73,13 @@ export interface LineCmd {
    * dash pattern; `'double'` draws two thin parallel passes offset by ±. Skip-
    * serialized at its default in Rust, so a solid line omits the field.
    */
-  style?: 'dashed' | 'dotted' | 'double';
+  style?: 'dashed' | 'dotted' | 'double' | 'mediumDashed' | 'dashDot' | 'mediumDashDot'
+    | 'dashDotDot' | 'mediumDashDotDot' | 'slantDashDot';
+  /**
+   * Rail width of a `'double'` line: two rails this wide on the outer edges of
+   * `width`. Absent, painters keep the legacy rails derived from `width`.
+   */
+  rail?: number;
   clip?: Rect;
 }
 
@@ -115,6 +140,7 @@ export interface TextCmd {
   dashedUnderline?: boolean;
   /** css/font family from the style font; the backend falls back to its default. */
   fontFamily?: string;
+  numberFormat?: NumberFormatLayout;
   /**
    * Preview text that is not the cell's committed value (a proposal ghost's
    * `new` text). Painted normally, but excluded from a11y text recovery.
@@ -123,10 +149,18 @@ export interface TextCmd {
   chart?: boolean;
 }
 
+export interface NumberFormatLayout {
+  left: number;
+  width: number;
+  parts: { offset: number; kind: 'padding' | 'fill'; character: string }[];
+  general?: number;
+  overflow?: boolean;
+}
+
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | LineCmd | PathCmd | TextCmd;
+export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd;
 
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and

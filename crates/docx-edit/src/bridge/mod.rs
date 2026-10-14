@@ -1400,6 +1400,22 @@ fn walk_story_chunks<T: ReadTxn>(
             Out::YMap(opaque)
                 if shared_map_string(opaque, txn, "_kind").as_deref() == Some("opaqueDrawing") =>
             {
+                let values = shared_values(opaque, txn);
+                if let Some(preview) = values.get("preview").and_then(any_map) {
+                    let formatting = lower_run_formatting(attributes, env);
+                    paragraph_runs.push(RawRun {
+                        kind: RawRunKind::Image(lower_image_values(preview, &formatting, env)),
+                        formatting,
+                        story_start: story_index,
+                        story_end: story_index + 1,
+                        pm_start: paragraph_pm_units,
+                        pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inline_sdt_widget: None,
+                        atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
+                    });
+                }
                 story_index += 1;
                 paragraph_pm_units += 1;
                 at_block_boundary = false;
@@ -2650,8 +2666,15 @@ fn lower_inline_sdt_values(
                 });
                 1
             }
-            "image" => {
-                if let Some(payload) = payload {
+            "image" | "opaqueDrawing" => {
+                let image = if kind == "opaqueDrawing" {
+                    payload
+                        .and_then(|payload| payload.get("preview"))
+                        .and_then(any_map)
+                } else {
+                    payload
+                };
+                if let Some(payload) = image {
                     runs.push(RawRun {
                         kind: RawRunKind::Image(lower_image_values(payload, &formatting, env)),
                         formatting,

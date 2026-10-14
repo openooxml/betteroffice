@@ -13,7 +13,7 @@ import {
   resolveLastResortFace,
   resolveMetricCompatFace,
 } from "@betteroffice/fonts";
-import type { PptxPlugin, PptxPluginGrant } from "@betteroffice/pptx-react";
+import type { PptxLegacyEditorProps, PptxPlugin, PptxPluginGrant } from "@betteroffice/pptx-react";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,
@@ -24,7 +24,7 @@ import {
   type CollaborationTransport,
 } from "../collab";
 
-const PptxEditor = dynamic(
+const PptxEditor = dynamic<PptxLegacyEditorProps & { experimentalWorkerOpen: false }>(
   () => import("@betteroffice/pptx-react").then((module) => module.PptxEditor),
   { ssr: false },
 );
@@ -236,7 +236,7 @@ export function PptxDemoClient() {
             Failed to load the demo presentation: {error}
           </p>
         ) : assets ? (
-          <PptxEditor
+          <PptxEditor legacySyncApi experimentalWorkerOpen={false}
             file={assets.file}
             fonts={assets.fonts}
             collaboration={collaboration}

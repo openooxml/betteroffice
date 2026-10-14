@@ -6,7 +6,7 @@
 <thead><tr><th></th><th>A</th><th>B</th><th>C</th><th>D</th><th>F</th><th>G</th><th>H</th><th>I</th><th>J</th><th>K</th></tr></thead>
 <tbody>
 <tr><th>1</th><td>Name</td><td>Qty</td><td>Price</td><td>Total</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-<tr><th>2</th><td>Apple</td><td>3</td><td>1.50</td><td>4.5</td><td>0.5</td><td>3/15/23</td><td></td><td></td><td></td><td></td></tr>
+<tr><th>2</th><td>Apple</td><td>3</td><td>1.50</td><td>4.5</td><td> 1/2</td><td>3/15/23</td><td>0.25</td><td></td><td></td><td></td></tr>
 <tr><th>3</th><td>Pear &lt;script&gt;|*x* &amp; [y](z)</td><td>2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr><th>5</th><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr><th>6</th><td rowspan="1" colspan="2" data-merge="A6:B6">merged</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>

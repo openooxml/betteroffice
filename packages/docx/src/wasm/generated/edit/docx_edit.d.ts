@@ -566,6 +566,13 @@ export class EditSession {
      */
     layout_document_with_regions_after_edit(input: string): void;
     /**
+     * The retained region layout of exactly the first `pages` pages when no
+     * later content can change them, and of the whole document otherwise; see
+     * `EngineSession::layout_document_with_regions_exact_prefix_retained`.
+     * Returns `{ provisional, pages, documentWidth? }` as JSON.
+     */
+    layout_document_with_regions_exact_prefix_retained(input: string, pages: number): string;
+    /**
      * Region-layout input JSON in, a paginated envelope with section and page
      * regions already composed as JSON out — ready for the display builder
      * with no host-side layout mutation. Retains the pass for resident edits.
@@ -1716,6 +1723,7 @@ export interface InitOutput {
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_after_edit: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_layout_document_with_regions_exact_prefix_retained: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained: (a: number, b: number, c: number) => [number, number];
