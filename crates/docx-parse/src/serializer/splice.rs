@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use crate::paragraph_identity::{
     ParagraphOccurrence, Tag, attribute, paragraph_occurrences, patch_paragraph_ids, tags,
-    unescaped,
+    unescaped, MC_NAMESPACE,
 };
 
 use super::context::RecordedParagraphs;
@@ -131,7 +131,7 @@ fn subtract(
 }
 
 /// The namespace prefixes `fragment` uses outside the scope of its own declarations of them.
-fn required_prefixes(fragment: &str) -> Option<BTreeSet<&str>> {
+pub(crate) fn required_prefixes(fragment: &str) -> Option<BTreeSet<&str>> {
     let mut required = BTreeSet::new();
     let mut scopes: Vec<Vec<&str>> = Vec::new();
     for tag in tags(fragment)? {
@@ -164,7 +164,7 @@ fn required_prefixes(fragment: &str) -> Option<BTreeSet<&str>> {
 }
 
 /// The root element's start tag.
-fn root_tag(xml: &str) -> Option<Tag<'_>> {
+pub(crate) fn root_tag(xml: &str) -> Option<Tag<'_>> {
     let bytes = xml.as_bytes();
     let mut cursor = 0;
     loop {
@@ -197,6 +197,62 @@ fn bindings<'a>(xml: &'a str, tag: &Tag<'a>) -> HashMap<&'a str, &'a str> {
         .iter()
         .filter_map(|(key, range)| Some((key.strip_prefix("xmlns:")?, &xml[range.clone()])))
         .collect()
+}
+
+pub(crate) fn root_with_prefixes<'s>(
+    source: &'s str,
+    serialized: &str,
+    prefixes: &BTreeSet<&str>,
+) -> Option<Cow<'s, str>> {
+    let root = root_tag(source)?;
+    let bound = bindings(source, &root);
+    let target = root_tag(serialized)?;
+    let wanted = bindings(serialized, &target);
+    let mut declarations = String::new();
+    for prefix in prefixes {
+        if !bound.contains_key(prefix) {
+            declarations.push_str(&format!(" xmlns:{prefix}=\"{}\"", wanted.get(prefix)?));
+        }
+    }
+    let mut edits = Vec::new();
+    if prefixes.contains("w14") && !bound.contains_key("w14") {
+        match bound.get("mc") {
+            Some(uri) if uri.trim() != MC_NAMESPACE => return None,
+            Some(_) => {}
+            None => {
+                if !prefixes.contains("mc") {
+                    declarations.push_str(&format!(" xmlns:mc=\"{MC_NAMESPACE}\""));
+                }
+            }
+        }
+        match attribute(&root, "mc:Ignorable") {
+            Some(range) => {
+                let value = unescaped(source, range.clone())?;
+                if !value.split_whitespace().any(|prefix| prefix == "w14") {
+                    let suffix = if value.is_empty() { "w14" } else { " w14" };
+                    edits.push((range.end..range.end, suffix.to_owned()));
+                }
+            }
+            None => declarations.push_str(" mc:Ignorable=\"w14\""),
+        }
+    }
+    if !declarations.is_empty() {
+        let at = root.range.end - if root.empty { 2 } else { 1 };
+        edits.push((at..at, declarations));
+    }
+    if edits.is_empty() {
+        return Some(Cow::Borrowed(source));
+    }
+    edits.sort_by_key(|(range, _)| range.start);
+    let mut patched = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (range, text) in edits {
+        patched.push_str(&source[cursor..range.start]);
+        patched.push_str(&text);
+        cursor = range.end;
+    }
+    patched.push_str(&source[cursor..]);
+    Some(Cow::Owned(patched))
 }
 
 /// Whether `source`'s root binds every prefix in `prefixes` to the namespace `serialized`'s
@@ -740,9 +796,23 @@ pub(crate) fn splice_story_part(
     for (_, _, xml) in &rows.edits {
         prefixes.extend(required_prefixes(xml)?);
     }
+    let root = root_tag(source)?;
+    let bound = bindings(source, &root);
+    if prefixes
+        .iter()
+        .any(|prefix| !bound.contains_key(prefix) && *prefix != "w14")
+    {
+        return None;
+    }
+    let rooted = root_with_prefixes(source, serialized, &prefixes)?;
+    let source = rooted.as_ref();
     if !root_binds(source, serialized, &prefixes)? {
         return None;
     }
+    let occurrences = match &rooted {
+        Cow::Borrowed(_) => occurrences,
+        Cow::Owned(patched) => paragraph_occurrences(patched)?,
+    };
     let mut ids = assignments.clone();
     for (&ordinal, xml) in written {
         let occurrence = &occurrences[ordinal as usize];
