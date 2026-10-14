@@ -120,18 +120,16 @@ export function createAsyncEditorApi(
         const captured = structuredClone(request);
         const input = bridge().exportCoordinator?.();
         if (!input) throw new XlsxCommandAdmissionError('editor-unavailable');
-        const ticket = await input.runAfterPendingInput(() => {
+        return await input.runAfterPendingInput(async () => {
           assertProposalReady();
-          if (input.readOnly) return null;
-          return input.command({ kind: 'propose', payload: {
+          if (input.readOnly) return proposalRefusal('read-only');
+          const ticket = input.command({ kind: 'propose', payload: {
             args: [captured.agentId, captured.note ?? null, captured.edits],
           } });
-        }, true);
-        assertProposalReady();
-        if (!ticket) return proposalRefusal('read-only');
-        const status = await ticket.result;
-        assertProposalReady();
-        return { ok: true, proposal: status.result as Proposal };
+          const status = await ticket.result;
+          assertProposalReady();
+          return { ok: true as const, proposal: status.result as Proposal };
+        }, 'posted');
       } catch (error) {
         if (!session.current || session.retiring) return proposalRefusal('document-replaced');
         if (session.failure || !session.ready) return proposalRefusal('editor-unavailable');
