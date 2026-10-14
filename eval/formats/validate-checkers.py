@@ -1202,6 +1202,14 @@ def split_first_run(package):
     split_run(word_paragraph(package, PILOT), [('The pilot started ', None), ('in September with ', None)])
 
 
+def without_word_space(index):
+    def edit(package):
+        text = word_paragraph(package, PILOT).findall('w:r/w:t', NS)[index]
+        assert text.text and (text.text[0].isspace() or text.text[-1].isspace())
+        text.attrib.pop('{http://www.w3.org/XML/1998/namespace}space', None)
+    return edit
+
+
 def explicit_normal(package):
     paragraph = word_paragraph(package, 'The steering group meets on 20 October.')
     word_style(paragraph, 'Normal')
@@ -1294,6 +1302,8 @@ def validate_docx(directory):
     tracked = 'tracked changes are not allowed'
     for name, number, edit, accept, reason in [
             ('docx-07 bold phrase with the first run split', 7, split_first_run, True, None),
+            ('docx-07 trailing whitespace preservation removed', 7, without_word_space(0), False, None),
+            ('docx-07 leading whitespace preservation removed', 7, without_word_space(2), False, None),
             ('docx-08 explicit Normal style and empty run properties', 8, explicit_normal, True, None),
             ('docx-01 tracked insertion', 1, tracked_run('Summary', 'ins'), False, tracked),
             ('docx-07 tracked formatting change', 7, tracked_format, False, tracked),
