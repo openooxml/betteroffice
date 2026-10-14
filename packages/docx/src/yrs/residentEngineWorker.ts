@@ -129,6 +129,7 @@ let sessionFonts: ResidentSessionFonts | null = null;
 let commandHooksFactory: ResidentCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  selectionContext?: boolean;
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
 } | null = null;
@@ -470,8 +471,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           }
           if (checked.status === 'ready' && checked.prepared.selection &&
             (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate')) {
-            const page = selectionPageOf(checked.prepared.selection.focus);
-            if (page !== undefined) changes.pages.add(page);
+            changes.selectionContext = true;
           }
           if (command.kind === 'setFontEnvironment' && checked.status === 'ready') {
             try {
@@ -525,6 +525,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       },
       async frame({ coversThroughSeq, full }) {
         const viewport = changes.viewport;
+        const selectionContext = changes.selectionContext;
+        changes.selectionContext = undefined;
         const previousWindow = changes.window ?? commandDisplayWindow ?? init.displayWindow;
         changes.viewport = undefined;
         const pages = [...changes.pages];
@@ -723,6 +725,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
         });
+        if (selectionContext && projectedEcho) requestedPages.add(projectedEcho.page.pageIndex);
         const echoContext = projectedEcho && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
           pendingOffscreenPageIds.has(projectedEcho.page.pageId))
           ? projectedEcho : undefined;
