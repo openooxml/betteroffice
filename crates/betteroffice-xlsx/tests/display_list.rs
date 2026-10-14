@@ -354,10 +354,7 @@ fn display_lists_end_at_the_last_track_with_extent() {
             .render_sheet(
                 SheetId(0),
                 &RenderOptions {
-                    range: Some(CellRange::new(
-                        CellRef::new(0, 0),
-                        CellRef::new(59, 25),
-                    )),
+                    range: Some(CellRange::new(CellRef::new(0, 0), CellRef::new(59, 25))),
                     ..RenderOptions::default()
                 },
             )
@@ -373,7 +370,9 @@ fn display_lists_keep_interior_hidden_tracks() {
         sheet.col_widths.insert(col, 0.0);
     }
     sheet.row_heights.insert(4, 0.0);
-    sheet.merges.push(CellRange::new(CellRef::new(6, 1), CellRef::new(6, 6)));
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(6, 1), CellRef::new(6, 6)));
     let workbook = open(sheet);
     let geometry = GridGeometry::new(
         workbook.sheet(SheetId(0)).unwrap(),

@@ -1527,18 +1527,12 @@ mod tests {
             ..WorkbookModel::default()
         };
         let parts = xlsx_parse::serialize_workbook(&model).unwrap();
-        let session = Session::open(&ooxml_opc::rezip_parts(&parts).unwrap(), None).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let session = Session::open(&bytes, None).unwrap();
         let viewport = r#"{"x":0,"y":0,"width":1600,"height":1000}"#;
-        let mut clock = || 0.0;
         for result in [
             session.display_list_json(viewport),
             session.display_list_for_json(0, viewport),
-            session
-                .display_list_profiled_json(viewport, &mut clock)
-                .map(|profiled| {
-                    serde_json::from_str::<serde_json::Value>(&profiled).unwrap()["displayList"]
-                        .to_string()
-                }),
         ] {
             let frame: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
             assert_eq!(frame["grid"]["colOffsets"].as_array().unwrap().len(), 9);

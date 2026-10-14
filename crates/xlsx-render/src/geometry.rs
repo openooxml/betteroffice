@@ -307,9 +307,8 @@ impl PrintMetrics {
 }
 
 const SIZE_CHUNK_LEN: usize = 256;
-const _: () = assert!(
-    MAX_ROWS as usize % SIZE_CHUNK_LEN == 0 && MAX_COLS as usize % SIZE_CHUNK_LEN == 0
-);
+const _: () =
+    assert!(MAX_ROWS as usize % SIZE_CHUNK_LEN == 0 && MAX_COLS as usize % SIZE_CHUNK_LEN == 0);
 
 #[derive(Debug, Clone)]
 struct SizeChunk {
@@ -820,9 +819,7 @@ impl GridGeometry {
         let rows = match self.last_row_with_height() {
             Some(last) if bottom - vp.y > 0.0 => {
                 let r0 = self.row_at_y(vp.y).min(last);
-                let r1 = self
-                    .row_at_y((vp.y + vp.height).min(bottom))
-                    .min(last);
+                let r1 = self.row_at_y((vp.y + vp.height).min(bottom)).min(last);
                 r0..r1 + 1
             }
             _ => MAX_ROWS..MAX_ROWS,
@@ -830,9 +827,7 @@ impl GridGeometry {
         let cols = match self.last_col_with_width() {
             Some(last) if right - vp.x > 0.0 => {
                 let c0 = self.col_at_x(vp.x).min(last);
-                let c1 = self
-                    .col_at_x((vp.x + vp.width).min(right))
-                    .min(last);
+                let c1 = self.col_at_x((vp.x + vp.width).min(right)).min(last);
                 c0..c1 + 1
             }
             _ => MAX_COLS..MAX_COLS,
@@ -1341,9 +1336,14 @@ mod tests {
                         values.insert(index, 0.0);
                     }
                 }
-                let pairs: Vec<_> = values.iter().map(|(&index, &size)| (index, size)).collect();
+                let pairs: Vec<_> = values
+                    .iter()
+                    .map(|(&index, &size)| (index, size))
+                    .collect();
                 let mut sizes = Sizes::from_values(LIMIT, default, &pairs);
-                let mut model: Vec<_> = (0..LIMIT).map(|index| values.get(&index).copied()).collect();
+                let mut model: Vec<_> = (0..LIMIT)
+                    .map(|index| values.get(&index).copied())
+                    .collect();
                 let expected = |model: &[Option<f32>]| {
                     model
                         .iter()
@@ -1407,6 +1407,9 @@ mod tests {
             y: bottom,
             ..screen
         };
-        assert_eq!(g.viewport_range(&beyond), (MAX_ROWS..MAX_ROWS, MAX_COLS..MAX_COLS));
+        assert_eq!(
+            g.viewport_range(&beyond),
+            (MAX_ROWS..MAX_ROWS, MAX_COLS..MAX_COLS)
+        );
     }
 }
