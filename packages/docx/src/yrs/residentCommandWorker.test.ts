@@ -2432,9 +2432,9 @@ test('worker refreshes deleted cell handles and resizes merged cells', async () 
     expect(refused.version).toBe(1);
     const undone = await client.edit(intent(3, 1, 'undo', {}));
     expect(undone.outcomes[0]?.status).toBe('applied');
-    const merged = await client.edit(intent(4, 2, 'mergeTableCells', {
-      selection: { anchor: cellPoint(engine, 'A').selection.anchor, focus: cellB.selection.focus },
-    }));
+    const anchor = cellPoint(engine, 'A').selection.anchor;
+    const focus = cellPoint(engine, 'B').selection.focus;
+    const merged = await client.edit(intent(4, 2, 'mergeTableCells', { selection: { anchor, focus } }));
     expect(merged.outcomes[0]?.status).toBe('applied');
     const mergedCell = cellObjects(merged).find((cell) => cell.story === cellPoint(engine, 'A').story)!;
     const resized = await client.edit(intent(5, 3, 'resizeObject', {

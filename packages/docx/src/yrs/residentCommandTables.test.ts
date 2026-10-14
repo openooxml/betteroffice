@@ -249,17 +249,18 @@ test('split_table_cell_subdivides_and_reports_size_refusals', async () => {
 test('set_table_cell_shading_shades_clears_and_keeps_selection', async () => {
   const arm = await inCell();
   const before = JSON.stringify(payload(arm));
-  const kept = JSON.stringify(arm.state.selection);
+  const kept = arm.state.selection!.focus;
   const shaded = execute(arm, tableCommand(arm, 'setTableCellShading', { color: 'FF0000' }));
   expect(shaded.status).toBe('applied');
   expect(payload(arm)!.rows[0]!.cells[0]!.tcPr).toMatchObject({ backgroundColor: 'FF0000' });
-  expect(JSON.stringify(shaded.selection?.focus)).toBe(JSON.stringify(JSON.parse(kept).focus));
+  expect(shaded.selection?.focus).toMatchObject({ story: kept.story, paraId: kept.paraId, offset: kept.offset });
   expect(undo(arm).status).toBe('applied');
   expect(JSON.stringify(payload(arm))).toBe(before);
   expect(redo(arm).status).toBe('applied');
   expect(payload(arm)!.rows[0]!.cells[0]!.tcPr).toMatchObject({ backgroundColor: 'FF0000' });
+  const storyA = cellStory(arm, 'A');
   expect(execute(arm, tableCommand(arm, 'insertText', { text: 'x' })).status).toBe('applied');
-  expect(cellText(arm, cellStory(arm, 'A'))).toBe('xA');
+  expect(cellText(arm, storyA)).toBe('xA');
   expect(execute(arm, tableCommand(arm, 'setTableCellShading', { color: null })).status).toBe('applied');
   expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.backgroundColor).toBeUndefined();
 }, TIMEOUT);
