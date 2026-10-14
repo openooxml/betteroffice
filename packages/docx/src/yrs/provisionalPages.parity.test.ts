@@ -517,6 +517,9 @@ FLOW_STRADDLES['flow-landscape-bare'] = (pages) => {
   expect(pages.at(-1)!.width).toBeLessThan(pages[2]!.width);
 };
 
+/** The pass a plain text edit relayouts through, on engines that keep it apart from the full retained pass. */
+const EDIT_LAYOUT = 'layoutDocumentWithRegionsAfterEdit';
+
 const MEASUREMENT = {
   defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
   compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true as const,
@@ -552,11 +555,15 @@ async function commandFixture(feature = 'plain', exportable = false, options: {
   const full = applyFrameDelta(null, decodeFrameDelta(cold.buildDisplayListFrame(extras, 0)));
   await w.send({ type: 'open', bytes: bytes.slice().buffer });
   options.prepare?.(engine);
-  const methods = ['layoutDocumentWithRegionsRetained', 'layoutDocumentWithRegionsRetainedJson', 'beginRegionLayout', 'resumeRegionLayout'] as const;
+  const editLayout = EDIT_LAYOUT in engine ? EDIT_LAYOUT : 'layoutDocumentWithRegionsRetained';
+  const methods = new Set([
+    'layoutDocumentWithRegionsRetained', 'layoutDocumentWithRegionsRetainedJson', 'beginRegionLayout', 'resumeRegionLayout', editLayout,
+  ]);
   const calls: string[] = [];
+  const spied = engine as unknown as Record<string, (...args: never[]) => unknown>;
   for (const method of methods) {
-    const original = engine[method].bind(engine) as (...args: never[]) => unknown;
-    (engine as unknown as Record<string, unknown>)[method] = (...args: never[]) => { calls.push(method); return original(...args); };
+    const original = spied[method].bind(engine);
+    spied[method] = (...args: never[]) => { calls.push(method); return original(...args); };
   }
   const init: ResidentCommandInitRequest = {
     session: 'viewport-first', incarnation: 1, epoch: 1, readOnly: false,
@@ -567,7 +574,7 @@ async function commandFixture(feature = 'plain', exportable = false, options: {
   if (!reply.ok || !reply.commandInitial) throw new Error(JSON.stringify(reply));
   const initial = reply.commandInitial;
   const frame = applyFrameDelta(null, decodeFrameDelta(initial.frame.payload.frame));
-  return { cold, engine, w, init, initial, frame, full, calls, acks: [] as DocxCommandFrame[],
+  return { cold, engine, w, init, initial, frame, full, calls, editLayout, acks: [] as DocxCommandFrame[],
     destroy() { engine.destroy(); cold.destroy(); },
     async present() {
       return w.send({ type: 'commandViewport', request: { start: 0, end: 3, frameEpoch: frame.frameEpoch } });
@@ -1048,7 +1055,8 @@ test('insertText after a prefix selection completes before editing and matches a
     const ack = await sendCommand(f, 2, 'insertText', { text: 'Edit ' });
     const reference = await sendCommand(full, 2, 'insertText', { text: 'Edit ' });
     expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
-    expect(f.calls.filter(call => call === 'layoutDocumentWithRegionsRetained')).toHaveLength(2);
+    expect(f.calls.filter(call => call === 'layoutDocumentWithRegionsRetained' || call === f.editLayout))
+      .toEqual(['layoutDocumentWithRegionsRetained', f.editLayout]);
     const document = f.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' });
     const referenceDocument = full.engine.proposalEngine.readParagraphs({ story: 'body', view: 'accepted' });
     expect(document.ok).toBe(true);
