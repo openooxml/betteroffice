@@ -1436,6 +1436,26 @@ struct ImageBudget {
     bytes: u64,
 }
 
+/// Decoder limits holding one image to what the slide may still spend on
+/// it, so a frame larger than the declared size fails against the budget
+/// left instead of the default limit.
+fn decoder_limits(
+    declared_width: u32,
+    declared_height: u32,
+    cost: u64,
+    spent_bytes: u64,
+) -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(declared_width);
+    limits.max_image_height = Some(declared_height);
+    limits.max_alloc = Some(
+        MAX_IMAGE_BYTES
+            .saturating_sub(cost)
+            .min(MAX_SLIDE_IMAGE_BYTES.saturating_sub(spent_bytes)),
+    );
+    limits
+}
+
 impl ImageBudget {
     /// Decoded pixels, or `None` for content this backend will not draw: bytes
     /// it cannot decode, an image past [`MAX_IMAGE_PIXELS`], or one the slide
@@ -1478,6 +1498,14 @@ impl ImageBudget {
             .total_bytes()
             .saturating_add(declared.saturating_mul(4));
         self.charge(declared, cost)?;
+        decoder
+            .set_limits(decoder_limits(
+                declared_width,
+                declared_height,
+                cost,
+                self.bytes,
+            ))
+            .ok()?;
         let orientation = decoder.orientation().ok()?;
         let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
         decoded.apply_orientation(orientation);

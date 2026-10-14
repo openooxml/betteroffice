@@ -1306,6 +1306,26 @@ enum Decode {
     OverBudget,
 }
 
+/// Decoder limits holding one image to what the page may still spend on
+/// it, so a frame larger than the declared size fails against the budget
+/// left instead of the default limit.
+fn decoder_limits(
+    declared_width: u32,
+    declared_height: u32,
+    cost: u64,
+    spent_bytes: u64,
+) -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(declared_width);
+    limits.max_image_height = Some(declared_height);
+    limits.max_alloc = Some(
+        MAX_IMAGE_BYTES
+            .saturating_sub(cost)
+            .min(MAX_PAGE_IMAGE_BYTES.saturating_sub(spent_bytes)),
+    );
+    limits
+}
+
 /// A decoded image and what resolving it cost the page that decoded it.
 struct CachedImage {
     outcome: Option<Arc<Pixmap>>,
@@ -1532,6 +1552,17 @@ impl<'c> PageImages<'c> {
         charge.pixels = declared;
         charge.bytes_post = cost;
         IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if decoder
+            .set_limits(decoder_limits(
+                declared_width,
+                declared_height,
+                cost,
+                self.bytes,
+            ))
+            .is_err()
+        {
+            return Decode::Refused;
+        }
         let Ok(orientation) = decoder.orientation() else {
             return Decode::Refused;
         };
