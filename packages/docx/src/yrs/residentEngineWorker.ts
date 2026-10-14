@@ -439,7 +439,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
           await loadRustDisplayListQueryEngine();
         }
-        if (prefix && !canUsePrefix(command, context)) await completeCommandPrefix(host);
+        if (prefix && !(await host.withFrameWork(() => canUsePrefix(command, context)))) await completeCommandPrefix(host);
         selectionPage = command.kind === 'selectPoint' || command.kind === 'extendSelection'
           ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
         const navigation = command.kind === 'navigate' ? command.payload as DocxNavigationIntent : undefined;
