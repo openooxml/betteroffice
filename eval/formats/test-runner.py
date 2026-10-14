@@ -144,7 +144,8 @@ if mode == 'mcp':
 elif mode == 'web':
     print(json.dumps({'type': 'item.completed', 'item': {'id': 'web-1', 'type': 'web_search', 'query': 'openpyxl docs'}}))
 elif mode == 'path':
-    item = {'id': 'outside-1', 'type': 'command_execution', 'command': os.environ['FAKE_COMMAND']} if 'FAKE_COMMAND' in os.environ else {
+    command = os.environ.get('FAKE_COMMAND', '').replace('__REPOSITORY_FROM_WORKSPACE__', os.path.relpath(os.environ['FAKE_REPO'], workspace))
+    item = {'id': 'outside-1', 'type': 'command_execution', 'command': command} if 'FAKE_COMMAND' in os.environ else {
         'id': 'outside-1', 'type': 'file_change', 'changes': [json.loads(os.environ['FAKE_CHANGE'])]}
     print(json.dumps({'type': 'item.completed', 'item': item}))
 '''
@@ -379,6 +380,7 @@ class RunnerTests(unittest.TestCase):
                     self.assertIn(reason, record['check_message'])
 
     def test_generic_repository_reads_and_outside_file_changes_fail_with_correct_output(self):
+        home_relative = os.path.relpath(runner.REPO, Path.home())
         commands = [
             'cat eval/formats/check.py',
             f'cat {shlex.quote(str(ROOT / "check.py"))}',
@@ -386,17 +388,18 @@ class RunnerTests(unittest.TestCase):
             'python3 -c "import eval.formats.check"',
             'python3 -c "from eval.formats import check"',
             'cat validate-checkers.py tasks.json fixtures.json',
-            'cat ../other/input.xlsx',
-            'cat /etc/passwd',
-            'cat "/outside directory/input.xlsx"',
-            'cat ~/input.xlsx',
-            'cat "$HOME/input.xlsx"',
+            f'cat {shlex.quote(str(runner.REPO / "AGENTS.md"))}',
+            f'cat ~/{shlex.quote(home_relative + "/eval/formats/tasks.json")}',
+            f'cat ~/{shlex.quote(home_relative + "/AGENTS.md")}',
+            f'cat "$HOME/{home_relative}/AGENTS.md"',
+            f'cat "${{HOME}}/{home_relative}/AGENTS.md"',
+            'cat "__REPOSITORY_FROM_WORKSPACE__/AGENTS.md"',
         ]
         changes = [
             {'path': '../edit.py', 'kind': 'add'},
             {'path': '/outside/edit.py', 'kind': 'add'},
+            {'path': str(runner.REPO / 'edit.py'), 'kind': 'add'},
             {'path': 'edit.py', 'kind': 'update', 'diff': '+ from eval.formats import check'},
-            {'path': 'edit.py', 'kind': 'update', 'diff': '+ text = open("/etc/passwd").read()'},
         ]
         cases = [{'FAKE_COMMAND': command} for command in commands] + [{'FAKE_CHANGE': json.dumps(change)} for change in changes]
         for index, values in enumerate(cases):
@@ -408,6 +411,46 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(record['agent_exit_code'], 0)
                 self.assertFalse(record['pass'])
                 self.assertIn('forbidden path access', record['check_message'])
+
+    def test_generic_task_code_and_unrelated_paths_pass_with_correct_output(self):
+        commands = [
+            "python3 - <<'PY'\nxml = b'<a:t>Draft results</a:t>'\nPY",
+            "python3 - <<'PY'\nxml = b'<c r=\"B5\" s=\"1\">...</c>'\nPY",
+            "python3 - <<'PY'\nformula = f'=(C{r}-B{r})/B{r}'\nPY",
+            "python3 - <<'PY'\nformula = '=(C2-B2)/B2'\nPY",
+            'libreoffice --headless --convert-to xlsx input.xlsx >/tmp/office-recalc.log 2>&1',
+            'python3 edit.py 2>/dev/null',
+            "python3 - <<'PY'\nparts = name.split('/')\nPY",
+            "python3 - <<'PY'\nx = ~mask\nPY",
+            "python3 - <<'PY'\nformula = '=$B2/$C2'\nPY",
+            'cat ../other/input.xlsx',
+            'cat /etc/passwd',
+            'cat "/outside directory/input.xlsx"',
+            'cat ~/input.xlsx',
+            'cat "$HOME/input.xlsx"',
+        ]
+        changes = [{'path': 'edit.py', 'kind': 'update', 'diff': '+ text = open("/etc/passwd").read()'}]
+        cases = [{'FAKE_COMMAND': command} for command in commands] + [{'FAKE_CHANGE': json.dumps(change)} for change in changes]
+        for index, values in enumerate(cases):
+            results = self.root / f'generic-task-code-{index}'
+            results.mkdir()
+            with self.subTest(values=values), self.generic_environment(FAKE_MODE='path', **values):
+                record = runner.run_task(runner.checker.tasks()[0], None, 'test-model', results, arm='generic', python=self.python)
+                runner.checker.check(runner.checker.tasks()[0], results / record['task'] / 'output.xlsx')
+                self.assertEqual(record['agent_exit_code'], 0)
+                self.assertTrue(record['pass'], record['check_message'])
+
+    def test_generic_path_audit_checks_repository_spellings_anywhere(self):
+        workspace = self.root / 'workspace'
+        workspace.mkdir()
+        repository = self.root / 'repository-link'
+        repository.symlink_to(runner.REPO, target_is_directory=True)
+        log = self.root / 'repository-paths.jsonl'
+        for spelling in (repository, repository.resolve()):
+            with self.subTest(spelling=spelling), patch.object(runner, 'REPO', repository):
+                log.write_text(json.dumps({'type': 'item.completed', 'item': {
+                    'type': 'command_execution', 'command': f"printf 'prefix{spelling}suffix'"}}) + '\n')
+                self.assertIn('forbidden path access', runner.access_violation(log, 'generic', workspace, self.python, []))
 
     def test_generic_workspace_stays_outside_repository_when_tempdir_is_in_repository(self):
         results = self.root / 'generic-tempdir'
