@@ -759,7 +759,7 @@ fn story_fingerprint(
     let mut unit = Sha256::new();
     let mut blocks = Sha256::new();
     let mut block_content = Vec::new();
-    let mut content = Sha256::new();
+    let mut inline_content = Sha256::new();
     let mut inline = false;
     let mut start = 0u32;
     let mut position = 0u32;
@@ -780,8 +780,8 @@ fn story_fingerprint(
         let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
             if matches!(kind.as_str(), "table" | "blockSdt"));
         if !block {
-            content.update(&bytes);
-            content.update(b"\n");
+            inline_content.update(&bytes);
+            inline_content.update(b"\n");
         }
         position += match &segment.content {
             crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
@@ -792,7 +792,7 @@ fn story_fingerprint(
                 while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
                     let marker = serde_json::to_vec(&(at - start, key, end)).ok()?;
                     unit.update(&marker);
-                    content.update(&marker);
+                    inline_content.update(&marker);
                 }
                 start = position;
                 units.push(UnitState {
@@ -800,7 +800,7 @@ fn story_fingerprint(
                     digest: std::mem::take(&mut unit).finalize().into(),
                     blocks: std::mem::take(&mut blocks).finalize().into(),
                     block_content: std::mem::take(&mut block_content),
-                    content_digest: std::mem::take(&mut content).finalize().into(),
+                    content_digest: std::mem::take(&mut inline_content).finalize().into(),
                     inline: std::mem::take(&mut inline),
                 });
             }
@@ -817,7 +817,7 @@ fn story_fingerprint(
     for (at, key, end) in boundaries {
         let marker = serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?;
         unit.update(&marker);
-        content.update(&marker);
+        inline_content.update(&marker);
     }
     let trailing = unit.finalize().into();
     let empty: [u8; 32] = Sha256::new().finalize().into();
@@ -827,7 +827,7 @@ fn story_fingerprint(
             digest: trailing,
             blocks: blocks.finalize().into(),
             block_content,
-            content_digest: content.finalize().into(),
+            content_digest: inline_content.finalize().into(),
             inline,
         });
     }
@@ -2708,7 +2708,9 @@ fn spliced_part(
                 }
                 let key = unit.key.as_deref()?;
                 match source.view_of(key) {
-                    Some(((part_index, ordinal), 0)) if part_index == index => removed.push(ordinal),
+                    Some(((part_index, ordinal), 0)) if part_index == index => {
+                        removed.push(ordinal)
+                    }
                     None if synthetic(key) && !unit.inline => {}
                     _ => return None,
                 }
