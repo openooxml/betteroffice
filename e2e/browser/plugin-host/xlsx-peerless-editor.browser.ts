@@ -25,7 +25,8 @@ async function edit(page: Page, value: string, commit = 'Enter') {
   await scroll.focus();
   await scroll.press('F2');
   const input = page.getByTestId('xlsx-cell-editor');
-  await input.fill('');
+  await input.press('ControlOrMeta+A');
+  await input.press('Delete');
   await input.pressSequentially(value);
   await expect(input).toHaveValue(value);
   await expect(input).toBeFocused();
@@ -78,6 +79,38 @@ test('peer-less typing commits the cell and formula bar before navigation', asyn
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('24');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
+
+for (const release of ['F2', 'select all', 'Delete', 'typing'] as const) {
+  test(`peer-less F2 keeps the edit keys when its held seed arrives after ${release}`, async ({ page }) => {
+    await open(page);
+    const text = 'held edit';
+    const releaseAfter = async (step: typeof release) => {
+      if (step !== release) return;
+      expect(await page.evaluate(() => window.__xlsxWorkerEditor.heldCellInputs())).toBeGreaterThan(0);
+      await page.evaluate(() => window.__xlsxWorkerEditor.releaseCellInputs());
+    };
+    await page.evaluate(() => window.__xlsxWorkerEditor.holdCellInputs());
+    const scroll = page.getByTestId('xlsx-scroll');
+    await scroll.focus();
+    await scroll.press('F2');
+    const input = page.getByTestId('xlsx-cell-editor');
+    await expect(input).toBeFocused();
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.heldCellInputs())).toBeGreaterThan(0);
+    await releaseAfter('F2');
+    await input.press('ControlOrMeta+A');
+    await releaseAfter('select all');
+    await input.press('Delete');
+    await releaseAfter('Delete');
+    await input.pressSequentially(text);
+    await releaseAfter('typing');
+    await expect(input).toHaveValue(text);
+    expect(await input.evaluate((element) => (element as HTMLInputElement).selectionStart)).toBe(text.length);
+    await input.press('Enter');
+    await expect(input).toHaveCount(0);
+    await expect.poll(() => cells(page)).toEqual([[text]]);
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+  });
+}
 
 test('peer-less keyboard navigation and sheet tabs update the selection and canvas', async ({ page }) => {
   await open(page);

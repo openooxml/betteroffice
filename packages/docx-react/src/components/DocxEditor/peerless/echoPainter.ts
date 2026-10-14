@@ -1,12 +1,12 @@
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
 import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
-import { closeCommandBitmap } from '@betteroffice/docx/peerless';
 import type {
   DocxCommandEchoContext,
   DocxCommandFrame,
   DocxCommandPageIdentity,
   DocxEchoRect,
 } from '@betteroffice/docx/yrs';
+import { releaseBitmap, retainBitmap } from './bitmapOwnership';
 import type { PeerlessTextIntent } from './inputEvents';
 
 /** @internal Display-only drafts retain counts of original admissions after merging. */
@@ -48,7 +48,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   let paintedPage: string | undefined;
   let draft: EchoDraft | undefined;
   let coverage = -1;
-  const closed = new WeakSet<ImageBitmap>();
+  const owner = {};
   const pageSizes = new Map<string, readonly [number, number]>();
 
   function restorePages(): void {
@@ -73,15 +73,13 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       retained.add(item.bitmap);
       for (const background of item.backgrounds ?? []) retained.add(background.bitmap);
     }
+    for (const bitmap of retained) retainBitmap(bitmap, owner);
     const bitmaps = new Set<ImageBitmap>();
     for (const item of staged?.pages ?? []) {
       bitmaps.add(item.bitmap);
       for (const background of item.backgrounds ?? []) bitmaps.add(background.bitmap);
     }
-    for (const bitmap of bitmaps) if (!retained.has(bitmap) && !closed.has(bitmap)) {
-      closed.add(bitmap);
-      closeCommandBitmap(bitmap);
-    }
+    for (const bitmap of bitmaps) if (!retained.has(bitmap)) releaseBitmap(bitmap, owner);
     staged = keep;
     const pages = new Set(keep?.pages.map((item) => item.page.pageId));
     for (const id of pageSizes.keys()) if (!pages.has(id)) pageSizes.delete(id);

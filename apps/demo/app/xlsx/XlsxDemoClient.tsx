@@ -449,6 +449,8 @@ export function XlsxDemoClient() {
           )}
         >
           <XlsxEditor
+            legacySyncApi
+            experimentalWorkerOpen={false}
             file={file}
             fileName={fileName}
             collaboration={

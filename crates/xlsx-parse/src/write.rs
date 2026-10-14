@@ -24,7 +24,10 @@ use crate::package::{
     XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
     parse_relationships, relationship_part_path, remove_attribute, set_attribute,
 };
-use crate::patch::{SheetPatch, SourceStyles, StyleMatch, sheet_data_regeneration_loss};
+use crate::patch::{
+    SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
+    sheet_data_regeneration_loss,
+};
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
@@ -558,7 +561,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     let styles_retained = matches!(
         (package.styles.as_ref(), styles.as_ref()),
         (Some(source), Some(planned)) if source.path == planned.path
-    ) && style_plan.styles == package.original_workbook.styles;
+    ) && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
@@ -3134,16 +3137,16 @@ fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Ve
     })
 }
 
-/// Reuses each source pool entry the model left alone, so font schemes,
-/// `gray125` fills and `xf` attributes the model does not carry survive an
-/// edit that only appends new entries.
+/// Reuses each source pool entry `kept` says the model left alone, so font
+/// schemes, `gray125` fills and `xf` attributes the model does not carry
+/// survive an edit that only appends new entries.
 #[allow(clippy::too_many_arguments)]
-fn patched_pool<T: PartialEq>(
+fn patched_pool<T>(
     template: &XmlTemplate,
     pool_name: &str,
     item_name: &str,
     values: &[T],
-    original: &[T],
+    kept: impl Fn(usize, &T) -> bool,
     write_item: impl Fn(&mut Writer<Vec<u8>>, &T) -> io::Result<()>,
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
     overrides: Option<&HashMap<usize, Vec<u8>>>,
@@ -3162,10 +3165,7 @@ fn patched_pool<T: PartialEq>(
             items.push(pool.qualify_fragment(bytes)?);
             continue;
         }
-        match sources
-            .get(index)
-            .filter(|_| original.get(index) == Some(value))
-        {
+        match sources.get(index).filter(|_| kept(index, value)) {
             Some(source) => items.push(source.bytes.clone()),
             None => {
                 let item = fragment(|writer| write_item(writer, value))?;
@@ -3188,7 +3188,7 @@ fn styles_xml_with_template(
         "numFmts",
         "numFmt",
         &stylesheet.num_fmts,
-        &original.num_fmts,
+        |index, value| original.num_fmts.get(index) == Some(value),
         |writer, (id, code)| {
             writer
                 .create_element("numFmt")
@@ -3205,7 +3205,7 @@ fn styles_xml_with_template(
         "fonts",
         "font",
         &stylesheet.fonts,
-        &original.fonts,
+        |index, value| original.fonts.get(index) == Some(value),
         write_font,
         || fragment(|writer| write_fonts(writer, stylesheet)),
         Some(&overrides.fonts),
@@ -3215,7 +3215,7 @@ fn styles_xml_with_template(
         "fills",
         "fill",
         &stylesheet.fills,
-        &original.fills,
+        |index, value| original.fills.get(index) == Some(value),
         write_fill,
         || fragment(|writer| write_fills(writer, stylesheet)),
         Some(&overrides.fills),
@@ -3225,7 +3225,7 @@ fn styles_xml_with_template(
         "borders",
         "border",
         &stylesheet.borders,
-        &original.borders,
+        |index, value| original.borders.get(index) == Some(value),
         write_border,
         || fragment(|writer| write_borders(writer, stylesheet)),
         Some(&overrides.borders),
@@ -3235,7 +3235,7 @@ fn styles_xml_with_template(
         "cellXfs",
         "xf",
         &stylesheet.cell_xfs,
-        &original.cell_xfs,
+        |index, _| keeps_source_xf(stylesheet, original, index),
         write_xf,
         || fragment(|writer| write_cell_xfs(writer, stylesheet)),
         Some(&overrides.xfs),
@@ -3429,6 +3429,20 @@ fn write_fill(w: &mut Writer<Vec<u8>>, fill: &Fill) -> io::Result<()> {
                     })?;
                 Ok(())
             }
+            Fill::Pattern { pattern, fg, bg } => {
+                w.create_element("patternFill")
+                    .with_attribute(("patternType", pattern.as_sml()))
+                    .write_inner_content(|w| {
+                        if let Some(color) = fg {
+                            write_color(w, "fgColor", color)?;
+                        }
+                        if let Some(color) = bg {
+                            write_color(w, "bgColor", color)?;
+                        }
+                        Ok(())
+                    })?;
+                Ok(())
+            }
         })?;
     Ok(())
 }
@@ -3509,6 +3523,17 @@ fn write_xf(w: &mut Writer<Vec<u8>>, xf: &Xf) -> io::Result<()> {
     el.push_attribute(("fontId", font_id.as_str()));
     el.push_attribute(("fillId", fill_id.as_str()));
     el.push_attribute(("borderId", border_id.as_str()));
+    let xf_id;
+    if let Some(id) = xf.xf_id {
+        xf_id = id.to_string();
+        el.push_attribute(("xfId", xf_id.as_str()));
+    }
+    if xf.quote_prefix {
+        el.push_attribute(("quotePrefix", "1"));
+    }
+    if xf.pivot_button {
+        el.push_attribute(("pivotButton", "1"));
+    }
     if xf.num_fmt_id.is_some() {
         el.push_attribute(("applyNumberFormat", "1"));
     }
@@ -3524,14 +3549,24 @@ fn write_xf(w: &mut Writer<Vec<u8>>, xf: &Xf) -> io::Result<()> {
     if xf.alignment.is_some() {
         el.push_attribute(("applyAlignment", "1"));
     }
+    if xf.protection.is_some() {
+        el.push_attribute(("applyProtection", "1"));
+    }
 
-    match &xf.alignment {
-        None => w.write_event(Event::Empty(el))?,
-        Some(a) => {
-            w.write_event(Event::Start(el))?;
+    if xf.alignment.is_none() && xf.protection.is_none() {
+        w.write_event(Event::Empty(el))?;
+    } else {
+        w.write_event(Event::Start(el))?;
+        if let Some(a) = &xf.alignment {
             write_alignment(w, a)?;
-            w.write_event(Event::End(BytesEnd::new("xf")))?;
         }
+        if let Some(protection) = &xf.protection {
+            w.create_element("protection")
+                .with_attribute(("locked", if protection.locked { "1" } else { "0" }))
+                .with_attribute(("hidden", if protection.hidden { "1" } else { "0" }))
+                .write_empty()?;
+        }
+        w.write_event(Event::End(BytesEnd::new("xf")))?;
     }
     Ok(())
 }
@@ -3544,11 +3579,34 @@ fn write_alignment(w: &mut Writer<Vec<u8>>, a: &Alignment) -> io::Result<()> {
     if let Some(v) = a.v {
         el.push_attribute(("vertical", v.as_sml()));
     }
+    let rotation;
+    if let Some(value) = a.text_rotation {
+        rotation = value.to_string();
+        el.push_attribute(("textRotation", rotation.as_str()));
+    }
     if a.wrap_text {
         el.push_attribute(("wrapText", "1"));
     }
     if a.shrink_to_fit {
         el.push_attribute(("shrinkToFit", "1"));
+    }
+    let indent;
+    if let Some(value) = a.indent {
+        indent = value.to_string();
+        el.push_attribute(("indent", indent.as_str()));
+    }
+    let relative_indent;
+    if let Some(value) = a.relative_indent {
+        relative_indent = value.to_string();
+        el.push_attribute(("relativeIndent", relative_indent.as_str()));
+    }
+    if let Some(value) = a.justify_last_line {
+        el.push_attribute(("justifyLastLine", if value { "1" } else { "0" }));
+    }
+    let reading_order;
+    if let Some(value) = a.reading_order {
+        reading_order = value.to_string();
+        el.push_attribute(("readingOrder", reading_order.as_str()));
     }
     w.write_event(Event::Empty(el))?;
     Ok(())

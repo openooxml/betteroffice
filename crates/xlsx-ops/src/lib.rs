@@ -11,7 +11,7 @@ mod undo;
 
 pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
 pub use formatting::{
-    BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, HorizontalAlignment,
+    BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, HorizontalAlignment, KeptFacets,
     NumberFormatMutation, PreservedCellFormat, StylePatch, StyleProperty, TextWrapping,
     VerticalAlignment,
 };

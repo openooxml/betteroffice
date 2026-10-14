@@ -3,6 +3,8 @@ pub(crate) mod batch;
 mod edit_tests;
 #[cfg(test)]
 mod format_calculation_tests;
+#[cfg(test)]
+mod format_facets_tests;
 mod geometry;
 mod recovery;
 #[cfg(test)]
@@ -840,6 +842,9 @@ impl Workbook {
         if self.restore_snapshot(update, options)? {
             return Ok(self.remote_mutation_result(&before, true));
         }
+        if self.authority.seeds_another_bootstrap(update) {
+            return Err(Error::CollaborativeStructureChanged);
+        }
         let staged = self.stage_remote_updates(&[update], None)?;
         if staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
@@ -1493,11 +1498,14 @@ impl Workbook {
             })),
             fill_color: uniform(formats.iter().map(|(_, format)| {
                 match &format.fill {
-                    Fill::Solid(color) => styles
+                    Fill::Solid(color)
+                    | Fill::Pattern {
+                        fg: Some(color), ..
+                    } => styles
                         .resolve_color(color)
                         .unwrap_or_else(|| "#ffffff".into())
                         .to_ascii_lowercase(),
-                    Fill::None => "#ffffff".into(),
+                    Fill::None | Fill::Pattern { fg: None, .. } => "#ffffff".into(),
                 }
             })),
             border_preset: detect_border_preset(&formats, range),
@@ -1559,6 +1567,7 @@ impl Workbook {
                 .collect(),
             source_styles,
             formats: formats.into_iter().map(|(_, format)| format).collect(),
+            kept: Vec::new(),
         })
     }
 
@@ -3160,7 +3169,13 @@ fn uniform_border_value<T: PartialEq + Clone>(
 
 fn border_line_style(style: BorderStyle) -> BorderLineStyle {
     match style {
-        BorderStyle::Dashed => BorderLineStyle::Dashed,
+        BorderStyle::Dashed
+        | BorderStyle::MediumDashed
+        | BorderStyle::DashDot
+        | BorderStyle::MediumDashDot
+        | BorderStyle::DashDotDot
+        | BorderStyle::MediumDashDotDot
+        | BorderStyle::SlantDashDot => BorderLineStyle::Dashed,
         BorderStyle::Dotted | BorderStyle::Hair => BorderLineStyle::Dotted,
         BorderStyle::Double => BorderLineStyle::Double,
         BorderStyle::Thin | BorderStyle::Medium | BorderStyle::Thick => BorderLineStyle::Solid,

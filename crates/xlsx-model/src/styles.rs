@@ -46,15 +46,114 @@ pub struct Font {
     pub color: Option<Color>,
 }
 
-/// a cell fill. non-solid patterns collapse to their foreground color.
+/// A cell fill.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum Fill {
     #[default]
     None,
     Solid(Color),
+    Pattern {
+        pattern: PatternType,
+        fg: Option<Color>,
+        bg: Option<Color>,
+    },
 }
 
-/// border line weight/style, collapsed from the full sml set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PatternType {
+    Gray125,
+    Gray0625,
+    MediumGray,
+    DarkGray,
+    LightGray,
+    DarkHorizontal,
+    DarkVertical,
+    DarkDown,
+    DarkUp,
+    DarkGrid,
+    DarkTrellis,
+    LightHorizontal,
+    LightVertical,
+    LightDown,
+    LightUp,
+    LightGrid,
+    LightTrellis,
+}
+
+impl PatternType {
+    pub const ALL: [Self; 17] = [
+        Self::Gray125,
+        Self::Gray0625,
+        Self::MediumGray,
+        Self::DarkGray,
+        Self::LightGray,
+        Self::DarkHorizontal,
+        Self::DarkVertical,
+        Self::DarkDown,
+        Self::DarkUp,
+        Self::DarkGrid,
+        Self::DarkTrellis,
+        Self::LightHorizontal,
+        Self::LightVertical,
+        Self::LightDown,
+        Self::LightUp,
+        Self::LightGrid,
+        Self::LightTrellis,
+    ];
+
+    pub fn from_sml(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|pattern| pattern.as_sml() == value)
+    }
+
+    pub fn as_sml(self) -> &'static str {
+        match self {
+            Self::Gray125 => "gray125",
+            Self::Gray0625 => "gray0625",
+            Self::MediumGray => "mediumGray",
+            Self::DarkGray => "darkGray",
+            Self::LightGray => "lightGray",
+            Self::DarkHorizontal => "darkHorizontal",
+            Self::DarkVertical => "darkVertical",
+            Self::DarkDown => "darkDown",
+            Self::DarkUp => "darkUp",
+            Self::DarkGrid => "darkGrid",
+            Self::DarkTrellis => "darkTrellis",
+            Self::LightHorizontal => "lightHorizontal",
+            Self::LightVertical => "lightVertical",
+            Self::LightDown => "lightDown",
+            Self::LightUp => "lightUp",
+            Self::LightGrid => "lightGrid",
+            Self::LightTrellis => "lightTrellis",
+        }
+    }
+
+    pub fn mask(self) -> [u8; 8] {
+        match self {
+            Self::Gray125 => [0x11, 0, 0x44, 0, 0x11, 0, 0x44, 0],
+            Self::Gray0625 => [0x01, 0, 0x10, 0, 0x01, 0, 0x10, 0],
+            Self::MediumGray => [0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa, 0x55, 0xaa],
+            Self::DarkGray => [0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd, 0x77, 0xdd],
+            Self::LightGray => [0x11, 0x44, 0x11, 0x44, 0x11, 0x44, 0x11, 0x44],
+            Self::DarkHorizontal => [0xff, 0xff, 0, 0, 0xff, 0xff, 0, 0],
+            Self::DarkVertical => [0x33; 8],
+            Self::DarkDown => [0x33, 0x66, 0xcc, 0x99, 0x33, 0x66, 0xcc, 0x99],
+            Self::DarkUp => [0x33, 0x99, 0xcc, 0x66, 0x33, 0x99, 0xcc, 0x66],
+            Self::DarkGrid => [0xff, 0xff, 0x33, 0x33, 0xff, 0xff, 0x33, 0x33],
+            Self::DarkTrellis => [0x33, 0xff, 0xcc, 0xff, 0x33, 0xff, 0xcc, 0xff],
+            Self::LightHorizontal => [0xff, 0, 0, 0, 0xff, 0, 0, 0],
+            Self::LightVertical => [0x11; 8],
+            Self::LightDown => [0x11, 0x22, 0x44, 0x88, 0x11, 0x22, 0x44, 0x88],
+            Self::LightUp => [0x11, 0x88, 0x44, 0x22, 0x11, 0x88, 0x44, 0x22],
+            Self::LightGrid => [0xff, 0x11, 0x11, 0x11, 0xff, 0x11, 0x11, 0x11],
+            Self::LightTrellis => [0x11, 0xaa, 0x44, 0xaa, 0x11, 0xaa, 0x44, 0xaa],
+        }
+    }
+}
+
+/// Border line style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BorderStyle {
     Thin,
@@ -64,6 +163,12 @@ pub enum BorderStyle {
     Dotted,
     Double,
     Hair,
+    MediumDashed,
+    DashDot,
+    MediumDashDot,
+    DashDotDot,
+    MediumDashDotDot,
+    SlantDashDot,
 }
 
 impl BorderStyle {
@@ -71,9 +176,15 @@ impl BorderStyle {
     pub fn from_sml(s: &str) -> Self {
         match s {
             "thin" => BorderStyle::Thin,
-            "medium" | "mediumDashed" | "mediumDashDot" | "mediumDashDotDot" => BorderStyle::Medium,
+            "medium" => BorderStyle::Medium,
             "thick" => BorderStyle::Thick,
-            "dashed" | "dashDot" | "dashDotDot" | "slantDashDot" => BorderStyle::Dashed,
+            "dashed" => BorderStyle::Dashed,
+            "mediumDashed" => BorderStyle::MediumDashed,
+            "dashDot" => BorderStyle::DashDot,
+            "mediumDashDot" => BorderStyle::MediumDashDot,
+            "dashDotDot" => BorderStyle::DashDotDot,
+            "mediumDashDotDot" => BorderStyle::MediumDashDotDot,
+            "slantDashDot" => BorderStyle::SlantDashDot,
             "dotted" => BorderStyle::Dotted,
             "double" => BorderStyle::Double,
             "hair" => BorderStyle::Hair,
@@ -91,6 +202,88 @@ impl BorderStyle {
             BorderStyle::Dotted => "dotted",
             BorderStyle::Double => "double",
             BorderStyle::Hair => "hair",
+            BorderStyle::MediumDashed => "mediumDashed",
+            BorderStyle::DashDot => "dashDot",
+            BorderStyle::MediumDashDot => "mediumDashDot",
+            BorderStyle::DashDotDot => "dashDotDot",
+            BorderStyle::MediumDashDotDot => "mediumDashDotDot",
+            BorderStyle::SlantDashDot => "slantDashDot",
+        }
+    }
+}
+
+#[cfg(test)]
+mod pattern_border_tests {
+    use super::*;
+
+    #[test]
+    fn pattern_border_tokens_round_trip() {
+        for token in [
+            "thin",
+            "medium",
+            "dashed",
+            "dotted",
+            "thick",
+            "double",
+            "hair",
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ] {
+            assert_eq!(BorderStyle::from_sml(token).as_sml(), token);
+        }
+        assert_eq!(BorderStyle::from_sml("unknown"), BorderStyle::Thin);
+    }
+
+    #[test]
+    fn pattern_fill_interning_preserves_both_colors() {
+        let value = serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Indexed": 5}
+        }});
+        let fill: Fill = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&fill).unwrap(), value);
+        let mut ss = Stylesheet::default();
+        let mut format = ss.cell_format(None);
+        format.fill = fill;
+        let first = ss.intern_cell_format(&format).unwrap();
+        assert_eq!(ss.intern_cell_format(&format).unwrap(), first);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Indexed": 6}
+        }}))
+        .unwrap();
+        assert_ne!(ss.intern_cell_format(&format).unwrap(), first);
+    }
+
+    #[test]
+    fn pattern_masks_cover_the_specified_share_of_each_tile() {
+        // gray shares are the spec's percentages of 64 pixels; hatches are 1-px (light) or
+        // 2-px (dark) lines every 4 px, and grids and trellises count each crossing once
+        let expected = [
+            (PatternType::Gray0625, 64 / 16),
+            (PatternType::Gray125, 64 / 8),
+            (PatternType::LightGray, 64 / 4),
+            (PatternType::MediumGray, 64 / 2),
+            (PatternType::DarkGray, 64 * 3 / 4),
+            (PatternType::LightHorizontal, 16),
+            (PatternType::LightVertical, 16),
+            (PatternType::LightDown, 16),
+            (PatternType::LightUp, 16),
+            (PatternType::LightGrid, 16 + 16 - 4),
+            (PatternType::LightTrellis, 16 + 16 - 8),
+            (PatternType::DarkHorizontal, 32),
+            (PatternType::DarkVertical, 32),
+            (PatternType::DarkDown, 32),
+            (PatternType::DarkUp, 32),
+            (PatternType::DarkGrid, 32 + 32 - 16),
+            (PatternType::DarkTrellis, 32 + 32 - 16),
+        ];
+        assert_eq!(expected.len(), PatternType::ALL.len());
+        for (pattern, pixels) in expected {
+            let set: u32 = pattern.mask().iter().map(|row| row.count_ones()).sum();
+            assert_eq!(set, pixels, "{}", pattern.as_sml());
         }
     }
 }
@@ -193,13 +386,51 @@ pub struct Alignment {
     pub v: Option<VAlign>,
     pub wrap_text: bool,
     pub shrink_to_fit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_rotation: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_indent: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justify_last_line: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_order: Option<u32>,
 }
 
 impl Alignment {
     /// true when the element carries no meaningful alignment.
     pub fn is_empty(&self) -> bool {
-        self.h.is_none() && self.v.is_none() && !self.wrap_text && !self.shrink_to_fit
+        self.h.is_none()
+            && self.v.is_none()
+            && !self.wrap_text
+            && !self.shrink_to_fit
+            && self.text_rotation.is_none()
+            && self.indent.is_none()
+            && self.relative_indent.is_none()
+            && self.justify_last_line.is_none()
+            && self.reading_order.is_none()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Protection {
+    pub locked: bool,
+    pub hidden: bool,
+}
+
+impl Default for Protection {
+    fn default() -> Self {
+        Self {
+            locked: true,
+            hidden: false,
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// a cell format record (`CT_Xf` in cellXfs). a `None` pool index means
@@ -211,6 +442,40 @@ pub struct Xf {
     pub border: Option<u32>,
     pub num_fmt_id: Option<u16>,
     pub alignment: Option<Alignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xf_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quote_prefix: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pivot_button: bool,
+}
+
+impl Xf {
+    /// this entry as releases before format facets read it: no protection,
+    /// parent style or prefix flags, and only the alignment they modeled.
+    pub fn released_reading(&self) -> Self {
+        let alignment = self
+            .alignment
+            .as_ref()
+            .map(|alignment| Alignment {
+                h: alignment.h,
+                v: alignment.v,
+                wrap_text: alignment.wrap_text,
+                shrink_to_fit: alignment.shrink_to_fit,
+                ..Alignment::default()
+            })
+            .filter(|alignment| !alignment.is_empty());
+        Self {
+            font: self.font,
+            fill: self.fill,
+            border: self.border,
+            num_fmt_id: self.num_fmt_id,
+            alignment,
+            ..Self::default()
+        }
+    }
 }
 
 /// the workbook theme colors in clrScheme declaration order
@@ -316,6 +581,11 @@ impl<'a> FontKey<'a> {
 enum FillKey<'a> {
     None,
     Solid(ColorKey<'a>),
+    Pattern {
+        pattern: PatternType,
+        fg: Option<ColorKey<'a>>,
+        bg: Option<ColorKey<'a>>,
+    },
 }
 
 impl<'a> FillKey<'a> {
@@ -323,6 +593,17 @@ impl<'a> FillKey<'a> {
         Some(match fill {
             Fill::None => FillKey::None,
             Fill::Solid(color) => FillKey::Solid(ColorKey::new(color)?),
+            Fill::Pattern { pattern, fg, bg } => FillKey::Pattern {
+                pattern: *pattern,
+                fg: match fg {
+                    Some(color) => Some(ColorKey::new(color)?),
+                    None => None,
+                },
+                bg: match bg {
+                    Some(color) => Some(ColorKey::new(color)?),
+                    None => None,
+                },
+            },
         })
     }
 }
@@ -465,6 +746,10 @@ pub struct Stylesheet {
     format_sources: BTreeMap<u32, Option<u32>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     exact_style_indices: bool,
+    /// set at the `cell_xfs` indices read from snapshot records written before
+    /// format facets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    released_xfs: Vec<bool>,
     #[serde(skip)]
     derived_memo: HashMap<(u32, Xf), u32>,
     #[serde(skip)]
@@ -520,6 +805,14 @@ pub struct CellFormat {
     pub border: Border,
     pub number_format: NumberFormat,
     pub alignment: Alignment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xf_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quote_prefix: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pivot_button: bool,
 }
 
 /// borrowed view of a resolved cell format; defaults mirror [`CellFormat::default`].
@@ -530,6 +823,10 @@ pub struct ResolvedFormat<'a> {
     pub border: &'a Border,
     pub number_format: FormatCode<'a>,
     pub alignment: &'a Alignment,
+    pub protection: Option<&'a Protection>,
+    pub xf_id: Option<u32>,
+    pub quote_prefix: bool,
+    pub pivot_button: bool,
 }
 
 const DEFAULT_FONT: Font = Font {
@@ -554,6 +851,11 @@ const DEFAULT_ALIGNMENT: Alignment = Alignment {
     v: None,
     wrap_text: false,
     shrink_to_fit: false,
+    text_rotation: None,
+    indent: None,
+    relative_indent: None,
+    justify_last_line: None,
+    reading_order: None,
 };
 
 impl Stylesheet {
@@ -569,6 +871,7 @@ impl Stylesheet {
             indexed_colors,
             format_sources: _,
             exact_style_indices: _,
+            released_xfs: _,
             derived_memo: _,
             font_memo: _,
             fill_memo: _,
@@ -667,6 +970,10 @@ impl Stylesheet {
                 },
             },
             alignment: resolved.alignment.clone(),
+            protection: resolved.protection.copied(),
+            xf_id: resolved.xf_id,
+            quote_prefix: resolved.quote_prefix,
+            pivot_button: resolved.pivot_button,
         }
     }
 
@@ -692,6 +999,10 @@ impl Stylesheet {
             alignment: xf
                 .and_then(|xf| xf.alignment.as_ref())
                 .unwrap_or(&DEFAULT_ALIGNMENT),
+            protection: xf.and_then(|xf| xf.protection.as_ref()),
+            xf_id: xf.and_then(|xf| xf.xf_id),
+            quote_prefix: xf.is_some_and(|xf| xf.quote_prefix),
+            pivot_button: xf.is_some_and(|xf| xf.pivot_button),
         }
     }
 
@@ -822,6 +1133,10 @@ impl Stylesheet {
                 border,
                 num_fmt_id,
                 alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
             };
             if let Some(index) = xf.font
                 && xf.fill.is_none()
@@ -861,6 +1176,10 @@ impl Stylesheet {
                 border,
                 num_fmt_id,
                 alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
             };
             return Ok(Some(intern_linear(&mut self.cell_xfs, &xf)));
         }
@@ -886,6 +1205,10 @@ impl Stylesheet {
                 border,
                 num_fmt_id,
                 alignment,
+                protection: format.protection,
+                xf_id: format.xf_id,
+                quote_prefix: format.quote_prefix,
+                pivot_button: format.pivot_button,
             };
             let has_new_facet = (self.fonts.len() != font_len && has_font)
                 || (self.fills.len() != fill_len && has_fill)
@@ -942,6 +1265,10 @@ impl Stylesheet {
             border,
             num_fmt_id,
             alignment,
+            protection: format.protection,
+            xf_id: format.xf_id,
+            quote_prefix: format.quote_prefix,
+            pivot_button: format.pivot_button,
         };
         self.intern_xf(&xf)
     }
@@ -964,11 +1291,29 @@ impl Stylesheet {
         self.fills.truncate(marks.fills);
         self.borders.truncate(marks.borders);
         self.cell_xfs.truncate(marks.cell_xfs);
+        self.released_xfs.truncate(marks.cell_xfs);
         self.num_fmts.truncate(marks.num_fmts);
         self.format_sources
             .retain(|index, _| (*index as usize) < marks.cell_xfs);
         self.derived_memo
             .retain(|_, index| (*index as usize) < marks.cell_xfs);
+    }
+
+    /// appends `xf` as read from a snapshot record written before format facets.
+    #[doc(hidden)]
+    pub fn push_released_xf(&mut self, xf: Xf) {
+        self.released_xfs.resize(self.cell_xfs.len(), false);
+        self.released_xfs.push(true);
+        self.cell_xfs.push(xf);
+    }
+
+    /// whether `cell_xfs[index]` was read from a snapshot record written before
+    /// format facets and still holds only what such a record carries.
+    #[doc(hidden)]
+    pub fn is_released_xf(&self, index: usize) -> bool {
+        let entry = self.cell_xfs.get(index);
+        self.released_xfs.get(index) == Some(&true)
+            && entry.is_some_and(|xf| *xf == xf.released_reading())
     }
 
     fn intern_font(&mut self, value: &Font) -> u32 {
@@ -1247,6 +1592,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn format_facets_intern_and_serialize_in_small_and_large_pools() {
+        let mut value = serde_json::to_value(CellFormat::default()).unwrap();
+        value["protection"] = serde_json::json!({"locked": false, "hidden": true});
+        value["xfId"] = serde_json::json!(3);
+        value["quotePrefix"] = serde_json::json!(true);
+        value["pivotButton"] = serde_json::json!(true);
+        value["alignment"]["text_rotation"] = serde_json::json!(255);
+        value["alignment"]["indent"] = serde_json::json!(4);
+        value["alignment"]["relative_indent"] = serde_json::json!(-2);
+        value["alignment"]["justify_last_line"] = serde_json::json!(true);
+        value["alignment"]["reading_order"] = serde_json::json!(2);
+        let format: CellFormat = serde_json::from_value(value.clone()).unwrap();
+        for size in [0, INTERN_CACHE_MIN_POOL, INTERN_CACHE_MIN_POOL + 1] {
+            let mut styles = Stylesheet::default();
+            for id in 0..size {
+                styles.cell_xfs.push(Xf {
+                    num_fmt_id: Some(id as u16),
+                    ..Default::default()
+                });
+            }
+            for number_format in [
+                NumberFormat::default(),
+                NumberFormat::Custom {
+                    pattern: "0.000".into(),
+                },
+            ] {
+                let mut format = format.clone();
+                format.number_format = number_format;
+                let index = styles.intern_cell_format(&format).unwrap().unwrap();
+                assert_eq!(styles.intern_cell_format(&format).unwrap(), Some(index));
+                let resolved = styles.cell_format(Some(index));
+                let mut expected = value.clone();
+                expected["numberFormat"] = serde_json::to_value(&format.number_format).unwrap();
+                assert_eq!(serde_json::to_value(&resolved).unwrap(), expected);
+                let mut other = expected.clone();
+                other["protection"]["locked"] = serde_json::json!(true);
+                let other = serde_json::from_value(other).unwrap();
+                let other_index = styles.intern_cell_format(&other).unwrap().unwrap();
+                assert_ne!(index, other_index);
+                assert_ne!(
+                    styles.resolved_format(Some(index)),
+                    styles.resolved_format(Some(other_index))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_cell_format_json_stays_unchanged() {
+        let value = serde_json::json!({
+            "font": {"name": null, "size_pt": null, "bold": false, "italic": false,
+                "underline": false, "strike": false, "color": null},
+            "fill": "None", "border": {"left": null, "right": null, "top": null, "bottom": null},
+            "numberFormat": {"kind": "builtin", "id": 0},
+            "alignment": {"h": null, "v": null, "wrap_text": false, "shrink_to_fit": false}
+        });
+        let format: CellFormat = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(format, CellFormat::default());
+        assert_eq!(serde_json::to_value(format).unwrap(), value);
+        let xf = serde_json::json!({"font": null, "fill": null, "border": null,
+            "num_fmt_id": null, "alignment": null});
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<Xf>(xf.clone()).unwrap()).unwrap(),
+            xf
+        );
+    }
+
+    #[test]
     fn theme_slot_swaps_first_two_pairs() {
         let t = Theme::default();
         assert_eq!(t.slot(0), Some("#ffffff"));
@@ -1340,7 +1753,9 @@ mod tests {
                         v: Some(VAlign::Center),
                         wrap_text: true,
                         shrink_to_fit: false,
+                        ..Alignment::default()
                     }),
+                    ..Xf::default()
                 },
             ],
             num_fmts: vec![(164, "0.0\"%\"".into())],

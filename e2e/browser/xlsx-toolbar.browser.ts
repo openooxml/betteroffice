@@ -62,26 +62,39 @@ test('xlsx: a narrow toolbar keeps every control in a keyboard menu inside the v
   await expect(more).toBeFocused();
 });
 
-test('xlsx: a toolbar command pressed during IME composition lands after the composed text', async ({
-  page,
-}) => {
-  await open(page);
-  const bold = page.getByTestId('xlsx-formatting-toolbar').getByRole('button', { name: 'Bold' });
-  const wasBold = await bold.getAttribute('aria-pressed');
-  await page.getByTestId('xlsx-scroll').press('F2');
-  const input = page.getByTestId('xlsx-cell-editor');
-  await input.press('ControlOrMeta+A');
-  await input.pressSequentially('ab');
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send('Input.imeSetComposition', {
-    text: 'かな',
-    selectionStart: 2,
-    selectionEnd: 2,
-  });
-  await bold.click();
+for (const source of ['cell', 'formula'] as const) {
+  test(`xlsx: a toolbar command during ${source} IME composition preserves text and keyboard focus`, async ({
+    page,
+  }) => {
+    await open(page);
+    const bold = page.getByTestId('xlsx-formatting-toolbar').getByRole('button', { name: 'Bold' });
+    const wasBold = await bold.getAttribute('aria-pressed');
+    if (source === 'cell') await page.getByTestId('xlsx-scroll').press('F2');
+    const input = page.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input');
+    await input.focus();
+    await input.press('ControlOrMeta+A');
+    await input.pressSequentially('ab');
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.imeSetComposition', {
+      text: 'かな',
+      selectionStart: 2,
+      selectionEnd: 2,
+    });
+    await bold.click();
 
-  await expect(input).toHaveCount(0);
-  await expect(page.getByRole('gridcell').filter({ hasText: 'abかな' })).toHaveCount(1);
-  await expect(bold).toHaveAttribute('aria-pressed', wasBold === 'true' ? 'false' : 'true');
-  await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('abかな');
-});
+    if (source === 'cell') await expect(input).toHaveCount(0);
+    await expect(page.getByRole('gridcell').filter({ hasText: 'abかな' })).toHaveCount(1);
+    await expect(bold).toHaveAttribute('aria-pressed', wasBold === 'true' ? 'false' : 'true');
+    await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('abかな');
+    await expect(page.getByTestId(source === 'cell' ? 'xlsx-scroll' : 'xlsx-formula-input')).toBeFocused();
+    if (source === 'cell') {
+      await page.keyboard.press('F2');
+      await expect(input).toHaveValue('abかな');
+      await page.keyboard.press('End');
+    }
+    await page.keyboard.type('x');
+    await expect(input).toHaveValue('abかなx');
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('gridcell').filter({ hasText: 'abかなx' })).toHaveCount(1);
+  });
+}

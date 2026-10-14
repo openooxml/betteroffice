@@ -9,6 +9,7 @@ pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
+pub use xlsx_model::PatternType;
 
 use hashbrown::HashMap;
 use ooxml_drawingml::chart::ChartSpace;
@@ -31,7 +32,7 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, scaled,
+    PathStroke, Rect, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
@@ -402,6 +403,7 @@ fn emit_grid_segments(
                     width,
                     color: color.clone(),
                     style: None,
+                    rail: None,
                     clip: None,
                 });
             };
@@ -764,7 +766,7 @@ where
 
     for &(at, cell) in &anchors {
         // a cell naming no style still inherits its column's
-        let Some(hex) = &fx
+        let Some(fill) = &fx
             .xf(cell.style.or_else(|| sheet_ref.col_style(at.col)))
             .fill
         else {
@@ -774,14 +776,19 @@ where
             continue;
         };
         let clip = cell_box.clip;
-        commands.push(DrawCmd::FillRect {
-            x: clip.x,
-            y: clip.y,
-            w: clip.w,
-            h: clip.h,
-            color: hex.clone(),
-            clip: None,
-        });
+        let origin = (
+            if at.col < cols.frozen {
+                0.0
+            } else {
+                -cols.scroll
+            },
+            if at.row < rows.frozen {
+                0.0
+            } else {
+                -rows.scroll
+            },
+        );
+        commands.push(fill.command(clip, origin));
     }
 
     if print.is_none() {
@@ -814,6 +821,7 @@ where
                 width,
                 color: text_color.clone(),
                 style: None,
+                rail: None,
                 clip: None,
             });
         }
@@ -1001,6 +1009,7 @@ where
             width: PANE_DIVIDER_WIDTH,
             color: pane_divider_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -1013,6 +1022,7 @@ where
             width: PANE_DIVIDER_WIDTH,
             color: pane_divider_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -1196,48 +1206,56 @@ fn emit_column_fills(
         let Some(style) = sheet.col_style(col.index) else {
             continue;
         };
-        let Some(Fill::Solid(color)) = styles.fill_for(style) else {
+        let Some(fill) = styles
+            .fill_for(style)
+            .and_then(|fill| ResolvedFill::resolve(styles, fill))
+        else {
             continue;
         };
-        let Some(hex) = styles.resolve_color(color) else {
-            continue;
-        };
-        let mut run: Option<(f32, f32, u32)> = None;
+        let origin_x = if col.pinned { 0.0 } else { -cols.scroll };
+        let mut run: Option<(f32, f32, u32, f32)> = None;
         for row in &rows.tracks {
             let at = CellRef::new(row.index, col.index);
             let owned = sheet.cell(at).is_some() || merges.covering(at).is_some();
+            let origin_y = if row.pinned { 0.0 } else { -rows.scroll };
             match run {
-                Some((start, _, last)) if !owned && row.index == last + 1 => {
-                    run = Some((start, row.end, row.index));
+                Some((start, _, last, origin))
+                    if !owned
+                        && row.index == last + 1
+                        && (matches!(&fill, ResolvedFill::Solid(_)) || origin == origin_y) =>
+                {
+                    run = Some((start, row.end, row.index, origin));
                 }
                 _ => {
-                    if let Some((start, end, _)) = run.take()
+                    if let Some((start, end, _, origin_y)) = run.take()
                         && end > start
                     {
-                        commands.push(DrawCmd::FillRect {
-                            x: col.start,
-                            y: start,
-                            w: (col.end - col.start).max(0.0),
-                            h: end - start,
-                            color: hex.clone().into(),
-                            clip: None,
-                        });
+                        commands.push(fill.command(
+                            Rect {
+                                x: col.start,
+                                y: start,
+                                w: (col.end - col.start).max(0.0),
+                                h: end - start,
+                            },
+                            (origin_x, origin_y),
+                        ));
                     }
-                    run = (!owned).then_some((row.start, row.end, row.index));
+                    run = (!owned).then_some((row.start, row.end, row.index, origin_y));
                 }
             }
         }
-        if let Some((start, end, _)) = run
+        if let Some((start, end, _, origin_y)) = run
             && end > start
         {
-            commands.push(DrawCmd::FillRect {
-                x: col.start,
-                y: start,
-                w: (col.end - col.start).max(0.0),
-                h: end - start,
-                color: hex.into(),
-                clip: None,
-            });
+            commands.push(fill.command(
+                Rect {
+                    x: col.start,
+                    y: start,
+                    w: (col.end - col.start).max(0.0),
+                    h: end - start,
+                },
+                (origin_x, origin_y),
+            ));
         }
     }
 }
@@ -1591,12 +1609,71 @@ fn cell_box(
 struct ResolvedXf {
     format_code: Arc<str>,
     font: Option<ResolvedFont>,
-    fill: Option<Arc<str>>,
+    fill: Option<ResolvedFill>,
     border: Option<ResolvedBorder>,
     h: Option<HAlign>,
     v: Option<VAlign>,
     /// wrap_text or shrink_to_fit — both suppress text spill.
     wrap_or_shrink: bool,
+}
+
+enum ResolvedFill {
+    Solid(Arc<str>),
+    Pattern {
+        pattern: PatternType,
+        fg: Arc<str>,
+        bg: Arc<str>,
+    },
+}
+
+impl ResolvedFill {
+    fn resolve(styles: &Stylesheet, fill: &Fill) -> Option<Self> {
+        match fill {
+            Fill::None => None,
+            Fill::Solid(color) => styles
+                .resolve_color(color)
+                .map(|color| Self::Solid(color.into())),
+            Fill::Pattern { pattern, fg, bg } => Some(Self::Pattern {
+                pattern: *pattern,
+                fg: fg
+                    .as_ref()
+                    .and_then(|color| styles.resolve_color(color))
+                    .unwrap_or_else(|| "#000000".into())
+                    .into(),
+                bg: bg
+                    .as_ref()
+                    .and_then(|color| styles.resolve_color(color))
+                    .unwrap_or_else(|| "#ffffff".into())
+                    .into(),
+            }),
+        }
+    }
+
+    fn command(&self, rect: Rect, (origin_x, origin_y): (f32, f32)) -> DrawCmd {
+        let Rect { x, y, w, h } = rect;
+        match self {
+            Self::Solid(color) => DrawCmd::FillRect {
+                x,
+                y,
+                w,
+                h,
+                color: color.clone(),
+                clip: None,
+            },
+            Self::Pattern { pattern, fg, bg } => DrawCmd::PatternFill {
+                x,
+                y,
+                w,
+                h,
+                pattern: *pattern,
+                fg: fg.clone(),
+                bg: bg.clone(),
+                origin_x,
+                origin_y,
+                clip: None,
+            },
+        }
+    }
 }
 
 struct ResolvedFont {
@@ -1677,10 +1754,7 @@ impl<'a> FrameStyles<'a> {
             });
         let fill = style
             .and_then(|s| styles.fill_for(s))
-            .and_then(|fill| match fill {
-                Fill::Solid(color) => styles.resolve_color(color).map(Arc::from),
-                _ => None,
-            });
+            .and_then(|fill| ResolvedFill::resolve(styles, fill));
         let border = style
             .and_then(|s| styles.border_for(s))
             .map(|border| ResolvedBorder {
@@ -1911,6 +1985,7 @@ fn border_line(x1: f32, y1: f32, x2: f32, y2: f32, edge: &ResolvedBorderEdge) ->
         width: edge.width,
         color: edge.color.clone(),
         style: edge.style.clone(),
+        rail: (edge.style.as_deref() == Some("double")).then_some(edge.width / 3.0),
         clip: None,
     }
 }
@@ -1924,7 +1999,13 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
         BorderStyle::Thick => (3.0, None),
         BorderStyle::Dashed => (1.0, Some("dashed")),
         BorderStyle::Dotted => (1.0, Some("dotted")),
-        BorderStyle::Double => (1.0, Some("double")),
+        BorderStyle::Double => (3.0, Some("double")),
+        BorderStyle::MediumDashed => (2.0, Some("mediumDashed")),
+        BorderStyle::DashDot => (1.0, Some("dashDot")),
+        BorderStyle::MediumDashDot => (2.0, Some("mediumDashDot")),
+        BorderStyle::DashDotDot => (1.0, Some("dashDotDot")),
+        BorderStyle::MediumDashDotDot => (2.0, Some("mediumDashDotDot")),
+        BorderStyle::SlantDashDot => (1.0, Some("slantDashDot")),
     }
 }
 
@@ -1933,6 +2014,155 @@ mod merged_grid_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pattern_border_display_list_preserves_pattern_and_dash_styles() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        for (col, token) in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut format = wb.styles.cell_format(None);
+            format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+                "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Rgb": "#fedcba"}
+            }}))
+            .unwrap();
+            format.border.top = Some(xlsx_model::BorderEdge {
+                style: BorderStyle::from_sml(token),
+                color: Some(xlsx_model::Color::Rgb("#654321".into())),
+            });
+            let style = wb.styles.intern_cell_format(&format).unwrap();
+            sheet.set_cell(
+                CellRef::new(1, col as u32),
+                Cell {
+                    style,
+                    ..Cell::default()
+                },
+            );
+        }
+        let mut format = wb.styles.cell_format(None);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "gray125", "fg": "Auto", "bg": null
+        }}))
+        .unwrap();
+        let style = wb.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            CellRef::new(1, 6),
+            Cell {
+                style,
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 3.0,
+                y: 2.0,
+                width: 500.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+        let zoomed = serde_json::to_value(scaled(dl.clone(), 2.0)).unwrap();
+        let zoomed_fill = zoomed["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|cmd| cmd["op"] == "patternFill")
+            .unwrap();
+        assert_eq!(zoomed_fill["originX"], -6.0);
+        assert_eq!(zoomed_fill["pattern"], "lightUp");
+        let json = serde_json::to_value(dl).unwrap();
+        let cmds = json["commands"].as_array().unwrap();
+        let fills: Vec<_> = cmds
+            .iter()
+            .filter(|cmd| cmd["op"] == "patternFill")
+            .collect();
+        assert_eq!(fills.len(), 7);
+        assert_eq!(fills[0]["pattern"], "lightUp");
+        assert_eq!(fills[0]["fg"], "#123456");
+        assert_eq!(fills[0]["bg"], "#fedcba");
+        assert_eq!(fills[0]["originX"], -3.0);
+        assert_eq!(fills[0]["originY"], -2.0);
+        assert_eq!(fills[6]["fg"], "#000000");
+        assert_eq!(fills[6]["bg"], "#ffffff");
+        let lines: Vec<_> = cmds
+            .iter()
+            .filter(|cmd| cmd["color"] == "#654321")
+            .collect();
+        assert_eq!(lines.len(), 6);
+        for (line, token) in lines.iter().zip([
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ]) {
+            assert_eq!(line["style"], token);
+            assert_eq!(
+                line["width"],
+                if token.starts_with("medium") {
+                    2.0
+                } else {
+                    1.0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn double_border_carries_its_rail_width() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        let mut format = wb.styles.cell_format(None);
+        format.border.bottom = Some(xlsx_model::BorderEdge {
+            style: BorderStyle::Double,
+            color: Some(xlsx_model::Color::Rgb("#654321".into())),
+        });
+        let style = wb.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                style,
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 60.0,
+            },
+        )
+        .unwrap();
+        for (factor, width, rail) in [(1.0, 3.0, 1.0), (2.0, 6.0, 2.0)] {
+            let json = serde_json::to_value(scaled(dl.clone(), factor)).unwrap();
+            let line = json["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|cmd| cmd["style"] == "double")
+                .unwrap();
+            assert_eq!(
+                (line["width"].as_f64(), line["rail"].as_f64()),
+                (Some(width), Some(rail))
+            );
+        }
+    }
     use super::*;
     use xlsx_model::Hyperlink;
     use xlsx_model::styles::{Alignment, HAlign, Xf};

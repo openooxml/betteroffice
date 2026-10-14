@@ -17,7 +17,8 @@ pub use chart::{
 pub use date::DateSystem;
 pub use styles::{
     Alignment, Border, BorderEdge, BorderStyle, CellFormat, Color, Fill, Font, FormatCode, HAlign,
-    NumFmtTableFull, NumberFormat, PoolMarks, Stylesheet, Theme, VAlign, Xf,
+    NumFmtTableFull, NumberFormat, PatternType, PoolMarks, Protection, Stylesheet, Theme, VAlign,
+    Xf,
 };
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{

@@ -205,12 +205,53 @@ export interface SelectionFormatting {
   textWrapping?: TextWrapping;
 }
 
-export interface CapturedFormat {
+export interface CapturedFormat<TFormat = unknown> {
   rows: number;
   columns: number;
-  formats: unknown[];
+  formats: TFormat[];
   sourceStyles?: (number | null)[];
   sourceFormats?: unknown[];
+}
+
+export type CapturedColor = 'Auto' | { Rgb: string } | { Indexed: number }
+  | { Theme: { idx: number; tint: number } };
+
+export type CapturedFill = 'None' | { Solid: CapturedColor } | {
+  Pattern: { pattern: import('../display-list/types').PatternType; fg?: CapturedColor | null; bg?: CapturedColor | null };
+};
+
+export type CapturedBorderStyle = 'Thin' | 'Medium' | 'Thick' | 'Dashed' | 'Dotted' | 'Double' | 'Hair'
+  | 'MediumDashed' | 'DashDot' | 'MediumDashDot' | 'DashDotDot' | 'MediumDashDotDot' | 'SlantDashDot';
+
+export interface CapturedBorderEdge {
+  style: CapturedBorderStyle;
+  color?: CapturedColor | null;
+}
+
+export interface CapturedCellFormat {
+  font: {
+    name?: string | null;
+    size_pt?: number | null;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    strike?: boolean;
+    color?: CapturedColor | null;
+  };
+  fill: CapturedFill;
+  border: {
+    left?: CapturedBorderEdge | null;
+    right?: CapturedBorderEdge | null;
+    top?: CapturedBorderEdge | null;
+    bottom?: CapturedBorderEdge | null;
+  };
+  numberFormat: { kind: 'builtin'; id: number } | { kind: 'custom'; pattern: string };
+  alignment: {
+    h?: 'General' | 'Left' | 'Center' | 'Right' | 'Fill' | 'Justify' | 'CenterContinuous' | 'Distributed' | null;
+    v?: 'Top' | 'Center' | 'Bottom' | 'Justify' | 'Distributed' | null;
+    wrap_text?: boolean;
+    shrink_to_fit?: boolean;
+  };
 }
 
 export interface CellPoint {

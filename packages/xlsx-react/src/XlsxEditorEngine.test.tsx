@@ -1,11 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
-import { en } from '@betteroffice/xlsx-i18n';
-import { StrictMode, useEffect, useState } from 'react';
-import type { XlsxAsyncEditorProps, XlsxEditorProps } from './XlsxEditor';
+import { useEffect, useState } from 'react';
+import type { XlsxInThreadEditorProps } from './XlsxEditor';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
-import { XlsxAsyncApiUnavailableError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
+import { xlsxCommandController } from './commands/createXlsxCommandStore';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -17,7 +16,7 @@ let editorInstances = 0;
 const mounts = mock(() => {});
 const unmounts = mock(() => {});
 
-type MarkerProps = Pick<XlsxEditorProps, 'readOnly' | 'plugins' | 'pluginGrants' | 'onPluginError' | 'onReady'> & { backend?: 'legacy' | 'peerless' };
+type MarkerProps = Pick<XlsxInThreadEditorProps, 'readOnly' | 'plugins' | 'pluginGrants' | 'onPluginError' | 'onReady'> & { backend?: 'legacy' | 'peerless' };
 const workerEditor = mock((props: MarkerProps) => {
   const [instance] = useState(() => ++editorInstances);
   const [backend] = useState(() => props.backend ?? 'legacy');
@@ -37,8 +36,8 @@ mock.module('./viewer/XlsxSessionViewer', () => ({
   XlsxSessionViewer: (props: MarkerProps) => <div data-testid="worker-viewer"
     data-read-only={props.readOnly} data-plugins={props.plugins?.length ?? 0} />,
 }));
-const { PEERLESS_FLAG, XlsxEditor } = await import('./XlsxEditor');
-const asyncProps = { [PEERLESS_FLAG]: true } as const;
+const { resetXlsxEngineWarningsForTests } = await import('./engineWarnings');
+const { XlsxEditor } = await import('./XlsxEditor');
 
 function availableWorker() {
   Object.defineProperty(globalThis, 'Worker', { configurable: true, writable: true, value: class {} });
@@ -48,15 +47,6 @@ function expectInThread(view: ReturnType<typeof render>) {
   expect(view.queryByTestId('worker-editor')).toBeNull();
   expect(view.queryByTestId('worker-viewer')).toBeNull();
   expect(view.getByTestId('xlsx-scroll')).toBeDefined();
-}
-
-function expectAsyncRefusal(view: ReturnType<typeof render>) {
-  expect(view.container.children).toHaveLength(1);
-  expect(view.container.firstElementChild).toBe(view.getByRole('alert'));
-  expect(view.container.querySelector('canvas, input, textarea, [contenteditable="true"], [role="grid"], [role="toolbar"]')).toBeNull();
-  expect(view.queryByTestId('xlsx-scroll')).toBeNull();
-  expect(view.queryByTestId('worker-editor')).toBeNull();
-  expect(view.queryByTestId('worker-viewer')).toBeNull();
 }
 
 function inThreadWorkbook() {
@@ -74,7 +64,7 @@ function inThreadWorkbook() {
   const init = spyOn(xlsx, 'initWasm').mockResolvedValue(undefined);
   const open = spyOn(xlsx, 'openWorkbook').mockReturnValue(handle);
   restorers.push(() => open.mockRestore(), () => init.mockRestore());
-  return { open, init, displayList };
+  return { open, init, displayList, handle };
 }
 
 function inThreadPainting() {
@@ -107,6 +97,7 @@ function inThreadPainting() {
 }
 
 beforeEach(() => {
+  resetXlsxEngineWarningsForTests();
   const originalCanvas = Object.getOwnPropertyDescriptor(globalThis, 'OffscreenCanvas');
   Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, writable: true, value: class {} });
   restorers.push(() => {
@@ -136,205 +127,116 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('XlsxEditor engine dispatch', () => {
-  it('keeps the in-thread editor as the default', () => {
+  it('mounts the default worker-only editor without a main-thread engine', () => {
+    const host = inThreadWorkbook();
     const view = render(<XlsxEditor file={file} />);
-    expectInThread(view);
-    expect(workerEditor).not.toHaveBeenCalled();
+    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
+    expect(host.open).not.toHaveBeenCalled();
+    expect(host.init).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 
-  it('keeps the worker editor behind the existing hybrid opt-in', () => {
+  it('mounts the hybrid only with legacySyncApi and warns once across remounts', () => {
+    const view = render(<XlsxEditor legacySyncApi file={file} />);
+    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy');
+    view.unmount();
+    render(<XlsxEditor legacySyncApi file={file} />);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
+  });
+
+  it('keeps experimentalWorkerOpen=true on the async default', () => {
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen />);
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy');
+    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('mounts the async editor for an initially read-only workbook with empty plugins', () => {
-    const view = render(<XlsxEditor {...asyncProps} file={file} readOnly plugins={[]} />);
-    const marker = view.getByTestId('worker-editor');
-    expect(marker.getAttribute('data-backend')).toBe('peerless');
-    expect(view.queryByTestId('worker-viewer')).toBeNull();
-    view.rerender(<XlsxEditor {...asyncProps} file={file} plugins={[]} />);
-    expect(view.getByTestId('worker-editor')).toBe(marker);
-    expect(editorInstances).toBe(1);
-    expect(warn).not.toHaveBeenCalled();
-  });
+  for (const reason of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen'] as const) {
+    it(`falls back to the in-thread async API for ${reason} and warns once`, async () => {
+      if (reason !== 'experimentalWorkerOpen') Reflect.deleteProperty(globalThis, reason);
+      const host = inThreadWorkbook();
+      const ready = mock((_api: XlsxAsyncEditorApi) => {});
+      const props = { file, onReady: ready, experimentalWorkerOpen: reason === 'experimentalWorkerOpen' ? false : undefined };
+      const view = render(<XlsxEditor {...props} />);
+      expectInThread(view);
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      const api = ready.mock.calls[0]![0];
+      expect(api.hydrated).toBe(true);
+      expect('handle' in api).toBe(false);
+      expect('save' in api).toBe(false);
+      await api.whenHydrated();
+      expect(host.open).toHaveBeenCalledTimes(1);
+      view.unmount();
+      render(<XlsxEditor {...props} />);
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain('deprecated in-thread engine');
+    });
+  }
 
-  it('remounts the editor and cleans up readiness when the async flag changes', () => {
-    const cleanupReady = mock(() => {});
-    const ready = mock(() => cleanupReady);
-    const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={ready} />);
-    const first = view.getByTestId('worker-editor');
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy');
+  it('retains the worker-only session when readOnly and plugins change', () => {
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const view = render(<XlsxEditor file={file} readOnly onReady={ready} />);
+    const editor = view.getByTestId('worker-editor');
+    view.rerender(<XlsxEditor file={file} plugins={[]} onReady={ready} />);
+    expect(view.getByTestId('worker-editor')).toBe(editor);
     expect(mounts).toHaveBeenCalledTimes(1);
-    view.rerender(<XlsxEditor {...asyncProps} file={file} onReady={ready} />);
-    expect(view.getByTestId('worker-editor')).not.toBe(first);
-    expect(mounts).toHaveBeenCalledTimes(2);
-    expect(unmounts).toHaveBeenCalledTimes(1);
-    expect(cleanupReady).toHaveBeenCalledTimes(1);
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
-    Reflect.deleteProperty(globalThis, 'Worker');
-    view.rerender(<XlsxEditor {...asyncProps} file={file} onReady={ready} />);
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
-    expect(mounts).toHaveBeenCalledTimes(2);
-    expect(cleanupReady).toHaveBeenCalledTimes(1);
-    view.rerender(<XlsxEditor file={file} />);
-    expectInThread(view);
-    expect(unmounts).toHaveBeenCalledTimes(2);
-    expect(cleanupReady).toHaveBeenCalledTimes(2);
-    expect(warn).not.toHaveBeenCalled();
-    availableWorker();
-    view.rerender(<XlsxEditor {...asyncProps} file={file} />);
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
+    expect(unmounts).not.toHaveBeenCalled();
   });
 
-  it('refuses the async editor without OffscreenCanvas until a new file', () => {
-    const original = Object.getOwnPropertyDescriptor(globalThis, 'OffscreenCanvas');
-    Reflect.deleteProperty(globalThis, 'OffscreenCanvas');
-    restorers.push(() => {
-      if (original) Object.defineProperty(globalThis, 'OffscreenCanvas', original);
-      else Reflect.deleteProperty(globalThis, 'OffscreenCanvas');
-    });
-    const host = inThreadWorkbook();
-    const onError = mock((_error: Error) => {});
-    const ready = mock((_api: XlsxAsyncEditorApi) => {});
-    const view = render(<XlsxEditor {...asyncProps} file={file} onReady={ready} onError={onError} />);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0]![0]).toMatchObject({
-      name: 'XlsxAsyncApiUnavailableError', code: 'async-api-unavailable', message: 'asyncApi requires OffscreenCanvas',
-    });
-    expectAsyncRefusal(view);
-    expect(ready).not.toHaveBeenCalled();
-    expect(host.open).not.toHaveBeenCalled();
-    expect(host.init).not.toHaveBeenCalled();
-  });
-
-  it('refuses the async editor without Worker until a new file', () => {
-    Reflect.deleteProperty(globalThis, 'Worker');
-    const host = inThreadWorkbook();
-    const onError = mock((_error: Error) => {});
-    const nextError = mock((_error: Error) => {});
-    const ready = mock((_api: XlsxAsyncEditorApi) => {});
-    const view = render(<XlsxEditor {...asyncProps} file={file} onReady={ready} onError={onError} />);
-    expect(onError).toHaveBeenCalledTimes(1);
-    const failure = onError.mock.calls[0]![0];
-    expect(failure).toBeInstanceOf(XlsxAsyncApiUnavailableError);
-    expect(failure).toMatchObject({
-      name: 'XlsxAsyncApiUnavailableError', code: 'async-api-unavailable', message: 'asyncApi requires Worker',
-    });
-    const alert = view.getByRole('alert');
-    expect(alert.textContent).toBe(`${en.editor.openError}: ${failure.message}`);
-    expectAsyncRefusal(view);
-    view.rerender(<XlsxEditor {...asyncProps} file={file} readOnly onReady={ready} onError={nextError} />);
-    availableWorker();
-    view.rerender(<XlsxEditor {...asyncProps} file={file} onReady={ready} onError={nextError} />);
-    expect(view.getByRole('alert')).toBe(alert);
-    expectAsyncRefusal(view);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(nextError).not.toHaveBeenCalled();
-    expect(ready).not.toHaveBeenCalled();
-    expect(host.init).not.toHaveBeenCalled();
-    expect(host.open).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-    view.rerender(<XlsxEditor {...asyncProps} file={file.slice()} onReady={ready} onError={nextError} />);
-    expect(view.queryByRole('alert')).toBeNull();
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
-    expect(ready).toHaveBeenCalledTimes(1);
-    expect(nextError).not.toHaveBeenCalled();
-    expect(host.init).not.toHaveBeenCalled();
-    expect(host.open).not.toHaveBeenCalled();
-  });
-
-  for (const withCollaboration of [false, true]) {
-    it(`refuses the async editor with an in-thread opt-out (collaboration: ${withCollaboration})`, () => {
+  for (const reason of ['Worker', 'OffscreenCanvas', 'experimentalWorkerOpen'] as const) {
+    it(`rejects retired fallback commands after workbook replacement (${reason})`, async () => {
+      if (reason !== 'experimentalWorkerOpen') Reflect.deleteProperty(globalThis, reason);
       const host = inThreadWorkbook();
-      const onError = mock((_error: Error) => {});
+      const undo = mock<xlsx.WorkbookHandle['undo']>(() => ({ applied: true, sheetInfo: host.handle.sheetInfo() }));
+      const replacement = { ...host.handle, undo } as xlsx.WorkbookHandle;
       const ready = mock((_api: XlsxAsyncEditorApi) => {});
-      const props = { ...asyncProps, file, experimentalWorkerOpen: false,
-        collaboration: withCollaboration ? {} : undefined, onReady: ready, onError } as unknown as XlsxAsyncEditorProps;
-      const view = render(<XlsxEditor {...props} />);
-      expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0]![0]).toBeInstanceOf(XlsxAsyncApiUnavailableError);
-      expect(onError.mock.calls[0]![0]).toMatchObject({
-        name: 'XlsxAsyncApiUnavailableError', code: 'async-api-unavailable', message: 'asyncApi requires Worker',
+      const props = { onReady: ready, experimentalWorkerOpen: reason === 'experimentalWorkerOpen' ? false : undefined };
+      const view = render(<XlsxEditor {...props} file={file} />);
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      const retired = ready.mock.calls[0]![0];
+      const prepared = xlsxCommandController(retired.commands)!.prepare('undo');
+      host.open.mockReturnValue(replacement);
+      view.rerender(<XlsxEditor {...props} file={new Uint8Array([4, 5, 6])} />);
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(2));
+      await expect(retired.whenHydrated()).rejects.toMatchObject({ code: 'document-replaced' });
+      await expect(retired.commands.execute('undo', null)).rejects.toMatchObject({ code: 'document-replaced' });
+      await expect(retired.commands.execute('bold', null)).rejects.toMatchObject({ code: 'document-replaced' });
+      await expect(prepared.execute(null)).rejects.toMatchObject({ code: 'document-replaced' });
+      expect(() => xlsxCommandController(retired.commands)!.prepare('undo')).toThrow('The workbook was replaced');
+      expect(undo).not.toHaveBeenCalled();
+      const current = ready.mock.calls[1]![0];
+      await act(async () => {
+        await expect(current.commands.execute('undo', null)).resolves.toMatchObject({ ok: true });
       });
-      expect(view.getByRole('alert').textContent).toBe(`${en.editor.openError}: asyncApi requires Worker`);
-      expectAsyncRefusal(view);
-      view.rerender(<XlsxEditor {...props} readOnly />);
-      expectAsyncRefusal(view);
-      expect(onError).toHaveBeenCalledTimes(1);
-      expect(ready).not.toHaveBeenCalled();
-      expect(host.init).not.toHaveBeenCalled();
-      expect(host.open).not.toHaveBeenCalled();
-      expect(warn).not.toHaveBeenCalled();
+      expect(undo).toHaveBeenCalledTimes(1);
+      view.unmount();
+      await expect(current.commands.execute('undo', null)).rejects.toMatchObject({ code: 'document-replaced' });
+      expect(undo).toHaveBeenCalledTimes(1);
     });
   }
 
-  it('refuses unavailable async collaboration with the Worker requirement', () => {
-    Reflect.deleteProperty(globalThis, 'Worker');
+  it('opens default collaboration in the worker-only editor', () => {
     const host = inThreadWorkbook();
-    const onError = mock((_error: Error) => {});
-    const ready = mock((_api: XlsxAsyncEditorApi) => {});
-    const view = render(<XlsxEditor {...asyncProps} file={file} collaboration={{}} onReady={ready} onError={onError} />);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0]![0]).toMatchObject({
-      name: 'XlsxAsyncApiUnavailableError', code: 'async-api-unavailable', message: 'asyncApi requires Worker',
-    });
-    expect(onError.mock.calls[0]![0]).not.toBeInstanceOf(XlsxWorkerEditorCollaborationError);
-    expect(onError.mock.calls[0]![0]).toBeInstanceOf(XlsxAsyncApiUnavailableError);
-    expect(view.getByRole('alert').textContent).toBe(`${en.editor.openError}: asyncApi requires Worker`);
-    expectAsyncRefusal(view);
-    expect(ready).not.toHaveBeenCalled();
-    expect(host.init).not.toHaveBeenCalled();
+    const view = render(<XlsxEditor file={file} collaboration={{}} />);
+    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
     expect(host.open).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
   });
 
-  for (const change of ['file', 'flag', 'collaboration'] as const) {
-    it(`reports async unavailability once per session after a ${change} change`, () => {
-      Reflect.deleteProperty(globalThis, 'Worker');
-      const host = inThreadWorkbook();
-      const onError = mock((_error: Error) => {});
-      const ready = mock((_api: XlsxAsyncEditorApi) => {});
-      const props = { ...asyncProps, file, onReady: ready, onError };
-      const view = render(<XlsxEditor {...props} />);
-      expect(onError).toHaveBeenCalledTimes(1);
-      const next = { ...props, ...(change === 'file' ? { file: file.slice() }
-        : change === 'flag' ? { experimentalWorkerOpen: false } : { collaboration: {} }) } as unknown as XlsxAsyncEditorProps;
-      view.rerender(<XlsxEditor {...next} />);
-      expect(onError).toHaveBeenCalledTimes(2);
-      expect(onError.mock.calls[1]![0]).not.toBe(onError.mock.calls[0]![0]);
-      for (const [failure] of onError.mock.calls) {
-        expect(failure).toBeInstanceOf(XlsxAsyncApiUnavailableError);
-        expect(failure).toMatchObject({ name: 'XlsxAsyncApiUnavailableError', code: 'async-api-unavailable' });
-      }
-      view.rerender(<XlsxEditor {...next} readOnly />);
-      expect(onError).toHaveBeenCalledTimes(2);
-      expectAsyncRefusal(view);
-      expect(ready).not.toHaveBeenCalled();
-      expect(host.init).not.toHaveBeenCalled();
-      expect(host.open).not.toHaveBeenCalled();
-      expect(warn).not.toHaveBeenCalled();
-    });
-  }
-
-  it('reports async unavailability once in StrictMode when the callback throws', () => {
-    Reflect.deleteProperty(globalThis, 'Worker');
-    const host = inThreadWorkbook();
-    const onError = mock((_error: Error) => { throw new Error('Callback failed'); });
-    const ready = mock((_api: XlsxAsyncEditorApi) => {});
-    const view = render(<StrictMode><XlsxEditor {...asyncProps} file={file} onReady={ready} onError={onError} /></StrictMode>);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0]![0]).toMatchObject({ name: 'XlsxAsyncApiUnavailableError', code: 'async-api-unavailable' });
-    expectAsyncRefusal(view);
-    expect(ready).not.toHaveBeenCalled();
-    expect(host.init).not.toHaveBeenCalled();
-    expect(host.open).not.toHaveBeenCalled();
+  it('keeps the explicit legacy in-thread API synchronous', async () => {
+    inThreadWorkbook();
+    const ready = mock((_api: xlsx.WorkbookHandle) => {});
+    render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file} onReady={(api) => ready(api.handle)} />);
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    expect(ready.mock.calls[0]![0].version()).toBe('0');
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 
   it('shows in-thread display failures without reopening', async () => {
     const host = inThreadWorkbook();
     const painting = inThreadPainting();
-    const view = render(<XlsxEditor file={file} />);
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen={false} />);
     await waitFor(() => expect(host.displayList).toHaveBeenCalled());
     const failure = new Error('Rendering failed');
     host.displayList.mockImplementation(() => { throw failure; });
@@ -343,18 +245,4 @@ describe('XlsxEditor engine dispatch', () => {
     expect(host.open).toHaveBeenCalledTimes(1);
     expect(view.getByTestId('xlsx-render-error').textContent).toContain(failure.message);
   });
-
-  it('opens async collaboration in the peer-less editor when Worker is available', () => {
-    const host = inThreadWorkbook();
-    const onError = mock((_error: Error) => {});
-    const ready = mock((_api: XlsxAsyncEditorApi) => {});
-    const view = render(<XlsxEditor {...asyncProps} file={file} collaboration={{}} onReady={ready} onError={onError} />);
-    expect(view.queryByRole('alert')).toBeNull();
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('peerless');
-    expect(onError).not.toHaveBeenCalled();
-    expect(host.init).not.toHaveBeenCalled();
-    expect(host.open).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-  });
-
 });
