@@ -376,6 +376,30 @@ fn a_dual_metafile_prefers_emf_plus_and_falls_back_to_gdi() {
     );
 }
 
+fn dual_with_short_gdi(plus_records: Vec<(u16, u16, Vec<u8>)>) -> Vec<u8> {
+    let mut records = vec![plus_header(true)];
+    records.extend(plus_records);
+    Emf::new(100, 100)
+        .rec(70, &plus(&records).1)
+        .rec(54, &i32s(&[10]))
+        .recs(vec![rect(0, 0, 50, 50)])
+        .bytes()
+}
+
+#[test]
+fn a_failed_gdi_rendition_falls_back_only_to_an_emf_plus_one_that_draws() {
+    let drawn = replay(&dual_with_short_gdi(vec![
+        (0x4037, 0, Vec::new()),
+        plus_fill_rects(0xff00_ff00, &[[0.0, 0.0, 10.0, 10.0]]),
+    ]))
+    .unwrap();
+    let [Op::Shape(shape)] = &drawn.ops[..] else {
+        panic!("only the EMF+ fill");
+    };
+    assert_eq!(shape.fill, Some(Paint::Solid(Rgba::opaque(0, 255, 0))));
+    assert!(replay(&dual_with_short_gdi(vec![(0x4037, 0, Vec::new())])).is_err());
+}
+
 #[test]
 fn emf_plus_only_files_play_gdi_records_only_inside_get_dc_spans() {
     let cover = plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 100.0, 100.0]]);
