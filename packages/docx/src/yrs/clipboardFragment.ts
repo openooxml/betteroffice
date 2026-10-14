@@ -55,7 +55,7 @@ const MAX_FRAGMENT_CELLS = 10_000;
 const MAX_FRAGMENT_PARAGRAPHS = 1_000;
 const MAX_FRAGMENT_TEXT = 1_000_000;
 const MAX_FRAGMENT_DEPTH = 8;
-const LINE_BREAK = /[\n\r\u000B  ]/u;
+const LINE_BREAK = /[\n\r\u000B\u2028\u2029]/u;
 
 function plainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
