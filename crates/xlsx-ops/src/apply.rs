@@ -422,6 +422,13 @@ fn apply_range_formats(
     {
         let sheet_ref = &wb.sheets[sheet.0 as usize];
         let styles = &mut wb.styles;
+        let unstyled_shows_base = !partial || {
+            let base = styles.cell_format(Some(0));
+            xlsx_model::CellFormat {
+                font: base.font.clone(),
+                ..styles.cell_format(None)
+            } == base
+        };
         let mut occupied = sheet_ref
             .iter_cells_in_rect(
                 range.start.row..range.end.row.saturating_add(1),
@@ -505,7 +512,7 @@ fn apply_range_formats(
                         continue;
                     }
                 }
-                if format == previous {
+                if format == previous && (old_style.is_some() || unstyled_shows_base) {
                     staged.push(old_style);
                     continue;
                 }
@@ -2367,6 +2374,33 @@ mod tests {
             wb.styles.cell_format(style).number_format,
             xlsx_model::NumberFormat::Builtin { id: 10 }
         );
+    }
+
+    #[test]
+    fn number_format_edit_matching_a_base_xf_differing_only_in_font_keeps_the_cell_unstyled() {
+        let mut wb = wb_one_sheet();
+        wb.styles.fonts.push(xlsx_model::Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(11.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::Xf {
+            font: Some(0),
+            ..Default::default()
+        });
+        wb.sheets[0].set_cell(r("A1"), num(0.5).into());
+        let inverse = apply(
+            &mut wb,
+            &Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::new(r("A1"), r("A2")),
+                format: crate::NumberFormatMutation::Automatic,
+            },
+        )
+        .unwrap();
+        assert!(inverse.0.is_empty());
+        assert_eq!(wb.sheets[0].cell(r("A1")).unwrap().style, None);
+        assert!(wb.sheets[0].cell(r("A2")).is_none());
     }
 }
 
