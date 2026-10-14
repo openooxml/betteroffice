@@ -5,7 +5,7 @@ import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
-import { canMoveShape, canResizeShape, effectiveShapeRect, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
+import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
   decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
@@ -109,6 +109,7 @@ export function registerPresentationCommandHandlers(
   let observeChanges = false;
   let failedSeq: number | undefined;
   const storedMarks: TextStyle = {};
+  const draftStyles = new Map<string, TextStyleSnapshot>();
   let lastEditState: PresentationCommandEditState | undefined;
   let composition: { id: string; selection: PresentationCommandSelection; committed: boolean } | undefined;
   let typing: { target: string; group: string; time: number; kind: string; position: number } | undefined;
@@ -226,7 +227,7 @@ export function registerPresentationCommandHandlers(
   function selectedObject(slideId: string, shapeId: string): PresentationCommandObjectSelection | null {
     const deck = presentation().snapshot();
     const slide = deck.slides.find((slide) => slide.id === slideId);
-    const shape = slide && findTopLevelShape(slide, shapeId);
+    const shape = slide && findShape(slide.shapes, shapeId);
     const geometry = authoritativeGeometry(slideId);
     if (!shape || shape.id !== shapeId || !geometry) return null;
     const ids = new Set<string>();
@@ -255,7 +256,8 @@ export function registerPresentationCommandHandlers(
     const story = shape.textStories[0];
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
-      canMove: canMoveShape(shape), canResize: canResizeShape(shape), units };
+      canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -407,6 +409,8 @@ export function registerPresentationCommandHandlers(
     const cached = stories.get(storyKey(at))!;
     const story = cached.formatting ??= presentationStoryFormatting(presentation(), at);
     const marks = marksAt(at);
+    // Boxes inserted here type at their draft style, not the inherited cascade of their empty paragraphs.
+    const draft = draftStyles.get(storyKey(at));
     const previous = cached.toolbar;
     if (previous?.story === story && previous.selection.anchor === at.anchor && previous.selection.focus === at.focus &&
       previous.selection.affinity === at.affinity && previous.selection.kind === at.kind &&
@@ -417,12 +421,14 @@ export function registerPresentationCommandHandlers(
     let offset = 0;
     let caretStyle: TextStyleSnapshot | undefined;
     let precedingStyle: TextStyleSnapshot | undefined;
+    let firstStyle: TextStyleSnapshot | undefined;
     const styles: TextStyleSnapshot[] = [];
     const emptyStyles: TextStyleSnapshot[] = [];
     const alignments = new Set<string | null>();
     for (const paragraph of story.paragraphs) {
       const paragraphStart = offset;
       for (const run of paragraph.runs) {
+        if (draft && run.text.length === 0) continue;
         const runEnd = offset + run.text.length;
         const style: TextStyleSnapshot = { ...run.style,
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
@@ -431,6 +437,7 @@ export function registerPresentationCommandHandlers(
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
+        firstStyle ??= style;
         if (start >= offset && start < runEnd || start === offset && runEnd === offset) caretStyle ??= style;
         if (runEnd <= start && runEnd > offset) precedingStyle = style;
         if (runEnd > offset && start < runEnd && end > offset) styles.push(style);
@@ -442,10 +449,11 @@ export function registerPresentationCommandHandlers(
       offset += 1;
     }
     styles.push(...emptyStyles);
+    if (draft && styles.length === 0) styles.push(draft);
     let formatting: TextStyleSnapshot = { ...DEFAULT_EDITOR_TEXT_STYLE };
     if (start === end && at.kind !== 'shape') {
-      formatting = { ...formatting, ...(caretStyle ?? precedingStyle ?? story.paragraphs[0]?.runs[0]?.style),
-        ...marks };
+      formatting = { ...formatting, ...(caretStyle ?? precedingStyle ??
+        (draft ? firstStyle ?? draft : story.paragraphs[0]?.runs[0]?.style)), ...marks };
       if (formatting.fontSizePt !== null && formatting.fontSizePt !== undefined) {
         formatting.fontSizePt = normalizeFontSize(formatting.fontSizePt);
       }
@@ -475,7 +483,7 @@ export function registerPresentationCommandHandlers(
           && paragraph.editable && paragraph.fields.length === 0)) echoRun = neighbour.neighbour;
     }
     const slide = objectSelection ? opened.snapshot().slides.find((slide) => slide.id === objectSelection!.slideId) : null;
-    const shape = slide && findTopLevelShape(slide, objectSelection!.shapeId);
+    const shape = slide && slide.shapes.find((shape) => shape.id === objectSelection!.shapeId);
     const color = (value: string | null | undefined) => value && /^[#]?[0-9a-f]{6}$/i.test(value) ? `#${value.replace(/^#/, '')}` : null;
     lastEditState = { readOnly, proposals: opened.listProposals(), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
       object: shape && slide ? { formattable: shape.kind === 'shape', geometry: shape.geometry ?? null,
@@ -692,10 +700,16 @@ export function registerPresentationCommandHandlers(
       return { kind: 'history', direction: command.kind };
     }
     if (command.kind === 'selectObject') {
-      const { frame: tag, x, y, scale } = command.payload;
-      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
+      const { frame: tag } = command.payload;
       if (!objectFrame(tag) || command.basis.version !== version || presentation().version() !== version) return 'stale-basis';
       if (composition) return 'invalid-composition';
+      if ('shapeId' in command.payload) {
+        if (typeof command.payload.shapeId !== 'string') return 'invalid-payload';
+        const object = selectedObject(tag.slideId, command.payload.shapeId);
+        return object ? { kind: 'object', object } : 'bad-target';
+      }
+      const { x, y, scale } = command.payload;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale) || scale <= 0) return 'invalid-payload';
       const geometry = frames.get(frameKey(tag))!.geometry;
       const hit = hitGeometry(geometry, { x, y }, undefined, scale);
       if (hit?.kind !== 'shape') return 'bad-target';
@@ -1156,6 +1170,12 @@ export function registerPresentationCommandHandlers(
       objectSelection = command.kind === 'insertTextBox' ? null : object;
       selection = command.kind === 'insertTextBox' && object?.storyId ? { slideId: object.slideId, shapeId: object.shapeId,
         storyId: object.storyId, anchor: 0, focus: 0, affinity: 'downstream' } : object ? objectStory(object) : null;
+      if (command.kind === 'insertTextBox' && selection) {
+        const style = (admitted.draft as ShapeDraft).style;
+        draftStyles.set(storyKey(selection), { ...DEFAULT_EDITOR_TEXT_STYLE,
+          ...Object.fromEntries(Object.entries(style).filter(([, value]) => value !== undefined && value !== null)),
+          fontSizePt: normalizeFontSize(style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt) });
+      }
       clearMarks();
       return true;
     }
@@ -1504,6 +1524,7 @@ export function registerPresentationCommandHandlers(
     mutations.clear();
     storyMutations.clear();
     stories.clear();
+    draftStyles.clear();
     slideStoryKeys.clear();
     objectTokens.clear();
     selections.clear();

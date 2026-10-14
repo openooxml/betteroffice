@@ -135,11 +135,7 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
       if (format === 'docx')
         await page.getByTestId('yrs-input').press('ControlOrMeta+z');
       else await page.getByTestId(format + '-undo').click();
-      const undoneText =
-        format === 'pptx'
-          ? edited.text.replace(marker, marker.slice(0, -1))
-          : original.text;
-      expect((await save(page, format, info, 'undone')).text).toBe(undoneText);
+      expect((await save(page, format, info, 'undone')).text).toBe(original.text);
       if (format === 'docx')
         await page.getByTestId('yrs-input').press('ControlOrMeta+Shift+z');
       else await page.getByTestId(format + '-redo').click();

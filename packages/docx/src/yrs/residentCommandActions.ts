@@ -858,7 +858,6 @@ export function applyDocxCommand(
       for (const change of prepared.paragraphChanges ?? []) engine.setParagraphAttrs(change.range, change.attrs, command.payload.suggesting);
       break;
     case 'insertImage': case 'insertTable': case 'insertPageBreak': case 'insertSectionBreak': {
-      if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') engine.useCommandBreakProjection();
       let at = { story: range.story, ...range.start };
       if (!collapsed(range)) {
         const removed = engine.deleteRange(range, command.payload.suggesting);
@@ -884,8 +883,9 @@ export function applyDocxCommand(
           engine.insertPageBreak(at);
           caret({ ...at, offset: at.offset + 1 });
         } else {
-          if (!prepared.sectionBreakProperties) throw new Error('Prepared command lacks section properties');
-          caret(engine.splitSection(at, prepared.sectionBreakProperties, command.payload.type));
+          const properties = collapsed(range) ? prepared.sectionBreakProperties : residentSectionPropertiesAt(engine, at);
+          if (!properties) throw new Error('Prepared command lacks section properties');
+          caret(engine.splitSection(at, properties, command.payload.type));
         }
       }
       break;

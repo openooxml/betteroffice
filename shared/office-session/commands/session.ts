@@ -4,9 +4,12 @@ import { createPresenter } from './presenter';
 import { cloneData } from './clone';
 import { createBlockedLedger } from './ledger';
 import { isCommandAck, isCommandOutcomeUnknownError } from './types';
+import { hasOwn } from '../protocol';
+import { isQueryReply, type ArgsOf, type Hold, type HoldReason, type QueryReply, type QueryTable,
+  type Read, type ReadOptions, type RefusalOf, type ResultOf, type WorkerEditSession } from './spec';
 import type {
   Checkpoint, CommandAck, CommandConnection, CommandDraft, CommandEnvelope,
-  CommandOutcome, CommandTicket, EditSession, EditSessionState, OutboxEntry,
+  CommandOutcome, CommandTicket, EditSessionState, OutboxEntry,
   FrameEnvelope, PresentationStatus, RecoveryEvent, SubmitOptions, TicketOutcome, WorkerEditSessionOptions,
 } from './types';
 
@@ -47,8 +50,12 @@ type ConnectionRecord<P, S, E, F> = {
   fullFrameThroughSeq: number;
   fullFrameRevision?: number;
   fullFrameRetries: number;
+  /** Highest seq this connection's host had seen at attach or replay end, and highSeq at that moment. */
+  seenSeq: number;
+  seenMark: number;
   unsubscribe(): void;
   unsubscribeFrame?: () => void;
+  unsubscribeAck?: () => void;
 };
 
 function deferred<T>(): Deferred<T> {
@@ -83,9 +90,9 @@ function limit(value: number | undefined, fallback: number): number {
 }
 
 /** @internal Creates a worker-backed edit session with coverage reconciliation and ordered recovery. */
-export function createWorkerEditSession<O, P, S, E, F, X>(
-  options: WorkerEditSessionOptions<O, P, S, E, F, X>
-): EditSession<P, S, E, X> {
+export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable = {}>(
+  options: WorkerEditSessionOptions<O, P, S, E, F, X, Q>
+): WorkerEditSession<P, S, E, X, Q> {
   const initial = options.connection.initial;
   const maxAttempts = options.maxRecoveryAttempts === 0 ? 0 : limit(options.maxRecoveryAttempts, 2);
   const source = maxAttempts === 0 ? undefined : cloneData(options.source);
@@ -106,8 +113,6 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
   const futurePresentations = new Map<number, Deferred<PresentationStatus>>();
   const blockedSeqs = createBlockedLedger();
   const inFlight = new Set<number>();
-  const draftFences = new WeakMap<CommandDraft<P, X>, number>();
-  let fence = 0;
   let ticketId = 0;
   let highSeq = initial.throughSeq;
   let incarnation = initial.incarnation;
@@ -130,18 +135,34 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
   let recoveryAttempt = 0;
   let selectionThroughSeq = initial.throughSeq;
   let editStateThroughSeq = initial.throughSeq;
+  let revisionsThroughSeq = initial.throughSeq;
+  let knownSelection = initial.revisions?.selection ?? 0;
+  let knownLayout = initial.revisions?.layout ?? 0;
   let appliedCount = 0;
   let retainedBytes = 0;
   let unknownCount = 0;
   const diverged = new Set<number>();
+  const holdTimeoutMs = options.holdTimeoutMs ?? 2000;
+  if (!Number.isFinite(holdTimeoutMs) || holdTimeoutMs < 0) throw new TypeError('Invalid hold timeout');
+  const now = options.now ?? Date.now;
+  const timer = options.timer ?? ((callback: () => void, ms: number) => {
+    const id = setTimeout(callback, ms);
+    return () => { clearTimeout(id); };
+  });
+  type Held = { hold: Hold; opened: number; waiters: Set<() => void> };
+  type PendingRead = {
+    kind: string; args: unknown[]; watermark: number; attempt: number; done: boolean;
+    signal?: AbortSignal;
+    connection?: ConnectionRecord<P, S, E, F>;
+    result: Deferred<QueryReply>;
+    cleanup(): void;
+  };
+  const holds = new Map<Hold, Held>();
+  const reads = new Set<PendingRead>();
+  const waitingReads = new Set<PendingRead>();
   const outbox = createOutbox<P, X>({
     inputBurstCap: options.inputBurstCap,
-    coalesce: options.coalesce && ((prev, next) => {
-      if (draftFences.get(prev) !== draftFences.get(next)) return undefined;
-      const merged = options.coalesce!(prev, next);
-      if (merged) draftFences.set(merged, draftFences.get(next)!);
-      return merged;
-    }),
+    coalesce: options.coalesce,
   });
   const presenter = createPresenter<X, F>({
     echo: options.echo && {
@@ -165,6 +186,139 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
 
   function live(record: ConnectionRecord<P, S, E, F>): boolean {
     return !disposed && !terminal && record.active && connection === record;
+  }
+
+  function finishRead(request: PendingRead, result: QueryReply | SessionFailure): void {
+    if (request.done) return;
+    request.done = true;
+    reads.delete(request);
+    waitingReads.delete(request);
+    request.cleanup();
+    if (result instanceof SessionFailure) request.result.reject(result);
+    else request.result.resolve(result);
+  }
+
+  function readRefusal(code: string, detail?: string): QueryReply {
+    return { ok: false, refusal: { code, ...(detail === undefined ? {} : { detail }) } };
+  }
+
+  function checkReads(): void {
+    if (disposed || terminal || recovering) return;
+    const record = connection;
+    if (!record || !live(record)) return;
+    for (const request of waitingReads) {
+      if (!live(record) || recovering) return;
+      if (request.signal?.aborted) {
+        finishRead(request, readRefusal('superseded', 'aborted'));
+        continue;
+      }
+      let queued = false;
+      for (const ticket of pending) {
+        if (ticket.ticket.id <= request.watermark && ticket.seq === undefined && !ticket.ackSettled) {
+          queued = true;
+          break;
+        }
+      }
+      if (queued) continue;
+      waitingReads.delete(request);
+      const query = record.connection.client.call.query;
+      if (!query) { finishRead(request, readRefusal('unsupported')); continue; }
+      const fence = { session: sessionId, incarnation, epoch,
+        afterSeq: highSeq > record.seenMark ? highSeq : record.seenSeq };
+      const attempt = ++request.attempt;
+      request.connection = record;
+      const current = () => !request.done && request.attempt === attempt && live(record);
+      try {
+        void query.call(record.connection.client.call, fence, request.kind, request.args).then((reply) => {
+          if (!current()) return;
+          if (!isQueryReply(reply) || (reply.ok && (reply.at.incarnation !== fence.incarnation ||
+            reply.at.epoch !== fence.epoch || reply.at.throughSeq < fence.afterSeq))) {
+            fail(new SessionFailure('message', 'Malformed or unfenced query reply'));
+            return;
+          }
+          const stale = options.queries![request.kind]!.stale;
+          if (reply.ok && stale !== 'answer-at-fence' && stale.reject.some((dependency) =>
+            (dependency === 'doc' ? state.version : dependency === 'selection' ? knownSelection : knownLayout) > reply.at[dependency])) {
+            finishRead(request, readRefusal('superseded'));
+          } else finishRead(request, reply);
+        }, (error) => { if (current()) fail(failureFor(error)); })
+          .catch((error) => { if (current()) fail(failureFor(error)); });
+      } catch (error) { if (current()) fail(failureFor(error)); }
+    }
+  }
+
+  function hold(reason: HoldReason, holdOptions: { signal?: AbortSignal } = {}): Hold {
+    let released = disposed || terminal !== undefined;
+    const record: Held = { hold: undefined!, opened: now(), waiters: new Set() };
+    const signal = holdOptions.signal;
+    const owner: Hold = {
+      reason, get released() { return released; },
+      release() {
+        if (released) return;
+        released = true;
+        holds.delete(owner);
+        signal?.removeEventListener('abort', owner.release);
+        for (const waiter of record.waiters) waiter();
+        record.waiters.clear();
+      },
+    };
+    record.hold = owner;
+    if (!released) {
+      holds.set(owner, record);
+      if (signal?.aborted) owner.release();
+      else signal?.addEventListener('abort', owner.release, { once: true });
+    }
+    return owner;
+  }
+
+  function read<K extends keyof Q & string>(kind: K, args: ArgsOf<Q[K]>, readOptions: ReadOptions = {}):
+    Promise<Read<ResultOf<Q[K]>, RefusalOf<Q[K]>>> {
+    const result = deferred<QueryReply>();
+    const request: PendingRead = { kind, args, watermark: ticketId, attempt: 0, done: false,
+      signal: readOptions.signal, result, cleanup: () => {} };
+    const captured = [...holds.values()].filter((record) => record.hold !== readOptions.within);
+    const waiting = new Map<Held, { release(): void; cancel(): void }>();
+    const signal = readOptions.signal;
+    const abort = () => finishRead(request, readRefusal('superseded', 'aborted'));
+    request.cleanup = () => {
+      signal?.removeEventListener('abort', abort);
+      for (const [record, waiter] of waiting) { record.waiters.delete(waiter.release); waiter.cancel(); }
+      waiting.clear();
+    };
+    reads.add(request);
+    if (disposed) finishRead(request, readRefusal('disposed'));
+    else if (terminal) finishRead(request, terminal);
+    else if (!options.queries || !hasOwn(options.queries, kind) || !connection?.connection.client.call.query) {
+      finishRead(request, readRefusal('unsupported'));
+    } else if (signal?.aborted) abort();
+    else if (captured.some((record) => now() - record.opened >= holdTimeoutMs)) finishRead(request, readRefusal('busy'));
+    else {
+      signal?.addEventListener('abort', abort, { once: true });
+      if (captured.length === 0) { waitingReads.add(request); checkReads(); }
+      else for (const record of captured) {
+        const release = () => {
+          if (signal?.aborted) { abort(); return; }
+          if (now() - record.opened >= holdTimeoutMs) { finishRead(request, readRefusal('busy')); return; }
+          waiting.get(record)!.cancel();
+          waiting.delete(record);
+          record.waiters.delete(release);
+          if (waiting.size === 0 && !request.done) {
+            request.watermark = ticketId;
+            waitingReads.add(request);
+            checkReads();
+          }
+        };
+        const waiter = { release, cancel: () => {} };
+        waiting.set(record, waiter);
+        record.waiters.add(release);
+        waiter.cancel = timer(() => finishRead(request, readRefusal('busy')), Math.max(0, holdTimeoutMs - (now() - record.opened)));
+      }
+    }
+    return result.promise as Promise<Read<ResultOf<Q[K]>, RefusalOf<Q[K]>>>;
+  }
+
+  function releaseHolds(): void {
+    for (const owner of holds.keys()) owner.release();
   }
 
   function discardFrame(frame: FrameEnvelope<F> | undefined): void {
@@ -239,7 +393,10 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
     let removed = cancelOutboxAfter(outbox, tickets);
     while (true) {
       cancelTickets(removed.map((entry) => entry.tickets[0]!), 'dependency-refused');
-      if (removed.length < 64) return;
+      if (removed.length < 64) {
+        if (waitingReads.size) checkReads();
+        return;
+      }
       if (!synchronous) {
         enqueueCancellation(() => cancelQueued([]));
         return;
@@ -395,6 +552,13 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
           state = { ...state, editState: ack.editState };
           editStateThroughSeq = ack.throughSeq;
         }
+        if (ack.revisions && ack.throughSeq >= revisionsThroughSeq) {
+          knownSelection = ack.throughSeq === revisionsThroughSeq
+            ? Math.max(knownSelection, ack.revisions.selection) : ack.revisions.selection;
+          knownLayout = ack.throughSeq === revisionsThroughSeq
+            ? Math.max(knownLayout, ack.revisions.layout) : ack.revisions.layout;
+          revisionsThroughSeq = ack.throughSeq;
+        }
         if (ack.frame) {
           frameHandled = true;
           frameRejected = presentFrame(ack.frame);
@@ -460,6 +624,12 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
     record.failure = failure;
     try { record.unsubscribe(); } catch {}
     try { record.unsubscribeFrame?.(); } catch {}
+    try { record.unsubscribeAck?.(); } catch {}
+    for (const request of reads) if (request.connection === record) {
+      request.connection = undefined;
+      request.attempt += 1;
+      waitingReads.add(request);
+    }
     record.cancelReplay?.(failure);
     record.cancelReplay = undefined;
     try { return Promise.resolve(record.connection.client.dispose()).catch(() => {}); }
@@ -469,7 +639,7 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
   function attach(next: CommandConnection<P, S, E, F>): ConnectionRecord<P, S, E, F> {
     const record: ConnectionRecord<P, S, E, F> = {
       connection: next, active: true, fullFrameBusy: false, fullFrameThroughSeq: -1, fullFrameRetries: 0,
-      unsubscribe: () => {},
+      seenSeq: highSeq, seenMark: highSeq, unsubscribe: () => {},
     };
     connection = record;
     const unsubscribe = next.client.onFailure((failure) => {
@@ -485,6 +655,11 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
       if (record.active) record.unsubscribeFrame = unsubscribeFrame;
       else unsubscribeFrame();
     }
+    if (record.active && next.client.onAck) {
+      const unsubscribeAck = next.client.onAck((ack) => acceptAck(record, ack));
+      if (record.active) record.unsubscribeAck = unsubscribeAck;
+      else unsubscribeAck();
+    }
     return record;
   }
 
@@ -492,6 +667,8 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
     if (disposed || terminal) return;
     terminal = failure;
     recovering = false;
+    for (const request of reads) finishRead(request, failure);
+    releaseHolds();
     if (connection) void close(connection, failure);
     outbox.clear();
     inFlight.clear();
@@ -627,9 +804,13 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
         };
         selectionThroughSeq = opened.throughSeq;
         editStateThroughSeq = opened.throughSeq;
+        revisionsThroughSeq = opened.throughSeq;
+        knownSelection = opened.revisions?.selection ?? 0;
+        knownLayout = opened.revisions?.layout ?? 0;
         initialFrame = undefined;
         acceptAck(record, opened);
         const entries = [...log.values()].sort((a, b) => a.envelope.seq - b.envelope.seq);
+        let replayed = opened.throughSeq;
         for (const entry of entries) {
           if (!live(record)) throw record.failure;
           if (blocked(entry.outcome)) continue;
@@ -641,6 +822,7 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
             if (error instanceof SessionFailure) throw error;
             throw unknown(entry, error, true);
           }
+          replayed = Math.max(replayed, entry.envelope.seq);
           acceptAck(record, ack, true);
           if (cancellationDone) await cancellationDone.promise;
           if (!live(record)) {
@@ -652,10 +834,13 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
           }
         }
         if (!live(record)) throw record.failure;
+        record.seenSeq = replayed;
+        record.seenMark = highSeq;
         recovering = false;
         checkpointAttemptedAt = -1;
         report('recovered');
         diverged.clear();
+        if (waitingReads.size) checkReads();
         wake();
         return;
       } catch (error) {
@@ -886,6 +1071,7 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
         if (live(record)) fail(error instanceof SessionFailure ? error : unknown(logged, error, false));
       } finally { settleRpc(logged); }
     }
+    if (waitingReads.size) checkReads();
   }
 
   function pump(): void {
@@ -935,7 +1121,6 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
       return record.ticket;
     }
     const draft: CommandDraft<P, X> = { kind, payload, options: { ...submitOptions } };
-    draftFences.set(draft, fence);
     try {
       presenter.event(() => {
         const entry = outbox.enqueue(draft, record.ticket);
@@ -953,8 +1138,9 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
     return record.ticket;
   }
 
-  const session: EditSession<P, S, E, X> = {
-    backend: 'worker', get state() { return state; }, submit,
+  const session: WorkerEditSession<P, S, E, X, Q> = {
+    backend: 'worker', get state() { return state; }, submit, read, hold,
+    get stage() { return disposed ? 'disposed' : terminal ? 'failed' : recovering ? 'recovering' : 'ready'; },
     whenPresented(seq) {
       if (disposed || terminal) return Promise.resolve('dropped');
       const entry = log.get(seq) ?? presentations.get(seq);
@@ -979,7 +1165,6 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
       return () => { listeners.delete(listener); };
     },
     flush() {
-      fence += 1;
       fenceOutbox(outbox);
       if (terminal) return Promise.reject(terminal);
       const acknowledgements = [...pending].filter((record) => !record.ackSettled).map((record) => record.ack.promise);
@@ -994,6 +1179,8 @@ export function createWorkerEditSession<O, P, S, E, F, X>(
       disposal = finished.promise;
       disposed = true;
       recovering = false;
+      for (const request of reads) finishRead(request, readRefusal('disposed'));
+      releaseHolds();
       const closing = connection ? close(connection, new SessionFailure('disposed', 'Edit session was disposed')) : Promise.resolve();
       outbox.clear();
       inFlight.clear();

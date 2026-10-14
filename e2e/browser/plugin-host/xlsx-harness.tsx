@@ -183,6 +183,8 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <XlsxEditor
+        legacySyncApi
+        experimentalWorkerOpen={false}
         file={file}
         plugins={PLUGINS}
         onReady={(api) => {

@@ -178,10 +178,10 @@ async function mount(root: HTMLElement, probe: WorkerViewerProbe) {
   const common = { file, readOnly: true as const, showToolbar: false };
   createRoot(root).render(<React.Fragment>
     {!workerOnly && <div data-arm="in-thread">
-      <XlsxEditor {...common} onReady={localReady.resolve} />
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...common} onReady={localReady.resolve} />
     </div>}
     <div data-arm="worker">
-      <XlsxEditor {...common} experimentalWorkerOpen onReady={workerReady.resolve} />
+      <XlsxEditor legacySyncApi {...common} experimentalWorkerOpen onReady={workerReady.resolve} />
     </div>
   </React.Fragment>);
   await until(() => workerReady.settled && (workerOnly || localReady.settled) ? true : null,

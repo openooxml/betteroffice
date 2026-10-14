@@ -141,7 +141,7 @@ type Admitted<T> = { refused: PptxPluginRefusal } | { value: T };
  * `work`'s outcome, or null as soon as a signal aborts before `started()`; once the work has
  * started its own outcome is returned, so a change it committed is never reported as aborted.
  */
-function unlessAborted<T>(
+export function unlessAborted<T>(
   signals: readonly AbortSignal[],
   work: Promise<T>,
   started: () => boolean

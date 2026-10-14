@@ -130,3 +130,21 @@ test('shape_transform_read_only_and_frame_basis', async () => {
     expect(refused.outcomes[0]).toMatchObject({ reason: 'read-only', committed: false });
   } finally { await session.dispose(); }
 });
+
+test('shape_identity_selection_checks_target_and_frame', async () => {
+  const session = await open();
+  try {
+    const selected = await session.command(session.state, 1, { kind: 'selectObject', payload: {
+      ...input, frame: session.state.frame, shapeId: session.story.shapeId,
+    } });
+    expect(selected.selection).toMatchObject({ kind: 'object', shapeId: session.story.shapeId });
+    const missing = await session.command(selected, 2, { kind: 'selectObject', payload: {
+      ...input, frame: selected.frame, shapeId: 'missing',
+    } });
+    expect(missing.outcomes[0]).toMatchObject({ status: 'refused', reason: 'bad-target', committed: false });
+    const stale = await session.command(missing, 3, { kind: 'selectObject', payload: {
+      ...input, frame: { ...missing.frame, incarnation: 'other' }, shapeId: session.story.shapeId,
+    } });
+    expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-basis', committed: false });
+  } finally { await session.dispose(); }
+});

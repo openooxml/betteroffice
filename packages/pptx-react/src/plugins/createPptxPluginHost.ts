@@ -25,6 +25,7 @@ import {
   pluginCommandScope,
   scopedCommandStore,
   type PptxPluginEditorAccess,
+  type PptxPluginClients,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './definePptxPlugin';
 import type {
@@ -54,12 +55,17 @@ export interface PptxPluginHostAccess extends PptxPluginEditorAccess {
   geometry(): PptxPluginGeometry | null;
 }
 
+export type PptxPluginDocument = Pick<PresentationHandle, 'version' | 'onUpdate'>;
+export type PptxPluginViewAccess = Pick<PptxPluginHostAccess, 'commands' | 'translate' | 'geometry'>;
+export type PptxPluginClientFactory = (invocation: PluginInvocation<PptxPluginSnapshot>, grant: () => PptxPluginGrant,
+  store: PptxCommandStore) => PptxPluginClients;
+
 export interface PptxPluginHost {
   setPlugins(plugins: readonly PptxPlugin[] | undefined): void;
   setGrants(grants: Readonly<Record<string, PptxPluginGrant>> | undefined): void;
   setReporter(report: ((error: PptxPluginError) => void) | undefined): void;
   /** Starts a document generation over `handle`. */
-  open(handle: PresentationHandle): void;
+  open(handle: PptxPluginDocument): void;
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
@@ -119,7 +125,7 @@ function sameLayout(a: PptxPluginLayout | null, b: PptxPluginLayout | null): boo
   return a === b || (!!a && !!b && a.id === b.id && a.version === b.version);
 }
 
-function readVersion(handle: PresentationHandle): string | null {
+function readVersion(handle: PptxPluginDocument): string | null {
   try {
     return handle.version();
   } catch {
@@ -127,9 +133,15 @@ function readVersion(handle: PresentationHandle): string | null {
   }
 }
 
-export function createPptxPluginHost(access: PptxPluginHostAccess): PptxPluginHost {
+export function createPptxPluginHost(access: PptxPluginHostAccess): PptxPluginHost;
+export function createPptxPluginHost(access: PptxPluginViewAccess, clients: PptxPluginClientFactory): PptxPluginHost;
+export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginViewAccess, clients?: PptxPluginClientFactory): PptxPluginHost {
+  const createClients: PptxPluginClientFactory = clients ?? ((invocation, grant, store) => {
+    if (!('handle' in access)) throw new TypeError('Plugin clients require document access');
+    return createPluginClients(invocation, access, grant, store);
+  });
   let reporter: ((error: PptxPluginError) => void) | undefined;
-  let handle: PresentationHandle | null = null;
+  let handle: PptxPluginDocument | null = null;
   let detachUpdates: (() => void) | null = null;
   let installed = false;
   let generations = 0;
@@ -184,9 +196,8 @@ export function createPptxPluginHost(access: PptxPluginHostAccess): PptxPluginHo
 
   const createContext = (invocation: PluginInvocation<PptxPluginSnapshot>): Context => {
     const pluginId = invocation.pluginId;
-    const clients = createPluginClients(
+    const clients = createClients(
       invocation,
-      access,
       () => runtime.grant(pluginId) as PptxPluginGrant,
       scopedCommandStore(controller(), scopeFor(invocation))
     );

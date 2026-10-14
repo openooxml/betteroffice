@@ -9,6 +9,7 @@ export type {
   PptxAsyncCollaborationOptions,
   PptxEditorCollaborationOptions,
   PptxEditorProps,
+  PptxLegacyEditorProps,
   PptxWorkerViewerApi,
   PptxWorkerViewerProps,
   PptxPointPosition,

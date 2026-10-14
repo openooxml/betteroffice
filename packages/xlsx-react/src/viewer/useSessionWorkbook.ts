@@ -3,7 +3,7 @@ import type {
   Selection, Viewport, WorkbookFrame, WorkbookSession, WorkbookSheetView,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { XlsxEditorProps, XlsxPointPosition, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
+import type { XlsxInThreadEditorProps, XlsxPointPosition, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
 import { expandRangeToMergedCells } from './sessionGeometry';
@@ -316,7 +316,7 @@ export function useSessionWorkbook(
   const [, setRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const collaboration = (props as XlsxWorkerViewerProps & Pick<XlsxEditorProps, 'collaboration'>).collaboration;
+  const collaboration = (props as XlsxWorkerViewerProps & Pick<XlsxInThreadEditorProps, 'collaboration'>).collaboration;
   const reportError = useCallback((value: unknown) => {
     const error = value instanceof Error ? value : new Error(
       value && typeof value === 'object' && 'message' in value ? String(value.message) : String(value)

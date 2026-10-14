@@ -526,6 +526,7 @@ impl StoryRevisions {
                                 | "tcPr"
                                 | "rowspan"
                                 | "colspan"
+                                | "content"
                         )
                     })
             }

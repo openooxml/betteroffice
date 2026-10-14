@@ -177,10 +177,14 @@ import {
   resolveBundledFamilyFace, // ("Gelasio" or a Word family, bold, italic) -> exact face or undefined
   resolveScriptFallbackFace, // ('cjk-sc' | 'arabic' | ..., bold, italic) -> coverage face
   resolveLastResortFace, // always-available base face for any (family, bold, italic)
+  resolveDigitAdvance, // (family, bold?, italic?) -> recorded widest digit advance (em)
+  maxDigitWidth, // (family, sizePx, measure, bold?, italic?) -> widest digit in whole pixels
   loadBundledFontBytes, // (face, { baseUrl }?) -> Promise<ArrayBuffer> (cached per face + base)
   registerBundledFontFace, // face -> FontFace registration (no-op outside the DOM)
 } from '@betteroffice/fonts';
 ```
+
+The style flags default to `false`. Unrecorded styles return `undefined` from `resolveDigitAdvance`; `maxDigitWidth` measures them with the caller's callback.
 
 ## Licensing
 

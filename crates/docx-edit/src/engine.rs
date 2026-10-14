@@ -24,13 +24,15 @@ use docx_layout::measure_blocks::TableMeasurementFrame;
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
+use docx_layout::prescan::SectionLayoutConfig;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_document_regions_tracked,
     apply_section_geometry, apply_section_geometry_to_blocks, effective_header_footer_refs,
 };
 use docx_layout::types::{
-    BlockExtent, BlockId, ColumnLayout, Fragment, Input as LayoutInput, Layout, LayoutBlock,
-    MeasuredBlock, NoteAreaContract, ParagraphExtent, Run, SectionBreakType, SectionPageMargins,
+    BlockExtent, BlockId, ColumnLayout, Fragment, HeaderFooterRefs, Input as LayoutInput, Layout,
+    LayoutBlock, MeasuredBlock, NoteAreaContract, ParagraphExtent, Run, SectionBreakType,
+    SectionPageMargins,
 };
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::Serialize;
@@ -236,7 +238,47 @@ struct RegionPass {
     notes_converged: bool,
     /// The layout covers only a leading part of the body.
     provisional: bool,
+    /// The widest page of the whole body, when an exact prefix pass kept only
+    /// its certified pages.
+    certified_width: Option<f64>,
 }
+
+/// A region pass over only as much of the body as fills the first `pages`
+/// pages. An `exact` prefix is taken only where nothing after it can change
+/// those pages, and keeps no others.
+#[derive(Clone, Copy)]
+struct PagePrefix {
+    pages: usize,
+    exact: bool,
+}
+
+/// What [`EngineSession::layout_document_with_regions_exact_prefix_retained`] laid out.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExactPrefixLayout {
+    /// Only the first `pages` pages are laid out, each as the whole document lays it out.
+    pub provisional: bool,
+    pub pages: usize,
+    /// The widest page of the whole document, while only a prefix is laid out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_width: Option<f64>,
+}
+
+/// The pages an exact prefix pass keeps once it lays out two past them, the
+/// widest page of the whole body, and the body section the cut ends in when
+/// that is not the final one.
+#[derive(Clone, Copy)]
+struct ExactCut {
+    pages: usize,
+    document_width: f64,
+    section: Option<usize>,
+}
+
+/// The page size pagination takes when a request names none.
+const DEFAULT_PAGE_SIZE: docx_layout::types::Size = docx_layout::types::Size {
+    w: 816.0,
+    h: 1056.0,
+};
 
 const OPEN_USES_REGION_PATH: bool = false;
 const PREVIEW_USES_REGION_PATH: bool = false;
@@ -319,6 +361,7 @@ thread_local! {
         preview_shifts: 0,
     }) };
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
+    static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
     static SHIFT_SAFETY_WORK: Cell<usize> = const { Cell::new(0) };
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -361,6 +404,7 @@ struct PreparedRegionLayout {
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
     measured_float_geometry: Option<[f64; 5]>,
     provisional: bool,
+    exact_cut: Option<ExactCut>,
     cached_page_totals: bool,
     /// Body blocks still being measured; `input.measured` is final without them.
     body: Option<BodyMeasure>,
@@ -661,13 +705,7 @@ fn region_table_measurement_frames<'a>(
                 let break_type = match section_break {
                     Some(section_break) => section_break.break_type,
                     None => input.options.body_break_type,
-                }
-                .or_else(|| {
-                    section_index
-                        .checked_sub(1)
-                        .and_then(|index| section_breaks.get(index))
-                        .and_then(|section_break| section_break.break_type)
-                });
+                };
                 let continuous = break_type == Some(SectionBreakType::Continuous)
                     || section.and_then(|section| section.section_start)
                         == Some(SectionBreakType::Continuous);
@@ -741,6 +779,70 @@ fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
     end
 }
 
+/// Whether the pages before `block` lay out and paint as they do in the whole
+/// document whatever follows it. Page totals, note references, floats, columns
+/// and continuous section breaks couple earlier pages to later content.
+fn exact_prefix_block(block: &LayoutBlock) -> bool {
+    let local = |fmt: &docx_layout::types::RunFormatting| {
+        fmt.footnote_ref_id.is_none() && fmt.endnote_ref_id.is_none()
+    };
+    match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().all(|run| match run {
+            Run::Text(run) => local(&run.fmt),
+            Run::Tab(run) => local(&run.fmt),
+            Run::LineBreak(_) => true,
+            Run::Image(run) => {
+                run.position.is_none()
+                    && matches!(run.wrap_type.as_deref(), None | Some("inline"))
+                    && matches!(run.display_mode.as_deref(), None | Some("inline"))
+                    && matches!(run.css_float.as_deref(), None | Some("none"))
+            }
+            Run::Field(run) => {
+                run.field_type == "PAGE"
+                    && run.nested_sequences.is_empty()
+                    && run.instruction.as_deref().is_none_or(|instruction| {
+                        !instruction.contains(['{', '}'])
+                            && instruction.split_whitespace().all(|token| {
+                                !matches!(
+                                    token.to_ascii_uppercase().as_str(),
+                                    "NUMPAGES" | "SECTIONPAGES" | "DATE" | "TIME"
+                                )
+                            })
+                    })
+                    && local(&run.fmt)
+            }
+            Run::Unsupported => false,
+        }),
+        LayoutBlock::Table(table) => {
+            table.floating.is_none()
+                && table.rows.iter().all(|row| {
+                    row.cells
+                        .iter()
+                        .all(|cell| cell.blocks.iter().all(exact_prefix_block))
+                })
+        }
+        LayoutBlock::SectionBreak(section) => {
+            section.break_type != Some(SectionBreakType::Continuous)
+                && section
+                    .columns
+                    .as_ref()
+                    .is_none_or(|columns| columns.count == 1.0)
+        }
+        LayoutBlock::Image(image) => image.anchor.is_none(),
+        LayoutBlock::PageBreak(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether every body block passes [`exact_prefix_block`] and the supplied regions
+/// describe every section, or none. Header extension gives each supplied section its
+/// region's margins and the body's final section the last region's, so a cut ending in
+/// a section past them would not lay it out as the whole body does.
+fn exact_prefix_body(regions: &DocumentRegions, blocks: &[LayoutBlock]) -> bool {
+    blocks.iter().all(exact_prefix_block)
+        && (regions.sections.is_empty() || regions.sections.len() > section_breaks(blocks))
+}
+
 fn section_breaks(blocks: &[LayoutBlock]) -> usize {
     blocks
         .iter()
@@ -765,6 +867,100 @@ fn options_through_section(
     options
 }
 
+/// Each section of the whole body as its pagination opens it, so a body cut
+/// inside any section lays that section out as the whole body does.
+struct BodySections {
+    options: docx_layout::types::LayoutOptions,
+    /// The geometry and start of each section a body break ends.
+    ended: Vec<(SectionLayoutConfig, Option<SectionBreakType>)>,
+}
+
+impl BodySections {
+    fn new(blocks: &[LayoutBlock], options: &docx_layout::types::LayoutOptions) -> Self {
+        let mut size = options.page_size.clone().unwrap_or(DEFAULT_PAGE_SIZE);
+        let mut margins =
+            docx_layout::section_breaks::resolve_page_margins(options.margins.as_ref());
+        let ended = blocks
+            .iter()
+            .filter_map(|block| match block {
+                LayoutBlock::SectionBreak(section) => Some(section),
+                _ => None,
+            })
+            .map(|section| {
+                size = section.page_size.clone().unwrap_or_else(|| size.clone());
+                margins = section.margins.clone().unwrap_or_else(|| margins.clone());
+                let config = SectionLayoutConfig {
+                    page_size: size.clone(),
+                    margins: margins.clone(),
+                    columns: section.columns.clone(),
+                };
+                (config, section.break_type)
+            })
+            .collect();
+        Self {
+            options: options.clone(),
+            ended,
+        }
+    }
+
+    /// The options of the body cut inside section `last`, which then lays
+    /// out as its final section.
+    fn through(&self, last: usize) -> docx_layout::types::LayoutOptions {
+        let mut options = self.options.clone();
+        if let Some((config, start)) = self.ended.get(last) {
+            options.final_page_size = Some(config.page_size.clone());
+            options.final_margins = Some(config.margins.clone());
+            options.columns.clone_from(&config.columns);
+            options.body_break_type = *start;
+        }
+        options
+    }
+
+    fn widest_page(&self) -> f64 {
+        let last = self
+            .options
+            .final_page_size
+            .as_ref()
+            .or(self.options.page_size.as_ref())
+            .map_or(DEFAULT_PAGE_SIZE.w, |size| size.w);
+        self.ended
+            .iter()
+            .map(|(config, _)| config.page_size.w)
+            .fold(last, f64::max)
+    }
+}
+
+/// Keeps the first `pages` pages of an exact prefix pass and the damage it
+/// records on them; false, leaving the pass whole, when it did not lay out two
+/// pages past them.
+fn cut_exact_prefix(pagination: &mut PaginationState, pages: usize) -> bool {
+    let layout = pagination
+        .layout
+        .as_mut()
+        .expect("layout retained after successful pagination");
+    if layout.pages.len() < pages + 2 {
+        return false;
+    }
+    layout.pages.truncate(pages);
+    pagination.rebuilt_page_start = pagination.rebuilt_page_start.min(pages);
+    pagination.rebuilt_page_end = pagination.rebuilt_page_end.min(pages);
+    for range in &mut pagination.rebuilt_page_ranges {
+        range.start = range.start.min(pages);
+        range.end = range.end.min(pages);
+    }
+    pagination
+        .rebuilt_page_ranges
+        .retain(|range| !range.is_empty());
+    pagination
+        .display_rebuilt_pages
+        .retain(|&page| page < pages);
+    pagination.note_changed_pages.retain(|&page| page < pages);
+    if let Some(restamped) = &mut pagination.restamped_pages {
+        restamped.retain(|&page| page < pages);
+    }
+    true
+}
+
 /// Measures leading blocks until their pagination runs two pages past
 /// `pages` outside a section with columns, far enough that no later block
 /// moves the first `pages` pages.
@@ -779,8 +975,7 @@ fn measure_page_prefix_plain(
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
-    request_options: &docx_layout::types::LayoutOptions,
-    regions: &DocumentRegions,
+    through: &dyn Fn(usize) -> docx_layout::types::LayoutOptions,
     pages: usize,
     anchored: bool,
 ) -> Result<(Vec<BlockExtent>, Vec<FontChainDependencies>), String> {
@@ -825,8 +1020,7 @@ fn measure_page_prefix_plain(
         if end == blocks.len() {
             return Ok((measures, dependencies));
         }
-        let options =
-            options_through_section(request_options, regions, section_breaks(&blocks[..end]));
+        let options = through(section_breaks(&blocks[..end]));
         // Columns are balanced over their whole section, so no prefix ends inside one.
         if options
             .columns
@@ -863,8 +1057,7 @@ fn measure_page_prefix(
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
-    request_options: &docx_layout::types::LayoutOptions,
-    regions: &DocumentRegions,
+    through: &dyn Fn(usize) -> docx_layout::types::LayoutOptions,
     pages: usize,
     anchored: bool,
     trigger: RelayoutTrigger,
@@ -876,8 +1069,7 @@ fn measure_page_prefix(
             table_wrap_frames,
             measurement,
             geometry,
-            request_options,
-            regions,
+            through,
             pages,
             anchored,
         );
@@ -920,8 +1112,7 @@ fn measure_page_prefix(
         if end == blocks.len() {
             return Ok((measures, dependencies));
         }
-        let options =
-            options_through_section(request_options, regions, section_breaks(&blocks[..end]));
+        let options = through(section_breaks(&blocks[..end]));
         // Columns are balanced over their whole section, so no prefix ends inside one.
         if options
             .columns
@@ -1179,10 +1370,55 @@ where
     ))
 }
 
+/// Each header and footer variant `section` shows, with the story it takes.
+fn header_footer_descriptors(
+    section: &docx_layout::regions::RegionSection,
+    refs: HeaderFooterRefs,
+) -> [(HeaderFooterKind, HeaderFooterType, Option<String>); 6] {
+    let title_page = section.title_pg;
+    [
+        (
+            HeaderFooterKind::Header,
+            HeaderFooterType::Default,
+            refs.header_default
+                .or_else(|| (!title_page).then_some(refs.header_first.clone()).flatten()),
+        ),
+        (
+            HeaderFooterKind::Header,
+            HeaderFooterType::First,
+            title_page.then_some(refs.header_first).flatten(),
+        ),
+        (
+            HeaderFooterKind::Header,
+            HeaderFooterType::Even,
+            refs.header_even,
+        ),
+        (
+            HeaderFooterKind::Footer,
+            HeaderFooterType::Default,
+            refs.footer_default
+                .or_else(|| (!title_page).then_some(refs.footer_first.clone()).flatten()),
+        ),
+        (
+            HeaderFooterKind::Footer,
+            HeaderFooterType::First,
+            title_page.then_some(refs.footer_first).flatten(),
+        ),
+        (
+            HeaderFooterKind::Footer,
+            HeaderFooterType::Even,
+            refs.footer_even,
+        ),
+    ]
+}
+
+/// Widens each section's margins by its headers and footers. An input cut inside
+/// body section `cut` lays that section out as its final one.
 fn extend_input_for_header_footer(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
     variants: &[HeaderFooterVariant],
+    cut: Option<usize>,
 ) {
     if regions.sections.is_empty() {
         return;
@@ -1293,7 +1529,9 @@ fn extend_input_for_header_footer(
         })
         .then_some(float_bands);
     input.options.margins = extended.first().cloned();
-    input.options.final_margins = extended.last().cloned();
+    input.options.final_margins = cut
+        .map_or(extended.last(), |section| extended.get(section))
+        .cloned();
     let mut section_index = 0;
     for measured in &mut input.measured {
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
@@ -5096,6 +5334,7 @@ impl EngineSession {
                 &regions,
                 &worker.measurement,
                 &env,
+                None,
             )?;
             input.measured = self.measure_plain_worker(story, &env, &input, &worker.measurement)?;
             header_measurement = Some(worker.measurement);
@@ -5608,6 +5847,7 @@ impl EngineSession {
             RegionPass {
                 notes_converged: state.notes_converged,
                 provisional: state.provisional,
+                certified_width: None,
             }
         };
         self.retained_region_layout_json(&pass)
@@ -5644,7 +5884,114 @@ impl EngineSession {
         input_json: &str,
         pages: usize,
     ) -> Result<String, String> {
-        self.layout_regions_retained_json(input_json, Some(pages))
+        self.layout_regions_retained_json(
+            input_json,
+            Some(PagePrefix {
+                pages,
+                exact: false,
+            }),
+        )
+    }
+
+    /// The retained region layout of the first `pages` pages, taken only when
+    /// each lays out and paints as the whole document's does, with no page
+    /// totals, notes, floats, columns or continuous sections anywhere in it.
+    /// The retained layout then holds exactly those pages. Any other document,
+    /// or no pages, is laid out whole, as
+    /// [`Self::layout_document_with_regions_retained`] does.
+    pub fn layout_document_with_regions_exact_prefix_retained(
+        &self,
+        input_json: &str,
+        pages: usize,
+    ) -> Result<ExactPrefixLayout, String> {
+        let pass = if pages > 0 {
+            self.layout_regions(input_json, Some(PagePrefix { pages, exact: true }))?
+        } else {
+            self.layout_regions(input_json, None)?
+        };
+        if let Some(width) = pass.certified_width {
+            return Ok(ExactPrefixLayout {
+                provisional: true,
+                pages,
+                document_width: Some(width),
+            });
+        }
+        if pass.provisional {
+            self.layout_regions(input_json, None)?;
+        }
+        let pagination = self.pagination.borrow();
+        let layout = pagination
+            .layout
+            .as_ref()
+            .expect("layout retained after region layout");
+        Ok(ExactPrefixLayout {
+            provisional: false,
+            pages: layout.pages.len(),
+            document_width: None,
+        })
+    }
+
+    /// Whether nothing outside the body can make a prefix's pages differ from
+    /// the whole document's: no notes, columns or continuous sections, and
+    /// headers and footers whose blocks all pass [`exact_prefix_block`].
+    fn exact_prefix_context(
+        &self,
+        options: &docx_layout::types::LayoutOptions,
+        regions: &DocumentRegions,
+        notes: &docx_layout::footnotes::NoteLayoutInput,
+        env: &RenderEnv,
+    ) -> bool {
+        use yrs::{Map, ReadTxn};
+        let single_column =
+            |columns: Option<&ColumnLayout>| columns.is_none_or(|columns| columns.count == 1.0);
+        if !notes.contents.is_empty()
+            || regions.note_areas.is_some()
+            || regions.headers_footers.is_some()
+            || !single_column(options.columns.as_ref())
+            || regions.sections.iter().any(|section| {
+                section.section_start == Some(SectionBreakType::Continuous)
+                    || !single_column(section.columns.as_ref())
+            })
+        {
+            return false;
+        }
+        let notes_present = {
+            let txn = self.doc.yrs_doc().transact();
+            txn.get_map(crate::STORIES).is_some_and(|stories| {
+                stories
+                    .iter(&txn)
+                    .any(|(id, _)| id.starts_with("fn:") || id.starts_with("en:"))
+            })
+        };
+        if notes_present {
+            return false;
+        }
+        let mut stories = BTreeSet::new();
+        for refs in regions
+            .sections
+            .iter()
+            .filter_map(|section| section.header_footer_refs.clone())
+        {
+            stories.extend(
+                [
+                    refs.header_default,
+                    refs.header_first,
+                    refs.header_even,
+                    refs.footer_default,
+                    refs.footer_first,
+                    refs.footer_even,
+                ]
+                .into_iter()
+                .flatten()
+                .map(|r_id| self.doc.header_footer_story(&r_id)),
+            );
+        }
+        stories.iter().all(|story| {
+            self.with_resident_story(story, env, |blocks| {
+                blocks.iter().all(|block| exact_prefix_block(block))
+            })
+            .unwrap_or(false)
+        })
     }
 
     /// [`Self::layout_document_with_regions_retained_json`] a step at a time.
@@ -5715,9 +6062,9 @@ impl EngineSession {
     fn layout_regions_retained_json(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
     ) -> Result<String, String> {
-        let pass = self.layout_regions(input_json, prefix_pages)?;
+        let pass = self.layout_regions(input_json, prefix)?;
         self.retained_region_layout_json(&pass)
     }
 
@@ -5782,22 +6129,22 @@ impl EngineSession {
     fn layout_regions(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
     ) -> Result<RegionPass, String> {
         let trigger = self.take_region_relayout_trigger(input_json)?;
-        self.layout_regions_for_trigger(input_json, prefix_pages, trigger)
+        self.layout_regions_for_trigger(input_json, prefix, trigger)
     }
 
     fn layout_regions_for_trigger(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
         trigger: RelayoutTrigger,
     ) -> Result<RegionPass, String> {
         let _trigger_reset = RelayoutTriggerReset(self);
         self.consume_relayout_trigger();
         self.resumable.replace(None);
-        let mut prepared = self.prepare_region_layout(input_json, prefix_pages, trigger)?;
+        let mut prepared = self.prepare_region_layout(input_json, prefix, trigger)?;
         prepared.measure(usize::MAX)?;
         self.finish_region_layout(prepared)
     }
@@ -5892,7 +6239,7 @@ impl EngineSession {
     fn prepare_region_layout(
         &self,
         input_json: &str,
-        prefix_pages: Option<usize>,
+        prefix: Option<PagePrefix>,
         trigger: RelayoutTrigger,
     ) -> Result<PreparedRegionLayout, String> {
         self.certified_measurement_epoch.set(None);
@@ -5966,6 +6313,17 @@ impl EngineSession {
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
             env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
         }
+        let prefix = match prefix {
+            Some(PagePrefix { exact: true, .. })
+                if body_story.as_deref() != Some("body")
+                    || !parsed_render_env.as_ref().is_some_and(|env| {
+                        self.exact_prefix_context(&input.options, &regions, &notes, env)
+                    }) =>
+            {
+                None
+            }
+            prefix => prefix,
+        };
         let fonts = docx_layout::measure_fonts_generation();
         let measurement_fingerprint = serde_json::to_vec(&(
             &measurement.defaults,
@@ -6001,6 +6359,7 @@ impl EngineSession {
         let mut measured_table_wrap_frames = Vec::new();
         let mut measured_float_geometry = None;
         let mut provisional = false;
+        let mut exact_cut = None;
         let mut body = None;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
@@ -6096,19 +6455,28 @@ impl EngineSession {
                     let (widths, table_wrap_frames) =
                         region_table_measurement_frames(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
-                    match prefix_pages {
+                    match prefix {
                         // Floats whose zones only settle later, such as shapes that page-side
                         // wrapping brings into the body, rule a prefix out too.
-                        Some(pages) if !coupled && floats_follow_the_text(&blocks) => {
+                        Some(PagePrefix { pages, exact })
+                            if !coupled
+                                && floats_follow_the_text(&blocks)
+                                && (!exact || exact_prefix_body(&regions, &blocks)) =>
+                        {
                             let anchored = anchors_objects(&blocks);
+                            let sections =
+                                exact.then(|| BodySections::new(&blocks, &input.options));
+                            let through = |last: usize| match &sections {
+                                Some(sections) => sections.through(last),
+                                None => options_through_section(&request_options, &regions, last),
+                            };
                             let (measures, dependencies) = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
                                 &table_wrap_frames,
                                 &measurement,
                                 &geometry,
-                                &request_options,
-                                &regions,
+                                &through,
                                 pages,
                                 anchored,
                                 trigger,
@@ -6122,9 +6490,17 @@ impl EngineSession {
                             blocks.truncate(measures.len());
                             if provisional {
                                 let last = section_breaks(&blocks);
-                                input.options =
-                                    options_through_section(&request_options, &regions, last);
-                                regions.sections.truncate(last + 1);
+                                input.options = through(last);
+                                match sections {
+                                    Some(sections) => {
+                                        exact_cut = Some(ExactCut {
+                                            pages,
+                                            document_width: sections.widest_page(),
+                                            section: (last < sections.ended.len()).then_some(last),
+                                        });
+                                    }
+                                    None => regions.sections.truncate(last + 1),
+                                }
                             }
                             input.measured = blocks
                                 .into_iter()
@@ -6179,6 +6555,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            exact_cut,
             cached_page_totals,
             body,
         })
@@ -6251,6 +6628,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            exact_cut,
             cached_page_totals,
             body,
             ..
@@ -6269,7 +6647,8 @@ impl EngineSession {
             .map(|env| env.revision_preview.clone())
             .unwrap_or_default();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
-            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
+            let cut = exact_cut.and_then(|cut| cut.section);
+            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env, cut)?
         } else {
             None
         };
@@ -6426,6 +6805,7 @@ impl EngineSession {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
+        let certified = exact_cut.filter(|cut| cut_exact_prefix(&mut pagination, cut.pages));
         let layout = pagination
             .layout
             .as_mut()
@@ -6487,6 +6867,8 @@ impl EngineSession {
             })
             .transpose()?;
         pagination.note_changed_pages = note_changed_pages;
+        let page_count = certified.map_or(usize::MAX, |cut| cut.pages);
+        restamped_pages.retain(|&page| page < page_count);
         if let Some(pages) = &mut pagination.restamped_pages {
             pages.extend(restamped_pages);
         }
@@ -6562,6 +6944,7 @@ impl EngineSession {
         Ok(RegionPass {
             notes_converged,
             provisional,
+            certified_width: certified.map(|cut| cut.document_width),
         })
     }
 
@@ -6596,6 +6979,7 @@ impl EngineSession {
             measured_table_wrap_frames,
             measured_float_geometry,
             provisional,
+            exact_cut,
             cached_page_totals,
             body,
         } = prepared;
@@ -6613,7 +6997,8 @@ impl EngineSession {
             .map(|env| env.revision_preview.clone())
             .unwrap_or_default();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
-            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
+            let cut = exact_cut.and_then(|cut| cut.section);
+            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env, cut)?
         } else {
             None
         };
@@ -6902,6 +7287,7 @@ impl EngineSession {
         pagination.pagination_blocks_placed = pagination
             .pagination_blocks_placed
             .wrapping_add(placement_passes.placed_blocks as u64);
+        let certified = exact_cut.filter(|cut| cut_exact_prefix(&mut pagination, cut.pages));
         let layout = pagination
             .layout
             .as_mut()
@@ -7073,6 +7459,7 @@ impl EngineSession {
         Ok(RegionPass {
             notes_converged,
             provisional,
+            certified_width: certified.map(|cut| cut.document_width),
         })
     }
 
@@ -7370,18 +7757,117 @@ impl EngineSession {
         Ok(separator_heights)
     }
 
+    /// Whether a section from `from` on shows a header or footer, as measuring
+    /// it would find; header extension then applies to every section.
+    fn shows_header_or_footer_from(
+        &self,
+        regions: &DocumentRegions,
+        from: usize,
+        render_env: &RenderEnv,
+    ) -> Result<bool, String> {
+        if from >= regions.sections.len() {
+            return Ok(false);
+        }
+        let mut refs = HeaderFooterRefs::default();
+        let mut stories: HashMap<String, bool> = HashMap::new();
+        for (index, section) in regions.sections.iter().enumerate() {
+            if let Some(authored) = &section.header_footer_refs {
+                refs.inherit(authored);
+            }
+            if index < from {
+                continue;
+            }
+            for (.., r_id) in header_footer_descriptors(section, refs.clone()) {
+                let Some(r_id) = r_id else {
+                    continue;
+                };
+                let shown = match stories.get(&r_id) {
+                    Some(&shown) => shown,
+                    None => {
+                        let story = self.doc.header_footer_story(&r_id);
+                        self.with_resident_story(&story, render_env, |blocks| !blocks.is_empty())
+                            .map_err(|error| error.to_string())?
+                    }
+                };
+                if shown {
+                    return Ok(true);
+                }
+                stories.insert(r_id, shown);
+            }
+        }
+        Ok(false)
+    }
+
     fn measure_header_footer_payload(
         &self,
         input: &mut LayoutInput,
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
+        cut: Option<usize>,
     ) -> Result<Option<HeaderFooterPayload>, String> {
         let mut variants = Vec::new();
-        for section_index in 0..regions.sections.len() {
+        let sections = regions.sections.len();
+        let measured = cut.map_or(sections, |cut| (cut + 1).min(sections));
+        let mut descriptors = Vec::new();
+        for section_index in 0..measured {
             let Some(refs) = effective_header_footer_refs(regions, section_index) else {
                 continue;
             };
+            for (kind, hf_type, r_id) in
+                header_footer_descriptors(&regions.sections[section_index], refs)
+            {
+                if let Some(r_id) = r_id {
+                    descriptors.push((section_index, kind, hf_type, r_id));
+                }
+            }
+        }
+        if measured < sections && !descriptors.is_empty() {
+            let used: HashSet<_> = descriptors
+                .iter()
+                .map(|(_, kind, _, r_id)| (r_id.clone(), *kind == HeaderFooterKind::Header))
+                .collect();
+            let mut refs = measured
+                .checked_sub(1)
+                .and_then(|index| effective_header_footer_refs(regions, index))
+                .unwrap_or_default();
+            let mut last = HashMap::new();
+            for (section_index, section) in regions.sections.iter().enumerate().skip(measured) {
+                if let Some(authored) = &section.header_footer_refs {
+                    refs.inherit(authored);
+                }
+                for (order, (kind, hf_type, r_id)) in
+                    header_footer_descriptors(section, refs.clone())
+                        .into_iter()
+                        .enumerate()
+                {
+                    let Some(r_id) = r_id else {
+                        continue;
+                    };
+                    if used.contains(&(r_id.clone(), kind == HeaderFooterKind::Header)) {
+                        last.insert(
+                            (r_id, kind == HeaderFooterKind::Header),
+                            (section_index, order, kind, hf_type),
+                        );
+                    }
+                }
+            }
+            let mut later: Vec<_> = last
+                .into_iter()
+                .map(|((r_id, _), (section_index, order, kind, hf_type))| {
+                    (section_index, order, kind, hf_type, r_id)
+                })
+                .collect();
+            later.sort_by_key(|(section_index, order, ..)| (*section_index, *order));
+            descriptors.extend(
+                later
+                    .into_iter()
+                    .map(|(section_index, _, kind, hf_type, r_id)| {
+                        (section_index, kind, hf_type, r_id)
+                    }),
+            );
+        }
+        for (section_index, kind, hf_type, r_id) in descriptors {
             let section = &regions.sections[section_index];
             let page_size = section
                 .page_size
@@ -7395,92 +7881,45 @@ impl EngineSession {
                 section.margins.as_ref().or(input.options.margins.as_ref()),
             );
             let content_width = (page_size.w - margins.left - margins.right).max(1.0);
-            let descriptors = [
-                (
-                    HeaderFooterKind::Header,
-                    HeaderFooterType::Default,
-                    refs.header_default.clone().or_else(|| {
-                        (!section.title_pg)
-                            .then_some(refs.header_first.clone())
-                            .flatten()
-                    }),
-                ),
-                (
-                    HeaderFooterKind::Header,
-                    HeaderFooterType::First,
-                    section.title_pg.then_some(refs.header_first).flatten(),
-                ),
-                (
-                    HeaderFooterKind::Header,
-                    HeaderFooterType::Even,
-                    refs.header_even,
-                ),
-                (
-                    HeaderFooterKind::Footer,
-                    HeaderFooterType::Default,
-                    refs.footer_default.clone().or_else(|| {
-                        (!section.title_pg)
-                            .then_some(refs.footer_first.clone())
-                            .flatten()
-                    }),
-                ),
-                (
-                    HeaderFooterKind::Footer,
-                    HeaderFooterType::First,
-                    section.title_pg.then_some(refs.footer_first).flatten(),
-                ),
-                (
-                    HeaderFooterKind::Footer,
-                    HeaderFooterType::Even,
-                    refs.footer_even,
-                ),
-            ];
-            for (kind, hf_type, r_id) in descriptors {
-                let Some(r_id) = r_id else {
-                    continue;
-                };
-                let mut blocks = self
-                    .with_resident_story(
-                        &self.doc.header_footer_story(&r_id),
-                        render_env,
-                        |blocks| {
-                            blocks
-                                .iter()
-                                .map(|block| block.as_ref().clone())
-                                .collect::<Vec<_>>()
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
-                for block in &mut blocks {
-                    resolve_line_unit_spacing(
-                        block,
-                        regions.paragraph_spacing_line_px(section_index),
-                    );
-                    resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
-                }
-                let metrics = HeaderFooterMetrics {
-                    kind,
-                    page_size: &page_size,
-                    margins: &margins,
-                };
-                if let Some(variant) = measure_header_footer(
-                    r_id,
-                    kind,
-                    hf_type,
-                    section_index,
-                    blocks,
-                    content_width,
-                    metrics,
-                    measurement,
-                )? {
-                    variants.push(variant);
-                }
+            let mut blocks = self
+                .with_resident_story(&self.doc.header_footer_story(&r_id), render_env, |blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| block.as_ref().clone())
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| error.to_string())?;
+            for block in &mut blocks {
+                resolve_line_unit_spacing(block, regions.paragraph_spacing_line_px(section_index));
+                resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
+            }
+            let metrics = HeaderFooterMetrics {
+                kind,
+                page_size: &page_size,
+                margins: &margins,
+            };
+            #[cfg(test)]
+            HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
+            if let Some(variant) = measure_header_footer(
+                r_id,
+                kind,
+                hf_type,
+                section_index,
+                blocks,
+                content_width,
+                metrics,
+                measurement,
+            )? {
+                variants.push(variant);
             }
         }
-        if variants.is_empty() && regions.watermark.is_none() {
+        if variants.is_empty()
+            && regions.watermark.is_none()
+            && !self.shows_header_or_footer_from(regions, measured, render_env)?
+        {
             return Ok(None);
         }
-        extend_input_for_header_footer(input, regions, &variants);
+        extend_input_for_header_footer(input, regions, &variants, cut);
         Ok(Some(HeaderFooterPayload {
             title_pg: false,
             even_and_odd_headers: regions.even_and_odd_headers,
@@ -10012,6 +10451,45 @@ impl EngineSession {
         .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
     }
 
+    /// [`Self::display_range_rects_region_json`] for many `[from, to)` ranges of one region at
+    /// once, indexing each built body page's primitives a single time.
+    pub fn display_range_rects_batch(
+        &self,
+        region: &str,
+        part_id: &str,
+        ranges: &[(i64, i64)],
+    ) -> Result<Vec<Vec<docx_layout::hit::RangeRect>>, String> {
+        let scope = docx_layout::hit::parse_region_scope(region, part_id)?;
+        self.with_display_list(|list| {
+            if scope != docx_layout::hit::RegionScope::Body {
+                return ranges
+                    .iter()
+                    .map(|&(from, to)| {
+                        docx_layout::hit::range_rects_in_region(list, scope, from, to)
+                    })
+                    .collect();
+            }
+            let pages: Vec<_> = list
+                .pages
+                .iter()
+                .enumerate()
+                .filter(|(_, page)| !page.primitives.is_empty())
+                .map(|(index, page)| docx_layout::hit::RangeRectIndex::new(&page.primitives, index))
+                .collect();
+            ranges
+                .iter()
+                .map(|&(from, to)| {
+                    let (low, high) = (from.min(to), from.max(to));
+                    pages
+                        .iter()
+                        .flat_map(|page| page.rects(low, high))
+                        .collect()
+                })
+                .collect()
+        })
+        .ok_or_else(|| "resident display list is not built".to_owned())
+    }
+
     /// Body, header/footer and note range geometry directly against the
     /// resident list.
     pub fn display_range_rects_region_json(
@@ -10669,6 +11147,32 @@ mod tests {
             measured_table_wrap_margins("text", "left", json!([first, second, third])),
             (0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn an_untyped_section_after_a_continuous_width_change_measures_at_its_own_width() {
+        let mut second = table_wrap_section(500.0, serde_json::Value::Null);
+        second["sectionStart"] = json!("continuous");
+        let regions: DocumentRegions = serde_json::from_value(json!({"sections": [
+            table_wrap_section(600.0, serde_json::Value::Null),
+            second,
+            table_wrap_section(600.0, serde_json::Value::Null),
+        ]}))
+        .unwrap();
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "sectionBreak", "id": 0},
+            {"kind": "sectionBreak", "id": 1, "type": "continuous"},
+            {"kind": "paragraph", "id": "text", "runs": []}
+        ]))
+        .unwrap();
+        let mut input = LayoutInput {
+            measured: Vec::new(),
+            options: Default::default(),
+        };
+        apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
+        let (widths, frames) = region_measurement_frames(blocks.iter(), &input, &regions);
+        assert_eq!(widths.last(), Some(&600.0));
+        assert_eq!(frames.last(), Some(&true));
     }
 
     #[test]
@@ -13285,6 +13789,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let (widths, frames) =
             region_measurement_frames(blocks.iter(), &prepared.input, &prepared.regions);
         let geometry = initial_float_page_geometry(&prepared.input, &prepared.regions);
+        let (options, regions) = (&prepared.input.options, &prepared.regions);
+        let through = |last: usize| options_through_section(options, regions, last);
         let mut expected_blocks = blocks.clone();
         let (expected, _) = measure_page_prefix_plain(
             &mut expected_blocks,
@@ -13292,8 +13798,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             &frames,
             &prepared.measurement,
             &geometry,
-            &prepared.input.options,
-            &prepared.regions,
+            &through,
             8,
             true,
         )
@@ -13312,8 +13817,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &frames,
                 &prepared.measurement,
                 &geometry,
-                &prepared.input.options,
-                &prepared.regions,
+                &through,
                 8,
                 anchors_objects(&blocks),
                 trigger,
@@ -20881,6 +21385,511 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(first_pages(&prefix), first_pages(&full));
     }
 
+    /// The full pass and an exact prefix pass of `pages` pages over `bytes`, each on a fresh
+    /// session that `prepare` sets up after seeding, with the prefix pass's retained layout.
+    fn full_and_exact_prefix(
+        bytes: &[u8],
+        request: &str,
+        pages: usize,
+        prepare: &dyn Fn(&EngineSession),
+    ) -> (serde_json::Value, ExactPrefixLayout, serde_json::Value) {
+        let seeded = || {
+            let engine = EngineSession::new(149);
+            crate::seed::seed_from_docx(engine.doc(), bytes).unwrap();
+            prepare(&engine);
+            engine
+        };
+        let full = seeded()
+            .layout_document_with_regions_retained_json(request)
+            .unwrap();
+        let engine = seeded();
+        let laid = engine
+            .layout_document_with_regions_exact_prefix_retained(request, pages)
+            .unwrap();
+        (
+            serde_json::from_str(&full).unwrap(),
+            laid,
+            serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap(),
+        )
+    }
+
+    fn paragraphs(count: usize, label: &str) -> String {
+        (0..count)
+            .map(|index| {
+                format!("<w:p><w:r><w:t>{label} {index} fills several pages.</w:t></w:r></w:p>")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_prefix_rejects_page_totals_and_trims_certified_pages() {
+        let request = float_page_request(serde_json::json!({}));
+        for field in ["PAGE", "NUMPAGES", "SECTIONPAGES"] {
+            let body = format!(
+                r#"<w:p><w:fldSimple w:instr=" {field} "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>{}"#,
+                paragraphs(200, "Paragraph")
+            );
+            let bytes = docx_bytes("", &body);
+            let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 3, &|_| {
+                BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.clear());
+            });
+            if field == "PAGE" {
+                assert!(laid.provisional);
+                assert_eq!(laid.pages, 3);
+                assert_eq!(prefix["provisional"], true);
+                assert_eq!(prefix["layout"]["pages"].as_array().unwrap().len(), 3);
+                assert_eq!(first_pages(&prefix), first_pages(&full));
+                BODY_MEASUREMENT_WORK.with(|work| assert!(work.borrow().0.len() < 201));
+            } else {
+                assert!(!laid.provisional, "{field}");
+                assert_ne!(prefix["provisional"], true, "{field}");
+                assert_eq!(prefix["layout"], full["layout"], "{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_exact_prefix_lays_out_its_section_as_the_section_break_ending_it() {
+        let margins = r#"<w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360" w:header="0" w:footer="0" w:gutter="0"/>"#;
+        let body = format!(
+            r#"{}<w:p><w:pPr><w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>{margins}</w:sectPr></w:pPr></w:p>{}<w:sectPr><w:pgSz w:w="5760" w:h="4320"/>{margins}</w:sectPr>"#,
+            paragraphs(1000, "Landscape"),
+            paragraphs(100, "Final")
+        );
+        let bytes = docx_bytes("", &body);
+        let base: serde_json::Value =
+            serde_json::from_str(&float_page_request(serde_json::json!({}))).unwrap();
+        let final_section = base["regions"]["sections"][0].clone();
+        for sections in [
+            serde_json::json!([]),
+            serde_json::json!([{ "sectionId": "first" }, final_section]),
+        ] {
+            let mut request = base.clone();
+            request["regions"]["sections"] = sections.clone();
+            let (full, laid, prefix) =
+                full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
+            let widest = full["layout"]["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|page| page["size"]["w"].as_f64().unwrap())
+                .fold(0.0, f64::max);
+            assert!(widest > 1000.0, "{sections}");
+            assert!(laid.provisional, "{sections}");
+            assert_eq!(first_pages(&prefix), first_pages(&full), "{sections}");
+            assert_eq!(laid.document_width, Some(widest), "{sections}");
+        }
+    }
+
+    #[test]
+    fn an_exact_prefix_keeps_damage_and_field_widths_to_its_pages() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let header = preview_pagination_paragraph(
+            300,
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+        );
+        let body = format!(
+            r#"{}<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#,
+            (0..300)
+                .map(|index| preview_pagination_paragraph(index, &preview_fixture::run("Line")))
+                .collect::<String>()
+        );
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = preview_pagination_request(font);
+        request["regions"]["sections"][0]["headerFooterRefs"] =
+            serde_json::json!({"headerDefault": "header"});
+        let engine = EngineSession::new(75230);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let laid = engine
+            .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 3)
+            .unwrap();
+        assert!(laid.provisional);
+        {
+            let pagination = engine.pagination.borrow();
+            let within = |page: &usize| *page < 3;
+            assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 3);
+            assert!(pagination.rebuilt_page_end <= 3);
+            let ranges = &pagination.rebuilt_page_ranges;
+            assert!(ranges.iter().all(|pages| pages.end <= 3));
+            assert!(pagination.display_rebuilt_pages.iter().all(within));
+            let restamped = pagination.restamped_pages.as_ref();
+            assert!(restamped.is_none_or(|pages| pages.iter().all(within)));
+            assert!(pagination.note_changed_pages.iter().all(within));
+            let pending: BTreeSet<usize> = pagination.pending_display_pages().collect();
+            assert!(pagination.display_full_rebuild || (0..3).all(|page| pending.contains(&page)));
+        }
+        let headers = engine.retained_headers_footers_json().unwrap().unwrap();
+        let headers: serde_json::Value = serde_json::from_str(&headers).unwrap();
+        let widths: Vec<_> = headers["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|variant| variant["fieldWidths"].as_array())
+            .flatten()
+            .collect();
+        assert!(!widths.is_empty());
+        for width in widths {
+            assert_eq!(width["perPage"].as_array().unwrap().len(), 3);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_of_no_pages_lays_out_the_whole_document() {
+        let request = float_page_request(serde_json::json!({}));
+        let bytes = docx_bytes("", &paragraphs(200, "Paragraph"));
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 0, &|_| {});
+        assert!(!laid.provisional);
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert_eq!(laid.pages, pages.len());
+        assert_eq!(prefix["layout"], full["layout"]);
+    }
+
+    #[test]
+    fn an_exact_cut_needs_two_laid_out_pages_past_it() {
+        let request = float_page_request(serde_json::json!({}));
+        let engine = EngineSession::new(149);
+        let bytes = docx_bytes("", &paragraphs(200, "Paragraph"));
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        let mut pagination = engine.pagination.borrow_mut();
+        let pages = pagination.layout.as_ref().unwrap().pages.len();
+        assert!(pages > 4);
+        assert!(!cut_exact_prefix(&mut pagination, pages - 1));
+        assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), pages);
+        pagination.restamped_pages = Some(BTreeSet::from([0, 2, 5]));
+        assert!(cut_exact_prefix(&mut pagination, 3));
+        assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 3);
+        assert!(pagination.rebuilt_page_end <= 3);
+        assert_eq!(pagination.restamped_pages, Some(BTreeSet::from([0, 2])));
+    }
+
+    /// A Letter section break with `margin` twips above and below its body, and the header.
+    fn header_section(margin: u32) -> String {
+        format!(
+            r#"<w:sectPr><w:headerReference w:type="default" r:id="header"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="{margin}" w:right="1440" w:bottom="{margin}" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#
+        )
+    }
+
+    fn header_request(font: u32, margin: f64) -> serde_json::Value {
+        let mut request = preview_pagination_request(font);
+        request["regions"]["sections"][0] = serde_json::json!({
+            "sectionId": "main",
+            "pageSize": {"w": 816, "h": 1056},
+            "margins": {"top": margin, "right": 96, "bottom": margin, "left": 96,
+                "header": 48, "footer": 48},
+            "headerFooterRefs": {"headerDefault": "header"}
+        });
+        request
+    }
+
+    /// A 384 x 288 px section break of `width` twips, starting as `start` says.
+    fn section_break(width: u32, start: &str) -> String {
+        format!(
+            r#"<w:sectPr>{start}<w:pgSz w:w="{width}" w:h="4320"/><w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>"#
+        )
+    }
+
+    fn ending(text: &str, section: &str) -> String {
+        format!("<w:p><w:pPr>{section}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>")
+    }
+
+    fn cut_in_a_later_section(
+        body: &str,
+    ) -> (serde_json::Value, ExactPrefixLayout, serde_json::Value) {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&float_page_request(serde_json::json!({}))).unwrap();
+        request["regions"]["sections"] = serde_json::json!([]);
+        let bytes = docx_bytes("", body);
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
+        assert!(laid.provisional);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+        (full, laid, prefix)
+    }
+
+    #[test]
+    fn an_exact_prefix_cut_in_an_odd_page_section_keeps_its_filler_page() {
+        let body = format!(
+            "{}{}{}{}{}",
+            ending("First", &section_break(5760, "")),
+            paragraphs(200, "Odd"),
+            ending(
+                "Odd end",
+                &section_break(6480, r#"<w:type w:val="oddPage"/>"#)
+            ),
+            paragraphs(50, "Final"),
+            section_break(5760, "")
+        );
+        let (full, ..) = cut_in_a_later_section(&body);
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages[1]["fragments"].as_array().unwrap().len(), 0);
+        assert_eq!(pages[2]["size"]["w"].as_f64(), Some(432.0));
+    }
+
+    #[test]
+    fn an_exact_prefix_cut_on_a_section_break_lays_out_both_sides() {
+        let third = r#"<w:pageBreakBefore/>"#;
+        let body = format!(
+            "{}{}{}{}{}{}",
+            ending("One", ""),
+            ending("Two", third),
+            ending("Three", &format!("{third}{}", section_break(5760, ""))),
+            paragraphs(200, "Wide"),
+            ending("Wide end", &section_break(8640, "")),
+            paragraphs(50, "Final")
+        );
+        let (full, laid, _) = cut_in_a_later_section(&body);
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages[2]["size"]["w"].as_f64(), Some(384.0));
+        assert_eq!(pages[3]["size"]["w"].as_f64(), Some(576.0));
+        assert_eq!(laid.document_width, Some(816.0));
+    }
+
+    #[test]
+    fn an_exact_prefix_extends_margins_as_a_later_section_header_does_for_the_full_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let first = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="360" w:right="1440" w:bottom="360" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#;
+        let page = |index: u32, section: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!(
+                    "<w:pPr><w:pageBreakBefore/>{section}</w:pPr>{}",
+                    preview_fixture::run("Page")
+                ),
+            )
+        };
+        let body = format!(
+            "{}{}{}{}",
+            (0..79).map(|index| page(index, "")).collect::<String>(),
+            page(79, first),
+            (80..100).map(|index| page(index, "")).collect::<String>(),
+            header_section(1440)
+        );
+        let header = preview_pagination_paragraph(300, &preview_fixture::run("Head"));
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = header_request(font, 96.0);
+        let mut plain = request["regions"]["sections"][0].clone();
+        plain["sectionId"] = serde_json::json!("first");
+        plain["margins"]["top"] = serde_json::json!(24);
+        plain["margins"]["bottom"] = serde_json::json!(24);
+        plain.as_object_mut().unwrap().remove("headerFooterRefs");
+        let headed = request["regions"]["sections"][0].clone();
+        request["regions"]["sections"] = serde_json::json!([plain, headed]);
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
+        let top = &full["layout"]["pages"][0]["margins"]["top"];
+        assert_eq!(top.as_f64(), Some(48.0));
+        assert!(laid.provisional);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_keeps_the_last_inherited_header_measurement_for_certified_pages() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let page = |index: u32, section: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!(
+                    "<w:pPr><w:pageBreakBefore/>{section}</w:pPr>{}",
+                    preview_fixture::run("Page")
+                ),
+            )
+        };
+        let narrow = header_section(1440)
+            .replace(r#"w:w="12240""#, r#"w:w="6480""#)
+            .replace(r#"<w:headerReference w:type="default" r:id="header"/>"#, "");
+        let body = format!(
+            "{}{}{}{narrow}",
+            (0..79).map(|index| page(index, "")).collect::<String>(),
+            page(79, &header_section(1440)),
+            (80..100).map(|index| page(index, "")).collect::<String>()
+        );
+        let header = preview_pagination_paragraph(
+            300,
+            &preview_fixture::run(
+                "This shared header fits on one wide line but wraps on the narrow page",
+            ),
+        );
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = header_request(font, 96.0);
+        let headed = request["regions"]["sections"][0].clone();
+        let mut inherited = headed.clone();
+        inherited["pageSize"]["w"] = serde_json::json!(432);
+        inherited
+            .as_object_mut()
+            .unwrap()
+            .remove("headerFooterRefs");
+        request["regions"]["sections"] = serde_json::json!([headed, inherited]);
+        let layout = |prefix: bool| {
+            let engine = EngineSession::new(149);
+            crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+            if prefix {
+                let laid = engine
+                    .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 3)
+                    .unwrap();
+                assert!(laid.provisional);
+            } else {
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+            }
+            let output: serde_json::Value =
+                serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
+            let extras = serde_json::json!({
+                "fontChains": request["measurement"]["fontChains"],
+                "headersFooters": output["headersFooters"]
+            });
+            engine
+                .build_display_list_frame(&extras.to_string(), 0)
+                .unwrap();
+            let display =
+                serde_json::to_value(engine.with_display_list(Clone::clone).unwrap()).unwrap();
+            (output, display)
+        };
+        let (full, full_display) = layout(false);
+        let variants = full["headersFooters"]["variants"].as_array().unwrap();
+        let lines = |variant: &serde_json::Value| {
+            variant["measured"][0]["measure"]["lines"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        assert_eq!(lines(&variants[0]), 1);
+        assert!(lines(&variants[1]) > 1);
+        assert_eq!(
+            full["layout"]["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .take_while(|page| page["size"]["w"].as_f64() == Some(816.0))
+                .count(),
+            80
+        );
+        let (prefix, prefix_display) = layout(true);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+        assert_eq!(
+            prefix_display["pages"].as_array().unwrap()[..3],
+            full_display["pages"].as_array().unwrap()[..3],
+            "certified header and footer pixels match cold full layout"
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_measures_headers_only_through_its_own_section() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let plain = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#;
+        let paragraph = |index: u32, properties: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!(
+                    "<w:pPr>{properties}</w:pPr>{}",
+                    preview_fixture::run("Line")
+                ),
+            )
+        };
+        let opening = format!("<w:pageBreakBefore/>{}", header_section(1440));
+        let body = format!(
+            "{}{}{}{plain}",
+            (0..79)
+                .map(|index| paragraph(index, "<w:pageBreakBefore/>"))
+                .collect::<String>(),
+            paragraph(79, &opening),
+            (80..1080)
+                .map(|index| paragraph(index, plain))
+                .collect::<String>()
+        );
+        let header: String = (0..20)
+            .map(|index| preview_pagination_paragraph(300 + index, &preview_fixture::run("Head")))
+            .collect();
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let mut request = header_request(font, 96.0);
+        let headed = request["regions"]["sections"][0].clone();
+        let mut inherited = headed.clone();
+        inherited
+            .as_object_mut()
+            .unwrap()
+            .remove("headerFooterRefs");
+        let mut sections = vec![headed];
+        sections.extend(std::iter::repeat_n(inherited, 1001));
+        request["regions"]["sections"] = serde_json::Value::Array(sections);
+        let engine = EngineSession::new(149);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(0));
+        let laid = engine
+            .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 3)
+            .unwrap();
+        assert!(laid.provisional);
+        HEADER_FOOTER_MEASUREMENTS.with(|count| assert_eq!(count.get(), 2));
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_past_its_supplied_sections_lays_out_as_the_full_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let line = |index: u32, section: &str| {
+            preview_fixture::paragraph(
+                index + 1,
+                &format!("<w:pPr>{section}</w:pPr>{}", preview_fixture::run("Line")),
+            )
+        };
+        let lines =
+            |range: std::ops::Range<u32>| range.map(|index| line(index, "")).collect::<String>();
+        let run = r#"<w:t xml:space="preserve">Long</w:t>"#;
+        let long = [run; 300].join("<w:br/>");
+        let body = format!(
+            "{}<w:p><w:r>{long}</w:r></w:p>{}{}{}{}",
+            line(0, &header_section(1440)),
+            lines(1..60),
+            line(60, &header_section(6000)),
+            lines(61..120),
+            header_section(1440)
+        );
+        let header = preview_pagination_paragraph(300, &preview_fixture::run("Head"));
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let request = header_request(font, 96.0).to_string();
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 3, &|_| {});
+        let pages = full["layout"]["pages"].as_array().unwrap();
+        assert!(pages.len() > 5);
+        assert_eq!(pages[1]["margins"]["top"].as_f64(), Some(400.0));
+        let shown = prefix["layout"]["pages"].as_array().unwrap();
+        assert_eq!(shown[..], pages[..shown.len()]);
+        assert!(laid.provisional || shown.len() == pages.len());
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_exact_prefix_short_of_two_pages_past_the_cut_lays_out_the_full_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let tiny = r#"<w:pPr><w:spacing w:before="0" w:after="0" w:line="45" w:lineRule="exact"/></w:pPr>"#;
+        let paragraph = format!("{tiny}{}", preview_fixture::run("Line"));
+        let body = format!(
+            "{}{}",
+            (0..200)
+                .map(|index| preview_fixture::paragraph(index + 1, &paragraph))
+                .collect::<String>(),
+            header_section(7800)
+        );
+        let header = preview_pagination_paragraph(300, &preview_fixture::run("Head"));
+        let bytes = preview_pagination_story_document(&body, "header", &header);
+        let request = header_request(font, 520.0).to_string();
+        let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request, 3, &|_| {
+            BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().1 = 0);
+        });
+        assert!(!laid.provisional);
+        assert_eq!(prefix["layout"], full["layout"]);
+        BODY_MEASUREMENT_WORK.with(|work| assert_eq!(work.borrow().1, 2));
+        docx_layout::clear_measure_fonts();
+    }
+
     #[test]
     fn a_provisional_layout_renders_numpages_empty_until_the_full_pass() {
         assert_partial_numpages(false);
@@ -26867,7 +27876,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             visual_bottom: 100.0,
             field_widths: Vec::new(),
         }];
-        extend_input_for_header_footer(&mut input, &regions, &variants);
+        extend_input_for_header_footer(&mut input, &regions, &variants, None);
         let margins = input.options.margins.expect("extended margins");
         assert_eq!(margins.top, 1438.0 / 15.0);
         assert_eq!(margins.bottom, 96.0);

@@ -313,6 +313,12 @@ export class EditSession {
      */
     display_hit_test_regions_json(page_index: number, x: number, y: number): string;
     /**
+     * [`EditSession::display_range_rects_region_json`] for many ranges, given as flat
+     * `[from, to, from, to, ...]` pairs. Per range, in order: its rect count, then
+     * `pageIndex, x, y, width, height` for each rect.
+     */
+    display_range_rects_batch(region: string, part_id: string, ranges: Float64Array): Float64Array;
+    /**
      * Highlight rectangles for a body document range against the resident
      * display list: a JSON array of `{pageIndex,x,y,width,height}` in
      * page-local px, one entry per page the range touches. Body positions
@@ -558,6 +564,13 @@ export class EditSession {
      * last; see `EngineSession::layout_document_with_regions_after_edit`.
      */
     layout_document_with_regions_after_edit(input: string): void;
+    /**
+     * The retained region layout of exactly the first `pages` pages when no
+     * later content can change them, and of the whole document otherwise; see
+     * `EngineSession::layout_document_with_regions_exact_prefix_retained`.
+     * Returns `{ provisional, pages, documentWidth? }` as JSON.
+     */
+    layout_document_with_regions_exact_prefix_retained(input: string, pages: number): string;
     /**
      * Region-layout input JSON in, a paginated envelope with section and page
      * regions already composed as JSON out — ready for the display builder
@@ -1669,6 +1682,7 @@ export interface InitOutput {
     readonly editsession_delete_table: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_direct_batches_applied: (a: number) => number;
     readonly editsession_display_hit_test_regions_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_display_range_rects_batch: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_display_range_rects_on_pages_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
@@ -1708,6 +1722,7 @@ export interface InitOutput {
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_after_edit: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_layout_document_with_regions_exact_prefix_retained: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained: (a: number, b: number, c: number) => [number, number];

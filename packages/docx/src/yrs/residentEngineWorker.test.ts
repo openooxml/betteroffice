@@ -356,8 +356,8 @@ function worker() {
         harness.failRaster = null;
         throw new Error('raster failed');
       }
-      buffer.width = page.width * dpr * zoom;
-      buffer.height = page.height * dpr * zoom;
+      buffer.width = Math.ceil(page.width * dpr * zoom);
+      buffer.height = Math.ceil(page.height * dpr * zoom);
       buffer.pixels = harness.commandText ?? `${id}:${page.width}`;
     },
     present(canvas: Surface, buffer: Surface) {
@@ -608,6 +608,57 @@ function commandEnvelope(seq: number, text = '!'): DocxCommandEnvelope {
     basis: { epoch: COMMAND_INIT.epoch, version: 0 }, seq, kind: 'insertText', payload: { text },
   };
 }
+
+test('command raster scale sizes the initial bitmaps before presentation', async () => {
+  const { client, w } = await commandWorker();
+  try {
+    const initial = await client.commandInit({ ...COMMAND_INIT, rasterScale: 2 } as ResidentCommandInitRequest);
+    const pages = initial.frame.payload.stagedPresentation!.pages;
+    expect(pages.map(({ bitmap }) => [bitmap.width, bitmap.height])).toEqual([[200, 200]]);
+    expect(w.harness.rasterized).toEqual([1]);
+  } finally { client.destroy(); }
+});
+
+test('command raster scale repaints every window page in one viewport frame', async () => {
+  const { client, w } = await commandWorker();
+  Object.assign(w.harness.session, {
+    buildDisplayListFrame(_extras: string, expected: number) {
+      w.delta([1, 2, 3], expected === 0, 100.25, 3);
+      return Uint8Array.of(w.harness.delta!.frameEpoch);
+    },
+  });
+  try {
+    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 3], rasterScale: 1 } as ResidentCommandInitRequest);
+    const frames: DocxCommandFrame[] = [];
+    client.onFrame((candidate) => frames.push(candidate));
+    w.resetCalls();
+    await client.requestViewport({ start: 0, end: 3, frameEpoch: initial.frame.revision, rasterScale: 2 } as Parameters<typeof client.requestViewport>[0]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.payload.stagedPresentation!.pages.map(({ page, bitmap }) => [page.pageIndex, bitmap.width, bitmap.height]))
+      .toEqual([[0, 201, 200], [1, 201, 200], [2, 201, 200]]);
+    expect(w.harness.rasterized).toEqual([1, 2, 3]);
+  } finally { client.destroy(); }
+});
+
+test('command raster scale preserves pixels when rounded window sizes match', async () => {
+  const { client, w } = await commandWorker();
+  Object.assign(w.harness.session, {
+    buildDisplayPagesFrame(pages: number[]) {
+      w.delta(pages.map((index) => index + 1), false, 100, 1);
+      return Uint8Array.of(w.harness.delta!.frameEpoch);
+    },
+  });
+  try {
+    const initial = await client.commandInit({ ...COMMAND_INIT, displayWindow: [0, 1], rasterScale: 1.001 } as ResidentCommandInitRequest);
+    const frames: DocxCommandFrame[] = [];
+    client.onFrame((candidate) => frames.push(candidate));
+    w.resetCalls();
+    await client.requestViewport({ start: 0, end: 1, frameEpoch: initial.frame.revision, rasterScale: 1.002 } as Parameters<typeof client.requestViewport>[0]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.payload.stagedPresentation!.pages).toEqual([]);
+    expect(w.harness.rasterized).toEqual([]);
+  } finally { client.destroy(); }
+});
 
 function replaceCommandDocument(client: ResidentEngineWorkerClient) {
   return client.bootstrap({

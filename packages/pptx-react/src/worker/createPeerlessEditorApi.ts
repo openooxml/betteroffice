@@ -7,6 +7,7 @@ import type { PptxCommandStore } from '../commands/types';
 import type { PptxPointPosition } from '../PptxEditor';
 import type { PptxWorkerEditorApi } from './createWorkerEditorApi';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
+import { LEGACY_SYNC_API } from '../runtimeOptions';
 
 type AsyncOperations = Pick<PptxWorkerEditorApi,
   'getPositionAtPoint' | 'clearSelection' | 'selectText' | 'goToSlide' | 'refresh' | 'refreshProposals'>;
@@ -156,7 +157,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     registerFont: (face) => register(face, false), registerFallbackFont: (face) => register(face, true),
   });
   return Object.defineProperties(api, {
-    handle: { get() { throw new PptxPeerlessUnsupportedError('handle', 'handleAsync()'); } },
-    save: { value() { throw new PptxPeerlessUnsupportedError('save', 'saveAsync()'); } },
+    handle: { get() { throw new PptxPeerlessUnsupportedError('handle', `handleAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
+    save: { value() { throw new PptxPeerlessUnsupportedError('save', `saveAsync() or ${LEGACY_SYNC_API}={true} for synchronous access`); } },
   });
 }

@@ -28,6 +28,7 @@ pub use inventory::{
 };
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
+pub use patch::keeps_source;
 pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
 pub use reference::UnpatchableReference;
 #[cfg(any(test, feature = "test-oracle"))]

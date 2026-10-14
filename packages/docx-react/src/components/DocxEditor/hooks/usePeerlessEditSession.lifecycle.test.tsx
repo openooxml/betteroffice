@@ -50,6 +50,25 @@ function expectClosed(frame: DocxCommandFrame) {
   expect(page.backgrounds![0]!.bitmap.close).toHaveBeenCalledTimes(1);
 }
 
+test('opening reads the latest raster scale before command initialization', async () => {
+  const { connection, options } = resident();
+  const scales: (number | undefined)[] = [];
+  let finish!: () => void;
+  connection.requestFullFrame = () => new Promise(() => {});
+  options.openConnection = (...args: unknown[]) => new Promise((resolve) => {
+    finish = () => {
+      scales.push(typeof args[2] === 'function' ? (args[2] as () => number)() : undefined);
+      resolve(connection);
+    };
+  });
+  const view = renderHook(({ rasterScale }) => usePeerlessEditSession({ ...options, rasterScale } as UsePeerlessEditSessionOptions),
+    { initialProps: { rasterScale: 2 } });
+  view.rerender({ rasterScale: 3 });
+  await act(async () => { finish(); });
+  expect(scales).toEqual([3]);
+  expect(view.result.current.status).toBe('ready');
+});
+
 test('unmounting during connection open releases the unused initial frame', async () => {
   const { connection, dispose, options } = resident();
   let resolve!: (value: ResidentCommandConnection) => void;
