@@ -46,7 +46,7 @@ export interface SelectionOverlayProps {
 const DEFAULT_CARET_COLOR = 'var(--doc-caret, #000)';
 const DEFAULT_SELECTION_COLOR = 'rgba(66, 133, 244, 0.3)'; // Google Docs style blue
 export const DEFAULT_CARET_WIDTH = 2;
-const DEFAULT_BLINK_INTERVAL = 530; // Standard cursor blink rate
+export const DEFAULT_BLINK_INTERVAL = 530; // Standard cursor blink rate
 
 // =============================================================================
 // STYLES

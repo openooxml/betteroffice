@@ -18,6 +18,7 @@ import type {
 import type { TransferResult } from '../../../../shared/office-session/protocol';
 import type { MethodHandlers, MethodPolicies } from '../../../../shared/office-session/types';
 import type { ColorValue } from '../types/colors';
+import type { Comment } from '../types/content';
 import type {
   YrsAuthor,
   YrsContentControlValue,
@@ -79,9 +80,17 @@ export type DocxEffectiveFormatting = Pick<
   | 'fontFamily' | 'color' | 'highlight' | 'styleId' | 'alignment'
 > & { fontSizePt: number | null };
 
+/** The comment an `addComment` command added, under the ID saves and the host use, with every comment after it. */
+export interface DocxCommentResult {
+  seq: number;
+  id: number;
+  comments: Comment[];
+}
+
 export interface DocxEditState {
   documentVersion?: string;
   batch?: { seq: number; result: DocxEditResult };
+  comment?: DocxCommentResult;
   activePart?: ResidentPartTarget | null;
   readOnly: boolean;
   review?: { version: string; previewVersion: number };

@@ -197,6 +197,92 @@ function lastInReadingOrder(rects: readonly DisplayListRect[]): DisplayListRect 
   return last && { ...last, x: last.x + last.width, width: 0 };
 }
 
+/** @internal What {@link placeRepeated} reads of one presented layout. */
+export interface RepeatedPlacement {
+  queries: DisplayListQueries;
+  /** Whether the layout is whole and final. */
+  complete(): boolean;
+  /** Whether a page shown in the display window is not built yet. */
+  pending(pageIndex: number): boolean;
+  /** Projects `rects` and `anchor` onto the pages as they stand now. */
+  respond(
+    rects: readonly DisplayListRect[],
+    anchor: DisplayListRect | null
+  ): DocxAnchorGeometryResult;
+  unavailable(): DocxAnchorGeometryResult;
+}
+
+/**
+ * @internal Places a target in a header or footer story, which repeats on every page whose band
+ * shows it under one of `routed` relationship ids. Unbuilt pages outside the display window are
+ * left out; the anchor sits on the first built page that paints it, else on the first unbuilt one.
+ */
+export function placeRepeated(
+  { queries, complete, pending, respond, unavailable }: RepeatedPlacement,
+  routed: readonly string[],
+  ranges: Interval[],
+  hidden: readonly Interval[],
+  paragraph: number | null
+): DocxAnchorGeometryResult {
+  const rIds = new Set(routed);
+  const pages = queries.displayList?.pages ?? [];
+  const bands = pages.flatMap(({ header, footer, hfParts, unbuilt }, pageIndex) => {
+    for (const [region, rId] of [
+      ['header', header?.rId ?? hfParts?.header],
+      ['footer', footer?.rId ?? hfParts?.footer],
+    ] as const) {
+      if (rId !== undefined && rIds.has(rId)) return [{ region, rId, pageIndex, unbuilt: !!unbuilt }];
+    }
+    return [];
+  });
+  if (!bands.length) {
+    return complete()
+      ? anchorFailure('missing-target', 'No page paints this header or footer')
+      : anchorFailure('layout-unavailable', 'No laid-out page paints this header or footer');
+  }
+  if (bands.some(({ pageIndex }) => pending(pageIndex))) return unavailable();
+  const built = new Map(
+    bands.filter(({ unbuilt }) => !unbuilt).map((band) => [`${band.region}:${band.rId}`, band])
+  );
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  const shown = unionOf(subtract(ranges, hidden)).filter(({ from, to }) => from < to);
+  const drawn = [...built.values()]
+    .flatMap(({ region, rId }) =>
+      shown.flatMap(({ from, to }) =>
+        queries.hfRangeRects(region, rId, from, to).filter((rect) => rect.width > 0)
+      )
+    )
+    .sort((a, b) => a.pageIndex - b.pageIndex);
+  const firstOf = (candidates: readonly DisplayListRect[]) =>
+    candidates.reduce<DisplayListRect | null>(
+      (first, rect) => (!first || rect.pageIndex < first.pageIndex ? rect : first),
+      null
+    );
+  const first = firstOf(drawn);
+  const last = ranges.at(-1);
+  const gap = last && widen(last, hidden);
+  const end = first
+    ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
+    : firstOf(
+        [...built.values()].flatMap(({ region, rId }) => [
+          ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
+          ...(gap ? queries.hfCaretRects(region, rId, gap.to) : []),
+          ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
+        ])
+      );
+  if (end) return respond(drawn, { ...end, width: 0 });
+  const unbuilt = bands.find((band) => band.unbuilt);
+  if (!unbuilt) return respond(drawn, null);
+  const content = pages[unbuilt.pageIndex]?.contentBounds;
+  return respond(drawn, {
+    pageIndex: unbuilt.pageIndex,
+    x: content?.x ?? 0,
+    y: (content?.y ?? 0) + (unbuilt.region === 'footer' ? (content?.height ?? 0) : 0),
+    width: 0,
+    height: 0,
+  });
+}
+
 /**
  * Geometry of the current frame; visible unbuilt pages wait for exact content. While `held`,
  * overlays still draw this layout until geometry for the next one exists, so `toOverlayRect`
@@ -302,75 +388,6 @@ export function createPluginGeometry(
       pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
     };
   };
-  /**
-   * Places a target in a header or footer story, which repeats on every page whose band shows it
-   * under one of `routed` relationship ids. Unbuilt pages outside the display window are left out;
-   * the anchor sits on the first built page that paints it, else on the first unbuilt one.
-   */
-  const placeRepeated = (
-    routed: readonly string[],
-    ranges: Interval[],
-    hidden: readonly Interval[],
-    paragraph: number | null
-  ): DocxAnchorGeometryResult => {
-    const rIds = new Set(routed);
-    const pages = queries.displayList?.pages ?? [];
-    const bands = pages.flatMap(({ header, footer, hfParts, unbuilt }, pageIndex) => {
-      for (const [region, rId] of [
-        ['header', header?.rId ?? hfParts?.header],
-        ['footer', footer?.rId ?? hfParts?.footer],
-      ] as const) {
-        if (rId !== undefined && rIds.has(rId)) return [{ region, rId, pageIndex, unbuilt: !!unbuilt }];
-      }
-      return [];
-    });
-    if (!bands.length) {
-      return complete()
-        ? anchorFailure('missing-target', 'No page paints this header or footer')
-        : anchorFailure('layout-unavailable', 'No laid-out page paints this header or footer');
-    }
-    if (bands.some(({ pageIndex }) => pendingPage(pageIndex))) return unavailable();
-    const built = new Map(
-      bands.filter(({ unbuilt }) => !unbuilt).map((band) => [`${band.region}:${band.rId}`, band])
-    );
-    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-    const shown = unionOf(subtract(ranges, hidden)).filter(({ from, to }) => from < to);
-    const drawn = [...built.values()]
-      .flatMap(({ region, rId }) =>
-        shown.flatMap(({ from, to }) =>
-          queries.hfRangeRects(region, rId, from, to).filter((rect) => rect.width > 0)
-        )
-      )
-      .sort((a, b) => a.pageIndex - b.pageIndex);
-    const firstOf = (candidates: readonly DisplayListRect[]) =>
-      candidates.reduce<DisplayListRect | null>(
-        (first, rect) => (!first || rect.pageIndex < first.pageIndex ? rect : first),
-        null
-      );
-    const first = firstOf(drawn);
-    const last = ranges.at(-1);
-    const gap = last && widen(last, hidden);
-    const end = first
-      ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
-      : firstOf(
-          [...built.values()].flatMap(({ region, rId }) => [
-            ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
-            ...(gap ? queries.hfCaretRects(region, rId, gap.to) : []),
-            ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
-          ])
-        );
-    if (end) return respond(drawn, { ...end, width: 0 });
-    const unbuilt = bands.find((band) => band.unbuilt);
-    if (!unbuilt) return respond(drawn, null);
-    const content = pages[unbuilt.pageIndex]?.contentBounds;
-    return respond(drawn, {
-      pageIndex: unbuilt.pageIndex,
-      x: content?.x ?? 0,
-      y: (content?.y ?? 0) + (unbuilt.region === 'footer' ? (content?.height ?? 0) : 0),
-      width: 0,
-      height: 0,
-    });
-  };
   return {
     layout,
     dom,
@@ -437,7 +454,13 @@ export function createPluginGeometry(
       if (repeated?.root) {
         const { root: story, rIds, ranges, hidden = [], paragraph } = repeated;
         const routed = rIds ?? headerFooterDisplayRIds(session, story.slice('hf:'.length));
-        return placeRepeated(routed, [...ranges], hidden, paragraph);
+        return placeRepeated(
+          { queries, complete, pending: pendingPage, respond, unavailable },
+          routed,
+          [...ranges],
+          hidden,
+          paragraph
+        );
       }
       const window = displayWindowOf(queries)?.read();
       const display = (range: RawAnchorRange): Interval | null => {

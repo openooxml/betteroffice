@@ -28,6 +28,7 @@ export interface ImagePropertiesDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onApply: (data: ImagePropertiesData) => void;
+  onPosition?: () => void;
   currentData?: ImagePropertiesData;
 }
 
@@ -139,6 +140,7 @@ export function ImagePropertiesDialog({
   isOpen,
   onClose,
   onApply,
+  onPosition,
   currentData,
 }: ImagePropertiesDialogProps): React.ReactElement | null {
   const { t } = useTranslation();
@@ -325,6 +327,7 @@ export function ImagePropertiesDialog({
         </div>
 
         <div style={footerStyle}>
+          {onPosition && <button type="button" onClick={onPosition} style={{ ...btnStyle, marginRight: 'auto' }}>{t('dialogs.imagePosition.title')}</button>}
           <button type="button" style={btnStyle} onClick={onClose}>
             {t('common.cancel')}
           </button>

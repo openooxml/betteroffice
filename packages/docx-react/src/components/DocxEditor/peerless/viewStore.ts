@@ -1,6 +1,7 @@
 import type { EditSessionState } from '../../../../../../shared/office-session/commands/types';
 import type { DisplayPage } from '@betteroffice/docx/layout/render';
 import type {
+  DocxCommandFrame,
   DocxCommandPageIdentity,
   DocxCommandSelection,
   DocxEditState,
@@ -23,6 +24,7 @@ export interface PeerlessSelectionAnchors {
 
 /** @internal Installed geometry is independent of acknowledged worker selection. */
 export interface PeerlessFrameGeometry {
+  documentVersion?: string;
   identity: PeerlessViewIdentity;
   coversThroughSeq: number;
   frameEpoch: number;
@@ -37,6 +39,8 @@ export interface PeerlessFrameGeometry {
   }[];
   caret: DocxEchoRect | null;
   selectionRects: readonly DocxEchoRect[];
+  parts?: DocxCommandFrame['payload']['parts'];
+  objects?: DocxCommandFrame['payload']['geometry'];
 }
 
 /** @internal */

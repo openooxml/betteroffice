@@ -59,6 +59,8 @@ import { proposalProjectionStories } from './dirtyProjectionStories';
 import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
+import { readResidentPointer } from './residentPointerRead';
+import { readCommentInsertionRange } from './residentCommentProjection';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
@@ -1559,11 +1561,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     pendingUpdates = [];
     const before = session.proposalEngine.version();
     try {
-      const saved = openedParsed ? await session.saveDocument(request.host, request.comments, editorSaves) : await session.save(
+      const projection = commandHost ? session.commentProjection() : null;
+      editorSaves.commentIds = projection?.sessionIds;
+      const comments = projection?.comments ?? request.comments;
+      const saved = openedParsed ? await session.saveDocument(request.host, comments, editorSaves) : await session.save(
         new Uint8Array(openedSource!.bytes),
         openedSource!.hostJson,
         request.host,
-        request.comments,
+        comments,
         editorSaves,
         request.stories
       );
@@ -1731,6 +1736,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     let value: unknown;
     switch (request.read.kind) {
+      case 'commentInsertionRange':
+        value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
+        break;
       case 'rawSelectionInfo': {
         const { anchor, focus } = request.read.selection;
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
@@ -1740,9 +1748,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'validateEdits':
         value = engine.validateEdits(request.read.request);
         break;
-      case 'contentControlHandles':
-        value = readControlHandles(session);
+      case 'contentControlHandles': {
+        const frame = retainedFrame && retainedLayoutVersion === engine.version() ? retainedFrame : undefined;
+        let queries: ReturnType<typeof createDisplayListQueries> | undefined;
+        try {
+          value = readControlHandles(session, frame, layoutRevision,
+            frame && (() => queries ??= createDisplayListQueries(frame.displayList, loadedRustDisplayListQueryEngine() ?? undefined)));
+        } finally { queries?.dispose(); }
         break;
+      }
       case 'partSnapshot':
         value = { metadata: partMetadata(session.partDocument()), geometry: retainedFrame && retainedLayoutVersion === engine.version() ? session.partGeometry(retainedFrame) : [],
           frameEpoch: retainedFrame && retainedLayoutVersion === engine.version() ? retainedFrame.frameEpoch : null, layoutRevision };
@@ -1842,7 +1856,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         );
         break;
       case 'pointPosition':
-        value = resolveYrsPointPosition(
+        value = request.read.nativePoint ? retainedFrame && retainedLayoutVersion === engine.version()
+          ? await readResidentPointer(session, retainedFrame, layoutRevision, request.read.nativePoint, request.read.expectVersion) : null : resolveYrsPointPosition(
           displayPositionIndex(session),
           request.read.hit,
           request.read.expectVersion
