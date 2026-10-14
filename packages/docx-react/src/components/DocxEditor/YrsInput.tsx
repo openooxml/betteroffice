@@ -23,6 +23,7 @@ import {
   type YrsSession,
   type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
+import * as Yrs from '@betteroffice/docx/yrs';
 import {
   effectiveZoom,
   resolveDisplayPageClientRect,
@@ -33,12 +34,15 @@ import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGat
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
+  currentYrsSelectionRange,
   yrsCellLocFromStory,
   yrsCellStory,
+  yrsClipboardSlice,
   yrsSelectionNearTable,
   yrsSelectionPlainText,
   yrsTableSelectionRange,
 } from './yrsCommands';
+import { clipboardFragmentHtml, parseClipboardHtml } from './internals/clipboardHtml';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
@@ -1533,6 +1537,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
+    const sliceNow = (() => {
+      try { return yrsClipboardSlice(session); } catch { return null; }
+    })();
+    const hasFragment = !!sliceNow?.fragment;
     const text = new Promise<Blob>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
         const selected = yrsSelectionPlainText(source);
@@ -1546,8 +1554,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
     });
     void text.catch(() => {});
+    let html: Promise<Blob> | null = null;
+    if (hasFragment) {
+      html = new Promise<Blob>((resolve, reject) => {
+        const apply = (source: YrsSession): void | Promise<void> => {
+          try {
+            const slice = yrsClipboardSlice(source);
+            if (slice.fragment) resolve(new Blob([clipboardFragmentHtml(slice.fragment)], { type: 'text/html' }));
+            else resolve(new Blob([''], { type: 'text/html' }));
+          } catch (error) { reject(error); }
+          if (cut) return written;
+        };
+        const onDropped = () => reject(new Error('Newer input replaced the copy'));
+        if (!held || !holdOperation({ kind: 'copy', apply, onDropped })) {
+          enqueueInputOperation(() => apply(copied), 'selection', onDropped, undefined, false);
+        }
+      });
+      void html.catch(() => {});
+    }
+    const itemTypes: Record<string, Promise<Blob>> = html ? { 'text/plain': text, 'text/html': html } : { 'text/plain': text };
     const write = typeof ClipboardItem === 'function' && clipboard.write
-      ? clipboard.write([new ClipboardItem({ 'text/plain': text })])
+      ? clipboard.write([new ClipboardItem(itemTypes as Record<string, Blob | Promise<Blob>>)])
       : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
     written = write.then(() => { result.written = true; }, () => {});
     return result;
@@ -1691,11 +1718,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const text = primedCopyRef.current ?? (session ? yrsSelectionPlainText(session) : '');
+      const slice = session ? (() => {
+        try { return yrsClipboardSlice(session); } catch { return null; }
+      })() : null;
+      const text = primedCopyRef.current ?? slice?.text ?? (session ? yrsSelectionPlainText(session) : '');
       primedCopyRef.current = null;
       if (!text) return;
       event.preventDefault();
       event.clipboardData.setData('text/plain', text);
+      if (slice?.fragment) {
+        event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
+      }
     },
     [session]
   );
@@ -1703,9 +1736,30 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const handlePaste = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       event.preventDefault();
-      insertText(event.clipboardData.getData('text/plain'));
+      const plain = event.clipboardData.getData('text/plain');
+      const fragment = parseClipboardHtml(event.clipboardData.getData('text/html') ?? '');
+      if (fragment && session && !readOnly && !isSuggesting) {
+        const range = (() => {
+          try { return currentYrsSelectionRange(session); } catch { return null; }
+        })();
+        if (range && isBodyFlowStory(range.story)) {
+          enqueueInputOperation(() => {
+            if (!isCurrentInput(session)) return;
+            session.addUndoBoundary();
+            try {
+              const caret = Yrs.applyClipboardFragment(session, range, fragment, suggestingAuthor());
+              session.setSelection(caret);
+              finishMutation();
+            } finally {
+              if (isCurrentInput(session)) session.addUndoBoundary();
+            }
+          }, 'mutation');
+          return;
+        }
+      }
+      insertText(plain);
     },
-    [insertText]
+    [enqueueInputOperation, finishMutation, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
   );
 
   const handleCut = useCallback(

@@ -1,4 +1,5 @@
 import type {
+  DocxClipboardSlice,
   TablePayload,
   TablePayloadRow,
   YrsCellBorders,
@@ -13,6 +14,7 @@ import type {
   YrsTableRange,
 } from '@betteroffice/docx/yrs';
 import { storyOffsetForLoc, storyPlainText, tableAnchors, tablePlainText } from '@betteroffice/docx/yrs';
+import * as Yrs from '@betteroffice/docx/yrs';
 import { computeSplitDialogDefaults, pixelsToEmu } from '@betteroffice/docx/utils';
 import type { ImageLayoutTarget, SetImageWrapTypeOptions } from '@betteroffice/docx/docx';
 import type { TableContextInfo } from './types';
@@ -252,6 +254,19 @@ export function yrsSelectionPlainText(session: YrsSession): string {
   const start = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
   const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
   return start === end ? '' : storyPlainText(session, range.story, start, end);
+}
+
+/** The current selection as a clipboard slice: plain text always, plus a fragment when it holds a table. */
+export function yrsClipboardSlice(session: YrsSession): DocxClipboardSlice {
+  const table = currentYrsTableTarget(session);
+  if (table && !sameCell(table.range.anchor, table.range.head)) {
+    return Yrs.readClipboardSlice(session, { cells: table.range });
+  }
+  const range = currentYrsSelectionRange(session);
+  if (!range) return { text: '', fragment: null };
+  const from = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
+  const to = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
+  return Yrs.readClipboardSlice(session, { story: range.story, from, to });
 }
 
 function tablePayload(session: YrsSession, table: YrsTableLoc): TablePayload | null {
