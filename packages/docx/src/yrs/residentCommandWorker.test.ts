@@ -177,6 +177,44 @@ test('worker frames include highlights for keyboard and point range selections',
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker frames highlight one rect per cell of a selected table', async () => {
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+  const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map((side) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`).join('');
+  const { client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+    `<w:tbl><w:tblPr><w:tblW w:w="5760" w:type="dxa"/><w:tblBorders>${borders}</w:tblBorders></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="2880"/><w:gridCol w:w="2880"/></w:tblGrid>` +
+    `<w:tr>${cell('A')}${cell('B')}</w:tr><w:tr>${cell('C')}${cell('D')}</w:tr></w:tbl>`,
+  });
+  try {
+    const story = engine.geometryReader.storyIds().find((candidate) => engine.paragraphs(candidate)[0]?.text === 'A');
+    if (!story) throw new Error('Cell story missing');
+    const paraId = engine.paragraphs(story)[0]!.paraId;
+    const at = { story, paraId, offset: 0 };
+    await client.edit(intent(1, 0, 'select', { selection: { anchor: at, focus: at } }));
+    const tabled = await client.edit(intent(2, 0, 'selectTableCells', { target: 'table' }));
+    expect(tabled.outcomes[0]?.status).toBe('noop');
+    const rects = tabled.frame!.payload.selectionRects!;
+    expect(rects.length).toBe(4);
+    for (const rect of rects) {
+      expect(rect.pageIndex).toBe(0);
+      expect(rect.x).toBeGreaterThanOrEqual(0);
+      expect(rect.y).toBeGreaterThanOrEqual(0);
+      expect(rect.width).toBeGreaterThan(0);
+      expect(rect.height).toBeGreaterThan(0);
+    }
+    expect(new Set(rects.map((rect) => `${rect.x},${rect.y}`)).size).toBe(4);
+    const first = rects[0]!;
+    const clicked = await client.edit(intent(3, 0, 'selectPoint', {
+      page: { pageId: '1', pageIndex: first.pageIndex }, x: first.x + first.width / 2, y: first.y + first.height / 2,
+      layoutRevision: tabled.frame!.payload.layoutRevision, frameEpoch: tabled.frame!.revision,
+      clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    }));
+    expect(clicked.frame!.payload.selectionRects).toEqual([]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker selection reads project tracked deletions before slicing raw offsets', async () => {
   const { client, point } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:del w:id="1" w:author="Writer" w:date="2026-01-01T00:00:00Z">' +
