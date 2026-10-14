@@ -557,7 +557,7 @@ async function commandFixture(feature = 'plain', exportable = false, options: { 
   if (!reply.ok || !reply.commandInitial) throw new Error(JSON.stringify(reply));
   const initial = reply.commandInitial;
   const frame = applyFrameDelta(null, decodeFrameDelta(initial.frame.payload.frame));
-  return { cold, engine, w, init, initial, frame, full, calls,
+  return { cold, engine, w, init, initial, frame, full, calls, acks: [] as DocxCommandFrame[],
     destroy() { engine.destroy(); cold.destroy(); },
     async present() {
       return w.send({ type: 'commandViewport', request: { start: 0, end: 3, frameEpoch: frame.frameEpoch } });
@@ -668,7 +668,7 @@ function commandPoint(f: CommandFixture, pageIndex = 0, offset = 8): DocxSelecti
   const page = f.full.pages[pageIndex]!;
   const run = page.page.primitives.find((primitive) => primitive.kind === 'glyphRun');
   if (!run || run.kind !== 'glyphRun') throw new Error('Missing text');
-  const glyph = run.glyphs[offset]!;
+  const glyph = run.glyphs[Math.min(offset, run.glyphs.length - 1)]!;
   return {
     page: { pageId: page.pageId.toString(), pageIndex }, x: glyph.x, y: glyph.y - run.size / 2,
     frameEpoch: f.frame.frameEpoch, layoutRevision: 1, clickCount: 1,
@@ -683,6 +683,7 @@ async function sendCommand(f: CommandFixture, seq: number, kind: string, payload
   } });
   if (!reply.ok || !reply.commandAck?.frame) throw new Error(JSON.stringify(reply));
   expect(reply.commandAck.outcomes[0]?.status).toBe(kind === 'insertText' ? 'applied' : 'noop');
+  f.acks.push(reply.commandAck.frame);
   return reply.commandAck;
 }
 
@@ -695,7 +696,7 @@ function expectPrefixSelection(f: CommandFixture, ack: DocxCommandAck, calls: st
   expect(ack.frame!.payload.layoutProvisional).toBe(true);
   expect(ack.frame!.payload.finalizedPages).toBe(3);
   expect(f.calls).toEqual(calls);
-  const frame = commandFramesAfter(commandFramesAfter(f.frame, f.w.frames), [ack.frame!]);
+  const frame = commandFramesAfter(f.frame, [...f.w.frames, ...f.acks].sort((a, b) => a.revision - b.revision));
   expect(frame.pages).toHaveLength(3);
   for (const { page, pageIndex } of frame.pages) expect(page).toEqual(f.full.displayList.pages[pageIndex]);
 }
@@ -771,7 +772,7 @@ for (const kind of ['selectPoint', 'extendSelection', 'line down', 'document end
       const ack = await sendCommand(f, 2, commandKind, payload);
       const reference = await sendCommand(full, 2, commandKind, payload);
       expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
-      expect(commandFramesAfter(commandFramesAfter(f.frame, f.w.frames), [ack.frame!]).pages).toHaveLength(f.full.pages.length);
+      expect(commandFramesAfter(f.frame, f.acks).pages).toHaveLength(f.full.pages.length);
       expect(f.calls).toContain('layoutDocumentWithRegionsRetained');
       expect(selectionPositions(ack.selection)).toEqual(selectionPositions(reference.selection));
     } finally { f.destroy(); full.destroy(); }
