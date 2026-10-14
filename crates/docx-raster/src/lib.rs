@@ -1306,23 +1306,14 @@ enum Decode {
     OverBudget,
 }
 
-/// Decoder limits holding one image to what the page may still spend on
-/// it, so a frame larger than the declared size fails against the budget
-/// left instead of the default limit.
-fn decoder_limits(
-    declared_width: u32,
-    declared_height: u32,
-    cost: u64,
-    spent_bytes: u64,
-) -> image::Limits {
+/// Decoder limits holding one image to its declared size and its decoder to
+/// `max_alloc` bytes, so a frame larger than the declared size fails against
+/// the budget left instead of the default limit.
+fn decoder_limits(declared_width: u32, declared_height: u32, max_alloc: u64) -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(declared_width);
     limits.max_image_height = Some(declared_height);
-    limits.max_alloc = Some(
-        MAX_IMAGE_BYTES
-            .saturating_sub(cost)
-            .min(MAX_PAGE_IMAGE_BYTES.saturating_sub(spent_bytes)),
-    );
+    limits.max_alloc = Some(max_alloc);
     limits
 }
 
@@ -1517,8 +1508,8 @@ impl<'c> PageImages<'c> {
 
     /// `Decoded` pixels, `Refused` for content this backend will not draw
     /// (bytes it cannot decode, or an image past [`MAX_IMAGE_PIXELS`] or
-    /// [`MAX_IMAGE_BYTES`]), or `OverBudget` when the page has no decode
-    /// budget left. Declared pixels are charged before the decoder allocates,
+    /// [`MAX_IMAGE_BYTES`]), or `OverBudget` when the page's decode budget
+    /// left is too small, which the next page retries. Declared pixels are charged before the decoder allocates,
     /// so a stream that fails late still costs what it claimed.
     fn decode(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
         use image::ImageDecoder as _;
@@ -1552,22 +1543,21 @@ impl<'c> PageImages<'c> {
         charge.pixels = declared;
         charge.bytes_post = cost;
         IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
-        if decoder
-            .set_limits(decoder_limits(
-                declared_width,
-                declared_height,
-                cost,
-                self.bytes,
-            ))
-            .is_err()
-        {
+        let image_left = MAX_IMAGE_BYTES.saturating_sub(cost);
+        let page_left = MAX_PAGE_IMAGE_BYTES.saturating_sub(self.bytes);
+        let limits = decoder_limits(declared_width, declared_height, image_left.min(page_left));
+        if decoder.set_limits(limits).is_err() {
             return Decode::Refused;
         }
         let Ok(orientation) = decoder.orientation() else {
             return Decode::Refused;
         };
-        let Ok(mut decoded) = image::DynamicImage::from_decoder(decoder) else {
-            return Decode::Refused;
+        let mut decoded = match image::DynamicImage::from_decoder(decoder) {
+            Ok(decoded) => decoded,
+            Err(image::ImageError::Limits(_)) if page_left < image_left => {
+                return Decode::OverBudget;
+            }
+            Err(_) => return Decode::Refused,
         };
         decoded.apply_orientation(orientation);
         let Some(size) = IntSize::from_wh(decoded.width(), decoded.height()) else {
