@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
 use crate::paragraph_identity::{
-    ParagraphOccurrence, Tag, attribute, paragraph_occurrences, patch_paragraph_ids, tags,
-    unescaped, MC_NAMESPACE,
+    MC_NAMESPACE, ParagraphOccurrence, Tag, attribute, paragraph_occurrences, patch_paragraph_ids,
+    tags, unescaped,
 };
 
 use super::context::RecordedParagraphs;
