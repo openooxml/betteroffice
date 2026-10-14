@@ -464,7 +464,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         }
         try {
           let checked = await hooks.preflight(command, context);
-          if (prefix && checked.status === 'ready' && !canUsePrefix(command, context, checked.prepared.selection)) {
+          if (prefix && (checked.status !== 'ready' || !canUsePrefix(command, context, checked.prepared.selection))) {
             await completeCommandPrefix(host);
             checked = await hooks.preflight(command, context);
           }
