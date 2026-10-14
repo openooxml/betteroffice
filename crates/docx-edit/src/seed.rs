@@ -203,6 +203,7 @@ impl StoryPlan {
 
 struct ProjectedCell<'a> {
     paragraph_formatting: Option<Value>,
+    run_formatting: Option<Value>,
     attrs: JsonObject,
     content: Cow<'a, [Value]>,
 }
@@ -364,7 +365,7 @@ impl SourceMetadata {
         let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
         let style = paragraph_style_formatting(&paragraph, &self.styles, None);
         let run_style = self.styles.run_style_own(string(field(control, "styleId")));
-        let inherited = merge_text_formatting(style.as_deref(), run_style);
+        let inherited = merge_style_run_formatting(style.as_deref(), run_style);
         let merged = merge_text_formatting(inherited.as_ref(), control);
         payload(marks_to_attrs(&formatting_to_marks(merged.as_ref())))
     }
@@ -604,6 +605,8 @@ struct StyleResolver {
     default_character: Option<String>,
     #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     table_paragraph_formatting: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table_run_formatting: Option<Value>,
     #[serde(skip)]
     memo: StyleMemo,
 }
@@ -1180,6 +1183,33 @@ fn merge_text_formatting_owned(target: Option<Value>, source: Option<&Value>) ->
     Some(Value::Object(result))
 }
 
+fn merge_style_run_formatting(target: Option<&Value>, source: Option<&Value>) -> Option<Value> {
+    let mut result = merge_text_formatting(target, source)?;
+    for key in [
+        "bold",
+        "boldCs",
+        "italic",
+        "italicCs",
+        "allCaps",
+        "smallCaps",
+        "strike",
+        "doubleStrike",
+        "outline",
+        "shadow",
+        "emboss",
+        "imprint",
+        "hidden",
+    ] {
+        if let Some(value) = field(source, key).and_then(Value::as_bool) {
+            result.as_object_mut()?.insert(
+                key.to_owned(),
+                Value::Bool(truthy(field(target, key)) ^ value),
+            );
+        }
+    }
+    Some(result)
+}
+
 fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) -> Option<Value> {
     let Some(source) = object(source) else {
         return target.cloned();
@@ -1284,6 +1314,14 @@ impl StyleResolver {
         let _ = self.set_table_paragraph_formatting(state);
     }
 
+    fn set_table_run_formatting(&mut self, formatting: Option<Value>) -> Option<Value> {
+        let previous = std::mem::replace(&mut self.table_run_formatting, formatting);
+        if previous != self.table_run_formatting {
+            self.memo = StyleMemo::default();
+        }
+        previous
+    }
+
     fn resolve_paragraph_style(&self, style_id: Option<&str>) -> Arc<ResolvedParagraphStyle> {
         let defined_id = style_id.filter(|id| self.style(id).is_some());
         let mut memo = self
@@ -1305,7 +1343,7 @@ impl StyleResolver {
             .default_style("character")
             .and_then(|style| field(Some(style), "rPr"));
         let default_run = if default_character.is_some() {
-            merge_text_formatting(run.as_deref(), default_character).map(Arc::new)
+            merge_style_run_formatting(run.as_deref(), default_character).map(Arc::new)
         } else {
             run.clone()
         };
@@ -1349,19 +1387,22 @@ impl StyleResolver {
             field(self.doc_defaults.as_ref(), "pPr"),
             self.table_paragraph_formatting.as_ref(),
         );
-        let mut run = field(self.doc_defaults.as_ref(), "rPr").cloned();
+        let mut run = merge_style_run_formatting(
+            field(self.doc_defaults.as_ref(), "rPr"),
+            self.table_run_formatting.as_ref(),
+        );
         let style = style_id
             .and_then(|id| self.style(id))
             .or_else(|| self.default_style("paragraph"));
         if let Some(style) = style {
             paragraph = merge_paragraph_formatting(paragraph.as_ref(), field(Some(style), "pPr"));
-            run = merge_text_formatting(run.as_ref(), field(Some(style), "rPr"));
+            run = merge_style_run_formatting(run.as_ref(), field(Some(style), "rPr"));
         }
         if style_id.is_some() && style.is_none() {
             if let Some(style) = self.default_style("paragraph") {
                 paragraph =
                     merge_paragraph_formatting(paragraph.as_ref(), field(Some(style), "pPr"));
-                run = merge_text_formatting(run.as_ref(), field(Some(style), "rPr"));
+                run = merge_style_run_formatting(run.as_ref(), field(Some(style), "rPr"));
             }
         }
         if style_id.is_none() && style.is_none() && self.doc_defaults.is_none() {
@@ -1444,6 +1485,11 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
     }
     if truthy(formatting.get("italic")) {
         marks.push(mark("italic", vec![]));
+    }
+    for key in ["boldCs", "italicCs"] {
+        if let Some(value) = formatting.get(key).and_then(Value::as_bool) {
+            marks.push(mark(key, vec![("value".to_owned(), Value::Bool(value))]));
+        }
     }
     if let Some(underline) = object(formatting.get("underline"))
         && string(underline.get("style")) != Some("none")
@@ -1632,6 +1678,10 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
         }
         if boolean_marks.contains(&mark.name.as_str()) {
             attrs.insert(mark.name.clone(), Value::Bool(true));
+        } else if matches!(mark.name.as_str(), "boldCs" | "italicCs") {
+            if let Some((_, value)) = mark.attrs.iter().find(|(key, _)| key == "value") {
+                attrs.insert(mark.name.clone(), value.clone());
+            }
         } else if mark.name == "snapToGrid" {
             attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
         } else if mark.name == "highlight" {
@@ -1715,7 +1765,7 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
-    let inherited = merge_text_formatting(style_formatting, run_style);
+    let inherited = merge_style_run_formatting(style_formatting, run_style);
     let merged = merge_text_formatting_owned(inherited, formatting);
     let mut marks = formatting_to_marks(merged.as_ref());
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
@@ -1773,6 +1823,18 @@ impl RunInheritance {
         inherited_run_attrs(&self.0, paragraph_style, run_style)
     }
 
+    pub(crate) fn table_run_attrs(
+        &mut self,
+        paragraph_style: Option<&str>,
+        run_style: Option<&str>,
+        table_formatting: Value,
+    ) -> JsonObject {
+        let previous = self.0.set_table_run_formatting(Some(table_formatting));
+        let attrs = self.run_attrs(paragraph_style, run_style);
+        self.0.set_table_run_formatting(previous);
+        attrs
+    }
+
     pub(crate) fn paragraph_formatting(
         &mut self,
         paragraph_style: Option<&str>,
@@ -1796,7 +1858,8 @@ impl RunInheritance {
                     .map(|cell| {
                         json!({
                             "attributes": cell.attrs,
-                            "paragraphFormatting": cell.paragraph_formatting
+                            "paragraphFormatting": cell.paragraph_formatting,
+                            "runFormatting": cell.run_formatting
                         })
                     })
                     .collect()
@@ -4149,6 +4212,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
     let content = array(field(Some(cell), "content"));
     ProjectedCell {
         paragraph_formatting: None,
+        run_formatting: None,
         attrs,
         content: if content.is_empty() {
             Cow::Owned(vec![json!({ "type": "paragraph", "content": [] })])
@@ -4187,17 +4251,31 @@ fn table_column_count(table: &Value) -> usize {
         .max(array(field(Some(table), "columnWidths")).len())
 }
 
-fn table_cell_paragraph_formatting(
+fn table_cell_style_formatting(
     table: &Value,
     style: Option<&Value>,
     row_index: usize,
     start_column: usize,
     end_column: usize,
     columns: usize,
+    property: &str,
 ) -> Option<Value> {
-    let mut result = field(style, "pPr").cloned();
+    let merge = |target: Option<&Value>, source: Option<&Value>| {
+        if property == "rPr" {
+            merge_text_formatting(target, source)
+        } else {
+            merge_paragraph_formatting(target, source)
+        }
+    };
+    let mut result = field(style, property).cloned();
     let parts = array(field(style, "tblStylePr"));
-    if !parts.iter().any(|part| field(Some(part), "pPr").is_some()) {
+    if property == "rPr" {
+        let whole = parts
+            .iter()
+            .find(|part| string(field(Some(part), "type")) == Some("wholeTable"));
+        result = merge(result.as_ref(), field(whole, property));
+    }
+    if !parts.iter().any(|part| field(Some(part), property).is_some()) {
         return result;
     }
     let formatting = field(Some(table), "formatting");
@@ -4266,7 +4344,7 @@ fn table_cell_paragraph_formatting(
         let conditional = parts
             .iter()
             .find(|part| string(field(Some(part), "type")) == Some(region));
-        result = merge_paragraph_formatting(result.as_ref(), field(conditional, "pPr"));
+        result = merge(result.as_ref(), field(conditional, property));
     }
     result
 }
@@ -4358,13 +4436,23 @@ fn project_row<'a>(
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
         );
-        projected.paragraph_formatting = table_cell_paragraph_formatting(
+        projected.paragraph_formatting = table_cell_style_formatting(
             table,
             style_context.style,
             row_index,
             start_column,
             column,
             style_context.column_count,
+            "pPr",
+        );
+        projected.run_formatting = table_cell_style_formatting(
+            table,
+            style_context.style,
+            row_index,
+            start_column,
+            column,
+            style_context.column_count,
+            "rPr",
         );
         cells.push(projected);
     }
@@ -4402,13 +4490,23 @@ fn project_row<'a>(
             },
         );
         cells.push(ProjectedCell {
-            paragraph_formatting: table_cell_paragraph_formatting(
+            paragraph_formatting: table_cell_style_formatting(
                 table,
                 style_context.style,
                 row_index,
                 0,
                 total_columns,
                 style_context.column_count,
+                "pPr",
+            ),
+            run_formatting: table_cell_style_formatting(
+                table,
+                style_context.style,
+                row_index,
+                0,
+                total_columns,
+                style_context.column_count,
+                "rPr",
             ),
             attrs: projected.attrs,
             content: Cow::Owned(projected.content.into_owned()),
@@ -5241,12 +5339,14 @@ fn visit_story(
                     .units
                     .push(embed_unit("table", payload, &[], 1));
                 let previous_table_state = context.styles.set_table_paragraph_formatting(None);
+                let previous_run_state = context.styles.set_table_run_formatting(None);
                 let sources = source_cells(block);
                 for (row_index, row) in rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
                         context
                             .styles
                             .set_table_paragraph_formatting(cell.paragraph_formatting);
+                        context.styles.set_table_run_formatting(cell.run_formatting);
                         let source_cell = sources
                             .get(row_index)
                             .and_then(|cells| cells.get(cell_index))
@@ -5285,6 +5385,7 @@ fn visit_story(
                 context
                     .styles
                     .restore_table_paragraph_formatting(previous_table_state);
+                context.styles.set_table_run_formatting(previous_run_state);
                 last_kind = Some("table");
             }
             _ => {

@@ -62,3 +62,18 @@ export function mergeTextFormatting(
 
   return result as TextFormatting;
 }
+
+export function mergeStyleRunFormatting(
+  target: TextFormatting | undefined,
+  source: TextFormatting | undefined
+): TextFormatting | undefined {
+  const result = mergeTextFormatting(target, source);
+  if (!result || !source) return result;
+  for (const key of [
+    'bold', 'boldCs', 'italic', 'italicCs', 'allCaps', 'smallCaps', 'strike',
+    'doubleStrike', 'outline', 'shadow', 'emboss', 'imprint', 'hidden',
+  ] as const) {
+    if (typeof source[key] === 'boolean') result[key] = !!target?.[key] !== source[key];
+  }
+  return result;
+}

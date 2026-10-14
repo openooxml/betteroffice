@@ -1370,8 +1370,8 @@ export function wrapSession(
     runInheritance: (styles) => {
       const inheritance = session.run_inheritance(JSON.stringify(styles ?? null));
       return {
-        attributes: (paragraphStyle, runStyle) =>
-          JSON.parse(inheritance.attributes(paragraphStyle, runStyle)) as Record<string, unknown>,
+        attributes: (paragraphStyle, runStyle, tableRun) =>
+          JSON.parse(inheritance.attributes(paragraphStyle, runStyle, tableRun ? JSON.stringify(tableRun) : undefined)) as Record<string, unknown>,
         paragraphFormatting: (paragraphStyle, tableFormatting) =>
           JSON.parse(inheritance.paragraph_formatting(
             paragraphStyle, JSON.stringify(tableFormatting ?? null)

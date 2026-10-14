@@ -1304,7 +1304,7 @@ export class RunInheritance {
      * The attributes, as a JSON object, that seeding merges into the marks of a run of
      * `run_style` in a paragraph of `paragraph_style` before the run's direct formatting.
      */
-    attributes(paragraph_style?: string | null, run_style?: string | null): string;
+    attributes(paragraph_style?: string | null, run_style?: string | null, table_run_json?: string | null): string;
     paragraph_formatting(paragraph_style: string | null | undefined, table_formatting_json: string): string;
     table_attributes(table_json: string): string;
 }
@@ -1863,7 +1863,7 @@ export interface InitOutput {
     readonly retainedlayoutmeta_page_sizes: (a: number) => [number, number];
     readonly retainedlayoutmeta_partial: (a: number) => number;
     readonly retainedlayoutmeta_provisional: (a: number) => number;
-    readonly runinheritance_attributes: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly runinheritance_attributes: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runinheritance_paragraph_formatting: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runinheritance_table_attributes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];

@@ -313,10 +313,8 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
 
   if (attributes.bold) formatting.bold = true;
   if (attributes.italic) formatting.italic = true;
-  // Complex-script bold and italic follow the session where it states them (a comparison does),
-  // and bold and italic otherwise.
-  if (attributes.boldCs ?? attributes.bold) formatting.boldCs = true;
-  if (attributes.italicCs ?? attributes.italic) formatting.italicCs = true;
+  if (attributes.boldCs) formatting.boldCs = true;
+  if (attributes.italicCs) formatting.italicCs = true;
 
   const underline = asObject(attributes.underline);
   if (underline && underline.inheritedHyperlink !== true) {
@@ -431,24 +429,16 @@ const directFormatting: RunFormatter = (attributes) =>
 
 const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'bold', 'italic', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
-  'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl',
+  'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
-
-const COMPLEX_SCRIPT = [['boldCs', 'bold'], ['italicCs', 'italic']] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
-/**
- * What a run with `attributes` that inherits `inherited` writes: the values
- * that differ, and an explicit off for an inherited switch, color or
- * underline it clears. Complex-script bold and italic follow bold and italic
- * unless the session states them as the run's own.
- */
+/** Writes differences from inherited run formatting, including explicit resets. */
 function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextFormatting {
   const formatting = directFormatting(attributes);
   const result: Attrs = {};
   for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
-    if (key === 'boldCs' || key === 'italicCs') continue;
     const value = formatting[key as keyof TextFormatting];
     if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
     if (value !== undefined) result[key] = value;
@@ -457,11 +447,6 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextF
     else if (key === 'underline' && !lentByLinkStyle(attributes.underline)) {
       result[key] = { style: 'none' };
     }
-  }
-  for (const [script, key] of COMPLEX_SCRIPT) {
-    const stated = attributes[script];
-    const value = typeof stated === 'boolean' ? stated || undefined : result[key];
-    if (value !== undefined) result[script] = value;
   }
   return result as TextFormatting;
 }
@@ -1403,6 +1388,7 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
     }
     if (name === 'comment' || name === 'footnoteRef') continue;
     if (BOOLEAN_MARKS.has(name)) attrs[name] = true;
+    else if (name === 'boldCs' || name === 'italicCs') attrs[name] = value.value;
     else if (name === 'highlight') attrs.highlight = value.color;
     else if (name === 'insertion' || name === 'deletion') {
       attrs[name === 'insertion' ? 'ins' : 'del'] = dropNulls({
@@ -2502,6 +2488,7 @@ class SaveContext {
   private readonly payloadBaselines = new WeakMap<TablePayload, YrsTableInheritance>();
   private readonly sourceCells = new Map<string, YrsTableInheritance['rows'][number][number]>();
   private readonly cellParagraphs = new Map<string, ParagraphFormatting | undefined>();
+  private readonly cellRuns = new Map<string, TextFormatting | undefined>();
 
   constructor(
     private readonly session: YrsSession,
@@ -2590,6 +2577,7 @@ class SaveContext {
       this.memo.parents.set(cell.story, parent);
       const source = asString(cell.tcPr?._sourceCellStory) ?? cell.story;
       this.cellParagraphs.set(cell.story, this.sourceCells.get(source)?.paragraphFormatting ?? undefined);
+      this.cellRuns.set(cell.story, this.sourceCells.get(source)?.runFormatting ?? undefined);
     }
   }
 
@@ -2668,21 +2656,21 @@ class SaveContext {
    * How the runs of a paragraph with pilcrow `properties` save: relative to
    * what seeding merged into their marks under the styles the package saves.
    */
-  private runFormatter(properties: Attrs): RunFormatter {
+  private runFormatter(story: string, properties: Attrs): RunFormatter {
     const paragraphStyle = typeof properties.pStyle === 'string' ? properties.pStyle : null;
     return (attributes) =>
       relativeFormatting(
         attributes,
-        this.inheritedRun(paragraphStyle, asString(asObject(attributes.runStyle)?.styleId) || null)
+        this.inheritedRun(paragraphStyle, asString(asObject(attributes.runStyle)?.styleId) || null, this.cellRuns.get(story))
       );
   }
 
-  private inheritedRun(paragraphStyle: string | null, runStyle: string | null): TextFormatting {
-    const key = JSON.stringify([paragraphStyle, runStyle]);
+  private inheritedRun(paragraphStyle: string | null, runStyle: string | null, tableRun: TextFormatting | undefined): TextFormatting {
+    const key = JSON.stringify([paragraphStyle, runStyle, tableRun]);
     let inherited = this.inheritedRuns.get(key);
     if (inherited === undefined) {
       const inheritance = this.inheritance();
-      inherited = attrsToTextFormatting(inheritance.attributes(paragraphStyle, runStyle));
+      inherited = attrsToTextFormatting(inheritance.attributes(paragraphStyle, runStyle, tableRun));
       this.inheritedRuns.set(key, inherited);
     }
     return inherited;
@@ -2836,7 +2824,7 @@ class SaveContext {
             boundaries,
             baseParagraph,
             this.recovery(storyId),
-            this.runFormatter(segment.properties),
+            this.runFormatter(storyId, segment.properties),
             this.revisionIds,
             this.inheritedFormatting(storyId, segment.properties)
           );

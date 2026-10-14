@@ -16,7 +16,7 @@
 
 import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
-import type { Document, ParagraphFormatting, Table } from '../types/document';
+import type { Document, ParagraphFormatting, Table, TextFormatting } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import type {
   DocxParagraphAnchor,
@@ -961,7 +961,7 @@ export interface YrsRunInheritance {
    * The attributes seeding merges into the marks of a run of `runStyle` in a
    * paragraph of `paragraphStyle` before the run's direct formatting.
    */
-  attributes(paragraphStyle: string | null, runStyle: string | null): Record<string, unknown>;
+  attributes(paragraphStyle: string | null, runStyle: string | null, tableRun?: TextFormatting): Record<string, unknown>;
   paragraphFormatting(
     paragraphStyle: string | null,
     tableFormatting: ParagraphFormatting | undefined
@@ -975,6 +975,7 @@ export interface YrsTableInheritance {
   rows: Array<Array<{
     attributes: Record<string, unknown>;
     paragraphFormatting: ParagraphFormatting | null;
+    runFormatting: TextFormatting | null;
   }>>;
 }
 

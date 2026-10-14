@@ -1236,13 +1236,21 @@ impl RunInheritance {
     /// The attributes, as a JSON object, that seeding merges into the marks of a run of
     /// `run_style` in a paragraph of `paragraph_style` before the run's direct formatting.
     pub fn attributes(
-        &self,
+        &mut self,
         paragraph_style: Option<String>,
         run_style: Option<String>,
+        table_run_json: Option<String>,
     ) -> Result<String, JsValue> {
-        let attrs = self
-            .inner
-            .run_attrs(paragraph_style.as_deref(), run_style.as_deref());
+        let attrs = if let Some(table_run_json) = table_run_json {
+            self.inner.table_run_attrs(
+                paragraph_style.as_deref(),
+                run_style.as_deref(),
+                serde_json::from_str(&table_run_json).map_err(js_err)?,
+            )
+        } else {
+            self.inner
+                .run_attrs(paragraph_style.as_deref(), run_style.as_deref())
+        };
         serde_json::to_string(&attrs).map_err(js_err)
     }
 

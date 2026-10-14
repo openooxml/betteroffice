@@ -19,7 +19,7 @@ import type {
   ParagraphFormatting,
   TextFormatting,
 } from '../types/document';
-import { mergeTextFormatting } from '../utils/textFormattingMerge';
+import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
 
 /**
  * Resolved style properties ready for rendering
@@ -129,7 +129,8 @@ export class StyleResolver {
    */
   resolveParagraphStyle(
     styleId: string | undefined | null,
-    tableParagraphFormatting?: ParagraphFormatting
+    tableParagraphFormatting?: ParagraphFormatting,
+    tableRunFormatting?: TextFormatting
   ): ResolvedParagraphStyle {
     const result: ResolvedParagraphStyle = {};
 
@@ -140,6 +141,7 @@ export class StyleResolver {
     if (this.docDefaults?.rPr) {
       result.runFormatting = { ...this.docDefaults.rPr };
     }
+    result.runFormatting = mergeStyleRunFormatting(result.runFormatting, tableRunFormatting);
 
     const style = (styleId ? this.stylesById.get(styleId) : undefined) ?? this.defaultParagraphStyle;
     if (style === BUILTIN_NORMAL_STYLE) {
@@ -308,7 +310,7 @@ export class StyleResolver {
       result.paragraphFormatting = mergeParagraphFormatting(result.paragraphFormatting, style.pPr);
     }
     if (style.rPr) {
-      result.runFormatting = this.mergeTextFormatting(result.runFormatting, style.rPr);
+      result.runFormatting = mergeStyleRunFormatting(result.runFormatting, style.rPr);
     }
   }
 
