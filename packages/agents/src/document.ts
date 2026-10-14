@@ -365,8 +365,7 @@ export class DocxAgentDocument {
     stories.sort((a, b) => {
       const left = positions.get(a)!;
       const right = positions.get(b)!;
-      const root = left.root.localeCompare(right.root);
-      if (root) return root;
+      if (left.root !== right.root) return left.root < right.root ? -1 : 1;
       for (let i = 0; i < Math.min(left.path.length, right.path.length); i++) {
         if (left.path[i] !== right.path[i]) return left.path[i] - right.path[i];
       }
