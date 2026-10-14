@@ -393,8 +393,10 @@ async function savedText(page: Page) {
   ).map((node) => node.textContent ?? '').join(''), xml);
 }
 
+const steadyCaret = '[data-peerless-docx] div[aria-hidden="true"][style*="currentcolor" i] { opacity: 1 !important; }';
+
 async function pixels(page: Page, peerless = true) {
-  return documentCanvas(page, peerless).screenshot({ animations: 'disabled' });
+  return documentCanvas(page, peerless).screenshot({ animations: 'disabled', style: steadyCaret });
 }
 
 test('d2d_pending_insert_click_arrow_backspace_order', async ({ page }) => {

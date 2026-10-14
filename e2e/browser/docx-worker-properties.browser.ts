@@ -57,6 +57,24 @@ test('worker page setup preserves admitted text and saves authored margins', asy
   expect(xml).toContain('w:left="2160"');
 });
 
+test('worker ruler tabs and paragraph indents save through their native commands', async ({ page }, info) => {
+  await open(page);
+  const ruler = page.locator('.docx-horizontal-ruler');
+  await expect(ruler.getByRole('slider', { name: 'Left indent', exact: true })).toBeVisible();
+  const box = (await ruler.boundingBox())!;
+  await page.mouse.dblclick(box.x + 192, box.y + 11);
+  const tab = ruler.getByTitle('left tab at 1.00"');
+  await expect(tab).toBeVisible();
+  const marker = (await ruler.getByRole('slider', { name: 'Left indent', exact: true }).boundingBox())!;
+  await page.mouse.move(marker.x + marker.width / 2, marker.y + marker.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 144, marker.y + marker.height / 2);
+  await page.mouse.up();
+  const xml = await savedXml(page, info);
+  expect(xml).toContain('w:pos="1440"');
+  expect(xml).toContain('w:left="720"');
+});
+
 test('worker watermark dialog saves automatic size without dropping body edits', async ({ page }, info) => {
   const input = await open(page);
   await input.pressSequentially('Watermark ');

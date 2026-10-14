@@ -5,25 +5,49 @@ import type { DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandStore } from '../../../commands/types';
 import { normalizeInputEvent } from './inputEvents';
 import { admitInputIntents } from './inputAdmission';
+import { WorkerObjectDialog } from './WorkerObjectDialog';
+import type { PeerlessPropertyIntent } from './inputEvents';
+import type { DocxCommandResult } from '../../../commands/types';
 
 export function useWorkerContextMenu(options: {
   binding(): PeerlessEditSessionBinding | null;
   environment(): DocxCommandEnvironment;
   commands: DocxCommandStore;
   clipboard(cut: boolean): Promise<void>;
+  submit?(intent: PeerlessPropertyIntent): Promise<DocxCommandResult>;
   onPaste?: () => void;
   onError?: (error: Error) => void;
 }) {
   const [menu, setMenu] = useState<{
     binding: PeerlessEditSessionBinding; snapshot: ReturnType<PeerlessEditSessionBinding['viewStore']['getSnapshot']>;
     position: { x: number; y: number };
+    object?: { kind: 'image' | 'cell'; handle: string; version: string; x: number; y: number; width: number; height: number };
   } | null>(null);
+  const [dialog, setDialog] = useState<{ menu: NonNullable<typeof menu>; action: 'resizeImage' | 'moveImage' | 'resizeColumn' } | null>(null);
   const close = useCallback(() => setMenu(null), []);
   const open = (event: MouseEvent) => {
     const binding = options.binding();
     if (!binding) return;
     event.preventDefault(); event.stopPropagation();
-    setMenu({ binding, snapshot: structuredClone(binding.viewStore.getSnapshot()), position: { x: event.clientX, y: event.clientY } });
+    const snapshot = structuredClone(binding.viewStore.getSnapshot());
+    const geometry = snapshot.geometry;
+    const objects = geometry?.objects;
+    const surface = event.target instanceof Element ? event.target.closest<HTMLElement>('.paged-editor__page') : null;
+    const page = geometry?.pages.find(page => page.page.pageIndex === Number(surface?.dataset.pageIndex));
+    const box = surface?.getBoundingClientRect();
+    let object: NonNullable<typeof menu>['object'];
+    if (objects && geometry && page && box?.width && box.height && objects.version === geometry.documentVersion &&
+      objects.frameEpoch === geometry.frameEpoch && objects.layoutRevision === geometry.layoutRevision) {
+      const x = (event.clientX - box.left) * page.bounds.width / box.width;
+      const y = (event.clientY - box.top) * page.bounds.height / box.height;
+      for (const kind of ['image', 'cell'] as const) {
+        const found = objects.objects.find(target => target.kind === kind && target.rects.some(rect => rect.pageIndex === page.page.pageIndex &&
+          x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height));
+        const rect = found?.rects.find(rect => rect.pageIndex === page.page.pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height);
+        if (found && rect) { object = { kind, handle: found.handle, version: objects.version, x: rect.x, y: rect.y, width: rect.width, height: rect.height }; break; }
+      }
+    }
+    setMenu({ binding, snapshot, object, position: { x: event.clientX, y: event.clientY } });
   };
   const selection = menu?.snapshot.workerSelection;
   const hasSelection = !!selection && (selection.anchor.story !== selection.focus.story ||
@@ -39,6 +63,10 @@ export function useWorkerContextMenu(options: {
     ],
     { action: 'selectAll', label: t('contextMenu.selectAll') },
   ];
+  if (menu?.object && !readOnly && options.submit) {
+    if (menu.object.kind === 'image') items.unshift({ action: 'resizeImage', label: 'Resize image' }, { action: 'moveImage', label: 'Move image', dividerAfter: true });
+    else items.unshift({ action: 'resizeColumn', label: 'Column width', dividerAfter: true });
+  }
   if (menu?.snapshot.editState?.tableContext && !readOnly) {
     for (const [action, key] of [['addRowAbove', 'insertRowAbove'], ['addRowBelow', 'insertRowBelow'], ['deleteRow', 'deleteRow'],
       ['addColumnLeft', 'insertColumnLeft'], ['addColumnRight', 'insertColumnRight'], ['deleteColumn', 'deleteColumn'],
@@ -48,6 +76,9 @@ export function useWorkerContextMenu(options: {
   }
   const action = async (action: TextContextAction) => {
     if (!menu) return;
+    if (action === 'resizeImage' || action === 'moveImage' || action === 'resizeColumn') {
+      setDialog({ menu, action }); close(); return;
+    }
     close();
     try {
       const current = options.binding();
@@ -80,6 +111,21 @@ export function useWorkerContextMenu(options: {
       } else await options.commands.execute('tableAction', action as never);
     } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); }
   };
-  return { open, element: menu && <TextContextMenu isOpen position={menu.position} hasSelection={hasSelection}
-    isEditable={!readOnly} items={items} onAction={(value) => { void action(value); }} onClose={close} /> };
+  const applyObject = async (intent: PeerlessPropertyIntent) => {
+    const origin = dialog?.menu;
+    if (!origin || !options.submit) return false;
+    try {
+      const current = options.binding();
+      const latest = current?.viewStore.getSnapshot();
+      if (current !== origin.binding || latest?.version !== origin.snapshot.version ||
+        JSON.stringify(latest.identity) !== JSON.stringify(origin.snapshot.identity)) throw new Error('Context menu target changed');
+      if (options.environment().readOnly || options.environment().mode !== 'editing') throw new Error('Document is not editable');
+      const result = await options.submit(intent);
+      if (!result.ok) throw new Error(result.failure.message);
+      return true;
+    } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); return false; }
+  };
+  return { open, element: <>{menu && <TextContextMenu isOpen position={menu.position} hasSelection={hasSelection}
+    isEditable={!readOnly} items={items} onAction={(value) => { void action(value); }} onClose={close} />}
+    {dialog?.menu.object && <WorkerObjectDialog action={dialog.action} target={dialog.menu.object} apply={applyObject} close={() => setDialog(null)} />}</> };
 }

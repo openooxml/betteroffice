@@ -1,5 +1,6 @@
+import { createFontProvider } from '@betteroffice/fonts';
 import { createRoot } from 'react-dom/client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   DocxEditor,
   defineDocxPlugin,
@@ -9,6 +10,7 @@ import {
   type DocxPluginSidebarItem,
 } from '@betteroffice/docx-react';
 import documentUrl from '../../../apps/demo/public/betteroffice-demo.docx?url';
+import { repeatedHeaderDocx } from '../../../packages/docx-react/src/plugins/__fixtures__/storyAnchorsDocx';
 import '../../../packages/docx-react/src/styles/editor.css';
 
 interface ProbeState {
@@ -25,6 +27,9 @@ interface ProbeWindow {
   marks: number;
   reload(): Promise<void>;
 }
+
+const fonts = createFontProvider();
+const repeatedHeader = new URLSearchParams(location.search).get('doc') === 'repeated-header';
 
 const probe: ProbeWindow = {
   editor: null,
@@ -68,6 +73,21 @@ function ProbePanel({ context }: { context: ProbeContext }) {
       </button>
       <button
         type="button"
+        data-testid="probe-navigate-focus"
+        disabled={!last}
+        onClick={() =>
+          void context.run(async (action) => {
+            probe.navigation = await action.navigation.scrollToParagraph(
+              { story: 'body', paraId: last!.paraId },
+              { expectVersion: action.snapshot.version, focus: true }
+            );
+          })
+        }
+      >
+        Edit the last paragraph
+      </button>
+      <button
+        type="button"
         data-testid="probe-append"
         onClick={() =>
           void context.run(async (action) => {
@@ -92,6 +112,32 @@ function ProbePanel({ context }: { context: ProbeContext }) {
       </button>
       <input data-testid="probe-input" aria-label="Probe note" />
     </div>
+  );
+}
+
+/** Rects of `{{header}}` in the repeated header, one element per rect. */
+function HeaderProbe({ geometry }: { geometry: DocxPluginGeometry }) {
+  const result = geometry.getAnchorGeometry({
+    kind: 'range',
+    version: geometry.layout.version,
+    range: {
+      story: 'hf:rIdH',
+      start: { paraId: '10000001', offset: 9 },
+      end: { paraId: '10000001', offset: 19 },
+      view: 'accepted',
+    },
+  });
+  if (!result.ok) return <div data-probe-header-failure={result.failure.code} hidden />;
+  return (
+    <>
+      {result.rects.map((rect, index) => (
+        <div
+          key={index}
+          data-probe-header-rect={rect.pageIndex}
+          style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, outline: '1px solid blue' }}
+        />
+      ))}
+    </>
   );
 }
 
@@ -144,7 +190,8 @@ const alignment = defineDocxPlugin<ProbeState>({
   overlay: ({ geometry }) => (
     <>
       <GeometryProbe geometry={geometry} />
-      {Array.from({ length: Math.min(geometry.layout.pageCount, 2) }, (_, index) => {
+      {repeatedHeader && <HeaderProbe geometry={geometry} />}
+      {Array.from({ length: geometry.layout.pageCount }, (_, index) => {
         const bounds = geometry.dom.getPageBounds(index);
         const box = bounds && geometry.toOverlayRect(bounds);
         if (!box) return null;
@@ -209,18 +256,17 @@ const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true } } a
 function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
   const editor = useRef<DocxEditorRef>(null);
+  const setEditor = useCallback((value: DocxEditorRef | null) => { editor.current = value; probe.editor = value; }, []);
   useEffect(() => {
-    void fetch(documentUrl)
-      .then((response) => response.arrayBuffer())
-      .then(setBuffer);
+    void (repeatedHeader
+      ? repeatedHeaderDocx().then((bytes) => new Uint8Array(bytes).buffer)
+      : fetch(documentUrl).then((response) => response.arrayBuffer())
+    ).then(setBuffer);
   }, []);
-  useEffect(() => {
-    probe.editor = editor.current;
-  });
   if (!buffer) return null;
   return (
     <div style={{ height: '100%' }}>
-      <DocxEditor ref={editor} documentBuffer={buffer} plugins={PLUGINS} pluginGrants={GRANTS} />
+      <DocxEditor ref={setEditor} documentBuffer={buffer} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} experimentalPeerless={new URLSearchParams(location.search).get('peerless') === '1'} />
     </div>
   );
 }

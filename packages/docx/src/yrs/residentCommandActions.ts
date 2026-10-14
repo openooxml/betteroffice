@@ -750,7 +750,9 @@ export function applyDocxCommand(
     if (applied.status === 'refused') return { ...result('noop'), ...applied };
     repairCommandSelection(engine, state);
     state.storedMarks = null;
-    return result(applied.status);
+    const projected = result(applied.status);
+    if (applied.comment) projected.editState!.comment = { seq: command.seq, ...applied.comment };
+    return projected;
   }
   if (command.kind === 'setReadOnly') {
     state.readOnly = command.payload.readOnly;

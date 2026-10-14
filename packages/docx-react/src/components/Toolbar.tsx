@@ -27,8 +27,9 @@ function DefaultToolbarItems() {
   const chrome = useEditorChrome();
   const table = useDocxCommandState('tableAction');
   const image = useDocxCommandState('imageWrap');
+  const imageProperties = useDocxCommandState('imageProperties');
   const inTable = table.value != null;
-  const imageSelected = image.value != null;
+  const imageSelected = image.value != null || imageProperties.enabled;
   return (
     <>
       <ToolbarGroup label={t('formattingBar.groups.history')}>

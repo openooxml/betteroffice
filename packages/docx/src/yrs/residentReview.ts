@@ -6,6 +6,7 @@ import { DisplayPositionIndex } from './displayPositionIndex';
 import { createDisplayListQueries, type DisplayListQueries, type DisplayListRect } from '../layout/render/displayListQueries';
 import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { RetainedFrame } from '../layout/render/frameDelta';
+import type { Comment } from '../types/content';
 
 export interface DocxCommentPatch {
   body?: unknown;
@@ -21,6 +22,8 @@ export interface ResidentReviewSnapshot {
   layoutRevision: number;
   frameEpoch: number;
   comments: YrsCommentInfo[];
+  uiComments?: Comment[];
+  commentIds?: Record<string, number>;
   revisions: YrsRevisionInfo[];
   proposals: DocxProposalSnapshot;
   proposalGeometry: ProposalGeometryMirror;
@@ -63,6 +66,7 @@ export async function readResidentReviewSnapshot(
   try {
     const proposals = registry.snapshot();
     const comments = engine.listComments();
+    const projection = engine.commentProjection();
     const revisions = engine.geometryReader.listRevisions();
     const commentGeometry = Object.fromEntries(comments.map(({ id }) => {
       let anchors: ReturnType<ResidentEngineSession['resolveComment']>;
@@ -87,7 +91,8 @@ export async function readResidentReviewSnapshot(
     if (state.status === 'error') throw new Error(`Review highlight layout is unavailable: ${String(state.error)}`);
     return {
       version: proposals.version, previewVersion: proposals.previewVersion, layoutRevision,
-      frameEpoch: frame.frameEpoch, comments, revisions, proposals, proposalGeometry,
+      frameEpoch: frame.frameEpoch, comments, ...(projection ? { uiComments: projection.comments, commentIds: projection.ids } : {}),
+      revisions, proposals, proposalGeometry,
       commentGeometry, revisionGeometry, proposalHighlights,
     };
   } finally { queries.dispose(); }

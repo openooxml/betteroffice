@@ -1,15 +1,19 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ResidentDocumentRead } from '@betteroffice/docx/yrs';
 import type { createPeerlessShellController, PeerlessWorkerQuery } from './shellController';
 
 export function useWorkerQuery<K extends ResidentDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>, request: (ResidentDocumentRead & { kind: K }) | null) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const [result, setResult] = useState<{ view: typeof state.view; query: PeerlessWorkerQuery<K> } | null>(null);
-  const key = JSON.stringify(request);
+  const latestRequest = useRef(request);
+  latestRequest.current = request;
+  const key = JSON.stringify(request, (_key, value) => ArrayBuffer.isView(value)
+    ? { $type: value.constructor.name, $bytes: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) } : value);
   useEffect(() => {
     let current = true;
-    if (state.status !== 'ready' || key === 'null') return;
-    void controller.query<K>(JSON.parse(key)).then(query => {
+    const currentRequest = latestRequest.current;
+    if (state.status !== 'ready' || !currentRequest) return;
+    void controller.query<K>(currentRequest).then(query => {
       if (current) setResult({ view: state.view, query });
     }, () => { if (current) setResult(null); });
     return () => { current = false; };

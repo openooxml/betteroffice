@@ -10,6 +10,8 @@ const autoprefixer = fromReact('autoprefixer');
 /** Serves the plugin-host harnesses against the package sources. */
 export default defineConfig({
   root: import.meta.dirname,
+  optimizeDeps: { entries: ['*.html'] },
+  define: { 'globalThis.__DOCX_PEERLESS_HARNESS__': JSON.stringify(process.env.DOCX_PEERLESS_HARNESS === '1') },
   plugins: [
     {
       name: 'main-document-load-probe',

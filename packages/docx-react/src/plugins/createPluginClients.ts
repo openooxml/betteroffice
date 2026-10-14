@@ -51,7 +51,9 @@ export interface DocxPluginEditorAccess {
   /** Whether the document is open for viewing only, with no copy on this thread. */
   viewer?(): boolean;
   workerOpen?(): boolean;
-  workerRead?: Pick<DocxPluginReadClient, 'version' | 'readParagraphs' | 'listStories' | 'readStories' | 'findText'>;
+  workerRead?: Pick<DocxPluginReadClient, 'version' | 'readParagraphs' | 'listStories' | 'readStories' | 'findText'> & Partial<Pick<DocxPluginReadClient, 'validateEdits'>>;
+  workerEdits?: { applyEdits(request: Parameters<DocxPluginEditClient['applyEdits']>[0], authorize: () => DocxPluginRefusal | null): ReturnType<DocxPluginEditClient['applyEdits']> };
+  workerNavigation?: DocxPluginNavigation;
 }
 
 const LAYOUT_WAIT_MS = 30_000;
@@ -152,7 +154,7 @@ export function createPluginClients(
         listStories: () => guarded(() => read.listStories()),
         readStories: (request) => guarded(() => read.readStories(request)),
         findText: (request) => guarded(() => read.findText(request)),
-        validateEdits: async () => refusalOf(invocation) ?? pluginRefusal('unsupported-policy'),
+        validateEdits: (request) => guarded(() => read.validateEdits?.(request) ?? Promise.resolve(pluginRefusal('unsupported-policy'))),
       },
       commands: {
         getDescriptor: (id: never) => store.getDescriptor(id),
@@ -161,10 +163,20 @@ export function createPluginClients(
         execute: async (id: never, args: never) => refusalOf(invocation) ?? store.execute(id, args),
       } as unknown as DocxPluginCommandClient,
       edits: grantsEditBatch(grant(), 'separate') ? {
-        applyEdits: async () => refusalOf(invocation) ?? pluginRefusal('unsupported-policy'),
+        applyEdits: async (request) => {
+          const authorize = () => refusalOf(invocation) ?? (grantsEditBatch(grant(), request.history) ? null : pluginRefusal('permission-denied'));
+          const denied = authorize();
+          if (denied) return denied;
+          try {
+            const result = await (access.workerEdits?.applyEdits(request, authorize) ?? Promise.resolve(pluginRefusal('unsupported-policy')));
+            return authorize() ?? result;
+          } catch (error) {
+            return refusalOf(invocation) ?? pluginRefusal('input-failed', error instanceof Error ? error.message : String(error));
+          }
+        },
       } : null,
       navigation: {
-        scrollToParagraph: async () => refusalOf(invocation) ?? pluginRefusal('unsupported-policy'),
+        scrollToParagraph: (target, options) => guarded(() => access.workerNavigation?.scrollToParagraph(target, options) ?? Promise.resolve(pluginRefusal('unsupported-policy'))),
       },
     };
   }
