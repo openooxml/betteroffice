@@ -69,7 +69,12 @@ export function setupStructuralSaves() {
       const { hostJson } = await client.open(source);
       const host = decodeDocxHostJson(hostJson, source).document;
       const resident = worker.sessions[0]!;
-      apply({ ...resident.proposalEngine, deleteRow: resident.deleteRow, insertColumn: resident.insertColumn });
+      const peer = await createYrsSession();
+      owned.push(peer);
+      peer.openDocx(source.slice(), false);
+      peer.loadState(resident.encodeStateAsUpdate());
+      apply(peer);
+      resident.applyUpdate(peer.encodeStateAsUpdate());
       const saved = await client.save({ comments: [], host: hostSaveMetadata(host) });
       return documentXml(new Uint8Array(saved.bytes));
     }
