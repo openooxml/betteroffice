@@ -82,8 +82,8 @@ use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
     PlotDataLabels, PlotGroup, PlotLegend, PlotLine, PlotMarker, PlotMarkerSymbol, PlotOp,
-    PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label,
-    fallback_label_width, plot_chart_into,
+    PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, blank_numbers,
+    chart_aria_label, fallback_label_width, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1191,6 +1191,50 @@ pub struct BuildInput {
     resolved_comment_ids: Vec<i64>,
     comment_authors: Vec<CommentAuthorIn>,
     comment_threads: Vec<CommentThreadIn>,
+    unreadable: Vec<UnreadableDisplayInput>,
+}
+
+/// Display input the compiler could not read and left unpainted instead of
+/// failing the document: a measured block, whose fragments then paint
+/// nothing, or one fragment of a layout page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableDisplayInput {
+    /// Canonical key of the block.
+    pub block: String,
+    /// Layout page of an unreadable fragment; `None` for a measured block.
+    pub page: Option<usize>,
+    pub reason: String,
+}
+
+/// Records `entry` and reports it once per thread, so a block that stays
+/// unreadable across rebuilds warns once; the set restarts when it fills.
+fn record_unreadable(unreadable: &mut Vec<UnreadableDisplayInput>, entry: UnreadableDisplayInput) {
+    std::thread_local! {
+        static REPORTED: std::cell::RefCell<HashSet<u64>> = std::cell::RefCell::new(HashSet::new());
+    }
+    let fingerprint = {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&(&entry.block, entry.page, &entry.reason), &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
+    if REPORTED.with(|reported| {
+        let mut reported = reported.borrow_mut();
+        if reported.len() >= 1024 {
+            reported.clear();
+        }
+        reported.insert(fingerprint)
+    }) {
+        let place = entry.page.map_or_else(
+            || "measured block".to_owned(),
+            |page| format!("page {page} fragment of block"),
+        );
+        crate::warn_degraded(&format!(
+            "display list left {place} {:?} unpainted: {}",
+            entry.block, entry.reason
+        ));
+    }
+    unreadable.retain(|known| known.block != entry.block || known.page != entry.page);
+    unreadable.push(entry);
 }
 
 /// Parsed display input retained by the editing engine across edits. Its fields
@@ -1209,6 +1253,11 @@ impl ResidentDisplayInput {
     pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
         &self.input.font_chains
     }
+
+    /// What the retained input left unpainted because it could not be read.
+    pub fn unreadable(&self) -> &[UnreadableDisplayInput] {
+        &self.input.unreadable
+    }
 }
 
 impl std::fmt::Debug for ResidentDisplayInput {
@@ -1216,7 +1265,8 @@ impl std::fmt::Debug for ResidentDisplayInput {
         let mut debug = formatter.debug_struct("ResidentDisplayInput");
         debug
             .field("measured_blocks", &self.input.measured.len())
-            .field("pages", &self.input.layout.pages.len());
+            .field("pages", &self.input.layout.pages.len())
+            .field("unreadable", &self.input.unreadable);
         #[cfg(any(test, feature = "test-support"))]
         debug.field(
             "stale_block_pruning_passes",
@@ -1298,6 +1348,7 @@ impl<'de> Deserialize<'de> for BuildInput {
             resolved_comment_ids: wire.resolved_comment_ids,
             comment_authors: wire.comment_authors,
             comment_threads: wire.comment_threads,
+            unreadable: Vec::new(),
         })
     }
 }
@@ -2363,7 +2414,7 @@ struct ChartSeriesIn {
     name: Option<String>,
     #[serde(default)]
     categories: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "blank_numbers::deserialize")]
     values: Vec<f64>,
     #[serde(default)]
     color: Option<String>,
@@ -2373,9 +2424,9 @@ struct ChartSeriesIn {
     grouping: Option<String>,
     #[serde(default)]
     marker: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "blank_numbers::deserialize")]
     x_values: Vec<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "blank_numbers::deserialize")]
     bubble_sizes: Vec<f64>,
     #[serde(default)]
     smooth: bool,
@@ -11070,8 +11121,14 @@ pub fn release_resident_display_pages(
     let replacements = wanted
         .iter()
         .map(|&index| {
-            let page = convert_resident_page(&mut transcoder, &layout.pages[index], false)
-                .map_err(|error| format!("parse resident display layout page: {error}"))?;
+            let page = convert_resident_page(
+                &mut transcoder,
+                &layout.pages[index],
+                index,
+                false,
+                &mut Vec::new(),
+            )
+            .map_err(|error| format!("parse resident display layout page: {error}"))?;
             let placeholder = unbuilt_page_with_span(
                 &page,
                 index,
@@ -11085,6 +11142,10 @@ pub fn release_resident_display_pages(
         resident.input.layout.pages[index] = page;
         list.pages[index] = placeholder;
     }
+    resident
+        .input
+        .unreadable
+        .retain(|known| known.page.is_none_or(|page| !wanted.contains(&page)));
     prune_resident_display_measured(resident, list);
     Ok(wanted)
 }
@@ -11100,6 +11161,7 @@ fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &D
     resident.input.measured.retain(|measured| {
         measured_block_key(measured).is_some_and(|key| keys.contains(key.as_ref()))
     });
+    prune_unreadable_blocks(&mut resident.input);
 }
 
 /// The affected pages' source blocks by canonical key, first occurrence winning.
@@ -11253,7 +11315,8 @@ fn resident_build_input_for(
         .and_then(|s| serde_json::from_str(&s))
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let mut transcoder = crate::transcode::Transcoder::default();
-    let layout = convert_resident_layout(&mut transcoder, layout, pages)
+    let mut unreadable = Vec::new();
+    let layout = convert_resident_layout(&mut transcoder, layout, pages, &mut unreadable)
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let placed: Option<HashSet<Cow<'_, str>>> = pages.map(|pages| {
         pages
@@ -11270,9 +11333,8 @@ fn resident_build_input_for(
                 resident_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref()))
             })
         })
-        .map(|measured| transcoder.convert(measured))
-        .collect::<Result<Vec<MeasuredBlockIn>, _>>()
-        .map_err(|e| format!("parse resident display input: {e}"))?;
+        .filter_map(|measured| convert_measured_block(&mut transcoder, measured, &mut unreadable))
+        .collect();
     drop(placed);
     let options = transcoder
         .convert(&pagination.options)
@@ -11302,7 +11364,50 @@ fn resident_build_input_for(
         resolved_comment_ids: extras.resolved_comment_ids,
         comment_authors: extras.comment_authors,
         comment_threads: extras.comment_threads,
+        unreadable,
     })
+}
+
+/// Drops the measured-block entries of blocks no retained page places.
+fn prune_unreadable_blocks(input: &mut BuildInput) {
+    let placed: HashSet<Cow<'_, str>> = input
+        .layout
+        .pages
+        .iter()
+        .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key_ref))
+        .collect();
+    input
+        .unreadable
+        .retain(|known| known.page.is_some() || placed.contains(known.block.as_str()));
+}
+
+/// Converts one measured block, or records it as unreadable and leaves it out
+/// so that only its own fragments go unpainted.
+fn convert_measured_block(
+    transcoder: &mut crate::transcode::Transcoder,
+    measured: &crate::types::MeasuredBlock,
+    unreadable: &mut Vec<UnreadableDisplayInput>,
+) -> Option<MeasuredBlockIn> {
+    let key = resident_block_key(&measured.block).map(Cow::into_owned);
+    match transcoder.convert(measured) {
+        Ok(block) => {
+            if let Some(key) = key {
+                unreadable.retain(|known| known.page.is_some() || known.block != key);
+            }
+            Some(block)
+        }
+        Err(reason) => {
+            record_unreadable(
+                unreadable,
+                UnreadableDisplayInput {
+                    block: key.unwrap_or_default(),
+                    page: None,
+                    reason,
+                },
+            );
+            None
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -11329,14 +11434,36 @@ struct ResidentPageMetadata<'a> {
 fn convert_resident_page(
     transcoder: &mut crate::transcode::Transcoder,
     page: &crate::types::Page,
+    index: usize,
     build: bool,
+    unreadable: &mut Vec<UnreadableDisplayInput>,
 ) -> Result<PageIn, String> {
     #[cfg(any(test, feature = "test-support"))]
     let build = build || resident_conversion_test_support::force_full();
     if build {
         #[cfg(any(test, feature = "test-support"))]
         resident_conversion_test_support::count_pages(1);
-        return transcoder.convert(page);
+        return transcoder.convert(page).or_else(|error| {
+            let mut readable = page.clone();
+            readable.fragments.retain(|fragment| {
+                let Err(reason) = transcoder.convert::<_, FragmentIn>(fragment) else {
+                    return true;
+                };
+                record_unreadable(
+                    unreadable,
+                    UnreadableDisplayInput {
+                        block: resident_fragment_block_key(fragment).into_owned(),
+                        page: Some(index),
+                        reason,
+                    },
+                );
+                false
+            });
+            if readable.fragments.len() == page.fragments.len() {
+                return Err(error);
+            }
+            transcoder.convert(&readable)
+        });
     }
     transcoder.convert(&ResidentPageMetadata {
         size: &page.size,
@@ -11358,23 +11485,17 @@ fn convert_resident_layout(
     transcoder: &mut crate::transcode::Transcoder,
     layout: &crate::types::Layout,
     pages: Option<&HashSet<usize>>,
+    unreadable: &mut Vec<UnreadableDisplayInput>,
 ) -> Result<LayoutIn, String> {
-    #[cfg(any(test, feature = "test-support"))]
-    let force_full = resident_conversion_test_support::force_full();
-    #[cfg(not(any(test, feature = "test-support")))]
-    let force_full = false;
-    if pages.is_none() || force_full {
-        #[cfg(any(test, feature = "test-support"))]
-        resident_conversion_test_support::count_pages(layout.pages.len());
-        return transcoder.convert(layout);
-    }
-    let pages = pages.unwrap();
     Ok(LayoutIn {
         pages: layout
             .pages
             .iter()
             .enumerate()
-            .map(|(index, page)| convert_resident_page(transcoder, page, pages.contains(&index)))
+            .map(|(index, page)| {
+                let build = pages.is_none_or(|pages| pages.contains(&index));
+                convert_resident_page(transcoder, page, index, build, unreadable)
+            })
             .collect::<Result<_, _>>()?,
         partial: layout.partial,
         cached_page_totals: layout.cached_page_totals,
@@ -11749,12 +11870,19 @@ fn refresh_resident_display_pages_reading(
     let mut selected_blocks = HashSet::new();
     let mut transcoder = crate::transcode::Transcoder::default();
     for page_index in rebuilt_pages {
+        let mut recorded = Vec::new();
         let page = convert_resident_page(
             &mut transcoder,
             &layout.pages[page_index],
+            page_index,
             reading.contains(&page_index),
+            &mut recorded,
         )
         .map_err(|error| format!("parse resident display layout page: {error}"))?;
+        input
+            .unreadable
+            .retain(|known| known.page != Some(page_index));
+        input.unreadable.extend(recorded);
         if reading.contains(&page_index) {
             for fragment in &layout.pages[page_index].fragments {
                 selected_blocks.insert(resident_fragment_block_key(fragment));
@@ -11764,6 +11892,7 @@ fn refresh_resident_display_pages_reading(
     }
 
     if selected_blocks.is_empty() {
+        prune_unreadable_blocks(input);
         return Ok(());
     }
     let mut current_indices = HashMap::new();
@@ -11774,6 +11903,7 @@ fn refresh_resident_display_pages_reading(
     }
     let mut pending_blocks = selected_blocks;
     let mut added_blocks = false;
+    let mut unreadable_indices = Vec::new();
     for measured in &pagination.measured {
         if pending_blocks.is_empty() {
             break;
@@ -11784,7 +11914,11 @@ fn refresh_resident_display_pages_reading(
         if !pending_blocks.remove(key.as_ref()) {
             continue;
         }
-        let block = convert_resident_value(measured, "resident display measured block")?;
+        let Some(block) = convert_measured_block(&mut transcoder, measured, &mut input.unreadable)
+        else {
+            unreadable_indices.extend(current_indices.get(key.as_ref()).copied());
+            continue;
+        };
         match current_indices.get(key.as_ref()) {
             Some(&index) => input.measured[index] = block,
             None => {
@@ -11797,6 +11931,10 @@ fn refresh_resident_display_pages_reading(
         return Err(format!(
             "resident pagination measured block {key:?} is missing"
         ));
+    }
+    unreadable_indices.sort_unstable();
+    for index in unreadable_indices.into_iter().rev() {
+        input.measured.remove(index);
     }
     if added_blocks && !input.defer_stale_block_pruning {
         #[cfg(any(test, feature = "test-support"))]
@@ -11812,9 +11950,11 @@ fn refresh_resident_display_pages_reading(
             measured_block_key(measured).is_none_or(|key| keys.contains(key.as_ref()))
         });
     }
+    prune_unreadable_blocks(input);
     Ok(())
 }
 
+#[cfg(test)]
 fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
     input: &T,
     label: &str,
@@ -12767,7 +12907,9 @@ mod tests {
             let metadata = convert_resident_page(
                 &mut crate::transcode::Transcoder::default(),
                 &layout.pages[0],
+                0,
                 false,
+                &mut Vec::new(),
             )
             .unwrap();
             assert!(metadata.fragments.is_empty());
@@ -14851,7 +14993,7 @@ mod tests {
         assert!(rects >= 3);
 
         let (pagination, layout) = charted_page(serde_json::json!([2, null, 3]));
-        let (_, resident) = build_resident_display_list_with_fonts_observed(
+        let (resident, list) = build_resident_display_list_with_fonts_observed(
             &pagination,
             &layout,
             "{}",
@@ -14859,13 +15001,14 @@ mod tests {
             &mut || {},
         )
         .expect("a blank chart point must not fail the document");
-        assert_eq!(series_rects(&resident.pages[0]), rects - 1);
-        assert!(paints_block(&resident.pages[0], "intro"));
+        assert!(resident.unreadable().is_empty());
+        assert_eq!(series_rects(&list.pages[0]), rects - 1);
+        assert!(paints_block(&list.pages[0], "intro"));
         let json = build_display_list(
             &resident_build_input_via_json(&pagination, &layout, "{}"),
             &fonts,
         );
-        assert_eq!(json, resident);
+        assert_eq!(json, list);
     }
 
     #[test]
@@ -14882,7 +15025,14 @@ mod tests {
             unreachable!()
         };
         extent.lines[0].width = f64::NAN;
-        let (_, list) = build_resident_display_list_with_fonts_observed(
+        let unreadable = |resident: &ResidentDisplayInput| {
+            resident
+                .unreadable()
+                .iter()
+                .map(|entry| (entry.block.clone(), entry.page))
+                .collect::<Vec<_>>()
+        };
+        let (resident, list) = build_resident_display_list_with_fonts_observed(
             &pagination,
             &layout,
             "{}",
@@ -14892,6 +15042,7 @@ mod tests {
         .expect("one unreadable block must not fail the document");
         assert!(!paints_block(&list.pages[0], "intro"));
         assert_eq!(series_rects(&list.pages[0]), rects);
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
 
         let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
             &pagination,
@@ -14913,6 +15064,53 @@ mod tests {
         .expect("one unreadable block must not fail the page");
         assert!(!paints_block(&list.pages[0], "intro"));
         assert_eq!(series_rects(&list.pages[0]), rects);
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
+    }
+
+    #[test]
+    fn a_refresh_tracks_a_block_turning_unreadable_and_readable_again() {
+        let fonts = ooxml_text::FontStore::default();
+        let (clean, layout) = charted_page(serde_json::json!([2, 1, 3]));
+        let (mut resident, mut list) = build_resident_display_list_with_fonts_observed(
+            &clean,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        let mut broken = clean.clone();
+        let crate::types::BlockExtent::Paragraph(extent) = &mut broken.measured[0].measure else {
+            unreachable!()
+        };
+        extent.lines[0].width = f64::NAN;
+        let mut refresh = |pagination: &crate::types::Input| {
+            assert!(
+                update_resident_display_list_incremental_with_fonts_observed(
+                    pagination,
+                    &layout,
+                    &fonts,
+                    &mut resident,
+                    &mut list,
+                    0,
+                    1,
+                    &[],
+                    &HashMap::new(),
+                    &mut || {},
+                )
+                .unwrap()
+            );
+            (
+                paints_block(&list.pages[0], "intro"),
+                resident
+                    .unreadable()
+                    .iter()
+                    .map(|entry| entry.block.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(refresh(&broken), (false, vec!["intro".to_owned()]));
+        assert_eq!(refresh(&clean), (true, Vec::new()));
     }
 
     #[test]
@@ -14932,7 +15130,7 @@ mod tests {
             unreachable!()
         };
         fragment.x = f64::INFINITY;
-        let (_, list) = build_resident_display_list_with_fonts_observed(
+        let (resident, list) = build_resident_display_list_with_fonts_observed(
             &pagination,
             &layout,
             "{}",
@@ -14942,5 +15140,13 @@ mod tests {
         .expect("one unreadable fragment must not fail the document");
         assert!(!paints_block(&list.pages[0], "intro"));
         assert_eq!(series_rects(&list.pages[0]), rects);
+        assert_eq!(
+            resident
+                .unreadable()
+                .iter()
+                .map(|entry| (entry.block.as_str(), entry.page))
+                .collect::<Vec<_>>(),
+            [("intro", Some(0))]
+        );
     }
 }
