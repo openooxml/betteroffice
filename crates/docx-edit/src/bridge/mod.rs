@@ -2357,7 +2357,12 @@ fn lower_shape_block<T: ReadTxn>(
     env: &RenderEnv,
 ) -> Option<ShapeBlock> {
     let values = shared_values(shape, txn);
-    if let Some(block) = map_string(&values, "shapeJson")
+    if let Some(block) = values
+        .get("shapeJson")
+        .and_then(|value| match value {
+            Any::String(source) => Some(env.media.tokenized_json(source)),
+            _ => None,
+        })
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
         .and_then(|value| shapes::lower_shape_json(&value, pm_start, env))
     {
