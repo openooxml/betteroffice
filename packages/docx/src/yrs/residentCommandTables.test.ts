@@ -235,6 +235,23 @@ test('merge_table_cells_merges_split_restores_and_round_trips', async () => {
   expect(JSON.stringify(payload(arm))).toBe(before);
 }, TIMEOUT);
 
+test('merge_table_cells_refuses_a_range_covering_only_one_merged_cell', async () => {
+  const arm = await inCell();
+  selectCells(arm, [0, 0], [0, 1]);
+  expect(execute(arm, tableCommand(arm, 'mergeTableCells', {})).status).toBe('applied');
+  expect(anchors(arm)[0]).toMatchObject({ column: 0, colspan: 2 });
+  await inCellOn(arm, 'A');
+  selectCells(arm, [0, 0], [0, 1]);
+  const before = JSON.stringify(payload(arm));
+  const version = arm.engine.proposalEngine.version();
+  const canUndo = arm.engine.canUndo();
+  expect(execute(arm, tableCommand(arm, 'mergeTableCells', {})))
+    .toMatchObject({ status: 'refused', reason: 'invalid-selection' });
+  expect(arm.engine.proposalEngine.version()).toBe(version);
+  expect(JSON.stringify(payload(arm))).toBe(before);
+  expect(arm.engine.canUndo()).toBe(canUndo);
+}, TIMEOUT);
+
 test('split_table_cell_subdivides_and_reports_size_refusals', async () => {
   const arm = await inCell();
   const storyA = cellStory(arm, 'A');
