@@ -24,6 +24,8 @@ use crate::{
 
 /// excel's row-height ceiling in points.
 const MAX_ROW_HEIGHT_PT: f64 = 409.5;
+/// excel's column-width ceiling in characters.
+const MAX_COL_WIDTH_CHARS: f64 = 255.0;
 
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
@@ -219,12 +221,15 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
     let mut active_sheet = None;
+    let mut sheets_depth = None;
     let mut sheets = Vec::new();
     let mut defined_names = Vec::new();
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) => match local_name(&e).as_slice() {
+                // the save rewrites the root's `sheets` child, so only it lists sheets
+                b"sheets" if depth == 2 => sheets_depth = Some(depth),
                 b"workbookPr" => {
                     if let Some(v) = attr(&e, b"date1904")?
                         && is_truthy(&v)
@@ -240,7 +245,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                             .unwrap_or(SheetId(0)),
                     );
                 }
-                b"sheet" => {
+                b"sheet" if sheets_depth.is_some_and(|sheets| depth == sheets + 1) => {
                     let name = attr(&e, b"name")?.unwrap_or_default();
                     let rid = attr(&e, b"id")?;
                     sheets.push(SheetEntry { name, rid });
@@ -264,6 +269,12 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                 }
                 _ => {}
             },
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"sheets"
+                    && sheets_depth.is_some_and(|sheets| depth < sheets) =>
+            {
+                sheets_depth = None;
+            }
             Event::Eof => break,
             _ => {}
         }
@@ -815,8 +826,9 @@ fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
 /// sheet bounds). widths are stored per-column since the model has no
 /// column-range concept; the style keeps its run, which a whole-sheet `<col>`
 /// spans 16,384 columns wide. a negative authored width has no extent to
-/// render, so it narrows to zero the way a hidden column does; the authored
-/// value stays in `legacy` and the source span is reused verbatim on save.
+/// render, so it narrows to zero the way a hidden column does, and one past
+/// excel's ceiling opens at the ceiling; the authored value stays in `legacy`
+/// and the source span is reused verbatim on save.
 fn parse_col(
     e: &quick_xml::events::BytesStart,
     sheet: &mut Sheet,
@@ -851,7 +863,7 @@ fn parse_col(
     }
     let width = match authored {
         _ if hidden => 0.0,
-        Some(w) => w.max(0.0),
+        Some(w) => w.clamp(0.0, MAX_COL_WIDTH_CHARS),
         None => return Ok(()),
     };
     for col in min..=max {

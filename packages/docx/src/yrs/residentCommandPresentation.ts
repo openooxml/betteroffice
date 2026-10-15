@@ -6,6 +6,9 @@ import type {
   DocxCommandStagedPresentation,
 } from './residentCommandProtocol';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
+import type { DisplayPage, DisplayPrimitive } from '../layout/render/displayList';
+import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
+import type { RetainedFrame } from '../layout/render/frameDelta';
 
 const discardedBitmaps = new WeakSet<ImageBitmap>();
 
@@ -21,6 +24,40 @@ export function discardCommandPresentation(frame: DocxCommandFrame | undefined):
       closeCommandBitmap(bitmap);
     }
   }
+}
+
+/**
+ * @internal The page an echo background rasters: everything but the echoed line, reduced to what can
+ * paint into the damage rect, so the background costs the rect rather than the page.
+ */
+export function echoBackgroundPage(
+  retained: RetainedFrame['pages'][number],
+  dependency: DocxCommandEchoContext['damage'][number]
+): DisplayPage {
+  const omitted = new Set(dependency.omittedPrimitiveIds.map(BigInt));
+  const { rect } = dependency;
+  const reaches = (primitive: DisplayPrimitive) => {
+    if (primitive.kind === 'image' || primitive.kind === 'shape' || primitive.clipGroup ||
+      (primitive.kind === 'glyphRun' || primitive.kind === 'text') && (primitive.rotationDeg || primitive.modernEffects ||
+        primitive.textShadow)) return true;
+    const box = displayPrimitiveRect(primitive);
+    const margin = primitive.kind === 'glyphRun' ? primitive.size : primitive.kind === 'text' ? box.h : 1;
+    return box.x - margin < rect.x + rect.width && box.x + box.w + margin > rect.x &&
+      box.y - margin < rect.y + rect.height && box.y + box.h + margin > rect.y;
+  };
+  const page = retained.page;
+  const kept = (primitive: DisplayPrimitive, index: number) =>
+    !omitted.has(retained.primitiveIds[index]!) && reaches(primitive);
+  const region = <T extends { primitives: DisplayPrimitive[] }>(value: T | undefined) =>
+    value && { ...value, primitives: value.primitives.filter(reaches) };
+  return { ...page,
+    watermarkPrimitiveCount: page.primitives.slice(0, page.watermarkPrimitiveCount ?? 0).filter(kept).length,
+    primitives: page.primitives.filter(kept),
+    header: region(page.header), footer: region(page.footer),
+    ...(page.noteAreas ? { noteAreas: page.noteAreas.map((area) => ({ ...area,
+      ...(area.separatorPrimitives ? { separatorPrimitives: area.separatorPrimitives.filter(reaches) } : {}),
+      ...(area.primitives ? { primitives: area.primitives.filter(reaches) } : {}) })) } : {}),
+  };
 }
 
 /** @internal Worker-owned raster inputs; output bitmaps transfer to main. */

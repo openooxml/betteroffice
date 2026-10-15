@@ -183,6 +183,8 @@ export type ResidentEngineSession = Pick<
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(): ResidentCommentProjection | null;
   mediaDataUrl(token: string): string | null;
+  /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
+  echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
   /** @internal */
   proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
   /** @internal */
@@ -223,6 +225,8 @@ export type ResidentEngineSession = Pick<
   revisionCount(excluding?: ReadonlySet<string>): number;
   /** The retained region layout pass without serializing its reply. */
   layoutDocumentWithRegionsRetained(input: string): void;
+  /** The region pass after one edit, resident when that edit was a plain text edit. */
+  layoutDocumentWithRegionsAfterEdit(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
   retainedHeadersFootersJson(): string | undefined;
   /** @internal */
@@ -683,12 +687,14 @@ export async function createResidentEngineSession(
     },
     canUndo: () => session.can_undo(),
     canRedo: () => session.can_redo(),
-    insertText: (at, text, author) => applyCommandMutation(at.story, () =>
-      JSON.parse(session.insert_text(at.story, at.paraId, at.offset, text, author?.name, author?.date))),
+    insertText: (at, text, author) => applyCommandMutation(at.story, () => JSON.parse(author
+      ? session.insert_text(at.story, at.paraId, at.offset, text, author.name, author.date)
+      : session.edit_text_resident(at.story, at.paraId, at.offset, at.paraId, at.offset, text))),
     replaceRange: (range, text, author) => applyCommandMutation(range.story, () =>
       JSON.parse(session.replace_range(...rangeArgs(range), text, author?.name, author?.date))),
-    deleteRange: (range, author) => applyCommandMutation(range.story, () =>
-      JSON.parse(session.delete_range(...rangeArgs(range), author?.name, author?.date))),
+    deleteRange: (range, author) => applyCommandMutation(range.story, () => JSON.parse(author
+      ? session.delete_range(...rangeArgs(range), author.name, author.date)
+      : session.edit_text_resident(...rangeArgs(range), undefined))),
     splitParagraph: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date))),
     toggleMark: (range, mark) => applyCommandMutation(range.story, () =>
@@ -888,6 +894,8 @@ export async function createResidentEngineSession(
     ) as ResidentExactPrefixLayout,
     layoutDocumentWithRegionsRetained: (input) =>
       session.layout_document_with_regions_retained(partLayoutInput(input)),
+    layoutDocumentWithRegionsAfterEdit: (input) =>
+      session.layout_document_with_regions_after_edit(partLayoutInput(input)),
     retainedHeadersFootersJson: () => session.retained_headers_footers_json(),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
@@ -947,6 +955,7 @@ export async function createResidentEngineSession(
       return { frame, profile };
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    echoGlyphSetJson: (fontId, size, kern, alphabet) => session.echo_glyph_set_json(fontId, size, kern, alphabet),
     loadMediaSources: (json) => session.load_media_sources(json),
     loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {

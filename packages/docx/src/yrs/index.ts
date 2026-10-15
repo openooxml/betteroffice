@@ -85,6 +85,8 @@ export type {
   DocxCommandPayloads,
   DocxCommandSelection,
   DocxEditState,
+  DocxEchoGlyphLine,
+  DocxEchoGlyphSet,
   DocxEchoRect,
   DocxEchoTransform,
   DocxNavigationIntent,

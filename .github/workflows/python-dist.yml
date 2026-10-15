@@ -54,7 +54,7 @@ jobs:
           working-directory: bindings/python-${{ inputs.binding }}
 
       # A binding name holds no dot, so `python-<a>.*` cannot reach binding `a-b`.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-${{ inputs.binding }}.${{ matrix.platform.os }}.${{ matrix.platform.target }}
           path: bindings/python-${{ inputs.binding }}/dist
@@ -75,7 +75,7 @@ jobs:
           args: --out dist
           working-directory: bindings/python-${{ inputs.binding }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-${{ inputs.binding }}.sdist
           path: bindings/python-${{ inputs.binding }}/dist
@@ -92,7 +92,7 @@ jobs:
     steps:
       - run: echo "${{ inputs.binding }}" > built.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: built-${{ inputs.binding }}
           path: built.txt

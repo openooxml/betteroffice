@@ -197,7 +197,7 @@ test('render environment commands change hidden text and theme colors without ed
   });
   try {
     const nativeVersion = engine.proposalEngine.version();
-    const layouts = spyOn(engine, 'layoutDocumentWithRegionsRetained');
+    const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
     const command = intent(1, 0, 'setRenderEnvironment', {
       themeColors: { accent1: 'FF0000' }, showHiddenText: true,
     } as never);
@@ -271,7 +271,7 @@ test('d2c_worker_fixture_clones_staged_page_and_background_bitmaps', async () =>
 
 test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', async () => {
   const { client, engine, initial, point } = await openWorker();
-  const layouts = spyOn(engine, 'layoutDocumentWithRegionsRetained');
+  const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
   try {
     expect(initial.selection).toMatchObject({ anchor: point, focus: point });
     expect(initial.editState).toMatchObject({ readOnly: false, canUndo: false });
@@ -475,7 +475,7 @@ test('replace_matches_and_range_highlights_share_native_version_and_layout_ident
     expect(highlights.status).toBe('ok');
     if (highlights.status !== 'ok') throw new Error('Highlight read was superseded');
     const geometry = highlights.value!;
-    expect(geometry).toMatchObject({ version, layoutRevision: 1, frameEpoch: initial.frame.revision });
+    expect(geometry).toMatchObject({ version, layoutRevision: 1, frameEpoch: initial.frame!.revision });
     expect(geometry.rects[0].length).toBeGreaterThan(0);
     expect(geometry.rects[0][0].pageId).toBeDefined();
     const find = await client.documentRead({ kind: 'findText', request: { text: 'Seed', within: { kind: 'story', story: 'body' }, view: 'accepted' } });
@@ -2302,6 +2302,27 @@ test('round two resident geometry matches the reference walk on built pages', as
     } };
     expect(normalize(await readResidentFrameGeometry(engine, unresolved, range, 1)))
       .toEqual(normalize(await reference(engine, unresolved, range, 1)));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const WRAPPED = 'Wrapped' + ' echo words'.repeat(40);
+
+test('typing in a wrapped paragraph under an active display window carries echo context', async () => {
+  const bodyXml = Array.from({ length: 120 }, (_, index) => '<w:p w14:paraId="' + (index + 1).toString(16).padStart(8, '0') +
+    '"><w:r><w:t>' + (index === 2 ? WRAPPED : 'Seed paragraph ' + index) + '</w:t></w:r></w:p>').join('');
+  const { client, initial } = await openWorker({ bodyXml, displayWindow: [0, 2],
+    prepare: () => ({ story: 'body', paraId: '00000003', offset: 200 }) });
+  try {
+    await client.requestViewport({ start: 0, end: 3, frameEpoch: initial.frame!.revision });
+    const typed = (await client.edit(intent(1, 0, 'insertText', { text: 'x' }))).frame!.payload.echoContext;
+    expect(typed).toBeDefined();
+    const text = WRAPPED.slice(0, 200) + 'x' + WRAPPED.slice(200);
+    expect(text).toContain(typed!.text);
+    expect(typed!.text.length).toBeLessThan(text.length);
+    expect(typed!.boundaries[typed!.selection.focusGrapheme]!.utf16).toBe(typed!.text.indexOf('x') + 1);
+    const removed = (await client.edit(intent(2, 1, 'deleteBackward', {}))).frame!.payload.echoContext;
+    expect(removed).toBeDefined();
+    expect(WRAPPED).toContain(removed!.text);
   } finally { client.destroy(); }
 }, TIMEOUT);
 

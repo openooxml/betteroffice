@@ -358,6 +358,24 @@ export class EditSession {
      */
     drain_update_event(): Uint8Array;
     /**
+     * Typing echo model of one font at one shaping size from this session's
+     * resident font store: `{"horizontal","glyphIds","advances","kerning",
+     * "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
+     * run's kerning gate. Errors for an unknown font or a non-positive size.
+     */
+    echo_glyph_set_json(font_id: number, size: number, kern: boolean, alphabet: string): string;
+    /**
+     * A plain local text edit that the resident lowering records, so the next
+     * [`Self::layout_document_with_regions_after_edit`] re-lowers and
+     * re-measures only its paragraph: inserts `text` at the collapsed range,
+     * or deletes `[start, end)` without it. The document changes exactly as
+     * through [`Self::insert_text`] or [`Self::delete_range`] without an
+     * author, and the receipt is theirs. An empty insertion, an edit that
+     * spans paragraphs, or one whose paragraph resident input is not ready
+     * for goes through them instead and records nothing for the relayout.
+     */
+    edit_text_resident(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text?: string | null): string;
+    /**
      * The yrs v1 update carrying everything this replica has that the peer
      * described by `remote_state_vector` does not. Errors on a malformed
      * state vector.
@@ -554,6 +572,12 @@ export class EditSession {
      * Errors on unparseable input or on layout failure.
      */
     layout_document_json(input: string): string;
+    /**
+     * [`Self::layout_document_with_regions_retained`] after one edit: the
+     * resident path when that edit was the [`Self::edit_text_resident`] taken
+     * last; see `EngineSession::layout_document_with_regions_after_edit`.
+     */
+    layout_document_with_regions_after_edit(input: string): void;
     /**
      * The retained region layout of exactly the first `pages` pages when no
      * later content can change them, and of the whole document otherwise; see
@@ -1700,6 +1724,8 @@ export interface InitOutput {
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_document_properties_json: (a: number) => [number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
+    readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
@@ -1732,6 +1758,7 @@ export interface InitOutput {
     readonly editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_after_edit: (a: number, b: number, c: number) => [number, number];
     readonly editsession_layout_document_with_regions_exact_prefix_retained: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];

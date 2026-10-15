@@ -68,6 +68,8 @@ export const editsession_display_range_rects_region_json: (a: number, b: number,
 export const editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_document_properties_json: (a: number) => [number, number];
 export const editsession_drain_update_event: (a: number) => [number, number];
+export const editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
 export const editsession_encode_state: (a: number) => [number, number];
@@ -100,6 +102,7 @@ export const editsession_insert_table_fragment: (a: number, b: number, c: number
 export const editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
 export const editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_layout_document_with_regions_after_edit: (a: number, b: number, c: number) => [number, number];
 export const editsession_layout_document_with_regions_exact_prefix_retained: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];

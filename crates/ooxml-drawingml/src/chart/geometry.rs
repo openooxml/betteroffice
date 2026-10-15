@@ -3578,6 +3578,9 @@ fn emit_bar<S: PlotSink + ?Sized>(
         stacked_spans(family, cat_idx, spans);
         let total = category_total(family, cat_idx);
         for (ser_idx, series) in family.series.iter().enumerate() {
+            if series.data_value(cat_idx).is_none() {
+                continue;
+            }
             let (start, end) = spans.get(ser_idx).copied().unwrap_or((0.0, 0.0));
             let lane = if family.stacking() == Stacking::None {
                 ser_idx as f64
@@ -5987,6 +5990,19 @@ mod tests {
             .skip(1)
             .filter(|(_, _, w, h)| !is_swatch(*w, *h))
             .collect()
+    }
+
+    #[test]
+    fn a_blank_point_draws_no_bar() {
+        for chart_type in ["column", "bar"] {
+            let space = model_space(
+                chart_type,
+                None,
+                vec![model_series("Sales", &[2.0, f64::NAN, 3.0])],
+            );
+            let ops = plot_chart(&PlotChart::from(&space), rect());
+            assert_eq!(bars(&ops).len(), 2, "{chart_type}");
+        }
     }
 
     fn paths(ops: &[PlotOp]) -> usize {

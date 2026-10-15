@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formats, liveFormats, listedLiveFormats } from "./formats.ts";
+import { PREVIEW_STATUS, formats, liveFormats, listedLiveFormats, previewFormats } from "./formats.ts";
 import { formatMarkdown, indexMarkdown } from "./markdown.ts";
 
 describe("demo markdown", () => {
@@ -11,6 +11,14 @@ describe("demo markdown", () => {
     }
     for (const format of formats.filter((format) => !listedLiveFormats.includes(format))) {
       expect(markdown).not.toContain(`/${format.id}`);
+    }
+  });
+
+  test("lists preview formats with their status and no link", () => {
+    const markdown = indexMarkdown();
+    for (const format of previewFormats) {
+      expect(markdown).toContain(`- ${format.id.toUpperCase()} (${PREVIEW_STATUS})`);
+      expect(markdown).toContain(format.tagline);
     }
   });
 
