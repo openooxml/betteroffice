@@ -321,7 +321,7 @@ test("a docx the worker cannot open is refused before it replaces the open file"
     const view = render(<App />);
     await waitFor(() => expect(window.desktop).toBeDefined());
     act(() => { void window.desktop!.open({ id: "old", name: "old.docx", url: "http://localhost/old" }); });
-    await waitFor(() => expect(view.container.querySelector(".document-name")?.textContent).toBe("old.docx"), { timeout: 3_000 });
+    await waitFor(() => expect(view.container.querySelector(".document-name")?.textContent).toBe("old.docx"));
     const old = view.getByTestId("docx-mode");
     workerOpenFailure = new Error("Failed to parse DOCX: not a zip archive");
     act(() => { void window.desktop!.open({ id: "bad", name: "bad.docx", url: "http://localhost/bad" }); });
