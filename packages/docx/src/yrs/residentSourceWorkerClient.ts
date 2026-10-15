@@ -82,20 +82,25 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     }
     const reservation = { bytes: source.heapLimitBytes };
     this.openedHeapLimit = reservation;
+    this.cutReservation = reservation;
     try {
       const owned = { ...source, bytes: source.bytes.slice() };
       const response = await this.request({ type: 'openSource', source: owned }, [owned.bytes.buffer]);
       if (response.previewRefused) {
-        this.openedHeapLimit = null;
+        this.releaseCut(reservation);
         return null;
       }
       if (!response.sourceDocument) throw new ResidentWorkerFailureError('Resident engine worker omitted the opened source');
-      this.cutReservation = reservation;
       return response.sourceDocument;
     } catch (error) {
-      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      this.releaseCut(reservation);
       throw error;
     }
+  }
+
+  private releaseCut(reservation: { bytes?: number }): void {
+    if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+    if (this.cutReservation === reservation) this.cutReservation = null;
   }
 
   async openSource(source: ResidentSourceOpenRequest): Promise<ResidentEngineWorkerSourceOpened> {
@@ -104,6 +109,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     if ((this.openedHeapLimit && this.openedHeapLimit !== this.cutReservation) || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
     }
+    const cut = this.cutReservation;
     this.cutReservation = null;
     const reservation = { bytes: source.heapLimitBytes };
     this.openedHeapLimit = reservation;
@@ -121,7 +127,10 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
         ...(response.frame ? { preview: sourcePreviewFrame(response) } : {}),
       };
     } catch (error) {
-      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      if (this.openedHeapLimit === reservation) {
+        this.openedHeapLimit = cut;
+        this.cutReservation = cut;
+      }
       throw error;
     }
   }

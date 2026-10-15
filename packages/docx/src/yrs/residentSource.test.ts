@@ -302,3 +302,18 @@ for (const pageTotal of [false, true]) {
     } finally { client.destroy(); }
   }, TIMEOUT);
 }
+
+test('a whole source that fails to open leaves the worker on the cut it was to replace', async () => {
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    const bytes = source(400);
+    expect(await client.openSourceCut({ bytes, cut: { blocks: 20 } })).toBeDefined();
+    await expect(client.openSource({ bytes: new Uint8Array([1, 2, 3]) })).rejects.toThrow();
+    const { fonts, fontRegistrationSlots, layoutInput, extras } = init();
+    const preview = await client.previewSource({ fonts, fontRegistrationSlots, layoutInput, extras });
+    expect(firstPage([...(preview.pageFrames ?? []), preview.frame]).runs.map(({ text }) => text).join('')).toBe('Paragraph 1');
+    await client.openSource({ bytes });
+    expect((await client.commandInit({ ...init(), ...{ provisionalPages: 1 } })).frame).toBeDefined();
+  } finally { client.destroy(); }
+}, TIMEOUT);

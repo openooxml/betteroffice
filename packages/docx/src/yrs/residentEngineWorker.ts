@@ -16,7 +16,7 @@ import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
-import { residentSourceMetadata, validateResidentSource, type ResidentSourcePreviewOptions } from './residentSource';
+import { residentSourceMetadata, validateResidentSource, type ResidentSourceOpenRequest, type ResidentSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
@@ -1078,6 +1078,8 @@ function noteDocumentChange(): void {
 let previewing = false;
 /** Whether the opened source is a cut that stops before the end of its body. */
 let cutPartial = false;
+/** The request that opened the current cut, re-opened when the whole source that replaces it fails. */
+let openedCut: ResidentSourceOpenRequest | null = null;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1465,38 +1467,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     validateResidentSource(request.source);
     const source = request.source;
     if (session && (!previewing || commandHost || source.cut)) throw new Error('Resident engine worker already holds a document');
+    const replaced = previewing ? openedCut : null;
     if (session) destroySession(true);
     const started = performance.now();
-    const opening = await createResidentEngineSession(source.heapLimitBytes);
+    let opening: ResidentEngineSession | undefined;
     try {
-      let hostJson: string | undefined;
-      let document: import('../types/document').Document;
-      if (source.document) {
-        opening.openDocument(source.document, source);
-        document = source.document;
-      } else if (source.cut) {
-        const cut = opening.openDocxPreview(source.bytes!, source.cut.blocks, source.cut.paragraphBudget);
-        if (cut === null) {
-          opening.destroy();
-          reply({ id: request.id, ok: true, previewRefused: true });
-          return;
-        }
-        hostJson = cut;
-        const host = decodeDocxHostJson(hostJson, source.bytes!);
-        document = host.document;
-        cutPartial = host.wholeBody !== true;
-      } else {
-        hostJson = opening.openSourceDocx(source.bytes!, source);
-        document = decodeDocxHostJson(hostJson, source.bytes!).document;
+      opening = await createResidentEngineSession(source.heapLimitBytes);
+      const opened = adoptResidentSource(opening, source);
+      if (!opened) {
+        opening.destroy();
+        reply({ id: request.id, ok: true, previewRefused: true });
+        return;
       }
-      if (!source.cut) opening.setDirectBatches(true);
-      session = opening;
-      openedDocument = { heapLimitBytes: source.heapLimitBytes };
-      openedViaSource = true;
-      previewing = source.cut !== undefined;
-      openedParsed = source.document !== undefined;
-      openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
-      editorSaves = { full: false };
+      const { document, hostJson } = opened;
       const metadata = residentSourceMetadata(document);
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
@@ -1506,10 +1489,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector }, [stateVector]);
       }
     } catch (error) {
-      if (!(error instanceof WebAssembly.RuntimeError)) {
-        if (session === opening) destroySession(true);
-        else opening.destroy();
-      }
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (opening && session === opening) destroySession(true);
+      else opening?.destroy();
+      if (replaced) await reopenSourceCut(replaced);
       throw error;
     }
     return;
@@ -3003,6 +2986,7 @@ function destroySession(keepSurfaces = false): void {
   openedVersion = undefined;
   previewing = false;
   cutPartial = false;
+  openedCut = null;
   previewFinalPages = null;
   clearProvisionalFinalPages();
   pendingUpdates = [];
@@ -3117,6 +3101,53 @@ async function finalizeResidentFrame(
   }
   await replayOffscreen(false);
   return { bytes, delta, caret };
+}
+
+/** Parses `source` into `opening` and makes it the worker's document; null when the worker declines a cut. */
+function adoptResidentSource(
+  opening: ResidentEngineSession,
+  source: ResidentSourceOpenRequest
+): { document: import('../types/document').Document; hostJson?: string } | null {
+  let hostJson: string | undefined;
+  let document: import('../types/document').Document;
+  let partial = false;
+  if (source.document) {
+    opening.openDocument(source.document, source);
+    document = source.document;
+  } else if (source.cut) {
+    const cut = opening.openDocxPreview(source.bytes!, source.cut.blocks, source.cut.paragraphBudget);
+    if (cut === null) return null;
+    hostJson = cut;
+    const host = decodeDocxHostJson(hostJson, source.bytes!);
+    document = host.document;
+    partial = host.wholeBody !== true;
+  } else {
+    hostJson = opening.openSourceDocx(source.bytes!, source);
+    document = decodeDocxHostJson(hostJson, source.bytes!).document;
+  }
+  if (!source.cut) opening.setDirectBatches(true);
+  session = opening;
+  openedDocument = { heapLimitBytes: source.heapLimitBytes };
+  openedViaSource = true;
+  previewing = source.cut !== undefined;
+  cutPartial = partial;
+  openedCut = source.cut ? source : null;
+  openedParsed = source.document !== undefined;
+  openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
+  editorSaves = { full: false };
+  return { document, hostJson };
+}
+
+/** Restores a cut whose whole source failed to open, so the worker still holds the document its preview shows. */
+async function reopenSourceCut(source: ResidentSourceOpenRequest): Promise<void> {
+  const opening = await createResidentEngineSession(source.heapLimitBytes);
+  try {
+    if (!adoptResidentSource(opening, source)) opening.destroy();
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (session === opening) destroySession(true);
+    else opening.destroy();
+  }
 }
 
 async function replySourcePreview(
