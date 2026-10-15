@@ -6,6 +6,7 @@ import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions
 import { resolveShiftArrowCellRange } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
 import type { DocxCommandEnvelope, DocxCommandSelection } from './residentCommandProtocol';
+import { tableAnchors, type TablePayload } from './storyPlainText';
 import { closeCommandEngines, command, context, execute, openCommandEngine as openEngine, selection, snapshot, TIMEOUT, type CommandArm } from './residentCommandTestSupport';
 
 const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
@@ -20,6 +21,10 @@ async function inCell(bodyXml = body, text = 'A') {
   const paraId = arm.engine.paragraphs(story)[0]!.paraId;
   expect(execute(arm, command(arm, 'select', { selection: selection(paraId, 0, 0, story) })).status).toBe('noop');
   return arm;
+}
+
+function payload(arm: CommandArm): TablePayload | null {
+  return arm.engine.tablePayload('body', 0) as unknown as TablePayload | null;
 }
 
 function layout(arm: CommandArm) {
@@ -255,6 +260,24 @@ test('multi_cell_range_reports_one_rect_per_selected_cell', async () => {
     expect(rect.height).toBeGreaterThan(0);
   }
   expect(readResidentCellSelectionRects(arm.engine, frame, null)).toBeNull();
+}, TIMEOUT);
+
+test('select_row_from_a_middle_cell_then_merge_and_shade_apply_to_the_whole_row', async () => {
+  const wide = paragraph('Before') + '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>'
+    + `<w:tr>${cell('A') + cell('B') + cell('C')}</w:tr><w:tr>${cell('D') + cell('E') + cell('F')}</w:tr></w:tbl>` + paragraph('After');
+  const arm = await inCell(wide, 'B');
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'row' })).status).toBe('noop');
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 0, column: 2 } });
+  const shaded = execute(arm, command(arm, 'setTableCellShading', { color: 'FF0000' }));
+  expect(shaded.status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells.map((entry) => entry.tcPr?.backgroundColor)).toEqual(['FF0000', 'FF0000', 'FF0000']);
+  expect(payload(arm)!.rows[1]!.cells.map((entry) => entry.tcPr?.backgroundColor)).toEqual([undefined, undefined, undefined]);
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'row' })).status).toBe('noop');
+  const merged = execute(arm, command(arm, 'mergeTableCells', {}));
+  expect(merged.status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells).toHaveLength(1);
+  expect(tableAnchors(payload(arm)!).anchors.filter((anchor) => anchor.row === 0)).toMatchObject([{ column: 0, colspan: 3 }]);
+  expect(payload(arm)!.rows[1]!.cells).toHaveLength(3);
 }, TIMEOUT);
 
 test('merged_cell_range_reports_one_rect_per_distinct_cell_without_overlap', async () => {
