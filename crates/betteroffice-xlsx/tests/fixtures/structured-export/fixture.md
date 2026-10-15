@@ -34,6 +34,7 @@
 | 1 | 4.5 |
 | 2 | 45000.5 |
 | 3 | a\|b &lt;i&gt; |
+| 5 | zero height |
 
 <!-- xlsx-export:8 -->
 ## Dialog (dialogsheet)

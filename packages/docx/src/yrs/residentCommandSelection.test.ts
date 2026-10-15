@@ -15,11 +15,25 @@ import { mintCommandSelection } from './residentCommandAnchors';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import { createProposalRegistry, proposalRevisionPreview } from './proposals';
 import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions';
-import { resolveDocxSelectionIntent, type DocxSelectionCommandIntent } from './residentCommandSelection';
+import { releaseResidentSelectionReads, resolveDocxSelectionIntent, type DocxSelectionCommandIntent } from './residentCommandSelection';
 import type { DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest, ResidentDocxCommandEngine } from './residentCommandProtocol';
-import { TIMEOUT, closeCommandEngines, command, context, execute, openCommandEngine, selection, texts, type CommandArm } from './residentCommandTestSupport';
+import { TIMEOUT, closeCommandEngines, command, context, execute, openCommandEngine as openEngine, selection, texts, type CommandArm } from './residentCommandTestSupport';
 
-afterEach(closeCommandEngines);
+const selectionEngines = new Set<ResidentDocxCommandEngine>();
+const releasesAfterTest: (() => void)[] = [];
+
+afterEach(() => {
+  for (const release of releasesAfterTest.splice(0)) release();
+  for (const engine of selectionEngines) releaseResidentSelectionReads(engine);
+  selectionEngines.clear();
+  closeCommandEngines();
+});
+
+async function openCommandEngine(...args: Parameters<typeof openEngine>): Promise<CommandArm> {
+  const arm = await openEngine(...args);
+  selectionEngines.add(arm.engine);
+  return arm;
+}
 
 test('autofit_cell_click_preserves_dependent_tab_navigation_and_typing', async () => {
   await loadRustDisplayListQueryEngine();
@@ -123,6 +137,7 @@ function fakeArm(stories: Record<string, string[]>): CommandArm {
     },
     resolveStickyPosition: (at: { encoded: Uint8Array }) => sticky.get(at.encoded[0]!) ?? null,
   } as unknown as ResidentDocxCommandEngine;
+  selectionEngines.add(engine);
   return {
     engine, native: {} as CommandArm['native'], version: 0, seq: 0,
     state: { readOnly: false, selection: selection('body-0', 0), storedMarks: null, stickyPositions: new Map() },
@@ -255,7 +270,8 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     commandHooksFactory: factory,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
-    commandInit: null, commandHost: null, readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
+    commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
+    readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
@@ -264,10 +280,12 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     decodeFrameDelta: (next: RetainedFrame) => next,
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),
   };
-  return new Function(...Object.keys(dependencies),
+  const worker = new Function(...Object.keys(dependencies),
     new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
-    '\nreturn { hooks: bindResidentCommands(init), install: (frame, revision) => { retainedFrame = frame; layoutRevision = revision; } };'
-  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; install: (frame: RetainedFrame, revision: number) => void };
+    '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, install: (frame, revision) => { retainedFrame = frame; layoutRevision = revision; } };'
+  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; release(): void; install: (frame: RetainedFrame, revision: number) => void };
+  releasesAfterTest.push(worker.release);
+  return worker;
 }
 
 test('d2a_navigation_resolves_from_predecessor_selection', async () => {
@@ -628,16 +646,22 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
     session: arm.engine, commandHooksFactory: factory,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
-    commandInit: null, commandHost: null, readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
+    commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
+    readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
     createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
   };
-  const bind = () => new Function(...Object.keys(dependencies),
-    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) + '\nreturn bindResidentCommands(init);'
-  )(...Object.values(dependencies)) as ResidentCommandHooks;
+  const bind = () => {
+    const worker = new Function(...Object.keys(dependencies),
+      new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
+      '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; } };'
+    )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; release(): void };
+    releasesAfterTest.push(worker.release);
+    return worker.hooks;
+  };
   let hooks = bind();
   try {
     for (const [direction, start, destination] of [

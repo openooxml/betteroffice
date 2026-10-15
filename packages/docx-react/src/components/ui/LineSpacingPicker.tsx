@@ -102,7 +102,7 @@ export function LineSpacingPicker({
       onOpenChange={(next) => setOpen(next && !disabled)}
     >
       <SelectTrigger
-        className={cn('h-8 text-sm gap-0.5 px-2', disabled && 'opacity-50', className)}
+        className={cn('h-7 text-sm gap-0.5 px-2', disabled && 'opacity-[0.38]', className)}
         style={{ width: 'auto' }}
         aria-label={t('lineSpacing.label')}
         aria-disabled={reason.triggerProps['aria-disabled']}

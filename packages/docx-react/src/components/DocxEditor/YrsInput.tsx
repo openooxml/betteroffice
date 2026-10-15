@@ -13,6 +13,7 @@ import React, {
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  applyClipboardFragment,
   sameYrsSelection,
   type YrsAuthor,
   type YrsInputPositionMap,
@@ -35,10 +36,12 @@ import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVer
 import {
   yrsCellLocFromStory,
   yrsCellStory,
+  yrsClipboardSlice,
   yrsSelectionNearTable,
   yrsSelectionPlainText,
   yrsTableSelectionRange,
 } from './yrsCommands';
+import { clipboardFragmentHtml, parseClipboardHtml } from './internals/clipboardHtml';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
@@ -1533,11 +1536,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
-    const text = new Promise<Blob>((resolve, reject) => {
+    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session).fragment;
+    const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
-        const selected = yrsSelectionPlainText(source);
-        if (selected) resolve(new Blob([selected], { type: 'text/plain' }));
-        else reject(new Error('Nothing is selected to copy'));
+        try {
+          const captured = yrsClipboardSlice(source);
+          if (captured.text) resolve(captured);
+          else reject(new Error('Nothing is selected to copy'));
+        } catch (error) {
+          reject(error);
+        }
         if (cut) return written;
       };
       const onDropped = () => reject(new Error('Newer input replaced the copy'));
@@ -1545,9 +1553,19 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         enqueueInputOperation(() => apply(copied), 'selection', onDropped, undefined, false);
       }
     });
+    void slice.catch(() => {});
+    const text = slice.then((captured) => new Blob([captured.text], { type: 'text/plain' }));
     void text.catch(() => {});
+    const html = hasFragment
+      ? slice.then((captured) => new Blob(
+          [captured.fragment ? clipboardFragmentHtml(captured.fragment) : ''],
+          { type: 'text/html' }
+        ))
+      : null;
+    if (html) void html.catch(() => {});
+    const itemTypes: Record<string, Promise<Blob>> = html ? { 'text/plain': text, 'text/html': html } : { 'text/plain': text };
     const write = typeof ClipboardItem === 'function' && clipboard.write
-      ? clipboard.write([new ClipboardItem({ 'text/plain': text })])
+      ? clipboard.write([new ClipboardItem(itemTypes as Record<string, Blob | Promise<Blob>>)])
       : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
     written = write.then(() => { result.written = true; }, () => {});
     return result;
@@ -1691,11 +1709,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const text = primedCopyRef.current ?? (session ? yrsSelectionPlainText(session) : '');
+      const slice = session ? yrsClipboardSlice(session) : null;
+      const text = primedCopyRef.current ?? slice?.text ?? (session ? yrsSelectionPlainText(session) : '');
       primedCopyRef.current = null;
       if (!text) return;
       event.preventDefault();
       event.clipboardData.setData('text/plain', text);
+      if (slice?.fragment) {
+        event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
+      }
     },
     [session]
   );
@@ -1703,9 +1725,43 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const handlePaste = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       event.preventDefault();
-      insertText(event.clipboardData.getData('text/plain'));
+      const plain = event.clipboardData.getData('text/plain');
+      const fragment = parseClipboardHtml(event.clipboardData.getData('text/html') ?? '');
+      if (fragment && session && !readOnly && !isSuggesting && !holdInput) {
+        verticalCaretGoalRef.current.reset();
+        dispatchCaretInput();
+        enqueueInputOperation(() => {
+          if (!isCurrentInput(session)) return;
+          const current = ensureSelection();
+          const map = current ? inputPositionMap(current.anchor.story) : null;
+          if (!current || !map) return;
+          const range = toRange(current, map);
+          if (!isBodyFlowStory(range.story)) {
+            insertText(plain);
+            return;
+          }
+          try {
+            for (const paragraph of fragment.paragraphs) {
+              for (const table of paragraph.tables ?? []) session.validateTableFragment(table);
+            }
+          } catch {
+            insertText(plain);
+            return;
+          }
+          session.addUndoBoundary();
+          try {
+            const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
+            session.setSelection(caret);
+            finishMutation();
+          } finally {
+            if (isCurrentInput(session)) session.addUndoBoundary();
+          }
+        }, 'mutation');
+        return;
+      }
+      insertText(plain);
     },
-    [insertText]
+    [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
   );
 
   const handleCut = useCallback(

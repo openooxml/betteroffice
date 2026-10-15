@@ -177,12 +177,13 @@ function DefaultToolbarItems() {
   const { t } = useTranslation();
   return (
     <>
-      <ToolbarGroup label={t('toolbar.groups.search')}>
-        <ToolbarCommand id="searchMenus" />
-      </ToolbarGroup>
       <ToolbarGroup label={t('toolbar.groups.history')}>
         <ToolbarCommand id="undo" />
         <ToolbarCommand id="redo" />
+      </ToolbarGroup>
+      <ToolbarSeparator />
+      <ToolbarGroup label={t('toolbar.groups.search')}>
+        <ToolbarCommand id="searchMenus" />
       </ToolbarGroup>
       <ToolbarGroup label={t('toolbar.groups.print')}>
         <ToolbarCommand id="print" />

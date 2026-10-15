@@ -10,58 +10,19 @@ import {
 } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { ToolbarIcon } from './ToolbarIcon';
+import {
+  inheritedToolbarTokens,
+  toolbarButtonStyle,
+  toolbarMenuItemStyle,
+  toolbarMenuSeparatorStyle,
+  toolbarMenuStyle,
+  toolbarSeparatorStyle,
+  useFocusRing,
+} from '../../../../../shared/react-toolbar/theme';
 import { useRovingFocus } from '../../../../../shared/react-toolbar/useRovingFocus';
 import { useCommandChromeRef } from '../../commands/hooks';
 import { useOverflowRegistry, useOverflowSource } from '../toolbar/overflowRegistry';
-
-export const toolbarColors = {
-  text: '#3c4043',
-  muted: '#5f6368',
-  disabled: '#9aa0a6',
-  hover: '#e2e7ef',
-  active: '#d3e3fd',
-  border: '#c7cacf',
-  surface: '#ffffff',
-  rail: '#edf2fa',
-};
-
-const baseButtonStyle: CSSProperties = {
-  appearance: 'none',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: 2,
-  minWidth: 28,
-  height: 28,
-  padding: '0 5px',
-  border: 0,
-  borderRadius: 4,
-  color: toolbarColors.text,
-  font: '500 13px ui-sans-serif, system-ui, sans-serif',
-  lineHeight: 1,
-  whiteSpace: 'nowrap',
-  boxSizing: 'border-box',
-};
-
-export function interactiveButtonStyle(
-  disabled: boolean,
-  active: boolean,
-  hovered: boolean,
-  style?: CSSProperties
-): CSSProperties {
-  return {
-    ...baseButtonStyle,
-    background: active
-      ? toolbarColors.active
-      : hovered && !disabled
-      ? toolbarColors.hover
-      : 'transparent',
-    color: disabled ? toolbarColors.disabled : toolbarColors.text,
-    cursor: disabled ? 'default' : 'pointer',
-    opacity: disabled ? 0.48 : 1,
-    ...style,
-  };
-}
 
 /** A tooltip naming the control, its shortcut and, when disabled, why. */
 export function tooltipText(title: string, shortcut?: string | null, reason?: string): string {
@@ -125,6 +86,7 @@ export const ToolbarButtonBase = forwardRef<HTMLButtonElement, ToolbarButtonProp
     ref
   ) {
     const [hovered, setHovered] = useState(false);
+    const focus = useFocusRing<HTMLButtonElement>();
     const described = useDisabledDescription(disabled, description);
     return (
       <>
@@ -142,7 +104,16 @@ export const ToolbarButtonBase = forwardRef<HTMLButtonElement, ToolbarButtonProp
           onMouseEnter={() => setHovered(true)}
           onMouseLeave={() => setHovered(false)}
           onClick={disabled ? undefined : onClick}
-          style={interactiveButtonStyle(disabled, active === true, hovered, style)}
+          {...focus.focusProps}
+          style={{
+            ...toolbarButtonStyle({
+              disabled,
+              pressed: active === true,
+              hovered,
+              focusRing: focus.focusRing,
+            }),
+            ...style,
+          }}
         >
           {children}
         </button>
@@ -203,13 +174,7 @@ export function ToolbarSeparator() {
     <div
       role="separator"
       aria-orientation="vertical"
-      style={{
-        width: 1,
-        height: 24,
-        margin: '0 5px',
-        background: toolbarColors.border,
-        flex: '0 0 auto',
-      }}
+      style={toolbarSeparatorStyle}
     />
   );
 }
@@ -287,7 +252,9 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
   ) {
     const [open, setOpen] = useState<OpenState>(null);
     const [hovered, setHovered] = useState(false);
+    const focus = useFocusRing<HTMLButtonElement>();
     const [detected, setDetected] = useState<'menu' | 'dialog'>('menu');
+    const [tokens, setTokens] = useState<CSSProperties>({});
     const [position, setPosition] = useState<{
       top: number;
       left: number;
@@ -342,8 +309,10 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
         const menu = focusable.every((item) => item.matches(MENU_ITEM_SELECTOR));
         setDetected(menu ? 'menu' : 'dialog');
       }
-      const anchor = (open.anchor ?? triggerRef.current)?.getBoundingClientRect();
+      const anchorElement = open.anchor ?? triggerRef.current;
+      const anchor = anchorElement?.getBoundingClientRect();
       if (anchor) setPosition(placePopup(anchor, element, menuWidth));
+      setTokens(inheritedToolbarTokens(anchorElement));
     }, [open, popup, menuWidth]);
 
     useLayoutEffect(() => {
@@ -423,7 +392,17 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
               setOpen({ focus: 'last', anchor: null });
             }
           }}
-          style={interactiveButtonStyle(disabled, active || open !== null, hovered, style)}
+          {...focus.focusProps}
+          style={{
+            ...toolbarButtonStyle({
+              disabled,
+              pressed: active,
+              open: open !== null,
+              hovered,
+              focusRing: focus.focusRing,
+            }),
+            ...style,
+          }}
         >
           {trigger}
         </button>
@@ -461,13 +440,8 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
                 width: Math.min(menuWidth, window.innerWidth - 2 * VIEWPORT_MARGIN),
                 maxHeight: position ? Math.min(440, position.maxHeight) : 440,
                 overflowY: 'auto',
-                padding: 6,
-                border: `1px solid ${toolbarColors.border}`,
-                borderRadius: 8,
-                background: toolbarColors.surface,
-                boxShadow: '0 4px 16px rgba(60, 64, 67, 0.24)',
-                boxSizing: 'border-box',
-                outline: 'none',
+                ...toolbarMenuStyle,
+                ...tokens,
               }}
             >
               {children(() => {
@@ -531,6 +505,7 @@ export function ToolbarMenuItem({
   close,
 }: ToolbarMenuItemProps) {
   const [hovered, setHovered] = useState(false);
+  const itemFocus = useFocusRing<HTMLButtonElement>();
   const descriptionId = useId();
   const reason = disabled ? description : undefined;
   return (
@@ -551,24 +526,8 @@ export function ToolbarMenuItem({
           onClick?.();
           close?.();
         }}
-        style={{
-          appearance: 'none',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          width: '100%',
-          minHeight: 32,
-          padding: '5px 9px',
-          border: 0,
-          borderRadius: 4,
-          background: hovered && !disabled ? toolbarColors.hover : 'transparent',
-          color: disabled ? toolbarColors.disabled : toolbarColors.text,
-          cursor: disabled ? 'default' : 'pointer',
-          opacity: disabled ? 0.48 : 1,
-          font: '400 13px ui-sans-serif, system-ui, sans-serif',
-          textAlign: 'left',
-          boxSizing: 'border-box',
-        }}
+        {...itemFocus.focusProps}
+        style={toolbarMenuItemStyle({ disabled, hovered, focusRing: itemFocus.focusRing })}
       >
         <span
           style={{
@@ -581,7 +540,7 @@ export function ToolbarMenuItem({
           {icon}
         </span>
         <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{label}</span>
-        {selected && <span aria-hidden="true">✓</span>}
+        {selected && <ToolbarIcon name="check" size={18} />}
       </button>
       {reason && (
         <span id={descriptionId} hidden>
@@ -596,7 +555,7 @@ export function ToolbarMenuSeparator() {
   return (
     <div
       role="separator"
-      style={{ height: 1, margin: '5px 2px', background: toolbarColors.border }}
+      style={toolbarMenuSeparatorStyle}
     />
   );
 }

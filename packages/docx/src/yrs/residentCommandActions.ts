@@ -9,6 +9,11 @@ import {
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
+import { cellsForCaret, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
+import {
+  applyTableCommand, isTableCommandKind, liveTableAncestors, nearTable,
+  preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
+} from './residentCommandTables';
 import { validPartTarget, resolvePart, ensurePartDocument, removePartDocument } from './residentParts';
 import { validControlValue, resolveControlHandle } from './residentControls';
 import { propertyCommand, validPropertyCommand, propertyCommandTarget, applyPropertyCommand } from './residentPropertyCommands';
@@ -17,6 +22,7 @@ import { validFontEnvironment } from './residentFontEnvironment';
 import { resolveReservations, retainReservationOwners, validReservationsPayload } from './reservations';
 import { resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
+import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -149,7 +155,10 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     setSectionMargins: ['section', 'margins', 'expectVersion'],
     setTabStops: ['tabs', 'expectVersion'], removeTabStop: ['positionTwips', 'expectVersion'],
     formatSelection: ['delta'], toggleStrike: [], toggleList: ['kind'], changeIndent: ['direction'],
-    insertImage: ['image'], insertTable: ['rows', 'columns'], insertPageBreak: [], insertSectionBreak: ['type'],
+    insertImage: ['image'], insertTable: ['rows', 'columns'], pasteFragment: ['fragment'], insertPageBreak: [], insertSectionBreak: ['type'],
+    insertTableRow: ['side'], insertTableColumn: ['side'],
+    deleteTableRow: [], deleteTableColumn: [], deleteTable: [],
+    mergeTableCells: [], splitTableCell: ['rows', 'columns'], setTableCellShading: ['color'],
     resizeObject: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'expectVersion'],
     moveObject: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'],
     undo: [], redo: [], replaceMatches: ['targets', 'text', 'expectVersion', 'suggesting'],
@@ -157,6 +166,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     select: ['selection'], insertText: ['text'], replaceSelection: ['text'],
     navigate: ['unit', 'direction', 'extend', 'goalX'],
     navigateCell: ['direction', 'extend', 'createLastRow'],
+    selectTableCells: ['target'],
     selectPoint: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'],
     extendSelection: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'],
     deleteBackward: ['count'], deleteForward: ['count'], paragraphBreak: [], toggleMark: ['mark'],
@@ -221,6 +231,9 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
       if (!oneOf('backward', 'forward')(payload.direction) || !boolean(payload.extend) ||
         !boolean(payload.createLastRow)) return refuse('invalid-payload');
       break;
+    case 'selectTableCells':
+      if (!oneOf('table', 'row', 'column')(payload.target)) return refuse('invalid-payload');
+      break;
     case 'navigate':
       if (!oneOf('character', 'word', 'line', 'paragraph', 'document-boundary')(payload.unit) ||
         !boolean(payload.extend) || !oneOf('backward', 'forward', 'up', 'down')(payload.direction) ||
@@ -267,6 +280,21 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
       break;
     case 'insertTable':
       if (![payload.rows, payload.columns].every(entry => typeof entry === 'number' && Number.isSafeInteger(entry) && entry > 0 && entry <= 1000) || Number(payload.rows) * Number(payload.columns) > 10_000) return refuse('invalid-table-size');
+      break;
+    case 'pasteFragment':
+      if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
+      break;
+    case 'insertTableRow':
+      if (!oneOf('above', 'below')(payload.side)) return refuse('invalid-payload');
+      break;
+    case 'insertTableColumn':
+      if (!oneOf('left', 'right')(payload.side)) return refuse('invalid-payload');
+      break;
+    case 'splitTableCell':
+      if (![payload.rows, payload.columns].every(entry => typeof entry === 'number' && Number.isSafeInteger(entry) && entry >= 1 && entry <= 1000) || Number(payload.rows) * Number(payload.columns) > 10_000) return refuse('invalid-table-size');
+      break;
+    case 'setTableCellShading':
+      if (payload.color !== null && (typeof payload.color !== 'string' || !/^[0-9a-fA-F]{6}$/.test(payload.color))) return refuse('invalid-payload');
       break;
     case 'insertImage':
       if (!object(payload.image) || !json(payload.image) || Object.hasOwn(payload.image, '_kind') || ['widthEmu', 'heightEmu'].some(key => payload.image && object(payload.image) && payload.image[key] !== undefined && !positive(payload.image[key]))) return refuse('invalid-image');
@@ -404,7 +432,20 @@ export function preflightDocxCommand(
       });
       return { status: 'ready', prepared: {
         command: structuredClone(command), selection: resolved.selection, range: resolved.range,
+        cells: resolved.cells ?? cellsForCaret(engine, resolved.selection.focus.story),
       } };
+    }
+    case 'selectTableCells': {
+      const resolved = resolveCommandSelection(engine, state, command, context);
+      if (!resolved.ok) return refuse(resolved.reason);
+      const focused = resolveLiveCell(engine, resolved.selection.focus.story);
+      const cells = focused ? tableRangeFor(engine, focused, command.payload.target) : null;
+      if (!focused || !cells) return refuse('invalid-cell-target');
+      const at = resolved.selection.focus;
+      const selection = { anchor: at, focus: at };
+      const range = commandSelectionRange(engine, selection);
+      if (!range) return refuse('invalid-selection');
+      return { status: 'ready', prepared: { command: structuredClone(command), selection, range, cells } };
     }
   }
   if (command.kind === 'applyEdits') {
@@ -449,6 +490,16 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
+  if (isTableCommandKind(command.kind)) {
+    if (state.readOnly) return refuse('read-only');
+    const tableResolved = resolveCommandSelection(engine, state, command, context);
+    if (!tableResolved.ok) return refuse(tableResolved.reason);
+    const tabled = preflightTableCommand(engine, command as TableCommandIntent, tableResolved.selection);
+    if ('reason' in tabled) return refuse(tabled.reason);
+    return { status: 'ready', prepared: {
+      command: structuredClone(command), selection: tableResolved.selection, range: tableResolved.range, table: tabled.target,
+    } };
+  }
   const resolved = resolveCommandSelection(engine, state, command, context);
   if (!resolved.ok) return refuse(resolved.reason);
   if (command.kind === 'navigateCell') {
@@ -459,7 +510,13 @@ export function preflightDocxCommand(
       command: structuredClone(command), selection: resolved.selection, range: resolved.range, cellNavigation,
     } };
   }
-  if (state.readOnly && command.kind !== 'select') return refuse('read-only');
+  if (command.kind === 'select') {
+    return { status: 'ready', prepared: {
+      command: structuredClone(command), selection: resolved.selection, range: resolved.range,
+      cells: cellsForCaret(engine, resolved.selection.focus.story),
+    } };
+  }
+  if (state.readOnly) return refuse('read-only');
   if ((command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') && command.payload.suggesting) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
@@ -499,10 +556,36 @@ function sameSelection(left: DocxCommandSelection | null, right: DocxCommandSele
     left[key].paraId === right[key].paraId && left[key].offset === right[key].offset);
 }
 
+const CELL_RESET_KINDS = new Set(['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak']);
+
+function resetCellSelectionForEdit(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, kind: string): void {
+  if (state.selection && CELL_RESET_KINDS.has(kind)) writeCellSelection(engine, cellsForCaret(engine, state.selection.focus.story));
+}
+
+function writeCellSelection(engine: ResidentDocxCommandEngine, cells: PreparedDocxCommand['cells']): void {
+  try {
+    if (cells) engine.setCellSelection(cells);
+    else engine.clearCellSelection();
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+  }
+}
+
+function pastLeadingBlocks(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsLoc | null {
+  if (!engine.geometryReader.hasStory(at.story)) return null;
+  const spans = engine.geometryReader.paragraphSpans(at.story);
+  const index = spans.findIndex(span => span.paraId === at.paraId);
+  if (index < 0) return null;
+  let leading = 0;
+  for (const segment of engine.paragraphSegments(at.story, [index])[0] ?? []) {
+    if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
+    leading += 1;
+  }
+  return { ...at, offset: Math.min(spans[index]!.length, Math.max(leading, at.offset)) };
+}
+
 export function repairCommandSelection(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState): boolean {
-  let cells: ReturnType<ResidentDocxCommandEngine['cellSelection']> = null;
-  try { cells = engine.cellSelection(); }
-  catch (error) { if (error instanceof WebAssembly.RuntimeError) throw error; }
+  const cells = readCellSelection(engine);
   const preferred = engine.clearCellSelection();
   const projections = new Map<string, YrsPositionProjection | null>();
   const projection = (story: string) => {
@@ -511,16 +594,8 @@ export function repairCommandSelection(engine: ResidentDocxCommandEngine, state:
     return projections.get(root);
   };
   const safe = (at: YrsLoc): YrsLoc | null => {
-    if (!engine.geometryReader.hasStory(at.story)) return null;
-    const spans = engine.geometryReader.paragraphSpans(at.story);
-    const index = spans.findIndex(span => span.paraId === at.paraId);
-    if (index < 0 || projection(at.story)?.positionForLoc(at) == null) return null;
-    let leading = 0;
-    for (const segment of engine.paragraphSegments(at.story, [index])[0] ?? []) {
-      if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
-      leading += 1;
-    }
-    return { ...at, offset: Math.min(spans[index]!.length, Math.max(leading, at.offset)) };
+    const clamped = pastLeadingBlocks(engine, at);
+    return clamped && projection(at.story)?.positionForLoc(at) != null ? clamped : null;
   };
   const resolved = state.selection ? readCommandSelection(engine, state) : null;
   const collapsed = resolved?.ok && sameSelection({ anchor: resolved.selection.anchor, focus: resolved.selection.anchor }, resolved.selection);
@@ -580,6 +655,23 @@ function markDelta(mark: YrsRunMark, context: NonNullable<ReturnType<typeof proj
 }
 
 export function applyDocxCommand(
+  engine: ResidentDocxCommandEngine,
+  state: ResidentDocxCommandState,
+  prepared: PreparedDocxCommand,
+  context: DocxCommandApplyContext,
+  environment?: ResidentCommandHooksEnvironment
+): DocxCommandApplyResult {
+  const { inputTime, lastInputTime } = prepared.command;
+  if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+  engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
+  try {
+    return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+  } finally {
+    engine.setUndoInputTime(null);
+  }
+}
+
+function applyPreparedDocxCommand(
   engine: ResidentDocxCommandEngine,
   state: ResidentDocxCommandState,
   prepared: PreparedDocxCommand,
@@ -727,6 +819,9 @@ export function applyDocxCommand(
     return result(applied.applied ? 'applied' : 'noop');
   }
   if (command.kind === 'undo' || command.kind === 'redo') {
+    const beforeHead = engine.selection()?.head ?? null;
+    const tables = beforeHead ? liveTableAncestors(engine, beforeHead.story) : [];
+    const nearby = tables.map((table) => nearTable(engine, table)).filter((at): at is YrsLoc => !!at);
     engine.addUndoBoundary();
     const changed = command.kind === 'undo' ? engine.undo() : engine.redo();
     if (!changed) return result('noop');
@@ -747,11 +842,15 @@ export function applyDocxCommand(
       ? { anchor: native.anchor, focus: native.head } : null;
     const root = story && story !== 'body' && !story.startsWith('body:') ? story.split(':').slice(0, 2).join(':') : 'body';
     const fallbackStory = engine.geometryReader.hasStory(root) ? root : 'body';
+    const near = nearby.map((at) => pastLeadingBlocks(engine, at)).find((at) => !!at) ?? null;
     const first = selected ? null : engine.geometryReader.paragraphSpans(fallbackStory)[0];
     const at = first ? { story: fallbackStory, paraId: first.paraId, offset: 0 } : null;
-    const repaired = selected ?? (at ? { anchor: at, focus: at } : null);
+    const repaired = selected ?? (near ? { anchor: near, focus: near } : null) ?? (at ? { anchor: at, focus: at } : null);
     state.selection = repaired ? mintCommandSelection(engine, state, repaired) : null;
-    if (state.selection) engine.setSelection(state.selection.anchor, state.selection.focus);
+    if (state.selection) {
+      engine.setSelection(state.selection.anchor, state.selection.focus);
+      if (tables.length) syncCellSelectionWithCaret(engine, state.selection.focus.story);
+    }
     return result('applied');
   }
   if (Object.hasOwn(reviewCommandKeys, command.kind)) {
@@ -783,8 +882,10 @@ export function applyDocxCommand(
     publish(selected, true);
     return result(prepared.cellNavigation.insertRow ? 'applied' : 'noop');
   }
-  if (command.kind === 'select' || command.kind === 'navigate' || command.kind === 'selectPoint' || command.kind === 'extendSelection') {
+  if (command.kind === 'select' || command.kind === 'navigate' || command.kind === 'selectPoint' ||
+    command.kind === 'extendSelection' || command.kind === 'selectTableCells') {
     if (!sameSelection(priorSelection, selection)) state.storedMarks = null;
+    if (prepared.cells !== undefined) writeCellSelection(engine, prepared.cells);
     publish(selection, true);
     return result('noop');
   }
@@ -807,13 +908,15 @@ export function applyDocxCommand(
     };
     return result('noop', toolbar);
   }
+  resetCellSelectionForEdit(engine, state, command.kind);
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection') && command.payload.text === '' && collapsed(range)) return result('noop');
   if ((command.kind === 'deleteBackward' || command.kind === 'deleteForward') && collapsed(range)) return result('noop');
   if ((command.kind === 'formatRange' || command.kind === 'formatSelection') && Object.keys(command.payload.delta).length === 0) return result('noop');
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'insertPageBreak', 'insertSectionBreak'].includes(command.kind);
+  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak'].includes(command.kind) ||
+    isTableCommandKind(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
   switch (command.kind) {
@@ -901,13 +1004,28 @@ export function applyDocxCommand(
       }
       break;
     }
+    case 'insertTableRow': case 'insertTableColumn': case 'deleteTableRow': case 'deleteTableColumn':
+    case 'deleteTable': case 'mergeTableCells': case 'splitTableCell': case 'setTableCellShading': {
+      if (!prepared.table) throw new Error('Prepared command lacks table target');
+      const focus = selection.focus;
+      applyTableCommand(engine, state, prepared.command as TableCommandIntent, prepared.table,
+        { story: focus.story, paraId: focus.paraId, offset: focus.offset },
+        { caret, repair: () => repairCommandSelection(engine, state) });
+      break;
+    }
     case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
+    case 'pasteFragment': {
+      state.storedMarks = null;
+      caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
+      break;
+    }
     case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
     case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta); break;
     case 'clearFormatting': engine.clearFormatting(range); break;
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }
+  resetCellSelectionForEdit(engine, state, command.kind);
   if (discrete) engine.addUndoBoundary();
   return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
 }

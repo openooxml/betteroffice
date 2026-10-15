@@ -19,7 +19,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
-import { usePageChrome, type PageChromeHandle } from './usePageChrome';
+import { usePageChrome, type PageChromeHandle, type PageChromeHold } from './usePageChrome';
 
 const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
   labels: {
@@ -42,6 +42,7 @@ export function CanvasPageMirror({
   zoom = 1,
   active = true,
   defer = false,
+  hold = null,
   visible = true,
   register,
   noteAnchorRevision = 0,
@@ -57,6 +58,8 @@ export function CanvasPageMirror({
   active?: boolean;
   /** The first build may wait for idle time. */
   defer?: boolean;
+  /** While held, a first build and leaving the window wait for idle time after the hold. */
+  hold?: PageChromeHold | null;
   /** In the page window: a rebuild after a content change never waits. */
   visible?: boolean;
   /** Receives the handle that builds the mirror at once. */
@@ -69,6 +72,7 @@ export function CanvasPageMirror({
     t,
     active,
     defer,
+    hold,
     rebuildAtOnce: visible,
     urgentRevision: noteAnchorRevision,
     register,

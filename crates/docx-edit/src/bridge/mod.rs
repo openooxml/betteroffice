@@ -2380,7 +2380,12 @@ fn lower_shape_block<T: ReadTxn>(
     env: &RenderEnv,
 ) -> Option<ShapeBlock> {
     let values = shared_values(shape, txn);
-    if let Some(block) = map_string(&values, "shapeJson")
+    if let Some(block) = values
+        .get("shapeJson")
+        .and_then(|value| match value {
+            Any::String(source) => Some(env.media.tokenized_json(source)),
+            _ => None,
+        })
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
         .and_then(|value| shapes::lower_shape_json(&value, pm_start, env))
     {
@@ -3438,6 +3443,11 @@ fn flush_paragraph_parts<T: ReadTxn>(
     blocks
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PARAGRAPHS_FLUSHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flush_paragraph<T: ReadTxn>(
     mut raw_runs: Vec<RawRun>,
@@ -3452,6 +3462,8 @@ fn flush_paragraph<T: ReadTxn>(
     (map, source): (&mut preview::LoweringOutput, u32),
     carried: Vec<(u32, Vec<RawRun>)>,
 ) -> ParagraphBlock {
+    #[cfg(test)]
+    PARAGRAPHS_FLUSHED.with(|flushed| flushed.set(flushed.get() + 1));
     let values = pilcrow_values(pilcrow, txn);
     let para_id = value_string(values.get("paraId")).unwrap_or_default();
     let generated_prefix = format!("{story_id}:p");

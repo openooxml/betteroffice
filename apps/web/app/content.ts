@@ -1,5 +1,5 @@
-import { CRATES, DOCS, NPM, PYPI } from "../../../shared/sites";
-export { BENCHMARKS, CRATES, DEMO, DOCS, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
+import { CRATES, DOCS, NPM, PYPI, REPO } from "../../../shared/sites";
+export { BENCHMARKS, BENCHMARKS_SITE, CRATES, DEMO, DOCS, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
 
 export const SITE_TITLE = "BetterOffice — DOCX, XLSX and PPTX editors";
 export const SITE_DESCRIPTION =
@@ -8,7 +8,7 @@ export const SITE_DESCRIPTION =
 export const HERO = {
   title: "BetterOffice",
   tagline:
-    "The open-source office suite. Word-faithful editing and real-time collaboration on engines we build ourselves — running entirely in your browser, by the OpenOOXML project.",
+    "The open-source office suite. High-fidelity editing and real-time collaboration for people and agents, on Rust engines that run anywhere.",
 };
 
 export const ECOSYSTEMS = [
@@ -42,79 +42,103 @@ export const SUITE = {
   label: "Suite",
   heading: "One suite, four editors",
   prose:
-    "DOCX, XLSX and PPTX editors are published on npm and render inside your app. The VSDX diagram editor is available from source.",
+    "Every editor edits the file itself, with no conversion on open or save.",
 };
 
 export const EDITORS = [
   {
     name: "Documents",
     format: "docx",
-    desc: "Word-faithful editing: fonts, theme colors, styles, tables, headers & footers, tracked changes.",
+    demo: true,
+    desc: "Redline a contract with your team while an agent proposes the next clause.",
     status: "available",
   },
   {
     name: "Spreadsheets",
     format: "xlsx",
-    desc: "Calculation graph, grid rendering and number formats on the same shared core.",
+    demo: true,
+    desc: "Build a quarterly budget and watch every dependent formula update as you edit.",
     status: "available",
   },
   {
     name: "Slides",
     format: "pptx",
-    desc: "Slide model, masters and shape editing on the same shared core.",
+    demo: true,
+    desc: "Rework a pitch deck in the browser and hand it back as a real .pptx.",
     status: "available",
   },
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "Source preview: edit diagrams with pan and zoom, update shape data in batches, and export to Word or PowerPoint through Rust. Controls the engine would refuse are disabled rather than offered.",
+    demo: false,
+    desc: "Update a process map's shape data and drop it into a Word or PowerPoint report.",
     status: "source preview",
   },
 ];
+
+// a format's place in the suite, so other per-format lists follow the same order
+export const editorOrder = (format: string) => EDITORS.findIndex((editor) => editor.format === format);
 
 export const PACKAGES_SECTION = {
   label: "Packages",
   heading: "Ships as components, not iframes",
   prose:
-    "The DOCX, XLSX and PPTX editors install from npm and render inside your app — no embeds, no external services, documents never leave the page. The same engines publish to crates.io for native Rust and to PyPI for Python.",
+    "The DOCX, XLSX and PPTX editors install from npm and render inside your app — no embeds, no external services, documents never leave the page.",
 };
 
 export const PACKAGES = [
   {
     name: "@betteroffice/agents",
-    desc: "Office tools for agents — bounded search and reads, reviewable proposals and export through a TypeScript SDK or local MCP server. DOCX includes tracked edits and page previews; XLSX cell/formula and PPTX slide-text adapters are available as first prototypes.",
+    desc: "Tools for agents to search, read, edit and preview DOCX, XLSX and PPTX files, through a TypeScript SDK or a local MCP server.",
   },
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with unrecognized drawing markup preserved through editor saves, version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, undoable reanchoring of existing comments, and font loading kept apart between editors on one page.",
+    desc: "Framework-free DOCX core: parsing, CRDT editing, page layout and rendering on the Rust engine.",
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, composable toolbar controls, version-checked edit batches, host proposals a read-only viewer can preview, host-owned plugins with explicitly granted access, content-control discovery, page-referenced structured export, and several editors per page.",
+    desc: "The DOCX editor and viewer as a drop-in React component.",
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with version-checked atomic cell batches, anchored JSON and Markdown export, and opt-in operation timings.",
+    desc: "Framework-free spreadsheet core: parsing, formula calculation and rendering on the Rust engine.",
   },
   {
     name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, version-checked edit batches that flush pending input first, and host-owned plugins with explicitly granted access.",
+    desc: "The spreadsheet editor and viewer as a drop-in React component.",
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, structured JSON and Markdown export with anchors, opt-in operation timings, manual undo boundaries, comment repositioning, and caret anchors.",
+    desc: "Framework-free slides core: parsing, editing and rendering on the Rust engine.",
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, version-checked edit batches, and host-owned plugins with explicitly granted access.",
+    desc: "The slides editor and viewer as a drop-in React component.",
   },
 ];
 
 export const FOUNDATION = {
   label: "Features",
-  heading: "Office editing for people and agents",
+  heading: "Features",
   prose:
-    "OpenOOXML's Rust engines power every BetterOffice editor, from opening and editing files to layout and rendering. The same engines run in your browser and in headless workflows.",
+    "Every BetterOffice editor runs on Rust engines, from opening and editing files to layout and rendering. The same engines run in your browser, on your servers and inside agent workflows.",
+};
+
+export const FEATURES_LINK = { label: "All features", href: `${DOCS}/docs` };
+
+export const BENCHMARKS_SECTION = {
+  label: "Benchmarks",
+  heading: "Benchmarks",
+  workflow: `${REPO}/actions/workflows/visual-fidelity.yml`,
+  methodology: `${REPO}/blob/main/scripts/office-quality/README.md`,
+  more: "Per-document results",
+};
+
+export const AGENT_EVALS = {
+  heading: "Agent edits",
+  lead: (tasks: number) => `Same model, same ${tasks} editing tasks, two toolsets. An edit counts only if the requested change is there and nothing else in the file moved.`,
+  method: `${REPO}#evals`,
+  more: "Method, tasks and fixtures",
 };
 
 export const CAPABILITIES = [
@@ -132,11 +156,11 @@ export const CAPABILITIES = [
   },
   {
     name: "Undo and redo",
-    desc: "Navigate editing history and undo accepted agent proposals as a single step. DOCX hosts can set explicit boundaries and choose automatic or manual grouping.",
+    desc: "Navigate editing history and undo accepted agent proposals as a single step.",
   },
   {
     name: "Embed or automate",
-    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows. DOCX paragraphs with saved Word IDs resolve to the same anchor after reopening. DOCX hosts can query pointer positions for drops and hover tools.",
+    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows.",
   },
   {
     name: "Open source and self-hostable",
@@ -154,10 +178,12 @@ export const COLLABORATION = {
 export const PEERS = [
   {
     name: "People",
-    desc: "Live co-editing over any WebSocket relay. Offline edits converge on reconnect. The reference relay checkpoints updates and restores rooms after restarts; its 24-hour idle expiration still applies.",
+    desc: "Live co-editing over any WebSocket relay. Offline edits converge on reconnect.",
   },
   {
     name: "Agents",
     desc: "An agent edits through the same operations as a person, and human review is suggesting mode — accept or reject tracked changes, not a diff dialog.",
   },
 ];
+
+export const CODA = { heading: "The future is yours to edit." };

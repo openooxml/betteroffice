@@ -669,6 +669,8 @@ struct UnitState {
     digest: [u8; 32],
     /// Digest of its table and block content control embeds, which open their own blocks.
     blocks: [u8; 32],
+    block_content: Vec<serde_json::Value>,
+    content_digest: [u8; 32],
     /// Whether the unit holds anything besides those embeds and its pilcrow.
     inline: bool,
 }
@@ -756,6 +758,8 @@ fn story_fingerprint(
     let mut units = Vec::new();
     let mut unit = Sha256::new();
     let mut blocks = Sha256::new();
+    let mut block_content = Vec::new();
+    let mut inline_content = Sha256::new();
     let mut inline = false;
     let mut start = 0u32;
     let mut position = 0u32;
@@ -773,6 +777,12 @@ fn story_fingerprint(
         let bytes = serde_json::to_vec(&entry).ok()?;
         unit.update(&bytes);
         unit.update(b"\n");
+        let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
+            if matches!(kind.as_str(), "table" | "blockSdt"));
+        if !block {
+            inline_content.update(&bytes);
+            inline_content.update(b"\n");
+        }
         position += match &segment.content {
             crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
             _ => 1,
@@ -780,13 +790,17 @@ fn story_fingerprint(
         match &segment.content {
             crate::SegmentContent::Pilcrow(properties) => {
                 while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
-                    unit.update(serde_json::to_vec(&(at - start, key, end)).ok()?);
+                    let marker = serde_json::to_vec(&(at - start, key, end)).ok()?;
+                    unit.update(&marker);
+                    inline_content.update(&marker);
                 }
                 start = position;
                 units.push(UnitState {
                     key: Some(properties.para_id.clone()),
                     digest: std::mem::take(&mut unit).finalize().into(),
                     blocks: std::mem::take(&mut blocks).finalize().into(),
+                    block_content: std::mem::take(&mut block_content),
+                    content_digest: std::mem::take(&mut inline_content).finalize().into(),
                     inline: std::mem::take(&mut inline),
                 });
             }
@@ -795,12 +809,15 @@ fn story_fingerprint(
             {
                 blocks.update(&bytes);
                 blocks.update(b"\n");
+                block_content.push(entry);
             }
             _ => inline = true,
         }
     }
     for (at, key, end) in boundaries {
-        unit.update(serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?);
+        let marker = serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?;
+        unit.update(&marker);
+        inline_content.update(&marker);
     }
     let trailing = unit.finalize().into();
     let empty: [u8; 32] = Sha256::new().finalize().into();
@@ -809,6 +826,8 @@ fn story_fingerprint(
             key: None,
             digest: trailing,
             blocks: blocks.finalize().into(),
+            block_content,
+            content_digest: inline_content.finalize().into(),
             inline,
         });
     }
@@ -2502,6 +2521,145 @@ fn part_stories<'a>(
         .collect()
 }
 
+#[derive(Default)]
+struct RowSplices {
+    inserted: HashMap<String, SpliceAnchor>,
+    removed: HashSet<String>,
+}
+
+fn admit_row_splices(
+    was: &UnitState,
+    now: &UnitState,
+    origin: (&SourceIndex, usize),
+    before: &BTreeMap<&String, &StoryState>,
+    after: &BTreeMap<&String, &StoryState>,
+    edits: &mut RowSplices,
+) -> Option<()> {
+    let (source, index) = origin;
+    if was.blocks == now.blocks {
+        return Some(());
+    }
+    if was.block_content.len() != now.block_content.len() {
+        return None;
+    }
+    fn cells(row: &serde_json::Value) -> Option<Vec<&str>> {
+        row.get("cells")?
+            .as_array()?
+            .iter()
+            .map(|cell| cell.get("story")?.as_str())
+            .collect()
+    }
+    for (was, now) in was.block_content.iter().zip(&now.block_content) {
+        if was == now {
+            continue;
+        }
+        if was[0]["embed"] != "table" || now[0]["embed"] != "table" || was[1] != now[1] {
+            return None;
+        }
+        let mut old_payload = was[0]["payload"].as_object()?.clone();
+        let mut new_payload = now[0]["payload"].as_object()?.clone();
+        let old_rows = old_payload.remove("rows")?;
+        let new_rows = new_payload.remove("rows")?;
+        if old_payload != new_payload {
+            return None;
+        }
+        let old_rows = old_rows.as_array()?;
+        let new_rows = new_rows.as_array()?;
+        let old_keys = old_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
+        let new_keys = new_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
+        if old_keys.iter().chain(&new_keys).any(Vec::is_empty) {
+            return None;
+        }
+        let old_map: HashMap<&str, usize> = old_keys
+            .iter()
+            .enumerate()
+            .map(|(at, stories)| (stories[0], at))
+            .collect();
+        let new_map: HashMap<&str, usize> = new_keys
+            .iter()
+            .enumerate()
+            .map(|(at, stories)| (stories[0], at))
+            .collect();
+        if old_map.len() != old_rows.len() || new_map.len() != new_rows.len() {
+            return None;
+        }
+        let kept_old: Vec<&str> = old_keys
+            .iter()
+            .map(|stories| stories[0])
+            .filter(|key| new_map.contains_key(key))
+            .collect();
+        let kept_new: Vec<&str> = new_keys
+            .iter()
+            .map(|stories| stories[0])
+            .filter(|key| old_map.contains_key(key))
+            .collect();
+        if kept_old.is_empty() || kept_old != kept_new {
+            return None;
+        }
+        for (at, stories) in old_keys.iter().enumerate() {
+            if let Some(&new_at) = new_map.get(stories[0]) {
+                if old_rows[at] != new_rows[new_at] {
+                    return None;
+                }
+            } else {
+                for story in stories {
+                    if after.contains_key(&story.to_string())
+                        || !edits.removed.insert((*story).to_owned())
+                    {
+                        return None;
+                    }
+                }
+            }
+        }
+        let row_ordinals = |stories: &[&str]| -> Option<Vec<u32>> {
+            let mut ordinals = Vec::new();
+            for story in stories {
+                for unit in &before.get(&story.to_string())?.units {
+                    let Some(key) = unit.key.as_deref() else {
+                        continue;
+                    };
+                    if let Some(((part_index, ordinal), 0)) = source.view_of(key) {
+                        if part_index != index {
+                            return None;
+                        }
+                        ordinals.push(ordinal);
+                    } else if unit.inline || unit.has_blocks() {
+                        return None;
+                    }
+                }
+            }
+            ordinals.sort_unstable();
+            (!ordinals.is_empty()).then_some(ordinals)
+        };
+        for (at, stories) in new_keys.iter().enumerate() {
+            if old_map.contains_key(stories[0]) {
+                continue;
+            }
+            let anchor = if let Some(previous) = new_keys[..at]
+                .iter()
+                .rev()
+                .find(|stories| old_map.contains_key(stories[0]))
+            {
+                SpliceAnchor::After(*row_ordinals(previous)?.last()?)
+            } else {
+                let next = new_keys[at + 1..]
+                    .iter()
+                    .find(|stories| old_map.contains_key(stories[0]))?;
+                SpliceAnchor::Before(*row_ordinals(next)?.first()?)
+            };
+            for story in stories {
+                if before.contains_key(&story.to_string())
+                    || !after.contains_key(&story.to_string())
+                    || edits.inserted.insert((*story).to_owned(), anchor).is_some()
+                {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(())
+}
+
 /// `source.parts[index]` as a part a save can splice: one whose stories still hold, in order
 /// and each with the block embeds it was seeded with, the paragraphs seeded from it that they
 /// hold, each the only view of its source paragraph. Removed source paragraphs held no block
@@ -2523,21 +2681,47 @@ fn spliced_part(
     }
     let before = part_stories(seeded, part);
     let after = part_stories(live, part);
-    if !before.keys().eq(after.keys()) {
-        return None;
+    let mut rows = RowSplices::default();
+    for (story, seed) in &before {
+        let Some(now) = after.get(story) else {
+            continue;
+        };
+        for was in &seed.units {
+            if let Some(is) = now.units.iter().find(|unit| unit.key == was.key) {
+                admit_row_splices(was, is, (source, index), &before, &after, &mut rows)?;
+            }
+        }
     }
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
     let mut inserted = Vec::new();
     let mut removed = Vec::new();
-    for (seed, now) in before.values().zip(after.values()) {
+    for (story, seed) in &before {
+        let Some(now) = after.get(story) else {
+            if !rows.removed.contains(story.as_str()) {
+                return None;
+            }
+            for unit in &seed.units {
+                if unit.has_blocks() {
+                    return None;
+                }
+                let key = unit.key.as_deref()?;
+                match source.view_of(key) {
+                    Some(((part_index, ordinal), 0)) if part_index == index => {
+                        removed.push(ordinal)
+                    }
+                    None if synthetic(key) && !unit.inline => {}
+                    _ => return None,
+                }
+            }
+            continue;
+        };
         let (was_units, was_tail) = split_tail(&seed.units);
         let (is_units, is_tail) = split_tail(&now.units);
         match (was_tail, is_tail) {
             (None, None) => {}
-            (Some(was), Some(is))
-                if was.digest == is.digest && was.blocks == is.blocks && !is.inline => {}
+            (Some(was), Some(is)) if was.content_digest == is.content_digest && !is.inline => {}
             _ => return None,
         }
         let was_keys: HashMap<&str, &UnitState> = was_units
@@ -2596,10 +2780,7 @@ fn spliced_part(
                 }
                 continue;
             };
-            if was.blocks != is.blocks {
-                return None;
-            }
-            let same = was.digest == is.digest;
+            let same = was.content_digest == is.content_digest;
             match source.view_of(key) {
                 Some(((part_index, ordinal), 0)) if part_index == index => {
                     paragraphs.push((ordinal, key.to_owned()));
@@ -2616,6 +2797,21 @@ fn spliced_part(
         }
         if pending > 0 {
             return None;
+        }
+    }
+    for (story, now) in &after {
+        if before.contains_key(story) {
+            continue;
+        }
+        let anchor = *rows.inserted.get(story.as_str())?;
+        for unit in &now.units {
+            let key = unit.key.as_deref()?;
+            if unit.has_blocks() || source.view_of(key).is_some() {
+                return None;
+            }
+            if !synthetic(key) || unit.inline {
+                inserted.push(anchor);
+            }
         }
     }
     if paragraphs.len() + removed.len() != part.backed.len() {

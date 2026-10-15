@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from './pinned-evaluate';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
@@ -55,7 +56,7 @@ async function inkAtViewportCentre(page: Page): Promise<number> {
     return { x: rect.left + rect.width / 2 - 150, y: rect.top + rect.height / 2 - 200 };
   });
   const png = await page.screenshot({ clip: { ...box, width: 300, height: 400 } });
-  return page.evaluate(async (base64) => {
+  return pinnedEvaluate(page, async (base64) => {
     const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
     const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
     const canvas = new OffscreenCanvas(image.width, image.height);

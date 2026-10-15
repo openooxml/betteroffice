@@ -24,11 +24,12 @@
  * chain their donor, so a deferred pickup still costs one delta. The donor's
  * own later queries degrade to its JSON-arg path.
  *
- * **Handle release.** `dispose()` frees the handle immediately. A facade
- * dropped without it — a `useMemo` replacement, say — is covered by a
- * `FinalizationRegistry`, and the Rust store additionally caps live handles
- * and evicts the oldest, so a missed finalize cannot grow memory without
- * bound.
+ * **Handle release.** `dispose()` frees the handle immediately, and ending a
+ * facade's line frees every handle the line's facades hold. Only a facade
+ * holding a handle is registered with a `FinalizationRegistry`, which covers
+ * one dropped without `dispose()` (a `useMemo` replacement, say); the Rust
+ * store additionally caps live handles and evicts the oldest, so a missed
+ * finalize cannot grow memory without bound.
  *
  * **Failure.** A wasm TRAP poisons the whole instance: a guard held across the
  * query leaks and every later call into it fails, so the engine is marked dead,
@@ -372,6 +373,8 @@ interface FacadeDeltaSeed {
 /** Shared by a facade and every facade built from it; weak, so no layout outlives its holders. */
 interface FacadeLineage {
   newest: WeakTo<DisplayListQueries> | null;
+  /** The store handles the line's facades hold, closed when the line ends. */
+  handles: Set<HandleCell>;
 }
 
 type WeakTo<T> = { deref(): T | undefined };
@@ -394,12 +397,19 @@ const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
 const lineages = new WeakMap<object, FacadeLineage>();
 
 /**
- * Ends `line`: its superseded facades answer nothing until a facade of the same
- * line is built. Call it when the session behind the line goes away.
+ * Ends `line`: closes the store handles its facades hold, which then query
+ * over JSON, and its superseded facades answer nothing until a facade of the
+ * same line is built. Call it when the session behind the line goes away.
  */
 export function endDisplayListQueriesLine(line: object): void {
   const lineage = lineages.get(line);
-  if (lineage) lineage.newest = null;
+  if (!lineage) return;
+  lineage.newest = null;
+  for (const cell of lineage.handles) {
+    handleCloser(cell)();
+    handleFinalizers?.unregister(cell);
+  }
+  lineage.handles.clear();
 }
 
 type DisplayListQuerySource = RustDisplayListQueryEngine | ResidentDisplayListQueryEngine;
@@ -671,8 +681,8 @@ export function createDisplayListQueries(
   let handleAttempted = false;
   let superseded = false;
   let disposed = false;
-  // lets dispose() cancel the finalizer below so a handle is never double-closed
-  const finalizerToken = {};
+  // set once the facade exists; weak, so no closure here names the facade
+  let self: WeakTo<DisplayListQueries> | null = null;
 
   // The adoption donor: `previous` when it holds the handle, otherwise the
   // donor `previous` itself recorded — pre-collapsed to one hop so a typing
@@ -686,7 +696,7 @@ export function createDisplayListQueries(
     previousSeed.supersede();
   }
   if (previousSeed && previousSeed.line !== (line ?? null)) previousSeed.lineage.newest = null;
-  let lineage: FacadeLineage = { newest: null };
+  let lineage: FacadeLineage = { newest: null, handles: new Set() };
   if (line) {
     lineage = lineages.get(line) ?? lineage;
     lineages.set(line, lineage);
@@ -699,6 +709,28 @@ export function createDisplayListQueries(
     return current !== null && deadSources.has(current);
   };
 
+  const closeHandle = handleCloser(cell);
+
+  // Only a facade holding a handle is registered for finalization and listed on
+  // its line; the cell doubles as the unregister token.
+  const holdHandle = (): void => {
+    const facade = self?.deref();
+    if (cell.handle === null || !facade) return;
+    handleFinalizers?.register(facade, closeHandle, cell);
+    for (const held of lineage.handles) if (held.handle === null) lineage.handles.delete(held);
+    lineage.handles.add(cell);
+  };
+
+  const forgetHandle = (): void => {
+    handleFinalizers?.unregister(cell);
+    lineage.handles.delete(cell);
+  };
+
+  const releaseHandle = (): void => {
+    closeHandle();
+    forgetHandle();
+  };
+
   /**
    * A trap poisons the whole wasm instance, so record it, stop querying, and
    * tell the host to rebuild. The leaked handle is abandoned rather than
@@ -708,7 +740,7 @@ export function createDisplayListQueries(
     const failure = error instanceof Error ? error : new Error(String(error));
     sourceError = failure;
     cell.handle = null;
-    handleFinalizers?.unregister(finalizerToken);
+    forgetHandle();
     const current = source();
     if (!current || deadSources.has(current)) return;
     deadSources.add(current);
@@ -724,8 +756,6 @@ export function createDisplayListQueries(
       }
     }
   };
-
-  const closeHandle = handleCloser(cell);
 
   // adopt the donor facade's parsed list when only some pages changed:
   // ships a page-delta into the Rust store instead of the whole list
@@ -767,13 +797,20 @@ export function createDisplayListQueries(
       handleAttempted ||
       cell.handle !== null ||
       !cell.eng ||
-      isDead()
+      isDead() ||
+      // a method kept past its collected facade: nothing could release the handle
+      !self?.deref()
     ) {
       return;
     }
     if (!cell.eng.hasDisplayListSession?.() || !cell.eng.openDisplayList) return;
     handleAttempted = true;
-    if (adoptHandle()) return;
+    if (!adoptHandle()) openFreshHandle();
+    holdHandle();
+  };
+
+  const openFreshHandle = (): void => {
+    if (!cell.eng?.openDisplayList) return;
     try {
       if (cell.eng.updateDisplayList && cell.eng.hasDisplayListUpdate?.()) {
         // Pages are parsed into the store when a query first needs them, so
@@ -836,8 +873,7 @@ export function createDisplayListQueries(
       }
       // Rust closes the handle on a failed update; close defensively in case
       // the failure happened before wasm ran.
-      closeHandle();
-      handleFinalizers?.unregister(finalizerToken);
+      releaseHandle();
       storeRevisions = null;
       console.warn('[CanvasRenderer] display-list page load failed; using JSON-arg queries', error);
     }
@@ -885,7 +921,7 @@ export function createDisplayListQueries(
           return null;
         }
         console.warn(`[CanvasRenderer] ${label} session query failed; falling back`, error);
-        closeHandle();
+        releaseHandle();
       }
     }
     try {
@@ -1463,8 +1499,7 @@ export function createDisplayListQueries(
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
-    closeHandle();
-    handleFinalizers?.unregister(finalizerToken);
+    releaseHandle();
   };
 
   const queries: DisplayListQueries = {
@@ -1529,10 +1564,10 @@ export function createDisplayListQueries(
     dispose,
   };
 
-  // Auto-release the handle if the facade is dropped without dispose(). The held
-  // value closes over `cell` only, never over `queries` or its donor, so
+  // A handle is auto-released if the facade is dropped without dispose(). The
+  // held value closes over `cell` only, never over `queries` or its donor, so
   // registering cannot keep `queries` alive.
-  handleFinalizers?.register(queries, closeHandle, finalizerToken);
+  self = weakly(queries);
 
   facadeDeltaSeeds.set(queries, {
     list,
@@ -1552,12 +1587,12 @@ export function createDisplayListQueries(
         // ownership moves to the adopting facade: neither dispose() nor the
         // finalizer may close it here anymore
         cell.handle = null;
-        handleFinalizers?.unregister(finalizerToken);
+        forgetHandle();
       }
       return transferred;
     },
   });
-  lineage.newest = weakly(queries);
+  lineage.newest = self;
 
   return queries;
 }

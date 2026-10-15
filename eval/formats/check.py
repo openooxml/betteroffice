@@ -18,6 +18,9 @@ NS = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
       'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
       'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
       'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+      'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      'w14': 'http://schemas.microsoft.com/office/word/2010/wordml',
+      'mc': 'http://schemas.openxmlformats.org/markup-compatibility/2006',
       'rel': 'http://schemas.openxmlformats.org/package/2006/relationships'}
 BUILTIN_FORMATS = {0: 'General', 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00',
                    9: '0%', 10: '0.00%', 14: 'mm-dd-yy', 49: '@'}
@@ -26,13 +29,19 @@ FACETS = {'applyNumberFormat': ('number_format',), 'applyFont': ('bold', 'italic
           'applyFill': ('fill_pattern', 'fill', 'fill_other', 'fill_background', 'fill_rest'),
           'applyBorder': ('border',), 'applyAlignment': ('alignment',), 'applyProtection': ('protection',)}
 XF_FACET_CHILDREN = (f'{{{NS["s"]}}}alignment', f'{{{NS["s"]}}}protection')
+ORDER_FREE_CHILDREN = {f'{{{NS["s"]}}}{name}' for name in ('font', 'rPr')}
 NOTES_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml'
 OWNER = '<owning slide>'
 CREATED = 'notes part created for the requested notes'
+SAVE_TIME = '{http://purl.org/dc/terms/}modified'
+PARAGRAPH_IDS = tuple(f'{{{NS["w14"]}}}{name}' for name in ('paraId', 'textId'))
+TRACKED = {f'{{{NS["w"]}}}{name}' for name in ('ins', 'del', 'moveFrom', 'moveTo', 'rPrChange', 'pPrChange', 'sectPrChange',
+                                         'tblPrChange', 'tblPrExChange', 'tblGridChange', 'trPrChange', 'tcPrChange',
+                                         'cellIns', 'cellDel', 'cellMerge', 'numberingChange')}
 
 
 def tasks():
-    return json.loads((ROOT / 'tasks.json').read_text())
+    return json.loads(Path(os.environ.get('FORMAT_EVAL_TASKS') or ROOT / 'tasks.json').read_text())
 
 
 def verified(data, entry, name):
@@ -42,7 +51,7 @@ def verified(data, entry, name):
 
 
 def fixture(task):
-    manifest = json.loads((ROOT / 'fixtures.json').read_text())
+    manifest = json.loads(Path(os.environ.get('FORMAT_EVAL_MANIFEST') or ROOT / 'fixtures.json').read_text())
     name = task['fixture']
     entry = manifest['fixtures'][name]
     local = os.environ.get('FORMAT_EVAL_FIXTURES', '').strip()
@@ -83,8 +92,10 @@ def canonical(node):
     if node is None:
         return None
     text = node.text if node.text and node.text.strip() else None
-    return (node.tag, tuple(sorted(node.attrib.items())), text,
-            tuple(canonical(child) for child in node))
+    children = [canonical(child) for child in node]
+    if node.tag in ORDER_FREE_CHILDREN:
+        children.sort(key=lambda child: child[0])
+    return (node.tag, tuple(sorted(node.attrib.items())), text, tuple(children))
 
 
 def relpath(part):
@@ -311,7 +322,9 @@ def styles(archive):
         font = copy.deepcopy(fonts[int(xf.get('fontId', '0'))])
         bold, italic = boolean(font.find('s:b', NS)), boolean(font.find('s:i', NS))
         for tag in ('b', 'i'):
-            for node in font.findall(f's:{tag}', NS):
+            nodes = font.findall(f's:{tag}', NS)
+            require(len(nodes) <= 1, f'duplicate font child {tag}')
+            for node in nodes:
                 font.remove(node)
         fill = copy.deepcopy(fills[int(xf.get('fillId', '0'))])
         pattern = fill.find('s:patternFill', NS)
@@ -391,6 +404,7 @@ def workbook(archive):
             elif kind == 'b':
                 value = value == '1'
             elif kind == 'n' and value is not None:
+                require(value.strip(), f'{entry.attrib["name"]}!{address}: empty cached value')
                 value = Decimal(value)
                 require(value.is_finite(), f'non-finite value in {address}')
             elif kind == 'e':
@@ -505,7 +519,7 @@ def paragraph(node, inherited_bullet=False):
         if kind == 'r':
             if runs and runs[-1]['kind'] == 'r' and runs[-1]['style'] == style:
                 runs[-1]['text'] += text
-            elif text:
+            else:
                 runs.append({'kind': kind, 'text': text, 'style': style, 'field': None})
         elif kind == 'br':
             runs.append({'kind': kind, 'text': '\n', 'style': style, 'field': None})
@@ -619,6 +633,8 @@ def styled_run(item):
 
 
 def replace_paragraph_text(item, text):
+    if text == item['text']:
+        return
     require(styled_run(item), 'fixture replacement must have one styled run')
     item['text'] = text
     item['runs'][0]['text'] = text
@@ -634,7 +650,7 @@ def replace_notes(notes, lines):
     template = paragraphs[0]
     run = template['runs'][0]
     bodies[0]['paragraphs'] = [{'text': line, 'bullet': template['bullet'], 'props': template['props'], 'end': template['end'],
-                                'runs': [dict(run, text=line)] if line else []}
+                                'runs': [dict(run, text=line)]}
                                for line in lines]
     return notes
 
@@ -668,7 +684,9 @@ def expected_presentation(source, spec):
 
 
 def compare(expected, actual, path='document'):
-    if isinstance(expected, dict):
+    if isinstance(expected, NewParagraphAttributes):
+        expected.compare(actual, path)
+    elif isinstance(expected, dict):
         require(isinstance(actual, dict) and expected.keys() == actual.keys(), f'{path}: fields differ')
         for key in expected:
             compare(expected[key], actual[key], f'{path}.{key}')
@@ -731,6 +749,263 @@ def check_presentation(expected, actual):
                     compare(shape, found, f'{path}.shape {j}')
 
 
+def w(name):
+    return f'{{{NS["w"]}}}{name}'
+
+
+def local(tag):
+    return tag.rsplit('}', 1)[-1]
+
+
+def properties(node):
+    return None if node is None or (not node.attrib and len(node) == 0) else canonical(node)
+
+
+def run_model(node):
+    content = []
+    for child in node:
+        if child.tag == w('t'):
+            text = child.text or ''
+            space = child.get('{http://www.w3.org/XML/1998/namespace}space')
+            if text and (text[0].isspace() or text[-1].isspace()) and space != 'preserve':
+                content.append(('xml:space', None))
+            content.append(('text', text))
+        elif child.tag != w('rPr'):
+            content.append(canonical(child))
+    return {'kind': 'r', 'attributes': dict(node.attrib), 'properties': properties(node.find('w:rPr', NS)), 'content': content}
+
+
+def joined(content):
+    result = []
+    for token in content:
+        if token[0] == 'text' and result and result[-1][0] == 'text':
+            result[-1] = ('text', result[-1][1] + token[1])
+        elif token != ('text', ''):
+            result.append(token)
+    return result
+
+
+def merged_runs(items):
+    result = []
+    for item in items:
+        previous = result[-1] if result else None
+        if previous and previous['kind'] == item['kind'] == 'r' and \
+                (previous['attributes'], previous['properties']) == (item['attributes'], item['properties']):
+            previous['content'] += item['content']
+        else:
+            result.append(item)
+    for item in result:
+        if item['kind'] == 'r':
+            item['content'] = joined(item['content'])
+    return result
+
+
+def paragraph_text(item):
+    return ''.join(token[1] for run in item['content'] if run['kind'] == 'r' for token in run['content'] if token[0] == 'text')
+
+
+def docx_paragraph(node, default_style):
+    props = copy.deepcopy(node.find('w:pPr', NS))
+    style = props.find('w:pStyle', NS) if props is not None else None
+    if style is not None:
+        props.remove(style)
+    item = {'kind': 'p', 'attributes': dict(node.attrib), 'style': style.get(w('val')) if style is not None else default_style,
+            'properties': properties(props),
+            'content': merged_runs([run_model(child) if child.tag == w('r') else {'kind': local(child.tag), 'element': canonical(child)}
+                                    for child in node if child.tag != w('pPr')])}
+    item['text'] = paragraph_text(item)
+    return item
+
+
+def docx_blocks(children, default_style):
+    blocks = []
+    for child in children:
+        if child.tag == w('p'):
+            blocks.append(docx_paragraph(child, default_style))
+        elif child.tag == w('tbl'):
+            rows = [{'attributes': dict(row.attrib), 'properties': [canonical(item) for item in row if item.tag != w('tc')],
+                     'cells': [{'attributes': dict(cell.attrib), 'properties': properties(cell.find('w:tcPr', NS)),
+                                'blocks': docx_blocks([item for item in cell if item.tag != w('tcPr')], default_style)}
+                               for cell in row.findall('w:tc', NS)]}
+                    for row in child.findall('w:tr', NS)]
+            blocks.append({'kind': 'tbl', 'attributes': dict(child.attrib),
+                           'properties': [canonical(item) for item in child if item.tag != w('tr')], 'rows': rows})
+        else:
+            blocks.append({'kind': local(child.tag), 'element': canonical(child)})
+    return blocks
+
+
+def tracked_changes(archive):
+    counts = {}
+    for name in archive.namelist():
+        if name.endswith('.xml'):
+            for node in xml(archive, name).iter():
+                if node.tag in TRACKED:
+                    counts[local(node.tag)] = counts.get(local(node.tag), 0) + 1
+    return counts
+
+
+def document(archive):
+    part = related(archive, '', 'officeDocument')
+    require(part is not None, 'main document part is missing')
+    styles_part = related(archive, part, 'styles')
+    defaults = [style.get(w('styleId')) for style in xml(archive, styles_part).findall('w:style', NS)
+                if style.get(w('type')) == 'paragraph' and style.get(w('default')) in ('1', 'true', 'on')] if styles_part else []
+    require(len(defaults) <= 1, 'multiple default paragraph styles')
+    default_style = defaults[0] if defaults else None
+    root = resolved_xml(archive, part)
+    body = root.find('w:body', NS)
+    require(body is not None, 'document has no body')
+    blocks = docx_blocks(body, default_style)
+    root.remove(body)
+    state = package_state(archive, {part}, {})
+    core = related(archive, '', 'core-properties')
+    if core in state:
+        saved = resolved_xml(archive, core)
+        for node in saved.iter(SAVE_TIME):
+            node.text = 'updated on save'
+        state[core] = canonical(saved)
+    return {'content_type': content_type(archive, part), 'document': canonical(root), 'body_attributes': dict(body.attrib),
+            'body': blocks, 'default_style': default_style, 'tracked_changes': tracked_changes(archive), 'package_state': state}
+
+
+def docx_paragraphs(blocks):
+    for block in blocks:
+        if block['kind'] == 'p':
+            yield block
+        elif block['kind'] == 'tbl':
+            for row in block['rows']:
+                for cell in row['cells']:
+                    yield from docx_paragraphs(cell['blocks'])
+
+
+class NewParagraphAttributes(dict):
+    def __init__(self, attributes, input_ids):
+        super().__init__((key, value) for key, value in attributes.items() if key not in PARAGRAPH_IDS)
+        self.input_ids = input_ids
+
+    def compare(self, actual, path):
+        require(isinstance(actual, dict), f'{path}: fields differ')
+        for key in PARAGRAPH_IDS:
+            if key in actual:
+                value = actual[key]
+                require(re.fullmatch(r'[0-9A-Fa-f]{8}', value) and 0 < int(value, 16) < 0x80000000,
+                        f'{path}: invalid {local(key)} {value!r}')
+                require(value.upper() not in self.input_ids, f'{path}: {local(key)} reuses an input paragraph id')
+        compare(dict(self), {key: value for key, value in actual.items() if key not in PARAGRAPH_IDS}, path)
+
+
+def docx_unique(blocks, text):
+    matches = [item for item in docx_paragraphs(blocks) if item['text'] == text]
+    require(len(matches) == 1, f'fixture must have exactly one paragraph with text {text!r}')
+    return matches[0]
+
+
+def top_level(body, text):
+    item = docx_unique(body, text)
+    require(any(block is item for block in body), f'fixture paragraph {text!r} must be in the body')
+    return item
+
+
+def set_docx_text(item, text):
+    require(len(item['content']) == 1 and item['content'][0]['kind'] == 'r' and item['content'][0]['content'] == [('text', item['text'])],
+            'fixture paragraph must have one plain text run')
+    item['content'][0]['content'] = [('text', text)]
+    item['text'] = text
+
+
+def with_bold(props):
+    children = [child for child in (props[3] if props else ()) if child[0] != w('b')]
+    children.insert(sum(child[0] in (w('rStyle'), w('rFonts')) for child in children), (w('b'), (), None, ()))
+    return (w('rPr'), props[1] if props else (), None, tuple(children))
+
+
+def bold_phrase(item, phrase):
+    for index, run in enumerate(item['content']):
+        if run['kind'] == 'r' and len(run['content']) == 1 and run['content'][0][0] == 'text' and phrase in run['content'][0][1]:
+            before, after = run['content'][0][1].split(phrase, 1)
+            item['content'][index:index + 1] = [dict(run, properties=props, content=[('text', text)]) for text, props in
+                                                ((before, run['properties']), (phrase, with_bold(run['properties'])), (after, run['properties'])) if text]
+            return
+    require(False, f'fixture phrase {phrase!r} must be inside one text run')
+
+
+def docx_cell(body, table, row, column):
+    tables = [block for block in body if block['kind'] == 'tbl']
+    require(0 < table <= len(tables), f'fixture table {table} is missing')
+    return tables[table - 1]['rows'][row - 1]['cells'][column - 1]
+
+
+def cell_paragraph(cell):
+    require(len(cell['blocks']) == 1 and cell['blocks'][0]['kind'] == 'p', 'fixture cell must hold one paragraph')
+    return cell['blocks'][0]
+
+
+def at(blocks, item):
+    return next(i for i, block in enumerate(blocks) if block is item)
+
+
+def expected_document(source, spec):
+    expected = copy.deepcopy(source)
+    body = expected['body']
+    input_ids = {value.upper() for item in docx_paragraphs(source['body'])
+                 for key, value in item['attributes'].items() if key in PARAGRAPH_IDS}
+    styled = [(top_level(body, text), style) for text, style in spec.get('styles', {}).items()]
+    bolded = [(docx_unique(body, item['paragraph']), item['phrase']) for item in spec.get('bold', [])]
+    texts = [(docx_unique(body, old), new) for old, new in spec.get('text', {}).items()]
+    texts += [(cell_paragraph(docx_cell(body, item['table'], item['row'], item['column'])), item['text']) for item in spec.get('cells', [])]
+    deleted = [top_level(body, text) for text in spec.get('delete_paragraphs', [])]
+    anchors = [(top_level(body, text), lines) for text, lines in spec.get('insert_paragraphs', {}).items()]
+    if 'replace' in spec:
+        old, new = spec['replace']['old'], spec['replace']['new']
+        for item in docx_paragraphs(body):
+            if old in item['text']:
+                wanted = item['text'].replace(old, new)
+                for run in item['content']:
+                    if run['kind'] == 'r':
+                        run['content'] = [('text', token[1].replace(old, new)) if token[0] == 'text' else token for token in run['content']]
+                item['text'] = paragraph_text(item)
+                require(item['text'] == wanted, f'fixture occurrence of {old!r} must be inside one text run')
+    for item, text in texts:
+        set_docx_text(item, text)
+    for item, phrase in bolded:
+        bold_phrase(item, phrase)
+    for item, style in styled:
+        item['style'] = style
+    tables = [block for block in body if block['kind'] == 'tbl']
+    for change in spec.get('insert_rows', []):
+        rows = tables[change['table'] - 1]['rows']
+        row = copy.deepcopy(rows[change['like'] - 1])
+        for cell, text in zip(row['cells'], change['cells'], strict=True):
+            set_docx_text(cell_paragraph(cell), text)
+            for item in docx_paragraphs(cell['blocks']):
+                item['attributes'] = NewParagraphAttributes(item['attributes'], input_ids)
+        rows.insert(change['before'] - 1, row)
+    for change in spec.get('delete_rows', []):
+        del tables[change['table'] - 1]['rows'][change['row'] - 1]
+    for item in deleted:
+        del body[at(body, item)]
+    for item, lines in anchors:
+        position = at(body, item) + 1
+        body[position:position] = [{'kind': 'p', 'attributes': NewParagraphAttributes({}, input_ids), 'style': expected['default_style'], 'properties': None, 'text': line,
+                                    'content': [{'kind': 'r', 'attributes': {}, 'properties': None, 'content': [('text', line)]}]}
+                                   for line in lines]
+    return expected
+
+
+def check_document(expected, actual):
+    for kind, found in actual['tracked_changes'].items():
+        require(found <= expected['tracked_changes'].get(kind, 0), f'tracked changes are not allowed: w:{kind} added')
+    compare(expected, actual)
+    for key in PARAGRAPH_IDS:
+        seen = set()
+        for item in docx_paragraphs(actual['body']):
+            value = item['attributes'].get(key)
+            if value is not None:
+                require(value.upper() not in seen, f'document.body: duplicate {local(key)} {value!r}')
+                seen.add(value.upper())
+
+
 def check(task, output):
     output = Path(output)
     require(output.is_file(), f'missing output file: {output.name}')
@@ -738,6 +1013,8 @@ def check(task, output):
         validate_package(revised)
         if task['format'] == 'xlsx':
             compare(expected_workbook(workbook(source), task['expected']), workbook(revised))
+        elif task['format'] == 'docx':
+            check_document(expected_document(document(source), task['expected']), document(revised))
         else:
             check_presentation(expected_presentation(presentation(source), task['expected']), presentation(revised))
     return 'exact requested content, formulas, formatting, order, notes, and preserved content verified'
@@ -749,6 +1026,7 @@ def main():
     parser.add_argument('output', type=Path)
     args = parser.parse_args()
     task = next(task for task in tasks() if task['id'] == args.task)
+    fixture(task)
     try:
         print(f'PASS: {task["id"]}: {check(task, args.output)}')
     except Exception as error:

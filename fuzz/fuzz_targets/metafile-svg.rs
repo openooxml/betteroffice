@@ -4,6 +4,8 @@ use libfuzzer_sys::fuzz_target;
 use ooxml_metafile::{MAX_SVG_BYTES, to_svg};
 
 const EMF_EOF: u32 = 14;
+const EMF_COMMENT: u32 = 70;
+const EMF_PLUS: u32 = 0x2B46_4D45;
 const EMF_SIGNATURE: u32 = 0x464D_4520;
 const WMF_PLACEABLE_KEY: u32 = 0x9AC6_CDD7;
 const WMF_PLACEABLE_HEADER: usize = 22;
@@ -16,6 +18,20 @@ fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn has_plus_records(data: &[u8]) -> bool {
+    let mut offset = 0;
+    while let (Some(kind), Some(size)) = (u32_at(data, offset), u32_at(data, offset + 4)) {
+        if kind == EMF_COMMENT && size >= 16 && u32_at(data, offset + 12) == Some(EMF_PLUS) {
+            return true;
+        }
+        if kind == EMF_EOF || size < 8 {
+            return false;
+        }
+        offset += size as usize;
+    }
+    false
 }
 
 /// Grows every record up to EOF by `SLACK` bytes, rewriting its declared size to cover them.
@@ -67,7 +83,7 @@ fuzz_target!(|data: &[u8]| {
     // WMF records infer optional fields from their size, so only EMF, whose
     // records address their data by offset, must ignore trailing slack.
     let emf = u32_at(data, 0) == Some(1) && u32_at(data, 40) == Some(EMF_SIGNATURE);
-    if !emf {
+    if !emf || has_plus_records(data) {
         return;
     }
     let padded = pad_records(data).expect("a replayed EMF frames into records up to EOF");

@@ -33,7 +33,14 @@ function deferred<T>() {
 
 async function harness(maxPatches = 8) {
   const pair = createInProcessPair();
-  createWorkbookSessionHost(pair.host);
+  let disposeHost = () => {};
+  createWorkbookSessionHost({
+    ...pair.host,
+    listen(listener) {
+      disposeHost = () => listener({ protocol: 1, kind: 'dispose' });
+      return pair.host.listen(listener);
+    },
+  });
   const requests: string[] = [];
   const sequences = new Map<number, number>();
   const replies = new Map<number, () => void>();
@@ -152,7 +159,10 @@ async function harness(maxPatches = 8) {
     requests, context, paintFailure, submit, held, deliver, installCurrent,
     bind: () => paintSource.installInitial(session.initialPaint?.frame),
     crash: (failure: SessionFailure) => crash!(failure),
-    dispose: async () => { off(); await run.dispose(); },
+    dispose: async () => {
+      off();
+      try { await run.dispose(); } finally { disposeHost(); }
+    },
   };
 }
 

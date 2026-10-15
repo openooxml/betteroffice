@@ -11,9 +11,11 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './residentCommandFrame';
 import { createResidentCommandHost } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
+import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
-import { stageCommandPresentation } from './residentCommandPresentation';
+import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
+import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
@@ -21,9 +23,13 @@ import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
 import { ResidentSessionFonts, type ResidentFontEnvironment } from './residentFontEnvironment';
 import type {
+  DocxCommandApplyContext,
+  DocxCommandEnvelope,
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
+  DocxCommandSelection,
   DocxNavigationIntent,
+  DocxSelectionPointIntent,
   ResidentCommandHooksFactory,
   ResidentCommandHost,
   ResidentCommandInitRequest,
@@ -65,7 +71,8 @@ import { readCommentInsertionRange } from './residentCommentProjection';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
-import { readResidentFrameGeometry, resetResidentObjectHandles } from './residentObjectGeometry';
+import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
+import { readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
@@ -76,6 +83,8 @@ import {
   resolveSelectionUnit,
 } from './viewerSelection';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
+import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -116,6 +125,7 @@ let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let commandHost: ResidentCommandHost | null = null;
+let releaseCommandHost: (() => void) | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
@@ -131,11 +141,13 @@ let sessionFonts: ResidentSessionFonts | null = null;
 let commandHooksFactory: ResidentCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  selectionContext?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
   layoutStale?: boolean;
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
+  echoRaster?: { pageId: string; pixelRatio: number };
   layoutPreviewVersion?: number;
 } | null = null;
 
@@ -158,6 +170,8 @@ function reportQueryParseFailure(frame: RetainedFrame, version: string, error: u
 function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommandHost {
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (!commandHooksFactory) throw new Error('Resident command hooks are not installed');
+  releaseCommandHost?.();
+  releaseCommandHost = null;
   const engine = session;
   if (init.rasterScale !== undefined) setCommandRasterScale(init.rasterScale);
   init.layoutInput = resolveLayoutReservationInput(engine, init.layoutInput, true);
@@ -193,7 +207,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       if (preview) owner.renderEnv.revisionPreview = preview;
       else delete owner.renderEnv.revisionPreview;
     }
-    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(JSON.stringify(input));
+    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
     else engine.layoutDocumentJson(JSON.stringify(input));
     layoutPreviewVersion = snapshot.previewVersion;
     if (commandFrameChanges) {
@@ -268,6 +282,48 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     }
     return selectionQueries.queries;
   };
+  const readSelectionFrame = () => {
+    const version = engine.proposalEngine.version();
+    if (layoutDirty || !retainedFrame) {
+      if (!selectionLayout || selectionLayout.version !== version) {
+        const extras = JSON.stringify({
+          ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
+        });
+        selectionLayout = { version, frame: applyFrameDelta(null, decodeFrameDelta(engine.buildDisplayListFrame(extras, 0))) };
+      }
+      return selectionLayout;
+    }
+    return { frame: retainedFrame, version };
+  };
+  const selectionPageOf = (selected: DocxCommandSelection['focus'], limit = Infinity): number | undefined => {
+    const at = selected.sticky
+      ? engine.resolveStickyPosition({ story: selected.story, encoded: selected.sticky }) : selected;
+    if (!at || (at.story !== 'body' && !at.story.startsWith('body:'))) return undefined;
+    const position = displayPositionIndex(engine).positionOf(at, 'body');
+    if (position === null) return undefined;
+    const { frame: selectedFrame, version } = readSelectionFrame();
+    let frame = selectedFrame;
+    if (prefix && limit === prefix.pages) {
+      const pages = frame.pages.filter(({ page, pageIndex }) => pageIndex < limit && page.unbuilt &&
+        page.positionSpan && position >= page.positionSpan[0] && position <= page.positionSpan[1])
+        .map(({ pageIndex }) => pageIndex);
+      if (pages.length) {
+        frame = applyFrameDelta(frame, decodeFrameDelta(engine.buildDisplayPagesFrame(pages, frame.frameEpoch)));
+        if (layoutDirty || !retainedFrame) selectionLayout = { version, frame };
+        else retainedFrame = frame;
+        for (const page of pages) commandFrameChanges?.pages.add(page);
+      }
+    }
+    const queries = queriesFor(frame, version);
+    const forward = queries.rangeRects(position, position + 1).find((rect) =>
+      rect.height > 0 && rect.pageIndex < limit && frame.pages[rect.pageIndex] && !frame.pages[rect.pageIndex]!.page.unbuilt);
+    if (forward) return forward.pageIndex;
+    const paragraph = engine.geometryReader.locateParagraph(at.story, at.paraId);
+    if (at.offset !== paragraph.end - paragraph.start) return undefined;
+    const caret = queries.caretRect(position);
+    return caret && caret.height > 0 && caret.pageIndex < limit && frame.pages[caret.pageIndex] &&
+      !frame.pages[caret.pageIndex]!.page.unbuilt ? caret.pageIndex : undefined;
+  };
   resetResidentObjectHandles(engine);
   const hooks = commandHooksFactory(engine, init, {
     getLayoutReservations() {
@@ -286,19 +342,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     supportsFontEnvironment: true,
     proposals: registry,
     readSelectionLayout() {
-      const version = engine.proposalEngine.version();
-      let frame: RetainedFrame;
-      if (layoutDirty || !retainedFrame) {
-        if (!selectionLayout || selectionLayout.version !== version) {
-          const extras = JSON.stringify({
-            ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
-          });
-          selectionLayout = { version, frame: applyFrameDelta(null, decodeFrameDelta(engine.buildDisplayListFrame(extras, 0))) };
-        }
-        frame = selectionLayout.frame;
-      } else {
-        frame = retainedFrame;
-      }
+      const { version, frame: selectedFrame } = readSelectionFrame();
+      let frame = selectedFrame;
       const target = selectionPage;
       const pages = new Set<number>();
       const installSelectionFrame = (bytes: Uint8Array) => {
@@ -400,6 +445,60 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   });
   const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
   commandFrameChanges = changes;
+  const prefixNavigation = {
+    character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
+    word: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
+    line: { backward: 'result', forward: 'result', up: 'interior', down: 'interior' },
+    paragraph: { backward: 'interior', forward: 'interior', up: 'complete', down: 'complete' },
+    'document-boundary': { backward: 'result', forward: 'complete', up: 'complete', down: 'complete' },
+  } satisfies Record<DocxNavigationIntent['unit'], Record<DocxNavigationIntent['direction'], 'result' | 'interior' | 'complete'>>;
+  const canUsePrefix = (
+    command: DocxCommandEnvelope, context: DocxCommandApplyContext, result?: DocxCommandSelection | null
+  ): boolean => {
+    if (!prefix || changes.layoutStale) return false;
+    if (result !== undefined) {
+      if (!result || result.anchor.story !== result.focus.story || result.anchor.paraId !== result.focus.paraId ||
+        result.anchor.offset !== result.focus.offset || result.focus.story !== 'body') return false;
+      const pageIndex = selectionPageOf(result.focus, prefix.pages);
+      if (pageIndex === undefined) return false;
+      const { frame, version } = readSelectionFrame();
+      const position = displayPositionIndex(engine).positionOf(result.focus, 'body');
+      if (position === null) return false;
+      const queries = queriesFor(frame, version);
+      const caret = queries.caretRect(position);
+      if (!caret || caret.height <= 0 || caret.pageIndex !== pageIndex || queries.imageByPos(position)) return false;
+      if (!frame.pages[pageIndex]!.page.primitives.some(primitive =>
+        (primitive.kind === 'glyphRun' || primitive.kind === 'text') && primitive.docStart !== undefined &&
+        primitive.docEnd !== undefined && primitive.docStart <= position && position <= primitive.docEnd)) return false;
+      if (command.kind === 'selectPoint' || command.kind === 'extendSelection') {
+        const point = command.payload as DocxSelectionPointIntent;
+        const hit = queries.hitTestRegions(point.page.pageIndex, point.x, point.y);
+        if (hit?.region !== 'body' || hit.target !== 'text') return false;
+      }
+    }
+    const base = context.predecessorSelection ?? hooks.selection();
+    switch (command.kind) {
+      case 'selectPoint': case 'extendSelection': {
+        const point = command.payload as DocxSelectionPointIntent | null;
+        const index = point?.page?.pageIndex;
+        if (index === undefined || !Number.isSafeInteger(index) || index < 0 || index >= prefix.pages ||
+          typeof point?.page?.pageId !== 'string') return false;
+        const page = retainedPageByKey(readSelectionFrame().frame, point.page.pageId);
+        if (!page || page.pageIndex !== index) return false;
+        return (command.kind !== 'extendSelection' && !point.modifiers?.shift) ||
+          (!!base && selectionPageOf(base.anchor, prefix.pages) !== undefined);
+      }
+      case 'navigate': {
+        const navigation = command.payload as DocxNavigationIntent | null;
+        const policy = navigation && prefixNavigation[navigation.unit]?.[navigation.direction];
+        if (!policy || policy === 'complete' || !base) return false;
+        const focus = selectionPageOf(base.focus, prefix.pages);
+        if (focus === undefined || selectionPageOf(base.anchor, prefix.pages) === undefined) return false;
+        return policy === 'result' || focus < prefix.pages - 1;
+      }
+      default: return false;
+    }
+  };
   let revision = 0;
   const host = createResidentCommandHost({
     init,
@@ -407,10 +506,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     hooks: {
       ...hooks,
       async preflight(command, context) {
-        if (prefix) await completeCommandPrefix(host);
         if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
           await loadRustDisplayListQueryEngine();
         }
+        if (prefix && !(await host.withFrameWork(async () => canUsePrefix(command, context)))) await completeCommandPrefix(host);
         selectionPage = command.kind === 'selectPoint' || command.kind === 'extendSelection'
           ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
         const navigation = command.kind === 'navigate' ? command.payload as DocxNavigationIntent : undefined;
@@ -435,7 +534,15 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           };
         }
         try {
-          const checked = await hooks.preflight(command, context);
+          let checked = await hooks.preflight(command, context);
+          if (prefix && (checked.status !== 'ready' || !canUsePrefix(command, context, checked.prepared.selection))) {
+            await completeCommandPrefix(host);
+            checked = await hooks.preflight(command, context);
+          }
+          if (checked.status === 'ready' && checked.prepared.selection &&
+            (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate')) {
+            changes.selectionContext = true;
+          }
           if (command.kind === 'setFontEnvironment' && checked.status === 'ready') {
             try {
               preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as ResidentFontEnvironment));
@@ -488,6 +595,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       },
       async frame({ coversThroughSeq, full }) {
         const viewport = changes.viewport;
+        const selectionContext = changes.selectionContext;
+        changes.selectionContext = undefined;
         const previousWindow = changes.window ?? commandDisplayWindow ?? init.displayWindow;
         changes.viewport = undefined;
         const pages = [...changes.pages];
@@ -684,13 +793,20 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
         if (changes.window && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
+        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
+        const pixelRatio = offscreenDpr * offscreenZoom;
+        const echoRaster = changes.echoRaster;
+        if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
+        const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
+          glyphs: echoGlyphs.provider(pixelRatio),
         });
-        const echoContext = projectedEcho && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
+        if (selectionContext && projectedEcho?.glyphs) requestedPages.add(projectedEcho.page.pageIndex);
+        const echoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
           pendingOffscreenPageIds.has(projectedEcho.page.pageId))
           ? projectedEcho : undefined;
-        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
+        const echoGlyphSets = echoGlyphs.unsent(echoContext);
         const images = new Map<string, ImageBitmap>();
         const failedImages = new Set<string>();
         const rasterOptions = {
@@ -712,11 +828,14 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             return image;
           },
         };
-        const pixelRatio = offscreenDpr * offscreenZoom;
         const visiblePages = new Set<number>();
         const center = caretPage ?? 0;
         if (caretPage !== undefined) visiblePages.add(center);
         if (echoContext) visiblePages.add(echoContext.page.pageIndex);
+        if (echoRaster && pendingOffscreenPageIds.has(echoRaster.pageId)) {
+          const retained = retainedPageByKey(layout.frame, echoRaster.pageId);
+          if (retained) visiblePages.add(retained.pageIndex);
+        }
         for (const index of pages) visiblePages.add(index);
         if (changes.window) {
           for (let index = changes.window[0]; index < Math.min(changes.window[1], layout.frame.pages.length); index += 1) visiblePages.add(index);
@@ -750,30 +869,27 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           async rasterizeBackground(dependency) {
             const retained = retainedPageByKey(layout.frame, dependency.page.pageId);
             if (!retained) throw new Error('Command background is unavailable');
-            const keep = new Set(dependency.primitiveIds);
-            const buffer = new OffscreenCanvas(1, 1);
-            await rasterizeDisplayPageToBackBuffer(buffer, { ...retained.page,
-              watermarkPrimitiveCount: retained.page.primitives.slice(0, retained.page.watermarkPrimitiveCount ?? 0)
-                .filter((_primitive, index) => keep.has(retained.primitiveIds[index]!.toString())).length,
-              primitives: retained.page.primitives.filter((_primitive, index) => keep.has(retained.primitiveIds[index]!.toString())),
-            }, rasterOptions, pixelRatio);
             const { rect } = dependency;
-            const crop = new OffscreenCanvas(Math.ceil(rect.width * pixelRatio), Math.ceil(rect.height * pixelRatio));
-            const ctx = crop.getContext('2d');
-            if (!ctx) throw new Error('Command background canvas is unavailable');
-            ctx.drawImage(buffer, rect.x * pixelRatio, rect.y * pixelRatio,
-              rect.width * pixelRatio, rect.height * pixelRatio, 0, 0, crop.width, crop.height);
-            return crop.transferToImageBitmap();
+            const device = [rect.x, rect.y, rect.width, rect.height].map((value) => Math.round(value * pixelRatio)) as
+              [number, number, number, number];
+            const buffer = new OffscreenCanvas(device[2], device[3]);
+            await rasterizeDisplayPageToBackBuffer(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
+              pixelRatio, 1, { x: device[0], y: device[1], width: device[2], height: device[3] });
+            return buffer.transferToImageBitmap();
           },
         }).finally(() => { for (const image of images.values()) image.close(); });
+        if (echoContext) changes.echoRaster = { pageId: echoContext.page.pageId, pixelRatio };
+        else if (stagedPages.some((page) => page.pageId === echoRaster?.pageId)) changes.echoRaster = undefined;
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
         const shown: ReturnType<typeof presentLayout> = init.provisionalPages === undefined ? {} : presentLayout();
         const selected = hooks.selection();
-        const selectionRects = !shown.layoutProvisional && selected && (selected.anchor.story !== selected.focus.story ||
+        const cells = readCellSelection(engine);
+        const cellRects = !shown.layoutProvisional ? readResidentCellSelectionRects(engine, layout.frame, cells) : null;
+        const selectionRects = cellRects ?? (!shown.layoutProvisional && selected && (selected.anchor.story !== selected.focus.story ||
           selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset)
           ? (await readResidentRangeHighlights(engine, layout.frame, [{
             story: selected.anchor.story, start: selected.anchor, end: selected.focus,
-          }], layoutRevision)).rects[0] ?? [] : [];
+          }], layoutRevision)).rects[0] ?? [] : []);
         const built = buildCommandFrame({
           frame: finalized.bytes,
           metadata: first
@@ -786,8 +902,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           parts: shown.layoutProvisional ? [] : engine.partGeometry(retainedFrame!),
           geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
-          ...shown, echoContext, stagedPresentation: presentation.value,
+          ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
         });
+        echoGlyphs.sent(echoGlyphSets);
         revision = built.value.revision;
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
@@ -797,6 +914,11 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   commandInit = init;
+  releaseCommandHost = () => {
+    selectionQueries?.queries.dispose();
+    selectionQueries = undefined;
+    releaseResidentSelectionReads(engine);
+  };
   commandHost = host;
   if (!viewportFirst(init)) return host;
   commandLayout = {
@@ -820,6 +942,19 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   };
   relayout('initial');
   return host;
+}
+
+type EchoGlyphState = { cache: GlyphCache; engine: EchoGlyphEngine; sources: EchoGlyphSources };
+
+/** Echo glyph sets live as long as the glyph cache of the font store they were shaped from. */
+function commandEchoGlyphs(cache: GlyphCache, engine: EchoGlyphEngine, full: boolean): EchoGlyphSources {
+  let state = echoGlyphState;
+  if (!state || state.cache !== cache || state.engine !== engine) {
+    state = { cache, engine, sources: new EchoGlyphSources(engine, ++echoGlyphGeneration) };
+    echoGlyphState = state;
+  }
+  if (full) state.sources.resend();
+  return state.sources;
 }
 
 /** Whether `init` opens on a certified prefix that completes in the background. */
@@ -962,6 +1097,8 @@ let sentHeadersFootersEpoch = 0;
 let fontsRevision = -1;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
+let echoGlyphState: EchoGlyphState | null = null;
+let echoGlyphGeneration = 0;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
 const pendingOffscreenPageIds = new Set<string>();
@@ -1128,6 +1265,7 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
+    kind === 'pasteFragment' ||
     kind === 'insertPageBreak' || kind === 'insertSectionBreak';
 }
 
@@ -1748,6 +1886,33 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         const { anchor, focus } = request.read.selection;
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
         value = session.selectionText({ story: anchor.story, start: anchor, end: focus });
+        break;
+      }
+      case 'clipboardSlice': {
+        const { anchor, focus } = request.read.selection;
+        const cells = session.cellSelection();
+        const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
+          cells.anchor.tableIndex !== cells.head.tableIndex ||
+          cells.anchor.row !== cells.head.row || cells.anchor.column !== cells.head.column);
+        if (multiCell && cells) {
+          const payload = clipboardTablePayload(
+            session.tablePayload(cells.anchor.story, cells.anchor.tableIndex),
+          );
+          const holds = !!payload &&
+            tableAnchors(payload).anchors.some(
+              (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
+            );
+          if (holds) {
+            value = readClipboardSlice(session, { cells });
+            break;
+          }
+        }
+        if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
+        value = readClipboardSlice(session, {
+          story: anchor.story,
+          from: storyOffsetForLoc(session.geometryReader, anchor),
+          to: storyOffsetForLoc(session.geometryReader, focus),
+        });
         break;
       }
       case 'validateEdits':
@@ -2858,6 +3023,8 @@ function destroySession(keepSurfaces = false): void {
   proposals?.destroy();
   layoutReady = false;
   proposals = null;
+  releaseCommandHost?.();
+  releaseCommandHost = null;
   session?.destroy();
   lastProposalMirrorVersion = null;
   session = null;

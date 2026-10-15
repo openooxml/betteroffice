@@ -1,4 +1,4 @@
-import { getFormat, listedLiveFormats } from "./formats";
+import { PREVIEW_STATUS, getFormat, listedLiveFormats, previewFormats } from "./formats";
 
 export const MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8";
 
@@ -17,12 +17,15 @@ export function indexMarkdown(): string {
         `- [${format.id.toUpperCase()}](${SITE}/${format.id}) — ${format.kind}. ${format.tagline}`,
     )
     .join("\n");
+  const previews = previewFormats
+    .map((format) => `\n- ${format.id.toUpperCase()} (${PREVIEW_STATUS}) — ${format.kind}. ${format.tagline}`)
+    .join("");
 
   return `# BetterOffice demos
 
 ${INTRO}
 
-${list}
+${list}${previews}
 
 - [Website](${WEBSITE})
 - [Documentation](${DOCS})

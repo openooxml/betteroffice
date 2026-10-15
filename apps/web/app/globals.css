@@ -1,37 +1,42 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "../../../shared/site-tokens.css";
 
 @custom-variant dark (&:is(.dark *));
 
-@theme {
-  --color-bg: #ffffff;
-  --color-surface: #fafafa;
-  --color-fg: #141414;
-  --color-ink: #5c5c5c;
-  --color-acc: #059669;
-  --color-dim: #8f8f8f;
-  --color-faint: #c9c9c9;
-  --color-line: rgb(0 0 0 / 0.1);
-  --color-line-soft: rgb(0 0 0 / 0.055);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
-    Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
-    "Liberation Mono", monospace;
+@theme inline {
+  --color-bg: var(--bo-bg);
+  --color-surface: var(--bo-surface);
+  --color-fg: var(--bo-fg);
+  --color-ink: var(--bo-ink);
+  --color-acc: var(--bo-acc);
+  --color-acc-soft: var(--bo-acc-soft);
+  --color-dim: var(--bo-dim);
+  --color-faint: var(--bo-faint);
+  --color-line: var(--bo-line);
+  --color-line-soft: var(--bo-line-soft);
+  --color-head: var(--bo-head);
+  --font-sans: var(--font-geist), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", SFMono-Regular,
+    Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 @layer base {
   html {
-    color-scheme: light;
+    color-scheme: light dark;
     scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
     -webkit-text-size-adjust: 100%;
+    overflow-x: clip;
   }
 
   body {
     background: var(--color-bg);
     color: var(--color-fg);
     font-family: var(--font-sans);
-    font-size: 1rem;
+    font-size: 0.9375rem;
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -45,7 +50,6 @@
   :focus-visible {
     outline: 1px solid var(--color-fg);
     outline-offset: 3px;
-    border-radius: 1px;
   }
 
   code,
@@ -54,35 +58,129 @@
     font-family: var(--font-mono);
     font-feature-settings: "liga" 0;
   }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
 }
 
-/* registration marks on the section rails — no utility for pseudo content */
-.sec::before,
-.sec::after {
-  content: "+";
-  position: absolute;
-  top: -0.72em;
-  font-family: var(--font-mono);
-  font-size: 0.8125rem;
-  line-height: 1;
-  color: var(--color-faint);
-  background: var(--color-bg);
-  padding: 2px 1px;
-  user-select: none;
+/* one entrance, on first paint, no script; the title only settles so it paints immediately */
+@keyframes bo-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
 }
 
-.sec::before {
-  left: -0.34em;
+@keyframes bo-settle {
+  from {
+    transform: translateY(0.12em);
+  }
 }
 
-.sec::after {
-  right: -0.34em;
+@keyframes bo-blink {
+  50% {
+    opacity: 0;
+  }
 }
 
-@media (max-width: 44rem) {
-  .sec::before,
-  .sec::after {
+@media (prefers-reduced-motion: no-preference) {
+  .rise {
+    animation: bo-rise 1s var(--bo-ease) both;
+    animation-delay: calc(var(--i, 0) * 90ms + 120ms);
+  }
+
+  .settle {
+    animation: bo-settle 1.1s var(--bo-ease) both;
+  }
+
+  .blink {
+    animation: bo-blink 1.1s steps(1) infinite;
+  }
+}
+
+/* used-by ticker (USED_BY_ROTATE): slow drift with soft edges, held on hover, reset and still when a name has focus */
+.marquee {
+  min-width: 0;
+  overflow: hidden;
+  mask-image: linear-gradient(to right, transparent, #000 9%, #000 91%, transparent);
+}
+
+.marquee-track {
+  display: flex;
+  width: max-content;
+}
+
+.marquee-copy {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  list-style: none;
+}
+
+.marquee-copy a {
+  display: block;
+  padding: 1.25rem clamp(1.5rem, 3vw, 2.5rem);
+  color: var(--color-dim);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.marquee-copy a:hover {
+  color: var(--color-fg);
+}
+
+.marquee-copy a:focus-visible {
+  outline-offset: -4px;
+}
+
+@keyframes bo-marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .marquee-track {
+    animation: bo-marquee var(--marquee-s, 45s) linear infinite;
+  }
+
+  .marquee:hover .marquee-track {
+    animation-play-state: paused;
+  }
+
+  .marquee:focus-within {
+    mask-image: none;
+  }
+
+  .marquee:focus-within .marquee-track {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marquee {
+    mask-image: none;
+  }
+
+  .marquee-track {
+    width: auto;
+  }
+
+  .marquee-copy {
+    flex: 1;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
+  .marquee-copy:not(:first-child) {
     display: none;
+  }
+
+  .marquee-copy a {
+    padding-inline: 0 1.5rem;
   }
 }
 

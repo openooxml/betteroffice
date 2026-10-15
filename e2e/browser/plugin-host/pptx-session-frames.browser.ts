@@ -1,4 +1,5 @@
 import { test, expect } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type { SessionFramesProbe } from './pptx-session-frames-harness';
 
 test('pptx: worker session frames paint the same pixels as a local handle', async ({ page }) => {
@@ -10,7 +11,7 @@ test('pptx: worker session frames paint the same pixels as a local handle', asyn
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/pptx-session-frames.html');
   await page.waitForFunction(() => '__pptxSessionFrames' in window);
-  const { results, workers } = await page.evaluate(async () => {
+  const { results, workers } = await pinnedEvaluate(page, async () => {
     const probe = (window as unknown as { __pptxSessionFrames: SessionFramesProbe })
       .__pptxSessionFrames;
     return { results: await probe.done, workers: probe.workers };

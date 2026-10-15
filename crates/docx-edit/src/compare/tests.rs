@@ -1494,9 +1494,15 @@ fn style_toggles_are_read_at_every_level_of_a_chain() {
             )
             .map_err(|diagnostics| diagnostics[0].code)
         };
+        let (same, changed) = if style == "Toggled" {
+            ("<w:b/>", r#"<w:b w:val="0"/>"#)
+        } else {
+            (r#"<w:b w:val="0"/>"#, "<w:b/>")
+        };
         assert_eq!(verify(""), Ok(()), "{style}");
+        assert_eq!(verify(same), Ok(()), "{style}");
         assert_eq!(
-            verify("<w:b/>"),
+            verify(changed),
             Err(CompareDiagnosticCode::RoundtripMismatch),
             "{style}"
         );

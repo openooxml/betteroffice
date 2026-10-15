@@ -8,7 +8,6 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Assoc, GetString, ID, IndexedSequence, Out, ReadTxn, StickyIndex, TextRef, Transact,
-    Update,
 };
 
 use crate::{EditingDoc, story_ref};
@@ -52,7 +51,7 @@ pub(crate) fn apply_update_with_typing_inference(
     doc: &EditingDoc,
     bytes: &[u8],
 ) -> Result<Option<TypingInference>, String> {
-    let update = Update::decode_v1(bytes).map_err(|error| error.to_string())?;
+    let update = crate::decode_peer_update_v1(bytes).map_err(|error| error.to_string())?;
     let insertions = update.insertions(false);
     let mut clients = insertions.client_ids();
     let client_id = clients.next().filter(|_| clients.next().is_none());

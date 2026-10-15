@@ -336,7 +336,14 @@ describe('workbook command swap compatibility', () => {
 
   test('postcommit traps reject commands and paint waiters without recovery or late reply publication', async () => {
     const pair = createInProcessPair();
-    createWorkbookSessionHost(pair.host);
+    let disposeHost = () => {};
+    createWorkbookSessionHost({
+      ...pair.host,
+      listen(listener) {
+        disposeHost = () => listener({ protocol: 1, kind: 'dispose' });
+        return pair.host.listen(listener);
+      },
+    });
     const requests: string[] = [];
     let signalFailure: ((error: unknown) => void) | undefined;
     let release = () => {};
@@ -386,6 +393,6 @@ describe('workbook command swap compatibility', () => {
       await expect(session.submit(command(session, 2, 'editCell', { args: [0, 1, 0, 'blocked'] })))
         .rejects.toBeInstanceOf(SessionFailure);
       expect(requests).toEqual(['open', 'command']);
-    } finally { await session.dispose(); }
+    } finally { disposeHost(); await session.dispose(); }
   });
 });

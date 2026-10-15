@@ -333,6 +333,123 @@ test('table navigation uses the controller admission and creates a final row onl
   expect(submit.mock.calls.at(-1)![0]).toMatchObject({ payload: { createLastRow: false } });
 });
 
+test('table selection dispatches selectTableCells as fenced selection input', async () => {
+  const { controller, binding, viewStore } = fixture();
+  const state = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection: null,
+    editState: { ...state.editState!, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0, columnIndex: 0,
+      rowCount: 2, columnCount: 2, hasMultiCellSelection: false, canSplitCell: true } } });
+  const submit = mock(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'noop' }) } }));
+  binding.commands = { submit } as never;
+  controller.attach(binding);
+  expect(controller.environment().supportedCommands?.has('tableAction')).toBe(true);
+  expect(controller.environment().tableActions).toEqual(new Set(['selectTable', 'selectRow', 'selectColumn',
+    'addRowAbove', 'addRowBelow', 'addColumnLeft', 'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable',
+    'mergeCells', 'splitCell', 'cellFillColor']));
+  expect(await controller.commands.store.execute('tableAction', 'selectTable')).toMatchObject({ ok: true, status: 'noop' });
+  expect(await controller.commands.store.execute('tableAction', 'selectRow')).toMatchObject({ ok: true });
+  expect(await controller.commands.store.execute('tableAction', 'selectColumn')).toMatchObject({ ok: true });
+  const calls = submit.mock.calls as unknown as Array<[unknown, unknown]>;
+  expect(calls.map(([intent, options]) => ({ intent, options }))).toEqual([
+    { intent: { kind: 'selectTableCells', payload: { target: 'table' } }, options: { source: 'selection', fence: true } },
+    { intent: { kind: 'selectTableCells', payload: { target: 'row' } }, options: { source: 'selection', fence: true } },
+    { intent: { kind: 'selectTableCells', payload: { target: 'column' } }, options: { source: 'selection', fence: true } },
+  ]);
+  expect(await controller.commands.store.execute('tableAction', 'deleteRow')).toMatchObject({ ok: true, status: 'noop' });
+  expect(calls.at(-1)).toEqual([{ kind: 'deleteTableRow', payload: {} }, { fence: true }]);
+});
+
+function tableFixture(tableContext: Record<string, unknown> = {}) {
+  const { controller, binding, viewStore } = fixture();
+  const state = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection: null,
+    editState: { ...state.editState!, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0, columnIndex: 0,
+      rowCount: 3, columnCount: 3, hasMultiCellSelection: true, canSplitCell: true, rowSpan: 1, columnSpan: 1, ...tableContext } } });
+  const submit = mock(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }) } }));
+  binding.commands = { submit } as never;
+  controller.attach(binding);
+  return { controller, binding, viewStore, submit };
+}
+
+test('table structure actions submit the worker table commands without a selection', async () => {
+  const { controller, submit } = tableFixture();
+  expect(controller.environment().tableActions).toEqual(new Set(['selectTable', 'selectRow', 'selectColumn',
+    'addRowAbove', 'addRowBelow', 'addColumnLeft', 'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable',
+    'mergeCells', 'splitCell', 'cellFillColor']));
+  const cases: Array<[unknown, unknown]> = [
+    ['addRowAbove', { kind: 'insertTableRow', payload: { side: 'above' } }],
+    ['addRowBelow', { kind: 'insertTableRow', payload: { side: 'below' } }],
+    ['addColumnLeft', { kind: 'insertTableColumn', payload: { side: 'left' } }],
+    ['addColumnRight', { kind: 'insertTableColumn', payload: { side: 'right' } }],
+    ['deleteRow', { kind: 'deleteTableRow', payload: {} }],
+    ['deleteColumn', { kind: 'deleteTableColumn', payload: {} }],
+    ['deleteTable', { kind: 'deleteTable', payload: {} }],
+    ['mergeCells', { kind: 'mergeTableCells', payload: {} }],
+    [{ type: 'cellFillColor', color: '#FF0000' }, { kind: 'setTableCellShading', payload: { color: 'FF0000' } }],
+    [{ type: 'cellFillColor', color: null }, { kind: 'setTableCellShading', payload: { color: null } }],
+  ];
+  for (const [action] of cases) {
+    expect(await controller.commands.store.execute('tableAction', action as never)).toMatchObject({ ok: true, status: 'executed' });
+  }
+  expect((submit.mock.calls as unknown as Array<[unknown, unknown]>).map(([intent, options]) => ({ intent, options })))
+    .toEqual(cases.map(([, intent]) => ({ intent, options: { fence: true } })));
+  submit.mockImplementation(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'refused', reason: 'invalid-cell-target' }) } }));
+  expect(await controller.commands.store.execute('tableAction', 'deleteRow')).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
+});
+
+test('unsupported table border actions still gate unsupported-command', async () => {
+  const { controller, submit } = tableFixture();
+  for (const action of ['borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop'] as const) {
+    expect(controller.commands.store.getState('tableAction', action))
+      .toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
+    expect(await controller.commands.store.execute('tableAction', action)).toMatchObject({ ok: false });
+  }
+  for (const action of [{ type: 'borderColor', color: 'FF0000' }, { type: 'borderWidth', size: 8 },
+    { type: 'cellBorder', side: 'top', style: 'single', size: 4, color: 'FF0000' }] as const) {
+    expect(controller.commands.store.getState('tableAction', action as never))
+      .toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
+  }
+  expect(submit).not.toHaveBeenCalled();
+});
+
+test('table structure gates follow last row and column, merge selection and suggesting mode', async () => {
+  const single = tableFixture({ rowCount: 1, columnCount: 1, hasMultiCellSelection: false });
+  expect(single.controller.commands.store.getState('tableAction', 'deleteRow'))
+    .toMatchObject({ enabled: false, disabledReason: { code: 'last-row' } });
+  expect(single.controller.commands.store.getState('tableAction', 'deleteColumn'))
+    .toMatchObject({ enabled: false, disabledReason: { code: 'last-column' } });
+  expect(single.controller.commands.store.getState('tableAction', 'mergeCells'))
+    .toMatchObject({ enabled: false, disabledReason: { code: 'multiple-cells-required' } });
+
+  const { controller } = tableFixture();
+  expect(await controller.commands.store.execute('editingMode', { mode: 'suggesting' })).toMatchObject({ ok: true });
+  for (const action of ['addRowAbove', 'addRowBelow', 'deleteRow'] as const) {
+    expect(controller.commands.store.getState('tableAction', action)).toMatchObject({ enabled: true });
+  }
+  for (const action of ['addColumnLeft', 'addColumnRight', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell'] as const) {
+    expect(controller.commands.store.getState('tableAction', action))
+      .toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-unsupported' } });
+  }
+  expect(controller.commands.store.getState('tableAction', { type: 'cellFillColor', color: 'FF0000' }))
+    .toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-unsupported' } });
+});
+
+test('splitCell opens the dialog with span defaults and submits splitTableCell on apply', async () => {
+  const { controller, submit } = tableFixture({ rowSpan: 1, columnSpan: 2 });
+  let captured: { defaults: unknown; apply(rows: number, columns: number): Promise<unknown> } | undefined;
+  const openSplitCell = mock((defaults: unknown, apply: (rows: number, columns: number) => Promise<unknown>) => {
+    captured = { defaults, apply };
+  });
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, openSplitCell } as never);
+  expect(await controller.commands.store.execute('tableAction', 'splitCell')).toMatchObject({ ok: true, status: 'opened' });
+  expect(openSplitCell).toHaveBeenCalledTimes(1);
+  expect(captured!.defaults).toEqual({ initialRows: 1, initialCols: 2, minRows: 1, minCols: 2 });
+  expect(submit).not.toHaveBeenCalled();
+  expect(await captured!.apply(1, 3)).toMatchObject({ ok: true, status: 'executed' });
+  expect((submit.mock.calls as unknown as Array<[unknown, unknown]>).map(([intent, options]) => ({ intent, options })))
+    .toEqual([{ intent: { kind: 'splitTableCell', payload: { rows: 1, columns: 3 } }, options: { fence: true } }]);
+});
+
 test('internal modes remain switchable after viewing and update mutation author context', async () => {
   const { controller, binding } = fixture();
   const author = mock((_name: string | null) => {});

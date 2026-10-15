@@ -29,9 +29,7 @@
 
 - **Real-time collaboration.** People and agents edit the same file together,
   with live cursors and selections. Concurrent changes merge automatically,
-  and offline edits sync when peers reconnect. The reference relay checkpoints
-  stored updates and rehydrates rooms after restarts, preserving CRDT identities.
-  Its 24-hour idle expiration still applies.
+  and offline edits sync when peers reconnect.
 
 - **Undo and redo.** Navigate editing history and undo accepted agent
   proposals as a single step.
@@ -39,9 +37,6 @@
 - **Embed or automate.** Drop React editors into your app, build on the
   framework-free JavaScript cores, or use Rust and Python APIs for headless
   processing and agent workflows.
-
-- **Host-controlled XLSX editing.** XLSX hosts can intercept saving, flush drafts and accepted clipboard input,
-  and query the cell under a pointer without moving the selection.
 
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
@@ -56,7 +51,7 @@
 | package | registry | what it does |
 |---|---|---|
 | [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | crates.io | typed Rust API for opening, editing, laying out, and saving DOCX documents |
-| [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
+| [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core: parsing, CRDT editing, and page layout in Rust through WebAssembly |
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
@@ -74,7 +69,7 @@
 | package | registry | what it does |
 |---|---|---|
 | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | crates.io | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
-| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, image insertion, shape ordering, and rendering in Rust through WebAssembly |
+| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core: slide model, masters, editing, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
@@ -84,16 +79,27 @@ VSDX packages build from this repository; see the [VSDX guide](https://docs.bett
 
 ### Agent tools
 
-[`@betteroffice/agents`](packages/agents) lets agents find, read and edit DOCX text with tracked
-changes; edit XLSX values, formulas and formatting, sort ranges and manage rows, columns and
-sheets; and edit PPTX text, bullets and speaker notes, manage slides and add text boxes, shapes
-and images, with previews for all three, through a TypeScript SDK or the `betteroffice-mcp`
-server.
+[`@betteroffice/agents`](packages/agents) lets agents search, read, edit and preview DOCX, XLSX
+and PPTX files through a TypeScript SDK or the `betteroffice-mcp` server.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
+
+## Evals
+
+`gpt-6-luna` via `codex exec`, one run per task, on the [format eval suite](eval/README.md): 10 DOCX, 10 XLSX and 10 PPTX edits. A task passes only if the edit is correct and the rest of the file is untouched.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 6/10 | **10/10** |
+| XLSX | 0/10 | **10/10** |
+| PPTX | 8/10 | **10/10** |
+
+Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
+
+[Per-task results and methodology](https://evals.betteroffice.dev).
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
@@ -162,8 +168,7 @@ bun run rust:check   # fmt + clippy + tests for the engines
 
 Run `bun run test:e2e:browser` for headless browser tests of all three editors.
 The [E2E guide](e2e/README.md) also covers pinned corpus scenarios,
-cross-SDK checks, and operation profiles. The XLSX and PPTX JavaScript cores expose
-opt-in operation timings; the native XLSX facade also reports edit stage timings.
+cross-SDK checks, and operation profiles.
 
 Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
 

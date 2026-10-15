@@ -121,6 +121,7 @@ struct AxisSpan {
 impl AxisLayout {
     fn new(
         limit: u32,
+        last_sized: Option<u32>,
         frozen: u32,
         scroll: f32,
         extent: f32,
@@ -148,13 +149,18 @@ impl AxisLayout {
         }
 
         let sheet_extent = edge(limit);
-        if frozen < limit && frozen_extent < extent && sheet_extent - scroll > frozen_extent {
+        if let Some(last_sized) = last_sized
+            && frozen < limit
+            && frozen_extent < extent
+            && sheet_extent - scroll > frozen_extent
+        {
             let body_extent = extent - frozen_extent;
             let origin = frozen_extent + scroll;
-            let first = at(origin).max(frozen).min(limit - 1);
+            let end = last_sized.max(frozen);
+            let first = at(origin).max(frozen).min(end);
             let last = at((origin + body_extent).min(sheet_extent))
                 .max(first)
-                .min(limit - 1);
+                .min(end);
             for index in first..=last {
                 let raw_start = edge(index) - scroll;
                 let raw_end = edge(index + 1) - scroll;
@@ -449,6 +455,7 @@ fn viewport_axes(
     let cols_axis = |extent: f32| {
         AxisLayout::new(
             MAX_COLS,
+            geometry.last_col_with_width(),
             frozen_cols,
             viewport.x,
             extent,
@@ -461,6 +468,7 @@ fn viewport_axes(
         && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen);
     let mut rows = AxisLayout::new(
         MAX_ROWS,
+        geometry.last_row_with_height(),
         frozen_rows,
         viewport.y,
         if cols_off_grid { 0.0 } else { viewport.height },

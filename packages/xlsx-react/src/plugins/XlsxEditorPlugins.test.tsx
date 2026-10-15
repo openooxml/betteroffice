@@ -2393,7 +2393,14 @@ describe('XlsxEditor plugin adapters', () => {
   });
 
   test('plugin reads wait for a chart nudge and refuse during a chart drag', async () => {
-    const [chart] = openWorkbook(charted.slice()).displayList({ x: 0, y: 0, ...VIEWPORT }).charts!;
+    const [chart] = (() => {
+      const workbook = openWorkbook(charted.slice());
+      try {
+        return workbook.displayList({ x: 0, y: 0, ...VIEWPORT }).charts!;
+      } finally {
+        workbook.dispose();
+      }
+    })();
     const center = {
       clientX: chart.clip.x + chart.clip.w / 2,
       clientY: chart.clip.y + chart.clip.h / 2,

@@ -1,6 +1,7 @@
-import type { ParagraphFormatting, Table, TableLook } from '../types/document';
+import type { ParagraphFormatting, Table, TableLook, TextFormatting } from '../types/document';
 import type { Style } from '../types/styles';
 import { mergeParagraphFormatting } from '../utils/paragraphFormattingMerge';
+import { mergeTextFormatting } from '../utils/textFormattingMerge';
 
 export function tableCellParagraphFormatting(
   table: Table,
@@ -10,8 +11,38 @@ export function tableCellParagraphFormatting(
   endColumn: number,
   columns: number
 ): ParagraphFormatting | undefined {
-  let result = style?.pPr;
-  if (!style?.tblStylePr?.some((part) => part.pPr)) return result;
+  return tableCellStyleFormatting(table, style, rowIndex, startColumn, endColumn, columns, 'pPr');
+}
+
+export function tableCellRunFormatting(
+  table: Table,
+  style: Style | undefined,
+  rowIndex: number,
+  startColumn: number,
+  endColumn: number,
+  columns: number
+): TextFormatting | undefined {
+  return tableCellStyleFormatting(table, style, rowIndex, startColumn, endColumn, columns, 'rPr');
+}
+
+function tableCellStyleFormatting<K extends 'pPr' | 'rPr'>(
+  table: Table,
+  style: Style | undefined,
+  rowIndex: number,
+  startColumn: number,
+  endColumn: number,
+  columns: number,
+  property: K
+): Style[K] {
+  const merge = (target: Style[K], source: Style[K]): Style[K] =>
+    (property === 'rPr'
+      ? mergeTextFormatting(target as TextFormatting | undefined, source as TextFormatting | undefined)
+      : mergeParagraphFormatting(target as ParagraphFormatting | undefined, source as ParagraphFormatting | undefined)) as Style[K];
+  let result = style?.[property];
+  if (property === 'rPr') {
+    result = merge(result, style?.tblStylePr?.find((part) => part.type === 'wholeTable')?.[property]);
+  }
+  if (!style?.tblStylePr?.some((part) => part[property])) return result;
   const look = table.formatting?.look ?? style.tblPr?.look;
   const flag = (key: Exclude<keyof TableLook, 'value'>, mask: number) =>
     look?.[key] ?? (Number.parseInt(look?.value ?? (look ? '0' : '04A0'), 16) & mask) !== 0;
@@ -56,9 +87,9 @@ export function tableCellParagraphFormatting(
     if (active) regions.push(region);
   }
   for (const region of regions) {
-    result = mergeParagraphFormatting(
+    result = merge(
       result,
-      style.tblStylePr.find((part) => part.type === region)?.pPr
+      style.tblStylePr.find((part) => part.type === region)?.[property]
     );
   }
   return result;

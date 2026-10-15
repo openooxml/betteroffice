@@ -6,7 +6,8 @@ import { findWordBoundaries } from '../utils/textSelection';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import { commandSelectionRange, readCommandSelection, resolveCommandSelection } from './residentCommandAnchors';
-import type { YrsLoc, YrsStoryRange } from './index';
+import { resolvePointerCellRange, resolveShiftArrowCellRange } from './residentCommandTableSelection';
+import type { YrsLoc, YrsStoryRange, YrsTableRange } from './index';
 import type {
   DocxCommandApplyContext,
   DocxCommandIntent,
@@ -41,6 +42,7 @@ export type ResolveDocxSelectionIntentResult = {
   selection: DocxCommandSelection;
   range: YrsStoryRange;
   goalX?: number;
+  cells?: YrsTableRange | null;
 };
 
 interface SelectionReads {
@@ -59,6 +61,11 @@ interface SelectionReads {
 }
 
 const selectionReads = new WeakMap<ResidentDocxCommandEngine, SelectionReads>();
+
+export function releaseResidentSelectionReads(engine: ResidentDocxCommandEngine): void {
+  for (const queries of selectionReads.get(engine)?.queries.values() ?? []) queries.dispose();
+  selectionReads.delete(engine);
+}
 
 function readsFor(engine: ResidentDocxCommandEngine): SelectionReads {
   const reader = engine.geometryReader;
@@ -252,6 +259,7 @@ export function resolveDocxSelectionIntent(
   let goalX: number | undefined;
   let anchor: YrsLoc = base.anchor;
   let focus: YrsLoc = base.focus;
+  let cells: YrsTableRange | null | undefined;
   if (command.kind === 'navigate') {
     const navigation = command.payload;
     const backward = navigation.direction === 'backward' || navigation.direction === 'up';
@@ -316,9 +324,18 @@ export function resolveDocxSelectionIntent(
       }
       focus = { story: focus.story, paraId: spans[paragraph]!.paraId, offset };
     }
-    if (navigation.extend && anchor.story !== focus.story) {
-      focus = base.focus;
-      clamped = true;
+    if (navigation.extend) {
+      const stepped = resolveShiftArrowCellRange(engine, base, focus, navigation.unit, navigation.direction,
+        'goalX' in navigation ? navigation.goalX : undefined);
+      if (stepped) {
+        anchor = stepped.selection.anchor;
+        focus = stepped.selection.focus;
+        cells = stepped.cells;
+        if (stepped.goalX !== undefined) goalX = stepped.goalX;
+      } else if (anchor.story !== focus.story) {
+        focus = base.focus;
+        clamped = true;
+      }
     }
     if (!navigation.extend) anchor = focus;
   } else {
@@ -363,8 +380,15 @@ export function resolveDocxSelectionIntent(
     }
     if (command.kind === 'extendSelection' || point.modifiers.shift) {
       if (anchor.story !== focus.story) {
-        focus = base.focus;
-        clamped = true;
+        const pointer = resolvePointerCellRange(engine, base.anchor, focus);
+        if (pointer) {
+          anchor = pointer.textAnchor;
+          focus = pointer.textAnchor;
+          cells = pointer.cells;
+        } else {
+          focus = base.focus;
+          clamped = true;
+        }
       }
     } else {
       anchor = focus;
@@ -385,5 +409,6 @@ export function resolveDocxSelectionIntent(
     clamped = true;
   }
   if (!range) throw new Error('Document has no valid selection');
-  return { status: clamped ? 'clamped' : 'resolved', selection, range, ...(goalX === undefined ? {} : { goalX }) };
+  return { status: clamped ? 'clamped' : 'resolved', selection, range,
+    ...(goalX === undefined ? {} : { goalX }), ...(cells === undefined ? {} : { cells }) };
 }

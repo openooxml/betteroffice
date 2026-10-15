@@ -8,6 +8,24 @@ async function open(page: Page) {
   await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
 }
 
+// Chromium's inspector holds an awaited promise weakly: a GC after it settles but before the reply
+// fails the call ("Promise was collected", reported as a navigation). The holder keeps it reachable.
+async function operate<R, A = undefined>(page: Page, operation: (arg: A) => Promise<R>, arg?: A): Promise<R> {
+  const holder = await page.evaluateHandle<{ run(arg: unknown): Promise<R>; promise?: Promise<R> }>(
+    `({ run: ${operation} })`
+  );
+  try {
+    const result = await holder.evaluateHandle((holder, arg) => (holder.promise = holder.run(arg)), arg);
+    try {
+      return (await result.jsonValue()) as R;
+    } finally {
+      await result.dispose();
+    }
+  } finally {
+    await holder.dispose();
+  }
+}
+
 async function offsets(page: Page) {
   return page.evaluate(() => {
     const canvas = document.querySelector('canvas[data-page-index="0"]')?.getBoundingClientRect();
@@ -57,7 +75,7 @@ test('after an edit, overlays and sidebar cards follow the new version; cards ke
   const before = await card.getAttribute('data-version');
   await page.getByTestId('probe-append').click();
   await expect(card).not.toHaveAttribute('data-version', before!);
-  const version = await page.evaluate(async () => {
+  const version = await operate(page, async () => {
     const editor = (
       window as unknown as {
         __probe: {
@@ -93,7 +111,7 @@ test('navigation scrolls the paragraph into view and reports success', async ({ 
 
 test('navigation keeps the selection unless focus is requested', async ({ page }) => {
   await open(page);
-  const paragraphs = () => page.evaluate(async () =>
+  const paragraphs = () => operate(page, async () =>
     (await (window as unknown as LooseProbe).__probe.editor.readParagraphs({ view: 'accepted' })).paragraphs);
   const text = async (paraId: string) => (await paragraphs()).find(paragraph => paragraph.paraId === paraId)?.text;
   const navigate = async (id: string) => {
@@ -120,7 +138,7 @@ test('navigation keeps the selection unless focus is requested', async ({ page }
 
 test('navigation builds and reaches a paragraph on an unresident page', async ({ page }) => {
   await open(page);
-  const filled = await page.evaluate(async () => {
+  const filled = await operate(page, async () => {
     const { editor } = (window as unknown as LooseProbe).__probe;
     const read = await editor.readParagraphs({ view: 'accepted' });
     return editor.applyEdits({ expectVersion: read.version, steps: [{ op: 'insertParagraphs',
@@ -204,7 +222,7 @@ test('sidebar cards make room for comments and start afresh after replacement', 
   await open(page);
   const card = page.getByTestId('probe-card');
   await expect(card).toBeVisible();
-  await page.evaluate(async (worker) => {
+  await operate(page, async (worker) => {
     const editor = (
       window as unknown as {
         __probe: {
@@ -239,7 +257,7 @@ test('sidebar cards make room for comments and start afresh after replacement', 
   await expect(card).toHaveAttribute('data-expanded', 'true');
   await expect(card).toHaveAttribute('data-clicks', '1');
   const before = await card.getAttribute('data-version');
-  await page.evaluate(() =>
+  await operate(page, () =>
     (window as unknown as { __probe: { reload(): Promise<void> } }).__probe.reload()
   );
   await expect(card).toBeVisible({ timeout: 60_000 });
@@ -296,7 +314,7 @@ test('page overlays stay on the previous layout while an edit lays out, then fol
   await open(page);
   const added = page.locator(`[data-probe-page="${await page.evaluate(() => (window as unknown as LooseProbe).__probe.geometry.layout.pageCount)}"]`);
   await expect(added).not.toBeAttached();
-  const version = await page.evaluate(async () => {
+  const version = await operate(page, async () => {
     const { editor } = (window as unknown as LooseProbe).__probe;
     const read = await editor.readParagraphs({ view: 'accepted' });
     const gaps = { count: 0 };
@@ -351,7 +369,7 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
   page,
 }) => {
   await open(page);
-  const filled = await page.evaluate(async () => {
+  const filled = await operate(page, async () => {
     const { editor } = (window as unknown as LooseProbe).__probe;
     const read = await editor.readParagraphs({ view: 'accepted' });
     const paragraphs = Array.from({ length: 80 }, (_, index) => ({
@@ -382,7 +400,7 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       .toBeLessThan(1.5);
     await second.scrollIntoViewIfNeeded();
     await expect(second).toBeInViewport();
-    const query = await page.evaluate(async (worker) => {
+    const query = await operate(page, async (worker) => {
       const { editor, geometry } = (window as unknown as LooseProbe).__probe;
       const surface = document.querySelector('canvas[data-page-index="1"]')!;
       const canvas = surface.getBoundingClientRect();
@@ -420,7 +438,7 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
     await page.mouse.click(x, y);
     await expect
       .poll(() =>
-        page.evaluate(async (worker) => {
+        operate(page, async (worker) => {
           const { editor } = (window as unknown as LooseProbe).__probe;
           if (!worker) return editor.getEditorRef().getYrsSession().selection()?.head ?? null;
           const info = await editor.readSelectionInfo();
@@ -429,7 +447,7 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       )
       .toEqual(query.loc);
 
-    const inserted = await page.evaluate(async ({ target, version }: PointHit) => {
+    const inserted = await operate(page, async ({ target, version }: PointHit) => {
       const { editor } = (window as unknown as LooseProbe).__probe;
       const text = async (): Promise<string> => {
         const read = await editor.readParagraphs({ story: target.story, view: 'accepted' });

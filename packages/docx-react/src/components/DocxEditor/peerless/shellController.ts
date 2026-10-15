@@ -1,6 +1,7 @@
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
 import { WASM32_MEMORY_LIMIT_BYTES, type DocxEditRequest, type DocxEditResult, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
   type ResidentFontEnvironment, type ResidentFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
+import { computeSplitDialogDefaults } from '@betteroffice/docx/utils';
 import { normalizeFontFamilies } from '@betteroffice/docx/utils/fontOptions';
 import { DEFAULT_FONTS } from '../../ui/FontPicker';
 import { DEFAULT_STYLES } from '../../ui/StylePicker';
@@ -56,6 +57,8 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
   pickImage?(insert: (image: Readonly<Record<string, unknown>>) => Promise<DocxCommandResult>): void;
+  openSplitCell?(defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
+    apply: (rows: number, columns: number) => Promise<DocxCommandResult>): void;
 }
 
 export function createPeerlessShellController(initial: Options) {
@@ -129,8 +132,10 @@ export function createPeerlessShellController(initial: Options) {
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
       sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage',
+      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
         ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
+      tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
+        'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor']),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
@@ -315,6 +320,40 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'indent' || id === 'outdent') return format({ kind: 'changeIndent', payload: { direction: id === 'indent' ? 'increase' : 'decrease' } });
       if (id === 'paragraphStyle') return format({ kind: 'applyParagraphStyle', payload: { styleId: (args as DocxCommandArgs['paragraphStyle']).styleId } });
       if (id === 'insertTable') return submit({ kind: 'insertTable', payload: args as DocxCommandArgs['insertTable'] });
+      if (id === 'tableAction') {
+        const key = typeof args === 'string' ? args : (args as { type?: string } | undefined)?.type;
+        const target: 'table' | 'row' | 'column' | null = key === 'selectTable' ? 'table' : key === 'selectRow' ? 'row' : key === 'selectColumn' ? 'column' : null;
+        if (target) {
+          const current = ready();
+          return settleCommand(current, current.commands.submit({ kind: 'selectTableCells', payload: { target } },
+            { source: 'selection', fence: true }));
+        }
+        switch (key) {
+          case 'addRowAbove': return submit({ kind: 'insertTableRow', payload: { side: 'above' } });
+          case 'addRowBelow': return submit({ kind: 'insertTableRow', payload: { side: 'below' } });
+          case 'addColumnLeft': return submit({ kind: 'insertTableColumn', payload: { side: 'left' } });
+          case 'addColumnRight': return submit({ kind: 'insertTableColumn', payload: { side: 'right' } });
+          case 'deleteRow': return submit({ kind: 'deleteTableRow', payload: {} });
+          case 'deleteColumn': return submit({ kind: 'deleteTableColumn', payload: {} });
+          case 'deleteTable': return submit({ kind: 'deleteTable', payload: {} });
+          case 'mergeCells': return submit({ kind: 'mergeTableCells', payload: {} });
+          case 'cellFillColor': {
+            const color = (args as { color?: string | null }).color;
+            const normalized = color === null || color === undefined || color === '' ? null : color.replace(/^#/, '');
+            return submit({ kind: 'setTableCellShading', payload: { color: normalized } });
+          }
+          case 'splitCell': {
+            if (!options.openSplitCell) break;
+            const tableContext = snapshot.view?.editState?.tableContext;
+            const defaults = computeSplitDialogDefaults(tableContext?.rowSpan ?? 1, tableContext?.columnSpan ?? 1);
+            const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
+            options.openSplitCell(defaults, (rows, columns) =>
+              deferred.complete(() => submit({ kind: 'splitTableCell', payload: { rows, columns } })));
+            return { ok: true, status: 'opened' };
+          }
+          default: break;
+        }
+      }
       if (id === 'insertImage' && options.pickImage) {
         const picker = commands.defer('insertImage', null, 'selection');
         options.pickImage(image => picker.complete(() => submit({ kind: 'insertImage', payload: { image } })));

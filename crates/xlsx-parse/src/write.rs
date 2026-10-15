@@ -23,7 +23,8 @@ use crate::axis::SheetAxes;
 use crate::package::{
     ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
     XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
-    parse_relationships, relationship_part_path, remove_attribute, set_attribute,
+    parse_relationships, relationship_part_path, relationships_by_id, remove_attribute,
+    set_attribute,
 };
 use crate::patch::{
     SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
@@ -335,6 +336,10 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         &mut used_paths,
         &worksheet_relationship_type,
     )?;
+    let mut planned_ids = sheets
+        .iter()
+        .filter_map(|sheet| sheet.relationship.id().map(str::to_owned))
+        .collect::<HashSet<_>>();
     let shared_strings = have_sst.then(|| {
         plan_part(
             package.shared_strings.as_ref(),
@@ -343,6 +348,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             &shared_strings_relationship_type,
             "xl/sharedStrings.xml",
             &mut used_relationship_ids,
+            &mut planned_ids,
         )
     });
     let shared_string_plan = package
@@ -365,6 +371,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             &styles_relationship_type,
             "xl/styles.xml",
             &mut used_relationship_ids,
+            &mut planned_ids,
         )
     });
     let synthesized_styles = package.styles.is_none() && !wb.styles.is_empty();
@@ -376,6 +383,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             &theme_relationship_type,
             "xl/theme/theme1.xml",
             &mut used_relationship_ids,
+            &mut planned_ids,
         )
     });
 
@@ -531,6 +539,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             styles.as_ref(),
             theme.as_ref(),
             edited,
+            &mut used_relationship_ids,
         )?,
     )?;
     parts.set(
@@ -1057,17 +1066,16 @@ fn plan_sheets(
     worksheet_relationship_type: &str,
 ) -> Result<Vec<PlannedSheet>, ParseError> {
     let mut sheet_ids = SheetIds::new(package);
+    let relationship_by_id = relationships_by_id(&package.workbook_relationships);
     claimed_origins
         .iter()
         .map(|origin| {
             if let Some(origin) = *origin {
                 let source = &package.sheets[origin];
-                let source_relationship = source.relationship_id.as_deref().and_then(|id| {
-                    package
-                        .workbook_relationships
-                        .iter()
-                        .find(|relationship| relationship.id() == Some(id))
-                });
+                let source_relationship = source
+                    .relationship_id
+                    .as_deref()
+                    .and_then(|id| relationship_by_id.get(id).copied());
                 let relationship = match source_relationship {
                     Some(relationship) => relationship.clone(),
                     None => new_relationship(
@@ -1105,6 +1113,8 @@ fn plan_sheets(
         .collect()
 }
 
+/// Plans a part the reader finds by relationship type, so its relationship
+/// takes a fresh id when a sheet or another part already holds the source one.
 fn plan_part(
     source: Option<&PartReference>,
     relationships: &[Relationship],
@@ -1112,43 +1122,41 @@ fn plan_part(
     relationship_type: &str,
     fallback_path: &str,
     used_relationship_ids: &mut HashSet<String>,
+    planned_ids: &mut HashSet<String>,
 ) -> PlannedPart {
-    if let Some(source) = source {
-        let source_relationship = source
+    let typed = |relationship: &&Relationship| {
+        relationship.has_type(type_suffix) && relationship.target().is_some()
+    };
+    let source_relationship = source.and_then(|source| {
+        source
             .relationship_id
             .as_deref()
             .and_then(|id| {
                 relationships
                     .iter()
+                    .filter(typed)
                     .find(|relationship| relationship.id() == Some(id))
             })
-            .or_else(|| {
-                relationships
-                    .iter()
-                    .find(|relationship| relationship.has_type(type_suffix))
-            });
-        let relationship = match source_relationship {
-            Some(relationship) => relationship.clone(),
-            None => new_relationship(
-                next_relationship_id(used_relationship_ids),
-                relationship_type,
-                relative_to_xl(&source.path),
-            ),
-        };
-        return PlannedPart {
-            path: source.path.clone(),
-            relationship,
-        };
-    }
-
-    PlannedPart {
-        path: fallback_path.to_owned(),
-        relationship: new_relationship(
+            .or_else(|| relationships.iter().find(typed))
+    });
+    let path = source.map_or_else(|| fallback_path.to_owned(), |source| source.path.clone());
+    let mut relationship = match source_relationship {
+        Some(relationship) => relationship.clone(),
+        None => new_relationship(
             next_relationship_id(used_relationship_ids),
             relationship_type,
-            relative_to_xl(fallback_path),
+            relative_to_xl(&path),
         ),
+    };
+    if relationship
+        .id()
+        .is_none_or(|id| !planned_ids.insert(id.to_owned()))
+    {
+        let id = next_relationship_id(used_relationship_ids);
+        planned_ids.insert(id.clone());
+        set_attribute(&mut relationship.attributes, "Id", "Id", id);
     }
+    PlannedPart { path, relationship }
 }
 
 /// Picks the relationship type the source uses, keeping Strict URIs intact.
@@ -1566,6 +1574,7 @@ fn merged_workbook_relationships(
     styles: Option<&PlannedPart>,
     theme: Option<&PlannedPart>,
     edited: bool,
+    used_relationship_ids: &mut HashSet<String>,
 ) -> Result<Vec<u8>, ParseError> {
     let planned = sheets
         .iter()
@@ -1594,22 +1603,32 @@ fn merged_workbook_relationships(
         .filter_map(|part| part.relationship_id.clone()),
     );
 
+    let resolved = relationships_by_id(&package.workbook_relationships);
     let mut emitted = HashSet::new();
     let mut merged = Vec::new();
+    let mut renumbered = Vec::new();
     for source in &package.workbook_relationships {
         if edited && source.has_type("calcChain") {
             continue;
         }
         let id = source.id();
-        if let Some(planned) = id.and_then(|id| planned_by_id.get(id))
-            && emitted.insert(id.unwrap().to_owned())
-        {
-            merged.push((*planned).clone());
+        if let Some(planned) = id.and_then(|id| planned_by_id.get(id)) {
+            if emitted.insert(id.unwrap().to_owned()) {
+                merged.push((*planned).clone());
+            }
         } else if id.is_some_and(|id| source_owned_ids.contains(id))
             || source.has_type("sharedStrings")
             || source.has_type("styles")
             || source.has_type("theme")
+            || source.target().is_none()
         {
+        } else if let Some(id) = id
+            && !resolved
+                .get(id)
+                .is_some_and(|resolved| std::ptr::eq(*resolved, source))
+        {
+            // a duplicate id the reader does not resolve keeps its part under a fresh id
+            renumbered.push(source);
         } else {
             merged.push(source.clone());
             if let Some(id) = id {
@@ -1623,6 +1642,16 @@ fn merged_workbook_relationships(
         {
             merged.push(relationship.clone());
         }
+    }
+    for source in renumbered {
+        let mut relationship = source.clone();
+        set_attribute(
+            &mut relationship.attributes,
+            "Id",
+            "Id",
+            next_relationship_id(used_relationship_ids),
+        );
+        merged.push(relationship);
     }
     relationships_xml(&merged)
 }

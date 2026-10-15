@@ -547,8 +547,9 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
     assert_eq!(to_json(&objects[1].anchor)["a1"], "K11");
 
     let summary = &content.sheets[1];
-    assert_eq!(summary.hidden_rows, ["4:5"]);
-    assert_eq!(summary.cells.len(), 3);
+    assert_eq!(summary.hidden_rows, ["4:4"]);
+    assert_eq!(cell(&content, 1, "A5").display_text, "zero height");
+    assert_eq!(summary.cells.len(), 4);
     assert_eq!(summary.cells[1].formula.as_deref(), Some("NOW()"));
     assert_eq!(
         summary.cells[1].value,
@@ -631,14 +632,7 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
         "Secret, Ghost, hidden rows on two sheets, hidden columns"
     );
     let serialized = serde_json::to_string(&content).unwrap();
-    for secret in [
-        "classified",
-        "boo",
-        "odd",
-        "secret row",
-        "secret column",
-        "zero height",
-    ] {
+    for secret in ["classified", "boo", "odd", "secret row", "secret column"] {
         assert!(!serialized.contains(secret), "{secret} leaked");
     }
 }
@@ -871,7 +865,7 @@ fn limits_truncate_at_complete_records() {
             assert_eq!(content, full);
         }
     }
-    assert_eq!(previous_cells, 22);
+    assert_eq!(previous_cells, 23);
 }
 
 #[test]

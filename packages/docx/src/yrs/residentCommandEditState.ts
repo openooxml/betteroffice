@@ -1,5 +1,6 @@
 import type { YrsHyperlinkAttrs, YrsSelectionContext } from './index';
 import { readCommandSelection } from './residentCommandAnchors';
+import { readCellSelection, resolveLiveCell } from './residentCommandTableSelection';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import type {
   DocxCommandTableContext,
@@ -70,25 +71,22 @@ function validTablePayload(value: unknown): value is TablePayload {
 }
 
 function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCommandTableContext | null {
-  const matches = Array.from(story.matchAll(/:t(\d+):r(\d+)c(\d+)(?=:|$)/g));
-  const match = matches[matches.length - 1];
-  if (!match || match.index == null) return null;
-  let focused = {
-    story: story.slice(0, match.index), tableIndex: Number(match[1]),
-    row: Number(match[2]), column: Number(match[3]),
-  };
-  if (![focused.tableIndex, focused.row, focused.column].every(Number.isSafeInteger)) return null;
-  const selected = engine.cellSelection();
-  const sameTable = selected && selected.anchor.story === selected.head.story &&
-    selected.anchor.tableIndex === selected.head.tableIndex &&
+  const focused = resolveLiveCell(engine, story);
+  if (!focused || ![focused.tableIndex, focused.row, focused.column].every(Number.isSafeInteger)) return null;
+  const selected = readCellSelection(engine);
+  const sameTable = !!selected && selected.anchor.story === focused.story &&
+    selected.anchor.tableIndex === focused.tableIndex &&
     selected.head.story === focused.story && selected.head.tableIndex === focused.tableIndex;
-  if (sameTable && selected) focused = selected.head;
+  const head = sameTable && selected ? selected.head : focused;
   const payload = engine.tablePayload(focused.story, focused.tableIndex);
   if (!validTablePayload(payload)) return null;
   const { anchors, columns } = tableAnchors(payload);
-  const cell = anchors.find((entry) => entry.row <= focused.row && focused.row < entry.row + entry.rowspan &&
-    entry.column <= focused.column && focused.column < entry.column + entry.colspan);
+  const cell = anchors.find((entry) => entry.row <= head.row && head.row < entry.row + entry.rowspan &&
+    entry.column <= head.column && head.column < entry.column + entry.colspan);
   if (!cell) return null;
+  const focusedCell = anchors.find((entry) => entry.row <= focused.row && focused.row < entry.row + entry.rowspan &&
+    entry.column <= focused.column && focused.column < entry.column + entry.colspan);
+  if (!focusedCell) return null;
   const properties = payload.rows.flatMap((row) => row.cells ?? []).find((entry) => entry.story === cell.story)?.tcPr;
   const borders = properties?.borders;
   let cellBorderColor: DocxCommandTableContext['cellBorderColor'];
@@ -103,11 +101,12 @@ function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCom
     }
   }
   return {
-    story: focused.story, tableIndex: focused.tableIndex, rowIndex: focused.row, columnIndex: focused.column,
+    story: focused.story, tableIndex: focused.tableIndex, rowIndex: head.row, columnIndex: head.column,
     rowCount: payload.rows.length, columnCount: columns,
     hasMultiCellSelection: !!(sameTable && selected && (selected.anchor.row !== selected.head.row ||
       selected.anchor.column !== selected.head.column)),
     canSplitCell: true,
+    rowSpan: focusedCell.rowspan, columnSpan: focusedCell.colspan,
     ...(typeof payload.tblPr?.justification === 'string' ? { justification: payload.tblPr.justification } : {}),
     ...(cellBorderColor ? { cellBorderColor } : {}),
     ...(typeof properties?.backgroundColor === 'string'

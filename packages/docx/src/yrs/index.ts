@@ -16,7 +16,7 @@
 
 import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
-import type { Document } from '../types/document';
+import type { Document, ParagraphFormatting, Table, TextFormatting } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import type {
   DocxParagraphAnchor,
@@ -47,6 +47,7 @@ import type {
 import type { DocxParagraphHeading } from './readTypes';
 import type { DocxListStoriesResult } from './stories';
 import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
+import type { DocxTableFragment } from './clipboardFragment';
 import {
   type DocxProposalRegistryState,
   type DocxProposalRequest,
@@ -85,6 +86,8 @@ export type {
   DocxCommandPayloads,
   DocxCommandSelection,
   DocxEditState,
+  DocxEchoGlyphLine,
+  DocxEchoGlyphSet,
   DocxEchoRect,
   DocxEchoTransform,
   DocxNavigationIntent,
@@ -110,6 +113,7 @@ export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
 export * from './storyPlainText';
+export * from './clipboardFragment';
 export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentRangeHighlights } from './residentRangeHighlights';
@@ -912,6 +916,16 @@ export interface YrsTableReceipt {
 }
 
 /**
+ * Receipt of {@link YrsSession.insertTableFragment}: the table receipt plus
+ * the caret right after the inserted table embed.
+ *
+ * @public
+ */
+export interface YrsTableFragmentReceipt extends YrsTableReceipt {
+  after: YrsLoc;
+}
+
+/**
  * OOXML-shaped cell border value passed through to `tcPr.borders`.
  *
  * @public
@@ -962,6 +976,30 @@ export interface YrsMediaSource {
 export interface YrsWorkerDocumentMirror {
   version: string;
   proposals: DocxProposalRegistryState;
+}
+
+/** What runs inherit under one package's styles. @internal */
+export interface YrsRunInheritance {
+  /**
+   * The attributes seeding merges into the marks of a run of `runStyle` in a
+   * paragraph of `paragraphStyle` before the run's direct formatting.
+   */
+  attributes(paragraphStyle: string | null, runStyle: string | null, tableRun?: TextFormatting): Record<string, unknown>;
+  paragraphFormatting(
+    paragraphStyle: string | null,
+    tableFormatting: ParagraphFormatting | undefined
+  ): ParagraphFormatting | undefined;
+  tableAttributes(table: Table): YrsTableInheritance;
+  dispose(): void;
+}
+
+export interface YrsTableInheritance {
+  attributes: Record<string, unknown>;
+  rows: Array<Array<{
+    attributes: Record<string, unknown>;
+    paragraphFormatting: ParagraphFormatting | null;
+    runFormatting: TextFormatting | null;
+  }>>;
 }
 
 export interface YrsSession extends CollaborationReplica {
@@ -1234,6 +1272,14 @@ export interface YrsSession extends CollaborationReplica {
   insertRow(at: YrsCellLoc, side: 'above' | 'below', suggesting?: YrsAuthor): YrsTableReceipt;
   /** Inserts a rectangular structural table at a paragraph-keyed location. */
   insertTable(at: YrsLoc, rows: number, columns: number, suggesting?: YrsAuthor): YrsTableReceipt;
+  /** Inserts a clipboard table fragment at a paragraph-keyed location. */
+  insertTableFragment(
+    at: YrsLoc,
+    table: DocxTableFragment,
+    suggesting?: YrsAuthor
+  ): YrsTableFragmentReceipt;
+  /** Validates a clipboard table fragment without mutating; throws when invalid. */
+  validateTableFragment(table: DocxTableFragment): void;
   /** Inserts a column left or right of the cell that `at` resolves into. */
   insertColumn(at: YrsCellLoc, side: 'left' | 'right'): YrsTableReceipt;
   /** Deletes every row covered by an explicit rectangular cell range. */
@@ -1447,6 +1493,8 @@ export interface YrsSession extends CollaborationReplica {
    * order and upper case. Reads only. @internal
    */
   writtenParagraphIds(bytes: Uint8Array): Record<string, string[]>;
+  /** Resolves what runs inherit under a package's `styles`. Reads only. @internal */
+  runInheritance(styles: Document['package']['styles']): YrsRunInheritance;
 
   // -- version-checked host edits --
 

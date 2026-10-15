@@ -95,7 +95,9 @@ test('ordered xlsx command frames release the resident lane for later admitted e
     const displayList = JSON.parse(new TextDecoder().decode(frame!.payload.displayList));
     expect(displayList.commands.some((entry: { op: string; text?: string }) => entry.op === 'text' && entry.text === '2')).toBe(true);
     expect((await client.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('2');
-  } finally { await client.dispose(); }
+  } finally {
+    try { await client.call.dispose(); } finally { await client.dispose(); }
+  }
 });
 
 test('large unchanged selection projections copy no edit state and changes stay sparse', async () => {

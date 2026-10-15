@@ -1126,20 +1126,22 @@ test('the editor state prefetch waits for a sliced background page-build reply w
       request.type === 'buildPages' || request.type === 'encodeState',
   };
   const { posted, workers, received, reply, replies } = installWorker(options);
+  // Each wait covers in-thread work on the 1200-paragraph fixture, over a second on a loaded runner.
+  const heavy = { timeout: 10_000 };
   const frames = holdFrames(true);
   const fallback = holdPeerFallback();
   const visibility = stubDocumentVisibility('visible');
   try {
     const props = { ...initialProps, source: await longFixture(1200) };
     const { result, unmount } = renderHook(useHarness, { initialProps: props });
-    await waitFor(() => expect(result.current.host).not.toBeNull());
+    await waitFor(() => expect(result.current.host).not.toBeNull(), heavy);
     const session = result.current.core.session!;
     const metadata = observeMetadataBootstrap(session);
     const load = spyOn(session, 'loadState');
     registerRestore(() => load.mockRestore());
     act(() => result.current.pipeline.runLayoutPipeline());
-    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
-    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session), heavy);
+    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true), heavy);
     act(() => result.current.presentFrame());
     const layout = result.current.renderer.settledDisplayList(null, null, 'document');
     void layout.catch(() => {});
@@ -1166,7 +1168,7 @@ test('the editor state prefetch waits for a sliced background page-build reply w
     expect(load).not.toHaveBeenCalled();
     const postedBeforeReply = posted.length;
     await act(async () => reply(batch));
-    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1), heavy);
     const prefetched = await received('encodeState');
     expect(posted.indexOf(prefetched)).toBeGreaterThanOrEqual(postedBeforeReply);
     expectStatePrefetchAfterPageBuilds(posted);
@@ -1179,7 +1181,7 @@ test('the editor state prefetch waits for a sliced background page-build reply w
       reply(prefetched);
       frames.runIdle();
     });
-    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true), heavy);
     expectStatePrefetchAfterPageBuilds(posted);
     expect(load).not.toHaveBeenCalled();
     expect(result.current.mainOpens).toEqual([]);
@@ -6271,6 +6273,12 @@ test('a failed empty hand-over releases the mirror before using the main replica
   })).toMatchObject({ ok: true });
 });
 
+const openingInputQueries: WeakRef<DisplayListQueries>[] = [];
+afterEach(() => {
+  for (const queries of openingInputQueries) queries.deref()?.dispose();
+  openingInputQueries.length = 0;
+});
+
 async function openingEditor(workerPreview = true, viewer = false, options: {
   delayQueries?: boolean;
   source?: Uint8Array;
@@ -6319,6 +6327,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
       });
       try {
         facade = createDisplayListQueries(queries.displayList, undefined, previousInputQueries, harness.core.session);
+        openingInputQueries.push(new WeakRef(facade));
       } finally {
         loaded.mockRestore();
         loading.mockRestore();

@@ -149,7 +149,7 @@ import {
 import type { FontOption } from './ui/FontPicker';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from './DocumentOutline';
 import { RULER_WIDTH } from './ui/VerticalRuler';
-import { SIDEBAR_DOCUMENT_SHIFT } from './sidebar/constants';
+import { minLayoutWidth } from './DocxEditor/minLayoutWidth';
 import { useCommentSidebarItems, type CommentCallbacks } from '../hooks/useCommentSidebarItems';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { DocxEditorPluginProps } from '../plugins/types';
@@ -207,6 +207,10 @@ export interface DocxDocumentChange {
 
 export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEditor/types';
 
+export interface DocxErrorInfo {
+  recoverable: boolean;
+}
+
 /**
  * DocxEditor props
  */
@@ -258,8 +262,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onDocumentChange?: (change: DocxDocumentChange) => void;
   /** Callback when selection changes */
   onSelectionChange?: (state: SelectionState | null) => void;
-  /** Callback on error */
-  onError?: (error: Error) => void;
+  /** Recoverable worker reports include `{ recoverable: true }`; fatal and legacy reports omit `info`. */
+  onError?: (error: Error, info?: DocxErrorInfo) => void;
   /**
    * Called when the fullest wasm memory, on the main thread or in the resident
    * worker, crosses a `memoryBudget` level or drops back below it. Silent while
@@ -309,6 +313,12 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    * with collaboration. Default false.
    */
   previewFirstPage?: boolean;
+  /**
+   * Accessible page DOM in the worker-only editor. `'full'` (default) places each line where
+   * it is painted; `'text'` keeps only readable text, links and tables, which costs less but
+   * gives assistive tech no on-page positions and plugin DOM range queries no elements.
+   */
+  pageMirror?: 'full' | 'text';
   /**
    * Lets the ref's proposal methods run while the editor is read-only or viewing. Typing,
    * `applyEdits`, commands and plugin writes stay blocked. Default: false.
@@ -2348,8 +2358,12 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Leg
     ? Math.round(Math.max(...sectionPageWidths) / 15)
     : DEFAULT_PAGE_WIDTH;
 
-  const minLayoutWidth =
-    2 * outlineLeftAllowance + maxPageWidthPx + (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0);
+  const layoutMinWidth = minLayoutWidth({
+    outlineLeftAllowance,
+    maxPageWidthPx,
+    zoom: state.zoom,
+    sidebarOpen,
+  });
 
   // pageWidthPx — the final section's width — positions the sidebar / comment
   // margin markers against the page most content lives under.
@@ -2568,7 +2582,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Leg
         showOutline={showOutline}
         showOutlineButton={showOutlineButton}
         sidebarOpen={sidebarOpen}
-        minLayoutWidth={minLayoutWidth}
+        minLayoutWidth={layoutMinWidth}
         editorScrollLeft={editorScrollLeft}
         expandedSidebarItem={expandedSidebarItem}
         trackedChanges={trackedChanges}

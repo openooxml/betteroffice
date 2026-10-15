@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
-import { toolbarColors, tooltipText, useDisabledDescription } from './ToolbarPrimitives';
+import { tooltipText, useDisabledDescription } from './ToolbarPrimitives';
+import {
+  TOOLBAR_DISABLED_OPACITY,
+  toolbarFocusStyle,
+  toolbarMenuItemStyle,
+  toolbarMenuStyle,
+  toolbarTheme,
+  useFocusRing,
+} from '../../../../../shared/react-toolbar/theme';
 
 export interface ComboboxOption {
   value: string;
@@ -35,6 +43,9 @@ export function EditableCombobox({
   const described = useDisabledDescription(disabled, description);
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
+  const [hoveredOption, setHoveredOption] = useState<string | null>(null);
+  const [focusedOption, setFocusedOption] = useState<string | null>(null);
+  const focus = useFocusRing<HTMLInputElement>();
   const [position, setPosition] = useState({ top: 0, left: 0, width });
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -87,12 +98,13 @@ export function EditableCombobox({
         alignItems: 'center',
         width,
         height: 28,
-        border: `1px solid ${toolbarColors.border}`,
-        borderRadius: 4,
-        background: disabled ? 'rgba(255,255,255,0.5)' : toolbarColors.surface,
-        opacity: disabled ? 0.48 : 1,
+        border: `1px solid ${toolbarTheme.line}`,
+        borderRadius: 6,
+        background: toolbarTheme.surface,
+        opacity: disabled ? TOOLBAR_DISABLED_OPACITY : 1,
         boxSizing: 'border-box',
         flex: '0 0 auto',
+        ...toolbarFocusStyle(focus.focusRing),
       }}
     >
       <input
@@ -107,6 +119,7 @@ export function EditableCombobox({
         title={described.reason ? tooltipText(label, null, described.reason) : undefined}
         value={draft}
         onFocus={(event) => {
+          focus.focusProps.onFocus(event);
           if (disabled) return;
           setOpen(true);
           event.currentTarget.select();
@@ -123,7 +136,8 @@ export function EditableCombobox({
             event.preventDefault();
           }
         }}
-        onBlur={() => {
+        onBlur={(event) => {
+          focus.focusProps.onBlur(event);
           if (disabled) return;
           requestAnimationFrame(() => {
             if (!menuRef.current?.contains(document.activeElement)) commit();
@@ -137,7 +151,7 @@ export function EditableCombobox({
           border: 0,
           outline: 0,
           background: 'transparent',
-          color: toolbarColors.text,
+          color: toolbarTheme.ink,
           font: '500 13px ui-sans-serif, system-ui, sans-serif',
           boxSizing: 'border-box',
           ...inputStyle,
@@ -165,11 +179,11 @@ export function EditableCombobox({
           padding: 0,
           border: 0,
           background: 'transparent',
-          color: toolbarColors.muted,
+          color: toolbarTheme.inkMuted,
           cursor: disabled ? 'default' : 'pointer',
         }}
       >
-        <ToolbarIcon name="chevronDown" size={14} />
+        <ToolbarIcon name="chevronDown" size={18} />
       </button>
       {open && !disabled && (
         <div
@@ -184,12 +198,7 @@ export function EditableCombobox({
             width: position.width,
             maxHeight: 260,
             overflowY: 'auto',
-            padding: 4,
-            border: `1px solid ${toolbarColors.border}`,
-            borderRadius: 6,
-            background: toolbarColors.surface,
-            boxShadow: '0 4px 16px rgba(60, 64, 67, 0.24)',
-            boxSizing: 'border-box',
+            ...toolbarMenuStyle,
           }}
         >
           {options.map((option) => (
@@ -204,21 +213,23 @@ export function EditableCombobox({
                 onCommit?.(option.value);
                 close();
               }}
+              onMouseEnter={() => setHoveredOption(option.value)}
+              onMouseLeave={() => setHoveredOption(null)}
+              onFocus={() => setFocusedOption(option.value)}
+              onBlur={() => setFocusedOption(null)}
               style={{
-                appearance: 'none',
-                display: 'block',
-                width: '100%',
+                ...toolbarMenuItemStyle({
+                  hovered: hoveredOption === option.value,
+                  focusRing: focusedOption === option.value,
+                }),
+                gap: 6,
                 minHeight: 28,
-                padding: '4px 7px',
-                border: 0,
-                borderRadius: 3,
-                background: option.value === value ? toolbarColors.active : 'transparent',
-                color: toolbarColors.text,
-                cursor: 'pointer',
-                font: '400 13px ui-sans-serif, system-ui, sans-serif',
-                textAlign: 'left',
+                padding: '4px 8px 4px 4px',
               }}
             >
+              <span style={{ display: 'inline-flex', width: 18, flex: '0 0 auto' }}>
+                {option.value === value && <ToolbarIcon name="check" size={18} />}
+              </span>
               {option.label}
             </button>
           ))}

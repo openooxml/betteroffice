@@ -1,5 +1,60 @@
 # BetterOffice
 
+## Commands
+
+Package manager is bun, not npm.
+
+```bash
+bun install
+bun run dev              # apps/web; dev:demo and dev:docs for the others
+bun run test             # builds the xlsx and docx wasm, then runs the TS tests
+bun run typecheck        # every workspace
+bun run rust:check       # cargo fmt --check, clippy -D warnings, cargo test
+bun run build:packages   # the published TS packages, each building its wasm
+bun run build            # apps/web
+
+bun test packages/xlsx -t "formula precedence"    # one TS test by name
+cargo test -p betteroffice-vsdx --test facade     # one crate or target; add --features wasm for wasm-gated tests
+```
+
+The `.wasm` and `.js` glue under `packages/*/src/wasm/generated/` are gitignored build
+artifacts; the tracked `.d.ts` files must be regenerated and committed when the WASM API
+changes. `bun test <path>` does not build them, so `Cannot find module './generated/...'`
+means a missing bundle: run `bun run build:<format>-wasm`. CI pins `wasm-pack` 0.15.0.
+Rust tests behind `#[cfg(target_arch = "wasm32")]` never compile under a normal
+`cargo test`; check what actually ran.
+
+## Architecture
+
+Every format (docx, xlsx, pptx, vsdx) is the same layered pipeline:
+
+```
+crates/<fmt>-parse          bytes <-> lossless document model
+crates/<fmt>-edit           Yrs CRDT session, mutation policy, transactional save
+crates/<fmt>-render         model -> display list (docx: docx-layout); -raster paints PNG
+crates/betteroffice-<fmt>   native Rust facade, the public crates.io API
+packages/<fmt>              framework-free TS core over the wasm bundle
+packages/<fmt>-react        React editor
+```
+
+Shared `ooxml-*` crates hold the OPC container, DrawingML, text, metafile, diff and
+redaction code. `bindings/` (PyO3) is a separate Cargo workspace that a root `cargo test`
+does not build.
+
+- Lossless round-trip is the core invariant: parsers keep unknown XML, attribute order and
+  source order, and saving patches the intact source part, so unchanged parts stay byte-identical.
+- Edits go through the format's mutation policy, never raw value writes; a refused edit
+  reports a typed receipt.
+- Where a format validates remote updates, it applies them to a staged clone and adopts it
+  only if valid, so a rejected update leaves state untouched.
+- The render and save projections of one state must agree; prefer making divergence
+  impossible by construction over adding another check.
+
+VSDX is a ShapeSheet model, not DrawingML: inches (not EMU), Y-up from bottom-left, and
+every cell has a formula `F` and a cached value `V`. Corpus tests read `VSDX_CORPUS_DIR`
+and skip when it is unset; never commit corpus files. Fixtures are synthetic, from
+`scripts/create-vsdx-fixture.ts`. Gate every vsdx crate, including `-p betteroffice-vsdx`.
+
 ## Comments
 
 NO inline comments unless the code is not understandable without them. Docstrings must be extremely concise.
@@ -10,6 +65,7 @@ NO inline comments unless the code is not understandable without them. Docstring
 - Touch user docs only when public API or user-visible behaviour changes, and then minimally.
 - No process, status, planning or agent-loop documents in the repo: operating guides, running benchmark logs, overnight plans, personal paths or environments.
 - `openspec/` is only for major, long-term initiatives. Keep a spec current or delete it.
+- `apps/web/public/llms.txt`, the landing page copy (`apps/web/app/content.ts`) and `README.md` describe formats and packages at a high level. Never append API details, options or status notes there; they belong in the docs site and changesets.
 
 ## Titles
 

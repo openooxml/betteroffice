@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -39,6 +39,16 @@ const FONT = resolve(
 
 const PRESENT_ONLY = 1 << 7;
 const ABSENT_ANCHOR = -(2n ** 63n);
+
+const sessions: ReturnType<typeof createEditSession>[] = [];
+const facades: ReturnType<typeof createDisplayListQueries>[] = [];
+
+afterEach(() => {
+  for (const facade of facades) facade.dispose();
+  facades.length = 0;
+  for (const session of sessions) session.free();
+  sessions.length = 0;
+});
 
 it('resumable decoding matches synchronous decoding and still validates late failures', () => {
   const bytes = shiftFrame([[0, 1, 1, 1]], []);
@@ -567,7 +577,7 @@ describe('FrameDelta range shifts', () => {
             Object.getOwnPropertyDescriptors(expectedPage)
           );
           if (index < 4) {
-            expect(displayPageRevision(page)).toBe(apply === applyFrameDeltaOwned ? 1 : 0);
+            expect(displayPageRevision(page)).toBe(1);
             expect(page === previous.pages[index]!.page).toBe(apply === applyFrameDeltaOwned);
           }
         }
@@ -923,6 +933,7 @@ describe('FrameDelta wire round-trip', () => {
 
   it.skipIf(!hasEditWasm)('decodes wasm-encoded full and delta frames to the equivalent JSON list', () => {
     const session = createEditSession(11);
+    sessions.push(session);
     const { paraId } = JSON.parse(session.create_story('body', 'Hello frame', 'Normal', 'left'));
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
     const request = JSON.stringify({
@@ -975,6 +986,7 @@ describe('FrameDelta wire round-trip', () => {
 
   it.skipIf(!hasEditWasm)('retains owned primitive ids, so no retained page keeps its frame buffer alive', () => {
     const session = createEditSession(12);
+    sessions.push(session);
     session.create_story('body', 'Hello frame', 'Normal', 'left');
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
     const output = JSON.parse(
@@ -1011,6 +1023,7 @@ describe('FrameDelta wire round-trip', () => {
 
   it.skipIf(!hasEditWasm)('records owned position shifts and ships them as query-store shift ops', () => {
     const session = createEditSession(13);
+    sessions.push(session);
     const sentence = 'shift the following pages with enough text to fill several tiny pages. ';
     const { paraId } = JSON.parse(
       session.create_story('body', `start me. ${sentence.repeat(12)}`, 'Normal', 'left')
@@ -1086,6 +1099,7 @@ describe('FrameDelta wire round-trip', () => {
       verticalMoveByHandle: () => 'null',
     };
     const firstQueries = createDisplayListQueries(retained.displayList, engine);
+    facades.push(firstQueries);
     // parse every page into the store, so adoption has retained pages to shift
     firstQueries.rangeRects(0, Number.MAX_SAFE_INTEGER);
     expect(updates.length).toBe(1);
@@ -1111,6 +1125,7 @@ describe('FrameDelta wire round-trip', () => {
     // handle adoption ships those shifts as compact ops instead of replacing
     // the page's serialized payload
     const secondQueries = createDisplayListQueries(next.displayList, engine, firstQueries);
+    facades.push(secondQueries);
     secondQueries.prime();
     expect(updates.length).toBe(2);
     const update = JSON.parse(updates[1]!) as {
@@ -1484,7 +1499,7 @@ describe('FrameDelta note anchor shifts', () => {
       ).displayList.pages[0]!;
       expect(moved.primitives[0]).toMatchObject({ docStart: 3, docEnd: 4 });
       expect(moved.noteAreas![0]!.notes).toEqual([{ id: 1, anchorDocStart: 7 }]);
-      if (apply === applyFrameDeltaOwned) expect(displayPageNoteAnchorRevision(moved)).toBe(1);
+      expect(displayPageNoteAnchorRevision(moved)).toBe(1);
 
       for (const missing of [
         [1, 0, 7n, 8n],
@@ -1504,6 +1519,7 @@ describe('FrameDelta note anchor shifts', () => {
 
   it.skipIf(!hasLayoutWasm)('matches a fresh layout on footnote, endnote and mixed pages, in frames and the query store', () => {
     const session = createEditSession(71);
+    sessions.push(session);
     session.seed_from_docx(notedDocx(), undefined);
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
     const base = {
@@ -1547,6 +1563,7 @@ describe('FrameDelta note anchor shifts', () => {
     const extras = JSON.stringify({ fontChains });
     const freshList = (): DisplayList => {
       const fresh = createEditSession(72);
+      sessions.push(fresh);
       fresh.load(session.encode_state());
       fresh.load_note_separators(session.note_separators_state());
       fresh.register_measure_font(new Uint8Array(readFileSync(FONT)));

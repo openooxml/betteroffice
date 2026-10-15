@@ -7547,7 +7547,7 @@ impl EngineSession {
         {
             let scratch = EditingDoc::new(1);
             scratch
-                .apply_update_v1(&state)
+                .load_state_v1(&state)
                 .map_err(|error| error.to_string())?;
             *cache = Some(LoweredNoteSeparators {
                 state,
@@ -8462,6 +8462,21 @@ impl EngineSession {
                         .is_some()
                 });
         render_ready && layout_ready && display_ready && measure_ready
+    }
+
+    /// Whether a plain text command from `start_para` to `end_para` in `story`
+    /// edits through [`Self::edit_resident_text`]: it changes the document and
+    /// stays in one paragraph that [`Self::can_apply_input`] admits, as the
+    /// hybrid's input path does.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn takes_resident_text_edit(
+        &self,
+        story: &str,
+        start_para: &str,
+        end_para: &str,
+        text: Option<&str>,
+    ) -> bool {
+        text != Some("") && start_para == end_para && self.can_apply_input(story, start_para)
     }
 
     /// Rebuild the typed measured arena from the newly lowered body story.
@@ -9500,6 +9515,41 @@ impl EngineSession {
             .clone()
             .ok_or_else(|| "resident display extras are not built".to_owned())?;
         self.build_display_list_frame(&extras, expected_frame_epoch)
+    }
+
+    /// The region relayout after one edit. `story` names the story of a plain
+    /// text edit made through [`Self::edit_resident_text`]; when that edit is
+    /// the only change since the retained pass and `input_json` is the
+    /// retained request, this takes [`Self::apply_and_layout`]'s resident path.
+    /// Otherwise, and whenever that path cannot absorb the edit, it runs the
+    /// full pass of [`Self::layout_document_with_regions_retained`].
+    pub fn layout_document_with_regions_after_edit(
+        &self,
+        input_json: &str,
+        story: Option<&str>,
+    ) -> Result<(), String> {
+        let resident = story.filter(|_| {
+            self.typing_epoch.get() == Some(self.doc_epoch())
+                && self.pagination.borrow().doc_epoch.wrapping_add(1) == self.doc_epoch()
+                && self
+                    .regions
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|state| !state.provisional && state.request_json == input_json)
+        });
+        let Some(story) = resident else {
+            return self.layout_document_with_regions_retained(input_json);
+        };
+        let _trigger_reset = RelayoutTriggerReset(self);
+        self.set_relayout_trigger(RelayoutTrigger::Interactive);
+        if !self.apply_and_layout_regions_resident(
+            story,
+            &mut |_| {},
+            RelayoutTrigger::Interactive,
+        )? {
+            self.apply_and_layout_regions_full(RelayoutTrigger::Interactive)?;
+        }
+        Ok(())
     }
 
     /// Fallback for edits the resident region path cannot absorb: replay the
@@ -11008,6 +11058,8 @@ mod tests {
     mod interactive_layout_regression_tests;
 
     mod preview_refresh_tests;
+
+    mod command_relayout_tests;
 
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({

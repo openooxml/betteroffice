@@ -85,10 +85,18 @@
    * dark buttons, badges, tooltips). Inverts in dark mode so contrast holds. */
   --doc-on-primary: #ffffff;
 
-  /* Active toolbar toggle (bold/italic/comments/...): dark slab in light mode,
-   * Word-accent tint in dark mode (where a dark slab would flip light). */
-  --doc-toggle-active-bg: hsl(var(--foreground));
-  --doc-toggle-active-fg: #ffffff;
+  /* Toolbar palette, monochrome and shared with the xlsx and pptx toolbars.
+   * A pressed toggle is a subtle ghost tint. Hosts override these through the
+   * --bo-toolbar-* properties (see .oox-toolbar-rail below). */
+  --doc-toggle-active-bg: rgba(31, 31, 31, 0.12);
+  --doc-toggle-active-fg: #1f1f1f;
+  --doc-toolbar-accent: #1f1f1f;
+  --doc-toolbar-ink: #1f1f1f;
+  --doc-toolbar-ink-muted: #444746;
+  --doc-toolbar-rail: #f1f1f1;
+  --doc-toolbar-surface: #ffffff;
+  --doc-toolbar-hover: rgba(31, 31, 31, 0.08);
+  --doc-toolbar-line: rgba(31, 31, 31, 0.16);
 
   /* Text */
   --doc-text: #202124; /* primary text */
@@ -194,8 +202,15 @@
   --doc-accent: #4e9dff;
   --doc-accent-bg: #1f3047;
   --doc-on-primary: #1f1f1f; /* text/icon on a filled primary surface */
-  --doc-toggle-active-bg: var(--doc-primary-light);
-  --doc-toggle-active-fg: var(--doc-primary);
+  --doc-toggle-active-bg: rgba(255, 255, 255, 0.16);
+  --doc-toggle-active-fg: #e3e3e3;
+  --doc-toolbar-accent: #e3e3e3;
+  --doc-toolbar-ink: #e3e3e3;
+  --doc-toolbar-ink-muted: #c4c7c5;
+  --doc-toolbar-rail: #2d2d2d;
+  --doc-toolbar-surface: #2d2d2d;
+  --doc-toolbar-hover: rgba(255, 255, 255, 0.1);
+  --doc-toolbar-line: rgba(255, 255, 255, 0.16);
   --doc-text: #e8e8e8; /* primary text */
   --doc-text-muted: #a0a0a0; /* secondary text */
   --doc-text-subtle: #6e6e6e; /* tertiary/disabled text */
@@ -732,19 +747,72 @@
   background-color: var(--doc-bg-hover);
 }
 
-/* React toolbar toggle buttons (bold/italic/comments/...). Owned here, not via
+/* Formatting rail. A --bo-toolbar-* property set by the host wins over the
+ * editor palette. Inside the rail the editor's accent and shadcn tokens
+ * resolve to the neutral set, so pickers and menus stay monochrome. */
+.oox-root .oox-toolbar-rail {
+  background-color: var(--bo-toolbar-rail, var(--doc-toolbar-rail));
+  color: var(--bo-toolbar-ink, var(--doc-toolbar-ink));
+  --doc-primary: var(--bo-toolbar-accent, var(--doc-toolbar-accent));
+  --doc-primary-hover: var(--bo-toolbar-accent, var(--doc-toolbar-accent));
+  --doc-primary-light: var(--bo-toolbar-hover, var(--doc-toolbar-hover));
+  --doc-bg-hover: var(--bo-toolbar-hover, var(--doc-toolbar-hover));
+  --doc-text: var(--bo-toolbar-ink, var(--doc-toolbar-ink));
+  --doc-text-muted: var(--bo-toolbar-ink-muted, var(--doc-toolbar-ink-muted));
+  --doc-surface: var(--bo-toolbar-surface, var(--doc-toolbar-surface));
+  --foreground: 0 0% 12%;
+  --primary: 0 0% 12%;
+  --primary-foreground: 0 0% 100%;
+  --muted: 0 0% 89%;
+  --muted-foreground: 140 2% 27%;
+  --accent: 0 0% 89%;
+  --accent-foreground: 0 0% 12%;
+  --ring: 0 0% 12%;
+}
+.oox-root.dark .oox-toolbar-rail,
+.oox-root .dark .oox-toolbar-rail {
+  --foreground: 0 0% 89%;
+  --primary: 0 0% 89%;
+  --primary-foreground: 0 0% 12%;
+  --muted: 0 0% 24%;
+  --muted-foreground: 140 3% 78%;
+  --accent: 0 0% 24%;
+  --accent-foreground: 0 0% 89%;
+  --ring: 0 0% 89%;
+}
+.oox-root .oox-toolbar-rail :is(button, input, [role='combobox'], [tabindex]:not([role='menu'])):focus-visible {
+  outline: 2px solid var(--bo-toolbar-accent, var(--doc-toolbar-accent));
+  outline-offset: 1px;
+  box-shadow: none;
+}
+.oox-root .oox-toolbar-separator,
+.oox-root .oox-toolbar-group:not(:last-child)::after {
+  background-color: var(--bo-toolbar-line, var(--doc-toolbar-line));
+}
+.oox-root .oox-toolbar-group:not(:last-child)::after {
+  content: '';
+  flex: none;
+  width: 1px;
+  height: 20px;
+  margin-left: 6px;
+}
+
+/* Toolbar toggle buttons (bold/italic/comments/...). Owned here, not via
  * Tailwind utilities: `cn` is clsx-only (no tailwind-merge), so competing
- * hover:bg utilities don't dedupe and the active slab could lose its color on
- * hover (white icon on a light bg). The `.oox-root` prefix outranks the
- * single-class Tailwind hover utilities. */
-.oox-root .oox-toolbar-toggle:hover {
-  background-color: var(--doc-bg-hover);
-  color: var(--doc-text);
+ * hover:bg utilities don't dedupe and the pressed slab could lose its color
+ * on hover. These rules follow `@tailwind utilities`, so they win ties. */
+.oox-root .oox-toolbar-toggle {
+  color: var(--bo-toolbar-ink-muted, var(--doc-toolbar-ink-muted));
+}
+.oox-root .oox-toolbar-toggle:hover,
+.oox-root .oox-toolbar-toggle[aria-expanded='true'] {
+  background-color: var(--bo-toolbar-hover, var(--doc-toolbar-hover));
+  color: var(--bo-toolbar-ink, var(--doc-toolbar-ink));
 }
 .oox-root .oox-toolbar-toggle[data-active='true'],
 .oox-root .oox-toolbar-toggle[data-active='true']:hover {
-  background-color: var(--doc-toggle-active-bg);
-  color: var(--doc-toggle-active-fg);
+  background-color: var(--bo-toolbar-selected, var(--doc-toggle-active-bg));
+  color: var(--bo-toolbar-ink, var(--doc-toggle-active-fg));
 }
 
 /* Outline / navigation toggle button (shown when the panel is collapsed).

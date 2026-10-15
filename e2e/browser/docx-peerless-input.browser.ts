@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from 'playwright/test';
+import { pinnedEvaluate } from './pinned-evaluate';
 import JSZip from 'jszip';
 import { readFileSync } from 'node:fs';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
@@ -23,6 +24,7 @@ interface InputProbe {
   holdFrames: boolean;
   contextBytes: number | null;
   refuseNext: boolean;
+  editDelayMs: number;
   heldAcks: HeldMessage[];
   heldFrames: HeldMessage[];
   mainInstances: number;
@@ -77,6 +79,7 @@ async function installProbe(page: Page) {
       holdFrames: false,
       contextBytes: null,
       refuseNext: false,
+      editDelayMs: 0,
       heldAcks: [],
       heldFrames: [],
       mainInstances: 0,
@@ -111,6 +114,8 @@ async function installProbe(page: Page) {
       if (context && probe.contextBytes !== null) context.serializedBytes = probe.contextBytes;
     };
     const NativeWorker = window.Worker;
+    let delivery = Promise.resolve();
+    let delayed = 0;
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
         super(url, options);
@@ -178,8 +183,17 @@ async function installProbe(page: Page) {
           }
           probe.commands.push(structuredClone((outgoing as typeof request).command));
         }
-        if (Array.isArray(transferOrOptions)) super.postMessage(outgoing, transferOrOptions);
-        else super.postMessage(outgoing, transferOrOptions);
+        const post = () => {
+          if (Array.isArray(transferOrOptions)) super.postMessage(outgoing, transferOrOptions);
+          else super.postMessage(outgoing, transferOrOptions);
+        };
+        const delay = request.type === 'edit' ? probe.editDelayMs : 0;
+        if (delay === 0 && delayed === 0) return post();
+        delayed += 1;
+        delivery = delivery.then(() => new Promise((resolve) => setTimeout(resolve, delay))).then(() => {
+          delayed -= 1;
+          post();
+        });
       }
     };
   });
@@ -270,7 +284,7 @@ test('font picker prepares the selected family and retains shaped glyph widths',
 });
 
 async function harnessText(page: Page) {
-  const bytes = await page.evaluate(() => window.__docxPeerlessHarness!.exportBytes());
+  const bytes = await pinnedEvaluate(page, () => window.__docxPeerlessHarness!.exportBytes());
   const zip = await JSZip.loadAsync(Buffer.from(bytes));
   const xml = await zip.file('word/document.xml')!.async('string');
   return page.evaluate((xml) => Array.from(
@@ -334,7 +348,7 @@ async function settled(page: Page) {
 }
 
 async function paintTurns(page: Page) {
-  await page.evaluate(() => new Promise<void>((resolve) => {
+  await pinnedEvaluate(page, () => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
 }
@@ -455,6 +469,18 @@ test('d2d_typing_paste_formatting_share_chain', async ({ page }) => {
     return !!run?.getElementsByTagNameNS('*', 'b').length;
   }, xml)).toBe(true);
   expect(await savedText(page)).toBe('TPASTEBabcd');
+});
+
+test('typing_applied_late_undoes_in_one_step', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  await page.evaluate(() => { window.__docxPeerlessInput.editDelayMs = 700; });
+  await input.pressSequentially('Beta');
+  await settled(page);
+  expect(await savedText(page)).toBe('Betaabcd');
+  await input.press('ControlOrMeta+z');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
 });
 
 test('save_includes_typing_deferred_after_vertical_navigation', async ({ page }) => {
@@ -712,6 +738,148 @@ test('handoff_installs_A_then_redraws_pending_B', async ({ page }) => {
       containsPoint(stage.getBoundingClientRect()) && !!hit && root.contains(hit) &&
       (hit === element || caret.contains(hit));
   }), 'The caret must be on-screen within the page canvas and editor stage').toBe(true);
+});
+
+const ECHO_WRAPPED = 'Wrapped' + ' echo words'.repeat(12);
+const ECHO_PARAGRAPHS = Array.from({ length: 120 }, (_, index) => index === 1 ? ECHO_WRAPPED : `Seed paragraph ${index}`);
+
+async function echoDocumentBytes() {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const body = ECHO_PARAGRAPHS.map((text) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`).join('');
+  zip.file('word/document.xml', xml.replace(/<w:body>.*?<w:sectPr>/, `<w:body>${body}<w:sectPr>`));
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+test('echo paints the caret line of a wrapped paragraph before the reply and reconciles to the reply', async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+  await openHarness(page, 1, await echoDocumentBytes());
+  const input = await focusHarness(page);
+  for (const key of ['ArrowDown', 'ArrowDown', 'ArrowRight', 'ArrowRight', 'ArrowRight']) await input.press(key);
+  await settled(page);
+  const context = await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext);
+  expect(context, 'the caret line must carry an echo context').toBeDefined();
+  expect(ECHO_WRAPPED.endsWith(context!.text) && context!.text.length < ECHO_WRAPPED.length).toBe(true);
+  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const canvasPixels = () => canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  const key = async (press: () => Promise<void>) => {
+    const before = await canvasPixels();
+    const start = await page.evaluate(() => {
+      window.__docxPeerlessInput.holdAcks = true;
+      window.__docxPeerlessInput.holdFrames = true;
+      return window.__docxPeerlessInput.commands.length;
+    });
+    await press();
+    await paintTurns(page);
+    const early = await canvasPixels();
+    await expect.poll(() => page.evaluate((start) => {
+      const probe = window.__docxPeerlessInput;
+      const seq = probe.commands[start]?.seq;
+      return seq !== undefined && probe.heldAcks.some(({ message }) => message.ok && (message.commandAck?.throughSeq ?? -1) >= seq &&
+        !!message.commandAck?.frame);
+    }, start)).toBe(true);
+    const authoritative = await page.evaluate((start) => {
+      const probe = window.__docxPeerlessInput;
+      const seq = probe.commands[start]!.seq;
+      const frame = probe.heldAcks.map(({ message }) => message.ok ? message.commandAck : undefined)
+        .find((ack) => ack?.frame && ack.throughSeq >= seq)!.frame!;
+      const item = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageIndex === 0)!;
+      const copy = document.createElement('canvas');
+      copy.width = item.bitmap.width;
+      copy.height = item.bitmap.height;
+      copy.getContext('2d')!.drawImage(item.bitmap, 0, 0);
+      return copy.toDataURL();
+    }, start);
+    expect(await canvasPixels(), 'nothing but the echo paints while the reply is held').toEqual(early);
+    await page.evaluate(() => {
+      window.__docxPeerlessInput.releaseAcks();
+      window.__docxPeerlessInput.releaseFrames();
+    });
+    await settled(page);
+    const after = await canvasPixels();
+    expect(after, 'the reply replaces the echo with its own pixels').toEqual(authoritative);
+    expect(after).not.toEqual(before);
+    return { before, early };
+  };
+  const typed = await key(() => beforeinput(input, 'x'));
+  expect(typed.early, 'the typed glyph paints before the reply').not.toEqual(typed.before);
+  const deleted = await key(() => input.press('Backspace'));
+  expect(deleted.early, 'the backspace paints before the reply').not.toEqual(deleted.before);
+  const split = await key(() => input.press('Enter'));
+  expect(split.early, 'a declined key leaves the pixels to the reply').toEqual(split.before);
+  expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
+});
+
+test('echo paints exactly the pixels of the reply for inserts and backspaces', async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+  await openHarness(page, 1, await echoDocumentBytes());
+  const input = await focusHarness(page);
+  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const key = async (label: string, press: () => Promise<void>) => {
+    await settled(page);
+    expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
+      `${label}: the caret line must carry an echo context`).toBeDefined();
+    const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+    const start = await page.evaluate(() => {
+      window.__docxPeerlessInput.holdAcks = true;
+      window.__docxPeerlessInput.holdFrames = true;
+      return window.__docxPeerlessInput.commands.length;
+    });
+    await press();
+    await paintTurns(page);
+    await expect.poll(() => page.evaluate((start) => {
+      const probe = window.__docxPeerlessInput;
+      const seq = probe.commands[start]?.seq;
+      return seq !== undefined && probe.heldAcks.some(({ message }) => message.ok &&
+        (message.commandAck?.throughSeq ?? -1) >= seq && !!message.commandAck?.frame);
+    }, start)).toBe(true);
+    const comparison = await canvas.evaluate((element, start) => {
+      const probe = window.__docxPeerlessInput;
+      const seq = probe.commands[start]!.seq;
+      const frame = probe.heldAcks.map(({ message }) => message.ok ? message.commandAck : undefined)
+        .find((ack) => ack?.frame && ack.throughSeq >= seq)!.frame!;
+      const item = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageIndex === 0)!;
+      const target = element as HTMLCanvasElement;
+      const reply = document.createElement('canvas');
+      reply.width = item.bitmap.width;
+      reply.height = item.bitmap.height;
+      const replyContext = reply.getContext('2d', { willReadFrequently: true })!;
+      replyContext.drawImage(item.bitmap, 0, 0);
+      if (reply.width !== target.width || reply.height !== target.height) return { size: false, differing: -1, max: 0, bbox: null };
+      const echo = target.getContext('2d')!.getImageData(0, 0, target.width, target.height).data;
+      const expected = replyContext.getImageData(0, 0, reply.width, reply.height).data;
+      let differing = 0;
+      let max = 0;
+      let bbox: number[] | null = null;
+      for (let index = 0; index < echo.length; index += 4) {
+        let delta = 0;
+        for (let channel = 0; channel < 4; channel += 1) delta = Math.max(delta, Math.abs(echo[index + channel]! - expected[index + channel]!));
+        if (!delta) continue;
+        differing += 1;
+        max = Math.max(max, delta);
+        const x = (index / 4) % target.width;
+        const y = Math.floor(index / 4 / target.width);
+        bbox = bbox ? [Math.min(bbox[0]!, x), Math.min(bbox[1]!, y), Math.max(bbox[2]!, x), Math.max(bbox[3]!, y)] : [x, y, x, y];
+      }
+      return { size: true, differing, max, bbox };
+    }, start);
+    const early = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+    expect(early, `${label}: the echo paints before the reply`).not.toEqual(before);
+    expect(comparison, `${label}: the echo paints exactly the reply's pixels`).toEqual({ size: true, differing: 0, max: 0, bbox: null });
+    await page.evaluate(() => {
+      window.__docxPeerlessInput.releaseAcks();
+      window.__docxPeerlessInput.releaseFrames();
+    });
+    await settled(page);
+  };
+  for (const press of ['ArrowDown', 'ArrowDown', ...Array<string>(8).fill('ArrowRight')]) await input.press(press);
+  await key('wrapped insert', () => beforeinput(input, 'x'));
+  await key('wrapped backspace', () => input.press('Backspace'));
+  await input.press('ControlOrMeta+Home');
+  for (const press of ['ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'End', 'ArrowLeft', 'ArrowLeft', 'ArrowLeft', 'ArrowLeft']) await input.press(press);
+  await key('single-line insert', () => beforeinput(input, 'x'));
+  await key('single-line backspace', () => input.press('Backspace'));
+  expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
 });
 
 test('viewing_refuses_typing_then_editing_applies', async ({ page }) => {
@@ -1045,7 +1213,7 @@ test(`viewport-first ${feature} open paints later pages after certified geometry
   await releaseCertifiedGeometry(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
-  await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
+  await pinnedEvaluate(page, async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
   const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
   await expect(later).toBeAttached();
   await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);

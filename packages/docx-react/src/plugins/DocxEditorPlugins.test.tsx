@@ -54,12 +54,14 @@ import {
   setMissingWorkerCapabilitiesForTests,
 } from '../components/DocxEditor/internals/engineChoice';
 import { setupWorkerEngine } from '../components/DocxEditor/__fixtures__/workerEngine';
+import { testScope } from '../components/DocxEditor/__fixtures__/testScope';
 
 const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, false, documentBytes(), false);
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+const { settle, until } = testScope(act);
 
 const FIXTURE = resolve(
   import.meta.dir,
@@ -145,17 +147,6 @@ async function inlineImageDocument(
     `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`
   );
   return zip.generateAsync({ type: 'arraybuffer' });
-}
-
-async function settle(ms = 20) {
-  await act(async () => {
-    await new Promise((done) => setTimeout(done, ms));
-  });
-}
-
-async function until(done: () => boolean) {
-  for (let attempt = 0; attempt < 300 && !done(); attempt += 1) await settle(10);
-  expect(done()).toBe(true);
 }
 
 type State = { count: number };

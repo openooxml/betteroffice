@@ -16,15 +16,37 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
                 | "rightBrace"
                 | "donut"
                 | "bentArrow"
+                | "cloud"
                 | "cloudCallout"
                 | "wedgeRectCallout"
                 | "wedgeRoundRectCallout"
                 | "ribbon2"
                 | "swooshArrow"
                 | "circularArrow"
+                | "leftCircularArrow"
+                | "curvedLeftArrow"
+                | "curvedRightArrow"
+                | "curvedUpArrow"
+                | "uturnArrow"
                 | "foldedCorner"
                 | "ellipse"
                 | "roundRect"
+                | "round1Rect"
+                | "round2SameRect"
+                | "round2DiagRect"
+                | "can"
+                | "blockArc"
+                | "pie"
+                | "chord"
+                | "flowChartDelay"
+                | "flowChartOnlineStorage"
+                | "gear6"
+                | "gear9"
+                | "moon"
+                | "heart"
+                | "leftBracket"
+                | "rightBracket"
+                | "teardrop"
                 | "triangle"
                 | "homePlate"
         )
@@ -104,12 +126,12 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
 }
 
 fn shade_fill(paint: &mut Paint, mode: PresetPathFill) {
-    if !matches!(
-        mode,
-        PresetPathFill::DarkenLess | PresetPathFill::LightenLess
-    ) {
-        return;
-    }
+    let (factor, offset) = match mode {
+        PresetPathFill::DarkenLess => (0.8, 0.0),
+        PresetPathFill::LightenLess => (0.8, 51.0),
+        PresetPathFill::Lighten => (0.6, 102.0),
+        _ => return,
+    };
     let shade = |color: &mut String| {
         let Some(hex) = color
             .strip_prefix('#')
@@ -125,16 +147,7 @@ fn shade_fill(paint: &mut Paint, mode: PresetPathFill) {
         };
         let adjusted: Vec<_> = channels
             .into_iter()
-            .map(|value| {
-                let value = f64::from(value) * 0.8;
-                (value
-                    + if mode == PresetPathFill::LightenLess {
-                        51.0
-                    } else {
-                        0.0
-                    })
-                .round() as u8
-            })
+            .map(|value| (f64::from(value) * factor + offset).round() as u8)
             .collect();
         *color = format!(
             "#{:02x}{:02x}{:02x}{}",
@@ -159,6 +172,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn can_lightens_its_top_and_keeps_alpha() {
+        let source = serde_json::from_value(serde_json::json!({
+            "kind": "shape", "objectId": 1, "name": "can", "geometry": "can",
+            "x": 0, "y": 0, "w": 200, "h": 100, "path": [],
+            "fill": { "kind": "solid", "color": "#32649680" },
+            "stroke": { "color": "#000000", "width": 1 }
+        }))
+        .unwrap();
+        let parts = preset_primitives(source);
+        assert_eq!(parts.len(), 3);
+        for (index, expected) in [Some("#32649680"), Some("#84a2c080"), None]
+            .into_iter()
+            .enumerate()
+        {
+            let Primitive::Shape { fill, stroke, .. } = &parts[index].0 else {
+                panic!()
+            };
+            match (fill, expected) {
+                (Some(Paint::Solid { color }), Some(expected)) => assert_eq!(color, expected),
+                (None, None) => {}
+                _ => panic!("unexpected fill"),
+            }
+            assert_eq!(stroke.is_some(), index == 2);
+            if let Some(stroke) = stroke {
+                assert_eq!(stroke.join.as_deref(), Some("round"));
+            }
+        }
+    }
+
+    #[test]
+    fn callout_leader_lines_are_stroke_only() {
+        for (geometry, body_stroked) in [
+            ("callout1", false),
+            ("borderCallout1", true),
+            ("accentCallout1", false),
+            ("accentCallout2", false),
+        ] {
+            let source = serde_json::from_value(serde_json::json!({
+                "kind": "shape", "objectId": 1, "name": geometry, "geometry": geometry,
+                "x": 0, "y": 0, "w": 200, "h": 100, "path": [],
+                "fill": { "kind": "solid", "color": "#326496" },
+                "stroke": { "color": "#000000", "width": 1 }
+            }))
+            .unwrap();
+            let parts = preset_primitives(source);
+            assert_eq!(parts.len(), 2, "{geometry}");
+            let Primitive::Shape {
+                fill: body_fill,
+                stroke: body_stroke,
+                ..
+            } = &parts[0].0
+            else {
+                panic!()
+            };
+            assert!(body_fill.is_some() && parts[0].1);
+            assert_eq!(body_stroke.is_some(), body_stroked);
+
+            let Primitive::Shape {
+                fill: leader_fill,
+                stroke: leader_stroke,
+                ..
+            } = &parts[1].0
+            else {
+                panic!()
+            };
+            assert!(leader_fill.is_none() && !parts[1].1);
+            assert!(leader_stroke.is_some());
+        }
+    }
+
+    #[test]
     fn layered_presets_cast_one_shadow_with_every_fill_and_open_stroke() {
         for geometry in [
             "arc",
@@ -167,7 +251,18 @@ mod tests {
             "rightBrace",
             "ribbon2",
             "foldedCorner",
+            "cloud",
             "cloudCallout",
+            "can",
+            "leftBracket",
+            "rightBracket",
+            "callout1",
+            "borderCallout1",
+            "accentCallout1",
+            "accentCallout2",
+            "curvedLeftArrow",
+            "curvedRightArrow",
+            "curvedUpArrow",
         ] {
             let source = serde_json::from_value(serde_json::json!({
                 "kind": "shape", "objectId": 1, "name": "shadow", "geometry": geometry,

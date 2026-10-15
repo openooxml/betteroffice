@@ -8,8 +8,8 @@ use crate::comments::{
     slide_comment_parts,
 };
 use crate::drawing::{
-    common_slide_data, parse_diagram_drawing, parse_paragraph_properties, parse_style_levels,
-    parse_text_styles,
+    common_slide_data, common_slide_data_with_vml, parse_diagram_drawing,
+    parse_paragraph_properties, parse_style_levels, parse_text_styles,
 };
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
@@ -68,6 +68,7 @@ fn parse_package(
     )?;
 
     let mut has_connectors = false;
+    let mut vml_budget = ParseBudget::new(limits);
     let mut slides = Vec::with_capacity(presentation.slides.len());
     let mut sources = BTreeMap::new();
     let mut notes_sources = BTreeMap::new();
@@ -78,12 +79,20 @@ fn parse_package(
             .map(Vec::as_slice)
             .unwrap_or_default();
         has_connectors |= !root.descendants_named("cxnSp").is_empty();
-        let data = common_slide_data(
+        let previews = parse_vml_previews(
+            &root,
+            slide_relationships,
+            &parts,
+            &relationships,
+            &mut vml_budget,
+        );
+        let data = common_slide_data_with_vml(
             &root,
             slide_relationships,
             &reference.part_path,
             &mut budget,
             shape_elements,
+            &previews,
         )?;
         let mut notes = String::new();
         if let Some(notes_path) = crate::notes::slide_notes_part(slide_relationships)
@@ -396,6 +405,80 @@ fn parse_part(
         .get(path)
         .ok_or_else(|| PptxError::MissingPart(path.to_owned()))?;
     parse_xml(bytes, path, budget)
+}
+
+fn parse_vml_previews(
+    slide: &XmlElement,
+    slide_relationships: &[Relationship],
+    parts: &HashMap<&str, &[u8]>,
+    relationships: &BTreeMap<String, Vec<Relationship>>,
+    budget: &mut ParseBudget<'_>,
+) -> BTreeMap<String, PictureFill> {
+    let wanted: HashSet<_> = slide
+        .descendants_named("oleObj")
+        .into_iter()
+        .filter(|object| object.child("pic").is_none())
+        .filter_map(|object| object.attribute("spid"))
+        .filter(|spid| !spid.is_empty())
+        .collect();
+    let mut previews = BTreeMap::new();
+    if wanted.is_empty() {
+        return previews;
+    }
+    for relationship in slide_relationships
+        .iter()
+        .filter(|relationship| relationship.has_type("/vmlDrawing"))
+    {
+        let Some(path) = relationship.resolved_target.as_deref() else {
+            continue;
+        };
+        let Some(bytes) = parts.get(path) else {
+            continue;
+        };
+        let Ok(root) = parse_xml(bytes, path, budget) else {
+            continue;
+        };
+        let vml_relationships = relationships
+            .get(path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for shape in root.descendants_named("shape") {
+            let spids = [shape.attribute("id"), shape.attribute("o:spid")];
+            if !spids.iter().flatten().any(|spid| wanted.contains(spid)) {
+                continue;
+            }
+            let Some(image) = shape.child("imagedata") else {
+                continue;
+            };
+            let Some(id) = image
+                .attribute("o:relid")
+                .or_else(|| image.attribute("r:id"))
+            else {
+                continue;
+            };
+            let Some(media_path) = vml_relationships
+                .iter()
+                .find(|relationship| relationship.id == id)
+                .and_then(|relationship| relationship.resolved_target.as_deref())
+                .filter(|path| path.starts_with("ppt/media/") && parts.contains_key(path))
+            else {
+                continue;
+            };
+            for spid in spids
+                .into_iter()
+                .flatten()
+                .filter(|spid| wanted.contains(spid))
+            {
+                previews
+                    .entry(spid.to_owned())
+                    .or_insert_with(|| PictureFill {
+                        media_part_path: Some(media_path.to_owned()),
+                        ..PictureFill::default()
+                    });
+            }
+        }
+    }
+    previews
 }
 
 fn parse_table_style_part(

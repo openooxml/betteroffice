@@ -45,6 +45,8 @@ export interface DocxCommandEnvironment {
   zoom: number;
   zoomWhileOpening?: boolean;
   supportedCommands?: ReadonlySet<DocxCommandId>;
+  /** Table actions the host shell wires to worker commands; absent means every known action passes. */
+  tableActions?: ReadonlySet<string>;
   canOpen: boolean;
   canReportIssue: boolean;
   /** The body, not a header, footer or note, has the input. */
@@ -390,6 +392,7 @@ function evaluateTableAction(env: DocxCommandEnvironment, action: DocxTableActio
   const table = env.table;
   if (!table?.isInTable) return 'table-required';
   if (key === null) return null;
+  if (env.tableActions && !env.tableActions.has(key)) return 'unsupported-command';
   if (typeof action === 'object' && !SUPPORTED_TABLE_OBJECT_ACTIONS.has(key)) {
     return 'unsupported-command';
   }

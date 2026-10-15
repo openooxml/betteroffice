@@ -56,6 +56,15 @@ impl EvaluationBudget {
     }
 }
 
+/// an open array evaluation; see [`EvalContext::array_scope`].
+pub(crate) struct ArrayScope<'c>(&'c Cell<u32>);
+
+impl Drop for ArrayScope<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
 /// take `count` from what is left, or nothing when that is not enough.
 fn take(left: &Cell<u64>, count: u64) -> bool {
     let remaining = left.get();
@@ -88,7 +97,8 @@ pub struct EvalContext<'a> {
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
-    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
+    defined_name_values: Rc<RefCell<DefinedNameValues>>,
+    array_depth: Rc<Cell<u32>>,
     bindings: Rc<RefCell<Vec<Binding>>>,
     lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
@@ -113,6 +123,7 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            array_depth: Rc::new(Cell::new(0)),
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
@@ -136,6 +147,7 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            array_depth: Rc::new(Cell::new(0)),
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
@@ -163,6 +175,7 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            array_depth: Rc::new(Cell::new(0)),
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: Some(budget),
@@ -186,6 +199,7 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::clone(&self.unsupported_functions),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
+            array_depth: Rc::clone(&self.array_depth),
             bindings: Rc::clone(&self.bindings),
             lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
@@ -297,6 +311,17 @@ impl<'a> EvalContext<'a> {
     pub(crate) fn record_unsupported_function(&self) {
         self.unsupported_functions
             .set(self.unsupported_functions.get().saturating_add(1));
+    }
+
+    /// marks an array evaluation until the scope drops; a scalar formula
+    /// intersects a range only outside every such scope.
+    pub(crate) fn array_scope(&self) -> ArrayScope<'_> {
+        self.array_depth.set(self.array_depth.get() + 1);
+        ArrayScope(&self.array_depth)
+    }
+
+    fn intersects(&self) -> bool {
+        self.cell.is_some() && self.array_depth.get() == 0
     }
 
     fn record_budget_error(&self) {
@@ -444,33 +469,27 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Bool(b) => CellValue::Bool { value: *b },
         Expr::Error(e) => err(*e),
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
-        // no implicit intersection: a bare range in scalar context is #VALUE!
         Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
-            err(ErrorValue::Value)
+            match as_area(expr, ctx) {
+                Some(area) => intersect(area, ctx),
+                None => err(ErrorValue::Value),
+            }
         }
         Expr::RangeJoin { start, end } => match range_join_area(start, end, ctx) {
-            Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
-                Ok(value) => value,
-                Err(error) => err(error),
-            },
-            Ok(_) => err(ErrorValue::Value),
+            Ok(area) => intersect(area, ctx),
             Err(error) => err(error),
         },
         Expr::TableRef { table, spec } => match table_area(table, spec, ctx) {
-            Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
-                Ok(value) => value,
-                Err(error) => err(error),
-            },
-            Ok(_) => err(ErrorValue::Value),
+            Ok(area) => intersect(area, ctx),
             Err(error) => err(error),
         },
         Expr::Name { scope, name } => match bound(scope, name, ctx) {
             Some(binding) => kept(ctx, binding.scalar()),
             None => evaluate_defined_name(scope, name, ctx),
         },
-        Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
+        Expr::Unary { op, expr } => coerced(&evaluate(expr, ctx), ctx, |v| apply_unary(*op, v)),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
-        Expr::Percent(inner) => apply_percent(&evaluate(inner, ctx)),
+        Expr::Percent(inner) => coerced(&evaluate(inner, ctx), ctx, apply_percent),
         Expr::Literal(value) => kept(ctx, normalize_provider_value(value.clone())),
         Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
         Expr::FuncCall { func, name, args } => match func {
@@ -489,8 +508,31 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// a reference read as one value. a scalar formula takes the cell on its own
+/// row or column, as excel's implicit intersection does; `#VALUE!` when there
+/// is none, and always inside array evaluation.
+fn intersect(area: Area, ctx: &EvalContext<'_>) -> CellValue {
+    let along = |start: u32, len: usize, at: Option<u32>| match len {
+        1 => Some(0),
+        _ => at
+            .filter(|at| (start..start.saturating_add(len as u32)).contains(at))
+            .map(|at| (at - start) as usize),
+    };
+    let at = ctx.cell.filter(|_| ctx.intersects());
+    let row = along(area.start.row, area.rows, at.map(|at| at.row));
+    let col = along(area.start.col, area.cols, at.map(|at| at.col));
+    match (row, col) {
+        (Some(row), Some(col)) => area.get(ctx, row, col).unwrap_or_else(err),
+        _ => err(ErrorValue::Value),
+    }
+}
+
 /// a defined name identified by the sheet its lookup resolved against.
 type DefinedNameKey = (SheetId, String);
+
+/// each name's value and whether it reached an engine gap, per intersection
+/// mode.
+type DefinedNameValues = HashMap<(DefinedNameKey, bool), (CellValue, bool)>;
 
 /// a defined name resolved to its parsed definition plus the sheet that
 /// definition's unqualified refs bind to.
@@ -501,20 +543,22 @@ struct DefinedNameBinding {
 }
 
 /// a name's value is stable for the life of a context, so each one is expanded
-/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n. a
-/// hit replays the engine gap the expansion recorded, which a handler may have
-/// cleared since.
+/// at most once per intersection mode: without the memo a chain of `A=B+B`
+/// definitions costs 2^n. a hit replays the engine gap the expansion recorded,
+/// which a handler may have cleared since.
 fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
     let key = match defined_name_key(scope, name, ctx) {
         Ok(key) => key,
         Err(error) => return err(error),
     };
-    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&key) {
+    let memo = (key, ctx.intersects());
+    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&memo) {
         if *gap {
             ctx.record_unsupported_function();
         }
         return cached.clone();
     }
+    let (key, intersects) = memo;
     let binding = match bind_defined_name(key, name, ctx) {
         Ok(binding) => binding,
         Err(error) => return err(error),
@@ -524,7 +568,7 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
     let gap = ctx.unsupported_checkpoint() > checkpoint;
     ctx.defined_name_values
         .borrow_mut()
-        .insert(binding.key, (value.clone(), gap));
+        .insert((binding.key, intersects), (value.clone(), gap));
     value
 }
 
@@ -533,10 +577,7 @@ fn defined_name_key(
     name: &str,
     ctx: &EvalContext<'_>,
 ) -> Result<DefinedNameKey, ErrorValue> {
-    let lookup_sheet = match scope {
-        Some(scope) => ctx.provider.sheet_id(scope).ok_or(ErrorValue::Ref)?,
-        None => ctx.sheet,
-    };
+    let lookup_sheet = resolve_sheet(scope, ctx).ok_or(ErrorValue::Ref)?;
     Ok((lookup_sheet, name.to_lowercase()))
 }
 
@@ -570,7 +611,12 @@ fn bind_defined_name(
         Some(cache) => parse_cached(cache, formula),
         None => parse_formula(formula).ok().map(Arc::new),
     }
-    .ok_or(ErrorValue::Name)?;
+    .ok_or_else(|| {
+        if formula.contains('[') {
+            ctx.record_unsupported_function();
+        }
+        ErrorValue::Name
+    })?;
     let sheet = defined.local_sheet.unwrap_or(key.0);
     #[cfg(test)]
     DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
@@ -596,12 +642,8 @@ pub(crate) fn resolve_ref(
     cell: CellRef,
     ctx: &EvalContext<'_>,
 ) -> CellValue {
-    let sid = match sheet {
-        Some(name) => match ctx.provider.sheet_id(name) {
-            Some(id) => id,
-            None => return err(ErrorValue::Ref),
-        },
-        None => ctx.sheet,
+    let Some(sid) = resolve_sheet(sheet, ctx) else {
+        return err(ErrorValue::Ref);
     };
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
@@ -616,13 +658,22 @@ pub(crate) fn resolve_ref(
 /// context sheet). returns `None` only when a named sheet does not exist.
 pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Option<SheetId> {
     match sheet {
-        Some(name) => ctx.provider.sheet_id(name),
+        Some(name) => ctx
+            .provider
+            .sheet_id(name)
+            .or_else(|| missing_sheet(name, ctx)),
         None => Some(ctx.sheet),
     }
 }
 
-fn eval_unary(op: UnaryOp, expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
-    apply_unary(op, &evaluate(expr, ctx))
+/// a sheet qualifier the workbook does not hold. one that names another
+/// workbook (`[1]Sheet`; a sheet name cannot contain `[`) is an engine gap,
+/// since the package carries none of that workbook's cells.
+fn missing_sheet(name: &str, ctx: &EvalContext<'_>) -> Option<SheetId> {
+    if name.contains('[') {
+        ctx.record_unsupported_function();
+    }
+    None
 }
 
 pub(crate) fn apply_unary(op: UnaryOp, v: &CellValue) -> CellValue {
@@ -672,11 +723,11 @@ pub(crate) fn apply_binary(
     }
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow => {
-            let a = match to_number(lv) {
+            let a = match operand(lv, ctx) {
                 Ok(n) => n,
                 Err(e) => return err(e),
             };
-            let b = match to_number(rv) {
+            let b = match operand(rv, ctx) {
                 Ok(n) => n,
                 Err(e) => return err(e),
             };
@@ -698,6 +749,39 @@ pub(crate) fn apply_binary(
         }
         _ => compare(op, lv, rv),
     }
+}
+
+/// excel reads date text as a number through the author's locale, which the
+/// file does not record, so failing to coerce such text is an engine gap
+/// rather than `#VALUE!`.
+fn date_text_gap(operand: &CellValue, ctx: &EvalContext<'_>) {
+    if let CellValue::Text { value } = operand
+        && crate::functions::datetime::is_date_text(value)
+    {
+        ctx.record_unsupported_function();
+    }
+}
+
+fn operand(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
+    to_number(value).inspect_err(|_| date_text_gap(value, ctx))
+}
+
+/// a numeric operator over one value; see [`date_text_gap`].
+pub(crate) fn coerced(
+    value: &CellValue,
+    ctx: &EvalContext<'_>,
+    apply: impl Fn(&CellValue) -> CellValue,
+) -> CellValue {
+    let result = apply(value);
+    if matches!(
+        result,
+        CellValue::Error {
+            value: ErrorValue::Value
+        }
+    ) {
+        date_text_gap(value, ctx);
+    }
+    result
 }
 
 fn arithmetic(op: BinaryOp, a: f64, b: f64) -> CellValue {

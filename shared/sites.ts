@@ -6,5 +6,7 @@ export const REPO = "https://github.com/openooxml/betteroffice";
 export const NPM = "https://www.npmjs.com/org/betteroffice";
 export const CRATES = "https://crates.io/search?q=betteroffice";
 export const PYPI = "https://pypi.org/project/betteroffice-xlsx";
-export const BENCHMARKS = `${REPO}#visual-fidelity`;
+export const BENCHMARKS = `${REPO}#benchmarks`;
+export const BENCHMARKS_SITE = "https://benchmarks.betteroffice.dev";
+export const EVALS_SITE = "https://evals.betteroffice.dev";
 export const RELEASES = `${REPO}/releases`;

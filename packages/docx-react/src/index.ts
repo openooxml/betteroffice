@@ -22,6 +22,7 @@ export type {
 export {
   DocxEditor,
   type DocxEditorProps,
+  type DocxErrorInfo,
   type DocxEditorRef,
   type DocxParagraphMatch,
   type DocxSelectionInfo,

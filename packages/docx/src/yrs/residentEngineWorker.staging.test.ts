@@ -3,8 +3,20 @@ import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { decodeFrameDelta, FRAME_DELTA_VERSION, retainedFramePageById, type DecodedFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import { buildCommandFrame } from './residentCommandFrame';
-import { closeCommandBitmap, stageCommandPresentation } from './residentCommandPresentation';
-import type { DocxCommandEchoContext, DocxCommandFrame } from './residentCommandProtocol';
+import { closeCommandBitmap, echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
+import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from './residentCommandProtocol';
+import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displayList';
+import { drawGlyphRunPrimitive } from '../layout/render/canvasBackend';
+import { GlyphCache } from '../layout/render/glyphCache';
+import { indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs } from './residentEchoGlyphs';
+import { readCellSelection } from './residentCommandTableSelection';
+import { readResidentCellSelectionRects } from './residentObjectGeometry';
+
+const echoAlphabet = 'abxy';
+const echoGlyphSet: DocxEchoGlyphSet = { key: 'set', fontId: 1, alphabet: echoAlphabet, horizontal: 0.01,
+  glyphIds: [...echoAlphabet].map((char) => char.charCodeAt(0)), advances: [1000, 1000, 1000, 1000],
+  kerning: [], unsafePairs: [], outlines: Object.fromEntries([...echoAlphabet].map((char) => [char.charCodeAt(0),
+    JSON.stringify({ upem: 1000, cmds: [{ t: 'M', x: char.charCodeAt(0), y: 0 }, { t: 'L', x: 0, y: 700 }, { t: 'Z' }] })])) };
 
 test('package_image_fixture_has_complete_colored_scanlines', () => {
   const png = Buffer.from(readFileSync(new URL('./__fixtures__/seed-parity/images/word/media/image1.png.base64', import.meta.url), 'utf8'), 'base64');
@@ -27,12 +39,14 @@ test('package_image_fixture_has_complete_colored_scanlines', () => {
   }
 });
 
-async function stageRequestedPages(requested: number[], damaged: number[] = [], echoContext?: DocxCommandEchoContext, imageSource?: string) {
-  const pages = Array.from({ length: 4 }, (_, pageIndex) => ({ pageIndex, width: 600, height: 800, primitives: imageSource ? [{ kind: 'image' as const, relId: imageSource, x: 0, y: 0, w: 10, h: 10 }] : [] }));
+async function stageRequestedPages(requested: number[], damaged: number[] = [], echoContext?: DocxCommandEchoContext, imageSource?: string,
+  primitives?: DisplayPrimitive[]) {
+  const pages = Array.from({ length: 4 }, (_, pageIndex) => ({ pageIndex, width: 600, height: 800,
+    primitives: primitives ?? (imageSource ? [{ kind: 'image' as const, relId: imageSource, x: 0, y: 0, w: 10, h: 10 }] : []) }));
   const retainedFrame: RetainedFrame = {
     protocolVersion: FRAME_DELTA_VERSION, docEpoch: 1, layoutEpoch: 1, frameEpoch: 7,
     pages: pages.map((page) => ({ page, pageIndex: page.pageIndex, pageId: BigInt(page.pageIndex + 1),
-      fingerprint: 0n, primitiveIds: new BigUint64Array() })),
+      fingerprint: 0n, primitiveIds: new BigUint64Array(page.primitives.map((_, index) => BigInt(index + 1))) })),
     damagedPageIds: new Set(damaged.map((index) => BigInt(index + 1))), removedPageIds: new Set(), displayList: { pages },
   };
   const bytes = new Uint8Array();
@@ -42,6 +56,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
   };
   const builds: number[][] = [];
   const rasters: number[] = [];
+  const rasterCalls: { primitives: number; clip: unknown }[] = [];
   const decoded: Blob[] = [];
   const resolved: unknown[] = [];
   const mediaReads: string[] = [];
@@ -61,6 +76,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
         mediaReads.push(token);
         return token === 'media:0' ? 'data:image/png;base64,' + readFileSync(new URL('./__fixtures__/seed-parity/images/word/media/image1.png.base64', import.meta.url), 'utf8').replace(/\s/g, '') : null;
       },
+      cellSelection: () => null,
       setDisplayWindow() {}, retainedHeadersFootersJson: () => 'null', proposalEngine: { version: () => '0' },
       buildDisplayPagesFrame: (indices: number[]) => { builds.push([...indices]); return bytes; },
       buildDisplayListFrame: () => bytes,
@@ -72,10 +88,13 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     finalizeResidentFrame: async () => ({ bytes, delta, caret: { frameEpoch: 7, caretRect: null } }),
     hooks: { editState: () => ({ storedMarks: null }), selection: () => null },
     projectCommandEchoContext: () => echoContext,
+    commandEchoGlyphs: () => ({ provider: () => undefined,
+      unsent: (context?: DocxCommandEchoContext) => context?.glyphs ? [echoGlyphSet] : [], sent() {} }),
     pendingOffscreenPageIds: pending, activeOffscreenPageIds: new Set(['1', '2', '3', '4']),
     glyphCache: {}, offscreenDpr: 1, offscreenZoom: 1,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
-    stageCommandPresentation, buildCommandFrame, pendingUpdates: [],
+    readCellSelection, readResidentCellSelectionRects,
+    stageCommandPresentation, echoBackgroundPage, buildCommandFrame, pendingUpdates: [],
     OffscreenCanvas: class {
       constructor(public width: number, public height: number) {}
       getContext() { return { drawImage() {} }; }
@@ -83,8 +102,10 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     },
     fetch: async (source: string) => { fetches.push(source); return fetch(source); },
     createImageBitmap: async (blob: Blob) => { decoded.push(blob); return image; },
-    rasterizeDisplayPageToBackBuffer: async (_buffer: unknown, page: RetainedFrame['displayList']['pages'][number], options: { resolveImage(source: string): Promise<unknown> }) => {
+    rasterizeDisplayPageToBackBuffer: async (_buffer: unknown, page: RetainedFrame['displayList']['pages'][number], options: { resolveImage(source: string): Promise<unknown> },
+      _pixelRatio?: number, _zoom?: number, clip?: unknown) => {
       rasters.push(page.pageIndex);
+      rasterCalls.push({ primitives: page.primitives.length, clip });
       if (imageSource) resolved.push(await options.resolveImage(imageSource));
     },
   };
@@ -92,7 +113,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     new Bun.Transpiler({ loader: 'ts' }).transformSync('const frameHooks = {\n' + method + '\n};') +
     '\nreturn frameHooks.frame({ coversThroughSeq: 9, full: false });'
   )(...Object.values(dependencies)) as { value: DocxCommandFrame; transfer: Transferable[] };
-  return { frame, builds, rasters, bitmap, background, pending, delta, decoded, resolved, mediaReads, image, closes, fetches };
+  return { frame, builds, rasters, rasterCalls, bitmap, background, pending, delta, decoded, resolved, mediaReads, image, closes, fetches };
 }
 
 test('remount_request_with_empty_native_delta_stages_requested_page', async () => {
@@ -129,22 +150,28 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
     boundaries: [0, 1, 2].map((utf16) => ({ utf16, grapheme: utf16,
       caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
     selection: { anchorGrapheme: 2, focusGrapheme: 2 }, transform: [1, 0, 0, 1, 0, 0],
-    damage: [{ page, rect, backgroundId: 'background', primitiveIds: [] }], shaping: 'simple-ltr',
+    damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }], shaping: 'simple-ltr',
+    glyphs: { glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,
+      device: { x: 0, y: 0, width: 100, height: 20 }, pixelRatio: 1 },
   };
   const result = await stageRequestedPages([2], [], echoContext);
   expect(result.delta.operations).toEqual([]);
   expect(result.frame.value.payload.echoContext).toEqual(echoContext);
+  expect(result.frame.value.payload.echoGlyphSets).toEqual([echoGlyphSet]);
   expect(result.frame.value.payload.stagedPresentation?.pages[0]?.backgrounds).toEqual([
     { id: 'background', rect, bitmap: result.background },
   ]);
   expect(result.frame.transfer).toContain(result.background);
   expect(result.rasters).toEqual([2, 2]);
   const texts: string[] = [];
+  const scope = globalThis as { Path2D?: unknown };
+  const previousPath = scope.Path2D;
+  scope.Path2D = class { glyph?: number; moveTo(x: number) { this.glyph ??= x; } lineTo() {} closePath() {} };
   const createCanvas = () => ({ width: 600, height: 800, getContext: () => ({
     save() {}, restore() {}, setTransform() {}, transform() {}, beginPath() {}, rect() {}, clip() {},
-    clearRect() {}, fillRect() {}, drawImage() {},
-    measureText(text: string) { return { width: text.length * 10 }; },
-    fillText(text: string) { texts.push(text); },
+    clearRect() {}, fillRect() {}, translate() {}, scale() {},
+    drawImage() { texts.push(''); },
+    fill(path: { glyph: number }) { texts.push(texts.pop()! + String.fromCharCode(path.glyph)); },
   }) }) as unknown as HTMLCanvasElement;
   let canvas = createCanvas();
   const peerless = (name: string) => readFileSync(new URL(`../../../docx-react/src/components/DocxEditor/peerless/${name}`, import.meta.url), 'utf8');
@@ -152,12 +179,18 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
   const ownership = new Function('closeCommandBitmap',
     new Bun.Transpiler({ loader: 'ts' }).transformSync(ownershipSource) + '\nreturn { retainBitmap, releaseBitmap };'
   )(closeCommandBitmap) as Record<'retainBitmap' | 'releaseBitmap', (bitmap: ImageBitmap, holder: object) => void>;
+  const deltasSource = peerless('frameDeltas.ts').replace(/^import .*$/gm, '').replaceAll('export function ', 'function ');
+  const { decodeCommandFrameDeltas } = new Function('decodeFrameDelta',
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(deltasSource) + '\nreturn { decodeCommandFrameDeltas };'
+  )(decodeFrameDelta) as { decodeCommandFrameDeltas: unknown };
   const source = peerless('echoPainter.ts');
   const painterSource = source.slice(source.indexOf('export function createEchoPainter('))
     .replace('export function createEchoPainter(', 'function createEchoPainter(');
-  const painter = new Function('decodeFrameDelta', 'canvasForPage', 'retainBitmap', 'releaseBitmap',
+  const painter = new Function('decodeCommandFrameDeltas', 'canvasForPage', 'retainBitmap', 'releaseBitmap', 'drawGlyphRunPrimitive',
+    'GlyphCache', 'indexEchoGlyphSet', 'leadingWordWidth', 'placeEchoGlyphs',
     new Bun.Transpiler({ loader: 'ts' }).transformSync(painterSource) + '\nreturn createEchoPainter({ canvasForPage });'
-  )(decodeFrameDelta, () => canvas, ownership.retainBitmap, ownership.releaseBitmap) as {
+  )(decodeCommandFrameDeltas, () => canvas, ownership.retainBitmap, ownership.releaseBitmap, drawGlyphRunPrimitive, GlyphCache,
+    indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs) as {
     preview(intent: { kind: 'insertText'; payload: { text: string } }): object | undefined;
     reconcile(frame: DocxCommandFrame, retired: readonly unknown[], remaining: readonly unknown[]): void;
     paint(entries: readonly unknown[]): void;
@@ -166,7 +199,7 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
   try {
     painter.reconcile({ revision: 6, coversThroughSeq: 9, payload: {
       frame: new ArrayBuffer(0), layoutRevision: 0, caret: { frameEpoch: 6, caretRect: null },
-      echoContext: { ...echoContext, frameEpoch: 6 },
+      echoContext: { ...echoContext, frameEpoch: 6 }, echoGlyphSets: [echoGlyphSet],
       stagedPresentation: { frameEpoch: 6, pages: [{ page, frameEpoch: 6,
         bitmap: { width: 600, height: 800, close() {} } as ImageBitmap,
         backgrounds: [{ id: 'background', rect, bitmap: { width: 100, height: 20, close() {} } as ImageBitmap }],
@@ -179,15 +212,16 @@ test('remount_request_with_pending_echo_restages_context_and_background', async 
       ticket: { id: 10, seq: 10, ack: Promise.resolve({ seq: 10, status: 'applied' }),
         presented: Promise.resolve('presented') } };
     painter.paint([pending]);
-    expect(texts).toEqual(['abx']);
+    expect(texts.at(-1)).toBe('abx');
     texts.length = 0;
     canvas = createCanvas();
     painter.reconcile(result.frame.value, [], [pending]);
     expect(result.frame.value.coversThroughSeq).toBe(9);
-    expect(texts).toEqual(['abx']);
+    expect(texts.at(-1)).toBe('abx');
     expect(painter.preview({ kind: 'insertText', payload: { text: 'y' } })).toBeDefined();
   } finally {
     painter.dispose();
+    scope.Path2D = previousPath;
   }
 });
 
@@ -218,4 +252,26 @@ test('unavailable_media_and_external_sources_do_not_fetch', async () => {
     expect(result.fetches).toEqual([]);
     expect(result.decoded).toEqual([]);
   }
+});
+
+test('the echo background rasters what reaches its damage rect, not the page', async () => {
+  const page = { pageId: '3', pageIndex: 2 };
+  const rect = { x: 0, y: 0, width: 100, height: 20 };
+  const run = (y: number): GlyphRunPrimitive => ({ kind: 'glyphRun', text: 'a', size: 12, fontId: 1, color: '#000',
+    glyphs: [{ id: 97, cluster: 0, x: 10, y, advance: 6 }] });
+  const echoContext: DocxCommandEchoContext = {
+    page, frameEpoch: 7, layoutRevision: 0, serializedBytes: 900, text: 'ab',
+    styleRuns: [{ startUtf16: 0, endUtf16: 2, fontFamily: 'Arial', fontSizePx: 12,
+      color: '#000', bold: false, italic: false, underline: false, strike: false,
+      transform: [1, 0, 0, 1, 0, 0], baseline: { x: 0, y: 14 } }],
+    boundaries: [0, 1, 2].map((utf16) => ({ utf16, grapheme: utf16, caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
+    selection: { anchorGrapheme: 2, focusGrapheme: 2 }, transform: [1, 0, 0, 1, 0, 0],
+    damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }], shaping: 'simple-ltr',
+    glyphs: { glyphSet: 'set', fontId: 1, size: 12, color: '#000', x: 0, y: 14, next: '', right: 100,
+      device: { x: 0, y: 0, width: 100, height: 20 }, pixelRatio: 1 },
+  };
+  const result = await stageRequestedPages([2], [], echoContext, undefined,
+    [run(14), ...Array.from({ length: 200 }, (_, index) => run(300 + index))]);
+  expect(result.rasterCalls.map(({ primitives }) => primitives)).toEqual([201, 1]);
+  expect(result.rasterCalls[1]?.clip).toEqual({ x: 0, y: 0, width: 100, height: 20 });
 });

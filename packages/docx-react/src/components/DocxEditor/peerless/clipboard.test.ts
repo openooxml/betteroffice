@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'bun:test';
-import { copyWorkerSelection } from './clipboard';
+import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
-import { createYrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
 
 function fixture(readOnly = false) {
   const selection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
@@ -66,4 +66,69 @@ test('copy and cut project raw selection offsets across tracked deletions in the
       expect(read.ok && read.paragraphs[0]?.text).toBe(cut ? 'bc' : 'abc');
     } finally { session.destroy(); }
   }
+});
+
+function sliceFixture(fragment: DocxClipboardFragment | null) {
+  return { text: 'A\tB', fragment };
+}
+
+test('copy with a fragment writes both types through writeSlice', async () => {
+  const { binding, readSelection } = fixture();
+  const fragment: DocxClipboardFragment = {
+    paragraphs: [{
+      tables: [{
+        tblPr: { width: 9360, widthType: 'dxa' },
+        grid: [],
+        rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'pilcrow' }] }] }],
+      }],
+      text: '',
+    }],
+  };
+  const write = mock(async (_text: string) => {});
+  const writeSlice = mock(async (_text: string, _html: string) => {});
+  const readClipboardSlice = mock(async () => sliceFixture(fragment));
+  expect(await copyWorkerSelection({ binding, readSelection, readClipboardSlice, write, writeSlice, isCurrent: () => true })).toBe(true);
+  expect(write).not.toHaveBeenCalled();
+  expect(writeSlice).toHaveBeenCalledTimes(1);
+  expect(writeSlice.mock.calls[0]?.[0]).toBe('A\tB');
+  expect(writeSlice.mock.calls[0]?.[1]).toContain('<table');
+});
+
+test('copy without a fragment writes plain text only', async () => {
+  const { binding, readSelection } = fixture();
+  const write = mock(async (_text: string) => {});
+  const writeSlice = mock(async (_text: string, _html: string) => {});
+  const readClipboardSlice = mock(async () => sliceFixture(null));
+  expect(await copyWorkerSelection({ binding, readSelection, readClipboardSlice, write, writeSlice, isCurrent: () => true })).toBe(true);
+  expect(write).toHaveBeenCalledWith('A\tB');
+  expect(writeSlice).not.toHaveBeenCalled();
+});
+
+test('copy with empty slice text writes nothing', async () => {
+  const { binding, readSelection } = fixture();
+  const write = mock(async (_text: string) => {});
+  const writeSlice = mock(async (_text: string, _html: string) => {});
+  const readClipboardSlice = mock(async () => ({ text: '', fragment: null }));
+  expect(await copyWorkerSelection({ binding, readSelection, readClipboardSlice, write, writeSlice, isCurrent: () => true })).toBe(false);
+  expect(write).not.toHaveBeenCalled();
+  expect(writeSlice).not.toHaveBeenCalled();
+});
+
+test('cut in cells mode copies but deletes nothing', async () => {
+  const { binding, readSelection, submit } = fixture();
+  (binding.viewStore.getSnapshot() as unknown as { editState: Record<string, unknown> }).editState = {
+    readOnly: false,
+    tableContext: { hasMultiCellSelection: true },
+  };
+  const writeSlice = mock(async (_text: string, _html: string) => {});
+  const readClipboardSlice = mock(async () => sliceFixture(null));
+  const write = mock(async (_text: string) => {});
+  expect(await copyWorkerSelection({ binding, readSelection, readClipboardSlice, write, writeSlice, cut: true, isCurrent: () => true })).toBe(true);
+  expect(write).toHaveBeenCalled();
+  expect(submit).not.toHaveBeenCalled();
+});
+
+test('paste gating follows the insertTable command state', () => {
+  expect(isPasteFragmentAllowed({ getState: () => ({ enabled: true }) })).toBe(true);
+  expect(isPasteFragmentAllowed({ getState: () => ({ enabled: false }) })).toBe(false);
 });

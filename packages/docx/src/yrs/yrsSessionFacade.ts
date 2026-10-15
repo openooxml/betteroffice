@@ -29,6 +29,7 @@ import type {
   YrsStorySegment,
   YrsTableRange,
   YrsTableReceipt,
+  YrsTableFragmentReceipt,
   YrsTargetEditResult,
   YrsTextMatch,
   YrsUndoCaptureMode,
@@ -326,7 +327,7 @@ export function wrapSession(
     noteYrsStoriesDirty(facade, stories);
   };
 
-  const markReceiptStories = (receipt: YrsTableReceipt): YrsTableReceipt => {
+  const markReceiptStories = <T extends YrsTableReceipt>(receipt: T): T => {
     markDirty(receipt.createdStoryIds);
     markDirty(receipt.deletedStoryIds);
     markDirty(receipt.changedStoryIds);
@@ -901,6 +902,27 @@ export function wrapSession(
           )
       );
     },
+    insertTableFragment: (at, table, suggesting) => {
+      ensureUndo(at.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(
+              session.insert_table_fragment(
+                at.story,
+                at.paraId,
+                at.offset,
+                JSON.stringify(table),
+                suggesting?.name,
+                suggesting?.date
+              )
+            ) as YrsTableFragmentReceipt
+          )
+      );
+    },
+    validateTableFragment: (table) => {
+      session.validate_table_fragment(JSON.stringify(table));
+    },
     insertRow: (at, side, suggesting) => {
       ensureUndo(at.story);
       return mutate(
@@ -1367,6 +1389,26 @@ export function wrapSession(
       ),
     writtenParagraphIds: (bytes) =>
       JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
+    runInheritance: (styles) => {
+      const inheritance = session.run_inheritance(JSON.stringify(styles ?? null));
+      return {
+        attributes: (paragraphStyle, runStyle, tableRun) =>
+          JSON.parse(inheritance.attributes(paragraphStyle, runStyle, tableRun ? JSON.stringify(tableRun) : undefined)) as Record<string, unknown>,
+        paragraphFormatting: (paragraphStyle, tableFormatting) =>
+          JSON.parse(inheritance.paragraph_formatting(
+            paragraphStyle, JSON.stringify(tableFormatting ?? null)
+          )) ?? undefined,
+        tableAttributes: (table) => JSON.parse(inheritance.table_attributes(JSON.stringify({
+          formatting: table.formatting,
+          columnWidths: table.columnWidths,
+          rows: table.rows.map((row) => ({
+            formatting: row.formatting,
+            cells: row.cells.map((cell) => ({ formatting: cell.formatting })),
+          })),
+        }))),
+        dispose: () => inheritance.free(),
+      };
+    },
     exportStructured: (options) =>
       JSON.parse(
         session.export_structured_json(JSON.stringify(options))
