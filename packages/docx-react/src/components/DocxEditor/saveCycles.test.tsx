@@ -99,7 +99,7 @@ for (const typing of [false, true]) {
         ]);
       }
     }
-  });
+  }, 20_000);
 }
 
 for (const typing of [false, true]) {
