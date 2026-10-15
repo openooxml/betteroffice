@@ -160,17 +160,7 @@ test('copy of a multi-cell selection sets text html containing a table', async (
 
 test('paste of html with a table inserts inside one undo group', async () => {
   const { session, textarea } = await mount(false);
-  const fragment = {
-    paragraphs: [{
-      tables: [{
-        tblPr: { width: 9360, widthType: 'dxa' },
-        grid: [],
-        rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'pilcrow' }] }] }],
-      }],
-      text: '',
-    }],
-  };
-  const html = clipboardFragmentHtml(fragment as never);
+  const html = clipboardFragmentHtml(tableFragment());
   let boundaries = 0;
   const boundary = session.addUndoBoundary.bind(session);
   session.addUndoBoundary = () => { boundaries += 1; return boundary(); };
@@ -198,17 +188,7 @@ test('paste of html with a table lands after text typed in the same tick', async
 
 test('suggesting mode pastes plain text', async () => {
   const { session, textarea } = await mount(false, true);
-  const fragment = {
-    paragraphs: [{
-      tables: [{
-        tblPr: { width: 9360, widthType: 'dxa' },
-        grid: [],
-        rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'pilcrow' }] }] }],
-      }],
-      text: '',
-    }],
-  };
-  pasteWith(textarea, clipboardFragmentHtml(fragment as never), 'hello');
+  pasteWith(textarea, clipboardFragmentHtml(tableFragment()), 'hello');
   await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
   expect(session.storySegments('body').some((segment) => segment.kind === 'embed')).toBe(false);
   expect(session.paragraphs('body').map((p) => p.text).join('\n')).toContain('hello');

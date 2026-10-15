@@ -13,6 +13,7 @@ import React, {
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  applyClipboardFragment,
   sameYrsSelection,
   type YrsAuthor,
   type YrsInputPositionMap,
@@ -23,7 +24,6 @@ import {
   type YrsSession,
   type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
-import * as Yrs from '@betteroffice/docx/yrs';
 import {
   effectiveZoom,
   resolveDisplayPageClientRect,
@@ -34,7 +34,6 @@ import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGat
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
-  currentYrsSelectionRange,
   yrsCellLocFromStory,
   yrsCellStory,
   yrsClipboardSlice,
@@ -1710,9 +1709,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const slice = session ? (() => {
-        try { return yrsClipboardSlice(session); } catch { return null; }
-      })() : null;
+      const slice = session ? yrsClipboardSlice(session) : null;
       const text = primedCopyRef.current ?? slice?.text ?? (session ? yrsSelectionPlainText(session) : '');
       primedCopyRef.current = null;
       if (!text) return;
@@ -1745,7 +1742,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           }
           session.addUndoBoundary();
           try {
-            const caret = Yrs.applyClipboardFragment(session, range, fragment, suggestingAuthor());
+            const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
             session.setSelection(caret);
             finishMutation();
           } finally {

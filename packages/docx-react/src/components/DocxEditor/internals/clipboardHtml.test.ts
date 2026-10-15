@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxTableFragment, DocxTableFragmentCell } from '@betteroffice/docx/yrs';
 import { clipboardFragmentHtml, parseClipboardHtml } from './clipboardHtml';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -16,7 +16,7 @@ const borders = {
   right: { style: 'single', size: 4, color: { rgb: '000000' } },
 };
 
-function cell(text: string, extraTcPr: Record<string, unknown> = {}, shading?: string) {
+function cell(text: string, extraTcPr: Record<string, unknown> = {}, shading?: string): DocxTableFragmentCell {
   return {
     tcPr: { borders, ...extraTcPr },
     content: text
@@ -26,7 +26,7 @@ function cell(text: string, extraTcPr: Record<string, unknown> = {}, shading?: s
   };
 }
 
-function tableFragment() {
+function tableFragment(): DocxTableFragment {
   return {
     tblPr: { width: 4680, widthType: 'dxa' },
     grid: [2340, 2340],
@@ -41,7 +41,7 @@ test('internal round trip returns the same fragment', () => {
   const fragment: DocxClipboardFragment = {
     paragraphs: [
       { text: 'before' },
-      { tables: [tableFragment() as never], text: 'after' },
+      { tables: [tableFragment()], text: 'after' },
     ],
   };
   const html = clipboardFragmentHtml(fragment);
@@ -121,7 +121,7 @@ test('text only html returns null', () => {
 
 test('unknown payload version or invalid shape falls back to the html table', () => {
   const fragment: DocxClipboardFragment = {
-    paragraphs: [{ tables: [tableFragment() as never], text: '' }],
+    paragraphs: [{ tables: [tableFragment()], text: '' }],
   };
   const html = clipboardFragmentHtml(fragment);
   const badVersion = html.replace('"v":1', '"v":999');
