@@ -82,6 +82,7 @@ export type ResidentEngineSession = Pick<
   | 'setCellSelection'
   | 'insertRow'
   | 'insertTable'
+  | 'insertTableFragment'
   | 'insertImage'
   | 'insertPageBreak'
   | 'insertSectionBreak'
@@ -647,6 +648,11 @@ export async function createResidentEngineSession(
     }),
     insertTable: (at, rows, columns, author) => applyCommandMutation(at.story, () => {
       const receipt = JSON.parse(session.insert_table(at.story, at.paraId, at.offset, rows, columns, author?.name, author?.date));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    insertTableFragment: (at, table, author) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.insert_table_fragment(at.story, at.paraId, at.offset, JSON.stringify(table), author?.name, author?.date));
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),

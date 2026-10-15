@@ -34,6 +34,7 @@ import type {
   YrsStickyPosition,
   YrsStoryRange,
 } from './index';
+import type { DocxClipboardFragment } from './clipboardFragment';
 import type { LayoutMetaV1 } from './layoutMeta';
 import type { DecodedFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentEngineSession } from './residentEngineSession';
@@ -238,6 +239,7 @@ export interface DocxCommandPayloads {
   changeIndent: DocxSelectionIntent & { direction: 'increase' | 'decrease' };
   insertImage: DocxSelectionIntent & { image: Readonly<Record<string, unknown>> };
   insertTable: DocxSelectionIntent & { rows: number; columns: number };
+  pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &

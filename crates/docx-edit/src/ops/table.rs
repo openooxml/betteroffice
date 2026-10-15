@@ -1256,7 +1256,7 @@ fn ensure_grid(data: &mut TableData, columns: usize) {
         && data
             .grid
             .iter()
-            .all(|width| any_number(Some(width)).is_some())
+            .all(|width| any_number(Some(width)).is_some_and(|width| width > 0.0))
     {
         return;
     }
@@ -3814,20 +3814,26 @@ mod tests {
 
     #[test]
     fn fragment_grid_mismatch_is_recomputed() {
-        let doc = fragment_doc();
-        let fragment = serde_json::json!({
-            "tblPr": {}, "grid": [1],
-            "rows": [{"trPr": {}, "cells": [fragment_cell("a"), fragment_cell("b")]}],
-        });
-        let receipt = doc
-            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
-            .unwrap();
-        assert_eq!((receipt.rows, receipt.columns), (1, 2));
-        let payload = doc.table_payload(&receipt.table).unwrap();
-        assert_eq!(
-            payload.get("grid"),
-            Some(&Any::from_json("[4680,4680]").unwrap())
-        );
+        for grid in [
+            serde_json::json!([1]),
+            serde_json::json!([2000, -5]),
+            serde_json::json!([2000, "wide"]),
+        ] {
+            let doc = fragment_doc();
+            let fragment = serde_json::json!({
+                "tblPr": {}, "grid": grid,
+                "rows": [{"trPr": {}, "cells": [fragment_cell("a"), fragment_cell("b")]}],
+            });
+            let receipt = doc
+                .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+                .unwrap();
+            assert_eq!((receipt.rows, receipt.columns), (1, 2));
+            let payload = doc.table_payload(&receipt.table).unwrap();
+            assert_eq!(
+                payload.get("grid"),
+                Some(&Any::from_json("[4680,4680]").unwrap())
+            );
+        }
     }
 
     #[test]

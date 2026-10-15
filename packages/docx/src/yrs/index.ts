@@ -46,6 +46,7 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import type { DocxListStoriesResult } from './stories';
+import type { DocxTableFragment } from './clipboardFragment';
 import {
   type DocxProposalRegistryState,
   type DocxProposalRequest,
@@ -907,6 +908,16 @@ export interface YrsTableReceipt {
 }
 
 /**
+ * Receipt of {@link YrsSession.insertTableFragment}: the table receipt plus
+ * the caret right after the inserted table embed.
+ *
+ * @public
+ */
+export interface YrsTableFragmentReceipt extends YrsTableReceipt {
+  after: YrsLoc;
+}
+
+/**
  * OOXML-shaped cell border value passed through to `tcPr.borders`.
  *
  * @public
@@ -1253,6 +1264,12 @@ export interface YrsSession extends CollaborationReplica {
   insertRow(at: YrsCellLoc, side: 'above' | 'below', suggesting?: YrsAuthor): YrsTableReceipt;
   /** Inserts a rectangular structural table at a paragraph-keyed location. */
   insertTable(at: YrsLoc, rows: number, columns: number, suggesting?: YrsAuthor): YrsTableReceipt;
+  /** Inserts a clipboard table fragment at a paragraph-keyed location. */
+  insertTableFragment(
+    at: YrsLoc,
+    table: DocxTableFragment,
+    suggesting?: YrsAuthor
+  ): YrsTableFragmentReceipt;
   /** Inserts a column left or right of the cell that `at` resolves into. */
   insertColumn(at: YrsCellLoc, side: 'left' | 'right'): YrsTableReceipt;
   /** Deletes every row covered by an explicit rectangular cell range. */
