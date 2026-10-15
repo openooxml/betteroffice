@@ -5,7 +5,7 @@ import { createYrsPositionProjection } from './yrsPositionProjection';
 
 export type TableSelectionTarget = 'table' | 'row' | 'column';
 
-function rootOf(story: string): string {
+export function rootOf(story: string): string {
   return story === 'body' || story.startsWith('body:') ? 'body' : story.split(':').slice(0, 2).join(':');
 }
 
@@ -19,14 +19,18 @@ export function readCellSelection(engine: Pick<ResidentDocxCommandEngine, 'cellS
 }
 
 export function resolveLiveCell(engine: ResidentDocxCommandEngine, story: string): YrsCellLoc | null {
+  if (story === rootOf(story)) return null;
   const projection = createYrsPositionProjection(engine.geometryReader, rootOf(story));
   if (!projection) return null;
+  let best: YrsCellLoc | null = null;
   for (const table of projection.allTables()) {
     const cell = table.cells.find((candidate) => candidate.story === story);
     if (!cell) continue;
-    return { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };
+    if (!best || table.story.length > best.story.length) {
+      best = { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };
+    }
   }
-  return null;
+  return best;
 }
 
 function validPayload(value: unknown): value is TablePayload {
