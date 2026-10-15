@@ -77,6 +77,11 @@ async function selectTable(page: Page, input: Locator, arm: Arm) {
   await input.focus();
 }
 
+async function caretAfterTable(input: Locator, arm: Arm) {
+  if (arm.name === 'default') await input.press('ArrowUp');
+  await input.press('ControlOrMeta+End');
+}
+
 async function copyPasteAfterTable(page: Page, input: Locator, arm: Arm) {
   await page.evaluate(() => navigator.clipboard.writeText('sentinel'));
   await selectTable(page, input, arm);
@@ -84,7 +89,7 @@ async function copyPasteAfterTable(page: Page, input: Locator, arm: Arm) {
   const flavors = await copiedFlavors(page);
   expect(flavors.types).toContain('text/html');
   expect(flavors.html).toContain('<table');
-  await input.press('ControlOrMeta+End');
+  await caretAfterTable(input, arm);
   await input.press('ControlOrMeta+v');
 }
 
