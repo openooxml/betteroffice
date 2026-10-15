@@ -25,7 +25,7 @@ jobs:
       id-token: write # OIDC provenance / Trusted Publishing
       actions: write # dispatch deploy.yml after publish
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -174,7 +174,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - id: registry
         run: |
@@ -242,7 +242,7 @@ jobs:
       contents: read
       actions: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Dispatch a publish per format, then wait for each
         env:
