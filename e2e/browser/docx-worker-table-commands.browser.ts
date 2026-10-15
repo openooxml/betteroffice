@@ -64,9 +64,31 @@ async function caretIntoTable(page: Page, input: ReturnType<Page['locator']>) {
 }
 
 async function tableMenuAction(page: Page, label: string) {
-  await page.getByTestId('toolbar-table-more').click();
-  const menu = page.locator('[role="menu"]');
-  await menu.getByRole('menuitem', { name: label, exact: true }).click();
+  if (await page.locator('[role="menu"]').count() > 0) await page.keyboard.press('Escape');
+  await page.locator('.paged-editor__page').first()
+    .click({ button: 'right', position: { x: 100, y: 100 }, force: true });
+  const item = page.getByRole('menuitem', { name: label, exact: true });
+  await expect(item).not.toHaveAttribute('aria-disabled', 'true');
+  await item.click();
+}
+
+async function setCellFillRed(page: Page) {
+  const fillButton = page.getByRole('button', { name: 'Cell Fill Color', exact: true }).last();
+  if (await fillButton.isVisible()) {
+    await fillButton.click();
+    const picker = page.getByRole('dialog', { name: 'Text Highlight Color picker', exact: true });
+    await expect(picker).toBeVisible();
+    await picker.getByLabel('Custom hex color', { exact: true }).fill('FF0000');
+    await picker.getByRole('button', { name: 'Apply', exact: true }).click();
+    return;
+  }
+  await page.getByRole('button', { name: 'More actions', exact: true }).click();
+  const overflow = page.getByRole('menu', { name: 'More actions', exact: true });
+  await overflow.getByRole('menuitem', { name: 'Table', exact: true }).hover();
+  const table = page.getByRole('menu', { name: 'Table', exact: true });
+  await table.getByRole('menuitem', { name: 'Cell Fill Color', exact: true }).hover();
+  const fill = page.getByRole('menu', { name: 'Cell Fill Color', exact: true });
+  await fill.getByRole('menuitemradio', { name: 'Red', exact: true }).click();
 }
 
 async function savedGrid(page: Page, info: TestInfo, step: string) {
@@ -141,12 +163,7 @@ test('worker table commands reshape the saved grid', async ({ page }, info) => {
   await dialog.getByRole('button', { name: 'Apply', exact: true }).click();
   expect(await savedGrid(page, info, 'split')).toMatchObject({ hasTable: true, rows: [5, 5, 5, 5, 5], gridCols: 5 });
 
-  const fillButton = page.getByRole('button', { name: 'Cell Fill Color', exact: true }).last();
-  await fillButton.click();
-  const picker = page.getByRole('dialog', { name: 'Text Highlight Color picker', exact: true });
-  await expect(picker).toBeVisible();
-  await picker.getByLabel('Custom hex color', { exact: true }).fill('FF0000');
-  await picker.getByRole('button', { name: 'Apply', exact: true }).click();
+  await setCellFillRed(page);
   const filled = await savedGrid(page, info, 'fill');
   expect(filled.fills.map((fill) => fill.toUpperCase())).toContain('FF0000');
 
