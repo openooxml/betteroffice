@@ -146,13 +146,10 @@ fn the_composed_chart_title_preserves_its_alignment() {
         {
             let is_title = paragraphs[0].runs[0].text == "Revenue";
             let centred = is_title || paragraphs[0].runs[0].text == "Q1";
-            let value_tick = paragraphs[0].runs[0].text.parse::<f64>().is_ok();
             assert_eq!(
                 paragraphs[0].align,
                 Some(if centred {
                     TextAlign::Center
-                } else if value_tick {
-                    TextAlign::Right
                 } else {
                     TextAlign::Left
                 })

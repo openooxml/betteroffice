@@ -2978,11 +2978,9 @@ fn chart_text_primitive(
     let align = match text.align {
         PlotTextAlign::Center => TextAlign::Center,
         PlotTextAlign::Start => TextAlign::Left,
-        PlotTextAlign::End => TextAlign::Right,
     };
     let x = match align {
         TextAlign::Center => box_x + ((box_w - advance) / 2.0).max(0.0),
-        TextAlign::Right => box_x + (box_w - advance),
         _ => box_x,
     };
     let baseline = safe_geometry(text.baseline_y as f32);
@@ -5775,49 +5773,6 @@ mod tests {
         );
         assert_eq!(pieces[1].style.face.line_id, run.style.face.id);
         assert_ne!(pieces[1].style.face.id, run.style.face.id);
-    }
-
-    #[test]
-    fn a_measured_chart_label_keeps_its_position_when_end_aligned() {
-        let renderer = renderer();
-        let draw = |width, align| {
-            chart_text_primitive(
-                &renderer,
-                &Theme::default(),
-                "chart:1",
-                ChartText {
-                    object_id: 1,
-                    text: "$600,000",
-                    x: 137.3,
-                    baseline_y: 40.0,
-                    width,
-                    font: ooxml_drawingml::chart::PlotFont {
-                        family: "Arial".to_owned(),
-                        ..ooxml_drawingml::chart::chart_label_font()
-                    },
-                    color: "#000000",
-                    align,
-                    rotation_deg: 0.0,
-                },
-                &mut SubstitutionLog::default(),
-            )
-            .unwrap()
-        };
-        let Primitive::TextBox { lines: start, .. } = draw(1.0, PlotTextAlign::Start) else {
-            panic!("a text box");
-        };
-        let Primitive::TextBox { lines: end, .. } =
-            draw(f64::from(start[0].width), PlotTextAlign::End)
-        else {
-            panic!("a text box");
-        };
-        assert_eq!(start[0].x, end[0].x);
-        for (start, end) in start[0].runs.iter().zip(&end[0].runs) {
-            assert_eq!(start.x, end.x);
-            for (start, end) in start.glyphs.iter().zip(&end.glyphs) {
-                assert_eq!(start.x, end.x);
-            }
-        }
     }
 
     #[test]

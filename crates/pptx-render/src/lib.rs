@@ -333,7 +333,6 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
                 align: Some(match text.align {
                     PlotTextAlign::Center => TextAlign::Center,
                     PlotTextAlign::Start => TextAlign::Left,
-                    PlotTextAlign::End => TextAlign::Right,
                 }),
                 level: 0,
                 runs: vec![TextRun {

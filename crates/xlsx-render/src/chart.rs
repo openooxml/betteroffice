@@ -883,7 +883,21 @@ impl PlotSink for ChartSink<'_> {
         true
     }
 
+    fn anchors_text_end(&self) -> bool {
+        true
+    }
+
+    fn push_end_aligned_text(&mut self, op: PlotOp) -> bool {
+        self.push_anchored(op, true)
+    }
+
     fn push_op(&mut self, op: PlotOp) -> bool {
+        self.push_anchored(op, false)
+    }
+}
+
+impl ChartSink<'_> {
+    fn push_anchored(&mut self, op: PlotOp, end_aligned: bool) -> bool {
         if self.failure.is_some() {
             return false;
         }
@@ -892,7 +906,7 @@ impl PlotSink for ChartSink<'_> {
             return false;
         };
         *self.remaining = next;
-        let command = match translate_op(op, self.clip) {
+        let command = match translate_op(op, self.clip, end_aligned) {
             Ok(command) => command,
             Err(()) => {
                 self.failure = Some(SinkFailure::Geometry);
@@ -911,7 +925,7 @@ impl PlotSink for ChartSink<'_> {
     }
 }
 
-fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
+fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Option<DrawCmd>, ()> {
     match op {
         PlotOp::Rect { x, y, w, h, fill } => Ok(Some(DrawCmd::FillRect {
             x: finite_f32(x)?,
@@ -936,11 +950,14 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             let width = positive_f32(width)?;
             let font_size_px = positive_f32(font.size_px)?;
             let font_size = positive_f32(font.size_px * 72.0 / 96.0)?;
-            let text_clip = text_clip(x, y, width, font_size_px, align, chart_clip)?;
-            let (x, align) = match align {
-                PlotTextAlign::Center => (x + width / 2.0, Align::Center),
-                PlotTextAlign::Start => (x, Align::Left),
-                PlotTextAlign::End => (x + width, Align::Right),
+            let text_clip = text_clip(x, y, width, font_size_px, end_aligned, chart_clip)?;
+            let (x, align) = if end_aligned {
+                (x + width, Align::Right)
+            } else {
+                match align {
+                    PlotTextAlign::Center => (x + width / 2.0, Align::Center),
+                    PlotTextAlign::Start => (x, Align::Left),
+                }
             };
             Ok(text_clip.map(|clip| DrawCmd::Text {
                 x,
@@ -1009,15 +1026,16 @@ fn text_clip(
     baseline_y: f32,
     width: f32,
     font_size_px: f32,
-    align: PlotTextAlign,
+    end_aligned: bool,
     chart_clip: Rect,
 ) -> Result<Option<Rect>, ()> {
-    let (clip_x, clip_width) = match align {
-        PlotTextAlign::End => (
+    let (clip_x, clip_width) = if end_aligned {
+        (
             f64::from(chart_clip.x),
             f64::from(x + width) - f64::from(chart_clip.x),
-        ),
-        _ => (f64::from(x), f64::from(width)),
+        )
+    } else {
+        (f64::from(x), f64::from(width))
     };
     let bounds = PlotRect {
         x: clip_x,
@@ -1584,7 +1602,8 @@ mod tests {
         assert!(bounds.x + bounds.w < chart_clip.x + chart_clip.w);
         assert!(bounds.y >= chart_clip.y);
         assert!(bounds.y + bounds.h <= chart_clip.y + chart_clip.h);
-        let DrawCmd::Text { x, clip, align, .. } = translate_op(op, chart_clip).unwrap().unwrap()
+        let DrawCmd::Text { x, clip, align, .. } =
+            translate_op(op, chart_clip, false).unwrap().unwrap()
         else {
             unreachable!();
         };
