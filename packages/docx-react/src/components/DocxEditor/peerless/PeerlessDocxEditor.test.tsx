@@ -189,7 +189,7 @@ function fakeBinding(session: DocxWorkerEditSession<PeerlessEchoIntent>, initial
   return {
     session, viewStore, echoPainter, admission,
     commands: createPeerlessCommandBinding(admission),
-    presentation: { hooks: { paint() {}, drop() {}, present() {} }, present: () => true, dispose() {} },
+    presentation: { hooks: { paint() {}, drop() {}, present() {} }, present: () => true, invalidate() {}, dispose() {} },
   };
 }
 
@@ -791,6 +791,18 @@ test('peerless shell catches chrome failures and reports worker errors in the ba
   await waitFor(() => expect(next.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
   act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onError?.(new Error('worker failed to open')); });
   await waitFor(() => expect(next.getByText('worker failed to open')).toBeTruthy());
+});
+
+test('a recoverable presentation failure reaches the host without closing the document', async () => {
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const stall = new Error('Full frame responses did not satisfy requested coverage and revision');
+  act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onRecoverableError!(stall); });
+  expect(onError.mock.calls).toEqual([[stall]]);
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+  expect(view.queryByText(stall.message)).toBeNull();
 });
 
 test('a failed Blob read ends opening and reaches the shell error banner', async () => {

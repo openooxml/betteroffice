@@ -2544,7 +2544,7 @@ impl EditSession {
                 .map(|source| source.read().comment_writes.snapshot())
                 .unwrap_or_default()
         });
-        self.engine.doc().apply_update_v1(update).map_err(js_err)?;
+        self.engine.doc().load_state_v1(update).map_err(js_err)?;
         if self.engine.doc().session_id() != session_id {
             self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         }
@@ -2744,7 +2744,7 @@ impl EditSession {
             None
         } else {
             EditingDoc::new(1)
-                .apply_update_v1(state)
+                .load_state_v1(state)
                 .map_err(|error| js_err(error.to_string()))?;
             Some(Arc::from(state))
         };

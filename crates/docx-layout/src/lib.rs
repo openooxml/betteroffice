@@ -109,6 +109,17 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = error)]
     fn console_error(message: &str);
+    #[wasm_bindgen(js_namespace = console, js_name = warn)]
+    fn console_warn(message: &str);
+}
+
+/// Reports content the engine left out rather than failing the document on:
+/// a console warning in wasm, stderr natively.
+pub(crate) fn warn_degraded(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    console_warn(&format!("[docx-wasm] {message}"));
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("[docx-layout] {message}");
 }
 
 /// wasm panics abort, so a trap reaches JS as a bare `RuntimeError:

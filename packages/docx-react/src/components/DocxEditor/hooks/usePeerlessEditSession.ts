@@ -28,6 +28,8 @@ export interface UsePeerlessEditSessionOptions {
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
   onError?(error: Error): void;
+  /** Failures the editor survives, such as pages that cannot be painted until the viewport or zoom changes. */
+  onRecoverableError?(error: Error): void;
 }
 
 /** @internal */
@@ -119,14 +121,16 @@ export function usePeerlessEditSession(
         });
         cleanups.push(() => viewStore.dispose());
         const canvasForPage = (page: DocxCommandPageIdentity) => callbacks.current.canvasForPage(page);
-        const requestFullFrame = () => {
-          if (!connection || controller.signal.aborted) return;
+        const requestFullFrame = (settled: () => void = () => {}) => {
+          if (!connection || controller.signal.aborted) { settled(); return; }
           const resident = connection;
           void resident.requestFullFrame().then((ack) => {
+            settled();
             if (!ack.frame) return;
             if (!controller.signal.aborted && resident === connection && receiveRequestedFrame) receiveRequestedFrame(ack.frame);
             else discardCommandPresentation(ack.frame);
           }).catch((error: unknown) => {
+            settled();
             if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
           });
         };
@@ -135,6 +139,7 @@ export function usePeerlessEditSession(
         const presentation = createFramePresentation({
           viewStore, echoPainter, canvasForPage, prepareGeometry: (frame) => callbacks.current.prepareGeometry(frame),
           requestFullFrame,
+          onError: (error) => { if (!controller.signal.aborted) callbacks.current.onRecoverableError?.(error); },
         });
         cleanups.push(() => presentation.dispose());
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
@@ -197,10 +202,12 @@ export function usePeerlessEditSession(
             displayWindow = { start, end };
             viewport = { ...viewport, ...displayWindow };
             void requestViewport();
+            presentation.invalidate();
           },
           setRasterScale(scale) {
             viewport = { ...displayWindow, ...viewport, rasterScale: scale };
             void requestViewport();
+            presentation.invalidate();
           },
         };
         unsubscribe = session.subscribe((state) => viewStore.acceptWorkerState({ session: initial.session, incarnation, epoch: state.epoch }, state));

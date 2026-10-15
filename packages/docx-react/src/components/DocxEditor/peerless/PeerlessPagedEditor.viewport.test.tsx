@@ -12,6 +12,7 @@ import { CanvasPageMirror } from '../CanvasPageMirror';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 import { commandPageGeometry } from './commandPageGeometry';
+import { fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -67,7 +68,7 @@ function frame(revision: number, indices: number[], caretPage = 0): DocxCommandF
   } };
 }
 
-async function mount(zoom = 1, caretPage = 0, prefix = false) {
+async function mount(zoom = 1, caretPage = 0, prefix = false, mirrors = false, pageMirror?: 'full' | 'text') {
   let complete = !prefix;
   const scroller = document.createElement('div');
   scroller.style.overflowY = 'auto';
@@ -102,6 +103,9 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
   let revision = 1;
   let receive: ((candidate: DocxCommandFrame) => void) | undefined;
   const built = new Set([0, 1, 2, caretPage]);
+  const displayPages = Array.from({ length: 20 }, (_, pageIndex) => ({ pageIndex, width: 200, height: 100, primitives: [{
+    kind: 'text' as const, text: `Readable page ${pageIndex + 1}`, x: 0, baselineY: 14, width: 100, font: '12px Arial', color: '#000',
+  }] }));
   const frames: DocxCommandFrame[] = [];
   const nextFrame = (indices: number[]) => {
     const candidate = frame(revision, indices, caretPage);
@@ -149,13 +153,14 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
         pages: Array.from({ length: complete ? 20 : 3 }, (_, pageIndex): PeerlessFrameGeometry['pages'][number] => ({
           page: { pageId: String(pageIndex + 1), pageIndex },
           bounds: { x: prefix && pageIndex < 3 ? 50 : 0, y: pageIndex * stride, width: prefix && pageIndex >= 3 ? 300 : 200, height: 100 }, transform: [1, 0, 0, 1, 0, 0],
+          ...(mirrors && built.has(pageIndex) ? { displayPage: displayPages[pageIndex] } : {}),
         })), caret: candidate.payload.caret.caretRect ? { x: 10,
           y: candidate.payload.caret.caretRect.pageIndex * stride, width: 1, height: 20 } : null, selectionRects: [],
       };
     },
   };
   let binding: PeerlessEditSessionBinding | undefined;
-  const view = render(<PeerlessPagedEditor sessionOptions={options} zoom={zoom} onReady={(ready) => { binding = ready; }} />, { container: scroller });
+  const view = render(<PeerlessPagedEditor sessionOptions={options} zoom={zoom} pageMirror={pageMirror} onReady={(ready) => { binding = ready; }} />, { container: scroller });
   await waitFor(() => expect(binding).toBeDefined());
   return { ...view, scroller, requests, edits, frames, pixels, readbacks, drawnAfterClose, initialScales, binding: binding!,
     async complete() {
@@ -402,4 +407,48 @@ test('a certified prefix grows its scroll column without moving the visible page
   expect(column.parentElement!.style.height).toBe(`${19 * stride + 100}px`);
   await editor.scrollTo(10);
   expect(editor.container.querySelector('[data-page-id="11"] canvas')?.getAttribute('width')).toBe('200');
+});
+
+test('pages entering the window while scrolling build their mirror at idle time once the scroll settles', async () => {
+  const scheduler = fakeIdleScheduler();
+  restorers.push(() => scheduler.restore());
+  const editor = await mount(1, 0, false, true);
+  const mirror = (pageIndex: number) => editor.container.querySelector<HTMLElement>(
+    `[data-page-id="${pageIndex + 1}"] .canvas-page-mirror`);
+  const full = (pageIndex: number) => mirror(pageIndex)?.querySelector('.layout-run-text') != null;
+  await waitFor(() => expect(full(1)).toBe(true));
+  await editor.scrollTo(10);
+  await waitFor(() => expect(mirror(10)).not.toBeNull());
+  const { start, end } = editor.requests.at(-1)!;
+  const entered = Array.from({ length: end - start }, (_, index) => start + index);
+  expect(entered.filter((pageIndex) => (mirror(pageIndex)?.childElementCount ?? 0) > 0)).toEqual([]);
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 200)); });
+  expect(entered.filter(full)).toEqual([]);
+  while (scheduler.idleWork.size > 0) act(() => scheduler.flushIdle());
+  expect(entered.filter(full)).toEqual(entered);
+  expect(mirror(10)!.textContent).toContain('Readable page 11');
+});
+
+test('a text page mirror keeps readable text and pointer selection without building the full mirror', async () => {
+  const scheduler = fakeIdleScheduler();
+  restorers.push(() => scheduler.restore());
+  const editor = await mount(1, 0, false, true, 'text');
+  const mirror = (pageIndex: number) => editor.container.querySelector<HTMLElement>(
+    `[data-page-id="${pageIndex + 1}"] .canvas-page-mirror`);
+  const idle = () => { while (scheduler.idleWork.size > 0) act(() => scheduler.flushIdle()); };
+  await waitFor(() => expect(mirror(1)).not.toBeNull());
+  idle();
+  expect(mirror(1)!.textContent?.trim()).toBe('Readable page 2');
+  await editor.scrollTo(10);
+  await waitFor(() => expect(mirror(10)).not.toBeNull());
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 200)); });
+  idle();
+  const { start, end } = editor.requests.at(-1)!;
+  for (let pageIndex = start; pageIndex < end; pageIndex += 1) {
+    expect(mirror(pageIndex)!.textContent?.trim()).toBe(`Readable page ${pageIndex + 1}`);
+  }
+  expect(editor.container.querySelector('.layout-run-text')).toBeNull();
+  const pages = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  fireEvent.pointerDown(pages, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
+  await waitFor(() => expect(editor.edits.map(({ kind }) => kind)).toContain('selectPoint'));
 });

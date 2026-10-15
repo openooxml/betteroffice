@@ -3410,6 +3410,136 @@ fn captures_self_closing_template_roots() {
     assert!(written.ends_with("</sst>"));
 }
 
+const BOM: &[u8] = b"\xEF\xBB\xBF";
+
+fn with_bom(parts: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    parts
+        .into_iter()
+        .map(|(path, bytes)| {
+            let mut prefixed = BOM.to_vec();
+            prefixed.extend_from_slice(
+                b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n",
+            );
+            prefixed.extend_from_slice(&bytes);
+            (path, prefixed)
+        })
+        .collect()
+}
+
+#[test]
+fn edits_save_over_parts_that_start_with_a_byte_order_mark() {
+    let mut parts = package_styled(
+        r#"<cols><col min="1" max="2" width="12" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1" t="s"><v>0</v></c></row><row r="5"><c r="D5"><f>A1*2</f><v>2</v></c></row></sheetData>"#,
+        Some(
+            r#"<fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs>"#,
+        ),
+        None,
+    );
+    parts.push((
+        "xl/sharedStrings.xml".into(),
+        br#"<sst count="1" uniqueCount="1"><si><t>kept</t></si></sst>"#.to_vec(),
+    ));
+    let parts = with_bom(parts);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut wb = parsed.workbook.clone();
+    let mut format = wb.styles.cell_format(Some(0));
+    format.font.bold = true;
+    let bold = wb.styles.intern_cell_format(&format).unwrap();
+    let a1 = wb.sheets[0].cell_mut(CellRef::new(0, 0)).unwrap();
+    a1.value = CellValue::Number { value: 2.0 };
+    a1.style = bold;
+    wb.shared_strings.push("added".into());
+    wb.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "added".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    for path in [
+        "xl/workbook.xml",
+        "xl/worksheets/sheet1.xml",
+        "xl/sharedStrings.xml",
+        "xl/styles.xml",
+    ] {
+        let bytes = part_bytes(&saved, path);
+        assert!(bytes.starts_with(BOM), "{path} lost its byte order mark");
+        assert_ne!(bytes, part_bytes(&parts, path), "{path} was not rewritten");
+    }
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    assert!(
+        sheet.contains(r#"<cols><col min="1" max="2" width="12" customWidth="1"/></cols>"#),
+        "{sheet}"
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    let a1 = cell_at(&reopened, "A1");
+    assert_eq!(a1.value, CellValue::Number { value: 2.0 });
+    assert!(reopened.styles.cell_format(a1.style).font.bold);
+    assert_eq!(
+        cell_at(&reopened, "B1").value,
+        CellValue::Text {
+            value: "kept".into()
+        }
+    );
+    assert_eq!(
+        cell_at(&reopened, "C1").value,
+        CellValue::Text {
+            value: "added".into()
+        }
+    );
+    assert_eq!(cell_at(&reopened, "D5").formula.as_deref(), Some("A1*2"));
+}
+
+#[test]
+fn edits_save_over_a_byte_order_mark_without_a_declaration_and_a_self_closing_root() {
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".into(), b"<sst/>".to_vec()));
+    for (_, bytes) in &mut parts {
+        bytes.splice(0..0, BOM.iter().copied());
+    }
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut wb = parsed.workbook.clone();
+    wb.shared_strings.push("added".into());
+    wb.sheets[0].set_cell(
+        CellRef::parse_a1("B1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "added".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let strings = part_bytes(&saved, "xl/sharedStrings.xml");
+    assert!(strings.starts_with(BOM));
+    assert!(strings.ends_with(b"</sst>"));
+    for path in ["xl/workbook.xml", "xl/worksheets/sheet1.xml"] {
+        assert!(part_bytes(&saved, path).starts_with(BOM), "{path}");
+    }
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(
+        cell_at(&reopened, "A1").value,
+        CellValue::Number { value: 1.0 }
+    );
+    assert_eq!(
+        cell_at(&reopened, "B1").value,
+        CellValue::Text {
+            value: "added".into()
+        }
+    );
+}
+
 /// Two `<si>` entries can carry the same text with different runs. A cell must
 /// keep pointing at the entry it was authored against.
 #[test]

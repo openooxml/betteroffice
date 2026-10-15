@@ -11,13 +11,19 @@ import { decodeCommandFrameDeltas } from './frameDeltas';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessFrameGeometry, PeerlessViewStore } from './viewStore';
 
+/** A failing presentation requests a full frame, retries once, then stalls until a frame installs or it is invalidated. */
+const FULL_FRAME_REQUESTS = 2;
+const STALLED = 'Full frame responses did not satisfy requested coverage and revision';
+
 /** @internal Geometry decoding and bitmap validation precede synchronous installation. */
 export interface PeerlessFramePresentationOptions {
   viewStore: PeerlessViewStore;
   echoPainter: PeerlessEchoPainter;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
-  requestFullFrame(): void;
+  /** Calls `settled` once, before the requested frame is delivered or when none will be. */
+  requestFullFrame(settled: () => void): void;
+  onError?(error: Error): void;
 }
 
 /** @internal Shared transactional hooks accept a frame only after staged pixels install. */
@@ -28,6 +34,8 @@ export interface PeerlessFramePresentation {
     retired: readonly EchoEntry<PeerlessEchoIntent>[],
     remaining: readonly EchoEntry<PeerlessEchoIntent>[]
   ): boolean;
+  /** Re-arms a stalled presentation with one full-frame request. */
+  invalidate(): void;
   dispose(): void;
 }
 
@@ -42,6 +50,48 @@ export function createFramePresentation(
   const handedOff = new WeakSet<ImageBitmap>();
   const owner = {};
   let identity = { ...options.viewStore.getSnapshot().identity };
+  let requests = FULL_FRAME_REQUESTS;
+  let outstanding = 0;
+  /** Newest revision whose failure waited on a pending request. */
+  let missed: number | undefined;
+  let stalled = false;
+  let reported = false;
+
+  function rearm(): void {
+    requests = FULL_FRAME_REQUESTS;
+    stalled = false;
+    reported = false;
+  }
+
+  function request(): void {
+    missed = undefined;
+    let open = true;
+    outstanding += 1;
+    options.requestFullFrame(() => {
+      if (!open) return;
+      open = false;
+      outstanding -= 1;
+    });
+  }
+
+  function fail(frame: DocxCommandFrame): false {
+    if (outstanding > 0) {
+      missed = Math.max(missed ?? frame.revision, frame.revision);
+      return reject(frame);
+    }
+    if (requests > 0) {
+      requests -= 1;
+      request();
+      return reject(frame);
+    }
+    stalled = true;
+    reject(frame);
+    if (!reported) {
+      reported = true;
+      options.onError?.(new Error(STALLED));
+    }
+    return false;
+  }
 
   function reject(frame: DocxCommandFrame): false {
     for (const page of frame.payload.stagedPresentation?.pages ?? []) {
@@ -96,6 +146,8 @@ export function createFramePresentation(
       coverage = -1;
       revision = undefined;
       identity = { ...current };
+      missed = undefined;
+      rearm();
       options.echoPainter.installContext(undefined);
     }
     pruneBackups();
@@ -142,13 +194,9 @@ export function createFramePresentation(
         targets.push({ page, canvas, ctx, width: canvas.width, height: canvas.height });
       }
     } catch {
-      options.requestFullFrame();
-      return reject(frame);
+      return fail(frame);
     }
-    if (missingCanvas) {
-      options.requestFullFrame();
-      return reject(frame);
-    }
+    if (missingCanvas) return fail(frame);
     try {
       for (const { page: { bitmap }, canvas, ctx } of targets) {
         ctx.save();
@@ -167,8 +215,7 @@ export function createFramePresentation(
         repaint(canvas, backup?.width ?? target!.width, backup?.height ?? target!.height, backup);
       }
       options.echoPainter.paint([...retired, ...remaining]);
-      options.requestFullFrame();
-      return reject(frame);
+      return fail(frame);
     }
     for (const { page, canvas } of targets) {
       for (const [previous, backup] of authoritative) {
@@ -199,6 +246,12 @@ export function createFramePresentation(
     }
     coverage = frame.coversThroughSeq;
     revision = frame.revision;
+    rearm();
+    if (missed !== undefined && missed <= frame.revision) missed = undefined;
+    if (missed !== undefined && outstanding === 0) {
+      requests -= 1;
+      request();
+    }
     return true;
   }
 
@@ -209,6 +262,11 @@ export function createFramePresentation(
       present: install,
     },
     present: install,
+    invalidate() {
+      if (disposed || !stalled) return;
+      stalled = false;
+      request();
+    },
     dispose() {
       disposed = true;
       for (const canvas of authoritative.keys()) setBackup(canvas);

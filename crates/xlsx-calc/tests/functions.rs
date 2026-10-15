@@ -608,6 +608,26 @@ fn datetime_functions() {
         ("DATE(1900, 2, 29)", n(60.0)), // the phantom leap day
         ("DATE(1900, 3, 1)", n(61.0)),
         ("YEAR(43831)", n(2020.0)),
+        ("YEAR(2958465)", n(9999.0)),
+        ("DAY(2958465)", n(31.0)),
+        ("YEAR(2958466)", e(ErrorValue::Num)),
+        ("DAY(1E+300)", e(ErrorValue::Num)),
+        ("MONTH(1E+300)", e(ErrorValue::Num)),
+        ("YEAR(1E+300)", e(ErrorValue::Num)),
+        ("WEEKDAY(1E+300)", e(ErrorValue::Num)),
+        ("WEEKNUM(1E+300)", e(ErrorValue::Num)),
+        ("ISOWEEKNUM(1E+300)", e(ErrorValue::Num)),
+        ("DAY(-1E+300)", e(ErrorValue::Num)),
+        ("DATE(10000, 1, 1)", e(ErrorValue::Num)),
+        ("DATE(9999, 12, 31)", n(2958465.0)),
+        ("DATE(2020, 1, 1E+300)", e(ErrorValue::Num)),
+        ("EDATE(2958465, 1)", e(ErrorValue::Num)),
+        ("EDATE(1, 1E+300)", e(ErrorValue::Num)),
+        ("WORKDAY(1, 1E+300)", e(ErrorValue::Num)),
+        ("WORKDAY(1E+300, 1)", e(ErrorValue::Num)),
+        ("NETWORKDAYS(0, 1E+300)", e(ErrorValue::Num)),
+        ("DAYS(2958466, 1)", e(ErrorValue::Num)),
+        ("YEARFRAC(1, 2958466, 2)", e(ErrorValue::Num)),
         ("MONTH(43831)", n(1.0)),
         ("DAY(43831)", n(1.0)),
         ("DAY(60)", n(29.0)),
@@ -1488,8 +1508,8 @@ fn builtin_names() -> Vec<&'static str> {
     names
 }
 
-/// a stored formula can call any builtin with any argument list; a wrong count
-/// or type is an error value, never a panic.
+/// a stored formula can call any builtin with any argument list; a wrong count,
+/// type or magnitude is an error value, never a panic.
 #[test]
 fn every_builtin_survives_any_argument_list() {
     const SHAPES: &[&str] = &[
@@ -1514,6 +1534,14 @@ fn every_builtin_survives_any_argument_list() {
         "A1:C3,1,1",
         "A1:A3,B1:B3",
         "{1,2;3,4}",
+        "1E+300",
+        "-1E+300",
+        "1E+300,1",
+        "1,1E+300",
+        "1,1,1E+300",
+        "1,1,1,1E+300",
+        "0,1E+300",
+        "1,-1E+300",
     ];
     let names = builtin_names();
     for name in ["ISOWEEKNUM", "SEQUENCE", "LAMBDA", "WORKDAY.INTL"] {

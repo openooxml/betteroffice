@@ -13,11 +13,13 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
+import { testScope } from '../__fixtures__/testScope';
 import { useFileIO } from './useFileIO';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook } = await import('@testing-library/react');
+const { act: rtlAct, cleanup, renderHook } = await import('@testing-library/react');
+const { act } = testScope(rtlAct);
 const sessions: YrsSession[] = [];
 const FIXTURE = resolve(
   import.meta.dir,

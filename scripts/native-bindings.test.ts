@@ -349,7 +349,7 @@ describe('native package release wiring', () => {
     expect(job.strategy).toBeUndefined();
     expect(job.steps[0].uses).toBe('actions/checkout@v7');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
-    expect(bun.with['bun-version']).toBe('1.4.2');
+    expect(bun.with['bun-version']).toBe('1.4.3');
     const toolchain = job.steps.find((step: any) => step.uses === 'dtolnay/rust-toolchain@stable');
     expect(toolchain.with.targets).toBe('wasm32-unknown-unknown');
     const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
@@ -427,7 +427,7 @@ describe('native package release wiring', () => {
     expect(job.strategy.matrix.binding).toEqual(NATIVE_FORMATS);
     expect(job.steps[0].with.ref).toBe('${{ github.event.pull_request.head.sha || github.sha }}');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
-    expect(bun.with['bun-version']).toBe('1.4.2');
+    expect(bun.with['bun-version']).toBe('1.4.3');
     const runtime = job.steps.find((step: any) => step.uses === 'actions/setup-node@v7.0.0');
     expect(runtime.with['node-version']).toBe('24');
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
