@@ -34,7 +34,8 @@ import type {
   YrsStickyPosition,
   YrsStoryRange,
   YrsTableRange,
-} from './index';import type { LayoutMetaV1 } from './layoutMeta';
+} from './index';
+import type { LayoutMetaV1 } from './layoutMeta';
 import type { DecodedFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
