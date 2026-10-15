@@ -8,6 +8,44 @@ const UNSUPPORTED: &[u8] =
     include_bytes!("../../../packages/xlsx/test-fixtures/unsupported-charts.xlsx");
 
 #[test]
+fn capped_frames_clip_charts_and_their_hits() {
+    let workbook = Workbook::open_for_read(FIXTURE).unwrap();
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 1_000_000.0,
+        height: 800.0,
+    };
+    let frame = workbook.display_list(&viewport).unwrap();
+    assert!(frame.truncated);
+    assert!(!frame.charts.is_empty());
+    let bottom = *frame.grid.row_offsets.last().unwrap();
+    assert!(
+        frame
+            .charts
+            .iter()
+            .all(|chart| chart.clip.y + chart.clip.h <= bottom)
+    );
+    for chart in &frame.charts {
+        let hit = workbook
+            .chart_at_point(
+                &viewport,
+                chart.clip.x + chart.clip.w / 2.0,
+                chart.clip.y + chart.clip.h / 2.0,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(frame.charts.iter().any(|chart| chart.id == hit.id));
+    }
+    assert!(
+        workbook
+            .chart_at_point(&viewport, 10.0, bottom + 1.0)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn fixture_covers_anchor_families_display_list_and_raster() {
     let workbook = Workbook::open_for_read(FIXTURE).unwrap();
     let sheet = workbook.model().sheet(SheetId(0)).unwrap();

@@ -189,6 +189,8 @@ pub struct DisplayList {
     pub hyperlinks: Vec<HyperlinkRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub charts: Vec<ChartRegion>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
 }
 
 /// scale every coordinate, size, stroke width, and font size by `factor`,
@@ -319,6 +321,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
         .collect();
 
     DisplayList {
+        truncated: dl.truncated,
         width: dl.width * factor,
         height: dl.height * factor,
         commands,
@@ -420,6 +423,7 @@ mod tests {
 
     fn sample() -> DisplayList {
         DisplayList {
+            truncated: false,
             width: 100.0,
             height: 50.0,
             commands: vec![
