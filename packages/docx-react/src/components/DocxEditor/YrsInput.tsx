@@ -1730,28 +1730,33 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       event.preventDefault();
       const plain = event.clipboardData.getData('text/plain');
       const fragment = parseClipboardHtml(event.clipboardData.getData('text/html') ?? '');
-      if (fragment && session && !readOnly && !isSuggesting) {
-        const range = (() => {
-          try { return currentYrsSelectionRange(session); } catch { return null; }
-        })();
-        if (range && isBodyFlowStory(range.story)) {
-          enqueueInputOperation(() => {
-            if (!isCurrentInput(session)) return;
-            session.addUndoBoundary();
-            try {
-              const caret = Yrs.applyClipboardFragment(session, range, fragment, suggestingAuthor());
-              session.setSelection(caret);
-              finishMutation();
-            } finally {
-              if (isCurrentInput(session)) session.addUndoBoundary();
-            }
-          }, 'mutation');
-          return;
-        }
+      if (fragment && session && !readOnly && !isSuggesting && !holdInput) {
+        verticalCaretGoalRef.current.reset();
+        dispatchCaretInput();
+        enqueueInputOperation(() => {
+          if (!isCurrentInput(session)) return;
+          const current = ensureSelection();
+          const map = current ? inputPositionMap(current.anchor.story) : null;
+          if (!current || !map) return;
+          const range = toRange(current, map);
+          if (!isBodyFlowStory(range.story)) {
+            insertText(plain);
+            return;
+          }
+          session.addUndoBoundary();
+          try {
+            const caret = Yrs.applyClipboardFragment(session, range, fragment, suggestingAuthor());
+            session.setSelection(caret);
+            finishMutation();
+          } finally {
+            if (isCurrentInput(session)) session.addUndoBoundary();
+          }
+        }, 'mutation');
+        return;
       }
       insertText(plain);
     },
-    [enqueueInputOperation, finishMutation, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
+    [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
   );
 
   const handleCut = useCallback(
