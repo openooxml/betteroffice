@@ -1876,6 +1876,11 @@ test('cut of a selection spanning a table completes the clipboard write and dele
   );
   const input = createRef<YrsInputRef>();
   const replicaReadyRef = { current: false };
+  let release!: () => void;
+  const replica = deferWorkerOpenReplica(session,
+    () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+    () => {}, () => { replicaReadyRef.current = true; });
+  replica.start();
   const view = render(inputFor(session, input, undefined, undefined, { replicaReadyRef }));
   const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
   const written = new Map<string, string>();
@@ -1900,7 +1905,7 @@ test('cut of a selection spanning a table completes the clipboard write and dele
   };
   try {
     fireEvent.cut(textarea);
-    replicaReadyRef.current = true;
+    await act(async () => { release(); });
     await waitFor(() => expect(written.get('text/html')).toContain('<table'), { timeout: 2_000 });
     expect(written.get('text/plain')).toContain('Seed');
     await waitFor(
