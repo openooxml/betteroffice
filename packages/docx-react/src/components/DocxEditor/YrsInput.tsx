@@ -1537,15 +1537,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
-    const sliceNow = (() => {
-      try { return yrsClipboardSlice(session); } catch { return null; }
-    })();
-    const hasFragment = !!sliceNow?.fragment;
-    const text = new Promise<Blob>((resolve, reject) => {
+    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session).fragment;
+    const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
-        const selected = yrsSelectionPlainText(source);
-        if (selected) resolve(new Blob([selected], { type: 'text/plain' }));
-        else reject(new Error('Nothing is selected to copy'));
+        try {
+          const captured = yrsClipboardSlice(source);
+          if (captured.text) resolve(captured);
+          else reject(new Error('Nothing is selected to copy'));
+        } catch (error) {
+          reject(error);
+        }
         if (cut) return written;
       };
       const onDropped = () => reject(new Error('Newer input replaced the copy'));
@@ -1553,25 +1554,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         enqueueInputOperation(() => apply(copied), 'selection', onDropped, undefined, false);
       }
     });
+    void slice.catch(() => {});
+    const text = slice.then((captured) => new Blob([captured.text], { type: 'text/plain' }));
     void text.catch(() => {});
-    let html: Promise<Blob> | null = null;
-    if (hasFragment) {
-      html = new Promise<Blob>((resolve, reject) => {
-        const apply = (source: YrsSession): void | Promise<void> => {
-          try {
-            const slice = yrsClipboardSlice(source);
-            if (slice.fragment) resolve(new Blob([clipboardFragmentHtml(slice.fragment)], { type: 'text/html' }));
-            else resolve(new Blob([''], { type: 'text/html' }));
-          } catch (error) { reject(error); }
-          if (cut) return written;
-        };
-        const onDropped = () => reject(new Error('Newer input replaced the copy'));
-        if (!held || !holdOperation({ kind: 'copy', apply, onDropped })) {
-          enqueueInputOperation(() => apply(copied), 'selection', onDropped, undefined, false);
-        }
-      });
-      void html.catch(() => {});
-    }
+    const html = hasFragment
+      ? slice.then((captured) => new Blob(
+          [captured.fragment ? clipboardFragmentHtml(captured.fragment) : ''],
+          { type: 'text/html' }
+        ))
+      : null;
+    if (html) void html.catch(() => {});
     const itemTypes: Record<string, Promise<Blob>> = html ? { 'text/plain': text, 'text/html': html } : { 'text/plain': text };
     const write = typeof ClipboardItem === 'function' && clipboard.write
       ? clipboard.write([new ClipboardItem(itemTypes as Record<string, Blob | Promise<Blob>>)])
