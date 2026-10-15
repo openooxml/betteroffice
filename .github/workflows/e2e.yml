@@ -79,7 +79,7 @@ jobs:
           bun run typecheck:e2e
           bun run test:e2e:harness
 
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         if: matrix.suite == 'corpus'
         with:
           version: '0.11.8'
