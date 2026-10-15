@@ -3,6 +3,7 @@ import { loadRustDisplayListQueryEngine } from '../layout/render/rustDisplayList
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import type { TextRunPrimitive } from '../layout/render/displayList';
 import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions';
+import { resolveShiftArrowCellRange } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
 import type { DocxCommandEnvelope, DocxCommandSelection } from './residentCommandProtocol';
 import { closeCommandEngines, command, context, execute, openCommandEngine as openEngine, selection, snapshot, TIMEOUT, type CommandArm } from './residentCommandTestSupport';
@@ -198,6 +199,20 @@ test('plain_click_arrow_and_typing_clear_the_range_into_the_caret_cell', async (
   const first = arm.engine.paragraphs('body')[0]!;
   expect(execute(arm, command(arm, 'select', { selection: selection(first.paraId, 0) })).status).toBe('noop');
   expect(arm.engine.cellSelection()).toBeNull();
+}, TIMEOUT);
+
+test('cell_selection_runtime_error_propagates_through_shift_arrow_range', async () => {
+  const arm = await inCell();
+  const base = arm.state.selection!;
+  Object.assign(arm.engine, {
+    cellSelection: () => { throw new WebAssembly.RuntimeError('unreachable'); },
+  });
+  expect(() => resolveShiftArrowCellRange(arm.engine, base, base.focus, 'character', 'forward'))
+    .toThrow(WebAssembly.RuntimeError);
+  Object.assign(arm.engine, {
+    cellSelection: () => { throw new TypeError('transient'); },
+  });
+  expect(resolveShiftArrowCellRange(arm.engine, base, base.focus, 'character', 'forward')).toBeNull();
 }, TIMEOUT);
 
 test('multi_cell_range_reports_one_rect_per_selected_cell', async () => {
