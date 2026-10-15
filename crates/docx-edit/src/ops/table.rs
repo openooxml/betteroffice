@@ -647,8 +647,8 @@ fn validate_fragment_row(
         _ => return Err(invalid(format!("{detail} trPr must be an object"))),
     };
     let cells = match object.get("cells") {
-        Some(Value::Array(cells)) if !cells.is_empty() => cells,
-        _ => return Err(invalid(format!("{detail} must contain at least one cell"))),
+        Some(Value::Array(cells)) => cells,
+        _ => return Err(invalid(format!("{detail} cells must be an array"))),
     };
     if cells.len() > MAX_FRAGMENT_COLUMNS {
         return Err(invalid(format!("{detail} holds more than 1000 cells")));
@@ -879,9 +879,21 @@ fn validation_anchors(valid: &FragmentTable, depth: usize) -> OpResult<usize> {
         grid: valid.grid.clone(),
         rows,
     };
-    let (_, columns) = anchors(&data)?;
+    let (cell_anchors, columns) = anchors(&data)?;
     if columns > MAX_FRAGMENT_COLUMNS {
         return Err(invalid("table holds more than 1000 columns"));
+    }
+    if cell_anchors.is_empty() {
+        return Err(invalid("table must contain at least one cell"));
+    }
+    for (row_index, row) in data.rows.iter().enumerate() {
+        if row.cells.is_empty()
+            && (0..columns).any(|column| covering(&cell_anchors, row_index, column).is_none())
+        {
+            return Err(invalid(format!(
+                "row {row_index} is not covered by a merged cell"
+            )));
+        }
     }
     Ok(columns)
 }

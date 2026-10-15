@@ -112,7 +112,7 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
     if (!Array.isArray(entry.grid) || !entry.grid.every(width => typeof width === 'number' && Number.isFinite(width) && width > 0)) return false;
     if (!Array.isArray(entry.rows) || entry.rows.length === 0 || entry.rows.length > 1000) return false;
     return entry.rows.every(row => plainObject(row) && row.trPr !== undefined && optionalMap(row.trPr) &&
-      Array.isArray(row.cells) && row.cells.length > 0 && row.cells.length <= 1000 && row.cells.every(cell => {
+      Array.isArray(row.cells) && row.cells.length <= 1000 && row.cells.every(cell => {
         if (!plainObject(cell) || cell.tcPr === undefined || !optionalMap(cell.tcPr)) return false;
         const tcPr = cell.tcPr as Record<string, unknown>;
         for (const key of ['rowspan', 'colspan'] as const) {
@@ -297,13 +297,13 @@ function fragmentFromPayload(
       byRow.set(anchor.row, list);
     }
   }
-  const ordered = [...byRow.entries()].sort(([a], [b]) => a - b);
-  if (ordered.length === 0) throw new Error('Table selection holds no cells');
-  const fragmentRows: DocxTableFragmentRow[] = ordered.map(([rowIndex, cells], surviving) => ({
-    trPr: copiedMap(rows[rowIndex]?.trPr) ?? {},
-    cells: cells
-      .sort((a, b) => a.column - b.column)
-      .map((anchor) => {
+  if (byRow.size === 0) throw new Error('Table selection holds no cells');
+  const fragmentRows: DocxTableFragmentRow[] = [];
+  for (let rowIndex = top; rowIndex <= bottom; rowIndex += 1) {
+    const cells = (byRow.get(rowIndex) ?? []).sort((a, b) => a.column - b.column);
+    fragmentRows.push({
+      trPr: copiedMap(rows[rowIndex]?.trPr) ?? {},
+      cells: cells.map((anchor) => {
         const raw = (rows[anchor.row]?.cells as RawCell[] | undefined)?.find(
           (cell) => cell?.story === anchor.story,
         );
@@ -319,15 +319,9 @@ function fragmentFromPayload(
           content: cellContent(reader, anchor.story),
           ...(shading !== undefined ? { shading } : {}),
         };
-      })
-      .map((cell) => ({
-        ...cell,
-        tcPr: {
-          ...cell.tcPr,
-          rowspan: Math.min(Number(cell.tcPr.rowspan) || 1, ordered.length - surviving),
-        },
-      })),
-  }));
+      }),
+    });
+  }
   const grid =
     Array.isArray(payload.grid) &&
     payload.grid.every((width) => typeof width === 'number' && Number.isFinite(width) && width > 0)
