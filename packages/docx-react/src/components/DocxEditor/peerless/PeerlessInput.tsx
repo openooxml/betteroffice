@@ -1,7 +1,9 @@
 import { useCallback, useLayoutEffect, useRef, useSyncExternalStore, type ReactElement, type Ref, type RefObject } from 'react';
 import { effectiveZoom } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
+import { parseClipboardHtml } from '../internals/clipboardHtml';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
 import { admitInputIntents, submitFormattingIntent, type PeerlessInputAdmission } from './inputAdmission';
 import { normalizeInputEvent, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
@@ -18,6 +20,7 @@ export interface PeerlessInputProps {
   onCompositionChange?(state: PeerlessCompositionState | null): void;
   onRecoverableText?(text: string): void;
   onClipboard?(cut: boolean): Promise<void>;
+  onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
   onNavigateCell?(direction: 'forward' | 'backward'): void;
@@ -175,6 +178,14 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       if (state.composing) return;
       event.preventDefault();
       active = { id: ++nextEventId, phase: 'start', inputType: 'insertFromPaste', keyboard: false };
+      const html = event.clipboardData?.getData('text/html') ?? '';
+      if (html) {
+        const fragment = parseClipboardHtml(html);
+        if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
+          element.value = '';
+          return;
+        }
+      }
       dispatch({ source: 'paste', eventId: active.id, inputTime: event.timeStamp,
         text: event.clipboardData?.getData('text/plain') ?? '',
       }, event);
