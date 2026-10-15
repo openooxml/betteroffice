@@ -687,6 +687,15 @@ fn validate_fragment_cell(
             .collect::<OpResult<HashMap<String, Any>>>()?,
         _ => return Err(invalid(format!("{detail} tcPr must be an object"))),
     };
+    for (key, cap) in [
+        ("rowspan", MAX_FRAGMENT_ROWS),
+        ("colspan", MAX_FRAGMENT_COLUMNS),
+    ] {
+        let span = any_usize(tc_pr.get(key), 1, key)?;
+        if span > cap {
+            return Err(invalid(format!("{detail} {key} exceeds {cap}")));
+        }
+    }
     if *remaining == 0 {
         return Err(invalid("fragment holds more than 10000 cells"));
     }
@@ -924,9 +933,27 @@ fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
                 column += 1;
             }
             let (rowspan, colspan) = span(cell)?;
-            if row_index + rowspan > data.rows.len() {
+            if colspan > MAX_FRAGMENT_COLUMNS {
+                return Err(invalid(format!(
+                    "cell {} exceeds the column limit",
+                    cell.story
+                )));
+            }
+            let row_end = row_index.checked_add(rowspan).ok_or_else(|| {
+                invalid(format!("cell {} spans beyond the final row", cell.story))
+            })?;
+            if row_end > data.rows.len() {
                 return Err(invalid(format!(
                     "cell {} spans beyond the final row",
+                    cell.story
+                )));
+            }
+            let column_end = column.checked_add(colspan).ok_or_else(|| {
+                invalid(format!("cell {} exceeds the column limit", cell.story))
+            })?;
+            if column_end > MAX_FRAGMENT_COLUMNS {
+                return Err(invalid(format!(
+                    "cell {} exceeds the column limit",
                     cell.story
                 )));
             }
