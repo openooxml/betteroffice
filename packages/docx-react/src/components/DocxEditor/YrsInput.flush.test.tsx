@@ -1870,9 +1870,10 @@ test('cut of a selection spanning a table completes the clipboard write and dele
   const paraId = session.paragraphs('body')[0]!.paraId;
   const { secondParaId } = session.splitParagraph({ story: 'body', paraId, offset: 4 });
   session.insertTable({ story: 'body', paraId: secondParaId, offset: 0 }, 1, 2);
+  const after = session.locateParagraph('body', secondParaId);
   session.setSelection(
     { story: 'body', paraId, offset: 0 },
-    { story: 'body', paraId: secondParaId, offset: 0 }
+    { story: 'body', paraId: secondParaId, offset: after.end - after.start }
   );
   const input = createRef<YrsInputRef>();
   const replicaReadyRef = { current: false };
