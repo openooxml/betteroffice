@@ -1740,6 +1740,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             insertText(plain);
             return;
           }
+          try {
+            for (const paragraph of fragment.paragraphs) {
+              for (const table of paragraph.tables ?? []) session.validateTableFragment(table);
+            }
+          } catch {
+            insertText(plain);
+            return;
+          }
           session.addUndoBoundary();
           try {
             const caret = applyClipboardFragment(session, range, fragment, suggestingAuthor());
