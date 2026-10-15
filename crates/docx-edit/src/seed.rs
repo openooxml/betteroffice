@@ -1082,7 +1082,7 @@ fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
     Ok(entries.into_iter().collect())
 }
 
-fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
+pub(crate) fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
     values
         .into_iter()
         .map(|(key, value)| Ok((key, any_from_value(value)?)))
@@ -1897,7 +1897,7 @@ fn emu_to_pixels(value: f64) -> f64 {
     value / 914_400.0 * 96.0
 }
 
-fn image_payload(image: &Value) -> JsonObject {
+pub(crate) fn image_payload(image: &Value) -> JsonObject {
     let size = field(Some(image), "size");
     let wrap = field(Some(image), "wrap");
     let position = field(Some(image), "position");
