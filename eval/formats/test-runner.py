@@ -590,8 +590,22 @@ class RunnerTests(unittest.TestCase):
         for spelling in (repository, repository.resolve()):
             with self.subTest(spelling=spelling), patch.object(runner, 'REPO', repository):
                 log.write_text(json.dumps({'type': 'item.completed', 'item': {
-                    'type': 'command_execution', 'command': f"printf 'prefix{spelling}suffix'"}}) + '\n')
+                    'type': 'command_execution', 'command': f"printf 'path={spelling}/file'"}}) + '\n')
                 self.assertIn('forbidden path access', runner.access_violation(log, 'generic', workspace))
+
+    def test_generic_path_audit_matches_repository_path_boundaries(self):
+        workspace = self.root / 'workspace'
+        workspace.mkdir()
+        with patch.object(runner, 'REPO', Path('/work')):
+            for command in ['python3 -c \'open("/tmp/x/workspace/input.xlsx")\'',
+                            'cat /workspace/input.xlsx', 'cat /work-backup/input.xlsx',
+                            'cat /tmp/x/work/input.xlsx']:
+                with self.subTest(command=command):
+                    self.assertIsNone(runner.path_violation(command, workspace))
+            for command in ['cat /work/eval/x', 'cat /work/file', 'cat "/work"',
+                            'printf "path=/work/file"']:
+                with self.subTest(command=command):
+                    self.assertIn('forbidden path access', runner.path_violation(command, workspace))
 
     def test_generic_workspace_stays_outside_repository_when_tempdir_is_in_repository(self):
         results = self.root / 'generic-tempdir'

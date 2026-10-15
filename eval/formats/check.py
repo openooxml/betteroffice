@@ -132,7 +132,7 @@ def resolved_xml(archive, part, node=None):
     links = relations(archive, part)
     for item in node.iter():
         for key, value in list(item.attrib.items()):
-            if key.startswith(f'{{{NS["r"]}}}'):
+            if key.startswith(f'{{{NS["r"]}}}') and value:
                 require(value in links, f'missing relationship ID in {part}: {value}')
                 item.set(key, json.dumps(links[value], sort_keys=True))
     return node
@@ -1412,7 +1412,7 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
     def model(node, paragraph_style=None):
         attrs = dict(node.attrib)
         for key, value in list(attrs.items()):
-            if key.startswith(f'{{{NS["r"]}}}'):
+            if key.startswith(f'{{{NS["r"]}}}') and value:
                 require(value in links, f'missing relationship ID in {name}: {value}')
                 attrs[key] = json.dumps(links[value], sort_keys=True)
         if node.tag == f'{{{NS["mc"]}}}Choice' and 'Requires' in attrs:
@@ -1455,7 +1455,7 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
                             require(item.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve', 'significant Word whitespace lacks xml:space')
                         content.extend(('character', char, props, tuple(sorted(run_attrs.items()))) for char in text)
                     elif item.tag != f'{{{NS[prefix]}}}rPr':
-                        content.append(model(item, paragraph_style))
+                        content.append(('run-content', model(item, paragraph_style), props, tuple(sorted(run_attrs.items()))))
                 tokens.extend(content or [('empty-run', props, tuple(sorted(run_attrs.items())))])
             else:
                 tokens.append(model(child, paragraph_style))

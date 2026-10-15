@@ -306,7 +306,8 @@ text includes tables and notes. Unmodeled content remains canonical XML or exact
 binary hashes. The explicit representation/save allowances are:
 
 - ZIP metadata/order, XML prefixes, attribute order and insignificant whitespace;
-  relationship IDs resolve to their targets, and content-type/relationship lists
+  nonempty relationship IDs resolve to their targets; empty relationship attributes
+  mean no relationship and remain exact. Content-type/relationship lists
   compare without ordering. Binary payloads remain exact.
 - Word/DrawingML text-run splits preserve character properties, fields, bookmarks
   and empty formatted runs. Word run properties resolve through document defaults,
