@@ -334,6 +334,110 @@ describe('validClipboardFragment spans', () => {
   });
 });
 
+describe('validClipboardFragment rust parity', () => {
+  function tableFragment(rows: unknown, grid: unknown = []): unknown {
+    return { paragraphs: [{ tables: [{ tblPr: {}, grid, rows }], text: '' }] };
+  }
+  function cell(tcPr: Record<string, unknown>, format?: Record<string, unknown>): unknown {
+    return {
+      tcPr,
+      content: [
+        format === undefined
+          ? { kind: 'text', text: 'a' }
+          : { kind: 'text', text: 'a', format },
+        { kind: 'pilcrow' },
+      ],
+    };
+  }
+
+  test('rejects a rowspan past the last row', () => {
+    expect(validClipboardFragment(tableFragment([
+      { trPr: {}, cells: [cell({ rowspan: 2 })] },
+    ]))).toBe(false);
+  });
+
+  test('rejects overlapping anchors', () => {
+    expect(validClipboardFragment(tableFragment([
+      { trPr: {}, cells: [cell({ colspan: 2 }), cell({ rowspan: 2 })] },
+      { trPr: {}, cells: [cell({ colspan: 3 })] },
+    ]))).toBe(false);
+  });
+
+  test('rejects an uncovered empty row and a table without cells', () => {
+    expect(validClipboardFragment(tableFragment([
+      { trPr: {}, cells: [cell({})] },
+      { trPr: {}, cells: [] },
+    ]))).toBe(false);
+    expect(validClipboardFragment(tableFragment([
+      { trPr: {}, cells: [] },
+    ]))).toBe(false);
+  });
+
+  test('rejects a grid whose length differs from the column count', () => {
+    const rows = [{ trPr: {}, cells: [cell({}), cell({})] }];
+    expect(validClipboardFragment(tableFragment(rows, [2000]))).toBe(false);
+    expect(validClipboardFragment(tableFragment(rows, [2000, 2000]))).toBe(true);
+    expect(validClipboardFragment(tableFragment(rows, []))).toBe(true);
+  });
+
+  test('rejects mistyped format delta values', () => {
+    const withFormat = (format: Record<string, unknown>): unknown =>
+      tableFragment([{ trPr: {}, cells: [cell({}, format)] }]);
+    expect(validClipboardFragment(withFormat({ bold: 'yes' }))).toBe(false);
+    expect(validClipboardFragment(withFormat({ fontSize: -1 }))).toBe(false);
+    expect(validClipboardFragment(withFormat({ fontSize: '12' }))).toBe(false);
+    expect(validClipboardFragment(withFormat({ color: { rgb: 'FF0000', themeColor: 'accent1' } }))).toBe(false);
+    expect(validClipboardFragment(withFormat({ color: {} }))).toBe(false);
+    expect(validClipboardFragment(withFormat({ fontFamily: {} }))).toBe(false);
+    expect(validClipboardFragment(withFormat({ underline: { style: 3 } }))).toBe(false);
+    expect(validClipboardFragment(withFormat({ bold: true, fontSize: 12 }))).toBe(true);
+    expect(validClipboardFragment(withFormat({ color: { rgb: 'FF0000' } }))).toBe(true);
+    expect(validClipboardFragment(withFormat({ fontFamily: { ascii: 'Calibri' } }))).toBe(true);
+  });
+
+  test('an invalid second table aborts the paste before any mutation', () => {
+    const calls: string[] = [];
+    const good = {
+      tblPr: {}, grid: [],
+      rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'a' }, { kind: 'pilcrow' }] }] }],
+    };
+    const bad = {
+      tblPr: {}, grid: [],
+      rows: [{ trPr: {}, cells: [{ tcPr: { rowspan: 2 }, content: [{ kind: 'text', text: 'b' }, { kind: 'pilcrow' }] }] }],
+    };
+    const engine = {
+      validateTableFragment: (table: unknown) => {
+        calls.push('validate');
+        if (table === bad) throw new Error('invalid table');
+      },
+      deleteRange: () => {
+        calls.push('delete');
+        return { revisionId: null, range: { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 0 } } };
+      },
+      splitParagraph: (at: YrsLoc) => ({ firstParaId: at.paraId, secondParaId: 'p1', revisionId: null }),
+      insertText: (at: YrsLoc, text: string) => ({
+        revisionId: null,
+        range: { story: at.story, start: at, end: { paraId: at.paraId, offset: at.offset + text.length } },
+      }),
+      insertTableFragment: (at: YrsLoc) => {
+        calls.push('table');
+        return {
+          table: { story: at.story, tableIndex: 0 }, rows: 1, columns: 1,
+          createdStoryIds: [], deletedStoryIds: [], changedStoryIds: [], newParaIds: [],
+          deletedTable: false, revisionIds: [],
+          after: { story: at.story, paraId: at.paraId, offset: at.offset + 1 },
+        };
+      },
+    } as unknown as ClipboardPasteEngine;
+    expect(() => applyClipboardFragment(
+      engine,
+      { story: 'body', start: { paraId: 'p0', offset: 0 }, end: { paraId: 'p0', offset: 2 } },
+      { paragraphs: [{ tables: [good as never], text: '' }, { tables: [bad as never], text: '' }] },
+    )).toThrow('invalid table');
+    expect(calls).toEqual(['validate', 'validate']);
+  });
+});
+
 describe('applyClipboardFragment', () => {
   function fakeEngine(calls: string[]): ClipboardPasteEngine {
     const engine = {
