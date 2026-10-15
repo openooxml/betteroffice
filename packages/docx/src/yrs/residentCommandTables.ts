@@ -7,6 +7,7 @@ import type {
   ResidentDocxCommandEngine,
   ResidentDocxCommandState,
 } from './residentCommandProtocol';
+import { readCellSelection } from './residentCommandTableSelection';
 
 export type TableCommandKind =
   | 'insertTableRow' | 'insertTableColumn'
@@ -53,15 +54,6 @@ function liveCell(engine: ResidentDocxCommandEngine, story: string): YrsCellLoc 
     }
   }
   return best;
-}
-
-function readCellSelection(engine: ResidentDocxCommandEngine): YrsTableRange | null {
-  try {
-    return engine.cellSelection();
-  } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
-    return null;
-  }
 }
 
 function resolveTableTarget(

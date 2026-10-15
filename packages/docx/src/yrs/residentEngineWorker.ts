@@ -37,7 +37,7 @@ import type {
   ResidentDocxCommandEngine,
 } from './residentCommandProtocol';
 import type { CollaborationCursor } from '../collaboration/types';
-import type { YrsLoc, YrsRegionLayoutProgress, YrsResidentCaretRect, YrsResidentWorkerSnapshot, YrsTableRange } from './index';
+import type { YrsLoc, YrsRegionLayoutProgress, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import {
   createResidentEngineSession,
@@ -71,6 +71,7 @@ import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
 import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
+import { readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
@@ -875,10 +876,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
         const shown: ReturnType<typeof presentLayout> = init.provisionalPages === undefined ? {} : presentLayout();
         const selected = hooks.selection();
-        let cells: YrsTableRange | null = null;
-        try {
-          cells = engine.cellSelection();
-        } catch {}
+        const cells = readCellSelection(engine);
         const cellRects = !shown.layoutProvisional ? readResidentCellSelectionRects(engine, layout.frame, cells) : null;
         const selectionRects = cellRects ?? (!shown.layoutProvisional && selected && (selected.anchor.story !== selected.focus.story ||
           selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset)

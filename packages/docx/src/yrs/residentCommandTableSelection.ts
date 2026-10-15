@@ -9,10 +9,11 @@ function rootOf(story: string): string {
   return story === 'body' || story.startsWith('body:') ? 'body' : story.split(':').slice(0, 2).join(':');
 }
 
-export function safeCellSelection(engine: ResidentDocxCommandEngine): YrsTableRange | null {
+export function readCellSelection(engine: Pick<ResidentDocxCommandEngine, 'cellSelection'>): YrsTableRange | null {
   try {
     return engine.cellSelection();
-  } catch {
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
     return null;
   }
 }
@@ -113,7 +114,7 @@ export function resolvePointerCellRange(
 ): PointerCellRange | null {
   const common = commonTableFor(engine, anchorAt.story, hitAt.story);
   if (!common) return null;
-  const active = safeCellSelection(engine);
+  const active = readCellSelection(engine);
   const sameTable = !!active && active.anchor.story === common.story && active.anchor.tableIndex === common.tableIndex &&
     active.head.story === common.story && active.head.tableIndex === common.tableIndex;
   const anchor: YrsCellLoc = sameTable && active
@@ -162,7 +163,7 @@ export function resolveShiftArrowCellRange(
   const delta = shiftArrowCellDelta(unit, direction);
   const caret = delta ? resolveLiveCell(engine, base.focus.story) : null;
   if (!delta || !caret) return null;
-  const active = safeCellSelection(engine);
+  const active = readCellSelection(engine);
   const sameTable = !!active && active.anchor.story === caret.story && active.anchor.tableIndex === caret.tableIndex &&
     active.head.story === caret.story && active.head.tableIndex === caret.tableIndex;
   const multi = !!sameTable && !!active &&

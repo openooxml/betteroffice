@@ -1,6 +1,6 @@
 import type { YrsHyperlinkAttrs, YrsSelectionContext } from './index';
 import { readCommandSelection } from './residentCommandAnchors';
-import { resolveLiveCell, safeCellSelection } from './residentCommandTableSelection';
+import { readCellSelection, resolveLiveCell } from './residentCommandTableSelection';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import type {
   DocxCommandTableContext,
@@ -73,7 +73,7 @@ function validTablePayload(value: unknown): value is TablePayload {
 function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCommandTableContext | null {
   const focused = resolveLiveCell(engine, story);
   if (!focused || ![focused.tableIndex, focused.row, focused.column].every(Number.isSafeInteger)) return null;
-  const selected = safeCellSelection(engine);
+  const selected = readCellSelection(engine);
   const sameTable = !!selected && selected.anchor.story === focused.story &&
     selected.anchor.tableIndex === focused.tableIndex &&
     selected.head.story === focused.story && selected.head.tableIndex === focused.tableIndex;

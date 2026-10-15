@@ -9,7 +9,7 @@ import {
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
-import { cellsForCaret, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
+import { cellsForCaret, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
 import {
   applyTableCommand, isTableCommandKind, liveTableAncestors, nearTable,
   preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
@@ -572,9 +572,7 @@ function pastLeadingBlocks(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsLo
 }
 
 export function repairCommandSelection(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState): boolean {
-  let cells: ReturnType<ResidentDocxCommandEngine['cellSelection']> = null;
-  try { cells = engine.cellSelection(); }
-  catch (error) { if (error instanceof WebAssembly.RuntimeError) throw error; }
+  const cells = readCellSelection(engine);
   const preferred = engine.clearCellSelection();
   const projections = new Map<string, YrsPositionProjection | null>();
   const projection = (story: string) => {
