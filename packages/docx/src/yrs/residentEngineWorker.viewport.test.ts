@@ -4,6 +4,8 @@ import type { DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { DocxCommandFrame, ResidentCommandHooks, ResidentCommandInitRequest } from './residentCommandProtocol';
+import { readCellSelection } from './residentCommandTableSelection';
+import { readResidentCellSelectionRects } from './residentObjectGeometry';
 
 function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: boolean; queryEngine?: RustDisplayListQueryEngine } = {}) {
   const source = readFileSync(`${import.meta.dir}/residentEngineWorker.ts`, 'utf8');
@@ -80,6 +82,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       for (const index of indices) { pages[index]!.page.unbuilt = true; pages[index]!.page.primitives = []; }
       return advance(expected, indices);
     },
+    cellSelection: () => null,
     residentCaretSnapshot: () => ({ frameEpoch: revision, caretRect: options.cell || pages[caretPage]!.page.unbuilt ? null
       : { pageId: String(caretPage + 1), pageIndex: caretPage, x: 0, y: 0, height: 20 } }),
   };
@@ -109,6 +112,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       state.retainedFrame.frameEpoch = revision;
       return { bytes, delta, caret: engine.residentCaretSnapshot() };
     },
+    readCellSelection, readResidentCellSelectionRects,
     projectCommandEchoContext: () => undefined,
     commandEchoGlyphs: () => ({ provider: () => undefined, unsent: () => [], sent() {} }),
     readResidentRangeHighlights: async () => ({ rects: [[]] }),
