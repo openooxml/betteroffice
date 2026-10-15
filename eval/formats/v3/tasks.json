@@ -548,6 +548,132 @@
     "cross_model": false
   },
   {
+    "id": "docx-v3-27-notification-details",
+    "format": "docx",
+    "title": "Complete the Section 301/311 notification details",
+    "difficulty": 3,
+    "fixture": "h-us-doe-1b290aa46d1d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, complete the Section 301/311 notification letter for issue: replace the date placeholder line “(enter date here, centered revised template 1B January 29, 2015)” with “January 15, 2026”; in the funding sentence beginning “Funding is being provided for (contract or order) number (fill-in),”, replace “(fill-in)” with “DE-EE0012345”; and change “The contractor is (name of the contractor), located in (name city and state).” to “The contractor is Great Lakes Analytical Services, located in Chicago, Illinois.” Keep the subject line, award categories, addressees, signature block and all other template wording unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "(enter date here, centered revised template 1B January 29, 2015)",
+          "new": "January 15, 2026"
+        },
+        {
+          "part": "word/document.xml",
+          "old": "(fill-in)",
+          "new": "DE-EE0012345"
+        },
+        {
+          "part": "word/document.xml",
+          "old": "The contractor is (name of the contractor), located in (name city and state).",
+          "new": "The contractor is Great Lakes Analytical Services, located in Chicago, Illinois."
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-28-background-overview",
+    "format": "docx",
+    "title": "Add a background-section overview",
+    "difficulty": 2,
+    "fixture": "open-government-canada-c23e51dca13d.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, immediately after the body heading “Background Information”, add these two paragraphs in order: “This data dictionary describes the transposed vote datasets for the 44th general election and the 2023 representation orders.” and “The following sections set out the data sources and datasets, followed by a glossary of terms.” Use the body paragraph style and opening text formatting of the first existing body paragraph after that heading, beginning “After each decennial census of population by Statistics Canada”. Keep that existing paragraph, all other headings, dataset descriptions and the glossary table unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "insert_paragraphs": {
+        "heading": "Background Information",
+        "texts": [
+          "This data dictionary describes the transposed vote datasets for the 44th general election and the 2023 representation orders.",
+          "The following sections set out the data sources and datasets, followed by a glossary of terms."
+        ]
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-29-bold-nav-channel",
+    "format": "docx",
+    "title": "Bold the Nav1.3 ion channel term in the dataset description",
+    "difficulty": 2,
+    "fixture": "h-r4b-heidata-3f5dc701d9ab.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the dataset description paragraph beginning “Mechanistically, we find a combination of increased sodium leak current”, apply bold formatting to the exact phrase “Nav1.3 ion channel”. Retain its font and all other formatting; keep the contact details, authors and the data and file overview unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "Mechanistically, we find a combination of increased sodium leak current and enhanced utilization of the Nav1.3 ion channel to drive their pacemaker-like, warm-sensitive activity. We propose a salient neuronal plasticity mechanism, adaptively driving acclimation to promote heat tolerance.",
+        "phrase": "Nav1.3 ion channel",
+        "property": "b"
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-30-update-contact-email",
+    "format": "docx",
+    "title": "Update the application contact email",
+    "difficulty": 1,
+    "fixture": "scottish-government-publications-e6811d3ef802.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the contact details for completed applications, change the email address “animal.health@scotland.gsi.gov.uk” to “animal.health@gov.scot”. Keep the postal address, telephone number, application criteria and all form wording unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "animal.health@scotland.gsi.gov.uk",
+          "new": "animal.health@gov.scot"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-31-fix-negative-impacts-heading",
+    "format": "docx",
+    "title": "Correct the negative impacts subheading",
+    "difficulty": 1,
+    "fixture": "welsh-government-publications-a1b09f757c43.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the summary of potential health impacts, correct the subheading “Negatives Impacts” to “Negative Impacts” so it matches the “Positive Impacts” subheading. Keep the cost paragraph below it, the vulnerable-groups assessment and all screening tables unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "Negatives Impacts",
+          "new": "Negative Impacts"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-32-bold-session-title",
+    "format": "docx",
+    "title": "Bold the Session 1 title in the conference programme",
+    "difficulty": 2,
+    "fixture": "govuk-publication-attachments-e9e489926952.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the Conference Programme, apply bold formatting to the exact phrase “Session 1: Lost Art: Experience of claimants and institutions” in the 10 30 session line. Retain its font and all other formatting; keep the session times, chairs, panels and session descriptions unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "10 30Session 1: Lost Art: Experience of claimants and institutions",
+        "phrase": "Session 1: Lost Art: Experience of claimants and institutions",
+        "property": "b"
+      }
+    },
+    "cross_model": false
+  },
+  {
     "id": "xlsx-v3-01-spending-label",
     "format": "xlsx",
     "title": "Clarify the spending units",
@@ -1614,6 +1740,265 @@
       }
     },
     "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-27-subcontract-label",
+    "format": "xlsx",
+    "title": "Correct the subcontract cost summary label",
+    "difficulty": 1,
+    "fixture": "govuk-publication-attachments-e6c67232e66c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Sub contract costs, correct the copied cost-category label in B7 from “Materials for application (£)” to “Sub contract costs for application (£)”. Keep the amount in C7, all financial inputs, formulas, cached results and worksheet protection unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Sub contract costs": {
+          "B7": {
+            "value": "Sub contract costs for application (£)",
+            "formula": null
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-28-passenger-headers",
+    "format": "xlsx",
+    "title": "Emphasise the regional passenger traffic headers",
+    "difficulty": 2,
+    "fixture": "h-r23-faa-forecast-67db3e8c89b5.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Regional Pax 25, make the DOMESTIC, INTERNATIONAL and TOTAL header cells C8:H8 bold with solid light blue fill (#D9EAF7). Keep their other font and cell properties, all historical and forecast figures, formulas, cached results and external links unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Regional Pax 25": {
+          "C8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "D8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "E8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "F8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "G8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "H8": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-29-glossary-sort",
+    "format": "xlsx",
+    "title": "Alphabetise the subsidy assumptions glossary",
+    "difficulty": 2,
+    "fixture": "h-r23-omb-050a7fa91318.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Glossary of Terms, alphabetise the ten definitions under “Assumptions Underlying Subsidy Estimates (Tables 3 through 6):” by sorting A6:A15 in ascending alphabetical order by their full text in column A. Each definition must move with its cell formatting. Keep row heights, section headings, the other glossary sections, the footnote and all loan tables unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "sort_range": {
+        "sheet": "Glossary of Terms",
+        "range": "A6:A15",
+        "key": "A",
+        "ascending": true
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-30-delivery-terms",
+    "format": "xlsx",
+    "title": "Record normal delivery terms for all SINs",
+    "difficulty": 1,
+    "fixture": "h-r23-gsa-mas-14188f994c42.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on PRICING TERMS, record a normal delivery time of 30 calendar days after receipt of order for all SINs, for both commercial and Government orders. In the first blank row of the Normal Delivery table (row 10), set A10 to “All SINs”, B10 under “Normal Delivery ARO (Commercial)” to “30 calendar days”, and C10 under “Normal Delivery ARO (Government)” to “30 calendar days”. Keep the remaining delivery rows, freight selections, pricing terms and data validation unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "PRICING TERMS": {
+          "A10": {
+            "value": "All SINs",
+            "formula": null
+          },
+          "B10": {
+            "value": "30 calendar days",
+            "formula": null
+          },
+          "C10": {
+            "value": "30 calendar days",
+            "formula": null
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-31-population-change",
+    "format": "xlsx",
+    "title": "Highlight population headers and add six metro area changes",
+    "difficulty": 3,
+    "fixture": "h-us-census-3cd2169b6541.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on cbsa-met-est2020int-pop, emphasise the four existing population-table header labels in A3, B3, C3 and M3 with bold text and solid light blue fill (#D9EAF7), retaining their other formatting. Add a comparison column in N for the first six metro areas, from “Abilene, TX Metro Area” in row 7 through “Albuquerque, NM Metro Area” in row 12. Set N3 to “2020 Census minus 2010 base”, also bold with solid light blue fill (#D9EAF7). In N7:N12, show the April 1, 2020 Census count in column M minus the April 1, 2010 Estimates Base in column B, using =M7-B7 filled down through =M12-B12. Keep these as formulas with cached integer values 11326, -984, -5117, 11934, 28543 and 29473 respectively, formatted #,##0. Use the existing row and column defaults for all other new-cell formatting. Leave the other cells in column N blank and retain all published population figures, merged cells and notes. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "cbsa-met-est2020int-pop": {
+          "A3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "B3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "C3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "M3": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "N3": {
+            "value": "2020 Census minus 2010 base",
+            "formula": null,
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "N7": {
+            "value": 11326,
+            "formula": "M7-B7",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N8": {
+            "value": -984,
+            "formula": "M8-B8",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N9": {
+            "value": -5117,
+            "formula": "M9-B9",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N10": {
+            "value": 11934,
+            "formula": "M10-B10",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N11": {
+            "value": 28543,
+            "formula": "M11-B11",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "N12": {
+            "value": 29473,
+            "formula": "M12-B12",
+            "style": {
+              "number_format": "#,##0"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-32-food-research-total",
+    "format": "xlsx",
+    "title": "Add three-year private food industry research totals",
+    "difficulty": 2,
+    "fixture": "h-us-usda-ers-02345166f314.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on Ag R&D data table, add a summary row at row 58 for private food industry R&D over 2020–2022 (the annual data in rows 52–54). Set A58 to “2020–2022 private food industry R&D total”. In F58, total the current-dollar amounts with =SUM(F52:F54), cached as 20839. In L58, total the constant 2022-dollar amounts rounded to two decimals with =ROUND(SUM(L52:L54),2), cached as 21600.20. Both totals are in millions of U.S. dollars; format F58 and L58 as #,##0.00. Use the existing column defaults for all other new-cell formatting and leave the remaining cells of row 58 blank. Keep the original data table, missing-value markers and source note unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Ag R&D data table": {
+          "A58": {
+            "value": "2020–2022 private food industry R&D total",
+            "formula": null
+          },
+          "F58": {
+            "value": 20839,
+            "formula": "SUM(F52:F54)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          },
+          "L58": {
+            "value": 21600.2,
+            "formula": "ROUND(SUM(L52:L54),2)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": false
   },
   {
     "id": "pptx-v3-01-policy-title",
