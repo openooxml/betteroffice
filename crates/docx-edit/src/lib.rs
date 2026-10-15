@@ -190,6 +190,7 @@ const PPR_DEL: &str = "pPrDel";
 const PPR_CHANGE: &str = "pPrChange";
 /// `_kind` of a hard-break embed.
 const BREAK_KIND: &str = "break";
+pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 
 pub type EditResult<T> = Result<T, EditError>;
 pub type StoryId = String;
@@ -2000,6 +2001,33 @@ mod tests {
         assert_eq!(cache.take("body", 1).as_deref(), Some(&1));
         assert_eq!(cache.get("body", 1), None);
         assert_eq!(cache.take("body", 1), None);
+    }
+
+    #[test]
+    fn peer_updates_over_the_size_cap_are_refused() {
+        let (a, b) = peers("one two", 1, 2);
+        a.insert_text(
+            &local("A"),
+            Position::new("body", 3),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let update = a.encode_state_as_update_v1();
+        let mut oversized = update.clone();
+        oversized.resize(MAX_UPDATE_BYTES + 1, 0);
+        let before = b.encode_state_as_update_v1();
+
+        let error = b.apply_update_v1(&oversized).unwrap_err();
+        assert_eq!(
+            error,
+            EditError::InvalidUpdate(format!("update exceeds {MAX_UPDATE_BYTES} bytes"))
+        );
+        assert!(presence::apply_update_with_typing_inference(&b, &oversized).is_err());
+        assert_eq!(b.encode_state_as_update_v1(), before);
+
+        b.apply_update_v1(&update).unwrap();
+        assert_eq!(b.encode_state_vector_v1(), a.encode_state_vector_v1());
     }
 
     #[test]
