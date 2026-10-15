@@ -7,6 +7,7 @@ import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '
 import type { PeerlessFrameGeometry } from './viewStore';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import { commandPageGeometry } from './commandPageGeometry';
+import { fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -61,7 +62,7 @@ function frame(revision: number, indices: number[], caretPage = 0): DocxCommandF
   } };
 }
 
-async function mount(zoom = 1, caretPage = 0, prefix = false) {
+async function mount(zoom = 1, caretPage = 0, prefix = false, mirrors = false) {
   let complete = !prefix;
   const scroller = document.createElement('div');
   scroller.style.overflowY = 'auto';
@@ -96,6 +97,9 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
   let revision = 1;
   let receive: ((candidate: DocxCommandFrame) => void) | undefined;
   const built = new Set([0, 1, 2, caretPage]);
+  const displayPages = Array.from({ length: 20 }, (_, pageIndex) => ({ pageIndex, width: 200, height: 100, primitives: [{
+    kind: 'text' as const, text: `Readable page ${pageIndex + 1}`, x: 0, baselineY: 14, width: 100, font: '12px Arial', color: '#000',
+  }] }));
   const frames: DocxCommandFrame[] = [];
   const nextFrame = (indices: number[]) => {
     const candidate = frame(revision, indices, caretPage);
@@ -143,6 +147,7 @@ async function mount(zoom = 1, caretPage = 0, prefix = false) {
         pages: Array.from({ length: complete ? 20 : 3 }, (_, pageIndex): PeerlessFrameGeometry['pages'][number] => ({
           page: { pageId: String(pageIndex + 1), pageIndex },
           bounds: { x: prefix && pageIndex < 3 ? 50 : 0, y: pageIndex * stride, width: prefix && pageIndex >= 3 ? 300 : 200, height: 100 }, transform: [1, 0, 0, 1, 0, 0],
+          ...(mirrors && built.has(pageIndex) ? { displayPage: displayPages[pageIndex] } : {}),
         })), caret: candidate.payload.caret.caretRect ? { x: 10,
           y: candidate.payload.caret.caretRect.pageIndex * stride, width: 1, height: 20 } : null, selectionRects: [],
       };
@@ -354,4 +359,24 @@ test('a certified prefix grows its scroll column without moving the visible page
   expect(column.parentElement!.style.height).toBe(`${19 * stride + 100}px`);
   await editor.scrollTo(10);
   expect(editor.container.querySelector('[data-page-id="11"] canvas')?.getAttribute('width')).toBe('200');
+});
+
+test('pages entering the window while scrolling build their mirror at idle time once the scroll settles', async () => {
+  const scheduler = fakeIdleScheduler();
+  restorers.push(() => scheduler.restore());
+  const editor = await mount(1, 0, false, true);
+  const mirror = (pageIndex: number) => editor.container.querySelector<HTMLElement>(
+    `[data-page-id="${pageIndex + 1}"] .canvas-page-mirror`);
+  const full = (pageIndex: number) => mirror(pageIndex)?.querySelector('.layout-run-text') != null;
+  await waitFor(() => expect(full(1)).toBe(true));
+  await editor.scrollTo(10);
+  await waitFor(() => expect(mirror(10)).not.toBeNull());
+  const { start, end } = editor.requests.at(-1)!;
+  const entered = Array.from({ length: end - start }, (_, index) => start + index);
+  expect(entered.filter((pageIndex) => (mirror(pageIndex)?.childElementCount ?? 0) > 0)).toEqual([]);
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 200)); });
+  expect(entered.filter(full)).toEqual([]);
+  while (scheduler.idleWork.size > 0) act(() => scheduler.flushIdle());
+  expect(entered.filter(full)).toEqual(entered);
+  expect(mirror(10)!.textContent).toContain('Readable page 11');
 });

@@ -20,7 +20,7 @@ import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
 import { checkIdleContinuation, fakeIdleScheduler } from './__fixtures__/fakeIdleScheduler';
-import type { PageChromeHandle } from './usePageChrome';
+import { createPageChromeHold, type PageChromeHandle } from './usePageChrome';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
@@ -773,6 +773,52 @@ test('unmounting an inactive page cancels its queued first fallback', async () =
   expect(idleWork.size).toBe(0);
   unmount();
   render(<CanvasPageMirror page={pages[0]!} active={false} />).unmount();
+  expect(idleWork.size).toBe(0);
+});
+
+test('held pages keep what they show and catch up in the shared idle slices after the hold', async () => {
+  const pages = blankPages(4, (index) => [{
+    kind: 'text', x: 10, baselineY: 20, width: 30, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
+  }]);
+  const hold = createPageChromeHold();
+  const view = (count: number, active: number[]) => (
+    <>{pages.slice(0, count).map(({ pageIndex }) => (
+      <div key={pageIndex} className="canvas-page" data-page-index={pageIndex}>
+        <CanvasPageMirror page={pages[pageIndex]!} active={active.includes(pageIndex)}
+          visible={active.includes(pageIndex)} hold={hold} />
+      </div>
+    ))}</>
+  );
+  const { container, rerender } = render(view(3, [0, 2]));
+  await idle();
+  const shown = () => Array.from(container.querySelectorAll('.canvas-page-mirror'), (host) => host.firstElementChild);
+  const before = shown();
+  expect(mirroredPages(container)).toEqual([0, 2]);
+  expect(before[1]!.textContent).toBe('Page 1');
+
+  hold.set(true);
+  rerender(view(4, [0, 1, 3]));
+  await act(async () => {});
+  const held = shown();
+  expect([held[0] === before[0], held[1] === before[1], held[2] === before[2], held[3]])
+    .toEqual([true, true, true, null]);
+  expect(mirroredPages(container)).toEqual([0, 2]);
+  expect(idleWork.size).toBe(0);
+
+  act(() => hold.set(false));
+  expect(mirroredPages(container)).toEqual([0, 2]);
+  expect(idleWork.size).toBe(1);
+  hold.set(true);
+  await act(async () => flushIdle({ didTimeout: false, timeRemaining: () => 50 }));
+  expect(mirroredPages(container)).toEqual([0, 2]);
+  expect(idleWork.size).toBe(0);
+
+  act(() => hold.set(false));
+  rerender(view(4, [0, 1]));
+  rerender(view(4, [0, 1, 3]));
+  await idle();
+  expect(mirroredPages(container)).toEqual([0, 1, 3]);
+  expect(shown()[2]!.textContent).toBe('Page 2');
   expect(idleWork.size).toBe(0);
 });
 

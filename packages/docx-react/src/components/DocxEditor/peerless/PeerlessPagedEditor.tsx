@@ -15,11 +15,13 @@ import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 import { CanvasPageMirror } from '../CanvasPageMirror';
+import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
 import { CanvasA11yLiveRegion } from '../CanvasA11yLiveRegion';
 import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
 const emptyPages: readonly PageGeometry[] = [];
+const SCROLL_SETTLE_MS = 150;
 const pageLayouts = new WeakMap<readonly PageGeometry[], { width: number; height: number }>();
 
 function pageLayout(pages: readonly PageGeometry[]) {
@@ -32,10 +34,11 @@ function pageLayout(pages: readonly PageGeometry[]) {
   return layout;
 }
 
-const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visible }: {
+const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visible, hold }: {
   geometry: PageGeometry;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   visible: boolean;
+  hold: PageChromeHold;
 }): ReactElement {
   const surface = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -55,23 +58,25 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
     data-page-index={geometry.page.pageIndex}
     className="paged-editor__page canvas-page"
     style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'none' }}
-  >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible} visible={visible} />}</div>;
+  >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible} visible={visible} hold={hold} />}</div>;
 }, (previous, next) => previous.canvasForPage === next.canvasForPage &&
-  previous.visible === next.visible && previous.geometry.displayPage === next.geometry.displayPage &&
+  previous.visible === next.visible && previous.hold === next.hold &&
+  previous.geometry.displayPage === next.geometry.displayPage &&
   previous.geometry.page.pageId === next.geometry.page.pageId &&
   previous.geometry.page.pageIndex === next.geometry.page.pageIndex &&
   previous.geometry.bounds.x === next.geometry.bounds.x && previous.geometry.bounds.y === next.geometry.bounds.y &&
   previous.geometry.bounds.width === next.geometry.bounds.width && previous.geometry.bounds.height === next.geometry.bounds.height);
 
-const PeerlessPages = memo(function PeerlessPages({ pages, visiblePages, canvasForPage }: {
+const PeerlessPages = memo(function PeerlessPages({ pages, visiblePages, canvasForPage, hold }: {
   pages: readonly PageGeometry[];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   visiblePages: readonly PageGeometry[];
+  hold: PageChromeHold;
 }) {
   const visible = new Set(visiblePages.map(({ page }) => page.pageId));
   return <>{pages.filter((page) => visible.has(page.page.pageId) || page.displayPage?.unbuilt === false ||
     (page.displayPage && !page.displayPage.unbuilt)).map((page) => <PeerlessPage key={page.page.pageId}
-      geometry={page} visible={visible.has(page.page.pageId)} canvasForPage={canvasForPage} />)}</>;
+      geometry={page} visible={visible.has(page.page.pageId)} hold={hold} canvasForPage={canvasForPage} />)}</>;
 });
 
 function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject<HTMLTextAreaElement | null> }): ReactElement {
@@ -131,6 +136,12 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const { height } = layout;
   const column = useRef<HTMLDivElement>(null);
   const measuredWindow = useRef<{ start: number; end: number } | null>(null);
+  const chromeHold = useMemo(createPageChromeHold, []);
+  const scrollSettle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (scrollSettle.current !== null) clearTimeout(scrollSettle.current);
+    scrollSettle.current = null;
+  }, []);
   useLayoutEffect(() => {
     const owner = column.current?.ownerDocument;
     if (!owner) return;
@@ -168,19 +179,28 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       onDisplayWindowChange(pages[next.start]!.page.pageIndex, pages[next.end]!.page.pageIndex + 1);
     };
     const schedule = () => { if (raf === null) raf = requestAnimationFrame(measure); };
+    const scroll = () => {
+      schedule();
+      chromeHold.set(true);
+      if (scrollSettle.current !== null) clearTimeout(scrollSettle.current);
+      scrollSettle.current = setTimeout(() => {
+        scrollSettle.current = null;
+        chromeHold.set(false);
+      }, SCROLL_SETTLE_MS);
+    };
     measure();
-    target.addEventListener('scroll', schedule, { passive: true });
+    target.addEventListener('scroll', scroll, { passive: true });
     window.addEventListener('resize', schedule);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
     observer?.observe(host);
     if (!root) observer?.observe(scrollParent);
     return () => {
       if (raf !== null) cancelAnimationFrame(raf);
-      target.removeEventListener('scroll', schedule);
+      target.removeEventListener('scroll', scroll);
       window.removeEventListener('resize', schedule);
       observer?.disconnect();
     };
-  }, [pages, zoom, onDisplayWindowChange]);
+  }, [pages, zoom, onDisplayWindowChange, chromeHold]);
   useLayoutEffect(() => {
     if (geometry && displayWindow[1] > displayWindow[0]) binding.setDisplayWindow?.(displayWindow[0], displayWindow[1]);
   }, [binding, displayWindow[0], displayWindow[1], geometry?.identity.incarnation, geometry?.identity.epoch]);
@@ -246,7 +266,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         onPointerCancel={releasePointer}
         onLostPointerCapture={(event) => { if (dragPointer.current === event.pointerId) dragPointer.current = null; }}>
         {pageOverlays}
-        <PeerlessPages pages={pages} visiblePages={visiblePages} canvasForPage={canvasForPage} />
+        <PeerlessPages pages={pages} visiblePages={visiblePages} canvasForPage={canvasForPage} hold={chromeHold} />
         {highlights?.map((rect, index) => <div key={`find-${index}`} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: rect.current ? 'rgba(255, 150, 0, 0.4)' : 'rgba(255, 220, 0, 0.3)', pointerEvents: 'none' }} />)}
         {canDisplaySelection && geometry?.selectionRects.map((rect, index) => <div key={index} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: 'rgba(59, 130, 246, 0.25)', pointerEvents: 'none' }} />)}
         {caret && <PeerlessCaret caret={caret} input={input} />}
