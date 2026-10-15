@@ -193,12 +193,12 @@ export function readResidentCellSelectionRects(
   const bottom = Math.max(range.anchor.row, range.head.row);
   const left = Math.min(range.anchor.column, range.head.column);
   const right = Math.max(range.anchor.column, range.head.column);
-  const specs: DisplayListSelectedCellSpec[] = [];
-  for (let row = top; row <= bottom; row += 1) {
-    for (let column = left; column <= right; column += 1) {
-      specs.push({ tableKey: String(display.from), row, col: column, rowSpan: 1, colSpan: 1 });
-    }
-  }
+  const specs: DisplayListSelectedCellSpec[] = (table?.cells ?? [])
+    .filter((cell) => cell.row <= bottom && cell.row + cell.rowspan - 1 >= top &&
+      cell.column <= right && cell.column + cell.colspan - 1 >= left)
+    .map((cell) => ({
+      tableKey: String(display.from), row: cell.row, col: cell.column, rowSpan: cell.rowspan, colSpan: cell.colspan,
+    }));
   const tableKeyOf = (position: number | undefined) => position === undefined ? null
     : projected.tables.find((entry) => entry.from <= position && position < entry.to)?.from.toString() ?? null;
   return deriveDisplayListSelectedCellRects(frame.displayList, specs, tableKeyOf, { kind: 'body' })
