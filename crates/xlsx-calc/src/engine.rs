@@ -1451,6 +1451,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_array_formula_over_date_text_keeps_its_cached_rectangle() {
+        for (formula, first, second) in [
+            ("-A1:A2", -44_519.0, -44_520.0),
+            ("A1:A2%", 445.19, 445.2),
+            ("A1:A2+1", 44_520.0, 44_521.0),
+        ] {
+            let (mut wb, s) = one_sheet();
+            put_text(&mut wb, s, "A1", "19/11/2021");
+            put_text(&mut wb, s, "A2", "20/11/2021");
+            put_recorded(&mut wb, s, "C1", formula, "C1:C2");
+            set_cached(&mut wb, s, "C1", num(first));
+            put_num(&mut wb, s, "C2", second);
+            rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "C1"), num(first), "{formula}");
+            assert_eq!(value(&wb, s, "C2"), num(second), "{formula}");
+        }
+    }
+
     /// the array form of a supported function is still a gap in the engine, so
     /// it must leave the cached value alone exactly as an unknown name does.
     /// `nanogpt-excel` reaches this through
