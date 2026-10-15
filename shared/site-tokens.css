@@ -1,0 +1,82 @@
+/* ink on paper: hierarchy comes from a few greys, never from extra colors */
+:root {
+  --bo-bg: #ffffff;
+  --bo-surface: #f7f7f6;
+  --bo-fg: #0b0b0b;
+  --bo-ink: #555555;
+  --bo-dim: #6b6b6b;
+  --bo-faint: #bdbdbd;
+  --bo-line: rgb(0 0 0 / 0.12);
+  --bo-line-soft: rgb(0 0 0 / 0.065);
+  --bo-acc: #047857;
+  --bo-acc-soft: rgb(4 120 87 / 0.12);
+  --bo-head: rgb(255 255 255 / 0.82);
+  --bo-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bo-bg: #090909;
+    --bo-surface: #111111;
+    --bo-fg: #f2f2f0;
+    --bo-ink: #a6a6a6;
+    --bo-dim: #8c8c8c;
+    --bo-faint: #3d3d3d;
+    --bo-line: rgb(255 255 255 / 0.13);
+    --bo-line-soft: rgb(255 255 255 / 0.07);
+    --bo-acc: #34d399;
+    --bo-acc-soft: rgb(52 211 153 / 0.14);
+    --bo-head: rgb(9 9 9 / 0.78);
+  }
+}
+
+/* page frame: one centred column, hairline rails down both sides */
+.wrap {
+  position: relative;
+  margin-inline: auto;
+  width: 100%;
+  max-width: 76rem;
+  padding-inline: clamp(1.25rem, 4vw, 3rem);
+  border-inline: 1px solid var(--bo-line-soft);
+}
+
+@media (max-width: 48rem) {
+  .wrap {
+    border-inline: 0;
+  }
+}
+
+/* registration marks where a section rule meets the rails */
+.rule {
+  border-top: 1px solid var(--bo-line-soft);
+}
+
+.rule::before,
+.rule::after {
+  content: "+";
+  content: "+" / "";
+  position: absolute;
+  top: -0.72em;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1;
+  color: var(--bo-faint);
+  background: var(--bo-bg);
+  padding: 2px 1px;
+  user-select: none;
+}
+
+.rule::before {
+  left: -0.36em;
+}
+
+.rule::after {
+  right: -0.36em;
+}
+
+@media (max-width: 48rem) {
+  .rule::before,
+  .rule::after {
+    display: none;
+  }
+}
