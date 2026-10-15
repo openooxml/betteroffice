@@ -84,6 +84,9 @@ function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCom
   const cell = anchors.find((entry) => entry.row <= head.row && head.row < entry.row + entry.rowspan &&
     entry.column <= head.column && head.column < entry.column + entry.colspan);
   if (!cell) return null;
+  const focusedCell = anchors.find((entry) => entry.row <= focused.row && focused.row < entry.row + entry.rowspan &&
+    entry.column <= focused.column && focused.column < entry.column + entry.colspan);
+  if (!focusedCell) return null;
   const properties = payload.rows.flatMap((row) => row.cells ?? []).find((entry) => entry.story === cell.story)?.tcPr;
   const borders = properties?.borders;
   let cellBorderColor: DocxCommandTableContext['cellBorderColor'];
@@ -103,7 +106,7 @@ function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCom
     hasMultiCellSelection: !!(sameTable && selected && (selected.anchor.row !== selected.head.row ||
       selected.anchor.column !== selected.head.column)),
     canSplitCell: true,
-    rowSpan: cell.rowspan, columnSpan: cell.colspan,
+    rowSpan: focusedCell.rowspan, columnSpan: focusedCell.colspan,
     ...(typeof payload.tblPr?.justification === 'string' ? { justification: payload.tblPr.justification } : {}),
     ...(cellBorderColor ? { cellBorderColor } : {}),
     ...(typeof properties?.backgroundColor === 'string'
