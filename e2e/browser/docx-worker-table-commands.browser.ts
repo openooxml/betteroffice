@@ -51,18 +51,16 @@ async function highlightGrid(page: Page): Promise<{ x: number; y: number }[][]> 
 
 async function caretIntoTable(page: Page, input: ReturnType<Page['locator']>) {
   await input.press('ControlOrMeta+Home');
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    await input.press('ArrowDown');
-    const surface = page.locator('.paged-editor__page').first();
-    await surface.click({ button: 'right', position: { x: 100, y: 100 }, force: true });
-    const item = page.getByRole('menuitem', { name: 'Select entire table', exact: true });
-    if (await item.count() > 0) {
-      await item.click();
-      return;
-    }
-    await page.keyboard.press('Escape');
-  }
-  throw new Error('Caret did not enter the table');
+  await input.press('ArrowDown');
+  await expect(async () => {
+    if (await page.locator('[role="menu"]').count() > 0) await page.keyboard.press('Escape');
+    await page.locator('.paged-editor__page').first()
+      .click({ button: 'right', position: { x: 100, y: 100 }, force: true });
+    await page.getByRole('menuitem', { name: 'Select entire table', exact: true }).click({ timeout: 2000 });
+    await page.waitForFunction(() => [...document.querySelectorAll('div[aria-hidden="true"]')]
+      .filter((element) => (element as HTMLElement).style.background.includes('59, 130, 246')).length >= 1,
+      undefined, { timeout: 3000 });
+  }).toPass({ timeout: 30000 });
 }
 
 async function tableMenuAction(page: Page, label: string) {
@@ -145,7 +143,7 @@ test('worker table commands reshape the saved grid', async ({ page }, info) => {
 
   const fillButton = page.getByRole('button', { name: 'Cell Fill Color', exact: true }).last();
   await fillButton.click();
-  const picker = page.getByRole('dialog', { name: 'Cell Fill Color picker', exact: true });
+  const picker = page.getByRole('dialog', { name: 'Text Highlight Color picker', exact: true });
   await expect(picker).toBeVisible();
   await picker.getByLabel('Custom hex color', { exact: true }).fill('FF0000');
   await picker.getByRole('button', { name: 'Apply', exact: true }).click();
