@@ -35,6 +35,7 @@ const SEED = 0x72616e67;
 const STEPS = 12;
 const SMALL_FIXTURE_STEPS = 6;
 const RECOVERY_STEP = 1;
+const DOCUMENT_TIMEOUT_MS = 15_000;
 const BASELINE_EXCLUSIONS: Array<[string, string]> = [];
 const FLAVOURS: Flavour[] = [
   'plain',
@@ -224,21 +225,27 @@ async function coldFrame(
   }
 }
 
-test('viewport frames match a cold rebuild after every resident edit and scroll', async () => {
-  const started = performance.now();
-  let documents = 0;
-  let corpusDocuments = 0;
-  let attempted = 0;
-  let totalSteps = 0;
-  let smallDocuments = 0;
-  let positionFrames = 0;
-  let rangeFrames = 0;
-  const refused: string[] = [];
-  const excluded: string[] = [];
-  const failures: string[] = [];
-  for (const fixture of fixtures()) {
+const coverage = {
+  started: 0,
+  documents: 0,
+  corpusDocuments: 0,
+  attempted: 0,
+  totalSteps: 0,
+  smallDocuments: 0,
+  positionFrames: 0,
+  rangeFrames: 0,
+  refused: [] as string[],
+  excluded: [] as string[],
+};
+
+const FIXTURES = [...fixtures()];
+const TITLE = 'viewport frames match a cold rebuild after every resident edit and scroll';
+
+for (const fixture of FIXTURES) {
+  test(`${TITLE}: ${fixture.name}`, async () => {
+    coverage.started ||= performance.now();
     const { name, bytes, seed, corpus, noWindow = false } = fixture;
-    attempted += 1;
+    coverage.attempted += 1;
     const exclusion = BASELINE_EXCLUSIONS.find(([excluded]) => excluded === name);
     const session = await createResidentEngineSession();
     let context = `document=${name} seed=${seed} step=-1 op=initial`;
@@ -249,8 +256,8 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
         hostJson = session.openDocx(bytes);
       } catch (error) {
         if (corpus && /\b(refused|unsupported)\b/i.test(String(error))) {
-          refused.push(`${name}: ${String(error)}`);
-          continue;
+          coverage.refused.push(`${name}: ${String(error)}`);
+          return;
         }
         throw error;
       }
@@ -348,8 +355,8 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
         expectPages(hosts, baseline, context, noWindow ? undefined : window);
       } catch (error) {
         if (!exclusion) throw error;
-        excluded.push(`${name}: ${exclusion[1]}`);
-        continue;
+        coverage.excluded.push(`${name}: ${exclusion[1]}`);
+        return;
       }
       const expectColdPages = async () => {
         const oracle = await coldFrame(
@@ -459,9 +466,9 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
                 ({ kind }) => kind.startsWith('shift-') || kind === 'patch-positions'
               )
             ) {
-              positionFrames += 1;
+              coverage.positionFrames += 1;
             }
-            if (delta.operations.some(({ kind }) => kind === 'shift-range')) rangeFrames += 1;
+            if (delta.operations.some(({ kind }) => kind === 'shift-range')) coverage.rangeFrames += 1;
           }
           const oracle = await expectColdPages();
           if (step === RECOVERY_STEP) {
@@ -471,34 +478,37 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
             expectPages(hosts, oracle, context, noWindow ? undefined : window);
           }
         }
-        totalSteps += 1;
+        coverage.totalSteps += 1;
       }
-      documents += 1;
+      coverage.documents += 1;
       if (corpus) {
-        corpusDocuments += 1;
-        if (pageCount < 3) smallDocuments += 1;
+        coverage.corpusDocuments += 1;
+        if (pageCount < 3) coverage.smallDocuments += 1;
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      failures.push(
-        message.startsWith(context)
-          ? message.split('\n')[0]!
-          : `${context} page=-1 key=session: ${message.split('\n')[0]}`
+      throw new Error(
+        message.startsWith(context) ? message : `${context} page=-1 key=session: ${message}`,
+        { cause: error }
       );
     } finally {
       session.destroy();
     }
-  }
+  }, DOCUMENT_TIMEOUT_MS);
+}
+
+test(`${TITLE}: coverage`, () => {
+  const { documents, corpusDocuments, smallDocuments, totalSteps, positionFrames, rangeFrames } = coverage;
+  expect(coverage.attempted, 'the per-document tests of this file feed the totals; run them with it').toBe(FIXTURES.length);
   console.info(
-    `viewport frames: ${documents}/${attempted} documents (${corpusDocuments} corpus, ${smallDocuments} small at ${SMALL_FIXTURE_STEPS} steps, others at ${STEPS}), ${totalSteps} steps, ${positionFrames} position frames (${rangeFrames} with range shifts), ${(
-      (performance.now() - started) / 1000
-    ).toFixed(2)} s; refused: ${refused.join('; ') || 'none'}; exclusions: ${excluded.join('; ') || 'none'}; failures: ${failures.join('; ') || 'none'}`
+    `viewport frames: ${documents}/${coverage.attempted} documents (${corpusDocuments} corpus, ${smallDocuments} small at ${SMALL_FIXTURE_STEPS} steps, others at ${STEPS}), ${totalSteps} steps, ${positionFrames} position frames (${rangeFrames} with range shifts), ${(
+      (performance.now() - coverage.started) / 1000
+    ).toFixed(2)} s; refused: ${coverage.refused.join('; ') || 'none'}; exclusions: ${coverage.excluded.join('; ') || 'none'}`
   );
-  expect(failures, 'viewport frame parity failures').toEqual([]);
   expect(
-    documents + refused.length + excluded.length,
+    documents + coverage.refused.length + coverage.excluded.length,
     `document=selection seed=${SEED} step=-1 op=coverage page=-1 key=documents`
-  ).toBe(attempted);
+  ).toBe(coverage.attempted);
   expect(
     documents,
     `document=selection seed=${SEED} step=-1 op=coverage page=-1 key=documents`
@@ -506,7 +516,7 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
     FLAVOURS.length +
       1 +
       NO_WINDOW_FLAVOURS.length -
-      excluded.filter((name) => name.startsWith('synthetic/')).length
+      coverage.excluded.filter((name) => name.startsWith('synthetic/')).length
   );
   expect(
     positionFrames,
@@ -516,4 +526,4 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
     rangeFrames,
     `document=selection seed=${SEED} step=-1 op=coverage page=-1 key=rangeFrames`
   ).toBeGreaterThan(0);
-}, 120_000);
+});

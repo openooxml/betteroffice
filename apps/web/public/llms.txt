@@ -4,6 +4,12 @@
 
 DOCX, XLSX and PPTX are published on npm, crates.io and PyPI. VSDX diagram support builds from source and has no published packages. Versions differ by format and registry; the registries and the [release notes](https://github.com/openooxml/betteroffice/releases) list current versions, and the documentation holds the API reference.
 
+Used by: [OpenCode](https://opencode.ai), [atira](https://atira.ai), [Ketryx](https://www.ketryx.com) and others.
+
+## Features
+
+Agents propose edits that people review in the editor as attributed tracked changes, inline diffs and previews, and an accepted proposal undoes as one step. Untouched file parts survive a round trip, and everything is Apache-2.0 and self-hostable; see [all features](https://docs.betteroffice.dev/docs).
+
 ## Docs
 
 - [Documentation](https://docs.betteroffice.dev): guides and API reference.
@@ -17,7 +23,7 @@ DOCX, XLSX and PPTX are published on npm, crates.io and PyPI. VSDX diagram suppo
 
 ## npm packages
 
-Published under the `@betteroffice` scope. The `-react` packages are drop-in editor components; the packages without that suffix are framework-free cores for custom UIs and headless use. There is no Vue or other framework package.
+Published under the `@betteroffice` scope. The editors render inside your app with no iframe or external service, so documents never leave the page. The `-react` packages are drop-in editor components; the packages without that suffix are framework-free cores for custom UIs and headless use. There is no Vue or other framework package.
 
 - [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component, with toolbar, paginated canvas, comments and tracked changes. Use it to embed Word documents in a React app.
 - [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): the framework-free DOCX core: parsing, CRDT editing, pagination and canvas rendering. Use it for a custom UI or headless DOCX work in JavaScript.
@@ -70,12 +76,16 @@ Published to PyPI. The Rust engine is compiled into each wheel, so no Office ins
 
 ## Collaboration
 
+People and agents edit the same document live as peers, with the same undo and tracked-changes attribution, and offline edits sync on reconnect.
+
 Every editor replica is a Yrs document, and the providers speak the standard Yjs sync-v1 protocol over any reliable binary transport you supply. The repository includes a reference Cloudflare relay; the [collaboration guide](https://docs.betteroffice.dev/docs/collaboration) covers both.
 
 ## Demos and benchmarks
 
 - [Live demos](https://demo.betteroffice.dev): DOCX, XLSX and PPTX editors running in the browser.
 - [Visual fidelity results](https://github.com/openooxml/betteroffice#benchmarks): published packages and source builds compared with Microsoft Office on selected corpus files.
+- [Benchmarks site](https://benchmarks.betteroffice.dev): per-document results for every benchmark sample.
+- [Benchmark summary](https://betteroffice.dev/#benchmarks): BetterOffice and LibreOffice per format on visual similarity to Office, exact page counts, formula accuracy, and render and recalculation time.
 - [Benchmark method](https://github.com/openooxml/betteroffice/tree/main/scripts/office-quality): Office reference captures and image comparison.
 
 ## Links

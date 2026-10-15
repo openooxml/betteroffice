@@ -6,11 +6,45 @@ import {
   publishedCrates,
   publishedPackages,
 } from "../../../scripts/published-packages.mjs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { BENCHMARKS, BENCHMARKS_SITE, DEMO, DOCS, EDITORS, PACKAGES, RELEASES, REPO, SITE } from "./content.ts";
+import { USED_BY, usedByLine } from "./used-by.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const LLMS = readFileSync(join(ROOT, "apps/web/public/llms.txt"), "utf8");
 
+process.env.BETTEROFFICE_BENCHMARKS = readFileSync(join(ROOT, "README.md"), "utf8");
+const { default: Home } = await import("./page.tsx");
+const PAGE = renderToStaticMarkup(createElement(Home));
+
+// what llms.txt carries, at index level, for each section of the landing page
+const COVERAGE = {
+  hero: ["office suite", "written in Rust", "agent", `(${DEMO})`, `(${DOCS})`, `(${REPO})`],
+  "used-by": [usedByLine()],
+  suite: [...EDITORS.map((editor) => editor.format.toUpperCase()), "published on npm", "source preview", "edited in their own format"],
+  foundation: ["tracked changes", "undoes as one step", "Untouched file parts", "self-hostable", `(${DOCS}/docs)`],
+  benchmarks: [`(${BENCHMARKS})`, `(${BENCHMARKS_SITE})`, `(${SITE}/#benchmarks)`, "LibreOffice", "render and recalculation time", "scripts/office-quality"],
+  collaboration: ["People and agents", "offline edits", `(${DOCS}/docs/collaboration)`],
+  packages: ["never leave the page", ...PACKAGES.map((pkg) => `[${pkg.name}](`), `(${DOCS}/docs/packages)`, `(${RELEASES})`],
+  coda: [`(${DEMO})`, `(${DOCS})`],
+};
+
 describe("llms.txt", () => {
+  test("covers every section of the landing page", () => {
+    const sections = [...PAGE.matchAll(/<section[^>]*aria-labelledby="([^"]+)"/g)].map((m) => m[1]);
+    expect(sections).toContain("benchmarks");
+    expect(sections.filter((id) => !(id in COVERAGE))).toEqual([]);
+    for (const id of sections) {
+      expect({ [id]: COVERAGE[id].filter((text) => !LLMS.includes(text)) }).toEqual({ [id]: [] });
+    }
+  });
+
+  test("names who uses it exactly as the band does", () => {
+    expect(LLMS.split("\n")).toContain(usedByLine());
+    for (const entry of USED_BY.filter((e) => !e.enabled)) expect(LLMS).not.toContain(entry.name);
+  });
+
   test("names no npm package that does not exist", () => {
     const real = new Set(publishedPackages());
     const claimed = [...LLMS.matchAll(/@betteroffice\/[a-z0-9-]+/g)].map((m) => m[0]);

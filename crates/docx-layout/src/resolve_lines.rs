@@ -29,6 +29,8 @@ fn utf16_slice(s: &str, start: usize, end: usize) -> String {
 
 /// Resolves the visible run segments for one measured line.
 pub fn resolve_line_segments(runs: &[Run], line: &TypesetRow) -> Vec<ResolvedSegment> {
+    #[cfg(any(test, feature = "test-support"))]
+    crate::work_counters::resolved_line();
     let mut segments: Vec<ResolvedSegment> = Vec::new();
 
     for run_index in line.head_run..=line.tail_run {

@@ -22,12 +22,16 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { PartEditTarget } from '../partEdit';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 import { workerOpenSave } from '../internals/workerOpenSave';
+import { testScope } from '../__fixtures__/testScope';
 import { setupWorkerEngine } from '../__fixtures__/workerEngine';
 import { useFileIO } from './useFileIO';
 import { useHeaderFooterEditing } from './useHeaderFooterEditing';
 import * as headerFooterEditing from './useHeaderFooterEditing';
 
-const { act, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
+const { act: rtlAct, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
+const scope = testScope(rtlAct);
+const act = (callback: () => unknown) => scope.act(async () => { await callback(); });
+const { until } = scope;
 const quiet = { error: console.error, warn: console.warn };
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -225,15 +229,6 @@ function expectUnchanged(source: Fixture, saved: ArrayBuffer, names: string[]): 
   }
 }
 
-async function until(done: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 300 && !done(); attempt += 1) {
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    });
-  }
-  expect(done()).toBe(true);
-}
-
 async function mount(bytes: ArrayBuffer, options: { experimentalWorkerOpen?: boolean } = { experimentalWorkerOpen: false }) {
   const { experimentalWorkerOpen } = options;
   const engineProps = experimentalWorkerOpen === undefined ? {} : { experimentalWorkerOpen };
@@ -329,11 +324,14 @@ function testSaveEngines(name: string, inThread: SaveTest, worker: SaveTest = in
     } finally {
       cleanup();
       takePreloadedResidentEngineWorker()?.destroy();
-      await act(async () => {});
-      for (const worker of workers) worker.terminate();
-      compileModule.mockRestore();
-      resetEngineChoiceForTests();
-      globalThis.Worker = originalWorker;
+      try {
+        await act(async () => {});
+      } finally {
+        for (const worker of workers) worker.terminate();
+        compileModule.mockRestore();
+        resetEngineChoiceForTests();
+        globalThis.Worker = originalWorker;
+      }
     }
   }, 20_000);
 }
@@ -601,10 +599,13 @@ test.each(sourceBufferEngines)('a package part the host replaced in originalBuff
   } finally {
     cleanup();
     takePreloadedResidentEngineWorker()?.destroy();
-    await act(async () => {});
-    compileModule.mockRestore();
-    resetEngineChoiceForTests();
-    globalThis.Worker = originalWorker;
+    try {
+      await act(async () => {});
+    } finally {
+      compileModule.mockRestore();
+      resetEngineChoiceForTests();
+      globalThis.Worker = originalWorker;
+    }
   }
 });
 

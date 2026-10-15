@@ -1,55 +1,54 @@
 import Link from "next/link";
-import type { Format } from "../../lib/formats";
+import { FormatGlyph } from "../../../../shared/format-glyph";
+import { PREVIEW_STATUS, type Format } from "../../lib/formats";
 
-export function FormatCard({ format }: { format: Format }) {
-  const live = format.status === "live";
+// one editor on the launcher: its line drawing, then name, status, kind and tagline;
+// a preview format is listed without a link
+export function FormatCard({ format, preview = false }: { format: Format; preview?: boolean }) {
+  const live = format.status === "live" && !preview;
   const content = (
     <>
-      <div>
-        <div className="flex items-center justify-between">
-          <span className="font-mono text-[0.8125rem] text-fg">
-            {format.name}
-          </span>
-          <StatusBadge live={live} />
+      <div className="relative aspect-[2/1] border-b border-line-soft bg-surface text-fg transition-colors group-hover:bg-[color-mix(in_oklab,var(--color-surface),var(--color-fg)_4%)] max-sm:aspect-auto max-sm:border-r max-sm:border-b-0">
+        <div className="absolute inset-x-3 top-3 bottom-1 max-sm:inset-x-2.5 max-sm:inset-y-4">
+          <FormatGlyph format={format.id} />
         </div>
-        <p className="mt-2 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-dim">
-          {format.kind}
-        </p>
-        <p className="mt-4 text-[0.8125rem] leading-relaxed text-ink">
-          {format.tagline}
-        </p>
       </div>
-      <span className="mt-auto pt-6 font-mono text-xs text-dim transition-colors group-hover:text-fg">
-        {live ? "open demo →" : "coming soon"}
-      </span>
+      <div className="flex flex-1 flex-col gap-2 p-5 xl:p-6">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-[1.0625rem] leading-snug font-[560] tracking-[-0.015em]">{format.name}</h3>
+          <Status status={preview ? PREVIEW_STATUS : live ? "available" : "coming"} />
+        </div>
+        <p className="font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-dim">{format.kind}</p>
+        <p className="text-sm leading-[1.65] text-ink">{format.tagline}</p>
+        {!preview && (
+          <span className="mt-auto pt-3 font-mono text-xs text-dim transition-colors group-hover:text-fg">
+            {live ? "open demo →" : "coming soon"}
+          </span>
+        )}
+      </div>
     </>
   );
+  const card = "flex flex-col bg-bg max-sm:grid max-sm:grid-cols-[8.5rem_1fr]";
 
-  if (!live) {
-    return <div className="flex min-h-52 flex-col bg-bg p-6">{content}</div>;
-  }
+  if (!live) return <div className={card}>{content}</div>;
 
   return (
-    <Link
-      href={`/${format.id}`}
-      className="group flex min-h-52 flex-col bg-bg p-6 no-underline transition-colors hover:bg-surface"
-    >
+    <Link href={`/${format.id}`} className={`group ${card} no-underline`}>
       {content}
     </Link>
   );
 }
 
-function StatusBadge({ live }: { live: boolean }) {
+function Status({ status }: { status: string }) {
+  const available = status === "available";
   return (
     <span
-      className={
-        "inline-flex items-center gap-1.5 font-mono text-[0.625rem] uppercase tracking-[0.12em] " +
-        (live
-          ? "text-acc before:size-1.5 before:rounded-full before:bg-acc before:shadow-[0_0_8px_rgba(5,150,105,0.45)]"
-          : "text-dim before:size-1.5 before:rounded-full before:bg-faint")
-      }
+      className={`inline-flex shrink-0 items-center gap-1.5 border px-1.5 py-px font-mono text-[0.625rem] uppercase tracking-[0.12em] whitespace-nowrap ${
+        available ? "border-acc/40 text-acc" : "border-dashed border-line text-dim"
+      }`}
     >
-      {live ? "available" : "coming"}
+      {available && <span className="size-1.5 bg-acc" />}
+      {status}
     </span>
   );
 }

@@ -54,7 +54,7 @@ export type PageCanvasBuffer = HTMLCanvasElement | OffscreenCanvas;
 type PageCanvasContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 /**
- * Raster a complete page into a detached backing surface. Callers can prepare
+ * Raster a page or damage band into a detached backing surface. Callers can prepare
  * every damaged page concurrently, then present the finished buffers in one
  * synchronous pass without ever exposing the renderer's initial clear.
  */
@@ -63,16 +63,19 @@ export async function rasterizeDisplayPageToBackBuffer(
   page: DisplayPage,
   options: DrawPageOptions = {},
   devicePixelRatio: number = 1,
-  zoom: number = 1
+  zoom: number = 1,
+  /** Device-pixel crop; its pixels equal the corresponding full-page raster. */
+  clip?: { x: number; y: number; width: number; height: number }
 ): Promise<PageCanvasBuffer> {
   const ctx = canvas.getContext('2d') as PageCanvasContext | null;
   if (!ctx) throw new Error('Canvas 2D context is unavailable');
   const scale = devicePixelRatio * zoom;
-  const width = Math.ceil(page.width * scale);
-  const height = Math.ceil(page.height * scale);
+  const width = clip?.width ?? Math.ceil(page.width * scale);
+  const height = clip?.height ?? Math.ceil(page.height * scale);
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   ctx.resetTransform();
+  if (clip) ctx.translate(-clip.x, -clip.y);
   ctx.scale(scale, scale);
   await drawDisplayPage(ctx as unknown as CanvasRenderingContext2D, page, options);
   return canvas;
@@ -279,13 +282,7 @@ async function drawPrimitiveCore(
       drawTextRun(ctx, families?.size ? textRunWithFamilies(primitive, families) : primitive);
       break;
     case 'glyphRun':
-      drawGlyphRun(
-        ctx,
-        families?.size && primitive.fallbackFont
-          ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
-          : primitive,
-        options.glyphCache
-      );
+      drawGlyphRunPrimitive(ctx, primitive, options);
       break;
     case 'rect':
       drawRect(ctx, primitive);
@@ -339,6 +336,22 @@ async function drawPrimitiveCore(
     default:
       throw unknownPrimitiveError(primitive);
   }
+}
+
+/** Paints one glyph run synchronously, exactly as page rasterization does. */
+export function drawGlyphRunPrimitive(
+  ctx: CanvasRenderingContext2D,
+  primitive: GlyphRunPrimitive,
+  options: DrawPageOptions = {}
+): void {
+  const families = options.fontFamilies;
+  drawGlyphRun(
+    ctx,
+    families?.size && primitive.fallbackFont
+      ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
+      : primitive,
+    options.glyphCache
+  );
 }
 
 // text runs anchor at the left pen origin with an alphabetic baseline; rtl

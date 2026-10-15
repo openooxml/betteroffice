@@ -26,12 +26,39 @@ import { visitTrackedControlContent } from '../utils/trackedControlContent';
 
 import type { BlockContent, Comment, ParagraphContent } from '../types/content';
 
+/** Every comment ID a range marker in `content` carries, at any depth. */
+function rangedCommentIds(content: BlockContent[]): Set<number> {
+  const ids = new Set<number>();
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    if (!node || typeof node !== 'object' || ArrayBuffer.isView(node)) return;
+    const entry = node as { type?: unknown; id?: unknown };
+    if (
+      (entry.type === 'commentRangeStart' || entry.type === 'commentRangeEnd') &&
+      typeof entry.id === 'number'
+    ) {
+      ids.add(entry.id);
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') visit(value);
+    }
+  };
+  visit(content);
+  return ids;
+}
+
 /**
  * Inject `commentRangeStart`/`commentRangeEnd` for reply comments
- * that share their parent comment's text range.
+ * that share their parent comment's text range and have none of their own.
  */
 export function injectReplyRangeMarkers(content: BlockContent[], comments: Comment[]): boolean {
-  const replies = comments.filter((c) => c.parentId != null);
+  const threaded = comments.filter((c) => c.parentId != null);
+  if (threaded.length === 0) return false;
+  const ranged = rangedCommentIds(content);
+  const replies = threaded.filter((c) => !ranged.has(c.id));
   if (replies.length === 0) return false;
   let inserted = false;
 
@@ -92,12 +119,16 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
 
 /**
  * Inject `commentRangeStart`/`commentRangeEnd` for comments whose
- * parent is a tracked-change revision (insertion/deletion). The TC
- * content nodes don't carry the comment's range, so we wrap them.
+ * parent is a tracked-change revision (insertion/deletion) and that have
+ * no range of their own. The TC content nodes don't carry the comment's
+ * range, so we wrap them.
  */
 export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Comment[]): boolean {
   const commentIds = new Set(comments.map((c) => c.id));
-  const tcReplies = comments.filter((c) => c.parentId != null && !commentIds.has(c.parentId));
+  const threaded = comments.filter((c) => c.parentId != null && !commentIds.has(c.parentId));
+  if (threaded.length === 0) return false;
+  const ranged = rangedCommentIds(content);
+  const tcReplies = threaded.filter((c) => !ranged.has(c.id));
   if (tcReplies.length === 0) return false;
   let inserted = false;
 

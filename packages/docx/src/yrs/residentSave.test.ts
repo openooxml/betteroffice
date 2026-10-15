@@ -1107,3 +1107,128 @@ describe('worker save availability', () => {
     expect(difference(saved, bytes, CORE)).toBeNull();
   }, TIMEOUT);
 });
+
+describe('worker save of reply threads', () => {
+  const DRAWING_NS =
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" ' +
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" ' +
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14"';
+  const GROUP =
+    '<w:p w14:paraId="0000D001"><w:r><mc:AlternateContent><mc:Choice Requires="wpg"><w:drawing>' +
+    '<wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Group 1"/>' +
+    '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/>' +
+    '<wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="457200"/></a:xfrm></wpg:grpSpPr>' +
+    '<wps:wsp><wps:cNvPr id="2" name="Text Box 2"/><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm>' +
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>' +
+    '<w:p w14:paraId="0000D002"><w:r><w:t>Grouped box text</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>' +
+    '</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice></mc:AlternateContent></w:r></w:p>';
+  const NESTED_LINK =
+    '<w:p w14:paraId="0000D003"><w:hyperlink w:anchor="outer"><w:r><w:t xml:space="preserve">Outer </w:t></w:r>' +
+    '<w:hyperlink w:anchor="inner"><w:r><w:t>inner link text</w:t></w:r></w:hyperlink></w:hyperlink></w:p>';
+  const FIELD_RUN =
+    '<w:r><w:t xml:space="preserve">Page </w:t><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>' +
+    '<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/><w:t xml:space="preserve"> of </w:t>' +
+    '<w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> NUMPAGES </w:instrText><w:fldChar w:fldCharType="separate"/>' +
+    '<w:t>2</w:t><w:fldChar w:fldCharType="end"/></w:r>';
+  const FIELDS = `<w:p w14:paraId="0000D004">${FIELD_RUN}</w:p>`;
+  const UNMODELLED = GROUP + NESTED_LINK + FIELDS;
+  const TEXT = '<w:r><w:t>Commented text</w:t></w:r>';
+  const REPLY_START = '<w:commentRangeStart w:id="2"/>';
+  const REPLY_END = '<w:commentRangeEnd w:id="2"/>';
+  const REPLY_REFERENCE = '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="2"/></w:r>';
+  const REFERENCES = '<w:r><w:commentReference w:id="1"/></w:r>';
+
+  function threaded(body: string): Uint8Array {
+    const parts: PartsMap = new Map();
+    const set = (name: string, content: string) => parts.set(name, toBytes(content));
+    set(
+      '[Content_Types].xml',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+        `<Override PartName="/word/document.xml" ContentType="${OFFICE}.wordprocessingml.document.main+xml"/>` +
+        `<Override PartName="/word/comments.xml" ContentType="${OFFICE}.wordprocessingml.comments+xml"/>` +
+        `<Override PartName="/word/commentsExtended.xml" ContentType="${OFFICE}.wordprocessingml.commentsExtended+xml"/></Types>`
+    );
+    set(
+      '_rels/.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        `<Relationship Id="rIdDoc" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`
+    );
+    set(
+      'word/_rels/document.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        `<Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/>` +
+        '<Relationship Id="rIdCx" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/></Relationships>'
+    );
+    set(
+      'word/comments.xml',
+      `<w:comments ${NS}><w:comment w:id="1" w:author="Host" w:date="${SUGGEST.date}">${paragraph('0C000001', 'Parent')}</w:comment>` +
+        `<w:comment w:id="2" w:author="Host" w:date="${SUGGEST.date}">${paragraph('0C000002', 'Reply')}</w:comment></w:comments>`
+    );
+    set(
+      'word/commentsExtended.xml',
+      '<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">' +
+        '<w15:commentEx w15:paraId="0C000001"/><w15:commentEx w15:paraId="0C000002" w15:paraIdParent="0C000001"/></w15:commentsEx>'
+    );
+    set(
+      'word/document.xml',
+      `<w:document ${NS} xmlns:r="${REL}" ${DRAWING_NS}><w:body>${body}<w:sectPr/></w:body></w:document>`
+    );
+    return new Uint8Array(rezipPartsToArrayBuffer(parts));
+  }
+
+  function documentXml(bytes: Uint8Array): string {
+    return new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+  }
+
+  async function savedBody(body: string): Promise<string> {
+    const opened = await open(threaded(body));
+    const comments = hostComments(opened);
+    expect(comments.find((comment) => comment.id === 2)?.parentId).toBe(1);
+    return documentXml(await compareSave(opened, comments));
+  }
+
+  it('keeps a reply with its own range byte-for-byte on a no-edit save', async () => {
+    const body =
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${REPLY_START}${TEXT}<w:commentRangeEnd w:id="1"/>${REPLY_END}` +
+      `${REFERENCES}<w:r><w:commentReference w:id="2"/></w:r></w:p>${UNMODELLED}`;
+    expect(await savedBody(body)).toBe(documentXml(threaded(body)));
+  }, TIMEOUT);
+
+  for (const [name, parent, expected] of [
+    [
+      'a plain paragraph',
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${TEXT}<w:commentRangeEnd w:id="1"/>${REFERENCES}</w:p>`,
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${REPLY_START}${TEXT}<w:commentRangeEnd w:id="1"/>${REPLY_END}${REPLY_REFERENCE}${REFERENCES}</w:p>`,
+    ],
+    [
+      'a paragraph with fields',
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${TEXT}<w:commentRangeEnd w:id="1"/>${REFERENCES}${FIELD_RUN}</w:p>`,
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${REPLY_START}${TEXT}<w:commentRangeEnd w:id="1"/>${REPLY_END}${REPLY_REFERENCE}${REFERENCES}${FIELD_RUN}</w:p>`,
+    ],
+    [
+      'two paragraphs',
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${TEXT}</w:p>${GROUP}` +
+        `<w:p w14:paraId="0000B002">${TEXT}<w:commentRangeEnd w:id="1"/>${REFERENCES}</w:p>`,
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${REPLY_START}${TEXT}</w:p>${GROUP}` +
+        `<w:p w14:paraId="0000B002">${TEXT}<w:commentRangeEnd w:id="1"/>${REPLY_END}${REPLY_REFERENCE}${REFERENCES}</w:p>`,
+    ],
+  ] as const) {
+    it(`adds a missing reply range in ${name} and keeps every other byte`, async () => {
+      expect(await savedBody(parent + UNMODELLED)).toBe(documentXml(threaded(expected + UNMODELLED)));
+    }, TIMEOUT);
+  }
+
+  it.todo('adds a missing reply range around content the model drops (deferred until the model keeps nested hyperlinks)', async () => {
+    const link =
+      '<w:hyperlink w:anchor="outer"><w:r><w:t xml:space="preserve">Outer </w:t></w:r>' +
+      '<w:hyperlink w:anchor="inner"><w:r><w:t>inner</w:t></w:r></w:hyperlink></w:hyperlink>';
+    const parent = `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${link}<w:commentRangeEnd w:id="1"/>${REFERENCES}</w:p>`;
+    const expected =
+      `<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>${REPLY_START}${link}` +
+      `<w:commentRangeEnd w:id="1"/>${REPLY_END}${REPLY_REFERENCE}${REFERENCES}</w:p>`;
+    expect(await savedBody(parent + UNMODELLED)).toBe(documentXml(threaded(expected + UNMODELLED)));
+  }, TIMEOUT);
+});
