@@ -4,6 +4,7 @@ import { afterAll, afterEach, expect, mock, spyOn, test } from "bun:test";
 import { forwardRef, useEffect, useImperativeHandle } from "react";
 import type { XlsxAsyncEditorApi, XlsxAsyncEditorProps, XlsxCommandResult } from "@betteroffice/xlsx-react";
 import type { PptxAsyncEditorApi, PptxAsyncEditorProps } from "@betteroffice/pptx-react";
+import type { DocxErrorInfo } from "@betteroffice/docx-react";
 import type { EditorApi } from "./Editor";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -11,7 +12,7 @@ if (ownsDom) GlobalRegistrator.register();
 
 interface DocxProps {
   onSave(buffer: ArrayBuffer): void;
-  onError(error: Error): void;
+  onError(error: Error, info?: DocxErrorInfo): void;
   mode?: "editing" | "viewing";
   readOnly?: boolean;
   experimentalPeerless?: boolean;
@@ -229,6 +230,27 @@ test("peerless preview reports dirty state through worker document events", asyn
   } finally {
     browser.happyDOM.setURL(previousUrl);
   }
+});
+
+test("recoverable DOCX errors preserve serialization and the mounted editor", async () => {
+  const { api, errors, saved, view } = await mount();
+  const editor = view.getByTestId("docx-mode");
+  const stall = new Error("Full frame responses did not satisfy requested coverage and revision");
+  act(() => docxProps.onError(stall, { recoverable: true }));
+  save = async ({ onError, onSave }) => {
+    onError(stall, { recoverable: true });
+    onSave(Uint8Array.of(6).buffer);
+    return Uint8Array.of(6).buffer;
+  };
+  expect(await api.serialize()).toEqual(Uint8Array.of(6));
+  save = async ({ onError }) => {
+    onError(stall, { recoverable: true });
+    return null;
+  };
+  await expect(api.serialize()).rejects.toThrow("The editor is still opening the file. Try again in a moment.");
+  expect(errors).toEqual([]);
+  expect(saved).toEqual([]);
+  expect(view.getByTestId("docx-mode")).toBe(editor);
 });
 
 test("a failed save rejects with the editor's error and a retry saves", async () => {

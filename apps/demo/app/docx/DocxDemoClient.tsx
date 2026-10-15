@@ -18,6 +18,7 @@ import {
   type CollaborationReplica,
   type CollaborationTransport,
 } from "../collab";
+import { isFatalDocxError } from "./docxError";
 import { planDemoSession } from "../../lib/demoSession";
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts/cdn") });
@@ -271,7 +272,9 @@ export function DocxDemoClient() {
             collaboration={collaboration}
             documentName={source.name}
             onOpen={handleOpen}
-            onError={(cause) => setError(cause.message)}
+            onError={(cause, info) => {
+              if (isFatalDocxError(info)) setError(cause.message);
+            }}
             plugins={plugins}
             pluginGrants={pluginGrants}
             onPluginError={(failure) =>
