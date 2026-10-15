@@ -8,14 +8,21 @@ async function open(page: Page) {
   await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
 }
 
-// page.evaluate awaits a serialization wrapper that Chromium can report as collected after the
-// operation settles ("Promise was collected", surfaced as a navigation); a handle awaits the operation.
+// Chromium's inspector holds an awaited promise weakly: a GC after it settles but before the reply
+// fails the call ("Promise was collected", reported as a navigation). The holder keeps it reachable.
 async function operate<R, A = undefined>(page: Page, operation: (arg: A) => Promise<R>, arg?: A): Promise<R> {
-  const handle = await page.evaluateHandle(operation as (arg: unknown) => Promise<unknown>, arg);
+  const holder = await page.evaluateHandle<{ run(arg: unknown): Promise<R>; promise?: Promise<R> }>(
+    `({ run: ${operation} })`
+  );
   try {
-    return (await handle.jsonValue()) as R;
+    const result = await holder.evaluateHandle((holder, arg) => (holder.promise = holder.run(arg)), arg);
+    try {
+      return (await result.jsonValue()) as R;
+    } finally {
+      await result.dispose();
+    }
   } finally {
-    await handle.dispose();
+    await holder.dispose();
   }
 }
 
@@ -250,7 +257,7 @@ test('sidebar cards make room for comments and start afresh after replacement', 
   await expect(card).toHaveAttribute('data-expanded', 'true');
   await expect(card).toHaveAttribute('data-clicks', '1');
   const before = await card.getAttribute('data-version');
-  await page.evaluate(() =>
+  await operate(page, () =>
     (window as unknown as { __probe: { reload(): Promise<void> } }).__probe.reload()
   );
   await expect(card).toBeVisible({ timeout: 60_000 });
