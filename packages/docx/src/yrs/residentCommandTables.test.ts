@@ -54,7 +54,7 @@ async function inCellOn(arm: Arm, text: string): Promise<void> {
   expect(execute(arm, tableCommand(arm, 'select', { selection: selection(paraId, 0, 0, story) })).status).toBe('noop');
 }
 
-function validFocus(arm: Arm, result: { selection: unknown }): { story: string; paraId: string; offset: number } {
+function validFocus(arm: Arm, result: { selection?: unknown }): { story: string; paraId: string; offset: number } {
   const focus = (result.selection as { focus: { story: string; paraId: string; offset: number } } | null)?.focus;
   expect(focus).toBeDefined();
   expect(arm.engine.geometryReader.hasStory(focus!.story)).toBe(true);
