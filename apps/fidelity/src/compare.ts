@@ -56,7 +56,7 @@ function drawList(): void {
         const button = window.document.createElement('button');
         button.type = 'button';
         button.className =
-          'flex w-full cursor-pointer items-baseline gap-2 px-[18px] py-[7px] text-left hover:bg-hover aria-[current=true]:bg-hover aria-[current=true]:shadow-[inset_2px_0_var(--accent)]';
+          'flex w-full cursor-pointer items-baseline gap-2 px-[18px] py-[7px] text-left hover:bg-surface aria-[current=true]:bg-surface aria-[current=true]:shadow-[inset_2px_0_var(--bo-acc)]';
         button.append(
           span('text-[10px] tracking-[0.06em] text-dim uppercase', sample.format),
           span('flex-1 truncate', sample.id),
@@ -90,7 +90,7 @@ function drawStrip(): void {
       const button = window.document.createElement('button');
       button.type = 'button';
       button.className =
-        'min-w-[30px] flex-none cursor-pointer rounded-[3px] border border-transparent px-1.5 py-[3px] font-mono text-dim tabular-nums hover:border-line aria-[current=true]:bg-accent aria-[current=true]:text-bg data-[missing=true]:text-warn';
+        'min-w-[30px] flex-none cursor-pointer border border-transparent px-1.5 py-[3px] font-mono text-dim tabular-nums hover:border-line aria-[current=true]:bg-fg aria-[current=true]:text-bg data-[missing=true]:border-dashed data-[missing=true]:border-line data-[missing=true]:text-dim';
       button.textContent = String(entry.page);
       button.ariaCurrent = String(entry.page === page);
       button.dataset.missing = String(!hasRender(latest, current!.id, entry.page));
@@ -121,6 +121,7 @@ function drawHeader(): void {
   scores.replaceChildren(
     ...parts.map(([label, value]) => {
       const element = window.document.createElement('span');
+      element.className = 'whitespace-nowrap';
       element.append(`${label} `, bold(value!));
       return element;
     })
@@ -322,5 +323,5 @@ sheet.style.setProperty('--split', '50%');
 boot().catch((error) => {
   loaderMessage.textContent = `${
     error instanceof Error ? error.message : error
-  } — open a report.json to browse the measured scores and Office pages.`;
+  }. Open a report.json to browse the measured scores and Office pages.`;
 });

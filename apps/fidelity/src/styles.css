@@ -1,120 +1,97 @@
 @import 'tailwindcss' source('.');
+@import '../../../shared/site-tokens.css';
 
-@custom-variant light (&:where([data-theme='light'], [data-theme='light'] *));
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/geist-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/geist-mono-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
   --breakpoint-lg: 68.75rem;
-  --radius-panel: 14px;
 }
 
 @theme inline {
-  --color-bg: var(--bg);
-  --color-panel: var(--panel);
-  --color-solid: var(--solid);
-  --color-line: var(--line);
-  --color-line-2: var(--line-2);
-  --color-fg: var(--fg);
-  --color-ink: var(--ink);
-  --color-dim: var(--dim);
-  --color-faint: var(--faint);
-  --color-bo: var(--bo);
-  --color-warn: var(--warn);
-  --color-bad: var(--bad);
-  --color-track: var(--track);
-  --color-hover: var(--hover);
-  --color-tip: var(--tip-bg);
-  --color-accent: var(--accent);
+  --color-bg: var(--bo-bg);
+  --color-surface: var(--bo-surface);
+  --color-fg: var(--bo-fg);
+  --color-ink: var(--bo-ink);
+  --color-dim: var(--bo-dim);
+  --color-faint: var(--bo-faint);
+  --color-line: var(--bo-line-soft);
+  --color-line-soft: var(--bo-line-soft);
+  --color-line-2: var(--bo-line);
+  --color-acc: var(--bo-acc);
+  --color-acc-soft: var(--bo-acc-soft);
+  --color-head: var(--bo-head);
+  --color-hover: var(--bo-surface);
   --color-series: var(--c);
 }
 
 @layer base {
   :root {
-    color-scheme: dark;
-    --bg: #050608;
-    --panel: rgba(255, 255, 255, 0.022);
-    --solid: #0b0c0e;
-    --line: rgba(255, 255, 255, 0.08);
-    --line-2: rgba(255, 255, 255, 0.14);
-    --fg: #f4f4f5;
-    --ink: #a1a1aa;
-    --dim: #71717a;
-    --faint: #3f3f46;
-    --bo: #3ddc97;
-    --lo: #a3a6ff;
-    --docx: #5f9fff;
-    --pptx: #ff8b66;
-    --xlsx: #34c77b;
-    --e2e: #d4d4d8;
-    --warn: #f5c451;
-    --bad: #ff6b7d;
-    --grid: rgba(255, 255, 255, 0.04);
-    --grid-strong: rgba(255, 255, 255, 0.085);
-    --band: rgba(255, 255, 255, 0.014);
-    --track: rgba(255, 255, 255, 0.065);
-    --hover: rgba(255, 255, 255, 0.03);
-    --cell-high: #1e8a60;
-    --cell-none: #25262b;
-    --over-frame: rgba(245, 196, 81, 0.035);
-    --tip-bg: rgba(15, 17, 21, 0.96);
-    --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
-    --header: 56px;
-  }
-  :root[data-theme='light'] {
-    color-scheme: light;
-    --bg: #ffffff;
-    --panel: #ffffff;
-    --solid: #ffffff;
-    --line: #e7e7ea;
-    --line-2: #d4d4d9;
-    --fg: #111114;
-    --ink: #4e4e56;
-    --dim: #75757d;
-    --faint: #b4b4bb;
-    --bo: #0c9467;
-    --lo: #5d5fe0;
-    --docx: #2463eb;
-    --pptx: #e25a1c;
-    --xlsx: #178a4c;
-    --e2e: #55555d;
-    --warn: #c98a07;
-    --bad: #db2f4a;
-    --grid: rgba(0, 0, 0, 0.05);
-    --grid-strong: rgba(0, 0, 0, 0.1);
-    --band: rgba(0, 0, 0, 0.02);
-    --track: rgba(0, 0, 0, 0.07);
-    --hover: rgba(0, 0, 0, 0.03);
-    --cell-high: #86d3b0;
-    --cell-none: #e7e7ea;
-    --over-frame: rgba(201, 138, 7, 0.06);
-    --tip-bg: rgba(255, 255, 255, 0.98);
-    --shadow: 0 10px 30px rgba(17, 17, 20, 0.1);
-  }
-  .viewer {
-    --bg: #0b0b0c;
-    --panel: #141416;
-    --line: #26262a;
-    --fg: #e9e9ea;
-    --dim: #8c8c93;
-    --hover: #1c1c20;
-    --warn: #d98b6a;
-    --accent: #6aa6ff;
+    color-scheme: light dark;
+    --bg: var(--bo-bg);
+    --fg: var(--bo-fg);
+    --ink: var(--bo-ink);
+    --dim: var(--bo-dim);
+    --faint: var(--bo-faint);
+    --line: var(--bo-line-soft);
+    --line-2: var(--bo-line);
+    --ours: var(--bo-acc);
+    --lo: var(--bo-dim);
+    --grid: var(--bo-line-soft);
+    --grid-strong: var(--bo-line);
+    --band: color-mix(in srgb, var(--bo-fg) 3%, transparent);
+    --track: var(--bo-line-soft);
+    --hover: var(--bo-surface);
+    --over-frame: color-mix(in srgb, var(--bo-fg) 4%, transparent);
+    --tip-bg: var(--bo-bg);
+    --shadow: 0 10px 30px rgb(0 0 0 / 0.14);
+    --header: 4rem;
   }
   html {
     scroll-padding-top: calc(var(--header) + 16px);
+    overflow-x: clip;
+  }
+  body {
+    background: var(--bo-bg);
+    color: var(--bo-fg);
+  }
+  :focus-visible {
+    outline: 1px solid var(--bo-fg);
+    outline-offset: 3px;
   }
 }
 
 @layer components {
-  .c-commit { --c: var(--bo); }
-  .c-ours { --c: var(--bo); }
+  .c-commit { --c: var(--ours); }
+  .c-ours { --c: var(--ours); }
   .c-libreoffice { --c: var(--lo); }
-  .f-docx { --c: var(--docx); }
-  .f-pptx { --c: var(--pptx); }
-  .f-xlsx { --c: var(--xlsx); }
-  .f-e2e { --c: var(--e2e); }
+  .f-docx { --c: var(--bo-fg); }
+  .f-pptx { --c: var(--bo-ink); }
+  .f-xlsx { --c: var(--bo-dim); }
+  .f-e2e { --c: var(--bo-dim); }
   .muted { --c: var(--faint); }
+
+  .cdf .line.f-docx { stroke-dasharray: none; }
+  .cdf .line.f-pptx { stroke-dasharray: 6 3; }
+  .cdf .line.f-xlsx { stroke-dasharray: 2 3; }
+  .cdf .line.f-e2e { stroke-dasharray: 8 3 2 3; }
 
   .chart {
     display: block;
@@ -206,12 +183,12 @@
     stroke-dasharray: 2 3;
   }
   .frame {
-    stroke: var(--warn);
+    stroke: var(--bo-ink);
     stroke-width: 1.2;
     stroke-dasharray: 3 4;
   }
   .frame-label {
-    fill: var(--warn);
+    fill: var(--bo-ink);
     font-size: 10.5px;
   }
   .spectrum .over-frame {
@@ -247,14 +224,13 @@
   .dumbbell .rail {
     stroke: var(--track);
     stroke-width: 2;
-    stroke-linecap: round;
   }
   .dumbbell .gain {
-    stroke: var(--bo);
+    stroke: var(--ours);
     stroke-width: 2;
   }
   .dumbbell .loss {
-    stroke: var(--bad);
+    stroke: var(--fg);
     stroke-width: 2;
   }
   .dumbbell .from {
@@ -263,7 +239,7 @@
     stroke-width: 1.5;
   }
   .dumbbell .to {
-    fill: var(--bo);
+    fill: var(--ours);
   }
 
   .waffle {
@@ -277,7 +253,6 @@
     display: block;
     aspect-ratio: 1;
     background: var(--s);
-    border-radius: 3px;
     transition: transform 0.12s;
   }
   .cell.lit {
@@ -285,11 +260,11 @@
     transform: scale(1.4);
     box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--fg);
   }
-  .s-exact { --s: var(--bo); }
-  .s-high { --s: var(--cell-high); }
-  .s-near { --s: var(--warn); }
-  .s-far { --s: var(--bad); }
-  .s-none { --s: var(--cell-none); }
+  .s-exact { --s: var(--bo-acc); }
+  .s-high { --s: color-mix(in srgb, var(--bo-acc) 45%, var(--bo-bg)); }
+  .s-near { --s: var(--bo-dim); }
+  .s-far { --s: var(--bo-faint); }
+  .s-none { --s: var(--bo-line-soft); }
 
   .sheet {
     position: relative;
@@ -326,7 +301,7 @@
     bottom: 0;
     left: 5px;
     width: 1px;
-    background: var(--accent);
+    background: var(--bo-acc);
   }
   #stage[data-mode='difference'][data-pair='true'] .sheet {
     background: #000;

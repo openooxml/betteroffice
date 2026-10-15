@@ -1028,6 +1028,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       ...(metadata.after ? { afterSeq: metadata.after.seq } : {}),
       ...(metadata.expectVersion !== undefined ? { expectVersion: metadata.expectVersion } : {}),
       ...(metadata.inputTime !== undefined ? { inputTime: metadata.inputTime } : {}),
+      ...(metadata.lastInputTime !== undefined ? { lastInputTime: metadata.lastInputTime } : {}),
       ...(metadata.group !== undefined ? { group: metadata.group } : {}),
     };
     const group = records.get(entry.tickets[0]!)!;

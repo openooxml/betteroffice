@@ -81,6 +81,13 @@ export type ResidentEngineSession = Pick<
   | 'cellSelection'
   | 'setCellSelection'
   | 'insertRow'
+  | 'insertColumn'
+  | 'deleteRow'
+  | 'deleteColumn'
+  | 'deleteTable'
+  | 'mergeCells'
+  | 'splitCell'
+  | 'setCellShading'
   | 'insertTable'
   | 'insertTableFragment'
   | 'validateTableFragment'
@@ -153,6 +160,7 @@ export type ResidentEngineSession = Pick<
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  setUndoInputTime(span: readonly [first: number, last: number] | null): void;
   splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
   /**
    * Display ranges of the paragraphs, tables and block controls of `root` that `ranges` touch.
@@ -656,6 +664,41 @@ export async function createResidentEngineSession(
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),
+    insertColumn: (at, side) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.insert_column(JSON.stringify(at), side === 'right'));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    deleteRow: (range, author) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.delete_row(JSON.stringify(range), author?.name, author?.date));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    deleteColumn: (range) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.delete_column(JSON.stringify(range)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    deleteTable: (table) => applyCommandMutation(table.story, () => {
+      const receipt = JSON.parse(session.delete_table(JSON.stringify(table)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    mergeCells: (range) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.merge_cells(JSON.stringify(range)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    splitCell: (at, rows, columns) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.split_cell(JSON.stringify(at), rows, columns));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    setCellShading: (range, color) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.set_cell_shading(JSON.stringify(range), color ?? undefined));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
     insertTableFragment: (at, table, author) => applyCommandMutation(at.story, () => {
       const receipt = JSON.parse(session.insert_table_fragment(at.story, at.paraId, at.offset, JSON.stringify(table), author?.name, author?.date));
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
@@ -676,6 +719,10 @@ export async function createResidentEngineSession(
     setColumnWidth: (at, width) => applyCommandMutation(at.story, () =>
       JSON.parse(session.set_column_width(JSON.stringify(at), width))),
     beginUndoCapture: ensureUndo,
+    setUndoInputTime: (span) => {
+      if (span) session.set_undo_input_time(span[0], span[1]);
+      else session.clear_undo_input_time();
+    },
     addUndoBoundary: () => session.add_undo_boundary(),
     undo: () => {
       const changed = session.undo();

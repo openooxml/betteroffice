@@ -7,6 +7,7 @@ import {
   duration,
   h,
   mount,
+  s,
   spectrum,
   tipCard,
   waffle,
@@ -56,13 +57,14 @@ const columns = (count: number, aspect = 1.6) => Math.max(6, Math.ceil(Math.sqrt
 const median = (values: number[]) => percentile([...values].sort((left, right) => left - right), 50);
 const ratio = (part: number, whole: number) => (whole > 0 ? part / whole : 0);
 
-const SECTION = 'pt-18 md:pt-24';
-const PANELS = 'grid grid-cols-1 gap-3.5 md:grid-cols-2';
-const STRIP = 'grid grid-cols-1 gap-px overflow-hidden rounded-panel border border-line bg-line md:grid-cols-2 lg:grid-cols-4';
-const BOX = 'min-w-0 rounded-panel border border-line bg-panel p-4 md:p-5.5';
+const SECTION = 'wrap rule py-[clamp(3.5rem,7vw,6rem)]';
+const PANELS = 'grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2';
+const STRIP = 'grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2 lg:grid-cols-4';
+const BOX = 'min-w-0 bg-bg p-7 max-sm:p-6';
 const WAFFLES = 'grid grid-cols-2 gap-3.5 md:gap-7';
 const MONO = 'font-mono leading-[normal]';
-const LINK = 'underline decoration-line-2 underline-offset-3 hover:decoration-fg';
+const LABEL = 'font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-dim';
+const LINK = 'text-fg underline decoration-faint underline-offset-[3px] transition-colors hover:decoration-fg';
 
 /** Overrides may only name this origin, so a shared link cannot pass off someone else's numbers. */
 const local = (name: string) => sameOrigin(params.get(name), window.location.href);
@@ -100,11 +102,19 @@ function views(summary: Summary, format: Format): Record<Engine, EngineView> {
   };
 }
 
-function legendItem(cls: string, label: string, sub: string): HTMLElement {
+function lineSample(cls: string): SVGSVGElement {
+  return s(
+    'svg',
+    { width: 22, height: 8, viewBox: '0 0 22 8', class: 'cdf flex-none', 'aria-hidden': 'true' },
+    s('line', { x1: 0, x2: 22, y1: 4, y2: 4, class: `line ${cls}` })
+  );
+}
+
+function legendItem(cls: string, label: string, sub: string, sample: Node | null = null): HTMLElement {
   return h(
     'li',
     { class: 'flex items-center gap-[7px]' },
-    h('i', { class: `${SWATCH} ${cls}` }),
+    sample ?? h('i', { class: `${SWATCH} ${cls}` }),
     label,
     h('span', { class: `${MONO} text-[11px] text-dim` }, sub)
   );
@@ -129,15 +139,15 @@ interface KpiBar {
   share: number;
 }
 
-/** A rounded bar filled to a 0–1 share; `null` draws the empty track. */
+/** A square bar filled to a 0 to 1 share; `null` draws the empty track. */
 function track(share: number | null, size: string, fill = 'bg-series'): HTMLElement {
   return h(
     'i',
-    { class: `block overflow-hidden rounded-full bg-track ${size}` },
+    { class: `block overflow-hidden bg-line-soft ${size}` },
     share === null
       ? null
       : h('i', {
-          class: `block h-full w-(--w) rounded-[inherit] ${fill}`,
+          class: `block h-full w-(--w) ${fill}`,
           style: `--w:${(Math.max(0, Math.min(1, share)) * 100).toFixed(2)}%`,
         })
   );
@@ -151,12 +161,12 @@ function kpi(
 ) {
   return h(
     'article',
-    { class: 'min-w-0 bg-solid px-6 pt-5.5 pb-5' },
-    h('div', { class: 'text-[13px] text-ink' }, label),
+    { class: 'min-w-0 bg-bg p-7 max-sm:p-6' },
+    h('div', { class: LABEL }, label),
     h(
       'div',
       {
-        class: `mt-2.5 mb-4.5 leading-none font-semibold tracking-[-0.045em] whitespace-nowrap tabular-nums ${
+        class: `mt-2.5 mb-4.5 leading-none font-[560] tracking-[-0.04em] whitespace-nowrap tabular-nums ${
           compact ? 'text-[34px]' : 'text-[38px] md:text-[44px]'
         }`,
       },
@@ -404,7 +414,7 @@ function formatLabel(format: Format, color = 'text-dim'): HTMLElement {
 
 /** One row per metric, the engines' bars stacked on one scale so they compare at a glance. */
 function scoreboard(summary: Summary): HTMLElement {
-  const board = h('div', { class: 'overflow-clip rounded-panel border border-line bg-panel' });
+  const board = h('div', { class: 'grid gap-px overflow-clip border border-line-soft bg-line-soft' });
   for (const format of FORMATS) {
     const entry = summary.formats[format];
     if (!entry.documents) continue;
@@ -414,7 +424,7 @@ function scoreboard(summary: Summary): HTMLElement {
         'a',
         {
           class:
-            'flex flex-wrap items-baseline gap-x-2.5 gap-y-1 border-line px-5 pt-5.5 pb-2.5 text-[14px] font-semibold not-first:border-t',
+            'flex flex-wrap items-baseline gap-x-2.5 gap-y-1 bg-bg px-5 pt-5.5 pb-2.5 text-[14px] font-semibold',
           href: `#${format}`,
         },
         formatLabel(format),
@@ -433,7 +443,7 @@ function scoreboard(summary: Summary): HTMLElement {
           'div',
           {
             class:
-              'grid grid-cols-1 items-center border-t border-line hover:bg-hover md:grid-cols-[minmax(220px,1fr)_minmax(0,2fr)]',
+              'grid grid-cols-1 items-center bg-bg hover:bg-surface md:grid-cols-[minmax(220px,1fr)_minmax(0,2fr)]',
           },
           h(
             'div',
@@ -459,7 +469,7 @@ function scoreboard(summary: Summary): HTMLElement {
                 h(
                   'b',
                   { class: `text-right ${MONO} text-[13.5px] font-medium tabular-nums ${tone}` },
-                  top ? h('i', { class: 'mr-2 inline-block size-1.5 rounded-full bg-series align-[2px]' }) : null,
+                  top ? h('i', { class: 'mr-2 inline-block size-1.5 bg-series align-[2px]' }) : null,
                   cell ? cell.text : '—'
                 )
               );
@@ -482,10 +492,24 @@ function head(title: string, meta?: string, ...extra: HTMLElement[]): HTMLElemen
   return h(
     'header',
     { class: 'mb-6' },
-    h('h2', { class: 'text-[24px] leading-[1.15] font-semibold tracking-[-0.03em] md:text-[28px]' }, title),
-    meta ? h('p', { class: 'mt-2 max-w-[760px] text-[14px] text-ink' }, meta) : null,
+    h('h2', { class: 'text-[clamp(1.75rem,3.4vw,2.75rem)] leading-[0.95] font-[560] tracking-[-0.045em]' }, title),
+    meta ? h('p', { class: 'mt-2 max-w-[760px] text-sm text-ink' }, meta) : null,
     ...extra
   );
+}
+
+function sectionHead(n: number, total: number, name: string, title: string, meta?: string, ...extra: HTMLElement[]): HTMLElement {
+  const header = head(title, meta, ...extra);
+  const echoes = title.toLowerCase().includes(name.toLowerCase());
+  header.prepend(
+    h(
+      'p',
+      { class: `${LABEL} mb-7 flex gap-4` },
+      h('span', { class: 'tabular-nums' }, `${String(n).padStart(2, '0')} / ${String(total).padStart(2, '0')}`),
+      echoes ? null : h('span', { class: 'text-fg' }, name)
+    )
+  );
+  return header;
 }
 
 function caption(title: string, text: string, aside: HTMLElement | null): HTMLElement {
@@ -495,8 +519,8 @@ function caption(title: string, text: string, aside: HTMLElement | null): HTMLEl
     h(
       'div',
       {},
-      h('h3', { class: 'text-[15px] font-semibold tracking-[-0.01em]' }, title),
-      h('p', { class: 'mt-1 max-w-[640px] text-[13px] text-dim' }, text)
+      h('h3', { class: 'text-[15px] font-[560] tracking-[-0.01em]' }, title),
+      h('p', { class: 'mt-1 max-w-[640px] text-sm text-ink' }, text)
     ),
     aside
   );
@@ -516,11 +540,11 @@ function empty(message: string, href: string, label: string): HTMLElement {
 }
 
 function stat(value: string, note: string, trend: '' | 'up' | 'down' = ''): HTMLElement {
-  const tone = trend === 'up' ? 'text-bo' : trend === 'down' ? 'text-bad' : 'text-dim';
+  const tone = trend === 'up' ? 'text-acc' : trend === 'down' ? 'text-fg' : 'text-dim';
   return h(
     'div',
     { class: 'flex-none md:text-right' },
-    h('b', { class: 'block text-[28px] leading-[1.1] font-semibold tracking-[-0.04em] tabular-nums' }, value),
+    h('b', { class: 'block text-[28px] leading-[1.1] font-[560] tracking-[-0.04em] tabular-nums' }, value),
     h('span', { class: `text-[12px] ${tone}` }, note)
   );
 }
@@ -694,14 +718,16 @@ interface Line {
   values: number[];
 }
 
-function lines(series: Line[], options: { noun: string; frame?: number; height?: number }): HTMLElement {
+function lines(series: Line[], options: { noun: string; frame?: number; height?: number; lineLegend?: boolean }): HTMLElement {
   return h(
     'div',
     {},
     h(
       'ul',
       { class: 'mb-3.5 flex flex-wrap gap-x-[18px] gap-y-1.5 text-[13px]' },
-      ...series.map((entry) => legendItem(entry.cls, entry.label, `median ${duration(median(entry.values))}`))
+      ...series.map((entry) =>
+        legendItem(entry.cls, entry.label, `median ${duration(median(entry.values))}`, options.lineLegend ? lineSample(entry.cls) : null)
+      )
     ),
     chart(
       (width) => cdf(series, width, options),
@@ -752,7 +778,7 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
           class: `grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 text-[13px] md:grid-cols-[190px_minmax(0,1fr)_76px_128px] md:gap-4 ${engine[key].cls}`,
         },
         h('span', {}, engine[key].label, h('small', { class: `ml-[7px] ${MONO} text-[10.5px] text-dim` }, engine[key].sub)),
-        track(correct / Math.max(1, total), 'order-3 col-span-full h-2.5 md:order-none md:col-auto', 'bg-linear-to-r from-series/35 to-series'),
+        track(correct / Math.max(1, total), 'order-3 col-span-full h-2 md:order-none md:col-auto'),
         h('b', { class: `text-right ${MONO} text-[14px] font-semibold` }, percentText(correct, total)),
         h(
           'small',
@@ -864,7 +890,7 @@ function movers(entry: FormatSummary, wide: boolean): HTMLElement {
     const delta = row.ssim.libreoffice === null ? null : change(row.ssim[OURS]!, row.ssim.libreoffice);
     const bell = dumbbell(row.ssim.libreoffice, row.ssim[OURS]!, low, high);
     bell.classList.add('max-md:hidden');
-    const tone = delta === null ? 'text-dim' : delta >= 0 ? 'text-bo' : 'text-bad';
+    const tone = delta === null ? 'text-dim' : delta >= 0 ? 'text-acc' : 'text-fg';
     return h(
       'li',
       {},
@@ -873,7 +899,7 @@ function movers(entry: FormatSummary, wide: boolean): HTMLElement {
         {
           href: compareHref(row.id),
           class:
-            '-mx-2.5 grid grid-cols-[minmax(0,1fr)_58px_76px] items-center gap-3 rounded-[9px] px-2.5 py-2 text-[13px] hover:bg-hover md:grid-cols-[minmax(0,1fr)_84px_58px_76px]',
+            '-mx-2.5 grid grid-cols-[minmax(0,1fr)_58px_76px] items-center gap-3 px-2.5 py-2 text-[13px] hover:bg-surface md:grid-cols-[minmax(0,1fr)_84px_58px_76px]',
         },
         h('span', { class: `truncate ${MONO} text-[12.5px]` }, row.id),
         bell,
@@ -913,7 +939,7 @@ function movers(entry: FormatSummary, wide: boolean): HTMLElement {
   );
 }
 
-function formatSection(summary: Summary, format: Format): HTMLElement {
+function formatSection(summary: Summary, format: Format, n: number, total: number): HTMLElement {
   const entry = summary.formats[format];
   const engine = views(summary, format);
   const reference = entry.reference;
@@ -934,7 +960,10 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
   return h(
     'section',
     { class: SECTION, id: format },
-    head(
+    sectionHead(
+      n,
+      total,
+      format.toUpperCase(),
       TITLES[format],
       `${format.toUpperCase()} · ${plural(entry.documents, NOUNS[format])} · reference ${office}`,
       legend(SHOWN.filter((key) => entry.fidelity[key] || entry.render || entry.calculation).map((key) => engine[key]))
@@ -943,8 +972,11 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
   );
 }
 
-function latencySection(latency: Latency | null, published: boolean): HTMLElement {
-  const header = head(
+function latencySection(latency: Latency | null, published: boolean, n: number, total: number): HTMLElement {
+  const header = sectionHead(
+    n,
+    total,
+    'Latency',
     'Editing latency',
     latency?.ops
       ? `SDK calls timed by the end-to-end suite on main at ${short(latency.commit)}, in WASM and Python.`
@@ -1017,7 +1049,7 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
   let selected: Format = present[0]!;
   let release: (() => void) | null = null;
   const switcher = h('div', {
-    class: 'inline-flex flex-none rounded-[9px] border border-line bg-hover p-0.75',
+    class: 'inline-flex flex-none border border-line bg-bg p-0.75',
     role: 'tablist',
   });
   const plot = h('div', { class: 'min-w-0' });
@@ -1047,7 +1079,7 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
         type: 'button',
         role: 'tab',
         'data-format': format,
-        class: `cursor-pointer rounded-md px-3 py-1.25 font-sans text-[12px] leading-[normal] font-medium text-dim hover:text-fg aria-selected:bg-solid aria-selected:text-fg aria-selected:shadow-[0_0_0_1px_var(--line-2)] f-${format}`,
+        class: 'cursor-pointer border border-transparent px-3 py-1.25 font-mono text-xs leading-[normal] text-dim hover:text-fg aria-selected:border-fg aria-selected:bg-fg aria-selected:text-bg',
       },
       format.toUpperCase()
     );
@@ -1072,7 +1104,7 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
     stat(headlineText(latency.withinFrame, latency.ops, 1), 'inside one 60 Hz frame', 'up'),
     lines(
       present.map((format) => ({ cls: `f-${format}`, label: format.toUpperCase(), values: latency.formats[format]!.values })),
-      { frame: FRAME_MS, noun: 'calls', height: 260 }
+      { frame: FRAME_MS, noun: 'calls', height: 260, lineLegend: true }
     )
   );
 
@@ -1137,7 +1169,9 @@ function methodSection(
   summary: Summary | null,
   reportHref: string | null,
   latency: Latency | null,
-  published: boolean
+  published: boolean,
+  n: number,
+  total: number
 ): HTMLElement {
   const lo = summary?.libreoffice ?? 'the pinned LibreOffice release';
   const versions = summary
@@ -1161,10 +1195,10 @@ function methodSection(
   return h(
     'section',
     { class: SECTION, id: 'method' },
-    head('Method'),
+    sectionHead(n, total, 'Method', 'Method'),
     h(
       'div',
-      { class: 'grid grid-cols-1 gap-7 border-t border-line pt-6 md:grid-cols-3 lg:grid-cols-5' },
+      { class: 'grid grid-cols-1 gap-7 pt-2 md:grid-cols-3 lg:grid-cols-5' },
       card('Ground truth', `Microsoft Word, PowerPoint and Excel${office} on macOS exported every reference page to PDF, rasterized at 150 DPI. The corpus and its references are public.`),
       card('Visual similarity', 'Mean page-penalized grayscale SSIM at 150 DPI, without resampling or alignment, of the BetterOffice browser renderer. Missing or extra pages lower the score. Failed renders get no score, so read coverage next to the mean.'),
       card('Speed', `Native command-line builds time the whole job in five fresh processes after a warmup: start, import, fonts, layout, rasterize and write. They measure the Rust rasterizer at 96 DPI, not the browser renderer scored for similarity. LibreOffice ${lo} runs its prebuilt CLI with an isolated profile. Means cover the documents every engine handled.`),
@@ -1174,7 +1208,7 @@ function methodSection(
     h(
       'ul',
       { class: 'mt-7 flex flex-wrap gap-x-6 gap-y-2.5' },
-      ...links.map(([label, href]) => h('li', {}, h('a', { class: 'text-[13px] text-ink hover:text-fg', href }, `${label} ↗`)))
+      ...links.map(([label, href]) => h('li', {}, h('a', { class: `text-[13px] ${LINK}`, href }, `${label} ↗`)))
     )
   );
 }
@@ -1205,22 +1239,6 @@ async function endToEnd(): Promise<Latency | null> {
   }
 }
 
-const THEME = 'betteroffice-benchmarks-theme';
-
-function applyTheme(theme: 'light' | 'dark'): void {
-  document.documentElement.dataset.theme = theme;
-  find('theme').setAttribute('aria-label', theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode');
-}
-
-find('theme').addEventListener('click', () => {
-  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-  applyTheme(next);
-  try {
-    localStorage.setItem(THEME, next);
-  } catch {}
-});
-applyTheme(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark');
-
 const day = (iso: string) =>
   new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
@@ -1243,14 +1261,12 @@ async function boot(): Promise<void> {
     fail(error instanceof Error ? error.message : String(error));
   }
   const latency = await latencyPromise;
+  const present = loaded ? FORMATS.filter((format) => loaded.summary.formats[format].documents > 0) : [];
+  const sectionTotal = loaded ? present.length + 3 : 2;
   if (loaded) {
     const { summary, publishedAt, href } = loaded;
-    const present = FORMATS.filter((format) => summary.formats[format].documents > 0);
     const total = present.reduce((sum, format) => sum + summary.formats[format].documents, 0);
     const releases = present.map((format) => `${format.toUpperCase()} ${summary.versions[format]}`).join(' · ');
-    find('lede').textContent = `${thousands(total)} real documents, scored page by page against Microsoft Office${
-      summary.libreoffice ? ' and compared with LibreOffice' : ''
-    }.`;
     const span = (versions: string[]) =>
       versions.length > 1 ? `${versions[0]}–${versions.at(-1)}` : (versions[0] ?? '');
     const references = present.map((format) => summary.formats[format].reference).filter((entry) => entry !== null);
@@ -1267,6 +1283,7 @@ async function boot(): Promise<void> {
       `Microsoft Office ${span(officeVersions)}`.trim()
     );
     const facts: [string, Node | string][] = [
+      ['Documents', thousands(total)],
       ['Release', h('a', { class: LINK, href: 'https://www.npmjs.com/org/betteroffice' }, releases)],
       ...(references.length ? ([['Reference', office]] as [string, Node][]) : []),
       ...(summary.libreoffice ? ([['Baseline', `LibreOffice ${summary.libreoffice}`]] as [string, string][]) : []),
@@ -1275,7 +1292,7 @@ async function boot(): Promise<void> {
     ];
     find('facts').replaceChildren(
       ...facts.map(([term, value]) =>
-        h('div', { class: 'grid gap-0.5' }, h('dt', { class: 'text-[12px] text-dim' }, term), h('dd', { class: 'text-[13.5px]' }, value))
+        h('div', { class: 'grid gap-0.5' }, h('dt', { class: LABEL }, term), h('dd', { class: 'text-[13.5px]' }, value))
       )
     );
     for (const format of FORMATS)
@@ -1284,17 +1301,23 @@ async function boot(): Promise<void> {
     find('kpis').replaceChildren(...heroKpis(summary, latency));
     const board = find('scoreboard');
     board.hidden = false;
-    board.append(scoreboard(summary));
+    board.append(
+      sectionHead(
+        1,
+        sectionTotal,
+        'Scoreboard',
+        'Scoreboard',
+        'The latest release against LibreOffice. Scores and shares fill from 0 to 1, times and page errors to the larger value. The dot marks the better result.'
+      ),
+      scoreboard(summary)
+    );
     const formats = find('formats');
-    for (const format of present) {
-      const section = formatSection(summary, format);
-      formats.append(section);
-    }
+    present.forEach((format, index) => formats.append(formatSection(summary, format, index + 2, sectionTotal)));
   }
   const published = !local('e2e');
-  const latencyNode = latencySection(latency, published);
+  const latencyNode = latencySection(latency, published, sectionTotal - 1, sectionTotal);
   find('latency').replaceWith(latencyNode);
-  const method = methodSection(loaded?.summary ?? null, loaded?.href ?? null, latency, published);
+  const method = methodSection(loaded?.summary ?? null, loaded?.href ?? null, latency, published, sectionTotal, sectionTotal);
   find('method').replaceWith(method);
   document.body.classList.add('ready');
 }
