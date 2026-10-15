@@ -665,6 +665,31 @@ test('command prefix keeps geometry uncertified until a completed frame', async 
   } finally { f.destroy(); }
 });
 
+test('a review read answers for the presented prefix frame while its completion is pending', async () => {
+  const f = await commandFixture();
+  const review = () => f.w.send({ type: 'documentRead', read: { kind: 'reviewSnapshot', expectPreviewVersion: 0 } });
+  try {
+    expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+    const version = f.engine.proposalEngine.version();
+    const prefix = await review();
+    expect(prefix.ok && prefix.read).toMatchObject({ version, value: { version, frameEpoch: f.frame.frameEpoch, layoutRevision: 1,
+      proposals: { version, proposals: [] } } });
+    expect(f.calls).toEqual([]);
+    await f.present();
+    await f.w.turn();
+    expect(f.calls).toContain('beginRegionLayout');
+    const presented = f.w.frames.at(-1)!;
+    expect(presented.payload.layoutProvisional).toBe(true);
+    const pending = await f.w.interleave({ type: 'documentRead', read: { kind: 'reviewSnapshot', expectPreviewVersion: 0 } });
+    expect(pending.ok && pending.read?.value).toMatchObject({ frameEpoch: presented.revision });
+    await f.w.drain();
+    const completed = f.w.frames.at(-1)!;
+    expect(completed.payload.layoutProvisional).not.toBe(true);
+    const whole = await review();
+    expect(whole.ok && whole.read?.value).toMatchObject({ frameEpoch: completed.revision });
+  } finally { f.destroy(); }
+});
+
 test('command viewport beyond the prefix completes before painting and cancels stale slices', async () => {
   const f = await commandFixture();
   try {

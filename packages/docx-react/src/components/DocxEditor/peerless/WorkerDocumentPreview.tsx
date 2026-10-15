@@ -2,6 +2,9 @@ import { useLayoutEffect, useMemo, useRef } from 'react';
 import { applyFrameDelta, CANVAS_PAGE_GAP_PX, decodeFrameDelta } from '@betteroffice/docx/layout/render';
 import type { ResidentEngineWorkerClient, ResidentEngineWorkerFrame } from '@betteroffice/docx/yrs';
 
+/** @internal How long the open waits for the preview to paint before it lays out the document anyway. */
+export const peerlessPreviewPaint = { timeoutMs: 5_000 };
+
 export interface WorkerPreviewJob {
   client: ResidentEngineWorkerClient;
   frame: ResidentEngineWorkerFrame;
@@ -24,13 +27,19 @@ export function WorkerDocumentPreview({ job, zoom, onPresented }: {
     const root = host.current!;
     try {
       let y = 0;
-      const surfaces = pages.filter(({ page }) => !page.unbuilt).map(({ pageId, page }) => {
+      const surfaces = pages.filter(({ page }) => !page.unbuilt).map(({ pageId, pageIndex, page }) => {
+        const element = document.createElement('div');
+        element.className = 'paged-editor__page canvas-page';
+        element.dataset.pageIndex = String(pageIndex);
+        Object.assign(element.style, { position: 'absolute', left: `${(width - page.width) / 2}px`, top: `${y}px`,
+          width: `${page.width}px`, height: `${page.height}px`, background: 'white' });
         const canvas = document.createElement('canvas');
         canvas.dataset.previewPageId = pageId.toString();
-        Object.assign(canvas.style, { position: 'absolute', left: `${(width - page.width) / 2}px`, top: `${y}px`,
-          width: `${page.width}px`, height: `${page.height}px`, background: 'white' });
+        canvas.dataset.pageIndex = String(pageIndex);
+        Object.assign(canvas.style, { display: 'block', width: '100%', height: '100%' });
+        element.appendChild(canvas);
         y += page.height + CANVAS_PAGE_GAP_PX;
-        root.appendChild(canvas);
+        root.appendChild(element);
         return { pageId: pageId.toString(), canvas: canvas.transferControlToOffscreen() };
       });
       void job.client.attachCanvases(surfaces, surfaces.map(({ pageId }) => pageId), globalThis.devicePixelRatio || 1, 1,

@@ -1,7 +1,7 @@
 import { ResidentEngineWorkerClient, ResidentWorkerFailureError, takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerPort, type ResidentEngineWorkerFrame } from './residentEngineWorkerClient';
 import { isCommandAck } from '../../../../shared/office-session/commands/types';
-import { validateResidentSource, type ResidentSourceOpenRequest } from './residentSource';
+import { validateResidentSource, type ResidentSourceOpenRequest, type ResidentSourcePreviewOptions } from './residentSource';
 import type { ResidentFontEnvironmentEvent } from './residentFontEnvironment';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
@@ -18,6 +18,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
   private fontListeners = new Set<(event: ResidentFontEnvironmentEvent) => void>();
   private memoryListeners = new Set<(samples: WasmModuleMemory[]) => void>();
   private presentedFontsRevision = 0;
+  private cutReservation: { bytes?: number } | null = null;
 
   constructor(worker?: ResidentEngineWorkerPort) {
     super(worker);
@@ -73,11 +74,37 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     };
   }
 
-  async openSource(source: ResidentSourceOpenRequest): Promise<ResidentEngineWorkerSourceOpened> {
+  /** Opens a display-only cut of the first body blocks for a preview; null when the worker declines it. {@link openSource} replaces it. */
+  async openSourceCut(source: ResidentSourceOpenRequest & { bytes: Uint8Array; cut: NonNullable<ResidentSourceOpenRequest['cut']> }): Promise<Document | null> {
     validateResidentSource(source);
     if (this.openedHeapLimit || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
     }
+    const reservation = { bytes: source.heapLimitBytes };
+    this.openedHeapLimit = reservation;
+    try {
+      const owned = { ...source, bytes: source.bytes.slice() };
+      const response = await this.request({ type: 'openSource', source: owned }, [owned.bytes.buffer]);
+      if (response.previewRefused) {
+        this.openedHeapLimit = null;
+        return null;
+      }
+      if (!response.sourceDocument) throw new ResidentWorkerFailureError('Resident engine worker omitted the opened source');
+      this.cutReservation = reservation;
+      return response.sourceDocument;
+    } catch (error) {
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      throw error;
+    }
+  }
+
+  async openSource(source: ResidentSourceOpenRequest): Promise<ResidentEngineWorkerSourceOpened> {
+    validateResidentSource(source);
+    if (source.cut) throw new TypeError('A source cut opens through openSourceCut');
+    if ((this.openedHeapLimit && this.openedHeapLimit !== this.cutReservation) || this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+    }
+    this.cutReservation = null;
     const reservation = { bytes: source.heapLimitBytes };
     this.openedHeapLimit = reservation;
     try {
@@ -99,6 +126,13 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     }
   }
 
+  /** A preview frame of the opened source's first pages, laid out with the fonts its command session will use. */
+  async previewSource(preview: ResidentSourcePreviewOptions & { layoutInput: string }): Promise<ResidentEngineWorkerFrame> {
+    const response = await this.request({ type: 'previewSource', preview });
+    if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
+    return sourcePreviewFrame(response);
+  }
+
   async prewarm(): Promise<void> {
     await this.warm();
   }
@@ -114,7 +148,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
   }
 
   override frameRequestPending(reads = true): boolean {
-    return [...this.pending.values()].some(({ type }) => type === 'openSource') || super.frameRequestPending(reads);
+    return [...this.pending.values()].some(({ type }) => type === 'openSource' || type === 'previewSource') || super.frameRequestPending(reads);
   }
 
   protected override request(...args: Parameters<ResidentEngineWorkerClient['request']>) {

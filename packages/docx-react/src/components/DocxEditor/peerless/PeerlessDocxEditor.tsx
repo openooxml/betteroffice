@@ -58,12 +58,14 @@ import { DEFAULT_PAGE_WIDTH } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
-import { WorkerDocumentPreview, type WorkerPreviewJob } from './WorkerDocumentPreview';
+import { peerlessPreviewPaint, WorkerDocumentPreview, type WorkerPreviewJob } from './WorkerDocumentPreview';
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
+
+const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
 
 /** @internal */
 export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function PeerlessDocxEditor(props, ref) {
@@ -165,7 +167,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return fileIO.perform(id);
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
     currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph }));
-  useImperativeHandle(ref, () => controller.ref, [controller]);
   const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   useEffect(() => {
     let current = true;
@@ -334,61 +335,84 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     try {
       await client.prewarm();
       signal.throwIfAborted();
-      const opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
-        heapLimitBytes: settings.current.workerLimitBytes, preview: settings.current.previewFirstPage === true,
-        deferPreview: true,
-        mediaTokens: settings.current.mediaTokens === true });
-      signal.throwIfAborted();
-      if (opened.preview) {
-        controller.preview(opened.preview);
+      const measured = async (metadata: Document) => {
+        const theme = settings.current.theme ?? metadata.package.theme;
+        const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+        const environment = { themeColors, showHiddenText: settings.current.showHiddenText };
+        const layout = buildResidentRegionLayoutRequest(metadata, 24, { ...environment,
+          defaultTabStopTwips: metadata.package.settings?.defaultTabStop ?? null, mediaTokens: settings.current.mediaTokens === true });
+        const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
+        signal.throwIfAborted();
+        measurement ??= createRustMeasureSource({
+          engine: {
+            registerFont: (data) => {
+              const slot = appendFont(data);
+              fontIds[slot] = nextFontId++;
+              return slot;
+            },
+            registerSubstituteFont: (substituteOf, family) => {
+              const slot = appendFont({ substituteOf, family });
+              fontIds[slot] = fontIds[substituteOf];
+              return slot;
+            },
+            clearFonts: disposeFonts,
+          },
+          bundled: settings.current.measurementFontProvider,
+        });
+        measurement.setCompat(metadata.package.settings?.compatibilityFlags);
+        const embeddedFaces = await extractEmbeddedFontFaces(metadata);
+        signal.throwIfAborted();
+        measurement.setEmbeddedFaces(embeddedFaces);
+        await measurement.prepareFontRequirements(requirements);
+        signal.throwIfAborted();
+        const config = measurement.measurementConfigForRequirements(requirements);
+        if (!config) throw new Error('DOCX command fonts are not ready');
+        layout.measurement = {
+          ...config,
+          fontChains: Object.fromEntries(Object.entries(config.fontChains).map(([key, ids]) =>
+            [key, [...new Set(ids.map((id) => fontIds[id]))]])),
+        };
+        return { environment, layout, requirements, config };
+      };
+      const showPreview = async ({ layout, config }: Awaited<ReturnType<typeof measured>>) => {
+        const preview = await client.previewSource({ fonts: fonts.slice(), fontRegistrationSlots: { fontChains: config.fontChains },
+          layoutInput: JSON.stringify({ ...layout, cachedPageTotals: true }), extras: JSON.stringify({ fontChains: config.fontChains }) });
+        signal.throwIfAborted();
+        controller.preview(preview);
         await new Promise<void>((resolve, reject) => {
-          const cancel = () => reject(signal.reason);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const settle = (operation: () => void) => { clearTimeout(timer); signal.removeEventListener('abort', cancel); operation(); };
+          const cancel = () => settle(() => reject(signal.reason));
           signal.addEventListener('abort', cancel, { once: true });
-          const settle = (operation: () => void) => { signal.removeEventListener('abort', cancel); operation(); };
-          setPreviewJob({ client, frame: opened.preview!, signal,
+          timer = setTimeout(() => settle(resolve), peerlessPreviewPaint.timeoutMs);
+          setPreviewJob({ client, frame: preview, signal,
             resolve: () => settle(resolve), reject: (error) => settle(() => reject(error)) });
         });
+      };
+      const previewFailed = (error: unknown) => {
         signal.throwIfAborted();
+        errorHandler.current?.(error instanceof Error ? error : new Error(String(error)));
+      };
+      let previewed = false;
+      if (settings.current.previewFirstPage === true && input instanceof Uint8Array && settings.current.mediaTokens !== true) {
+        try {
+          const cut = await client.openSourceCut({ bytes: input, cut: PREVIEW_CUT, heapLimitBytes: settings.current.workerLimitBytes });
+          signal.throwIfAborted();
+          previewed = cut !== null;
+          if (cut) await showPreview(await measured(cut));
+        } catch (error) { previewed = true; previewFailed(error); }
       }
+      const opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
+        heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true });
+      signal.throwIfAborted();
       const metadata = opened.document;
       sourceComments.current = metadata.package.document.comments ?? [];
-      const theme = settings.current.theme ?? metadata.package.theme;
-      const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-      const environment = { themeColors, showHiddenText: settings.current.showHiddenText };
+      const opening = await measured(metadata);
+      const { environment, layout, requirements, config } = opening;
       renderEnvironment.current = { theme: metadata.package.theme, requested: JSON.stringify(environment) };
-      const layout = buildResidentRegionLayoutRequest(metadata, 24, { ...environment,
-        defaultTabStopTwips: metadata.package.settings?.defaultTabStop ?? null, mediaTokens: settings.current.mediaTokens === true });
-      const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
-      signal.throwIfAborted();
-      measurement = createRustMeasureSource({
-        engine: {
-          registerFont: (data) => {
-            const slot = appendFont(data);
-            fontIds[slot] = nextFontId++;
-            return slot;
-          },
-          registerSubstituteFont: (substituteOf, family) => {
-            const slot = appendFont({ substituteOf, family });
-            fontIds[slot] = fontIds[substituteOf];
-            return slot;
-          },
-          clearFonts: disposeFonts,
-        },
-        bundled: settings.current.measurementFontProvider,
-      });
-      measurement.setCompat(metadata.package.settings?.compatibilityFlags);
-      const embeddedFaces = await extractEmbeddedFontFaces(metadata);
-      signal.throwIfAborted();
-      measurement.setEmbeddedFaces(embeddedFaces);
-      await measurement.prepareFontRequirements(requirements);
-      signal.throwIfAborted();
-      const config = measurement.measurementConfigForRequirements(requirements);
-      if (!config) throw new Error('DOCX command fonts are not ready');
-      layout.measurement = {
-        ...config,
-        fontChains: Object.fromEntries(Object.entries(config.fontChains).map(([key, ids]) =>
-          [key, [...new Set(ids.map((id) => fontIds[id]))]])),
-      };
+      if (settings.current.previewFirstPage === true && !previewed) {
+        try { await showPreview(opening); } catch (error) { previewFailed(error); }
+      }
       const initial = await client.commandInit({
         session: crypto.randomUUID(), incarnation: 1, epoch: 1, readOnly: settings.current.readOnly,
         fonts: fonts.slice(),
@@ -571,7 +595,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const index = pageIndexes.current.get(page.pageId);
     if (index === undefined) return null;
     return host.current?.querySelector<HTMLCanvasElement>(
-      `[data-page-index="${index}"]:not([data-page-id]):not([data-page-key]) canvas`
+      `[data-page-index="${index}"]:not([data-page-id]):not([data-page-key]) canvas:not([data-preview-page-id])`
     ) ?? null;
   }, []);
 
@@ -615,8 +639,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
 
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
     source, openConnection, canvasForPage, prepareGeometry, onError: reportError,
-    onRecoverableError: error => errorHandler.current?.(error),
-  } : null, [source, openConnection, canvasForPage, prepareGeometry, reportError]);
+    onRecoverableError: error => { controller.stalled(error); errorHandler.current?.(error); },
+  } : null, [source, openConnection, canvasForPage, prepareGeometry, reportError, controller]);
+  useEffect(() => {
+    if (shellState.status !== 'ready' || !previewJob) return;
+    setPreviewJob(null);
+    void previewJob.client.attachCanvases([], [], globalThis.devicePixelRatio || 1, 1, { color: '#000', width: 2 }).catch(() => {});
+  }, [shellState.status, previewJob]);
   const onClipboard = useCallback(async (cut: boolean) => {
     const current = active.current;
     if (!current) return;
@@ -655,8 +684,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => {
     active.current = null;
     setPreviewJob(null);
-    if (hasSource) controller.opening(); else controller.empty();
-  }, [controller, source, documentBuffer, hasSource]);
+    if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
+  }, [controller, source, documentBuffer, parsedDocument, hasSource]);
+  useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
     const geometry = controller.getSnapshot().view?.geometry;

@@ -16,7 +16,7 @@ import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
-import { residentSourceMetadata, validateResidentSource } from './residentSource';
+import { residentSourceMetadata, validateResidentSource, type ResidentSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
@@ -130,6 +130,8 @@ let commandInit: ResidentCommandInitRequest | null = null;
 interface CommandLayout {
   /** Pages of the certified prefix the whole layout has not replaced yet, or null. */
   certifiedPages(): number | null;
+  /** The document version the certified prefix lays out, or null. */
+  certifiedVersion(): string | null;
   begin(): YrsRegionLayoutProgress;
   resume(blocks: number): YrsRegionLayoutProgress;
   /** Finishes a certified prefix's layout now; false when there is none. */
@@ -187,7 +189,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   const preparedFonts = new WeakMap<PreparedDocxCommand, Awaited<ReturnType<ResidentSessionFonts['prepare']>>>();
   const registry = proposals ??= createProposalRegistry(engine.proposalEngine);
   let layoutPreviewVersion = registry.snapshot().previewVersion;
-  let prefix: { pages: number; documentWidth?: number } | null = null;
+  let prefix: { pages: number; documentWidth?: number; version: string } | null = null;
   let certify = false;
   const dropPrefix = () => {
     prefix = null;
@@ -228,7 +230,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       const laid = engine.layoutDocumentWithRegionsExactPrefixRetained(init.layoutInput,
         Math.max(init.provisionalPages ?? 0, init.displayWindow?.[1] ?? 0));
       if (laid.provisional) {
-        prefix = { pages: laid.pages, documentWidth: laid.documentWidth };
+        prefix = { pages: laid.pages, documentWidth: laid.documentWidth, version: engine.proposalEngine.version() };
         provisionalFinalPages = laid.pages;
         incompleteLayout = { layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras };
       }
@@ -918,6 +920,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   if (!viewportFirst(init)) return host;
   commandLayout = {
     certifiedPages: () => prefix?.pages ?? null,
+    certifiedVersion: () => prefix?.version ?? null,
     begin: () => relayout('begin')!,
     resume: (blocks) => relayout('resume', blocks)!,
     complete() {
@@ -1071,6 +1074,8 @@ function noteDocumentChange(): void {
 }
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
+/** Whether the opened source is a cut that stops before the end of its body. */
+let cutPartial = false;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1219,6 +1224,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
       };
     case 'open':
     case 'openSource':
+    case 'previewSource':
     case 'bootstrap':
     case 'sync':
     case 'destroy':
@@ -1376,6 +1382,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     destroySession();
     return;
   }
+  if (request.type === 'previewSource') {
+    if (!session || !openedViaSource || commandHost) throw new Error('A source preview requires an opened source before commands');
+    await replySourcePreview(request.id, session, request.preview, () => request.preview.layoutInput, performance.now());
+    return;
+  }
   if (request.type === 'commandInit') {
     if (!session || !openedDocument || previewing) {
       throw new Error('Resident commands require a whole opened document');
@@ -1450,9 +1461,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'openSource') {
     validateResidentSource(request.source);
-    if (session) throw new Error('Resident engine worker already holds a document');
-    const started = performance.now();
     const source = request.source;
+    if (session && (!previewing || commandHost || source.cut)) throw new Error('Resident engine worker already holds a document');
+    if (session) destroySession(true);
+    const started = performance.now();
     const opening = await createResidentEngineSession(source.heapLimitBytes);
     try {
       let hostJson: string | undefined;
@@ -1460,44 +1472,33 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (source.document) {
         opening.openDocument(source.document, source);
         document = source.document;
+      } else if (source.cut) {
+        const cut = opening.openDocxPreview(source.bytes!, source.cut.blocks, source.cut.paragraphBudget);
+        if (cut === null) {
+          opening.destroy();
+          reply({ id: request.id, ok: true, previewRefused: true });
+          return;
+        }
+        hostJson = cut;
+        const host = decodeDocxHostJson(hostJson, source.bytes!);
+        document = host.document;
+        cutPartial = host.wholeBody !== true;
       } else {
         hostJson = opening.openSourceDocx(source.bytes!, source);
         document = decodeDocxHostJson(hostJson, source.bytes!).document;
       }
-      opening.setDirectBatches(true);
+      if (!source.cut) opening.setDirectBatches(true);
       session = opening;
       openedDocument = { heapLimitBytes: source.heapLimitBytes };
       openedViaSource = true;
+      previewing = source.cut !== undefined;
       openedParsed = source.document !== undefined;
-      openedSource = source.bytes && hostJson ? { bytes: exactBuffer(source.bytes), hostJson } : null;
+      openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
       editorSaves = { full: false };
       const metadata = residentSourceMetadata(document);
-      if (source.preview && !source.deferPreview) {
-        sourcePreviewing = true;
-        const preview = typeof source.preview === 'object' ? source.preview : {};
-        const pages = preview.pages ?? 1;
-        const init: ResidentCommandInitRequest = {
-          session: '', incarnation: 0, epoch: 0, readOnly: true,
-          fonts: preview.fonts ?? [], fontRegistrationSlots: preview.fontRegistrationSlots,
-          layoutInput: preview.layoutInput ?? JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})),
-          layoutWithRegions: true, layoutRevision: 1, extras: preview.extras ?? '{}',
-          displayWindow: preview.displayWindow ?? [0, pages],
-        };
-        setFrameDisplayWindow(opening, init.displayWindow, false);
-        const layout = hydrate({
-          workerAuthoritative: true, clientId: 0, state: new Uint8Array(0), selection: null,
-          fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
-          layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 1,
-        }, pages, true, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
-        if (layout.provisional) incompleteLayout = {
-          layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras,
-        };
-        setFrameDisplayWindow(opening, init.displayWindow, false);
-        const extras = JSON.stringify({ ...JSON.parse(init.extras), headersFooters: JSON.parse(opening.retainedHeadersFootersJson() ?? 'null') });
-        const bytes = opening.buildDisplayListFrame(extras, 0);
-        await replyFrame(request.id, bytes, performance.now() - started, [], undefined, started,
-          false, false, layout.layoutJson ?? undefined, layout.provisional, undefined, [], null,
-          { sourceDocument: metadata, hostJson });
+      if (source.preview) {
+        await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
         reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector }, [stateVector]);
@@ -1951,7 +1952,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'reviewSnapshot': {
         const registry = proposals ??= createProposalRegistry(engine);
         const frame = retainedFrame;
-        const layoutVersion = retainedLayoutVersion;
+        const layoutVersion = retainedLayoutVersion ?? commandLayout?.certifiedVersion() ?? null;
         const previewVersion = registry.snapshot().previewVersion;
         const published = commandFrameChanges?.reviewFrame;
         const review = !frame || layoutVersion !== engine.version() ||
@@ -2999,6 +3000,7 @@ function destroySession(keepSurfaces = false): void {
   editorSaves = { full: false };
   openedVersion = undefined;
   previewing = false;
+  cutPartial = false;
   previewFinalPages = null;
   clearProvisionalFinalPages();
   pendingUpdates = [];
@@ -3113,6 +3115,39 @@ async function finalizeResidentFrame(
   }
   await replayOffscreen(false);
   return { bytes, delta, caret };
+}
+
+async function replySourcePreview(
+  id: number,
+  opening: ResidentEngineSession,
+  preview: ResidentSourcePreviewOptions,
+  defaultLayoutInput: () => string,
+  started: number,
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+): Promise<void> {
+  sourcePreviewing = true;
+  const pages = preview.pages ?? 1;
+  const init: ResidentCommandInitRequest = {
+    session: '', incarnation: 0, epoch: 0, readOnly: true,
+    fonts: preview.fonts ?? [], fontRegistrationSlots: preview.fontRegistrationSlots,
+    layoutInput: preview.layoutInput ?? defaultLayoutInput(),
+    layoutWithRegions: true, layoutRevision: 1, extras: preview.extras ?? '{}',
+    displayWindow: preview.displayWindow ?? [0, pages],
+  };
+  setFrameDisplayWindow(opening, init.displayWindow, false);
+  const layout = hydrate({
+    workerAuthoritative: true, clientId: 0, state: new Uint8Array(0), selection: null,
+    fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
+    layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 1, partialDocument: cutPartial,
+  }, pages, true, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
+  if (layout.provisional) incompleteLayout = {
+    layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras,
+  };
+  setFrameDisplayWindow(opening, init.displayWindow, false);
+  const extras = JSON.stringify({ ...JSON.parse(init.extras), headersFooters: JSON.parse(opening.retainedHeadersFootersJson() ?? 'null') });
+  const bytes = opening.buildDisplayListFrame(extras, 0);
+  await replyFrame(id, bytes, performance.now() - started, [], undefined, started,
+    false, false, layout.layoutJson ?? undefined, layout.provisional, undefined, [], null, sourceOpened);
 }
 
 async function replyFrame(

@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -95,7 +96,7 @@ function installWorker(): void {
 
 test('DocxEditor leaves prewarming off by default', async () => {
   installWorker();
-  const editor = render(<DocxEditor showToolbar={false} />);
+  const editor = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} showToolbar={false} />);
   await act(async () => {});
   expect(FakeWorker.instances).toHaveLength(0);
   expect(yrs.takePreloadedResidentEngineWorker()).toBeNull();
@@ -106,7 +107,7 @@ test('an opted-in editor warms on mount once in StrictMode and releases an unuse
   installWorker();
   const editor = render(
     <StrictMode>
-      <DocxEditor experimentalPrewarm showToolbar={false} />
+      <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} experimentalPrewarm showToolbar={false} />
     </StrictMode>
   );
   expect(FakeWorker.instances).toHaveLength(1);

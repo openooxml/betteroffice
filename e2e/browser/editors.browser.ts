@@ -27,6 +27,9 @@ async function open(page: Page, format: Format, file?: string) {
   await expect(page.locator('[data-testid$="-error"]')).toHaveCount(0);
 }
 
+const docxInput = (page: Page) =>
+  page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+
 async function save(page: Page, format: Format, info: TestInfo, label: string) {
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save', exact: true }).first().click();
@@ -91,7 +94,7 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
           .locator('.canvas-page canvas')
           .first()
           .click({ position: { x: 150, y: 150 } });
-        const input = page.getByTestId('yrs-input');
+        const input = docxInput(page);
         await expect(input).toBeEditable();
         await input.press('ControlOrMeta+Home');
         await input.pressSequentially(marker);
@@ -133,11 +136,11 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
       const edited = await save(page, format, info, 'edited');
       expect(edited.text).toContain(marker);
       if (format === 'docx')
-        await page.getByTestId('yrs-input').press('ControlOrMeta+z');
+        await docxInput(page).press('ControlOrMeta+z');
       else await page.getByTestId(format + '-undo').click();
       expect((await save(page, format, info, 'undone')).text).toBe(original.text);
       if (format === 'docx')
-        await page.getByTestId('yrs-input').press('ControlOrMeta+Shift+z');
+        await docxInput(page).press('ControlOrMeta+Shift+z');
       else await page.getByTestId(format + '-redo').click();
       const redone = await save(page, format, info, 'redone');
       expect(redone.text).toBe(edited.text);
