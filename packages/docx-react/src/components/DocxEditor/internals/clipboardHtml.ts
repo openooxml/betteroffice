@@ -571,26 +571,48 @@ function parseTableElement(table: HTMLTableElement): DocxTableFragment {
       return { colspan, rowspan, shading, content: parseCellContent(cell), width: widthAttrTwips(cell) };
     });
   });
+  const rowCount = parsedRows.length;
+  const occupied: boolean[][] = parsedRows.map(() => []);
+  type PlacedCell = ParsedCell & { column: number };
+  const placedRows: PlacedCell[][] = [];
   let columns = 0;
-  for (const row of parsedRows) {
-    const span = row.reduce((sum, cell) => sum + cell.colspan, 0);
-    columns = Math.max(columns, span);
-  }
-  columns = Math.max(columns, 1);
-  for (const row of parsedRows) {
-    let span = row.reduce((sum, cell) => sum + cell.colspan, 0);
-    while (span < columns) {
-      row.push({ colspan: 1, rowspan: 1, shading: null, content: [{ kind: 'pilcrow' }], width: null });
-      span += 1;
+  parsedRows.forEach((cells, rowIndex) => {
+    const placed: PlacedCell[] = [];
+    let column = 0;
+    for (const cell of cells) {
+      while (occupied[rowIndex]![column]) column += 1;
+      const rowspan = Math.min(cell.rowspan, rowCount - rowIndex);
+      const colspan = cell.colspan;
+      for (let r = rowIndex; r < rowIndex + rowspan; r += 1) {
+        for (let c = column; c < column + colspan; c += 1) occupied[r]![c] = true;
+      }
+      placed.push({ ...cell, rowspan, colspan, column });
+      column += colspan;
+      columns = Math.max(columns, column);
     }
-  }
+    placedRows.push(placed);
+  });
+  columns = Math.max(columns, 1);
+  const filler = (): ParsedCell => ({
+    colspan: 1, rowspan: 1, shading: null, content: [{ kind: 'pilcrow' }], width: null,
+  });
+  const filledRows: ParsedCell[][] = placedRows.map((placed, rowIndex) => {
+    const byColumn = new Map(placed.map((cell) => [cell.column, cell as ParsedCell]));
+    const cells: ParsedCell[] = [];
+    for (let column = 0; column < columns; column += 1) {
+      const cell = byColumn.get(column);
+      if (cell) cells.push(cell);
+      else if (!occupied[rowIndex]![column]) cells.push(filler());
+    }
+    return cells;
+  });
   let grid: number[] = [];
   const cols = directCols(table);
   const colWidths = cols.map((col) => widthAttrTwips(col));
   if (cols.length === columns && colWidths.every((width): width is number => width !== null)) {
     grid = colWidths;
-  } else if (parsedRows.length > 0) {
-    const first = parsedRows[0]!;
+  } else if (filledRows.length > 0) {
+    const first = filledRows[0]!;
     if (first.length === columns && first.every((cell) => cell.colspan === 1 && cell.width !== null)) {
       grid = first.map((cell) => cell.width as number);
     }
@@ -599,7 +621,7 @@ function parseTableElement(table: HTMLTableElement): DocxTableFragment {
   return {
     tblPr: { width, widthType: 'dxa' },
     grid,
-    rows: parsedRows.map((cells) => ({
+    rows: filledRows.map((cells) => ({
       trPr: {},
       cells: cells.map((cell) => {
         const tcPr: Record<string, unknown> = { borders: DEFAULT_BORDERS() };
