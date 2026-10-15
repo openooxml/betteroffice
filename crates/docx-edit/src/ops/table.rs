@@ -3944,6 +3944,44 @@ mod tests {
     }
 
     #[test]
+    fn fragment_rowspan_occupancy_inserts() {
+        let doc = fragment_doc();
+        let fragment = serde_json::json!({
+            "tblPr": {}, "grid": [2000, 2000],
+            "rows": [
+                {"trPr": {}, "cells": [
+                    {"tcPr": {"rowspan": 2, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "A", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                    {"tcPr": {"rowspan": 1, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "B", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                ]},
+                {"trPr": {}, "cells": [
+                    {"tcPr": {"rowspan": 1, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "C", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                ]},
+            ],
+        });
+        let receipt = doc
+            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+            .unwrap();
+        assert_eq!((receipt.rows, receipt.columns), (2, 2));
+        assert_eq!(receipt.created_story_ids.len(), 3);
+        assert_eq!(
+            fragment_texts(&doc, &receipt.created_story_ids[2]),
+            vec!["C"]
+        );
+    }
+
+    #[test]
     fn fragment_huge_span_is_rejected_without_panic() {
         let colspan = serde_json::json!({
             "tblPr": {}, "grid": [],
