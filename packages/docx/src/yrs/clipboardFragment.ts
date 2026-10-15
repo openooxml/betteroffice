@@ -1,4 +1,19 @@
-import type { YrsInlineFormatDelta } from './index';
+import type {
+  YrsAuthor,
+  YrsLoc,
+  YrsSession,
+  YrsStoryRange,
+  YrsStorySegment,
+  YrsTableRange,
+  YrsInlineFormatDelta,
+} from './index';
+import {
+  embedPlainText,
+  storyPlainText,
+  tableAnchors,
+  tablePlainText,
+  type TablePayload,
+} from './storyPlainText';
 
 /** @internal Version of the internal clipboard payload; a reader ignores other versions. */
 export const DOCX_CLIPBOARD_FRAGMENT_VERSION = 1;
@@ -76,8 +91,7 @@ function optionalMap(value: unknown): boolean {
 }
 
 /** @internal Strict shape and size check for a pasted or copied clipboard fragment. */
-export function validClipboardFragment(value: unknown): value is DocxClipboardFragment {
-  const budget = { cells: MAX_FRAGMENT_CELLS, text: MAX_FRAGMENT_TEXT };
+export function validClipboardFragment(value: unknown): value is DocxClipboardFragment {  const budget = { cells: MAX_FRAGMENT_CELLS, text: MAX_FRAGMENT_TEXT };
   const text = (entry: unknown, allowEmpty: boolean): boolean => {
     if (typeof entry !== 'string' || (!allowEmpty && entry === '') || LINE_BREAK.test(entry)) return false;
     budget.text -= entry.length;
@@ -110,4 +124,360 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
     value.paragraphs.length > MAX_FRAGMENT_PARAGRAPHS) return false;
   return value.paragraphs.every(paragraph => plainObject(paragraph) && text(paragraph.text, true) &&
     (paragraph.tables === undefined || (Array.isArray(paragraph.tables) && paragraph.tables.every(entry => table(entry, 1)))));
+}
+
+/** @internal Sessions a table read needs: the raw payload plus story segments. */
+export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegments'>;
+
+/** @internal Engine surface a fragment paste needs. */
+export type ClipboardPasteEngine = Pick<
+  YrsSession,
+  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment'
+>;
+
+/** @internal Inclusive grid bounds for {@link readTableFragment}. */
+export interface ClipboardTableRect {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+/** @internal Copy source: a multi-cell range, or story units `[from, to)`. */
+export type ClipboardSliceTarget = { cells: YrsTableRange } | { story: string; from: number; to: number };
+
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function copiedMap(value: unknown): Record<string, unknown> | undefined {
+  const map = record(value);
+  return map && Object.keys(map).length > 0 ? { ...map } : undefined;
+}
+
+interface RawCell {
+  story: string;
+  tcPr?: unknown;
+}
+
+/** @internal Raw table payload lowered to the anchor reader's shape, or null. */
+export function clipboardTablePayload(value: unknown): TablePayload | null {
+  const map = record(value);
+  if (!map || !Array.isArray(map.rows)) return null;
+  return {
+    ...(record(map.tblPr) ? { tblPr: map.tblPr as Record<string, unknown> } : {}),
+    ...(Array.isArray(map.grid) ? { grid: map.grid } : {}),
+    rows: map.rows as TablePayload['rows'],
+  };
+}
+
+function rawRows(payload: { rows?: unknown }): Array<{ cells?: unknown; trPr?: unknown }> {
+  if (!payload || !Array.isArray(payload.rows) || payload.rows.length === 0) {
+    throw new Error('Table payload holds no rows');
+  }
+  return payload.rows as Array<{ cells?: unknown; trPr?: unknown }>;
+}
+
+function cellContent(reader: ClipboardTableReader, story: string): DocxFragmentSegment[] {
+  const content: DocxFragmentSegment[] = [];
+  for (const segment of reader.storySegments(story)) {
+    if (segment.kind === 'text') {
+      if (segment.text === '' || segment.attributes?.del != null) continue;
+      content.push({
+        kind: 'text',
+        text: segment.text,
+        ...(Object.keys(segment.attributes).length > 0 ? { attributes: { ...segment.attributes } } : {}),
+      });
+    } else if (segment.kind === 'pilcrow') {
+      content.push({
+        kind: 'pilcrow',
+        ...(Object.keys(segment.properties).length > 0 ? { properties: { ...segment.properties } } : {}),
+        ...(Object.keys(segment.attributes).length > 0 ? { attributes: { ...segment.attributes } } : {}),
+      });
+    } else if (segment.embedKind === 'tab' || segment.embedKind === 'break') {
+      content.push({
+        kind: segment.embedKind,
+        ...(Object.keys(segment.payload).length > 0 ? { payload: { ...segment.payload } } : {}),
+        ...(Object.keys(segment.attributes).length > 0 ? { attributes: { ...segment.attributes } } : {}),
+      });
+    } else if (segment.embedKind === 'table') {
+      content.push({
+        kind: 'table',
+        table: fragmentFromPayload(reader, segment.payload),
+        ...(Object.keys(segment.attributes).length > 0 ? { attributes: { ...segment.attributes } } : {}),
+      });
+    } else {
+      for (const part of embedTextSegments(reader, segment)) content.push(part);
+    }
+  }
+  return content;
+}
+
+function embedTextSegments(
+  reader: ClipboardTableReader,
+  segment: Extract<YrsStorySegment, { kind: 'embed' }>,
+): DocxFragmentSegment[] {
+  const out: DocxFragmentSegment[] = [];
+  const parts = embedPlainText(reader, segment.embedKind, segment.payload).split('\n');
+  const attributes = Object.keys(segment.attributes).length > 0 ? { ...segment.attributes } : undefined;
+  parts.forEach((text, index) => {
+    if (index > 0) out.push({ kind: 'pilcrow' });
+    if (text !== '') out.push({ kind: 'text', text, ...(attributes ? { attributes: { ...attributes } } : {}) });
+  });
+  return out;
+}
+
+function shadingOf(tcPr: Record<string, unknown>): string | undefined {
+  const color = typeof tcPr.backgroundColor === 'string' ? tcPr.backgroundColor.replace(/^#+/, '') : null;
+  return color && /^[0-9a-f]{6}$/iu.test(color) ? color : undefined;
+}
+
+function fragmentFromPayload(
+  reader: ClipboardTableReader,
+  payload: { tblPr?: unknown; grid?: unknown; rows?: unknown },
+  rect?: ClipboardTableRect,
+): DocxTableFragment {
+  const rows = rawRows(payload);
+  const tablePayload: TablePayload = { rows: rows as TablePayload['rows'] };
+  const { anchors, columns } = tableAnchors(tablePayload);
+  const rowCount = rows.length;
+  const full: ClipboardTableRect = {
+    top: 0,
+    bottom: rowCount - 1,
+    left: 0,
+    right: Math.max(columns - 1, 0),
+  };
+  const clamp = (value: number, max: number): number => Math.min(Math.max(value, 0), Math.max(max, 0));
+  let next = rect
+    ? {
+        top: clamp(Math.min(rect.top, rect.bottom), rowCount - 1),
+        bottom: clamp(Math.max(rect.top, rect.bottom), rowCount - 1),
+        left: clamp(Math.min(rect.left, rect.right), columns - 1),
+        right: clamp(Math.max(rect.left, rect.right), columns - 1),
+      }
+    : { ...full };
+  for (;;) {
+    const before = `${next.top}:${next.bottom}:${next.left}:${next.right}`;
+    for (const anchor of anchors) {
+      if (
+        anchor.row <= next.bottom &&
+        anchor.row + anchor.rowspan - 1 >= next.top &&
+        anchor.column <= next.right &&
+        anchor.column + anchor.colspan - 1 >= next.left
+      ) {
+        next = {
+          top: Math.min(next.top, anchor.row),
+          bottom: Math.max(next.bottom, anchor.row + anchor.rowspan - 1),
+          left: Math.min(next.left, anchor.column),
+          right: Math.max(next.right, anchor.column + anchor.colspan - 1),
+        };
+      }
+    }
+    if (`${next.top}:${next.bottom}:${next.left}:${next.right}` === before) break;
+  }
+  const { top, bottom, left, right } = next;
+  const byRow = new Map<number, typeof anchors>();
+  for (const anchor of anchors) {
+    if (
+      anchor.row >= top &&
+      anchor.row + anchor.rowspan - 1 <= bottom &&
+      anchor.column >= left &&
+      anchor.column + anchor.colspan - 1 <= right
+    ) {
+      const list = byRow.get(anchor.row) ?? [];
+      list.push(anchor);
+      byRow.set(anchor.row, list);
+    }
+  }
+  const ordered = [...byRow.entries()].sort(([a], [b]) => a - b);
+  if (ordered.length === 0) throw new Error('Table selection holds no cells');
+  const fragmentRows: DocxTableFragmentRow[] = ordered.map(([rowIndex, cells], surviving) => ({
+    trPr: copiedMap(rows[rowIndex]?.trPr) ?? {},
+    cells: cells
+      .sort((a, b) => a.column - b.column)
+      .map((anchor) => {
+        const raw = (rows[anchor.row]?.cells as RawCell[] | undefined)?.find(
+          (cell) => cell?.story === anchor.story,
+        );
+        const tcPr = { ...(record(raw?.tcPr) ?? {}) };
+        const shading = shadingOf(tcPr);
+        if (shading !== undefined) delete tcPr.backgroundColor;
+        return {
+          tcPr: {
+            ...tcPr,
+            rowspan: anchor.rowspan,
+            colspan: anchor.colspan,
+          },
+          content: cellContent(reader, anchor.story),
+          ...(shading !== undefined ? { shading } : {}),
+        };
+      })
+      .map((cell) => ({
+        ...cell,
+        tcPr: {
+          ...cell.tcPr,
+          rowspan: Math.min(Number(cell.tcPr.rowspan) || 1, ordered.length - surviving),
+        },
+      })),
+  }));
+  const grid =
+    Array.isArray(payload.grid) &&
+    payload.grid.every((width) => typeof width === 'number' && Number.isFinite(width) && width > 0)
+      ? (payload.grid as number[]).slice(left, right + 1)
+      : [];
+  const tblPr = { ...(record(payload.tblPr) ?? {}) };
+  if (
+    (left > 0 || right < columns - 1) &&
+    tblPr.widthType === 'dxa' &&
+    typeof tblPr.width === 'number' &&
+    grid.length > 0
+  ) {
+    tblPr.width = grid.reduce((sum, width) => sum + width, 0);
+  }
+  return { tblPr, grid, rows: fragmentRows };
+}
+
+/**
+ * Reads one rectangular table as a fragment. `rect` is inclusive; it expands
+ * to fully cover every merged cell it touches.
+ * @internal
+ */
+export function readTableFragment(
+  reader: ClipboardTableReader,
+  table: { story: string; tableIndex: number },
+  rect?: ClipboardTableRect,
+): DocxTableFragment {
+  const raw = reader.tablePayload(table.story, table.tableIndex);
+  if (!raw) throw new Error(`Table ${table.tableIndex} was not found in story ${table.story}`);
+  const payload = clipboardTablePayload(raw);
+  if (!payload) throw new Error(`Table ${table.tableIndex} in story ${table.story} holds no rows`);
+  return fragmentFromPayload(reader, payload, rect);
+}
+
+/**
+ * Reads the clipboard slice for a copy: always plain text, plus a fragment
+ * when the selection holds a table.
+ * @internal
+ */
+export function readClipboardSlice(
+  reader: ClipboardTableReader,
+  target: ClipboardSliceTarget,
+): DocxClipboardSlice {
+  if ('cells' in target) {
+    const { anchor, head } = target.cells;
+    const payload = clipboardTablePayload(reader.tablePayload(anchor.story, anchor.tableIndex));
+    const range = {
+      top: Math.min(anchor.row, head.row),
+      bottom: Math.max(anchor.row, head.row),
+      left: Math.min(anchor.column, head.column),
+      right: Math.max(anchor.column, head.column),
+    };
+    const text = payload ? tablePlainText(reader, payload, range).join('\n') : '';
+    return {
+      text,
+      fragment: payload
+        ? {
+            paragraphs: [
+              {
+                tables: [fragmentFromPayload(reader, payload, range)],
+                text: '',
+              },
+            ],
+          }
+        : null,
+    };
+  }
+  const from = Math.min(target.from, target.to);
+  const to = Math.max(target.from, target.to);
+  const text = storyPlainText(reader, target.story, from, to);
+  const paragraphs: DocxClipboardParagraph[] = [];
+  let current: { tables: DocxTableFragment[]; text: string } = { tables: [], text: '' };
+  let sawTable = false;
+  const push = (): void => {
+    paragraphs.push({
+      ...(current.tables.length > 0 ? { tables: current.tables } : {}),
+      text: current.text,
+    });
+    current = { tables: [], text: '' };
+  };
+  const appendPlainText = (value: string): void => {
+    const parts = value.split('\n');
+    current.text += parts[0] ?? '';
+    for (const part of parts.slice(1)) {
+      push();
+      current.text += part;
+    }
+  };
+  let offset = 0;
+  for (const segment of reader.storySegments(target.story)) {
+    const start = offset;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+    if (offset <= from || start >= to) continue;
+    if (segment.kind === 'text') {
+      current.text += segment.text.slice(Math.max(from, start) - start, Math.min(to, offset) - start);
+    } else if (segment.kind === 'pilcrow') {
+      push();
+    } else if (segment.embedKind === 'table') {
+      if (current.text !== '') push();
+      current.tables.push(fragmentFromPayload(reader, segment.payload));
+      sawTable = true;
+    } else if (segment.embedKind === 'tab') {
+      current.text += '\t';
+    } else if (segment.embedKind === 'break') {
+      push();
+    } else {
+      appendPlainText(embedPlainText(reader, segment.embedKind, segment.payload));
+    }
+  }
+  if (current.tables.length > 0 || current.text !== '') push();
+  return { text, fragment: sawTable ? { paragraphs } : null };
+}
+
+/**
+ * Pastes a fragment over a story range, returning the caret. Deletes a
+ * non-collapsed range first, then replays each paragraph: splits for
+ * paragraphs after the first, inserts tables, then text.
+ * @internal
+ */
+export function applyClipboardFragment(
+  engine: ClipboardPasteEngine,
+  range: YrsStoryRange,
+  fragment: DocxClipboardFragment,
+  suggesting?: YrsAuthor,
+): YrsLoc {
+  let caret: YrsLoc = {
+    story: range.story,
+    paraId: range.start.paraId,
+    offset: range.start.offset,
+  };
+  if (range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset) {
+    const removed = engine.deleteRange(range, suggesting);
+    if (!removed.range) throw new Error('Delete receipt lacks range');
+    caret = {
+      story: removed.range.story,
+      paraId: removed.range.start.paraId,
+      offset: removed.range.start.offset,
+    };
+  }
+  fragment.paragraphs.forEach((paragraph, index) => {
+    if (index > 0) {
+      const split = engine.splitParagraph(caret, suggesting);
+      caret = { story: caret.story, paraId: split.secondParaId, offset: 0 };
+    }
+    for (const table of paragraph.tables ?? []) {
+      caret = engine.insertTableFragment(caret, table, suggesting).after;
+    }
+    if (paragraph.text !== '') {
+      const inserted = engine.insertText(caret, paragraph.text, suggesting);
+      if (!inserted.range) throw new Error('Text receipt lacks range');
+      caret = {
+        story: inserted.range.story,
+        paraId: inserted.range.end.paraId,
+        offset: inserted.range.end.offset,
+      };
+    }
+  });
+  return caret;
 }

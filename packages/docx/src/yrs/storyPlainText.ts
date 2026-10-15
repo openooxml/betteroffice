@@ -49,7 +49,8 @@ function objectValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function embedPlainText(reader: PlainTextReader, kind: string, payload: Record<string, unknown>): string {
+/** Plain text of one non-table embed; tables use {@link tablePlainText}. @internal */
+export function embedPlainText(reader: PlainTextReader, kind: string, payload: Record<string, unknown>): string {
   switch (kind) {
     case 'tab':
       return '\t';
