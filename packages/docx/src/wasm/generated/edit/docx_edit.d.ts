@@ -551,7 +551,6 @@ export class EditSession {
      * caret right after the inserted table embed.
      */
     insert_table_fragment(story: string, para_id: string, offset: number, fragment_json: string, author_name?: string | null, author_date?: string | null): string;
-    validate_table_fragment(fragment_json: string): void;
     /**
      * Inserts `text` at `(story, para_id, offset)`. It must contain no
      * paragraph or line breaks, and it inherits the formatting at the
@@ -1303,6 +1302,7 @@ export class EditSession {
      * without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
      */
     validate_edits_json(request: string): string;
+    validate_table_fragment(fragment_json: string): void;
     /**
      * The session-scoped version token of the committed document state. It
      * changes on every committed change, local or remote, and when the
