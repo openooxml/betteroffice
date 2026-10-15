@@ -151,12 +151,11 @@ test('insert_table_column_left_targets_the_focused_column', async () => {
 test('delete_table_row_removes_the_focused_row_and_restores_on_undo', async () => {
   const arm = await inCell('C');
   const before = JSON.stringify(payload(arm));
-  const survivors = new Set([cellStory(arm, 'A'), cellStory(arm, 'B')]);
+  const survivor = cellStory(arm, 'A');
   const applied = execute(arm, tableCommand(arm, 'deleteTableRow', {}));
   expect(applied.status).toBe('applied');
   expect(payload(arm)!.rows).toHaveLength(1);
-  const caret = validFocus(arm, applied);
-  expect(survivors.has(caret.story)).toBe(true);
+  expect(validFocus(arm, applied).story).toBe(survivor);
   expect(undo(arm).status).toBe('applied');
   expect(JSON.stringify(payload(arm))).toBe(before);
   expect(cellText(arm, cellStory(arm, 'C'))).toBe('C');
@@ -170,14 +169,23 @@ test('delete_table_row_removes_the_focused_row_and_restores_on_undo', async () =
 test('delete_table_column_removes_the_focused_column_and_restores_on_undo', async () => {
   const arm = await inCell('B');
   const before = JSON.stringify(payload(arm));
-  const survivors = new Set([cellStory(arm, 'A'), cellStory(arm, 'C')]);
+  const survivor = cellStory(arm, 'A');
   const applied = execute(arm, tableCommand(arm, 'deleteTableColumn', {}));
   expect(applied.status).toBe('applied');
   expect(anchors(arm).filter((anchor) => anchor.row === 0)).toHaveLength(1);
-  expect(survivors.has(validFocus(arm, applied).story)).toBe(true);
+  expect(validFocus(arm, applied).story).toBe(survivor);
   expect(undo(arm).status).toBe('applied');
   expect(JSON.stringify(payload(arm))).toBe(before);
   expect(redo(arm).status).toBe('applied');
+}, TIMEOUT);
+
+test('delete_table_column_from_the_last_column_keeps_the_caret_in_its_row', async () => {
+  const arm = await inCell('D');
+  const survivor = cellStory(arm, 'C');
+  const applied = execute(arm, tableCommand(arm, 'deleteTableColumn', {}));
+  expect(applied.status).toBe('applied');
+  expect(tableAnchors(payload(arm)!).columns).toBe(1);
+  expect(validFocus(arm, applied).story).toBe(survivor);
 }, TIMEOUT);
 
 test('delete_table_removes_the_table_and_types_in_the_following_paragraph', async () => {
@@ -417,6 +425,23 @@ test('undo_parks_the_caret_after_the_live_table_when_a_table_was_inserted_before
   expect(typedAfterTable(arm, 'x', 1)).toBe(true);
 }, TIMEOUT);
 
+test('undo_in_a_nested_table_parks_the_caret_beside_the_inner_table', async () => {
+  const xml = paragraph('Before') + table([
+    cell('Outer') + `<w:tc>${paragraph('Host')}${table([cell('Inner A') + cell('Inner B')])}</w:tc>`,
+  ]) + paragraph('After');
+  const arm = await inCell('Inner A', xml);
+  const host = cellStory(arm, 'Host');
+  const innerBefore = JSON.stringify(payload(arm, host, 0));
+  expect(execute(arm, tableCommand(arm, 'insertTableRow', { side: 'below' })).status).toBe('applied');
+  const added = anchors(arm, host, 0).find((anchor) => anchor.row === 1 && anchor.column === 0)!.story;
+  const paraId = arm.engine.paragraphs(added)[0]!.paraId;
+  expect(execute(arm, tableCommand(arm, 'select', { selection: selection(paraId, 0, 0, added) })).status).toBe('noop');
+  const undone = undo(arm);
+  expect(undone.status).toBe('applied');
+  expect(JSON.stringify(payload(arm, host, 0))).toBe(innerBefore);
+  expect(validFocus(arm, undone).story).toBe(host);
+}, TIMEOUT);
+
 test('suggesting_insert_table_row_stamps_a_revision_that_reject_removes', async () => {
   const arm = await inCell();
   const author = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
@@ -430,4 +455,17 @@ test('suggesting_insert_table_row_stamps_a_revision_that_reject_removes', async 
   }));
   expect(rejected.status).toBe('applied');
   expect(payload(arm)!.rows).toHaveLength(2);
+}, TIMEOUT);
+
+test('suggesting_delete_table_row_stamps_a_revision_that_reject_restores', async () => {
+  const arm = await inCell('C');
+  const author = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  expect(execute(arm, tableCommand(arm, 'deleteTableRow', { suggesting: author })).status).toBe('applied');
+  const revisions = arm.engine.geometryReader.listRevisions() as { revisionId: string }[];
+  expect(revisions.length).toBeGreaterThan(0);
+  expect(execute(arm, tableCommand(arm, 'rejectRevision', {
+    revisionId: revisions[0]!.revisionId, expectVersion: arm.engine.proposalEngine.version(),
+  })).status).toBe('applied');
+  expect(payload(arm)!.rows).toHaveLength(2);
+  expect(cellText(arm, cellStory(arm, 'C'))).toBe('C');
 }, TIMEOUT);
