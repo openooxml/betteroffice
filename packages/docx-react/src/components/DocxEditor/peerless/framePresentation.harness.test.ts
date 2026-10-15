@@ -6,6 +6,7 @@ import { createEchoPainter, type PeerlessEchoIntent } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { createPeerlessViewStore, type PeerlessFrameGeometry } from './viewStore';
 import { registerBrowserHarness } from './browserHarness';
+import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 
 const identity = { session: 'harness', incarnation: 1, epoch: 1 };
 const page = { pageId: '1', pageIndex: 0 };
@@ -44,8 +45,10 @@ function frame(revision: number, coverage: number, text: string): DocxCommandFra
       boundaries: Array.from({ length: text.length + 1 }, (_, utf16) => ({ utf16, grapheme: utf16,
         caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
       selection: { anchorGrapheme: text.length, focusGrapheme: text.length },
-      damage: [{ page, rect, backgroundId: 'background', primitiveIds: [] }],
+      damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }],
+      glyphs: testEchoGlyphLine(),
     },
+    echoGlyphSets: [testEchoGlyphSet],
   } };
 }
 
@@ -64,10 +67,10 @@ test('checkpoints_capture_one_synchronous_handoff', async () => {
     save() {}, restore() {}, setTransform() {}, clearRect() { pixels = ''; },
     getImageData: () => ({ width: 100, height: 20 }) as ImageData,
     putImageData() {}, transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
-    measureText: (text: string) => ({ width: text.length * 10 }),
-    fillText(text: string) { pixels = text; },
+    translate() {}, scale() {}, fill(path: unknown) { pixels += glyphChar(path); },
     drawImage(bitmap: ImageBitmap) { pixels = (bitmap as ImageBitmap & { pixels: string }).pixels; },
   }) } as unknown as HTMLCanvasElement;
+  const restorePaths = installGlyphPaths();
   const store = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: -1,
     workerSelection: null, anchors: null, editState: undefined, geometry: null });
   const painter = createEchoPainter({ canvasForPage: () => canvas });
@@ -112,6 +115,7 @@ test('checkpoints_capture_one_synchronous_handoff', async () => {
     expect(presenter.present(frame(4, 2, 'AB'))).toBe('presented');
     expect(checkpoints).toHaveLength(4);
   } finally {
+    restorePaths();
     presenter.dispose();
     presentation.dispose();
     painter.dispose();

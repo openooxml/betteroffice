@@ -1272,6 +1272,204 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(92_003.0));
     }
 
+    fn put_text(wb: &mut Workbook, sheet: SheetId, cell: &str, text: &str) {
+        wb.sheet_mut(sheet).unwrap().set_cell(
+            a1(cell),
+            Cell {
+                value: CellValue::Text { value: text.into() },
+                ..Cell::default()
+            },
+        );
+    }
+
+    fn defined(wb: &mut Workbook, name: &str, formula: &str) {
+        wb.defined_names.push(DefinedName {
+            name: name.into(),
+            formula: formula.into(),
+            local_sheet: None,
+            hidden: false,
+        });
+    }
+
+    #[test]
+    fn references_into_another_workbook_keep_their_cached_results() {
+        let (mut wb, s) = one_sheet();
+        defined(&mut wb, "Rate", "'[2]Rates'!$A$1");
+        for (address, formula, cached) in [
+            ("A1", "'[1]Other Book'!B2", 91.5),
+            ("A2", "SUM('[1]Data'!A1:A4)*2", 10.0),
+            ("A3", "[1]Data!A1+1", 4.0),
+            ("A4", "Rate*2", 0.5),
+            ("A5", "INDIRECT(\"'[1]Data'!A1\")", 3.0),
+        ] {
+            put_cached_formula(&mut wb, s, address, formula, num(cached));
+        }
+        let cached_false = CellValue::Bool { value: false };
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A6",
+            "ISERROR('[1]Data'!A1)",
+            cached_false.clone(),
+        );
+        put_formula(&mut wb, s, "B1", "A1+1");
+        put_cached_formula(&mut wb, s, "C1", "Missing!A1", num(7.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        for (address, cached) in [
+            ("A1", 91.5),
+            ("A2", 10.0),
+            ("A3", 4.0),
+            ("A4", 0.5),
+            ("A5", 3.0),
+        ] {
+            assert_eq!(value(&wb, s, address), num(cached), "{address}");
+        }
+        assert_eq!(value(&wb, s, "A6"), cached_false);
+        assert_eq!(value(&wb, s, "B1"), num(92.5));
+        assert_eq!(
+            value(&wb, s, "C1"),
+            CellValue::Error {
+                value: ErrorValue::Ref
+            }
+        );
+    }
+
+    #[test]
+    fn indirect_in_r1c1_style_keeps_its_cached_result() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 5.0);
+        put_cached_formula(&mut wb, s, "B1", "INDIRECT(\"R1C1\",FALSE)", num(8.0));
+        put_formula(&mut wb, s, "B2", "B1+1");
+        put_formula(&mut wb, s, "B3", "INDIRECT(\"R1C1\",FALSE)");
+        put_cached_formula(&mut wb, s, "B4", "INDIRECT(\"A1\")", num(-1.0));
+        put_cached_formula(&mut wb, s, "B5", "INDIRECT(\"Nowhere!A1\")", num(-1.0));
+        put_cached_formula(&mut wb, s, "B6", "INDIRECT(\"'[1]Book'!Rate\")", num(0.25));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(8.0));
+        assert_eq!(value(&wb, s, "B2"), num(9.0));
+        let reference = CellValue::Error {
+            value: ErrorValue::Ref,
+        };
+        assert_eq!(value(&wb, s, "B3"), reference);
+        assert_eq!(value(&wb, s, "B4"), num(5.0));
+        assert_eq!(value(&wb, s, "B5"), reference);
+        assert_eq!(value(&wb, s, "B6"), num(0.25));
+    }
+
+    #[test]
+    fn a_range_in_a_scalar_formula_reads_the_cell_on_the_formulas_row_or_column() {
+        let (mut wb, s) = one_sheet();
+        wb.sheets.push(Sheet::new("Data"));
+        let data = SheetId(1);
+        for row in 1..=5 {
+            put_num(&mut wb, s, &format!("A{row}"), row as f64 * 10.0);
+            put_num(&mut wb, data, &format!("A{row}"), row as f64);
+        }
+        put_num(&mut wb, s, "D10", 4.0);
+        put_num(&mut wb, s, "E10", 5.0);
+        for (address, index) in [("E1", 1.0), ("E2", 4.0), ("E3", 2.0)] {
+            put_num(&mut wb, s, address, index);
+        }
+        defined(&mut wb, "Pay", "Sheet1!$A$1:$A$5");
+        put_recorded(&mut wb, s, "H1", "A1:A5*2", "H1:H5");
+        for (address, formula) in [
+            ("C3", "A1:A5"),
+            ("C4", "Pay*2"),
+            ("C5", "IF(Pay<>\"\",DATE(2020,Pay/10,1),\"\")"),
+            ("C2", "A:A"),
+            ("C1", "SUM(A1:A5)"),
+            ("G4", "Data!A1:A5"),
+            ("E12", "D10:F10"),
+            ("D2", "INDEX(A1:A5,E1:E3)"),
+            ("F3", "Pay+SUMPRODUCT(Pay*1)"),
+            ("F4", "SUMPRODUCT(Pay*1)+Pay"),
+            ("C7", "A1:A5"),
+            ("C8", "A1:B5"),
+            ("H12", "D10:F10"),
+        ] {
+            put_formula(&mut wb, s, address, formula);
+        }
+        rebuild_and_recalc_all(&mut wb, None);
+        for (address, expected) in [
+            ("C3", num(30.0)),
+            ("C4", num(80.0)),
+            ("C5", num(43_952.0)),
+            ("C2", num(20.0)),
+            ("C1", num(150.0)),
+            ("G4", num(4.0)),
+            ("E12", num(5.0)),
+            ("D2", num(40.0)),
+            ("F3", num(180.0)),
+            ("F4", num(190.0)),
+            ("H3", num(60.0)),
+            ("H5", num(100.0)),
+        ] {
+            assert_eq!(value(&wb, s, address), expected, "{address}");
+        }
+        for address in ["C7", "C8", "H12"] {
+            assert_eq!(
+                value(&wb, s, address),
+                CellValue::Error {
+                    value: ErrorValue::Value
+                },
+                "{address}"
+            );
+        }
+    }
+
+    #[test]
+    fn arithmetic_on_date_text_keeps_its_cached_result() {
+        let (mut wb, s) = one_sheet();
+        put_text(&mut wb, s, "A1", "19/11/2021");
+        put_text(&mut wb, s, "A2", "no date");
+        put_text(&mut wb, s, "A3", "5");
+        put_cached_formula(&mut wb, s, "B1", "A1+1", num(44_520.0));
+        put_formula(&mut wb, s, "B2", "B1+1");
+        put_cached_formula(&mut wb, s, "B3", "A2+1", num(-1.0));
+        put_cached_formula(&mut wb, s, "B4", "A3+1", num(-1.0));
+        put_cached_formula(&mut wb, s, "B5", "-A1", num(-44_519.0));
+        put_cached_formula(&mut wb, s, "B6", "A1%", num(445.19));
+        put_text(&mut wb, s, "A7", "31/04/2021");
+        put_cached_formula(&mut wb, s, "B7", "A7+1", num(-1.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(44_520.0));
+        assert_eq!(value(&wb, s, "B5"), num(-44_519.0));
+        assert_eq!(value(&wb, s, "B6"), num(445.19));
+        assert_eq!(value(&wb, s, "B2"), num(44_521.0));
+        assert_eq!(
+            value(&wb, s, "B3"),
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        );
+        assert_eq!(value(&wb, s, "B4"), num(6.0));
+        assert_eq!(
+            value(&wb, s, "B7"),
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        );
+    }
+
+    #[test]
+    fn an_array_formula_over_date_text_keeps_its_cached_rectangle() {
+        for (formula, first, second) in [
+            ("-A1:A2", -44_519.0, -44_520.0),
+            ("A1:A2%", 445.19, 445.2),
+            ("A1:A2+1", 44_520.0, 44_521.0),
+        ] {
+            let (mut wb, s) = one_sheet();
+            put_text(&mut wb, s, "A1", "19/11/2021");
+            put_text(&mut wb, s, "A2", "20/11/2021");
+            put_recorded(&mut wb, s, "C1", formula, "C1:C2");
+            set_cached(&mut wb, s, "C1", num(first));
+            put_num(&mut wb, s, "C2", second);
+            rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "C1"), num(first), "{formula}");
+            assert_eq!(value(&wb, s, "C2"), num(second), "{formula}");
+        }
+    }
+
     /// the array form of a supported function is still a gap in the engine, so
     /// it must leave the cached value alone exactly as an unknown name does.
     /// `nanogpt-excel` reaches this through
