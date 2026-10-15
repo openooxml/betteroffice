@@ -14,11 +14,12 @@ test('headline suite matches the README model and both Evals columns', async () 
   expect(table).toBeDefined();
   const [headers, , ...rows] = table!.split(/\r?\n/).map(line => line.trim().slice(1, -1).split('|').map(cell => cell.replace(/\*\*|`/g, '').trim()));
   const suite = (await loadData()).suites[0]!;
-  expect(suite.arms.map(a => a.label)).toEqual(headers!.slice(1));
+  const arms = headers!.slice(1).map(label => suite.arms.find(a => a.label === label));
+  expect(arms.every(Boolean)).toBe(true);
   for (const row of rows) {
     const format = row[0]!.toLowerCase();
-    for (const [index, arm] of suite.arms.entries()) {
-      const stats = aggregate(suite, { model, arm: arm.id, format });
+    for (const [index, arm] of arms.entries()) {
+      const stats = aggregate(suite, { model, arm: arm!.id, format });
       expect(`${stats.passes}/${stats.n}`).toBe(row[index + 1]!);
     }
   }

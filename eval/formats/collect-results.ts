@@ -118,6 +118,7 @@ export async function main(args: string[]) {
       const prefix = `${check.exitCode === 0 ? 'PASS' : 'FAIL'}: ${r.task}: `;
       if (![0, 1].includes(check.exitCode) || !message.startsWith(prefix)) throw new Error(`Checker could not score ${r.task}: ${check.stderr.toString()}`);
       if (r.timed_out || (r.agent_exit_code !== undefined && r.agent_exit_code !== 0) || r.tool_calls === 0) throw new Error(`Runner did not complete a valid workflow: ${r.task}`);
+      if (check.exitCode === 0 && !r.pass) throw new Error(`Runner rejected a workflow whose saved output now passes: ${r.task}`);
       r.pass = check.exitCode === 0;
       r.check_message = message.slice(prefix.length);
     }

@@ -1,8 +1,11 @@
 import { expect, test } from 'bun:test';
 import { collectResults, defaultArms, parseArgs, serialize, type Group, type Report } from './collect-results';
 
-const tasks = [{ id: 'docx-example', format: 'docx', title: 'Edit text', prompt: 'Change text.' }];
-const fixtures = { kind: 'real-world', count: 1, url: 'https://example.org/', metadata: 'https://example.org/metadata.json' };
+const tasks = [
+  { id: 'docx-example', format: 'docx', title: 'Edit text', prompt: 'Change text.' },
+  { id: 'xlsx-example', format: 'xlsx', title: 'Edit cell', prompt: 'Change a cell.' },
+];
+const fixtures = { kind: 'real-world', count: 2, url: 'https://example.org/', metadata: 'https://example.org/metadata.json' };
 const row = { task: tasks[0]!.id, pass: true, check_message: 'verified', tool_calls: 2, duration_seconds: 1.5 };
 const group = (arm = 'generic', run = 1, model = 'model-a'): Group & { report: Report } => ({
   arm, run, date: '2026-10-15', directory: '/private/runner', report: { model, results: [{ ...row }] },
@@ -11,10 +14,15 @@ const options = () => ({ suite: 'v3', tasks, arms: defaultArms, fixtures, reason
 
 test('three runs, third arm, and second model subset survive collection without runner metadata', () => {
   const arms = [...defaultArms, { id: 'third', label: 'Third arm', summary: 'Other tools.', tool_calls: 'Calls.' }];
-  const groups = arms.flatMap(a => [1, 2, 3].map(i => group(a.id, i)));
+  const groups = arms.flatMap(a => [1, 2, 3].map(i => {
+    const g = group(a.id, i);
+    g.report.results = tasks.map(t => ({ ...row, task: t.id }));
+    return g;
+  }));
   groups.push(group('third', 1, 'model-b'));
   const suite = collectResults({ ...options(), arms, groups });
-  expect(suite.runs).toHaveLength(10);
+  expect(suite.runs).toHaveLength(19);
+  expect(suite.tasks).toHaveLength(2);
   expect(suite.arms).toHaveLength(3);
   expect(suite.fixtures.kind).toBe('real-world');
   expect(suite.runs.filter(r => r.model === 'model-b')).toHaveLength(1);
