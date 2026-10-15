@@ -72,7 +72,7 @@ const tick = (ms: number): string =>
   ms >= 1000 ? `${round(ms / 1000)} s` : ms >= 1 ? `${round(ms)} ms` : `${round(ms * 1000)} µs`;
 
 /** The series-coloured dot of legends and tooltips. */
-export const SWATCH = 'inline-block size-2 flex-none rounded-full bg-series';
+export const SWATCH = 'inline-block size-2 flex-none bg-series';
 
 let tipNode: HTMLElement | null = null;
 
