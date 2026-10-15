@@ -6,6 +6,7 @@ import { createYrsPositionProjection } from './yrsPositionProjection';
 import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
 import { deriveDisplayListSelectedCellRects, type DisplayListSelectedCellSpec, type DisplayListTableRegion } from '../layout/render/displayListTables';
 import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
+import { rootOf } from './residentCommandTableSelection';
 import type { DisplayPrimitive } from '../layout/render/displayList';
 
 export interface ResidentObjectRect {
@@ -70,7 +71,7 @@ function issue(engine: ResidentEngineSession, kind: ObjectTarget['kind'], at: Yr
 }
 
 function resolveCell(engine: ResidentEngineSession, story: string): { at: YrsLoc; cell: YrsCellLoc } | null {
-  const root = story === 'body' || story.startsWith('body:') ? 'body' : story.split(':').slice(0, 2).join(':');
+  const root = rootOf(story);
   const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
   for (const table of projection.allTables()) {
@@ -162,8 +163,7 @@ export function readResidentCellSelectionRects(
 ): DisplayListRect[] | null {
   if (!range || range.anchor.story !== range.head.story || range.anchor.tableIndex !== range.head.tableIndex ||
     (range.anchor.row === range.head.row && range.anchor.column === range.head.column)) return null;
-  const root = range.anchor.story === 'body' || range.anchor.story.startsWith('body:') ? 'body'
-    : range.anchor.story.split(':').slice(0, 2).join(':');
+  const root = rootOf(range.anchor.story);
   if (root !== 'body' || !engine.geometryReader.hasStory(root)) return [];
   const table = createYrsPositionProjection(engine.geometryReader, root)?.allTables()
     .find((entry) => entry.story === range.anchor.story && entry.tableIndex === range.anchor.tableIndex);
@@ -212,8 +212,7 @@ export async function readResidentFrameGeometry(
   const objects: ResidentObjectGeometry[] = [];
   let selected: ResidentObjectRect[] = [];
   const selectionRoot = selection && selection.anchor.story === selection.focus.story
-    ? selection.anchor.story === 'body' || selection.anchor.story.startsWith('body:') ? 'body'
-      : selection.anchor.story.split(':').slice(0, 2).join(':') : null;
+    ? rootOf(selection.anchor.story) : null;
   const located = (rects: DisplayListRect[]): ResidentObjectRect[] => rects
     .filter(rect => frame.pages[rect.pageIndex] && !frame.pages[rect.pageIndex]!.page.unbuilt)
     .map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
