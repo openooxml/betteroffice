@@ -39,7 +39,7 @@ const MENU_COLORS = {
   border: 'var(--doc-border)',
   hover: 'var(--doc-bg-hover)',
   shadow: 'var(--doc-shadow)',
-  focus: 'var(--bo-toolbar-accent, var(--doc-toggle-active-bg))',
+  focus: 'var(--bo-toolbar-accent, var(--doc-toolbar-accent))',
 };
 
 function isInteractive(target: EventTarget | null): boolean {

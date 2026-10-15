@@ -3,6 +3,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useTranslation } from '../../i18n';
 import {
   toolbarButtonStyle,
+  toolbarPrimaryButtonStyle,
   toolbarTheme,
   useFocusRing,
 } from '../../../../../shared/react-toolbar/theme';
@@ -140,9 +141,8 @@ export function ToolbarPromptDialog({
             disabled={!valid}
             {...applyFocus.focusProps}
             style={{
-              ...toolbarButtonStyle({
+              ...toolbarPrimaryButtonStyle({
                 disabled: !valid,
-                pressed: true,
                 focusRing: applyFocus.focusRing,
               }),
               ...DIALOG_BUTTON,

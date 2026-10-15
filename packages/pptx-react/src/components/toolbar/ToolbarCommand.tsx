@@ -739,9 +739,9 @@ export function ShapeToolMenu() {
                     width: 44,
                     height: 38,
                     padding: 5,
-                    border: `1px solid ${tool === value ? toolbarTheme.accent : toolbarTheme.line}`,
+                    border: `1px solid ${toolbarTheme.line}`,
                     borderRadius: 6,
-                    background: tool === value ? toolbarTheme.hover : toolbarTheme.surface,
+                    background: tool === value ? toolbarTheme.selected : toolbarTheme.surface,
                     color: toolbarTheme.ink,
                     cursor: 'pointer',
                   }}

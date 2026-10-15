@@ -86,10 +86,11 @@
   --doc-on-primary: #ffffff;
 
   /* Toolbar palette, monochrome and shared with the xlsx and pptx toolbars.
-   * A pressed toggle is a solid ink slab. Hosts override these through the
+   * A pressed toggle is a subtle ghost tint. Hosts override these through the
    * --bo-toolbar-* properties (see .oox-toolbar-rail below). */
-  --doc-toggle-active-bg: #1f1f1f;
-  --doc-toggle-active-fg: #ffffff;
+  --doc-toggle-active-bg: rgba(31, 31, 31, 0.12);
+  --doc-toggle-active-fg: #1f1f1f;
+  --doc-toolbar-accent: #1f1f1f;
   --doc-toolbar-ink: #1f1f1f;
   --doc-toolbar-ink-muted: #444746;
   --doc-toolbar-rail: #f1f1f1;
@@ -201,8 +202,9 @@
   --doc-accent: #4e9dff;
   --doc-accent-bg: #1f3047;
   --doc-on-primary: #1f1f1f; /* text/icon on a filled primary surface */
-  --doc-toggle-active-bg: #e3e3e3;
-  --doc-toggle-active-fg: #1f1f1f;
+  --doc-toggle-active-bg: rgba(255, 255, 255, 0.16);
+  --doc-toggle-active-fg: #e3e3e3;
+  --doc-toolbar-accent: #e3e3e3;
   --doc-toolbar-ink: #e3e3e3;
   --doc-toolbar-ink-muted: #c4c7c5;
   --doc-toolbar-rail: #2d2d2d;
@@ -751,8 +753,8 @@
 .oox-root .oox-toolbar-rail {
   background-color: var(--bo-toolbar-rail, var(--doc-toolbar-rail));
   color: var(--bo-toolbar-ink, var(--doc-toolbar-ink));
-  --doc-primary: var(--bo-toolbar-accent, var(--doc-toggle-active-bg));
-  --doc-primary-hover: var(--bo-toolbar-accent, var(--doc-toggle-active-bg));
+  --doc-primary: var(--bo-toolbar-accent, var(--doc-toolbar-accent));
+  --doc-primary-hover: var(--bo-toolbar-accent, var(--doc-toolbar-accent));
   --doc-primary-light: var(--bo-toolbar-hover, var(--doc-toolbar-hover));
   --doc-bg-hover: var(--bo-toolbar-hover, var(--doc-toolbar-hover));
   --doc-text: var(--bo-toolbar-ink, var(--doc-toolbar-ink));
@@ -779,7 +781,7 @@
   --ring: 0 0% 89%;
 }
 .oox-root .oox-toolbar-rail :is(button, input, [role='combobox'], [tabindex]:not([role='menu'])):focus-visible {
-  outline: 2px solid var(--bo-toolbar-accent, var(--doc-toggle-active-bg));
+  outline: 2px solid var(--bo-toolbar-accent, var(--doc-toolbar-accent));
   outline-offset: 1px;
   box-shadow: none;
 }
@@ -809,8 +811,8 @@
 }
 .oox-root .oox-toolbar-toggle[data-active='true'],
 .oox-root .oox-toolbar-toggle[data-active='true']:hover {
-  background-color: var(--bo-toolbar-accent, var(--doc-toggle-active-bg));
-  color: var(--bo-toolbar-accent-ink, var(--doc-toggle-active-fg));
+  background-color: var(--bo-toolbar-selected, var(--doc-toggle-active-bg));
+  color: var(--bo-toolbar-ink, var(--doc-toggle-active-fg));
 }
 
 /* Outline / navigation toggle button (shown when the panel is collapsed).

@@ -12,6 +12,7 @@ const TOKENS = [
   'rail',
   'surface',
   'hover',
+  'selected',
   'line',
   'accent',
   'accent-ink',
@@ -23,6 +24,7 @@ export const toolbarTheme = {
   rail: 'var(--bo-toolbar-rail, #f1f1f1)',
   surface: 'var(--bo-toolbar-surface, #ffffff)',
   hover: 'var(--bo-toolbar-hover, rgba(31, 31, 31, 0.08))',
+  selected: 'var(--bo-toolbar-selected, rgba(31, 31, 31, 0.12))',
   line: 'var(--bo-toolbar-line, rgba(31, 31, 31, 0.16))',
   accent: 'var(--bo-toolbar-accent, #1f1f1f)',
   accentInk: 'var(--bo-toolbar-accent-ink, #ffffff)',
@@ -38,7 +40,7 @@ export const TOOLBAR_MENU_SHADOW = '0 4px 16px rgba(0, 0, 0, 0.12), 0 1px 3px rg
 
 export interface ToolbarControlState {
   disabled?: boolean;
-  /** Pressed toggle: solid accent fill. */
+  /** Pressed toggle: ghost selected tint. */
   pressed?: boolean;
   /** Open popup trigger: hover fill. */
   open?: boolean;
@@ -91,12 +93,12 @@ export function toolbarButtonStyle({
     border: 0,
     borderRadius: TOOLBAR_RADIUS,
     background: pressed
-      ? toolbarTheme.accent
+      ? toolbarTheme.selected
       : (hovered || open) && !disabled
         ? toolbarTheme.hover
         : 'transparent',
     color: pressed
-      ? toolbarTheme.accentInk
+      ? toolbarTheme.ink
       : hovered || open
         ? toolbarTheme.ink
         : toolbarTheme.inkMuted,
@@ -107,6 +109,18 @@ export function toolbarButtonStyle({
     whiteSpace: 'nowrap',
     boxSizing: 'border-box',
     ...toolbarFocusStyle(focusRing),
+  };
+}
+
+/** Solid primary action button. */
+export function toolbarPrimaryButtonStyle({
+  disabled = false,
+  focusRing,
+}: Pick<ToolbarControlState, 'disabled' | 'focusRing'>): CSSProperties {
+  return {
+    ...toolbarButtonStyle({ disabled, focusRing }),
+    background: toolbarTheme.accent,
+    color: toolbarTheme.accentInk,
   };
 }
 

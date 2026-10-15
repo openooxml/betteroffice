@@ -1,6 +1,11 @@
 import { createContext, useContext, useLayoutEffect, useRef } from 'react';
 import type { CSSProperties, KeyboardEvent, Ref } from 'react';
-import { toolbarTheme } from '../../../../../shared/react-toolbar/theme';
+import {
+  TOOLBAR_FONT_FAMILY,
+  toolbarFieldStyle,
+  toolbarTheme,
+  useFocusRing,
+} from '../../../../../shared/react-toolbar/theme';
 import { useTranslation } from '../../i18n';
 
 /** The editor's formula input, shared with whichever chrome renders the formula bar. */
@@ -33,20 +38,12 @@ const styles: Record<string, CSSProperties> = {
     gap: 4,
     flex: '1 1 320px',
     minWidth: 240,
-    padding: '0 6px',
-    borderRight: `1px solid ${toolbarTheme.line}`,
   },
   nameBox: {
-    appearance: 'none',
-    width: 64,
-    height: 28,
+    ...toolbarFieldStyle({}),
+    width: 72,
     flex: '0 0 auto',
-    boxSizing: 'border-box',
-    border: `1px solid ${toolbarTheme.line}`,
-    borderRadius: 6,
-    background: toolbarTheme.rail,
-    color: toolbarTheme.ink,
-    font: '500 12px ui-monospace, SFMono-Regular, Menlo, monospace',
+    font: `500 13px ${TOOLBAR_FONT_FAMILY}`,
     textAlign: 'center',
     outlineColor: toolbarTheme.accent,
   },
@@ -57,22 +54,8 @@ const styles: Record<string, CSSProperties> = {
     height: 28,
     flex: '0 0 auto',
     color: toolbarTheme.inkMuted,
-    font: 'italic 700 12px Georgia, serif',
+    font: `italic 700 13px ${TOOLBAR_FONT_FAMILY}`,
     userSelect: 'none',
-  },
-  input: {
-    appearance: 'none',
-    flex: '1 1 260px',
-    minWidth: 140,
-    height: 28,
-    boxSizing: 'border-box',
-    border: `1px solid ${toolbarTheme.line}`,
-    borderRadius: 6,
-    padding: '0 8px',
-    background: toolbarTheme.surface,
-    color: toolbarTheme.ink,
-    font: '13px ui-sans-serif, system-ui, sans-serif',
-    outlineColor: toolbarTheme.accent,
   },
 };
 
@@ -97,6 +80,9 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
       input.current.value = binding.value;
     }
   }, [binding]);
+  const formulaFocus = useFocusRing<HTMLInputElement>({
+    onBlur: () => binding?.onBlur(),
+  });
   if (!binding) return null;
   return (
     <div
@@ -144,8 +130,14 @@ export function FormulaBar({ className, style }: FormulaBarProps) {
           }
         }}
         onKeyUp={binding.onKeyUp}
-        onBlur={binding.onBlur}
-        style={styles.input}
+        onFocus={formulaFocus.focusProps.onFocus}
+        onBlur={formulaFocus.focusProps.onBlur}
+        style={{
+          ...toolbarFieldStyle({ focusRing: formulaFocus.focusRing }),
+          flex: '1 1 260px',
+          minWidth: 140,
+          padding: '0 8px',
+        }}
       />
     </div>
   );
