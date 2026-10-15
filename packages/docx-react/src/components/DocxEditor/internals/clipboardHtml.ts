@@ -461,7 +461,8 @@ function intAttr(element: Element, name: string): number {
   const raw = element.getAttribute(name);
   if (!raw) return 1;
   const value = Number.parseInt(raw, 10);
-  return Number.isInteger(value) && value >= 1 ? value : 1;
+  if (!Number.isInteger(value) || value < 1) return 1;
+  return Math.min(value, 1000);
 }
 
 function appendTextWithTabs(
