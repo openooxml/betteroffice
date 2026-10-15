@@ -253,6 +253,32 @@ describe('readClipboardSlice', () => {
   });
 });
 
+describe('validClipboardFragment spans', () => {
+  function fragmentWithSpan(tcPr: Record<string, unknown>): unknown {
+    return {
+      paragraphs: [{
+        tables: [{
+          tblPr: {},
+          grid: [],
+          rows: [{ trPr: {}, cells: [{ tcPr, content: [{ kind: 'text', text: 'a' }, { kind: 'pilcrow' }] }] }],
+        }],
+        text: '',
+      }],
+    };
+  }
+
+  test('rejects spans outside 1..=1000', () => {
+    expect(validClipboardFragment(fragmentWithSpan({ colspan: 1_000_000_000 }))).toBe(false);
+    expect(validClipboardFragment(fragmentWithSpan({ rowspan: 1_000_000_000 }))).toBe(false);
+    expect(validClipboardFragment(fragmentWithSpan({ colspan: 0 }))).toBe(false);
+    expect(validClipboardFragment(fragmentWithSpan({ rowspan: 1.5 }))).toBe(false);
+    expect(validClipboardFragment(fragmentWithSpan({ colspan: '2' }))).toBe(false);
+    expect(validClipboardFragment(fragmentWithSpan({ colspan: 1000 }))).toBe(true);
+    expect(validClipboardFragment(fragmentWithSpan({ rowspan: 1, colspan: 1 }))).toBe(true);
+    expect(validClipboardFragment(fragmentWithSpan({}))).toBe(true);
+  });
+});
+
 describe('applyClipboardFragment', () => {
   function fakeEngine(calls: string[]): ClipboardPasteEngine {
     const engine = {

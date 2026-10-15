@@ -3917,6 +3917,30 @@ mod tests {
     }
 
     #[test]
+    fn fragment_huge_span_is_rejected_without_panic() {
+        let colspan = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {"colspan": 1_000_000_000},
+                "content": [
+                    {"kind": "text", "text": "a", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        assert_fragment_refused(&fragment_doc(), &colspan);
+        let rowspan = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {"rowspan": 1_000_000_000},
+                "content": [
+                    {"kind": "text", "text": "a", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        assert_fragment_refused(&fragment_doc(), &rowspan);
+    }
+
+    #[test]
     fn fragment_refusals_leave_the_document_unchanged() {
         let overlapping = serde_json::json!({
             "tblPr": {}, "grid": [],
