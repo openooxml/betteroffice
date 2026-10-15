@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page, type TestInfo } from 'playwright/test';
+import { pinnedEvaluate } from './pinned-evaluate';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 
@@ -51,7 +52,7 @@ async function savedTables(page: Page, info: TestInfo, name: string): Promise<st
 async function copiedFlavors(page: Page): Promise<{ types: string[]; html: string; text: string }> {
   let flavors = { types: [] as string[], html: '', text: '' };
   await expect.poll(async () => {
-    flavors = await page.evaluate(async () => {
+    flavors = await pinnedEvaluate(page, async () => {
       const items = await navigator.clipboard.read();
       const types = items.flatMap(item => [...item.types]);
       const read = async (type: string) => {
@@ -83,7 +84,7 @@ async function caretAfterTable(input: Locator, arm: Arm) {
 }
 
 async function copyPasteAfterTable(page: Page, input: Locator, arm: Arm) {
-  await page.evaluate(() => navigator.clipboard.writeText('sentinel'));
+  await pinnedEvaluate(page, () => navigator.clipboard.writeText('sentinel'));
   await selectTable(page, input, arm);
   await input.press('ControlOrMeta+c');
   const flavors = await copiedFlavors(page);

@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from 'playwright/test';
+import { pinnedEvaluate } from './pinned-evaluate';
 import JSZip from 'jszip';
 import { readFileSync } from 'node:fs';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
@@ -283,7 +284,7 @@ test('font picker prepares the selected family and retains shaped glyph widths',
 });
 
 async function harnessText(page: Page) {
-  const bytes = await page.evaluate(() => window.__docxPeerlessHarness!.exportBytes());
+  const bytes = await pinnedEvaluate(page, () => window.__docxPeerlessHarness!.exportBytes());
   const zip = await JSZip.loadAsync(Buffer.from(bytes));
   const xml = await zip.file('word/document.xml')!.async('string');
   return page.evaluate((xml) => Array.from(
@@ -347,7 +348,7 @@ async function settled(page: Page) {
 }
 
 async function paintTurns(page: Page) {
-  await page.evaluate(() => new Promise<void>((resolve) => {
+  await pinnedEvaluate(page, () => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
 }
@@ -1212,7 +1213,7 @@ test(`viewport-first ${feature} open paints later pages after certified geometry
   await releaseCertifiedGeometry(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
-  await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
+  await pinnedEvaluate(page, async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
   const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
   await expect(later).toBeAttached();
   await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);

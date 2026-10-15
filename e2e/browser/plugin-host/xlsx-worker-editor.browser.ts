@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
 
 declare global {
@@ -10,19 +11,19 @@ test.setTimeout(120_000);
 async function open(page: Page, holdHydration = false) {
   await page.goto(holdHydration ? '/xlsx-worker-editor.html?holdHydration=1' : '/xlsx-worker-editor.html');
   await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-  await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
 }
 
 test('default worker API stages proposals after typing and supports accepting and rejecting them', async ({ page }) => {
   await page.goto('/xlsx-worker-editor.html?asyncApi=1');
   await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-  await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBe(0);
   await page.getByTestId('xlsx-scroll').focus();
   await page.getByTestId('xlsx-scroll').press('F2');
   await page.getByTestId('xlsx-cell-editor').fill('typed before proposal');
-  const proposed = await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
+  const proposed = await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
     agentId: 'browser', note: 'accept this edit', edits: [{ sheet: 0, row: 0, col: 0, input: 'accepted' }],
   }));
   expect(proposed.ok).toBe(true);
@@ -30,13 +31,13 @@ test('default worker API stages proposals after typing and supports accepting an
   expect(proposed.proposal.id).toBeTruthy();
   expect(proposed.proposal.cells).toMatchObject([{ oldText: 'typed before proposal', newText: 'accepted' }]);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(1);
-  const cellValues = () => page.evaluate(async () => {
+  const cellValues = () => pinnedEvaluate(page, async () => {
     const result = await window.__xlsxWorkerEditor.peerless!.editor.exportStructured({ scope: [{ sheet: 0, range: 'A1:B1' }] });
     if (!result.ok) throw new Error(result.failure.message);
     return result.content.sheets[0]!.cells.map((cell) => cell.displayText);
   });
   expect(await cellValues()).toEqual(['typed before proposal', '1']);
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalsPanel', { open: true })))
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalsPanel', { open: true })))
     .toMatchObject({ ok: true });
   const panel = page.getByTestId('xlsx-proposals-panel');
   const review = panel.getByTestId('xlsx-proposal');
@@ -51,7 +52,7 @@ test('default worker API stages proposals after typing and supports accepting an
   await expect(review.getByTestId('xlsx-proposal-reject')).toBeVisible();
   await expect.poll(paintedTexts).toContain('typed before proposal');
   await expect.poll(paintedTexts).toContain('accepted');
-  expect(await page.evaluate((proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalAccept', { proposalId }),
+  expect(await pinnedEvaluate(page, (proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalAccept', { proposalId }),
     proposed.proposal.id)).toMatchObject({ ok: true });
   await expect.poll(cellValues).toEqual(['accepted', '1']);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(0);
@@ -60,7 +61,7 @@ test('default worker API stages proposals after typing and supports accepting an
   await expect(panel).toHaveText('No pending proposals');
   await expect.poll(paintedTexts).toContain('accepted');
   await expect.poll(paintedTexts).not.toContain('typed before proposal');
-  const rejected = await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
+  const rejected = await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
     agentId: 'browser', edits: [{ sheet: 0, row: 0, col: 1, input: '99' }],
   }));
   expect(rejected.ok).toBe(true);
@@ -76,7 +77,7 @@ test('default worker API stages proposals after typing and supports accepting an
   await expect(review.getByTestId('xlsx-proposal-cell')).toHaveText('B1: 1 → 99');
   await expect.poll(paintedTexts).toContain('accepted');
   await expect.poll(paintedTexts).toContain('99');
-  expect(await page.evaluate((proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalReject', { proposalId }),
+  expect(await pinnedEvaluate(page, (proposalId) => window.__xlsxWorkerEditor.peerless!.editor.commands.execute('proposalReject', { proposalId }),
     rejected.proposal.id)).toMatchObject({ ok: true });
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.editor.commands.getState('proposalsPanel').value)).toBe(0);
   expect(await cellValues()).toEqual(['accepted', '1']);
@@ -115,7 +116,7 @@ async function edit(page: Page, value: string, capturePreview = false) {
     expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([]);
     await page.evaluate((text) => window.__xlsxWorkerEditor.releasePreview(text), value);
   }
-  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe(value);
+  await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe(value);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain(value);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(true);
   await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
@@ -132,8 +133,8 @@ test('xlsx worker editor echoes the caret, paints a commit preview and saves edi
   ]);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.previews)).toContain('worker edit');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.previewFrames)).toContain('worker edit');
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.saveAndReopen())).toBeGreaterThan(0);
-  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('worker edit');
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.saveAndReopen())).toBeGreaterThan(0);
+  await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe('worker edit');
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('worker edit');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
   expect(errors).toEqual([]);
@@ -142,8 +143,8 @@ test('xlsx worker editor echoes the caret, paints a commit preview and saves edi
 test('xlsx worker editor undo restores the original cell and canvas value', async ({ page }) => {
   await open(page);
   await edit(page, 'undo value');
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.undo())).toBe(true);
-  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('initial');
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.undo())).toBe(true);
+  await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe('initial');
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).not.toContain('undo value');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
@@ -165,20 +166,20 @@ test('xlsx worker editor preserves edits and its session across readOnly toggles
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBe(generation);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.readyCount())).toBe(readyCount);
   await expect(input).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('first edit');
+  await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe('first edit');
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('first edit');
   await page.getByTestId('xlsx-scroll').focus();
   await page.getByTestId('xlsx-scroll').press('F2');
   await expect(page.getByTestId('xlsx-cell-editor')).toHaveCount(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.readOnlyEditRefusal())).toContain('read-only');
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('first edit');
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.savedInputs())).toEqual(['first edit', '']);
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe('first edit');
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.savedInputs())).toEqual(['first edit', '']);
   await page.evaluate(() => window.__xlsxWorkerEditor.setReadOnly(false));
-  await page.evaluate(() => window.__xlsxWorkerEditor.hostEdit('second edit'));
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.hostEdit('second edit'));
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('second edit');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBe(generation);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.readyCount())).toBe(readyCount);
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.savedInputs())).toEqual(['first edit', 'second edit']);
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.savedInputs())).toEqual(['first edit', 'second edit']);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 
@@ -190,10 +191,10 @@ test('merged worker canvas has background pixels inside and grid pixels around t
     try {
       await page.goto('/xlsx-worker-editor.html?variant=merged-grid');
       await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-      await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+      await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
       await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
       for (const zoom of [1, 1.25]) {
-        await page.evaluate((scale) => window.__xlsxWorkerEditor.zoom(scale), zoom);
+        await pinnedEvaluate(page, (scale) => window.__xlsxWorkerEditor.zoom(scale), zoom);
         await expect(page.locator('[data-paint-source="worker"]')).toHaveAttribute('data-worker-zoom', String(zoom));
         const samples = await page.evaluate(() => {
           const canvas = document.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]')!;
@@ -244,8 +245,8 @@ for (const dpr of [1, 2]) {
         try {
           await page.goto(`/xlsx-worker-editor.html?holdHydration=1&variant=${variant}`);
           await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-          await page.evaluate(() => window.__xlsxWorkerEditor.ready);
-          await page.evaluate((scale) => window.__xlsxWorkerEditor.zoom(scale), zoom);
+          await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
+          await pinnedEvaluate(page, (scale) => window.__xlsxWorkerEditor.zoom(scale), zoom);
           await expect.poll(() => page.locator('[data-paint-source="worker"]').evaluate((canvas) => canvas.clientWidth)).toBeGreaterThan(0);
           await expect(page.locator('[data-paint-source="worker"]')).toHaveAttribute('data-worker-zoom', String(zoom));
           const clip = await page.evaluate(() => window.__xlsxWorkerEditor.cellClip());
@@ -274,7 +275,7 @@ for (const dpr of [1, 2]) {
 }
 
 async function replayMatchesPeer(page: Page) {
-  await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
   const { peers, replays } = await page.evaluate(() => ({ peers: window.__xlsxWorkerEditor.peerEntries, replays: window.__xlsxWorkerEditor.replayEntries }));
   expect(peers).toEqual(replays.map(({ sequence: _sequence, ...entry }) => entry));
   for (const generation of new Set(replays.map((entry) => entry.generation))) {
@@ -288,7 +289,7 @@ for (const phase of ['before', 'during', 'hydrated']) {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.goto(`/xlsx-worker-editor.html${phase === 'hydrated' ? '' : `?holdHydration=${phase}`}`);
     await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-    await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
     const scroll = page.getByTestId('xlsx-scroll');
     if (phase !== 'hydrated') {
       await page.evaluate(() => window.__xlsxWorkerEditor.queueBulkFill());
@@ -300,7 +301,7 @@ for (const phase of ['before', 'during', 'hydrated']) {
       await scroll.press('ArrowRight');
       const cell = await page.evaluate(() => window.__xlsxWorkerEditor.cellClip());
       await page.mouse.click(cell.x + 8, cell.y + 8);
-      await page.evaluate(() => navigator.clipboard.writeText('queued clipboard'));
+      await pinnedEvaluate(page, () => navigator.clipboard.writeText('queued clipboard'));
       await scroll.focus();
       await scroll.press('ControlOrMeta+v');
     }
@@ -318,15 +319,15 @@ for (const phase of ['before', 'during', 'hydrated']) {
       expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries)).toEqual([]);
       await page.evaluate(() => window.__xlsxWorkerEditor.releaseHydration());
     }
-    await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
     await page.getByRole('tab', { name: 'Other' }).click();
     await page.getByRole('tab', { name: 'Sheet', exact: true }).click();
-    await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
     await scroll.focus();
     await scroll.press('ControlOrMeta+b');
-    await page.evaluate(() => window.__xlsxWorkerEditor.flush());
-    await page.evaluate(() => window.__xlsxWorkerEditor.formatCells());
-    await page.evaluate(async () => {
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.formatCells());
+    await pinnedEvaluate(page, async () => {
       await window.__xlsxWorkerEditor.bulkFill();
       await window.__xlsxWorkerEditor.pluginRoutes();
       await window.__xlsxWorkerEditor.history();
@@ -335,13 +336,13 @@ for (const phase of ['before', 'during', 'hydrated']) {
     });
     await scroll.focus();
     await scroll.press('ControlOrMeta+v');
-    await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
     await scroll.press('ControlOrMeta+c');
-    await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
     await scroll.press('ControlOrMeta+x');
-    await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
     await scroll.press('Delete');
-    await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
     const chart = await page.evaluate(() => window.__xlsxWorkerEditor.chartClip());
     await page.mouse.move(chart.x + 8, chart.y + 8);
     await page.mouse.down();
@@ -355,7 +356,7 @@ for (const phase of ['before', 'during', 'hydrated']) {
     }
     const beforeFailure = await page.evaluate(() => window.__xlsxWorkerEditor.replayEntries.length);
     await page.evaluate(() => { window.__xlsxWorkerEditor.queueHostEdit('accepted before failure'); window.__xlsxWorkerEditor.fail(); });
-    expect(await page.evaluate(() => window.__xlsxWorkerEditor.recover())).toBeGreaterThan(0);
+    expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.recover())).toBeGreaterThan(0);
     const recovered = await page.evaluate(() => ({ peers: window.__xlsxWorkerEditor.peerEntries, replays: window.__xlsxWorkerEditor.replayEntries }));
     expect(recovered.replays).toHaveLength(beforeFailure);
     expect(recovered.peers.filter((entry) => entry.method === 'editCell' && entry.args[3] === 'accepted before failure')).toHaveLength(1);
@@ -366,7 +367,7 @@ for (const lifecycle of ['replacement', 'disposal', 'StrictMode']) {
   test(`keeps peer application order equal to worker replay order across every input route (${lifecycle})`, async ({ page }) => {
     await page.goto(`/xlsx-worker-editor.html?holdHydration=before${lifecycle === 'StrictMode' ? '&strict=1' : ''}`);
     await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-    await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+    await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
     const retiring = await page.evaluate(() => window.__xlsxWorkerEditor.generation());
     await page.getByTestId('xlsx-scroll').focus();
     await page.getByTestId('xlsx-scroll').press('F2');
@@ -386,7 +387,7 @@ for (const lifecycle of ['replacement', 'disposal', 'StrictMode']) {
     if (lifecycle === 'replacement') {
       await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBeGreaterThan(retiring);
       await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(true);
-      expect(await page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('initial');
+      expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe('initial');
       await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
       expect(await page.evaluate((retired) => window.__xlsxWorkerEditor.peerEntries.filter((entry) => entry.generation !== retired), retiring)).toEqual([]);
     }
@@ -402,7 +403,7 @@ for (const route of ['cell', 'host', 'paste'] as const) {
       const clip = await page.evaluate(() => window.__xlsxWorkerEditor.cellClip());
       if (route === 'host') await page.evaluate((value) => window.__xlsxWorkerEditor.queueCellHostEdit(value), input);
       else if (route === 'paste') {
-        await page.evaluate((value) => navigator.clipboard.writeText(value), input);
+        await pinnedEvaluate(page, (value) => navigator.clipboard.writeText(value), input);
         await page.getByTestId('xlsx-scroll').focus();
         await page.getByTestId('xlsx-scroll').press('ControlOrMeta+v');
       } else {
@@ -419,7 +420,7 @@ for (const route of ['cell', 'host', 'paste'] as const) {
       await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
       const after = await page.screenshot({ clip, animations: 'disabled' });
       expect(before.equals(after)).toBe(true);
-      await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe(normalized);
+      await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe(normalized);
       expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries)).toHaveLength(1);
       expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
     });
@@ -429,14 +430,14 @@ for (const route of ['cell', 'host', 'paste'] as const) {
 test('shows no speculative canvas for a host batch containing a style step', async ({ page }) => {
   await open(page, true);
   await page.evaluate(() => window.__xlsxWorkerEditor.queueStyledBatch());
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await pinnedEvaluate(page, () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(false);
   await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries)).toEqual([]);
   await page.evaluate(() => window.__xlsxWorkerEditor.releaseHydration());
-  await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.flush());
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.adoptedSequence())).toBeGreaterThanOrEqual(1);
-  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('styled batch');
+  await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe('styled batch');
   await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries[0])).toMatchObject({ method: 'applyEdits', args: [{
     steps: [{ op: 'setCellInputs', inputs: [['styled batch']] }, { op: 'patchStyle', patch: { fontSize: 24 } }],
