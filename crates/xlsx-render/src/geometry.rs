@@ -685,11 +685,23 @@ impl GridGeometry {
             .keys()
             .chain(fitted.keys())
             .copied()
+            .chain(
+                sheet
+                    .iter_cells()
+                    .map(|(at, _)| at.row)
+                    .chain(sheet.row_styles.keys().copied())
+                    .take(if sheet.format.zero_height {
+                        usize::MAX
+                    } else {
+                        0
+                    }),
+            )
             .collect();
         let rows: Vec<_> = sized
             .into_iter()
             .filter_map(|row| {
-                row_size(sheet, row, fitted.get(&row).copied(), scale).map(|size| (row, size))
+                row_size(sheet, row, fitted.get(&row).copied(), scale, default_row_pt)
+                    .map(|size| (row, size))
             })
             .collect();
         let columns = Sizes::from_values(xlsx_model::MAX_COLS, default_col_px, &columns);
@@ -764,7 +776,7 @@ impl GridGeometry {
                     }
                 }
             }
-            let size = row_size(sheet, row, fitted, scale);
+            let size = row_size(sheet, row, fitted, scale, default_pt);
             if self.rows.value(row) != size {
                 self.rows.set(row, size);
             }
@@ -838,7 +850,20 @@ impl GridGeometry {
     }
 }
 
-fn row_size(sheet: &Sheet, row: RowId, fitted: Option<f64>, scale: Option<f64>) -> Option<f32> {
+fn row_size(
+    sheet: &Sheet,
+    row: RowId,
+    fitted: Option<f64>,
+    scale: Option<f64>,
+    default_pt: f64,
+) -> Option<f32> {
+    if sheet.format.zero_height {
+        return Some(if sheet.row_hidden(row) {
+            0.0
+        } else {
+            row_pt_to_px(sheet.row_heights.get(&row).copied().unwrap_or(default_pt))
+        });
+    }
     sheet
         .row_heights
         .get(&row)
@@ -895,7 +920,10 @@ mod tests {
         assert_eq!(grid.row_y(5), GridGeometry::new(&sheet, &styles).row_y(5));
         sheet.row_styles.insert(4, 1);
         sheet.format.zero_height = true;
-        assert_eq!(GridGeometry::new(&sheet, &styles).row_y(5), 0.0);
+        assert_eq!(
+            GridGeometry::new(&sheet, &styles).row_y(5),
+            row_pt_to_px(DEFAULT_ROW_HEIGHT_PT)
+        );
     }
 
     fn sheet_with(cols: &[(ColId, f64)], rows: &[(RowId, f64)]) -> Sheet {
@@ -1198,7 +1226,72 @@ mod tests {
         assert!((grid.row_y(1) - row_pt_to_px(63.0)).abs() < 0.001);
     }
 
-    /// `zeroHeight` hides rows without their own `ht`; a sized row still shows.
+    #[test]
+    fn zero_height_content_rows_use_default_height_and_hit_testing() {
+        let parts = vec![
+            (
+                "xl/workbook.xml".into(),
+                br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels".into(),
+                br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "xl/worksheets/sheet1.xml".into(),
+                br#"<worksheet><sheetFormatPr defaultRowHeight="12.75" zeroHeight="1"/><sheetData><row r="1" ht="15"/><row r="2"><c r="A2" t="inlineStr"><is><t>visible</t></is></c></row><row r="4" hidden="1"/><row r="5"/></sheetData></worksheet>"#.to_vec(),
+            ),
+        ];
+        let workbook = xlsx_parse::parse_workbook(&parts).unwrap();
+        let sheet = &workbook.sheets[0];
+        let mut grid = GridGeometry::new(sheet, &workbook.styles);
+        assert_eq!(grid.row_y(1), 20.0);
+        assert_eq!(grid.row_y(2) - grid.row_y(1), 17.0);
+        assert_eq!(grid.row_y(3) - grid.row_y(2), 0.0);
+        assert_eq!(grid.row_y(4) - grid.row_y(3), 0.0);
+        assert_eq!(grid.row_y(5) - grid.row_y(4), 0.0);
+        assert_eq!(grid.row_at_y(21.0), 1);
+        grid.update_rows(sheet, &workbook.styles, [1, 2, 3, 4]);
+        assert_eq!(grid.row_y(2), 37.0);
+        assert_eq!(grid.row_y(5), 37.0);
+    }
+
+    #[test]
+    fn zero_height_geometry_tracks_style_only_cells_and_row_styles() {
+        let styles = Stylesheet::default();
+        let mut sheet = Sheet::new("Rows");
+        sheet.format.zero_height = true;
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::Cell {
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        sheet.row_styles.insert(1, 0);
+        sheet.row_heights.insert(2, 0.0);
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            xlsx_model::Cell {
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        let mut grid = GridGeometry::new(&sheet, &styles);
+        assert_eq!(grid.row_y(1), 17.0);
+        assert_eq!(grid.row_y(2), 34.0);
+        assert_eq!(grid.row_y(3), 34.0);
+        sheet.set_cell(CellRef::new(0, 0), Default::default());
+        sheet.row_styles.clear();
+        grid.update_rows(&sheet, &styles, [0, 1]);
+        assert_eq!(grid.row_y(3), 0.0);
+        sheet.row_styles.insert(3, 0);
+        grid.update_rows(&sheet, &styles, [3]);
+        assert_eq!(grid.row_y(4), 17.0);
+        assert_eq!(grid.row_at_y(1.0), 3);
+    }
+
     #[test]
     fn zero_height_collapses_only_the_unsized_rows() {
         let mut styles = Stylesheet::default();
@@ -1220,8 +1313,9 @@ mod tests {
             },
         );
         let grid = GridGeometry::new(&sheet, &styles);
-        assert_eq!(grid.row_y(1), 0.0);
+        assert_eq!(grid.row_y(1), row_pt_to_px(DEFAULT_ROW_HEIGHT_PT));
         assert!((grid.row_y(2) - grid.row_y(1) - row_pt_to_px(24.0)).abs() < 0.001);
+        assert_eq!(grid.row_y(3), grid.row_y(2));
     }
 
     #[test]

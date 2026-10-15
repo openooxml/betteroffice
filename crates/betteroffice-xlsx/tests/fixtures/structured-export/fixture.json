@@ -571,7 +571,7 @@
       "usedRange": "A1:A5",
       "selectedRange": "A1:A5",
       "hiddenRows": [
-        "4:5"
+        "4:4"
       ],
       "hiddenColumns": [],
       "merges": [],
@@ -638,6 +638,27 @@
           },
           "formula": null,
           "displayText": "a|b <i>",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s1!A5",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:1",
+              "index": 1,
+              "name": "Summary"
+            },
+            "a1": "A5"
+          },
+          "value": {
+            "kind": "text",
+            "value": "zero height"
+          },
+          "formula": null,
+          "displayText": "zero height",
           "numberFormat": "General",
           "formulaResult": null,
           "merge": null

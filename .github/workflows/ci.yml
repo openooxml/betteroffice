@@ -67,8 +67,11 @@ jobs:
           bun run typecheck:packages
           bun run --filter '@betteroffice/collaboration-relay' typecheck
 
-      - name: Test
-        run: bun run test
+      # What `bun run test` builds; the tests themselves run in the package-tests shards.
+      - name: Build the Wasm modules
+        run: |
+          bun run build:wasm
+          bun run build:fonts
 
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
@@ -98,6 +101,50 @@ jobs:
       - name: Import every package entry in plain Node
         run: node scripts/check-node-import.mjs
 
+  package-tests:
+    name: Package tests (${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - name: Fingerprint the wasm inputs
+        id: wasm
+        run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: target/wasm-pack
+          key: wasm-pack-${{ steps.wasm.outputs.key }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun run test --shard=${{ matrix.shard }}/2
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest
@@ -122,9 +169,66 @@ jobs:
       - name: Fail on high or critical advisories
         run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj --ignore=GHSA-vfj7-8cjw-p6xm
 
+  route:
+    name: Route the Rust gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: read
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - name: Pick the Rust gate's runner
+        id: pick
+        uses: actions/github-script@v9
+        env:
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          PINNED: ${{ vars.BO_CI_RUNNER }}
+          KYORA_CLASS: ${{ vars.BO_KYORA_CLASS || 'kyora-8x16' }}
+          KYORA_CAP: ${{ vars.BO_KYORA_CAP || '20' }}
+        with:
+          script: |
+            const { FORK, PINNED, KYORA_CLASS } = process.env;
+            const pick = (runner, reason) => {
+              core.setOutput('runner', runner);
+              core.info(`Rust gate runs on ${runner}: ${reason}`);
+            };
+            if (FORK === 'true') return pick('ubuntu-latest', 'fork pull request');
+            if (PINNED) return pick(PINNED, 'BO_CI_RUNNER');
+            const cap = Number(process.env.KYORA_CAP);
+            try {
+              const signal = AbortSignal.timeout(60_000);
+              const runIds = new Set();
+              for (const status of ['queued', 'in_progress']) {
+                const { data } = await github.rest.actions.listWorkflowRunsForRepo({ ...context.repo, status, per_page: 100, request: { signal } });
+                if (data.total_count > data.workflow_runs.length) return pick('ubuntu-latest', `${status} runs listing truncated`);
+                for (const run of data.workflow_runs) runIds.add(run.id);
+              }
+              let busy = 0;
+              for (const run_id of runIds) {
+                const { data } = await github.rest.actions.listJobsForWorkflowRun({ ...context.repo, run_id, filter: 'latest', per_page: 100, request: { signal } });
+                if (data.total_count > data.jobs.length) return pick('ubuntu-latest', `jobs listing truncated for run ${run_id}`);
+                for (const job of data.jobs) {
+                  if ((job.status === 'queued' || job.status === 'in_progress') && job.labels.some((label) => /^kyora-\d+x\d+/.test(label))) busy++;
+                }
+                if (busy >= cap) break;
+              }
+              pick(busy < cap ? KYORA_CLASS : 'ubuntu-latest', `${busy} of ${cap} kyora jobs busy`);
+            } catch (error) {
+              pick('ubuntu-latest', `failed to inspect active runs: ${error?.message ?? error}`);
+            }
+
   rust:
     name: Rust gate
-    runs-on: ubuntu-latest
+    needs: route
+    if: ${{ !cancelled() }}
+    # The route job picks the runner (GitHub-hosted for fork pull requests, BO_CI_RUNNER when set, else BO_KYORA_CLASS
+    # while fewer than BO_KYORA_CAP kyora jobs are queued or running); BO_CI_RUNNER=ubuntu-latest sends it back to GitHub-hosted.
+    runs-on: ${{ needs.route.result == 'success' && needs.route.outputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    # Full debuginfo in every test binary fills a kyora VM's disk; backtraces keep file:line.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v7
 
@@ -192,20 +296,19 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: node scripts/publish-crates.mjs --dry-run
 
+      # cargo-deny-action runs in Docker, which kyora VMs lack; this is the cargo-deny its v2.1.1 runs.
+      - uses: taiki-e/install-action@v2
+        if: steps.ws.outputs.present == 'true'
+        with:
+          tool: cargo-deny@0.20.2
+
       - name: License and advisory gate
         if: steps.ws.outputs.present == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          command: check bans licenses advisories sources
+        run: cargo deny --log-level warn --all-features check bans licenses advisories sources
 
       - name: License and advisory gate for the fuzz package
         if: steps.ws.outputs.present == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          manifest-path: fuzz/Cargo.toml
-          arguments: --all-features --config deny.toml
-          command: check
-          command-arguments: bans licenses advisories sources
+        run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
 
   python:
     name: Python gate

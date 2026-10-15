@@ -534,6 +534,7 @@ version = "0.4.3"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
+ "betteroffice-xlsx-parse",
  "hashbrown 0.17.1",
  "serde",
  "serde_json",

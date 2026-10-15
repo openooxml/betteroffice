@@ -94,7 +94,7 @@ export function useWorkerContextMenu(options: {
   if (menu?.snapshot.editState?.tableContext && !readOnly) {
     for (const [action, key] of [['addRowAbove', 'insertRowAbove'], ['addRowBelow', 'insertRowBelow'], ['deleteRow', 'deleteRow'],
       ['addColumnLeft', 'insertColumnLeft'], ['addColumnRight', 'insertColumnRight'], ['deleteColumn', 'deleteColumn'],
-      ['mergeCells', 'mergeCells'], ['splitCell', 'splitCell'], ['deleteTable', 'deleteTable']] as const) {
+      ['mergeCells', 'mergeCells'], ['splitCell', 'splitCell'], ['selectTable', 'selectTable'], ['deleteTable', 'deleteTable']] as const) {
       items.push({ action, label: t(`table.${key}`), disabled: !options.commands.getState('tableAction', action).enabled });
     }
   }

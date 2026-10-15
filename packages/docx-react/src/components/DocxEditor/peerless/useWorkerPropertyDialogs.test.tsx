@@ -35,6 +35,55 @@ test('hyperlink edits use the opened worker selection and expose its display tex
     hyperlink: { href: 'https://example.com/new', tooltip: 'New' }, expectVersion: 'captured-native' } });
 });
 
+test('split cell dialog opens with the span defaults and applies the chosen numbers', async () => {
+  const { hook } = fixture();
+  const apply = mock(async (_rows: number, _columns: number) => ({ ok: true, status: 'executed' }));
+  await act(async () => {
+    (hook.result.current as unknown as { openSplitCell(defaults: unknown, apply: unknown): void })
+      .openSplitCell({ initialRows: 2, initialCols: 2, minRows: 2, minCols: 1 }, apply);
+  });
+  const find = (node: unknown): { props: Record<string, unknown> } | undefined => {
+    if (!node || typeof node !== 'object') return undefined;
+    const props = (node as { props?: Record<string, unknown> }).props;
+    if (props && 'initialRows' in props) return node as { props: Record<string, unknown> };
+    const children = props?.children;
+    for (const child of Array.isArray(children) ? children : [children]) {
+      const found = find(child);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const dialog = find(hook.result.current.element);
+  expect(dialog?.props).toMatchObject({ isOpen: true, initialRows: 2, initialCols: 2, minRows: 2, minCols: 1 });
+  await act(async () => { await (dialog!.props.onApply as (rows: number, columns: number) => void)(2, 3); });
+  expect(apply).toHaveBeenCalledWith(2, 3);
+});
+
+test('cancelling the split cell dialog submits no split command', async () => {
+  const { hook } = fixture();
+  const apply = mock(async (_rows: number, _columns: number) => ({ ok: true, status: 'executed' }));
+  await act(async () => {
+    (hook.result.current as unknown as { openSplitCell(defaults: unknown, apply: unknown): void })
+      .openSplitCell({ initialRows: 2, initialCols: 2, minRows: 2, minCols: 1 }, apply);
+  });
+  const find = (node: unknown): { props: Record<string, unknown> } | undefined => {
+    if (!node || typeof node !== 'object') return undefined;
+    const props = (node as { props?: Record<string, unknown> }).props;
+    if (props && 'initialRows' in props) return node as { props: Record<string, unknown> };
+    const children = props?.children;
+    for (const child of Array.isArray(children) ? children : [children]) {
+      const found = find(child);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const dialog = find(hook.result.current.element);
+  expect(dialog?.props).toMatchObject({ isOpen: true, initialRows: 2, initialCols: 2 });
+  await act(async () => { (dialog!.props.onClose as () => void)(); });
+  expect(apply).not.toHaveBeenCalled();
+  expect(find(hook.result.current.element)).toBeUndefined();
+});
+
 test('image properties retain the opened physical handle after an adjacent image is selected', async () => {
   const { hook, applyQuery, selection, controller } = fixture();
   selection.focus.offset = 2;

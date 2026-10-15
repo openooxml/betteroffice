@@ -9,6 +9,8 @@ import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displ
 import { drawGlyphRunPrimitive } from '../layout/render/canvasBackend';
 import { GlyphCache } from '../layout/render/glyphCache';
 import { indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs } from './residentEchoGlyphs';
+import { readCellSelection } from './residentCommandTableSelection';
+import { readResidentCellSelectionRects } from './residentObjectGeometry';
 
 const echoAlphabet = 'abxy';
 const echoGlyphSet: DocxEchoGlyphSet = { key: 'set', fontId: 1, alphabet: echoAlphabet, horizontal: 0.01,
@@ -74,6 +76,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
         mediaReads.push(token);
         return token === 'media:0' ? 'data:image/png;base64,' + readFileSync(new URL('./__fixtures__/seed-parity/images/word/media/image1.png.base64', import.meta.url), 'utf8').replace(/\s/g, '') : null;
       },
+      cellSelection: () => null,
       setDisplayWindow() {}, retainedHeadersFootersJson: () => 'null', proposalEngine: { version: () => '0' },
       buildDisplayPagesFrame: (indices: number[]) => { builds.push([...indices]); return bytes; },
       buildDisplayListFrame: () => bytes,
@@ -90,6 +93,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     pendingOffscreenPageIds: pending, activeOffscreenPageIds: new Set(['1', '2', '3', '4']),
     glyphCache: {}, offscreenDpr: 1, offscreenZoom: 1,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
+    readCellSelection, readResidentCellSelectionRects,
     stageCommandPresentation, echoBackgroundPage, buildCommandFrame, pendingUpdates: [],
     OffscreenCanvas: class {
       constructor(public width: number, public height: number) {}

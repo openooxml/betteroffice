@@ -70,7 +70,8 @@ import { readCommentInsertionRange } from './residentCommentProjection';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
-import { readResidentFrameGeometry, resetResidentObjectHandles } from './residentObjectGeometry';
+import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
+import { readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
@@ -877,11 +878,13 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
         const shown: ReturnType<typeof presentLayout> = init.provisionalPages === undefined ? {} : presentLayout();
         const selected = hooks.selection();
-        const selectionRects = !shown.layoutProvisional && selected && (selected.anchor.story !== selected.focus.story ||
+        const cells = readCellSelection(engine);
+        const cellRects = !shown.layoutProvisional ? readResidentCellSelectionRects(engine, layout.frame, cells) : null;
+        const selectionRects = cellRects ?? (!shown.layoutProvisional && selected && (selected.anchor.story !== selected.focus.story ||
           selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset)
           ? (await readResidentRangeHighlights(engine, layout.frame, [{
             story: selected.anchor.story, start: selected.anchor, end: selected.focus,
-          }], layoutRevision)).rects[0] ?? [] : [];
+          }], layoutRevision)).rects[0] ?? [] : []);
         const built = buildCommandFrame({
           frame: finalized.bytes,
           metadata: first

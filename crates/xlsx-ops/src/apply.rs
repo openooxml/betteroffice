@@ -1346,6 +1346,113 @@ mod tests {
     }
 
     #[test]
+    fn zero_height_visibility_tracks_edits_undo_and_redo() {
+        let sheet = SheetId(0);
+        let mut initial = wb_one_sheet();
+        initial.sheets[0].format.zero_height = true;
+        initial.sheets[0].set_cell(CellRef::new(1, 0), num(1.0).into());
+        initial.sheets[0].set_cell(
+            CellRef::new(3, 0),
+            Cell {
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        initial.sheets[0].set_cell(CellRef::new(9, 0), num(9.0).into());
+        initial.sheets[0].row_styles.insert(5, 0);
+        initial.sheets[0].row_heights.extend([(7, 20.0), (9, 0.0)]);
+        let visible = |wb: &Workbook| {
+            (0..16)
+                .filter(|&row| !wb.sheets[0].row_hidden(row))
+                .collect::<Vec<_>>()
+        };
+        for (op, expected) in [
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(0, 0),
+                    cell: num(2.0),
+                },
+                vec![0, 1, 3, 5, 7],
+            ),
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(1, 0),
+                    cell: CellState::default(),
+                },
+                vec![3, 5, 7],
+            ),
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(3, 0),
+                    cell: CellState::default(),
+                },
+                vec![1, 5, 7],
+            ),
+            (
+                Op::InsertRows {
+                    sheet,
+                    at: 1,
+                    count: 2,
+                },
+                vec![3, 5, 7, 9],
+            ),
+            (
+                Op::DeleteRows {
+                    sheet,
+                    at: 1,
+                    count: 2,
+                },
+                vec![1, 3, 5],
+            ),
+            (
+                Op::InsertCols {
+                    sheet,
+                    at: 0,
+                    count: 1,
+                },
+                vec![1, 3, 5, 7],
+            ),
+            (
+                Op::DeleteCols {
+                    sheet,
+                    at: 0,
+                    count: 1,
+                },
+                vec![5, 7],
+            ),
+            (
+                Op::SetRowHeight {
+                    sheet,
+                    row: 1,
+                    height: Some(0.0),
+                },
+                vec![3, 5, 7],
+            ),
+            (
+                Op::RestoreRowStyles {
+                    sheet,
+                    styles: BTreeMap::new(),
+                },
+                vec![1, 3, 7],
+            ),
+        ] {
+            let mut workbook = initial.clone();
+            let inverse = apply_ops(&mut workbook, std::slice::from_ref(&op)).unwrap();
+            let edited = workbook.clone();
+            assert_eq!(visible(&workbook), expected, "{op:?}");
+            let redo = apply_ops(&mut workbook, &inverse).unwrap();
+            assert_eq!(workbook, initial, "undo {op:?}");
+            assert_eq!(visible(&workbook), [1, 3, 5, 7]);
+            apply_ops(&mut workbook, &redo).unwrap();
+            assert_eq!(workbook, edited, "redo {op:?}");
+            assert_eq!(visible(&workbook), expected);
+        }
+    }
+
+    #[test]
     fn remap_ref_delete_rows_edges() {
         let op = Op::DeleteRows {
             sheet: SheetId(0),

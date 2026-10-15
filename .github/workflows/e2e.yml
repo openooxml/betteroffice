@@ -17,9 +17,9 @@ jobs:
   scenarios:
     name: ${{ matrix.name }}
     # The corpus suite (a maturin release build of the Rust bindings, then the scenarios) runs on a
-    # fresh 8 vCPU / 8 GB kyora VM, one per job. Fork pull requests and the browser suite stay on
-    # GitHub's runners.
-    runs-on: ${{ matrix.suite == 'corpus' && !github.event.pull_request.head.repo.fork && 'kyora-8x8' || 'ubuntu-latest' }}
+    # fresh kyora VM, one per job. Fork pull requests and the browser suite stay on GitHub's runners,
+    # and repository variable BO_CI_RUNNER=ubuntu-latest sends the corpus suite back there too.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository || matrix.suite != 'corpus') && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -28,7 +28,11 @@ jobs:
           - suite: corpus
             name: Corpus scenarios
           - suite: browser
-            name: Browser editors
+            shard: 1
+            name: Browser editors (1/2)
+          - suite: browser
+            shard: 2
+            name: Browser editors (2/2)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -109,11 +113,11 @@ jobs:
 
       - name: Run the production editors in Chromium
         if: matrix.suite == 'browser'
-        run: bun run test:e2e:browser
+        run: bun run test:e2e:browser --shard=${{ matrix.shard }}/2
 
       - name: Run the editor plugin hosts in Chromium
         if: matrix.suite == 'browser'
-        run: bun run test:e2e:browser:plugins
+        run: bun run test:e2e:browser:plugins --shard=${{ matrix.shard }}/2
 
       - name: Upload corpus results
         if: always() && matrix.suite == 'corpus'
@@ -128,7 +132,7 @@ jobs:
         if: always() && matrix.suite == 'browser'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: e2e-browser
+          name: e2e-browser-${{ matrix.shard }}
           path: ${{ runner.temp }}/browser-results
           if-no-files-found: warn
           retention-days: 14

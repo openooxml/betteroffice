@@ -10,7 +10,7 @@ use proptest::sample::select;
 /// Absolute slack on unit-frame coordinates; rounding here is around 1e-15.
 const TOLERANCE: f64 = 1e-9;
 
-/// Every preset name `preset_geometry_to_path` draws.
+/// Preset names covered by geometry properties.
 const PRESETS: &[&str] = &[
     "rect",
     "roundRect",
@@ -87,6 +87,28 @@ const PRESETS: &[&str] = &[
     "wedgeRectCallout",
     "swooshArrow",
     "circularArrow",
+    "round2SameRect",
+    "round2DiagRect",
+    "can",
+    "blockArc",
+    "pie",
+    "flowChartExtract",
+    "frame",
+    "flowChartDelay",
+    "mathEqual",
+    "round1Rect",
+    "snip2DiagRect",
+    "stripedRightArrow",
+    "snip1Rect",
+    "bentUpArrow",
+    "notchedRightArrow",
+    "snip2SameRect",
+    "mathPlus",
+    "rightBracket",
+    "teardrop",
+    "leftBracket",
+    "chord",
+    "flowChartMerge",
 ];
 
 /// Presets added here whose ECMA-376 definition curves rather than only turning corners.
@@ -119,7 +141,7 @@ const HULL_OUTSIDE_FRAME: &[&str] = &["ellipseRibbon", "noSmoking"];
 const CURVE_SAMPLES: usize = 24;
 
 /// These presets can exceed their frames at valid adjustments or aspect ratios.
-const SPEC_OVERRUNS_FRAME: &[&str] = &["mathMultiply", "swooshArrow"];
+const SPEC_OVERRUNS_FRAME: &[&str] = &["mathMultiply", "swooshArrow", "teardrop", "bentUpArrow"];
 
 /// `cloudCallout`'s body overruns the 43200 frame its own path declares by about 1%.
 const BODY_SLACK: f64 = 0.02;
@@ -228,6 +250,14 @@ fn named(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
 
 fn draw(shape: &str, adjustments: &HashMap<String, f64>, aspect: f64) -> Vec<GeometryPathCommand> {
     preset_geometry_to_path(shape, adjustments, aspect)
+        .or_else(|| {
+            preset_geometry_layers(shape, adjustments, aspect).map(|layers| {
+                layers
+                    .into_iter()
+                    .flat_map(|layer| layer.commands)
+                    .collect()
+            })
+        })
         .unwrap_or_else(|| panic!("{shape} is not a preset"))
 }
 
@@ -405,7 +435,7 @@ proptest! {
                 prop_assert!(x.is_finite() && y.is_finite(), "{shape} emitted ({x}, {y})");
             }
         }
-        for shape in PRESETS.iter().chain(["arc", "cube", "leftBrace", "rightBrace", "ribbon2"].iter()) {
+        for shape in PRESETS.iter().chain(["arc", "cube", "leftBrace", "rightBrace", "ribbon2", "can", "leftBracket", "rightBracket"].iter()) {
             for layer in preset_geometry_layers(shape, &adjustments, aspect).into_iter().flatten() {
                 for (x, y) in coordinates(&layer.commands) {
                     prop_assert!(x.is_finite() && y.is_finite(), "{shape} layer emitted ({x}, {y})");
@@ -683,8 +713,374 @@ proptest! {
 }
 
 #[test]
+fn rectangle_variants_follow_ecma_vertices() {
+    assert_points(
+        &endpoints(&draw("round2SameRect", &HashMap::new(), 2.0)),
+        &[
+            (0.083335, 0.0),
+            (0.916665, 0.0),
+            (1.0, 0.16667),
+            (1.0, 1.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (0.0, 0.16667),
+            (0.083335, 0.0),
+        ],
+    );
+    assert_points(
+        &vertices(&draw("snip1Rect", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (0.916665, 0.0),
+            (1.0, 0.16667),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ],
+    );
+}
+
+#[test]
+fn frame_has_oppositely_wound_outer_and_inner_rectangles() {
+    let parts = subpaths(&draw("frame", &HashMap::new(), 2.0));
+    assert_eq!(parts.len(), 2);
+    assert_points(
+        &vertices(&parts[0]),
+        &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+    );
+    assert_points(
+        &vertices(&parts[1]),
+        &[
+            (0.0625, 0.125),
+            (0.0625, 0.875),
+            (0.9375, 0.875),
+            (0.9375, 0.125),
+        ],
+    );
+    assert!(signed_area(&sample(&parts[0])) * signed_area(&sample(&parts[1])) < 0.0);
+}
+
+#[test]
+fn math_equal_has_two_ecma_bars() {
+    let parts = subpaths(&draw("mathEqual", &HashMap::new(), 2.0));
+    assert_eq!(parts.len(), 2);
+    assert_points(
+        &vertices(&parts[0]),
+        &[
+            (0.13255, 0.206),
+            (0.86745, 0.206),
+            (0.86745, 0.4412),
+            (0.13255, 0.4412),
+        ],
+    );
+    assert_points(
+        &vertices(&parts[1]),
+        &[
+            (0.13255, 0.5588),
+            (0.86745, 0.5588),
+            (0.86745, 0.794),
+            (0.13255, 0.794),
+        ],
+    );
+}
+
+#[test]
+fn flowchart_triangles_use_their_declared_coordinate_space() {
+    for aspect in [0.5, 2.0] {
+        assert_points(
+            &vertices(&draw("flowChartExtract", &HashMap::new(), aspect)),
+            &[(0.0, 1.0), (0.5, 0.0), (1.0, 1.0)],
+        );
+        assert_points(
+            &vertices(&draw("flowChartMerge", &HashMap::new(), aspect)),
+            &[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)],
+        );
+    }
+}
+
+#[test]
+fn pie_defaults_trace_three_quadrants_in_a_wide_frame() {
+    assert_eq!(
+        preset_geometry_default_adjustments("pie"),
+        named(&[("adj1", 0.0), ("adj2", 162.0)])
+    );
+    assert_points(
+        &endpoints(&draw("pie", &HashMap::new(), 2.0)),
+        &[(1.0, 0.5), (0.5, 1.0), (0.0, 0.5), (0.5, 0.0), (0.5, 0.5)],
+    );
+    let path = draw("pie", &named(&[("adj1", 27.0), ("adj2", 54.0)]), 2.0);
+    assert_points(
+        &endpoints(&path),
+        &[
+            (0.7236067977499789, 0.9472135954999579),
+            (0.5, 1.0),
+            (0.5, 0.5),
+        ],
+    );
+}
+
+#[test]
+fn snips_and_block_arc_apply_non_default_adjustments() {
+    let path = draw(
+        "snip2DiagRect",
+        &named(&[("adj1", 0.1), ("adj2", 0.3)]),
+        2.0,
+    );
+    assert_points(
+        &vertices(&path),
+        &[
+            (0.05, 0.0),
+            (0.85, 0.0),
+            (1.0, 0.3),
+            (1.0, 0.9),
+            (0.95, 1.0),
+            (0.15, 1.0),
+            (0.0, 0.7),
+            (0.0, 0.1),
+        ],
+    );
+    assert_points(
+        &endpoints(&draw("blockArc", &named(&[("adj3", 0.1)]), 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.95, 0.5),
+            (0.5, 0.1),
+            (0.05, 0.5),
+        ],
+    );
+    assert_points(
+        &endpoints(&draw("blockArc", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.875, 0.5),
+            (0.5, 0.25),
+            (0.125, 0.5),
+        ],
+    );
+}
+
+#[test]
+fn block_arc_with_a_collapsed_inner_radius_keeps_its_center() {
+    assert_points(
+        &endpoints(&draw(
+            "blockArc",
+            &named(&[("adj1", 0.0), ("adj2", 27.0), ("adj3", 0.5)]),
+            2.0,
+        )),
+        &[
+            (1.0, 0.5),
+            (0.7236067977499789, 0.9472135954999579),
+            (0.5, 0.5),
+            (0.75, 0.5),
+        ],
+    );
+}
+
+#[test]
+fn block_arc_with_subnormal_end_angle_stays_inside_its_frame() {
+    for aspect in [
+        1.0 / 64.0,
+        0.5,
+        1.0 - f64::EPSILON,
+        1.0,
+        1.0 + f64::EPSILON,
+        2.0,
+        64.0,
+    ] {
+        let expected = draw(
+            "blockArc",
+            &named(&[("adj2", 0.0), ("adj3", 4.394663328410801)]),
+            aspect,
+        );
+        for adj2 in [
+            f64::from_bits(1),
+            4.86946011005727e-309,
+            f64::MIN_POSITIVE,
+            1e-20,
+        ] {
+            let path = draw(
+                "blockArc",
+                &named(&[("adj2", adj2), ("adj3", 4.394663328410801)]),
+                aspect,
+            );
+            assert_points(&endpoints(&path), &endpoints(&expected));
+            for (x, y) in coordinates(&path).into_iter().chain(sample(&path)) {
+                assert!(
+                    (-TOLERANCE..=1.0 + TOLERANCE).contains(&x)
+                        && (-TOLERANCE..=1.0 + TOLERANCE).contains(&y),
+                    "blockArc left its frame at ({x}, {y}) for adj2 {adj2} and aspect {aspect}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ribbon_at_zero_height_adjustment_keeps_its_curves() {
+    for aspect in [1.0 / 64.0, 0.5, 1.0, 2.0, 64.0] {
+        let path = draw("ribbon", &named(&[("adj1", 0.0)]), aspect);
+        assert!(
+            path.iter()
+                .any(|command| matches!(command, GeometryPathCommand::Cubic { .. }))
+        );
+        for (x, y) in coordinates(&path).into_iter().chain(sample(&path)) {
+            assert!(
+                (-TOLERANCE..=1.0 + TOLERANCE).contains(&x)
+                    && (-TOLERANCE..=1.0 + TOLERANCE).contains(&y),
+                "ribbon left its frame at ({x}, {y}) for aspect {aspect}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ecma_allows_teardrop_tips_and_bent_arrow_shafts_outside_the_frame() {
+    assert_points(
+        &endpoints(&draw("teardrop", &named(&[("adj", 2.0)]), 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.5, -0.5),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.0, 0.5),
+        ],
+    );
+    assert_points(
+        &vertices(&draw(
+            "bentUpArrow",
+            &named(&[("adj1", 0.5), ("adj2", 0.0), ("adj3", 0.25)]),
+            2.0,
+        )),
+        &[
+            (0.0, 0.5),
+            (0.875, 0.5),
+            (0.875, 0.25),
+            (1.0, 0.25),
+            (1.0, 0.0),
+            (1.0, 0.25),
+            (1.125, 0.25),
+            (1.125, 1.0),
+            (0.0, 1.0),
+        ],
+    );
+}
+
+#[test]
+fn can_at_zero_adjustment_keeps_every_layer_inside_its_frame() {
+    for aspect in [1.0 / 64.0, 0.5, 1.0, 2.0, 64.0] {
+        let layers = preset_geometry_layers("can", &named(&[("adj", 0.0)]), aspect).unwrap();
+        assert_eq!(layers.len(), 3);
+        for layer in &layers {
+            for (x, y) in coordinates(&layer.commands)
+                .into_iter()
+                .chain(sample(&layer.commands))
+            {
+                assert!(
+                    (-TOLERANCE..=1.0 + TOLERANCE).contains(&x)
+                        && (-TOLERANCE..=1.0 + TOLERANCE).contains(&y),
+                    "can left its frame at ({x}, {y}) for aspect {aspect}"
+                );
+            }
+            assert!(layer.commands.iter().all(|command| match *command {
+                GeometryPathCommand::Cubic { cp1y, cp2y, y, .. } => near((cp1y, cp2y), (y, y)),
+                GeometryPathCommand::Move { .. }
+                | GeometryPathCommand::Line { .. }
+                | GeometryPathCommand::Close => true,
+                _ => false,
+            }));
+        }
+        assert_points(
+            &endpoints(&layers[0].commands),
+            &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+        );
+        assert_points(
+            &endpoints(&layers[1].commands),
+            &[(0.0, 0.0), (1.0, 0.0), (0.0, 0.0)],
+        );
+        assert_points(
+            &endpoints(&layers[2].commands),
+            &[
+                (1.0, 0.0),
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+                (0.0, 0.0),
+            ],
+        );
+    }
+}
+
+#[test]
+fn can_and_brackets_preserve_fill_and_open_stroke_layers() {
+    use ooxml_drawingml::PresetPathFill;
+    let layers = preset_geometry_layers("can", &HashMap::new(), 2.0).unwrap();
+    assert_eq!(layers.len(), 3);
+    assert_eq!(layers[0].fill, PresetPathFill::Normal);
+    assert_eq!(layers[1].fill, PresetPathFill::Lighten);
+    assert_eq!(layers[2].fill, PresetPathFill::None);
+    assert!(!layers[0].stroke && !layers[1].stroke && layers[2].stroke);
+    assert_points(
+        &endpoints(&layers[0].commands),
+        &[
+            (0.0, 0.125),
+            (0.5, 0.25),
+            (1.0, 0.125),
+            (1.0, 0.875),
+            (0.5, 1.0),
+            (0.0, 0.875),
+        ],
+    );
+    for shape in ["can", "leftBracket", "rightBracket"] {
+        let layers = preset_geometry_layers(shape, &HashMap::new(), 2.0).unwrap();
+        let outline = layers.last().unwrap();
+        assert_eq!(outline.fill, PresetPathFill::None);
+        assert!(outline.stroke);
+        assert!(
+            !outline
+                .commands
+                .iter()
+                .any(|command| matches!(command, GeometryPathCommand::Close))
+        );
+    }
+}
+
+fn endpoints(path: &[GeometryPathCommand]) -> Vec<(f64, f64)> {
+    path.iter()
+        .filter_map(|command| match *command {
+            GeometryPathCommand::Move { x, y }
+            | GeometryPathCommand::Line { x, y }
+            | GeometryPathCommand::Quad { x, y, .. }
+            | GeometryPathCommand::Cubic { x, y, .. } => Some((x, y)),
+            GeometryPathCommand::Close => None,
+        })
+        .collect()
+}
+
+fn assert_points(actual: &[(f64, f64)], expected: &[(f64, f64)]) {
+    assert_eq!(actual.len(), expected.len(), "{actual:?}");
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        assert!(near(actual, expected), "{actual:?} != {expected:?}");
+    }
+}
+
+#[test]
 fn single_path_consumers_do_not_receive_partial_layered_presets() {
-    for shape in ["arc", "cube", "leftBrace", "rightBrace", "ribbon2"] {
+    for shape in [
+        "arc",
+        "cube",
+        "leftBrace",
+        "rightBrace",
+        "ribbon2",
+        "can",
+        "leftBracket",
+        "rightBracket",
+    ] {
         assert!(preset_geometry_to_path(shape, &HashMap::new(), 1.0).is_none());
         assert!(
             preset_geometry_layers(shape, &HashMap::new(), 1.0)

@@ -33,6 +33,7 @@ import type {
   YrsSession,
   YrsStickyPosition,
   YrsStoryRange,
+  YrsTableRange,
 } from './index';
 import type { DocxClipboardFragment } from './clipboardFragment';
 import type { LayoutMetaV1 } from './layoutMeta';
@@ -71,6 +72,8 @@ export interface DocxCommandTableContext {
   columnCount: number;
   hasMultiCellSelection: boolean;
   canSplitCell: boolean;
+  rowSpan?: number;
+  columnSpan?: number;
   justification?: string;
   cellBorderColor?: ColorValue;
   cellBackgroundColor?: string;
@@ -309,6 +312,7 @@ export interface DocxCommandPayloads {
   setProposalStates: DocxProposalStateRequest;
   withdrawProposals: DocxProposalWithdrawRequest;
   navigateCell: DocxSelectionIntent & { direction: 'forward' | 'backward'; extend: boolean; createLastRow: boolean };
+  selectTableCells: DocxSelectionIntent & { target: 'table' | 'row' | 'column' };
   select: { selection: DocxCommandSelection };
   navigate: DocxNavigationIntent;
   selectPoint: DocxSelectionPointIntent;
@@ -395,6 +399,7 @@ export interface PreparedDocxCommand {
   selection: DocxCommandSelection | null;
   range: YrsStoryRange | null;
   cellNavigation?: DocxCellNavigationPlan;
+  cells?: YrsTableRange | null;
   table?: DocxTableCommandTarget;
   paragraphChanges?: Array<{ range: YrsStoryRange; attrs: YrsParagraphAttrs }>;
   sectionBreakProperties?: SectionProperties;

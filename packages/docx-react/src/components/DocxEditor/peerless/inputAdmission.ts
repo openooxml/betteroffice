@@ -432,6 +432,9 @@ const SUGGESTED = {
   applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
   formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,
+  insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
+  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true,
+  selectTableCells: false,
   addComment: false, resizeObject: false, moveObject: false,
   setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
   setSectionMargins: false, setTabStops: false, removeTabStop: false,
@@ -471,7 +474,7 @@ function requireSelection(selection: DocxCommandSelection | null | undefined): D
 
 function isSelection(intent: AdmissionIntent): boolean {
   return intent.kind === 'openPart' || intent.kind === 'select' || intent.kind === 'navigate' || intent.kind === 'navigateCell' ||
-    intent.kind === 'selectPoint' || intent.kind === 'extendSelection';
+    intent.kind === 'selectTableCells' || intent.kind === 'selectPoint' || intent.kind === 'extendSelection';
 }
 
 function isText(intent: AdmissionIntent): intent is PeerlessTextIntent {

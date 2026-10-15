@@ -253,6 +253,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   };
   const canDisplaySelection = composition?.phase !== 'active' && geometry?.coversThroughSeq === snapshot.throughSeq;
   const caret = canDisplaySelection ? geometry?.caret : null;
+  const hideCaret = snapshot.editState?.tableContext?.hasMultiCellSelection === true;
   const releasePointer = (event: PointerEvent<HTMLDivElement>) => {
     if (dragPointer.current !== event.pointerId) return;
     dragPointer.current = null;
@@ -282,7 +283,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           textMirror={pageMirror === 'text'} />
         {highlights?.map((rect, index) => <div key={`find-${index}`} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: rect.current ? 'rgba(255, 150, 0, 0.4)' : 'rgba(255, 220, 0, 0.3)', pointerEvents: 'none' }} />)}
         {canDisplaySelection && geometry?.selectionRects.map((rect, index) => <div key={index} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: 'rgba(59, 130, 246, 0.25)', pointerEvents: 'none' }} />)}
-        {caret && <PeerlessCaret caret={caret} input={input} />}
+        {caret && !hideCaret && <PeerlessCaret caret={caret} input={input} />}
       </div>
     </div>
   </>;

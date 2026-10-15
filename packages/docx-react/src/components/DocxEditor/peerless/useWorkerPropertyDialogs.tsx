@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { EndnoteProperties, FootnoteProperties } from '@betteroffice/docx/types/document';
 import type { DocxEditorProps } from '../../DocxEditor';
 import { HyperlinkDialog, type HyperlinkData } from '../../dialogs/HyperlinkDialog';
@@ -6,6 +6,8 @@ import { FootnotePropertiesDialog } from '../../dialogs/FootnotePropertiesDialog
 import { ImagePropertiesDialog, type ImagePropertiesData } from '../../dialogs/ImagePropertiesDialog';
 import { ImagePositionDialog, type ImagePositionData } from '../../dialogs/ImagePositionDialog';
 import { PageSetupDialog } from '../../dialogs/PageSetupDialog';
+import { SplitCellDialog } from '../../dialogs/SplitCellDialog';
+import type { DocxCommandResult } from '../../../commands/types';
 import { WatermarkDialog } from '../../dialogs/WatermarkDialog';
 import { useWorkerQuery } from './useWorkerQuery';
 import { useWorkerPageSetupControls, useWorkerWatermarkControls } from './workerPropertyControls';
@@ -20,8 +22,12 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   const [image, setImage] = useState<{ query: WorkerPropertyQuery; position: boolean } | null>(null);
   const [notes, setNotes] = useState<WorkerPropertyQuery | null>(null);
   const [link, setLink] = useState<{ query: WorkerPropertyQuery; text: string } | null>(null);
+  const [split, setSplit] = useState<{ defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number };
+    apply(rows: number, columns: number): Promise<DocxCommandResult> } | null>(null);
+  const openSplitCell = useCallback((defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
+    apply: (rows: number, columns: number) => Promise<DocxCommandResult>) => { setSplit({ defaults, apply }); }, []);
   const report = (error: unknown) => props.onError?.(error instanceof Error ? error : new Error(String(error)));
-  useEffect(() => { setImage(null); setNotes(null); setLink(null); },
+  useEffect(() => { setImage(null); setNotes(null); setLink(null); setSplit(null); },
     [state.view?.identity.session, state.view?.identity.incarnation, state.view?.identity.epoch]);
   const openImage = async (position = false) => {
     try {
@@ -83,7 +89,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
     height: typeof imageData.height === 'number' ? imageData.height : typeof imageData.heightEmu === 'number' ? imageData.heightEmu / 9525 : undefined,
   } : undefined;
   return { openLink, openNotes, openImage, openImagePosition: () => openImage(true), imagePropertiesAvailable: object?.value?.kind === 'object',
-    openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark,
+    openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell,
     element: <>
       {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps} onApply={page.handlePageSetupApply} />}
       {watermark.showWatermark && <WatermarkDialog isOpen onClose={watermark.close} current={watermark.currentWatermark}
@@ -93,6 +99,9 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
         onRemove={hyperlink ? () => { void applyLink(null); } : undefined} />}
       {notes?.value?.kind === 'section' && <FootnotePropertiesDialog isOpen onClose={() => setNotes(null)} onApply={applyNotes}
         footnotePr={notes.value.properties.footnotePr} endnotePr={notes.value.properties.endnotePr} />}
+      {split && <SplitCellDialog isOpen onClose={() => setSplit(null)} initialRows={split.defaults.initialRows}
+        initialCols={split.defaults.initialCols} minRows={split.defaults.minRows} minCols={split.defaults.minCols}
+        onApply={(rows, columns) => { void split.apply(rows, columns); setSplit(null); }} />}
       {image && imageData && (image.position ? <ImagePositionDialog isOpen onClose={() => setImage(null)} onApply={applyImagePosition}
         currentData={{ ...imageData, ...(imageData.position && typeof imageData.position === 'object' ? imageData.position : {}) }} /> :
         <ImagePropertiesDialog isOpen onClose={() => setImage(null)} currentData={imageProperties} onApply={applyImageProperties}
