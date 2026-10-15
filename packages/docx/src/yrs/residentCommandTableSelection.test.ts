@@ -204,15 +204,16 @@ test('plain_click_arrow_and_typing_clear_the_range_into_the_caret_cell', async (
 test('cell_selection_runtime_error_propagates_through_shift_arrow_range', async () => {
   const arm = await inCell();
   const base = arm.state.selection!;
+  const moved = { ...base.focus, offset: base.focus.offset + 1 };
   Object.assign(arm.engine, {
     cellSelection: () => { throw new WebAssembly.RuntimeError('unreachable'); },
   });
-  expect(() => resolveShiftArrowCellRange(arm.engine, base, base.focus, 'character', 'forward'))
+  expect(() => resolveShiftArrowCellRange(arm.engine, base, moved, 'character', 'forward'))
     .toThrow(WebAssembly.RuntimeError);
   Object.assign(arm.engine, {
     cellSelection: () => { throw new TypeError('transient'); },
   });
-  expect(resolveShiftArrowCellRange(arm.engine, base, base.focus, 'character', 'forward')).toBeNull();
+  expect(resolveShiftArrowCellRange(arm.engine, base, moved, 'character', 'forward')).toBeNull();
 }, TIMEOUT);
 
 test('multi_cell_range_reports_one_rect_per_selected_cell', async () => {
