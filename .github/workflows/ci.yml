@@ -240,7 +240,7 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: node scripts/publish-crates.mjs --dry-run
 
-      # cargo-deny-action runs in Docker, which kyora VMs lack: its v2.1.1 release of cargo-deny, run directly.
+      # cargo-deny-action runs in Docker, which kyora VMs lack; this is the cargo-deny its v2.1.1 runs.
       - uses: taiki-e/install-action@v2
         if: steps.ws.outputs.present == 'true'
         with:
@@ -252,7 +252,7 @@ jobs:
 
       - name: License and advisory gate for the fuzz package
         if: steps.ws.outputs.present == 'true'
-        run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features check --config deny.toml bans licenses advisories sources
+        run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features --config deny.toml check bans licenses advisories sources
 
   python:
     name: Python gate
