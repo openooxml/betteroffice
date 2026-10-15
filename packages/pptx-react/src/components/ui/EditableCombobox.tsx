@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
 import { tooltipText, useDisabledDescription } from './ToolbarPrimitives';
-import { ToolbarSymbol } from '../../../../../shared/react-toolbar/icons';
 import {
   TOOLBAR_DISABLED_OPACITY,
   toolbarFocusStyle,
@@ -229,7 +228,7 @@ export function EditableCombobox({
               }}
             >
               <span style={{ display: 'inline-flex', width: 18, flex: '0 0 auto' }}>
-                {option.value === value && <ToolbarSymbol name="check" size={18} />}
+                {option.value === value && <ToolbarIcon name="check" size={18} />}
               </span>
               {option.label}
             </button>

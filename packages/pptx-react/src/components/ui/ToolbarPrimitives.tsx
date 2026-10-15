@@ -10,7 +10,7 @@ import {
 } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ToolbarSymbol } from '../../../../../shared/react-toolbar/icons';
+import { ToolbarIcon } from './ToolbarIcon';
 import {
   inheritedToolbarTokens,
   toolbarButtonStyle,
@@ -540,7 +540,7 @@ export function ToolbarMenuItem({
           {icon}
         </span>
         <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{label}</span>
-        {selected && <ToolbarSymbol name="check" size={18} />}
+        {selected && <ToolbarIcon name="check" size={18} />}
       </button>
       {reason && (
         <span id={descriptionId} hidden>

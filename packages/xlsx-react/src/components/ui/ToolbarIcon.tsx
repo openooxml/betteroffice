@@ -1,34 +1,62 @@
 import type { CSSProperties } from 'react';
-import { ToolbarSymbol, type ToolbarSymbolName } from '../../../../../shared/react-toolbar/icons';
+import { ToolbarSymbol } from '../../../../../shared/react-toolbar/icons';
+import {
+  add,
+  arrowDropDown,
+  borderAll,
+  borderColor,
+  cellMerge,
+  check,
+  decimalDecrease,
+  decimalIncrease,
+  download,
+  formatAlignLeft,
+  formatBold,
+  formatColorFill,
+  formatColorText,
+  formatItalic,
+  formatPaint,
+  image,
+  moreVert,
+  print,
+  rateReview,
+  redo,
+  remove,
+  search,
+  strikethroughS,
+  undo,
+  verticalAlignCenter,
+  wrapText,
+} from '../../../../../shared/react-toolbar/symbols';
 
 const SYMBOLS = {
-  search: 'search',
-  undo: 'undo',
-  redo: 'redo',
-  print: 'print',
-  formatPaint: 'format_paint',
-  decimalDecrease: 'decimal_decrease',
-  decimalIncrease: 'decimal_increase',
-  bold: 'format_bold',
-  italic: 'format_italic',
-  strikethrough: 'strikethrough_s',
-  textColor: 'format_color_text',
-  fillColor: 'format_color_fill',
-  borders: 'border_all',
-  borderColor: 'border_color',
-  merge: 'cell_merge',
-  alignLeft: 'format_align_left',
-  verticalAlignCenter: 'vertical_align_center',
-  wrap: 'wrap_text',
-  more: 'more_vert',
-  chevronDown: 'arrow_drop_down',
-  remove: 'remove',
-  add: 'add',
-  check: 'check',
-  save: 'download',
-  image: 'image',
-  proposals: 'rate_review',
-} as const satisfies Record<string, ToolbarSymbolName>;
+  search,
+  undo,
+  redo,
+  print,
+  formatPaint,
+  decimalDecrease,
+  decimalIncrease,
+  bold: formatBold,
+  italic: formatItalic,
+  strikethrough: strikethroughS,
+  textColor: formatColorText,
+  fillColor: formatColorFill,
+  borders: borderAll,
+  borderColor,
+  merge: cellMerge,
+  alignLeft: formatAlignLeft,
+  verticalAlignCenter,
+  wrap: wrapText,
+  more: moreVert,
+  chevronDown: arrowDropDown,
+  remove,
+  add,
+  check,
+  save: download,
+  image,
+  proposals: rateReview,
+};
 
 export type ToolbarIconName = keyof typeof SYMBOLS;
 
@@ -39,5 +67,5 @@ export interface ToolbarIconProps {
 }
 
 export function ToolbarIcon({ name, size, style }: ToolbarIconProps) {
-  return <ToolbarSymbol name={SYMBOLS[name]} size={size} style={style} />;
+  return <ToolbarSymbol path={SYMBOLS[name]} size={size} style={style} />;
 }

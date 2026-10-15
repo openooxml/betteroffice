@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { OverflowMenuEntry } from '../../../../../shared/react-toolbar/OverflowMenu';
-import { ToolbarSymbol } from '../../../../../shared/react-toolbar/icons';
+import { ToolbarIcon } from './ToolbarIcon';
 import {
   toolbarButtonStyle,
   toolbarMenuItemStyle,
@@ -454,7 +454,7 @@ export function ToolbarMenuItem({
           {icon}
         </span>
         <span style={{ flex: 1 }}>{label}</span>
-        {selected && <ToolbarSymbol name="check" size={18} />}
+        {selected && <ToolbarIcon name="check" size={18} />}
       </button>
       {reason && (
         <span id={id} hidden>

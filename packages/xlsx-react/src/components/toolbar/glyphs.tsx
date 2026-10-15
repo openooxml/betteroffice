@@ -4,43 +4,61 @@ import type {
   HorizontalAlignment,
   VerticalAlignment,
 } from '../Toolbar';
-import { ToolbarSymbol, type ToolbarSymbolName } from '../../../../../shared/react-toolbar/icons';
+import { ToolbarSymbol } from '../../../../../shared/react-toolbar/icons';
+import {
+  borderAll,
+  borderBottom,
+  borderClear,
+  borderHorizontal,
+  borderInner,
+  borderLeft,
+  borderOuter,
+  borderRight,
+  borderTop,
+  borderVertical,
+  formatAlignCenter,
+  formatAlignLeft,
+  formatAlignRight,
+  verticalAlignBottom,
+  verticalAlignCenter,
+  verticalAlignTop,
+} from '../../../../../shared/react-toolbar/symbols';
 
-const BORDER_SYMBOLS: Record<BorderPreset, ToolbarSymbolName> = {
-  all: 'border_all',
-  inner: 'border_inner',
-  horizontal: 'border_horizontal',
-  vertical: 'border_vertical',
-  outer: 'border_outer',
-  left: 'border_left',
-  top: 'border_top',
-  right: 'border_right',
-  bottom: 'border_bottom',
-  none: 'border_clear',
+const BORDER_SYMBOLS: Record<BorderPreset, string> = {
+  all: borderAll,
+  inner: borderInner,
+  horizontal: borderHorizontal,
+  vertical: borderVertical,
+  outer: borderOuter,
+  left: borderLeft,
+  top: borderTop,
+  right: borderRight,
+  bottom: borderBottom,
+  none: borderClear,
 };
 
-const HORIZONTAL_SYMBOLS: Record<HorizontalAlignment, ToolbarSymbolName> = {
-  left: 'format_align_left',
-  center: 'format_align_center',
-  right: 'format_align_right',
+const HORIZONTAL_SYMBOLS: Record<HorizontalAlignment, string> = {
+  left: formatAlignLeft,
+  center: formatAlignCenter,
+  right: formatAlignRight,
 };
 
-const VERTICAL_SYMBOLS: Record<VerticalAlignment, ToolbarSymbolName> = {
-  top: 'vertical_align_top',
-  middle: 'vertical_align_center',
-  bottom: 'vertical_align_bottom',
+const VERTICAL_SYMBOLS: Record<VerticalAlignment, string> = {
+  top: verticalAlignTop,
+  middle: verticalAlignCenter,
+  bottom: verticalAlignBottom,
 };
 
 export function BorderGlyph({ preset }: { preset: BorderPreset }) {
-  return <ToolbarSymbol name={BORDER_SYMBOLS[preset]} />;
+  return <ToolbarSymbol path={BORDER_SYMBOLS[preset]} />;
 }
 
 export function HorizontalAlignmentGlyph({ value }: { value: HorizontalAlignment }) {
-  return <ToolbarSymbol name={HORIZONTAL_SYMBOLS[value]} />;
+  return <ToolbarSymbol path={HORIZONTAL_SYMBOLS[value]} />;
 }
 
 export function VerticalAlignmentGlyph({ value }: { value: VerticalAlignment }) {
-  return <ToolbarSymbol name={VERTICAL_SYMBOLS[value]} />;
+  return <ToolbarSymbol path={VERTICAL_SYMBOLS[value]} />;
 }
 
 export function BorderStyleGlyph({ value }: { value: BorderStyle }) {
