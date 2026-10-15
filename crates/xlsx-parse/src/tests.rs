@@ -3528,7 +3528,10 @@ fn edits_save_over_a_byte_order_mark_without_a_declaration_and_a_self_closing_ro
         assert!(part_bytes(&saved, path).starts_with(BOM), "{path}");
     }
     let reopened = parse_workbook(&saved).unwrap();
-    assert_eq!(cell_at(&reopened, "A1").value, CellValue::Number { value: 1.0 });
+    assert_eq!(
+        cell_at(&reopened, "A1").value,
+        CellValue::Number { value: 1.0 }
+    );
     assert_eq!(
         cell_at(&reopened, "B1").value,
         CellValue::Text {
