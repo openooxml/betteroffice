@@ -1,6 +1,6 @@
 import type { YrsCellLoc, YrsLoc, YrsTableLoc, YrsTableRange } from './index';
 import { createYrsPositionProjection } from './yrsPositionProjection';
-import { tableAnchors, type TablePayload } from './storyPlainText';
+import { tableAnchors, type TableCellAnchor, type TablePayload } from './storyPlainText';
 import type {
   DocxCommandIntent,
   DocxCommandSelection,
@@ -64,7 +64,7 @@ function readCellSelection(engine: ResidentDocxCommandEngine): YrsTableRange | n
   }
 }
 
-export function resolveTableTarget(
+function resolveTableTarget(
   engine: ResidentDocxCommandEngine,
   selection: DocxCommandSelection
 ): { focused: YrsCellLoc; range: YrsTableRange; table: YrsTableLoc } | null {
@@ -101,11 +101,11 @@ export function nearTable(engine: ResidentDocxCommandEngine, table: YrsTableLoc)
     : null;
 }
 
-/** Live tables holding a story, outermost first; empty outside tables. */
+/** Live tables holding a story, innermost first; empty outside tables. */
 export function liveTableAncestors(engine: ResidentDocxCommandEngine, story: string): YrsTableLoc[] {
   const tables: YrsTableLoc[] = [];
   for (let cell = liveCell(engine, story); cell; cell = liveCell(engine, cell.story)) {
-    tables.unshift({ story: cell.story, tableIndex: cell.tableIndex });
+    tables.push({ story: cell.story, tableIndex: cell.tableIndex });
   }
   return tables;
 }
@@ -137,21 +137,26 @@ export function preflightTableCommand(
   return { target: { ...resolved, near: removes ? nearTable(engine, resolved.table) : null } };
 }
 
-function liveAnchor(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
+function liveAnchors(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
   const payload = engine.tablePayload(at.story, at.tableIndex) as TablePayload | null;
-  if (!payload || !Array.isArray(payload.rows)) return null;
-  return tableAnchors(payload).anchors.find((anchor) =>
+  return payload && Array.isArray(payload.rows) ? tableAnchors(payload).anchors : null;
+}
+
+function coveringAnchor(anchors: readonly TableCellAnchor[], at: YrsCellLoc): TableCellAnchor | null {
+  return anchors.find((anchor) =>
     anchor.row <= at.row && at.row < anchor.row + anchor.rowspan &&
     anchor.column <= at.column && at.column < anchor.column + anchor.colspan) ?? null;
 }
 
+function liveAnchor(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
+  const anchors = liveAnchors(engine, at);
+  return anchors ? coveringAnchor(anchors, at) : null;
+}
+
 function nearestCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): string | null {
-  const payload = engine.tablePayload(at.story, at.tableIndex) as TablePayload | null;
-  if (!payload || !Array.isArray(payload.rows)) return null;
-  const anchors = tableAnchors(payload).anchors;
-  const covering = anchors.find((anchor) =>
-    anchor.row <= at.row && at.row < anchor.row + anchor.rowspan &&
-    anchor.column <= at.column && at.column < anchor.column + anchor.colspan);
+  const anchors = liveAnchors(engine, at);
+  if (!anchors) return null;
+  const covering = coveringAnchor(anchors, at);
   if (covering) return covering.story;
   const column = anchors
     .filter((anchor) => anchor.column <= at.column && at.column < anchor.column + anchor.colspan)
