@@ -60,7 +60,7 @@ function footnotes(s: Suite, format?: string) {
     const dates = [...new Set(s.runs.filter(r => r.arm === arm.id && tasks.has(r.task)).map(r => r.date))].sort();
     return escape(arm.label) + ': ' + (dates.length ? dates.map(escape).join(', ') : 'No runs recorded');
   }).join('; ');
-  return `<div class="prose text-sm text-ink"><p>Tool calls count different things across arms.</p><ul>${s.arms.map(a => `<li>${escape(a.label)}: ${escape(a.tool_calls)}</li>`).join('')}</ul><p>Each arm ran as separate batches (${batches}). Times are not comparable across arms.</p></div>`;
+  return `<div class="prose text-sm text-ink"><p>Tool calls count different things across arms.</p><ul>${s.arms.map(a => `<li>${escape(a.label)}: ${escape(a.tool_calls)}</li>`).join('')}</ul><p>Each arm ran in separate batches (${batches}). Times are not comparable across arms.</p></div>`;
 }
 
 export const taskAnchor = (model: string, task: string) => 'task-' + Array.from(JSON.stringify([model, task]), c => c.codePointAt(0)!.toString(16)).join('-');
@@ -84,7 +84,7 @@ function failures(s: Suite, base: string) {
       group.push(r); groups.set(cause, group);
     }
     const body = [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([cause, runs]) =>
-      `<h3>${escape(cause)}</h3><ul class="grid gap-6">${runs.map(r => {
+      `<h3>${escape(cause[0]!.toUpperCase() + cause.slice(1))}</h3><ul class="grid gap-6">${runs.map(r => {
         const task = s.tasks.find(t => t.id === r.task)!;
         const library = arm.id === 'generic' ? ({ docx: 'python-docx', xlsx: 'openpyxl', pptx: 'python-pptx' } as Record<string, string>)[task.format] : undefined;
         return `<li>${link(location(base, '/' + task.format) + '#' + taskAnchor(r.model, r.task), task.title)}<p class="eyebrow mt-2">${escape(r.model)} · ${escape(arm.label)} · run ${r.run}${library ? ' · ' + escape(library) : ''}</p><p class="mt-2 max-w-[760px]">${escape(r.reason ?? r.check)}</p></li>`;

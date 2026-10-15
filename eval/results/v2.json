@@ -702,7 +702,7 @@
       "date": "2026-10-13",
       "pass": false,
       "check": "document.sheets[1].cells.A1.style.base.fill: expected None, found 'FFD9EAF7'",
-      "reason": "The model changed a shared default fill colour through a shallow copy, changing the base fill outside the requested header.",
+      "reason": "The model changed a shared default fill color through a shallow copy, changing the base fill outside the requested header.",
       "cause": "model",
       "tool_calls": 5,
       "seconds": 53.009

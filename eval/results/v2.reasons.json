@@ -124,7 +124,7 @@
     "arm": "generic",
     "task": "xlsx-10-quarter-report",
     "run": 1,
-    "reason": "The model changed a shared default fill colour through a shallow copy, changing the base fill outside the requested header.",
+    "reason": "The model changed a shared default fill color through a shallow copy, changing the base fill outside the requested header.",
     "cause": "model"
   }
 ]
