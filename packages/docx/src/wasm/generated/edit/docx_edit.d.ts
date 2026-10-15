@@ -228,6 +228,10 @@ export class EditSession {
      */
     clear_measure_fonts(): void;
     /**
+     * Clears the pinned input span.
+     */
+    clear_undo_input_time(): void;
+    /**
      * Stops queueing and discards anything not yet drained.
      */
     clear_update_event_observation(): void;
@@ -1153,6 +1157,10 @@ export class EditSession {
      */
     set_undo_capture_mode(mode: string): void;
     /**
+     * Pins the input span used to measure the next capture gap.
+     */
+    set_undo_input_time(first: number, last: number): void;
+    /**
      * Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
      * committed transaction. `update` is v1-encoded — feed it straight to
      * [`EditSession::apply_update`] on a peer — and is copied out of wasm
@@ -1688,6 +1696,7 @@ export interface InitOutput {
     readonly editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
     readonly editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_clear_measure_fonts: (a: number) => void;
+    readonly editsession_clear_undo_input_time: (a: number) => void;
     readonly editsession_clear_update_event_observation: (a: number) => void;
     readonly editsession_clear_update_observer: (a: number) => void;
     readonly editsession_client_id: (a: number) => number;
@@ -1841,6 +1850,7 @@ export interface InitOutput {
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_set_undo_input_time: (a: number, b: number, c: number) => void;
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
     readonly editsession_set_windowed_incremental_builds: (a: number, b: number) => void;
     readonly editsession_settle_revisions_json: (a: number, b: number, c: number) => [number, number, number, number];

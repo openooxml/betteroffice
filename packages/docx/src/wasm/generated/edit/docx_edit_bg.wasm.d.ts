@@ -46,6 +46,7 @@ export const editsession_clear_cell_selection: (a: number) => [number, number];
 export const editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
 export const editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const editsession_clear_measure_fonts: (a: number) => void;
+export const editsession_clear_undo_input_time: (a: number) => void;
 export const editsession_clear_update_event_observation: (a: number) => void;
 export const editsession_clear_update_observer: (a: number) => void;
 export const editsession_client_id: (a: number) => number;
@@ -199,6 +200,7 @@ export const editsession_set_section_margins: (a: number, b: number, c: number, 
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
+export const editsession_set_undo_input_time: (a: number, b: number, c: number) => void;
 export const editsession_set_update_observer: (a: number, b: any) => [number, number];
 export const editsession_set_windowed_incremental_builds: (a: number, b: number) => void;
 export const editsession_settle_revisions_json: (a: number, b: number, c: number) => [number, number, number, number];
