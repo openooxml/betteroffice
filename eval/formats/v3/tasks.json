@@ -2554,5 +2554,136 @@
       ]
     },
     "cross_model": false
+  },
+  {
+    "id": "pptx-v3-27-lecture-plan-discussion",
+    "format": "pptx",
+    "title": "Clarify the lecture-plan discussion topic",
+    "difficulty": 1,
+    "fixture": "h-zen-zenodo10k-165a026981f7.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 2 ('Lecture plan'), change 'Breakaway group discussion' to 'Group discussion: openness in daily research' to make the discussion topic explicit. Keep the existing automatic numbering, indentation, text formatting and speaker notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide2.xml",
+          "old": "Breakaway group discussion",
+          "new": "Group discussion: openness in daily research"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-28-testing-and-annex-order",
+    "format": "pptx",
+    "title": "Update the testing window and reorder Annex slides",
+    "difficulty": 2,
+    "fixture": "open-government-canada-d19a2803d7d0.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 12 ('Next steps '), under 'Step 3 – User System Testing', change the testing window from 'mid June 2024' to 'late June 2024'. Move original slide 15 ('Usability Testing Metrics') immediately after original slide 13 ('Annex') and before 'Scenarios', so it becomes slide 14. Keep every other slide in relative order, all printed slide numbers and each slide's speaker notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 15,
+        "to": 14
+      },
+      "edits": [
+        {
+          "part": "ppt/slides/slide12.xml",
+          "old": "mid June 2024",
+          "new": "late June 2024"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-29-history-overview-and-footer",
+    "format": "pptx",
+    "title": "Remove the software-name overview and capitalize Summit in slide footers",
+    "difficulty": 3,
+    "fixture": "h-r23-noaa-ngs-543c4a674cc8.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, delete original slide 4, titled 'A (probably incomplete) history of LSA software at NGS', which lists 'HAVAGO (1979)' without a description. Keep original slide 5 with the same title and expanded software descriptions. On all remaining slides, replace '2021 Geospatial summit on the Modernized NSRS' with '2021 Geospatial Summit on the Modernized NSRS' in the footer text stored on the individual slides. Keep slide layouts, slide masters, speaker notes, dates and printed slide numbers unchanged, and retain all remaining slides in their original relative order. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "delete_slide": 4,
+      "slide_replace": {
+        "old": "2021 Geospatial summit on the Modernized NSRS",
+        "new": "2021 Geospatial Summit on the Modernized NSRS"
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-30-discussion-slide-order",
+    "format": "pptx",
+    "title": "Move Discussion Question slide before ICS Facilities and fix safety question",
+    "difficulty": 2,
+    "fixture": "h-us-fema-6403eb57b467.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move original slide 17 ('Discussion Question') so it appears as slide 16, immediately after original slide 15 ('General Staff Sections') and before 'Common Types of ICS Facilities'. On that moved slide, change the second bullet from 'Who monitors incident operations advises the IC/UC on matters relating to health and safety?' to 'Who monitors incident operations and advises the IC/UC on matters relating to health and safety?'. Keep every other slide in relative order, all printed slide numbers and each slide's speaker notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 17,
+        "to": 16
+      },
+      "edits": [
+        {
+          "part": "ppt/slides/slide17.xml",
+          "old": "Who monitors incident operations advises the IC/UC on matters relating to health and safety?",
+          "new": "Who monitors incident operations and advises the IC/UC on matters relating to health and safety?"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-31-pkp-speaker-notes",
+    "format": "pptx",
+    "title": "Update speaker notes on Open Journal Systems overview slide",
+    "difficulty": 1,
+    "fixture": "h-zen-eifl-8e7fa1396e46.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the speaker notes on Slide 2 ('OPEN JOURNAL SYSTEMS BY PKP') with the single paragraph: 'Public Knowledge Project (PKP) is a non-profit research and development initiative within Simon Fraser University in Canada. It developed open source software for publishing, such as OJS (Open Journal Systems) which can be downloaded and used for free by anyone in the world. Over 44,000 active journals use OJS globally.' Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "notes": {
+        "2": "Public Knowledge Project (PKP) is a non-profit research and development initiative within Simon Fraser University in Canada. It developed open source software for publishing, such as OJS (Open Journal Systems) which can be downloaded and used for free by anyone in the world. Over 44,000 active journals use OJS globally."
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-32-results-table-categories",
+    "format": "pptx",
+    "title": "Remove orphaned footnote markers from Results table category labels",
+    "difficulty": 2,
+    "fixture": "h-zen-eifl-a40da9fe53a3.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 12 ('Results'), in the demographic results table, remove the orphaned footnote symbols from the two 'Others' category cells in the 'Category' column by changing 'Others*' (row 7, column 2, under 'Country of Residence') to 'Others' and changing 'Others#' (row 12, column 2, under 'Specialty / Level of Study') to 'Others'. Keep all counts, percentages and table formatting unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide12.xml",
+          "table": 1,
+          "row": 7,
+          "column": 2,
+          "text": "Others"
+        },
+        {
+          "part": "ppt/slides/slide12.xml",
+          "table": 1,
+          "row": 12,
+          "column": 2,
+          "text": "Others"
+        }
+      ]
+    },
+    "cross_model": false
   }
 ]
