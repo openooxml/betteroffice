@@ -583,12 +583,9 @@ export function applyDocxCommand(
   context: DocxCommandApplyContext,
   environment?: ResidentCommandHooksEnvironment
 ): DocxCommandApplyResult {
-  const inputTime = prepared.command.inputTime;
-  if (typeof inputTime !== 'number' || !Number.isFinite(inputTime)) {
-    return applyPreparedDocxCommand(engine, state, prepared, context, environment);
-  }
-  const lastInputTime = prepared.command.lastInputTime;
-  engine.setUndoInputTime([inputTime, Math.max(inputTime, typeof lastInputTime === 'number' && Number.isFinite(lastInputTime) ? lastInputTime : inputTime)]);
+  const { inputTime, lastInputTime } = prepared.command;
+  if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+  engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
   try {
     return applyPreparedDocxCommand(engine, state, prepared, context, environment);
   } finally {
