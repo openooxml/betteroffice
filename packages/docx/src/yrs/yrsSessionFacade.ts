@@ -29,6 +29,7 @@ import type {
   YrsStorySegment,
   YrsTableRange,
   YrsTableReceipt,
+  YrsTableFragmentReceipt,
   YrsTargetEditResult,
   YrsTextMatch,
   YrsUndoCaptureMode,
@@ -326,7 +327,7 @@ export function wrapSession(
     noteYrsStoriesDirty(facade, stories);
   };
 
-  const markReceiptStories = (receipt: YrsTableReceipt): YrsTableReceipt => {
+  const markReceiptStories = <T extends YrsTableReceipt>(receipt: T): T => {
     markDirty(receipt.createdStoryIds);
     markDirty(receipt.deletedStoryIds);
     markDirty(receipt.changedStoryIds);
@@ -900,6 +901,27 @@ export function wrapSession(
             ) as YrsTableReceipt
           )
       );
+    },
+    insertTableFragment: (at, table, suggesting) => {
+      ensureUndo(at.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(
+              session.insert_table_fragment(
+                at.story,
+                at.paraId,
+                at.offset,
+                JSON.stringify(table),
+                suggesting?.name,
+                suggesting?.date
+              )
+            ) as YrsTableFragmentReceipt
+          )
+      );
+    },
+    validateTableFragment: (table) => {
+      session.validate_table_fragment(JSON.stringify(table));
     },
     insertRow: (at, side, suggesting) => {
       ensureUndo(at.story);

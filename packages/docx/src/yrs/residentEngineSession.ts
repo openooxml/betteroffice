@@ -89,6 +89,8 @@ export type ResidentEngineSession = Pick<
   | 'splitCell'
   | 'setCellShading'
   | 'insertTable'
+  | 'insertTableFragment'
+  | 'validateTableFragment'
   | 'insertImage'
   | 'insertPageBreak'
   | 'insertSectionBreak'
@@ -697,6 +699,12 @@ export async function createResidentEngineSession(
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),
+    insertTableFragment: (at, table, author) => applyCommandMutation(at.story, () => {
+      const receipt = JSON.parse(session.insert_table_fragment(at.story, at.paraId, at.offset, JSON.stringify(table), author?.name, author?.date));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    validateTableFragment: (table) => { session.validate_table_fragment(JSON.stringify(table)); },
     insertImage: (at, image, author) => applyCommandMutation(at.story, () => JSON.parse(session.insert_image(at.story, at.paraId, at.offset, JSON.stringify(image), author?.name, author?.date))),
     insertPageBreak: at => applyCommandMutation(at.story, () => session.insert_page_break(at.story, at.paraId, at.offset)),
     insertSectionBreak: (at, type) => applyCommandMutation(at.story, () => session.insert_section_break(at.story, at.paraId, at.offset, type)),

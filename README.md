@@ -87,6 +87,18 @@ What to install for which language, with a first example each:
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
 
+## Evals
+
+`gpt-6-luna` via `codex exec`, one run per task, on the [format eval suite](eval/README.md): 10 DOCX, 10 XLSX and 10 PPTX edits. A task passes only if the edit is correct and the rest of the file is untouched.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 6/10 | **10/10** |
+| XLSX | 0/10 | **10/10** |
+| PPTX | 8/10 | **10/10** |
+
+Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
+
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
 

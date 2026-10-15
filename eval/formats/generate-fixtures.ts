@@ -213,9 +213,20 @@ async function wordDocument(blocks: Block[]) {
   ]));
   seed.file('word/_rels/document.xml.rels', rels([{ type: 'styles', target: 'styles.xml' }, { type: 'settings', target: 'settings.xml' },
     { type: 'numbering', target: 'numbering.xml' }]));
+  let paragraphIndex = 0;
+  const paragraphIds = new Set<number>();
   const body = blocks.map(block => 'rows' in block ? wordTable(block.rows)
-    : `<w:p>${block.style || block.list ? `<w:pPr>${block.style ? `<w:pStyle w:val="${block.style}"/>` : ''}${block.list ? '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>' : ''}</w:pPr>` : ''}${wordRun(block.text)}</w:p>`).join('');
-  seed.file('word/document.xml', `<w:document xmlns:w="${wordprocessing}" xmlns:r="${r}"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/></w:sectPr></w:body></w:document>`);
+    : `<w:p>${block.style || block.list ? `<w:pPr>${block.style ? `<w:pStyle w:val="${block.style}"/>` : ''}${block.list ? '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>' : ''}</w:pPr>` : ''}${wordRun(block.text)}</w:p>`).join('').replaceAll('<w:p>', () => {
+      const ids = ['paraId', 'textId'].map(name => {
+        const value = createHash('sha256').update(`format-eval-docx-${name}-${paragraphIndex}`).digest().readUInt32BE(0) & 0x7fffffff;
+        if (value === 0 || paragraphIds.has(value)) throw new Error(`Invalid or colliding DOCX ${name} at paragraph ${paragraphIndex}`);
+        paragraphIds.add(value);
+        return `w14:${name}="${value.toString(16).toUpperCase().padStart(8, '0')}"`;
+      });
+      paragraphIndex += 1;
+      return `<w:p ${ids.join(' ')}>`;
+    });
+  seed.file('word/document.xml', `<w:document xmlns:w="${wordprocessing}" xmlns:r="${r}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/></w:sectPr></w:body></w:document>`);
   const heading = (id: string, name: string, level: number, size: number) => `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${name}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="${level}"/></w:pPr><w:rPr><w:b/><w:sz w:val="${size}"/><w:szCs w:val="${size}"/></w:rPr></w:style>`;
   const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(side => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="auto"/>`).join('');
   seed.file('word/styles.xml', `<w:styles xmlns:w="${wordprocessing}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="DejaVu Sans" w:hAnsi="DejaVu Sans" w:eastAsia="DejaVu Sans" w:cs="DejaVu Sans"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>`

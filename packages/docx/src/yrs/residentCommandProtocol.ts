@@ -35,6 +35,7 @@ import type {
   YrsStoryRange,
   YrsTableRange,
 } from './index';
+import type { DocxClipboardFragment } from './clipboardFragment';
 import type { LayoutMetaV1 } from './layoutMeta';
 import type { DecodedFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentEngineSession } from './residentEngineSession';
@@ -292,6 +293,7 @@ export interface DocxCommandPayloads {
   mergeTableCells: DocxSelectionIntent;
   splitTableCell: DocxSelectionIntent & { rows: number; columns: number };
   setTableCellShading: DocxSelectionIntent & { color: string | null };
+  pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &

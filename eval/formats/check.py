@@ -19,6 +19,8 @@ NS = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
       'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
       'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
       'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      'w14': 'http://schemas.microsoft.com/office/word/2010/wordml',
+      'mc': 'http://schemas.openxmlformats.org/markup-compatibility/2006',
       'rel': 'http://schemas.openxmlformats.org/package/2006/relationships'}
 BUILTIN_FORMATS = {0: 'General', 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00',
                    9: '0%', 10: '0.00%', 14: 'mm-dd-yy', 49: '@'}
@@ -32,6 +34,7 @@ NOTES_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.notes
 OWNER = '<owning slide>'
 CREATED = 'notes part created for the requested notes'
 SAVE_TIME = '{http://purl.org/dc/terms/}modified'
+PARAGRAPH_IDS = tuple(f'{{{NS["w14"]}}}{name}' for name in ('paraId', 'textId'))
 TRACKED = {f'{{{NS["w"]}}}{name}' for name in ('ins', 'del', 'moveFrom', 'moveTo', 'rPrChange', 'pPrChange', 'sectPrChange',
                                          'tblPrChange', 'tblPrExChange', 'tblGridChange', 'trPrChange', 'tcPrChange',
                                          'cellIns', 'cellDel', 'cellMerge', 'numberingChange')}
@@ -681,7 +684,9 @@ def expected_presentation(source, spec):
 
 
 def compare(expected, actual, path='document'):
-    if isinstance(expected, dict):
+    if isinstance(expected, NewParagraphAttributes):
+        expected.compare(actual, path)
+    elif isinstance(expected, dict):
         require(isinstance(actual, dict) and expected.keys() == actual.keys(), f'{path}: fields differ')
         for key in expected:
             compare(expected[key], actual[key], f'{path}.{key}')
@@ -874,6 +879,22 @@ def docx_paragraphs(blocks):
                     yield from docx_paragraphs(cell['blocks'])
 
 
+class NewParagraphAttributes(dict):
+    def __init__(self, attributes, input_ids):
+        super().__init__((key, value) for key, value in attributes.items() if key not in PARAGRAPH_IDS)
+        self.input_ids = input_ids
+
+    def compare(self, actual, path):
+        require(isinstance(actual, dict), f'{path}: fields differ')
+        for key in PARAGRAPH_IDS:
+            if key in actual:
+                value = actual[key]
+                require(re.fullmatch(r'[0-9A-Fa-f]{8}', value) and 0 < int(value, 16) < 0x80000000,
+                        f'{path}: invalid {local(key)} {value!r}')
+                require(value.upper() not in self.input_ids, f'{path}: {local(key)} reuses an input paragraph id')
+        compare(dict(self), {key: value for key, value in actual.items() if key not in PARAGRAPH_IDS}, path)
+
+
 def docx_unique(blocks, text):
     matches = [item for item in docx_paragraphs(blocks) if item['text'] == text]
     require(len(matches) == 1, f'fixture must have exactly one paragraph with text {text!r}')
@@ -927,6 +948,8 @@ def at(blocks, item):
 def expected_document(source, spec):
     expected = copy.deepcopy(source)
     body = expected['body']
+    input_ids = {value.upper() for item in docx_paragraphs(source['body'])
+                 for key, value in item['attributes'].items() if key in PARAGRAPH_IDS}
     styled = [(top_level(body, text), style) for text, style in spec.get('styles', {}).items()]
     bolded = [(docx_unique(body, item['paragraph']), item['phrase']) for item in spec.get('bold', [])]
     texts = [(docx_unique(body, old), new) for old, new in spec.get('text', {}).items()]
@@ -955,6 +978,8 @@ def expected_document(source, spec):
         row = copy.deepcopy(rows[change['like'] - 1])
         for cell, text in zip(row['cells'], change['cells'], strict=True):
             set_docx_text(cell_paragraph(cell), text)
+            for item in docx_paragraphs(cell['blocks']):
+                item['attributes'] = NewParagraphAttributes(item['attributes'], input_ids)
         rows.insert(change['before'] - 1, row)
     for change in spec.get('delete_rows', []):
         del tables[change['table'] - 1]['rows'][change['row'] - 1]
@@ -962,7 +987,7 @@ def expected_document(source, spec):
         del body[at(body, item)]
     for item, lines in anchors:
         position = at(body, item) + 1
-        body[position:position] = [{'kind': 'p', 'attributes': {}, 'style': expected['default_style'], 'properties': None, 'text': line,
+        body[position:position] = [{'kind': 'p', 'attributes': NewParagraphAttributes({}, input_ids), 'style': expected['default_style'], 'properties': None, 'text': line,
                                     'content': [{'kind': 'r', 'attributes': {}, 'properties': None, 'content': [('text', line)]}]}
                                    for line in lines]
     return expected
@@ -972,6 +997,13 @@ def check_document(expected, actual):
     for kind, found in actual['tracked_changes'].items():
         require(found <= expected['tracked_changes'].get(kind, 0), f'tracked changes are not allowed: w:{kind} added')
     compare(expected, actual)
+    for key in PARAGRAPH_IDS:
+        seen = set()
+        for item in docx_paragraphs(actual['body']):
+            value = item['attributes'].get(key)
+            if value is not None:
+                require(value.upper() not in seen, f'document.body: duplicate {local(key)} {value!r}')
+                seen.add(value.upper())
 
 
 def check(task, output):

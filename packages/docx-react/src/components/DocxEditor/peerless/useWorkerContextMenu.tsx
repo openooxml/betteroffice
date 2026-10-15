@@ -5,9 +5,33 @@ import type { DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandStore } from '../../../commands/types';
 import { normalizeInputEvent } from './inputEvents';
 import { admitInputIntents } from './inputAdmission';
+import { isPasteFragmentAllowed } from './clipboard';
+import { parseClipboardHtml } from '../internals/clipboardHtml';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+
+async function readClipboardFragment(): Promise<DocxClipboardFragment | null> {
+  if (typeof navigator === 'undefined' || !navigator.clipboard || !('read' in navigator.clipboard)) return null;
+  let items: ClipboardItem[];
+  try {
+    items = await navigator.clipboard.read();
+  } catch {
+    return null;
+  }
+  for (const item of items) {
+    if (!item.types.includes('text/html')) continue;
+    let html: string;
+    try {
+      html = await (await item.getType('text/html')).text();
+    } catch {
+      return null;
+    }
+    return parseClipboardHtml(html);
+  }
+  return null;
+}
 
 export function useWorkerContextMenu(options: {
   binding(): PeerlessEditSessionBinding | null;
@@ -96,6 +120,23 @@ export function useWorkerContextMenu(options: {
       if (options.environment().readOnly || options.environment().mode === 'viewing') return;
       if (action === 'delete' && selection) current.commands.submit({ kind: 'replaceSelection', payload: { text: '', selection } }, { fence: true, source: 'paste' });
       else if (action === 'paste' || action === 'pasteAsPlainText') {
+        if (action === 'paste') {
+          const fragment = await readClipboardFragment();
+          if (fragment) {
+            if (current !== options.binding()) throw new Error('Document was replaced');
+            const latest = current.viewStore.getSnapshot();
+            if (latest.version !== menu.snapshot.version || JSON.stringify(latest.workerSelection) !== JSON.stringify(selection)) {
+              throw new Error('Context menu target changed');
+            }
+            if (options.environment().readOnly || options.environment().mode === 'viewing') return;
+            if (isPasteFragmentAllowed(options.commands)) {
+              admitInputIntents(current.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
+                { source: 'paste', fence: true });
+              options.onPaste?.();
+              return;
+            }
+          }
+        }
         const text = await navigator.clipboard.readText();
         if (current !== options.binding()) throw new Error('Document was replaced');
         const latest = current.viewStore.getSnapshot();

@@ -39,7 +39,9 @@ import { createWorkerPluginGeometry } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
-import { copyWorkerSelection } from './clipboard';
+import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
+import { admitInputIntents } from './inputAdmission';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
@@ -622,10 +624,31 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const copied = await copyWorkerSelection({ binding: current.binding, cut,
         isCurrent: () => active.current === current,
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-        write: (text) => navigator.clipboard.writeText(text) });
+        readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }),
+        write: (text) => navigator.clipboard.writeText(text),
+        writeSlice: async (text, html) => {
+          try {
+            if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
+            await navigator.clipboard.write([new ClipboardItem({
+              'text/plain': new Blob([text], { type: 'text/plain' }),
+              'text/html': new Blob([html], { type: 'text/html' }),
+            })]);
+          } catch {
+            await navigator.clipboard.writeText(text);
+          }
+        } });
       if (copied) { if (cut) props.onCut?.(); else props.onCopy?.(); }
     } catch (error) { errorHandler.current?.(error instanceof Error ? error : new Error(String(error))); }
   }, [controller, props.onCopy, props.onCut]);
+  const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
+    const current = active.current;
+    if (!current) return false;
+    if (!isPasteFragmentAllowed(controller.commands.store)) return false;
+    admitInputIntents(current.binding.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
+      { inputTime, source: 'paste', fence: true });
+    props.onPaste?.();
+    return true;
+  }, [controller, props.onPaste]);
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onPaste: props.onPaste, onError: props.onError });
@@ -772,7 +795,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         <WorkerDocumentPreview job={previewJob} zoom={zoom} onPresented={onPreviewPresented} />}
       {shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
-          displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}
+          displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}
           pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={props.onError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />

@@ -428,6 +428,7 @@ type AdmissionIntent = PeerlessInputIntent | PeerlessFormattingIntent;
 /** Kinds the worker records as suggestions; suggesting mode stamps its author on exactly these. */
 const SUGGESTED = {
   insertText: true, replaceSelection: true, deleteBackward: true, deleteForward: true, paragraphBreak: true,
+  pasteFragment: true,
   applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
   formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,

@@ -30,6 +30,7 @@ import type {
   YrsSelectionText,
   YrsStickyPosition,
 } from './index';
+import type { DocxClipboardSlice } from './clipboardFragment';
 import type { PointPosition } from '../plugin-api';
 import type { DocxResolvedPointPosition } from './pointPosition';
 import type {
@@ -126,6 +127,7 @@ export type ResidentDocumentRead =
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'rawSelectionInfo'; selection: DocxCommandSelection }
+  | { kind: 'clipboardSlice'; selection: DocxCommandSelection }
   | { kind: 'listStories' }
   | { kind: 'readStories'; request: DocxReadStoriesRequest }
   | { kind: 'findText'; request: DocxFindTextRequest }
@@ -170,6 +172,7 @@ export interface ResidentDocumentReadValues {
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
   rawSelectionInfo: YrsSelectionText;
+  clipboardSlice: DocxClipboardSlice;
   listStories: DocxListStoriesResult;
   readStories: DocxReadStoriesResult;
   findText: DocxFindTextResult;
