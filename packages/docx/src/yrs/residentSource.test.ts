@@ -285,12 +285,15 @@ for (const pageTotal of [false, true]) {
     try {
       const bytes = source(400, pageTotal);
       expect(await client.openSourceCut({ bytes, cut: { blocks: 20 } })).toBeDefined();
+      const cutParagraphs = worker.sessions.at(-1)!.geometryReader.paragraphs('body').length;
       await expect(client.commandInit(init())).rejects.toThrow('whole opened document');
       const { fonts, fontRegistrationSlots, layoutInput, extras } = init();
       const preview = await client.previewSource({ fonts, fontRegistrationSlots, extras,
         layoutInput: JSON.stringify({ ...JSON.parse(layoutInput), cachedPageTotals: true }) });
       await expect(client.openSource({ bytes, cut: { blocks: 20 } })).rejects.toThrow('openSourceCut');
       await client.openSource({ bytes });
+      expect(cutParagraphs).toBeGreaterThan(0);
+      expect(cutParagraphs).toBeLessThan(worker.sessions.at(-1)!.geometryReader.paragraphs('body').length);
       const initial = await client.commandInit({ ...init(), ...{ provisionalPages: 1 } });
       const previewed = firstPage([...(preview.pageFrames ?? []), preview.frame]);
       expect(previewed).toEqual(firstPage([...(initial.frame.payload.pageFrames ?? []), initial.frame.payload.frame]));

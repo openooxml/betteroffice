@@ -489,7 +489,9 @@ test('the preview releases its worker surfaces once the command session presents
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
   await waitFor(() => expect(requests.filter(request => request.type === 'attachCanvases')).toHaveLength(2));
   const order = requests.map(request => request.type);
-  const released = requests.filter(request => request.type === 'attachCanvases').at(-1);
+  const [painted, released] = requests.filter(request => request.type === 'attachCanvases');
+  if (painted?.type !== 'attachCanvases') throw new Error('Preview surfaces were not attached');
+  expect(painted.pages.length).toBeGreaterThan(0);
   expect(order.indexOf('attachCanvases')).toBeLessThan(order.indexOf('commandInit'));
   expect(order.lastIndexOf('attachCanvases')).toBeGreaterThan(order.indexOf('commandInit'));
   expect(released).toMatchObject({ pages: [], activePageIds: [] });
