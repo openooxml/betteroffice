@@ -1,4 +1,5 @@
 import { test, expect } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import JSZip from 'jszip';
 
 const PAGES = 60;
@@ -66,7 +67,7 @@ test('the DOCX quality harness captures every page when the first pages paint fi
   await page.waitForFunction(() => (window as unknown as { oracleReady?: boolean }).oracleReady, null, {
     timeout: 120_000,
   });
-  const result = await page.evaluate(
+  const result = await pinnedEvaluate(page,
     (bytes) =>
       (
         window as unknown as {
@@ -77,7 +78,7 @@ test('the DOCX quality harness captures every page when the first pages paint fi
   );
   expect(await page.evaluate(() => (window as unknown as { __held: boolean }).__held)).toBe(true);
   expect(result.pages).toBe(PAGES);
-  const last = await page.evaluate(
+  const last = await pinnedEvaluate(page,
     (index) =>
       (window as unknown as { oraclePage(index: number): Promise<string> }).oraclePage(index),
     PAGES - 1

@@ -194,8 +194,8 @@ test('search inside a rejected peer-local insertion anchors after Hello when wor
     ref={ref} documentBuffer={documentBuffer('Hello world')} allowHostProposals experimentalWorkerOpen
     measurementFontProvider={provider} plugins={[plugin]} onPluginError={(error) => errors.push(error)}
   />, { container: host });
-  await step('wait for session', () => waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy()));
   await step('initial layout', () => ref.current!.whenLayoutComplete(), true);
+  await step('wait for session', () => waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy()));
   const editor = ref.current!.getEditorRef()!;
   const session = editor.getYrsSession()!;
   sessions.push(session);
@@ -344,8 +344,8 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
       set: (value: number) => { sample(); scrollTop = value; sample(); },
     },
   });
-  await step('wait for session', () => waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy()));
   await step('initial layout', () => ref.current!.whenLayoutComplete(), true);
+  await step('wait for session', () => waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy()));
   const worker = workers.find((worker) => worker.requests.includes('open'))!;
   expect(worker).toBeDefined();
   const assertWorkerAvailable = () => expect(ref.current!.getMemoryStats().worker).not.toBeNull();

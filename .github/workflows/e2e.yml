@@ -16,10 +16,8 @@ concurrency:
 jobs:
   scenarios:
     name: ${{ matrix.name }}
-    # The corpus suite (a maturin release build of the Rust bindings, then the scenarios) runs on a
-    # fresh kyora VM, one per job. Fork pull requests and the browser suite stay on GitHub's runners,
-    # and repository variable BO_CI_RUNNER=ubuntu-latest sends the corpus suite back there too.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository || matrix.suite != 'corpus') && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
+    # A fresh kyora VM per job; fork pull requests stay GitHub-hosted and BO_CI_RUNNER overrides (see ci.yml).
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false

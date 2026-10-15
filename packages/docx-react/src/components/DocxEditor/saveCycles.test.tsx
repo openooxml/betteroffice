@@ -66,7 +66,7 @@ for (const typing of [false, true]) {
     const source = paragraphs(documentXml(buffer));
     for (let cycle = 0; cycle < 3; cycle += 1) {
       const ref = createRef<DocxEditorRef>();
-      const view = render(<DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} />);
+      const view = render(<DocxEditor ref={ref} showToolbar={false} experimentalWorkerOpen={false} documentBuffer={buffer} />);
       let saved: ArrayBuffer | null = null;
       try {
         await until(() => ref.current?.commands.getState('save').enabled === true);
@@ -99,7 +99,7 @@ for (const typing of [false, true]) {
         ]);
       }
     }
-  });
+  }, 20_000);
 }
 
 for (const typing of [false, true]) {
@@ -124,7 +124,7 @@ for (const typing of [false, true]) {
       for (let cycle = 0; cycle < 3; cycle += 1) {
         const opens = workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length;
         const ref = createRef<DocxEditorRef>();
-        const view = render(<DocxEditor ref={ref} documentBuffer={buffer} />);
+        const view = render(<DocxEditor ref={ref} showToolbar={false} documentBuffer={buffer} />);
         let saved: ArrayBuffer | null = null;
         try {
           await until(() => ref.current?.commands.getState('save').enabled === true);

@@ -1,3 +1,4 @@
+import { EVALS_SITE } from '../../../shared/sites';
 import {
   SWATCH,
   type SwarmSeries,
@@ -1187,6 +1188,7 @@ function methodSection(
     );
   const links: [string, string][] = [
     ['Benchmark methodology', METHOD],
+    ['Agent evals', EVALS_SITE],
     ['Benchmarks workflow', `${REPO}/actions/workflows/visual-fidelity.yml`],
     ['End-to-end suite', `${REPO}/blob/main/e2e/README.md`],
   ];

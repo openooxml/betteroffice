@@ -207,6 +207,10 @@ export interface DocxDocumentChange {
 
 export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEditor/types';
 
+export interface DocxErrorInfo {
+  recoverable: boolean;
+}
+
 /**
  * DocxEditor props
  */
@@ -258,8 +262,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onDocumentChange?: (change: DocxDocumentChange) => void;
   /** Callback when selection changes */
   onSelectionChange?: (state: SelectionState | null) => void;
-  /** Callback on error */
-  onError?: (error: Error) => void;
+  /** Recoverable worker reports include `{ recoverable: true }`; fatal and legacy reports omit `info`. */
+  onError?: (error: Error, info?: DocxErrorInfo) => void;
   /**
    * Called when the fullest wasm memory, on the main thread or in the resident
    * worker, crosses a `memoryBudget` level or drops back below it. Silent while

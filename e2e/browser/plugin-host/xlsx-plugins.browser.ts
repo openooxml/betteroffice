@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 
 interface Probe {
   editor: {
@@ -43,7 +44,7 @@ async function select(page: Page, row: number, col: number) {
 }
 
 async function zoom(page: Page, scale: number) {
-  await page.evaluate(
+  await pinnedEvaluate(page,
     (value) =>
       (window as unknown as { __probe: Probe }).__probe.editor!.commands.execute('zoom', {
         scale: value,
@@ -187,7 +188,7 @@ test('xlsx: plugin text fields keep their keys; built-in shortcuts in plugin chr
     page.evaluate(
       () => (window as unknown as { __probe: Probe }).__probe.editor!.handle.cell(0, 2, 1).input
     );
-  await page.evaluate(async () => {
+  await pinnedEvaluate(page, async () => {
     const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
     await editor.applyEdits({
       expectVersion: await editor.version(),
@@ -202,7 +203,7 @@ test('xlsx: plugin text fields keep their keys; built-in shortcuts in plugin chr
   });
   await select(page, 2, 1);
   const version = () =>
-    page.evaluate(() => (window as unknown as { __probe: Probe }).__probe.editor!.version());
+    pinnedEvaluate(page, () => (window as unknown as { __probe: Probe }).__probe.editor!.version());
   const before = await version();
 
   for (const id of ['overlay-input', 'probe-input', 'portal-input']) {

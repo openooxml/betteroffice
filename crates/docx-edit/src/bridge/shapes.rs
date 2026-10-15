@@ -531,7 +531,7 @@ fn shape_content_runs(
             {
                 Vec::new()
             } else {
-                shape_document_runs(content)
+                shape_document_runs(content, env)
             }
         }
         Some("hyperlink") => {
@@ -703,7 +703,7 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
     })
 }
 
-fn shape_document_runs(run: &Value) -> Vec<Run> {
+fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
     let formatting = shape_run_formatting(field(run, "formatting"));
     array(run, "content")
         .into_iter()
@@ -731,6 +731,15 @@ fn shape_document_runs(run: &Value) -> Vec<Run> {
                 pm_start: None,
                 pm_end: None,
             })),
+            Some("drawing") => {
+                let image = field(content, "image")?;
+                let values = crate::seed::payload(crate::seed::image_payload(image)).ok()?;
+                Some(Run::Image(super::lower_image_values(
+                    &values.into_iter().collect(),
+                    &formatting,
+                    env,
+                )))
+            }
             _ => None,
         })
         .collect()
@@ -1259,6 +1268,10 @@ fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
 }
 
 #[cfg(test)]
+#[path = "textbox_pictures_tests.rs"]
+mod textbox_pictures_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1408,7 +1421,7 @@ mod tests {
         let link = json!({"type": "hyperlink", "anchor": "top", "children": [text]});
         let page = json!({"type": "simpleField", "fieldType": "PAGE",
             "instruction": "PAGE", "content": [text]});
-        let text_runs = shape_document_runs(&text);
+        let text_runs = shape_document_runs(&text, &RenderEnv::default());
         let mut text_and_page = text_runs.clone();
         text_and_page.push(shape_field_run(&page, &RenderEnv::default()));
         for (result, expected) in [
