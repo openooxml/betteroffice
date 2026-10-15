@@ -425,170 +425,7 @@ fn parse_inline_format_delta(delta_json: &str) -> Result<InlineFormatDelta, JsVa
     let object = value
         .as_object()
         .ok_or_else(|| js_err("format_range expects a JSON object delta"))?;
-
-    let bool_patch = |key: &str| -> Result<Patch<bool>, JsValue> {
-        match object.get(key) {
-            None => Ok(Patch::Keep),
-            Some(Value::Null) => Ok(Patch::Clear),
-            Some(Value::Bool(value)) => Ok(Patch::Set(*value)),
-            Some(_) => Err(js_err(format!(
-                "format delta {key:?} must be a boolean or null"
-            ))),
-        }
-    };
-
-    let underline = match object.get("underline") {
-        None => Patch::Keep,
-        Some(Value::Null | Value::Bool(false)) => Patch::Clear,
-        Some(Value::Bool(true)) => Patch::Set(Default::default()),
-        Some(Value::Object(value)) => {
-            let string = |key: &str| -> Result<Option<String>, JsValue> {
-                value
-                    .get(key)
-                    .map(|entry| {
-                        entry
-                            .as_str()
-                            .map(str::to_owned)
-                            .ok_or_else(|| js_err(format!("underline {key:?} must be a string")))
-                    })
-                    .transpose()
-            };
-            Patch::Set(crate::UnderlinePatch {
-                style: string("style")?,
-                color: string("color")?,
-            })
-        }
-        Some(_) => {
-            return Err(js_err(
-                "format delta \"underline\" must be a boolean, object, or null",
-            ));
-        }
-    };
-
-    let strike = match object.get("strike") {
-        None => Patch::Keep,
-        Some(Value::Null | Value::Bool(false)) => Patch::Clear,
-        Some(Value::Bool(true)) => Patch::Set(crate::StrikePatch { double: false }),
-        Some(Value::Object(value)) => {
-            let double = value
-                .get("double")
-                .map(|entry| {
-                    entry
-                        .as_bool()
-                        .ok_or_else(|| js_err("strike \"double\" must be a boolean"))
-                })
-                .transpose()?
-                .unwrap_or(false);
-            Patch::Set(crate::StrikePatch { double })
-        }
-        Some(_) => {
-            return Err(js_err(
-                "format delta \"strike\" must be a boolean, object, or null",
-            ));
-        }
-    };
-
-    let color = match object.get("color") {
-        None => Patch::Keep,
-        Some(Value::Null) => Patch::Clear,
-        Some(Value::Object(value)) => match (
-            value.get("rgb").and_then(Value::as_str),
-            value.get("themeColor").and_then(Value::as_str),
-        ) {
-            (Some(rgb), None) => Patch::Set(ColorPatch::Rgb(rgb.to_owned())),
-            (None, Some(theme)) => Patch::Set(ColorPatch::Theme(theme.to_owned())),
-            _ => {
-                return Err(js_err(
-                    "format delta \"color\" requires exactly one of \"rgb\" or \"themeColor\"",
-                ));
-            }
-        },
-        Some(_) => {
-            return Err(js_err("format delta \"color\" must be an object or null"));
-        }
-    };
-
-    let highlight = match object.get("highlight") {
-        None => Patch::Keep,
-        Some(Value::Null) => Patch::Clear,
-        Some(Value::String(value)) => Patch::Set(value.clone()),
-        Some(_) => {
-            return Err(js_err(
-                "format delta \"highlight\" must be a string or null",
-            ));
-        }
-    };
-
-    let font_size = match object.get("fontSize") {
-        None => Patch::Keep,
-        Some(Value::Null) => Patch::Clear,
-        Some(Value::Number(value)) => Patch::Set(
-            value
-                .as_f64()
-                .ok_or_else(|| js_err("format delta \"fontSize\" must be finite"))?,
-        ),
-        Some(_) => {
-            return Err(js_err("format delta \"fontSize\" must be a number or null"));
-        }
-    };
-
-    let font_family = match object.get("fontFamily") {
-        None => Patch::Keep,
-        Some(Value::Null) => Patch::Clear,
-        Some(Value::Object(value)) => {
-            let ascii = value
-                .get("ascii")
-                .and_then(Value::as_str)
-                .ok_or_else(|| js_err("format delta \"fontFamily\" requires string \"ascii\""))?;
-            let h_ansi = value
-                .get("hAnsi")
-                .map(|entry| {
-                    entry
-                        .as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| js_err("fontFamily \"hAnsi\" must be a string"))
-                })
-                .transpose()?;
-            Patch::Set(FontFamilyPatch {
-                ascii: ascii.to_owned(),
-                h_ansi,
-            })
-        }
-        Some(_) => {
-            return Err(js_err(
-                "format delta \"fontFamily\" must be an object or null",
-            ));
-        }
-    };
-
-    let mut other = BTreeMap::new();
-    if let Some(value) = object.get("other") {
-        let entries = value
-            .as_object()
-            .ok_or_else(|| js_err("format delta \"other\" must be an object"))?;
-        for (key, value) in entries {
-            other.insert(
-                key.clone(),
-                if value.is_null() {
-                    None
-                } else {
-                    Some(json_to_any(value)?)
-                },
-            );
-        }
-    }
-
-    Ok(InlineFormatDelta {
-        bold: bool_patch("bold")?,
-        italic: bool_patch("italic")?,
-        underline,
-        strike,
-        color,
-        highlight,
-        font_size,
-        font_family,
-        other,
-    })
+    crate::format::parse_inline_format_delta(object).map_err(js_err)
 }
 
 /// Decodes the public facade's tri-state paragraph-property delta. Typed
@@ -2517,6 +2354,22 @@ impl EditSession {
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
+    /// Typing echo model of one font at one shaping size from this session's
+    /// resident font store: `{"horizontal","glyphIds","advances","kerning",
+    /// "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
+    /// run's kerning gate. Errors for an unknown font or a non-positive size.
+    pub fn echo_glyph_set_json(
+        &self,
+        font_id: u32,
+        size: f32,
+        kern: bool,
+        alphabet: &str,
+    ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        docx_layout::echo_glyph_set_json(font_id, size, kern, alphabet)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
     /// comment writes and marks loaded fields differing from seed placeholders as authored.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
@@ -2528,7 +2381,7 @@ impl EditSession {
                 .map(|source| source.read().comment_writes.snapshot())
                 .unwrap_or_default()
         });
-        self.engine.doc().apply_update_v1(update).map_err(js_err)?;
+        self.engine.doc().load_state_v1(update).map_err(js_err)?;
         if self.engine.doc().session_id() != session_id {
             self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         }
@@ -2728,7 +2581,7 @@ impl EditSession {
             None
         } else {
             EditingDoc::new(1)
-                .apply_update_v1(state)
+                .load_state_v1(state)
                 .map_err(|error| js_err(error.to_string()))?;
             Some(Arc::from(state))
         };
@@ -3012,6 +2865,16 @@ impl EditSession {
         };
         self.undo.set_capture_mode(mode);
         Ok(())
+    }
+
+    /// Pins the input span used to measure the next capture gap.
+    pub fn set_undo_input_time(&self, first: f64, last: f64) {
+        self.undo.set_input_time(Some((first as u64, last as u64)));
+    }
+
+    /// Clears the pinned input span.
+    pub fn clear_undo_input_time(&self) {
+        self.undo.set_input_time(None);
     }
 
     /// Current undo grouping policy.
@@ -3461,6 +3324,35 @@ impl EditSession {
             .insert_table(&ctx, Position::new(story, index), rows, columns)
             .map_err(js_err)?;
         serde_json::to_string(&receipt).map_err(js_err)
+    }
+
+    /// Inserts a clipboard table fragment at `(story, para_id, offset)`.
+    /// `fragment_json` is a [`DocxTableFragment`] (`packages/docx/src/yrs/clipboardFragment.ts`).
+    /// Returns the [`TableFragmentReceipt`] JSON, with `after` carrying the
+    /// caret right after the inserted table embed.
+    pub fn insert_table_fragment(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        fragment_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
+        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let ctx = edit_ctx(author_name, author_date)?;
+        let fragment: Value = serde_json::from_str(fragment_json).map_err(js_err)?;
+        let receipt = self
+            .engine
+            .doc()
+            .insert_table_fragment(&ctx, Position::new(story, index), &fragment)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
+    pub fn validate_table_fragment(&self, fragment_json: &str) -> Result<(), JsValue> {
+        let fragment: Value = serde_json::from_str(fragment_json).map_err(js_err)?;
+        EditingDoc::validate_table_fragment(&fragment).map_err(js_err)
     }
 
     /// Inserts a row above (`after = false`) or below (`after = true`) the

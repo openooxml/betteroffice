@@ -13,7 +13,8 @@ import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { releaseResidentSelectionReads } from './residentCommandSelection';
 import { readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
-import { stageCommandPresentation } from './residentCommandPresentation';
+import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
+import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
@@ -80,6 +81,8 @@ import {
   resolveSelectionUnit,
 } from './viewerSelection';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
+import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -142,6 +145,7 @@ let commandFrameChanges: {
   viewport?: ResidentCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
+  echoRaster?: { pageId: string; pixelRatio: number };
   layoutPreviewVersion?: number;
 } | null = null;
 
@@ -783,14 +787,20 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
         if (changes.window && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
+        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
+        const pixelRatio = offscreenDpr * offscreenZoom;
+        const echoRaster = changes.echoRaster;
+        if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
+        const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
           engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
+          glyphs: echoGlyphs.provider(pixelRatio),
         });
-        if (selectionContext && projectedEcho) requestedPages.add(projectedEcho.page.pageIndex);
-        const echoContext = projectedEcho && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
+        if (selectionContext && projectedEcho?.glyphs) requestedPages.add(projectedEcho.page.pageIndex);
+        const echoContext = projectedEcho?.glyphs && (full || requestedPages.has(projectedEcho.page.pageIndex) ||
           pendingOffscreenPageIds.has(projectedEcho.page.pageId))
           ? projectedEcho : undefined;
-        if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
+        const echoGlyphSets = echoGlyphs.unsent(echoContext);
         const images = new Map<string, ImageBitmap>();
         const failedImages = new Set<string>();
         const rasterOptions = {
@@ -812,11 +822,14 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             return image;
           },
         };
-        const pixelRatio = offscreenDpr * offscreenZoom;
         const visiblePages = new Set<number>();
         const center = caretPage ?? 0;
         if (caretPage !== undefined) visiblePages.add(center);
         if (echoContext) visiblePages.add(echoContext.page.pageIndex);
+        if (echoRaster && pendingOffscreenPageIds.has(echoRaster.pageId)) {
+          const retained = retainedPageByKey(layout.frame, echoRaster.pageId);
+          if (retained) visiblePages.add(retained.pageIndex);
+        }
         for (const index of pages) visiblePages.add(index);
         if (changes.window) {
           for (let index = changes.window[0]; index < Math.min(changes.window[1], layout.frame.pages.length); index += 1) visiblePages.add(index);
@@ -850,22 +863,17 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           async rasterizeBackground(dependency) {
             const retained = retainedPageByKey(layout.frame, dependency.page.pageId);
             if (!retained) throw new Error('Command background is unavailable');
-            const keep = new Set(dependency.primitiveIds);
-            const buffer = new OffscreenCanvas(1, 1);
-            await rasterizeDisplayPageToBackBuffer(buffer, { ...retained.page,
-              watermarkPrimitiveCount: retained.page.primitives.slice(0, retained.page.watermarkPrimitiveCount ?? 0)
-                .filter((_primitive, index) => keep.has(retained.primitiveIds[index]!.toString())).length,
-              primitives: retained.page.primitives.filter((_primitive, index) => keep.has(retained.primitiveIds[index]!.toString())),
-            }, rasterOptions, pixelRatio);
             const { rect } = dependency;
-            const crop = new OffscreenCanvas(Math.ceil(rect.width * pixelRatio), Math.ceil(rect.height * pixelRatio));
-            const ctx = crop.getContext('2d');
-            if (!ctx) throw new Error('Command background canvas is unavailable');
-            ctx.drawImage(buffer, rect.x * pixelRatio, rect.y * pixelRatio,
-              rect.width * pixelRatio, rect.height * pixelRatio, 0, 0, crop.width, crop.height);
-            return crop.transferToImageBitmap();
+            const device = [rect.x, rect.y, rect.width, rect.height].map((value) => Math.round(value * pixelRatio)) as
+              [number, number, number, number];
+            const buffer = new OffscreenCanvas(device[2], device[3]);
+            await rasterizeDisplayPageToBackBuffer(buffer, echoBackgroundPage(retained, dependency), rasterOptions,
+              pixelRatio, 1, { x: device[0], y: device[1], width: device[2], height: device[3] });
+            return buffer.transferToImageBitmap();
           },
         }).finally(() => { for (const image of images.values()) image.close(); });
+        if (echoContext) changes.echoRaster = { pageId: echoContext.page.pageId, pixelRatio };
+        else if (stagedPages.some((page) => page.pageId === echoRaster?.pageId)) changes.echoRaster = undefined;
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
         const shown: ReturnType<typeof presentLayout> = init.provisionalPages === undefined ? {} : presentLayout();
         const selected = hooks.selection();
@@ -886,8 +894,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           parts: shown.layoutProvisional ? [] : engine.partGeometry(retainedFrame!),
           geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
-          ...shown, echoContext, stagedPresentation: presentation.value,
+          ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
         });
+        echoGlyphs.sent(echoGlyphSets);
         revision = built.value.revision;
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
@@ -925,6 +934,19 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   };
   relayout('initial');
   return host;
+}
+
+type EchoGlyphState = { cache: GlyphCache; engine: EchoGlyphEngine; sources: EchoGlyphSources };
+
+/** Echo glyph sets live as long as the glyph cache of the font store they were shaped from. */
+function commandEchoGlyphs(cache: GlyphCache, engine: EchoGlyphEngine, full: boolean): EchoGlyphSources {
+  let state = echoGlyphState;
+  if (!state || state.cache !== cache || state.engine !== engine) {
+    state = { cache, engine, sources: new EchoGlyphSources(engine, ++echoGlyphGeneration) };
+    echoGlyphState = state;
+  }
+  if (full) state.sources.resend();
+  return state.sources;
 }
 
 /** Whether `init` opens on a certified prefix that completes in the background. */
@@ -1067,6 +1089,8 @@ let sentHeadersFootersEpoch = 0;
 let fontsRevision = -1;
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
+let echoGlyphState: EchoGlyphState | null = null;
+let echoGlyphGeneration = 0;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
 const pendingOffscreenPageIds = new Set<string>();
@@ -1233,6 +1257,7 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
+    kind === 'pasteFragment' ||
     kind === 'insertPageBreak' || kind === 'insertSectionBreak';
 }
 
@@ -1853,6 +1878,33 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         const { anchor, focus } = request.read.selection;
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
         value = session.selectionText({ story: anchor.story, start: anchor, end: focus });
+        break;
+      }
+      case 'clipboardSlice': {
+        const { anchor, focus } = request.read.selection;
+        const cells = session.cellSelection();
+        const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
+          cells.anchor.tableIndex !== cells.head.tableIndex ||
+          cells.anchor.row !== cells.head.row || cells.anchor.column !== cells.head.column);
+        if (multiCell && cells) {
+          const payload = clipboardTablePayload(
+            session.tablePayload(cells.anchor.story, cells.anchor.tableIndex),
+          );
+          const holds = !!payload &&
+            tableAnchors(payload).anchors.some(
+              (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
+            );
+          if (holds) {
+            value = readClipboardSlice(session, { cells });
+            break;
+          }
+        }
+        if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
+        value = readClipboardSlice(session, {
+          story: anchor.story,
+          from: storyOffsetForLoc(session.geometryReader, anchor),
+          to: storyOffsetForLoc(session.geometryReader, focus),
+        });
         break;
       }
       case 'validateEdits':

@@ -14,6 +14,7 @@ import {
 import { preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
+import { echoBackgroundPage } from './residentCommandPresentation';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandSelection,
   DocxSelectionPointIntent, ResidentCommandInitRequest,
@@ -49,7 +50,10 @@ beforeAll(async () => {
       name: 'resident-worker-real-engine',
       setup(build) {
         build.onLoad({ filter: /\/residentCommandPresentation\.ts$/ }, () => ({
-          contents: 'export const stageCommandPresentation = async ({ layout }) => ({ value: { frameEpoch: layout.frame.frameEpoch, pages: [] }, transfer: [] });',
+          contents: `
+            export const echoBackgroundPage = (...args) => testHarness.echoBackgroundPage(...args);
+            export const stageCommandPresentation = async ({ layout }) => ({ value: { frameEpoch: layout.frame.frameEpoch, pages: [] }, transfer: [] });
+          `,
           loader: 'js',
         }));
         build.onLoad({ filter: /\/rustDisplayList\.ts$/ }, () => ({
@@ -139,7 +143,8 @@ function worker(session: ResidentEngineSession, controlled = false, virtualTime 
   let now = 0;
   let timerId = 0;
   const timers = new Map<number, { at: number; callback: () => void }>();
-  const harness = { session, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
+  const harness = { session, echoBackgroundPage, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine,
+    loadedRustDisplayListQueryEngine,
     ...(virtualTime ? {
       clock: { now: () => now },
       setTimer(callback: () => void, ms: number) {

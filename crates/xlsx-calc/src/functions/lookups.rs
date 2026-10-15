@@ -375,8 +375,10 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         return Err(ErrorValue::Value);
     }
     if let Some(style) = args.get(1) {
-        // a bad a1 argument is the caller's error, not a silent A1 default
+        // a bad a1 argument is the caller's error, not a silent A1 default;
+        // R1C1 text is an engine gap
         if !crate::eval::to_bool(&evaluate(style, ctx))? {
+            ctx.record_unsupported_function();
             return Err(ErrorValue::Ref);
         }
     }
@@ -385,11 +387,23 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         CellValue::Error { value } => return Err(value),
         _ => return Err(ErrorValue::Ref),
     };
-    let expr = crate::parse_formula(&text).map_err(|_| ErrorValue::Ref)?;
+    let expr = crate::parse_formula(&text).map_err(|_| {
+        if text.contains('[') {
+            ctx.record_unsupported_function();
+        }
+        ErrorValue::Ref
+    })?;
     if !matches!(
         expr,
         Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. }
     ) {
+        if let Expr::Name {
+            scope: Some(scope), ..
+        } = &expr
+            && scope.contains('[')
+        {
+            ctx.record_unsupported_function();
+        }
         return Err(ErrorValue::Ref);
     }
     as_area(&expr, ctx).ok_or(ErrorValue::Ref)

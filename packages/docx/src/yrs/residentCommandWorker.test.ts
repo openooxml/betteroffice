@@ -475,7 +475,7 @@ test('replace_matches_and_range_highlights_share_native_version_and_layout_ident
     expect(highlights.status).toBe('ok');
     if (highlights.status !== 'ok') throw new Error('Highlight read was superseded');
     const geometry = highlights.value!;
-    expect(geometry).toMatchObject({ version, layoutRevision: 1, frameEpoch: initial.frame.revision });
+    expect(geometry).toMatchObject({ version, layoutRevision: 1, frameEpoch: initial.frame!.revision });
     expect(geometry.rects[0].length).toBeGreaterThan(0);
     expect(geometry.rects[0][0].pageId).toBeDefined();
     const find = await client.documentRead({ kind: 'findText', request: { text: 'Seed', within: { kind: 'story', story: 'body' }, view: 'accepted' } });
@@ -2305,6 +2305,27 @@ test('round two resident geometry matches the reference walk on built pages', as
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+const WRAPPED = 'Wrapped' + ' echo words'.repeat(40);
+
+test('typing in a wrapped paragraph under an active display window carries echo context', async () => {
+  const bodyXml = Array.from({ length: 120 }, (_, index) => '<w:p w14:paraId="' + (index + 1).toString(16).padStart(8, '0') +
+    '"><w:r><w:t>' + (index === 2 ? WRAPPED : 'Seed paragraph ' + index) + '</w:t></w:r></w:p>').join('');
+  const { client, initial } = await openWorker({ bodyXml, displayWindow: [0, 2],
+    prepare: () => ({ story: 'body', paraId: '00000003', offset: 200 }) });
+  try {
+    await client.requestViewport({ start: 0, end: 3, frameEpoch: initial.frame!.revision });
+    const typed = (await client.edit(intent(1, 0, 'insertText', { text: 'x' }))).frame!.payload.echoContext;
+    expect(typed).toBeDefined();
+    const text = WRAPPED.slice(0, 200) + 'x' + WRAPPED.slice(200);
+    expect(text).toContain(typed!.text);
+    expect(typed!.text.length).toBeLessThan(text.length);
+    expect(typed!.boundaries[typed!.selection.focusGrapheme]!.utf16).toBe(typed!.text.indexOf('x') + 1);
+    const removed = (await client.edit(intent(2, 1, 'deleteBackward', {}))).frame!.payload.echoContext;
+    expect(removed).toBeDefined();
+    expect(WRAPPED).toContain(removed!.text);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('resident geometry, object rects and selection after inline controls match the layout', async () => {
   const { createDisplayListQueries } = await import('../layout/render/displayListQueries');
   const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
@@ -2368,4 +2389,115 @@ test('resident geometry, object rects and selection after inline controls match 
     expect(expected.length).toBeGreaterThan(0);
     expect(selected.frame!.payload.geometry!.selection).toEqual(expected);
   } finally { queries.dispose(); client.destroy(); }
+}, TIMEOUT);
+
+const TABLE_BODY =
+  '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+  '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/></w:tblGrid>' +
+  '<w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr>' +
+  '<w:tr><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+  '<w:p w14:paraId="00000002"><w:r><w:t>After</w:t></w:r></w:p>';
+
+function cellPoint(engine: { paragraphs(story: string): { paraId: string; text: string }[]; geometryReader: { storyIds(): string[] } }, text: string) {
+  const story = engine.geometryReader.storyIds()
+    .find((story) => story.includes(':t') && engine.paragraphs(story)[0]?.text === text)!;
+  const paraId = engine.paragraphs(story)[0]!.paraId;
+  return { story, selection: { anchor: { story, paraId, offset: 0 }, focus: { story, paraId, offset: 0 } } };
+}
+
+function cellObjects(response: { frame?: DocxCommandFrame | null }) {
+  return response.frame!.payload.geometry!.objects.filter((object) => object.kind === 'cell');
+}
+
+test('worker orders table structure commands with single version steps duplicates and refusals', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });
+  try {
+    expect(cellObjects(initial)).toHaveLength(4);
+    const cellA = cellPoint(engine, 'A');
+    const selected = await client.edit(intent(1, 0, 'select', { selection: cellA.selection }));
+    expect(selected.outcomes[0]?.status).toBe('noop');
+    expect(selected.version).toBe(0);
+    const inserted = await client.edit(intent(2, 0, 'insertTableColumn', { side: 'right' }));
+    expect(inserted).toMatchObject({ version: 1, outcomes: [{ status: 'applied' }] });
+    expect(engine.selection()?.head.story).toBe(cellA.story);
+    expect(cellObjects(inserted)).toHaveLength(6);
+    expect(cellObjects(inserted).map((cell) => cell.rects[0]))
+      .not.toEqual(cellObjects(initial).map((cell) => cell.rects[0]));
+    const duplicate = await client.edit(intent(2, 0, 'insertTableColumn', { side: 'right' }));
+    expect(duplicate.outcomes).toEqual(inserted.outcomes);
+    expect(duplicate.version).toBe(1);
+    expect(cellObjects(await client.requestFullFrame())).toHaveLength(6);
+    const refused = await client.edit(intent(3, 1, 'mergeTableCells', {}));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
+    expect(refused.version).toBe(1);
+    const stale = await client.edit({ ...intent(4, 1, 'insertTableRow', { side: 'below' }), basis: { epoch: 2, version: 1 } });
+    expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-epoch' });
+    expect(stale.version).toBe(1);
+    expect(engine.proposalEngine.version()).toBe(inserted.frame!.payload.documentVersion!);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker refreshes deleted cell handles and resizes merged cells', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });
+  try {
+    const before = cellObjects(initial);
+    expect(before).toHaveLength(4);
+    const cellB = cellPoint(engine, 'B');
+    const deleted = await client.edit(intent(1, 0, 'deleteTableColumn', { selection: cellB.selection }));
+    expect(deleted.outcomes[0]?.status).toBe('applied');
+    const staleHandle = before.find((cell) => cell.story === cellB.story)!.handle;
+    const refused = await client.edit(intent(2, 1, 'resizeObject', {
+      handle: staleHandle, widthTwips: 2160, expectVersion: deleted.frame!.payload.documentVersion!,
+    }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-object' });
+    expect(refused.version).toBe(1);
+    const undone = await client.edit(intent(3, 1, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect((await client.edit(intent(4, 2, 'select', { selection: cellPoint(engine, 'A').selection }))).outcomes[0]?.status).toBe('noop');
+    engine.setCellSelection({
+      anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 }, head: { story: 'body', tableIndex: 0, row: 0, column: 1 },
+    });
+    const merged = await client.edit(intent(5, 2, 'mergeTableCells', {}));
+    expect(merged.outcomes[0]?.status).toBe('applied');
+    const mergedCell = cellObjects(merged).find((cell) => cell.story === cellPoint(engine, 'A').story)!;
+    const resized = await client.edit(intent(6, 3, 'resizeObject', {
+      handle: mergedCell.handle, widthTwips: 2160, expectVersion: merged.frame!.payload.documentVersion!,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2160, 1440]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker saves table cell shading and reopens it from the bytes', async () => {
+  const { client, engine } = await openWorker({ bodyXml: TABLE_BODY });
+  try {
+    const cellA = cellPoint(engine, 'A');
+    const shaded = await client.edit(intent(1, 0, 'setTableCellShading', { selection: cellA.selection, color: 'AABBCC' }));
+    expect(shaded.outcomes[0]?.status).toBe('applied');
+    expect(shaded.editState?.tableContext).toMatchObject({ cellBackgroundColor: 'AABBCC' });
+    const saved = await client.save({ comments: [] });
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.bytes))['word/document.xml']!);
+    expect(xml).toContain('AABBCC');
+    const { parseDocx } = await import('../docx');
+    const reopened = await parseDocx(saved.bytes, { preloadFonts: false });
+    const tables = reopened.package.document.content.filter((block): block is Extract<typeof block, { type: 'table' }> => block.type === 'table');
+    expect(tables).toHaveLength(1);
+    expect(JSON.stringify(tables[0]!.rows[0]!.cells[0]!.formatting?.shading)).toContain('AABBCC');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker refuses table structure commands in header stories', async () => {
+  const { client, engine } = await openWorker({ headersFooters: true });
+  try {
+    const paragraph = engine.geometryReader.paragraphSpans('hf:rIdHeader')[0]!;
+    const at = { story: 'hf:rIdHeader', paraId: paragraph.paraId, offset: 0 };
+    const inserted = await client.edit(intent(1, 0, 'insertTable', {
+      selection: { anchor: at, focus: at }, rows: 1, columns: 1,
+    }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(inserted.selection?.focus.story.startsWith('hf:rIdHeader')).toBe(true);
+    const refused = await client.edit(intent(2, 1, 'insertTableRow', { side: 'below' }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
+    expect(refused.version).toBe(1);
+  } finally { client.destroy(); }
 }, TIMEOUT);

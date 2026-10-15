@@ -148,7 +148,7 @@ export function FontPicker({
       onOpenChange={(next) => setOpen(next && !disabled)}
     >
       <SelectTrigger
-        className={cn('h-8 text-sm', disabled && 'opacity-50', className)}
+        className={cn('h-7 text-sm', disabled && 'opacity-[0.38]', className)}
         style={{ minWidth: typeof width === 'number' ? `${width}px` : width }}
         aria-label={t('font.selectAriaLabel')}
         aria-disabled={reason.triggerProps['aria-disabled']}

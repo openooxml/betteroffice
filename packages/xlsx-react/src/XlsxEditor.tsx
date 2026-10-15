@@ -87,6 +87,11 @@ import { EditorChromeContext } from './components/EditorToolbarContext';
 import type { BorderStyle } from './components/Toolbar';
 import { FormulaBarContext, type FormulaBarBinding } from './components/toolbar/FormulaBar';
 import { ToolbarCommandButton } from './components/toolbar/ToolbarCommand';
+import {
+  toolbarRailStyle,
+  toolbarSeparatorStyle,
+  toolbarTheme,
+} from '../../../shared/react-toolbar/theme';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
 import { ToolbarButtonBase, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import {
@@ -550,20 +555,14 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     flex: '0 0 auto',
     minHeight: DEFAULT_XLSX_TOOLBAR_HEIGHT,
     padding: '4px 0 5px',
-    borderBottom: '1px solid #e2e8f0',
+    borderBottom: `1px solid ${toolbarTheme.line}`,
     background: '#ffffff',
-    color: '#0f172a',
+    color: toolbarTheme.ink,
     boxSizing: 'border-box',
   },
   rail: {
-    display: 'flex',
-    alignItems: 'center',
-    minHeight: 32,
+    ...toolbarRailStyle,
     margin: '0 8px',
-    padding: '2px 8px',
-    borderRadius: 4,
-    background: '#ffffff',
-    boxSizing: 'border-box',
     overflowX: 'auto',
     overflowY: 'hidden',
   },
@@ -571,8 +570,6 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     display: 'inline-flex',
     alignItems: 'center',
     gap: 1,
-    padding: '0 6px',
-    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
     flex: '0 0 auto',
   },
   host: {
@@ -591,8 +588,8 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     marginLeft: -3,
     padding: '0 4px',
     borderRadius: 8,
-    background: '#0f172a',
-    color: '#ffffff',
+    background: toolbarTheme.accent,
+    color: toolbarTheme.accentInk,
     fontSize: 10,
     fontWeight: 700,
     lineHeight: 1,
@@ -2477,10 +2474,7 @@ function XlsxEditorContent({
     <EditorToolbar mode="commands">
       <EditorToolbar.Toolbar />
       <div style={xlsxToolbarStyles.rail} role="group" aria-label={t('toolbar.formulaBarLabel')}>
-        <ToolbarGroup
-          style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
-          label={t('toolbar.fileActionsLabel')}
-        >
+        <ToolbarGroup style={xlsxToolbarStyles.group} label={t('toolbar.fileActionsLabel')}>
           <ToolbarCommandButton id="save">
             <ToolbarIcon name="save" size={18} />
           </ToolbarCommandButton>
@@ -2488,7 +2482,9 @@ function XlsxEditorContent({
             <ToolbarIcon name="image" size={18} />
           </ToolbarCommandButton>
         </ToolbarGroup>
+        <div style={toolbarSeparatorStyle} aria-hidden="true" />
         <EditorToolbar.FormulaBar />
+        <div style={toolbarSeparatorStyle} aria-hidden="true" />
         <PresenceStrip
           peers={awarenessPeers}
           sheetIds={sheetInfo?.sheetIds ?? []}

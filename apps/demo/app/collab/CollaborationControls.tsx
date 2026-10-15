@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
+import { barBordered } from "../components/DemoTopBar";
 import type { CollaborationStatus } from "./types";
 
 interface CollaborationControlsProps {
@@ -43,9 +44,9 @@ export function CollaborationControls({
   const indicator = shared ? (error ? "error" : status) : "disconnected";
 
   return (
-    <div className="inline-flex flex-none items-center gap-2 font-mono text-[11px] leading-none">
+    <div className="inline-flex flex-none items-center gap-1.5 text-[12.5px] leading-none">
       <span
-        className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-hairline-strong bg-white px-[9px] whitespace-nowrap text-mute"
+        className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[rgba(31,31,31,0.16)] bg-white px-2.5 whitespace-nowrap text-[#444746]"
         data-status={indicator}
         role="status"
         title={error ?? undefined}
@@ -65,7 +66,7 @@ export function CollaborationControls({
       </span>
       {shared && (
         <button
-          className="min-h-7 cursor-pointer rounded-[5px] border border-hairline-strong bg-white px-[9px] whitespace-nowrap text-fg hover:bg-surface max-[760px]:hidden"
+          className={`${barBordered} max-[760px]:hidden`}
           type="button"
           onClick={() => {
             void navigator.clipboard

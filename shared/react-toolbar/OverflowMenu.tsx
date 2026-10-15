@@ -14,6 +14,8 @@ import type {
   MouseEvent as ReactMouseEvent,
   ReactNode,
 } from 'react';
+import { toolbarTheme, useFocusRing } from './theme';
+import type { ToolbarControlState } from './theme';
 import { useRovingFocus } from './useRovingFocus';
 
 /** One entry of an overflow menu; plain render data without behavior beyond `onSelect`. */
@@ -52,6 +54,8 @@ export interface OverflowMenuColors {
   border: string;
   hover: string;
   shadow: string;
+  /** Outline of the keyboard-focused item. */
+  focus: string;
 }
 
 export interface OverflowMenuHandle {
@@ -66,19 +70,21 @@ export interface OverflowMenuProps {
   entries: readonly OverflowMenuEntry[];
   colors?: Partial<OverflowMenuColors>;
   triggerClassName?: string;
-  triggerStyle?: CSSProperties;
+  /** A style, or one built from the trigger's hover, open and keyboard-focus state. */
+  triggerStyle?: CSSProperties | ((state: ToolbarControlState) => CSSProperties);
   testId?: string;
   /** Called after an item ran, with the input that chose it. */
   onItemSelected?(modality: 'pointer' | 'keyboard'): void;
 }
 
 const DEFAULT_COLORS: OverflowMenuColors = {
-  surface: '#ffffff',
-  text: '#202124',
-  mutedText: '#5f6368',
-  border: '#dadce0',
-  hover: '#f1f3f4',
-  shadow: 'rgba(60, 64, 67, 0.24)',
+  surface: toolbarTheme.surface,
+  text: toolbarTheme.ink,
+  mutedText: toolbarTheme.inkMuted,
+  border: toolbarTheme.line,
+  hover: toolbarTheme.hover,
+  shadow: 'rgba(0, 0, 0, 0.12)',
+  focus: toolbarTheme.accent,
 };
 
 const ITEM_SELECTOR = '[role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]';
@@ -153,6 +159,8 @@ function MenuList({
   const baseId = useId();
   const [placement, setPlacement] = useState<Placement | null>(null);
   const focused = useRef(false);
+  const [focusedEntry, setFocusedEntry] = useState<string | null>(null);
+  const [hoveredEntry, setHoveredEntry] = useState<string | null>(null);
   const [submenu, setSubmenu] = useState<{ id: string; focus: InitialFocus } | null>(null);
   const submenuAnchors = useRef(new Map<string, HTMLElement>());
   const roving = useRovingFocus({
@@ -299,16 +307,14 @@ function MenuList({
               if (isSubmenu && element) submenuAnchors.current.set(entry.id, element);
             }}
             onMouseDown={(event: ReactMouseEvent) => event.preventDefault()}
-            onMouseEnter={(event) => {
+            onMouseEnter={() => {
               if (isSubmenu && !entry.disabled) openSubmenu(entry.id, 'none');
               else if (submenu) setSubmenu(null);
-              (event.currentTarget as HTMLElement).style.background = entry.disabled
-                ? 'transparent'
-                : colors.hover;
+              setHoveredEntry(entry.id);
             }}
-            onMouseLeave={(event) => {
-              (event.currentTarget as HTMLElement).style.background = 'transparent';
-            }}
+            onMouseLeave={() => setHoveredEntry(null)}
+            onFocus={() => setFocusedEntry(entry.id)}
+            onBlur={() => setFocusedEntry((current) => (current === entry.id ? null : current))}
             onClick={() => {
               if (entry.disabled) return;
               if (isSubmenu) openSubmenu(entry.id, 'none');
@@ -318,13 +324,21 @@ function MenuList({
               display: 'flex',
               alignItems: 'center',
               gap: 8,
-              minHeight: 30,
+              minHeight: 32,
+              margin: '0 4px',
               padding: '4px 12px 4px 8px',
+              borderRadius: 6,
               fontSize: 13,
               cursor: entry.disabled ? 'default' : 'pointer',
               color: entry.disabled ? colors.mutedText : colors.text,
               opacity: entry.disabled ? 0.6 : 1,
-              outlineOffset: -2,
+              background:
+                !entry.disabled && (hoveredEntry === entry.id || focusedEntry === entry.id)
+                  ? colors.hover
+                  : 'transparent',
+              ...(focusedEntry === entry.id
+                ? { outline: `2px solid ${colors.focus}`, outlineOffset: -2 }
+                : { outline: 'none' }),
             }}
           >
             <span
@@ -446,6 +460,8 @@ export const OverflowMenu = forwardRef<OverflowMenuHandle, OverflowMenuProps>(fu
   const menus = useRef(new Set<HTMLElement>());
   const menuId = useId();
   const [open, setOpen] = useState<InitialFocus | null>(null);
+  const [hovered, setHovered] = useState(false);
+  const focus = useFocusRing<HTMLButtonElement>();
   const palette = { ...DEFAULT_COLORS, ...colors };
 
   const close = useCallback(() => setOpen(null), []);
@@ -495,7 +511,14 @@ export const OverflowMenu = forwardRef<OverflowMenuHandle, OverflowMenuProps>(fu
         ref={triggerRef}
         type="button"
         className={triggerClassName}
-        style={triggerStyle}
+        style={
+          typeof triggerStyle === 'function'
+            ? triggerStyle({ hovered, open: open !== null, focusRing: focus.focusRing })
+            : triggerStyle
+        }
+        {...focus.focusProps}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
         data-testid={testId}
         aria-label={label}
         title={label}

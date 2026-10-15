@@ -27,7 +27,6 @@ export interface UsePeerlessEditSessionOptions {
   recovery?: DocxWorkerEditSessionOptions<PeerlessDocumentSource, PeerlessEchoIntent>['recovery'];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
-  canEchoFont?(family: string): boolean;
   onError?(error: Error): void;
   /** Failures the editor survives, such as pages that cannot be painted until the viewport or zoom changes. */
   onRecoverableError?(error: Error): void;
@@ -122,23 +121,24 @@ export function usePeerlessEditSession(
         });
         cleanups.push(() => viewStore.dispose());
         const canvasForPage = (page: DocxCommandPageIdentity) => callbacks.current.canvasForPage(page);
-        const echoPainter = createEchoPainter({ canvasForPage, canEchoFont: family => callbacks.current.canEchoFont?.(family) ?? true });
+        const requestFullFrame = (settled: () => void = () => {}) => {
+          if (!connection || controller.signal.aborted) { settled(); return; }
+          const resident = connection;
+          void resident.requestFullFrame().then((ack) => {
+            settled();
+            if (!ack.frame) return;
+            if (!controller.signal.aborted && resident === connection && receiveRequestedFrame) receiveRequestedFrame(ack.frame);
+            else discardCommandPresentation(ack.frame);
+          }).catch((error: unknown) => {
+            settled();
+            if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+          });
+        };
+        const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame });
         cleanups.push(() => echoPainter.dispose());
         const presentation = createFramePresentation({
           viewStore, echoPainter, canvasForPage, prepareGeometry: (frame) => callbacks.current.prepareGeometry(frame),
-          requestFullFrame: (settled) => {
-            if (!connection || controller.signal.aborted) { settled(); return; }
-            const resident = connection;
-            void resident.requestFullFrame().then((ack) => {
-              settled();
-              if (!ack.frame) return;
-              if (!controller.signal.aborted && resident === connection && receiveRequestedFrame) receiveRequestedFrame(ack.frame);
-              else discardCommandPresentation(ack.frame);
-            }).catch((error: unknown) => {
-              settled();
-              if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
-            });
-          },
+          requestFullFrame,
           onError: (error) => { if (!controller.signal.aborted) callbacks.current.onRecoverableError?.(error); },
         });
         cleanups.push(() => presentation.dispose());

@@ -149,7 +149,7 @@ import {
 import type { FontOption } from './ui/FontPicker';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from './DocumentOutline';
 import { RULER_WIDTH } from './ui/VerticalRuler';
-import { SIDEBAR_DOCUMENT_SHIFT } from './sidebar/constants';
+import { minLayoutWidth } from './DocxEditor/minLayoutWidth';
 import { useCommentSidebarItems, type CommentCallbacks } from '../hooks/useCommentSidebarItems';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { DocxEditorPluginProps } from '../plugins/types';
@@ -2354,8 +2354,12 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Leg
     ? Math.round(Math.max(...sectionPageWidths) / 15)
     : DEFAULT_PAGE_WIDTH;
 
-  const minLayoutWidth =
-    2 * outlineLeftAllowance + maxPageWidthPx + (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0);
+  const layoutMinWidth = minLayoutWidth({
+    outlineLeftAllowance,
+    maxPageWidthPx,
+    zoom: state.zoom,
+    sidebarOpen,
+  });
 
   // pageWidthPx — the final section's width — positions the sidebar / comment
   // margin markers against the page most content lives under.
@@ -2574,7 +2578,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Leg
         showOutline={showOutline}
         showOutlineButton={showOutlineButton}
         sidebarOpen={sidebarOpen}
-        minLayoutWidth={minLayoutWidth}
+        minLayoutWidth={layoutMinWidth}
         editorScrollLeft={editorScrollLeft}
         expandedSidebarItem={expandedSidebarItem}
         trackedChanges={trackedChanges}

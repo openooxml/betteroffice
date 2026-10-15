@@ -3,6 +3,7 @@ import type { ComponentType, CSSProperties, ReactNode } from 'react';
 import type { ParagraphAlignment } from '@betteroffice/pptx';
 import type { TFunction, TranslationKey } from '@betteroffice/pptx-i18n';
 import type { OverflowMenuEntry } from '../../../../../shared/react-toolbar/OverflowMenu';
+import { toolbarTheme } from '../../../../../shared/react-toolbar/theme';
 import {
   pptxCommandController,
   type PptxPendingCommand,
@@ -29,7 +30,6 @@ import {
   ToolbarButtonBase,
   ToolbarDropdownBase,
   ToolbarMenuItem,
-  toolbarColors,
 } from '../ui/ToolbarPrimitives';
 import { runFromControl } from './activation';
 import { ToolbarOverflowContext, useOverflowSource, type OverflowPrompt } from './overflowRegistry';
@@ -497,7 +497,7 @@ function FontFamilyMenu() {
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {state.value ?? t('toolbar.mixed')}
           </span>
-          <ToolbarIcon name="chevronDown" size={13} />
+          <ToolbarIcon name="chevronDown" size={18} />
         </>
       }
     >
@@ -632,7 +632,7 @@ function NewSlideControl() {
         disabled={!main.state.enabled}
         description={reasonOf(main.state as PptxCommandState)}
         onClick={() => void main.execute()}
-        style={{ borderRadius: '4px 0 0 4px' }}
+        style={{ borderRadius: '6px 0 0 6px' }}
         testId="pptx-new-slide"
       >
         <ToolbarIcon name="newSlide" />
@@ -643,8 +643,8 @@ function NewSlideControl() {
         description={reasonOf(state as PptxCommandState)}
         menuWidth={230}
         testId="pptx-new-slide-layout"
-        style={{ minWidth: 20, width: 20, padding: 0, borderRadius: '0 4px 4px 0' }}
-        trigger={<ToolbarIcon name="chevronDown" size={13} />}
+        style={{ minWidth: 20, width: 20, padding: 0, borderRadius: '0 6px 6px 0' }}
+        trigger={<ToolbarIcon name="chevronDown" size={18} />}
       >
         {(close) =>
           layouts.map((layout, index) => (
@@ -703,7 +703,7 @@ export function ShapeToolMenu() {
         trigger={
           <>
             <ToolbarIcon name="shape" />
-            <ToolbarIcon name="chevronDown" size={11} />
+            <ToolbarIcon name="chevronDown" size={18} />
           </>
         }
       >
@@ -739,10 +739,10 @@ export function ShapeToolMenu() {
                     width: 44,
                     height: 38,
                     padding: 5,
-                    border: `1px solid ${toolbarColors.border}`,
-                    borderRadius: 4,
-                    background: tool === value ? toolbarColors.active : toolbarColors.surface,
-                    color: toolbarColors.text,
+                    border: `1px solid ${toolbarTheme.line}`,
+                    borderRadius: 6,
+                    background: tool === value ? toolbarTheme.selected : toolbarTheme.surface,
+                    color: toolbarTheme.ink,
                     cursor: 'pointer',
                   }}
                 >

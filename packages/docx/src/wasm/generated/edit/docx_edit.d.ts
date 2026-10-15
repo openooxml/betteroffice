@@ -228,6 +228,10 @@ export class EditSession {
      */
     clear_measure_fonts(): void;
     /**
+     * Clears the pinned input span.
+     */
+    clear_undo_input_time(): void;
+    /**
      * Stops queueing and discards anything not yet drained.
      */
     clear_update_event_observation(): void;
@@ -357,6 +361,13 @@ export class EditSession {
      * started.
      */
     drain_update_event(): Uint8Array;
+    /**
+     * Typing echo model of one font at one shaping size from this session's
+     * resident font store: `{"horizontal","glyphIds","advances","kerning",
+     * "unsafePairs"}`, indexed by the characters of `alphabet`. `kern` is the
+     * run's kerning gate. Errors for an unknown font or a non-positive size.
+     */
+    echo_glyph_set_json(font_id: number, size: number, kern: boolean, alphabet: string): string;
     /**
      * A plain local text edit that the resident lowering records, so the next
      * [`Self::layout_document_with_regions_after_edit`] re-lowers and
@@ -537,6 +548,13 @@ export class EditSession {
      * creating one story per cell. Errors when either dimension is zero.
      */
     insert_table(story: string, para_id: string, offset: number, rows: number, columns: number, author_name?: string | null, author_date?: string | null): string;
+    /**
+     * Inserts a clipboard table fragment at `(story, para_id, offset)`.
+     * `fragment_json` is a [`DocxTableFragment`] (`packages/docx/src/yrs/clipboardFragment.ts`).
+     * Returns the [`TableFragmentReceipt`] JSON, with `after` carrying the
+     * caret right after the inserted table embed.
+     */
+    insert_table_fragment(story: string, para_id: string, offset: number, fragment_json: string, author_name?: string | null, author_date?: string | null): string;
     /**
      * Inserts `text` at `(story, para_id, offset)`. It must contain no
      * paragraph or line breaks, and it inherits the formatting at the
@@ -1153,6 +1171,10 @@ export class EditSession {
      */
     set_undo_capture_mode(mode: string): void;
     /**
+     * Pins the input span used to measure the next capture gap.
+     */
+    set_undo_input_time(first: number, last: number): void;
+    /**
      * Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
      * committed transaction. `update` is v1-encoded — feed it straight to
      * [`EditSession::apply_update`] on a peer — and is copied out of wasm
@@ -1288,6 +1310,7 @@ export class EditSession {
      * without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
      */
     validate_edits_json(request: string): string;
+    validate_table_fragment(fragment_json: string): void;
     /**
      * The session-scoped version token of the committed document state. It
      * changes on every committed change, local or remote, and when the
@@ -1688,6 +1711,7 @@ export interface InitOutput {
     readonly editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
     readonly editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_clear_measure_fonts: (a: number) => void;
+    readonly editsession_clear_undo_input_time: (a: number) => void;
     readonly editsession_clear_update_event_observation: (a: number) => void;
     readonly editsession_clear_update_observer: (a: number) => void;
     readonly editsession_client_id: (a: number) => number;
@@ -1710,6 +1734,7 @@ export interface InitOutput {
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_document_properties_json: (a: number) => [number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
+    readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
@@ -1739,6 +1764,7 @@ export interface InitOutput {
     readonly editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_insert_table: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+    readonly editsession_insert_table_fragment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1841,6 +1867,7 @@ export interface InitOutput {
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_set_undo_input_time: (a: number, b: number, c: number) => void;
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
     readonly editsession_set_windowed_incremental_builds: (a: number, b: number) => void;
     readonly editsession_settle_revisions_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1862,6 +1889,7 @@ export interface InitOutput {
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_validate_table_fragment: (a: number, b: number, c: number) => [number, number];
     readonly editsession_version: (a: number) => [number, number];
     readonly editsession_written_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

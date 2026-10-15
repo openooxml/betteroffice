@@ -20,7 +20,7 @@ import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 const sessions: YrsSession[] = [];
 const globalRestores = new Set<() => void>();
 
@@ -1863,4 +1863,60 @@ test('typing in a table cell is offered to the resident engine', async () => {
   });
   expect(offered).toEqual(['x']);
   expect(session.paragraphs(cell)[0]!.text).toBe('x');
+});
+
+test('cut of a selection spanning a table completes the clipboard write and deletes', async () => {
+  const session = await seededSession();
+  const paraId = session.paragraphs('body')[0]!.paraId;
+  const { secondParaId } = session.splitParagraph({ story: 'body', paraId, offset: 4 });
+  session.insertTable({ story: 'body', paraId: secondParaId, offset: 0 }, 1, 2);
+  const after = session.locateParagraph('body', secondParaId);
+  session.setSelection(
+    { story: 'body', paraId, offset: 0 },
+    { story: 'body', paraId: secondParaId, offset: after.end - after.start }
+  );
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: false };
+  let release!: () => void;
+  const replica = deferWorkerOpenReplica(session,
+    () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+    () => {}, () => { replicaReadyRef.current = true; });
+  replica.start();
+  const view = render(inputFor(session, input, undefined, undefined, { replicaReadyRef }));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  const written = new Map<string, string>();
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  const scope = globalThis as { ClipboardItem?: unknown };
+  const clipboardItem = scope.ClipboardItem;
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      write: async (items: Array<{ data: Record<string, Blob | Promise<Blob>> }>) => {
+        for (const [type, value] of Object.entries(items[0]!.data)) {
+          written.set(type, await (await value).text());
+        }
+      },
+      writeText: async (value: string) => {
+        written.set('text/plain', value);
+      },
+    },
+  });
+  scope.ClipboardItem = class {
+    constructor(readonly data: Record<string, Blob | Promise<Blob>>) {}
+  };
+  try {
+    fireEvent.cut(textarea);
+    await act(async () => { release(); });
+    await waitFor(() => expect(written.get('text/html')).toContain('<table'), { timeout: 2_000 });
+    expect(written.get('text/plain')).toContain('Seed');
+    await waitFor(
+      () => expect(session.storySegments('body').some((segment) => segment.kind === 'embed')).toBe(false),
+      { timeout: 2_000 }
+    );
+    expect(session.paragraphs('body').map((paragraph) => paragraph.text).join('')).not.toContain('Seed');
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+    scope.ClipboardItem = clipboardItem;
+  }
 });

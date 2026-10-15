@@ -1,5 +1,4 @@
 import type { EchoEntry, EchoHooks } from '../../../../../../shared/office-session/commands/types';
-import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
 import { closeCommandBitmap } from '@betteroffice/docx/peerless';
 import type {
   DocxCommandFrame,
@@ -8,6 +7,7 @@ import type {
   DocxStagedPageBitmap,
 } from '@betteroffice/docx/peerless';
 import { releaseBitmap, retainBitmap } from './bitmapOwnership';
+import { decodeCommandFrameDeltas } from './frameDeltas';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessFrameGeometry, PeerlessViewStore } from './viewStore';
 
@@ -163,7 +163,7 @@ export function createFramePresentation(
     try {
       if (frame.baseRevision !== undefined && frame.baseRevision !== revision) throw new Error('base-mismatch');
       let base = revision;
-      const deltas = [...(frame.payload.pageFrames ?? []), frame.payload.frame].map(decodeFrameDelta);
+      const deltas = decodeCommandFrameDeltas(frame);
       const first = deltas[0]!;
       if (first.full !== (frame.baseRevision === undefined)) throw new Error('base-mismatch');
       for (const delta of deltas) {

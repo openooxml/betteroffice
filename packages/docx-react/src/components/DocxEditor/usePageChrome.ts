@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type RefObject } from 'react';
-import { displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
+import { displayPageIsShiftOf, displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { scheduleIdleWork } from './hooks/pageBuildScheduler';
 
@@ -18,11 +18,7 @@ export interface PageChromeOptions {
   hold?: PageChromeHold | null;
   /** A rebuild after a content change never waits. */
   rebuildAtOnce: boolean;
-  /**
-   * Counts in-place changes that are content changes for this chrome. Other
-   * in-place changes (position shifts, see `displayPageRevision`) rebuild it
-   * at idle time.
-   */
+  /** Counts urgent changes; other position shifts rebuild at idle time. */
   urgentRevision: number;
   /** Receives the handle that builds the chrome at once, for a page needed before it is active. */
   register?: (handle: PageChromeHandle | null) => void;
@@ -218,7 +214,8 @@ export function usePageChrome(
     const wanted = latest.current;
     return (
       built?.kind === kind &&
-      built.page === wanted.page &&
+      (built.page === wanted.page ||
+        (kind === 'fallback' && displayPageIsShiftOf(wanted.page, built.page))) &&
       built.t === wanted.t &&
       // A fallback's links do not move with a position shift.
       (kind === 'fallback' ||
@@ -284,7 +281,10 @@ export function usePageChrome(
       return () => clearTimeout(id);
     };
     if (!active) {
-      if (shows('fallback')) return;
+      if (shows('fallback')) {
+        builtForRef.current!.page = page;
+        return;
+      }
       // Leaving the window frees the chrome at once unless held; a first fallback waits.
       if ((builtForRef.current?.kind === 'chrome' || !fallback) && !hold?.held) {
         showFallback();
@@ -297,7 +297,8 @@ export function usePageChrome(
     const { defer, rebuildAtOnce } = scheduling.current;
     const changed =
       built !== null &&
-      (built.page !== page || built.t !== t || built.urgentRevision !== urgentRevision);
+      ((built.page !== page && !displayPageIsShiftOf(page, built.page)) ||
+        built.t !== t || built.urgentRevision !== urgentRevision);
     if (built ? changed && rebuildAtOnce : !defer) {
       if (!built && hold?.held) return afterHold(hold, build);
       build();

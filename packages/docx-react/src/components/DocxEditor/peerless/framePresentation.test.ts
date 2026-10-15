@@ -5,8 +5,11 @@ import { createPresenter } from '../../../../../../shared/office-session/command
 import { discardCommandPresentation } from '@betteroffice/docx/peerless';
 import type { DocxCommandFrame } from '@betteroffice/docx/peerless';
 import { createEchoPainter, type PeerlessEchoIntent, type PeerlessEchoPainter } from './echoPainter';
+import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 import { createFramePresentation, present } from './framePresentation';
 import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
+
+installGlyphPaths();
 
 const identity = { session: 'test', incarnation: 1, epoch: 1 };
 const page = { pageId: '1', pageIndex: 0 };
@@ -78,8 +81,12 @@ function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanv
         pixels.set(item.pageId, snapshots.get(value) ?? value);
       },
       transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
-      measureText(text: string) { return { width: text.length * 10 }; },
-      fillText(text: string) { events.push(`echo:${text}`); },
+      translate() {}, scale() {},
+      fill(path: unknown) {
+        const last = events.at(-1);
+        if (last?.startsWith('echo:')) events[events.length - 1] = last + glyphChar(path);
+        else events.push(`echo:${glyphChar(path)}`);
+      },
       drawImage(bitmap: ImageBitmap) {
         if (closes.has(bitmap)) drawnAfterClose.push(bitmap);
         events.push('pixels'); draws.push(bitmap); onDraw?.(); pixels.set(item.pageId, bitmap);
@@ -147,8 +154,10 @@ function echoFrame(revision: number, coverage: number, text: string): DocxComman
     boundaries: Array.from({ length: text.length + 1 }, (_, utf16) => ({ utf16, grapheme: utf16,
       caret: { x: utf16 * 10, y: 0, width: 1, height: 20 } })),
     selection: { anchorGrapheme: text.length, focusGrapheme: text.length },
-    damage: [{ page, rect, backgroundId: 'background', primitiveIds: [] }],
+    damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }],
+    glyphs: testEchoGlyphLine(),
   };
+  candidate.payload.echoGlyphSets = [testEchoGlyphSet];
   return candidate;
 }
 

@@ -5,6 +5,7 @@ import * as measurement from '@betteroffice/docx/layout';
 import * as utils from '@betteroffice/docx/utils';
 import * as yrs from '@betteroffice/docx/yrs';
 import * as peerless from '@betteroffice/docx/peerless';
+import * as frameRender from '@betteroffice/docx/layout/render';
 import type {
   DocxCommandFrame,
   DocxWorkerEditSession,
@@ -30,6 +31,8 @@ import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from 
 
 import { createInputAdmission } from './inputAdmission';
 import { createPeerlessCommandBinding } from './commandBinding';
+import { createEchoPainter } from './echoPainter';
+import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -1065,6 +1068,44 @@ test('prepared geometry keeps worker selection rectangles for the page overlay',
   Object.assign(frame.payload, { selectionRects: [{ pageIndex: 0, x: 12, y: 20, width: 30, height: 16 }] });
   const options = surface.mock.calls[0][0].sessionOptions;
   expect(options.prepareGeometry(frame)?.selectionRects).toEqual([{ x: 12, y: 20, width: 30, height: 16 }]);
+});
+
+test('a typing presentation decodes each buffer once across validation, geometry and echo', async () => {
+  render(<DocxEditor {...peerlessProps} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const options = surface.mock.calls[0][0].sessionOptions;
+  const painter = createEchoPainter({ canvasForPage: options.canvasForPage });
+  const presentation = createFramePresentation({ viewStore: binding!.viewStore, echoPainter: painter,
+    canvasForPage: options.canvasForPage, prepareGeometry: options.prepareGeometry,
+    requestFullFrame() { throw new Error('Unexpected full frame request'); } });
+  const decode = spyOn(frameRender, 'decodeFrameDelta');
+  try {
+    const initial = commandFrame(1);
+    initial.payload.stagedPresentation = { frameEpoch: 1, pages: [] };
+    expect(presentation.present(initial, [], [])).toBe(true);
+    decode.mockClear();
+    const typed = commandFrame(4, 1);
+    const buffers = [commandFrame(2, 1).payload.frame, commandFrame(3, 2).payload.frame, typed.payload.frame];
+    const data = new DataView(typed.payload.frame);
+    data.setBigUint64(40, 3n, true);
+    typed.payload.pageFrames = buffers.slice(0, 2);
+    typed.payload.stagedPresentation = { frameEpoch: 4, pages: [] };
+    expect(presentation.present(typed, [], [])).toBe(true);
+    expect(buffers.map((bytes) => decode.mock.calls.filter(([input]) => input === bytes).length)).toEqual([1, 1, 1]);
+    decode.mockClear();
+    data.setBigUint64(32, 5n, true);
+    data.setBigUint64(40, 4n, true);
+    const next = commandFrame(5, 4);
+    next.payload.frame = typed.payload.frame;
+    next.payload.stagedPresentation = { frameEpoch: 5, pages: [] };
+    expect(presentation.present(next, [], [])).toBe(true);
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(decode.mock.calls[0]![0]).toBe(next.payload.frame);
+  } finally {
+    decode.mockRestore();
+    presentation.dispose();
+    painter.dispose();
+  }
 });
 
 test('d8a_flag_off_keeps_legacy_mount', async () => {

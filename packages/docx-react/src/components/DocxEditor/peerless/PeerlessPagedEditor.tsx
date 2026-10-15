@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/peerless';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
+import { displayPageNoteAnchorRevision, displayPageRevision } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { nextPageWindow } from '../CanvasPagesView';
 import { viewportColumnBand } from '../internals/viewportBand';
@@ -10,6 +11,7 @@ import {
   type UsePeerlessEditSessionOptions,
 } from '../hooks/usePeerlessEditSession';
 import { PeerlessInput } from './PeerlessInput';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessCompositionState } from './composition';
 import { captureSelectionIntent } from './selection';
 import type { PeerlessFrameGeometry } from './viewStore';
@@ -34,10 +36,12 @@ function pageLayout(pages: readonly PageGeometry[]) {
   return layout;
 }
 
-const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visible, hold, fullMirror }: {
+const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visible, noteAnchorRevision, hold, fullMirror }: {
   geometry: PageGeometry;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   visible: boolean;
+  revision: number;
+  noteAnchorRevision: number;
   hold: PageChromeHold;
   fullMirror: boolean;
 }): ReactElement {
@@ -59,10 +63,12 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
     data-page-index={geometry.page.pageIndex}
     className="paged-editor__page canvas-page"
     style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'none' }}
-  >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible && fullMirror} visible={visible} hold={hold} />}</div>;
+  >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible && fullMirror} visible={visible}
+    noteAnchorRevision={noteAnchorRevision} hold={hold} />}</div>;
 }, (previous, next) => previous.canvasForPage === next.canvasForPage &&
   previous.visible === next.visible && previous.hold === next.hold && previous.fullMirror === next.fullMirror &&
   previous.geometry.displayPage === next.geometry.displayPage &&
+  previous.revision === next.revision && previous.noteAnchorRevision === next.noteAnchorRevision &&
   previous.geometry.page.pageId === next.geometry.page.pageId &&
   previous.geometry.page.pageIndex === next.geometry.page.pageIndex &&
   previous.geometry.bounds.x === next.geometry.bounds.x && previous.geometry.bounds.y === next.geometry.bounds.y &&
@@ -78,7 +84,9 @@ const PeerlessPages = memo(function PeerlessPages({ pages, visiblePages, canvasF
   const visible = new Set(visiblePages.map(({ page }) => page.pageId));
   return <>{pages.filter((page) => visible.has(page.page.pageId) || page.displayPage?.unbuilt === false ||
     (page.displayPage && !page.displayPage.unbuilt)).map((page) => <PeerlessPage key={page.page.pageId}
-      geometry={page} visible={visible.has(page.page.pageId)} hold={hold} fullMirror={!textMirror} canvasForPage={canvasForPage} />)}</>;
+      geometry={page} visible={visible.has(page.page.pageId)} hold={hold} fullMirror={!textMirror} canvasForPage={canvasForPage}
+      revision={page.displayPage ? displayPageRevision(page.displayPage) : 0}
+      noteAnchorRevision={page.displayPage ? displayPageNoteAnchorRevision(page.displayPage) : 0} />)}</>;
 });
 
 function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject<HTMLTextAreaElement | null> }): ReactElement {
@@ -106,7 +114,7 @@ function PeerlessCaret({ caret, input }: { caret: DocxEchoRect; input: RefObject
   return <div aria-hidden style={{ position: 'absolute', left: caret.x, top: caret.y, width: Math.max(1, caret.width), height: caret.height, background: 'currentColor', opacity: focused && lit ? 1 : 0, pointerEvents: 'none' }} />;
 }
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror }: {
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
@@ -115,6 +123,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   displayWindow: readonly [number, number];
   onDisplayWindowChange(start: number, end: number): void;
   onClipboard?(cut: boolean): Promise<void>;
+  onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
@@ -252,7 +261,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   return <>
     <CanvasA11yLiveRegion active getSelectionContext={getSelectionContext} notifyRef={notify} />
     <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
-      onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard}
+      onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
       caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
     <div ref={column} style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
       <div data-peerless-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'none' }}
@@ -289,6 +298,7 @@ export interface PeerlessPagedEditorProps {
   displayWindow?: readonly [number, number];
   onDisplayWindowChange?(window: readonly [number, number]): void;
   onClipboard?(cut: boolean): Promise<void>;
+  onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean;
@@ -297,7 +307,7 @@ export interface PeerlessPagedEditorProps {
 }
 
 /** @internal */
-export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror }: PeerlessPagedEditorProps): ReactElement | null {
+export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, pageOverlays, pageMirror }: PeerlessPagedEditorProps): ReactElement | null {
   const [devicePixelRatio, setDevicePixelRatio] = useState(() => typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1);
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -397,7 +407,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-peerless-docx="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} pageOverlays={pageOverlays} pageMirror={pageMirror} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} pageOverlays={pageOverlays} pageMirror={pageMirror} />}
     {session.status === 'failed' && <div role="alert">Unable to open document.</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       This text could not be applied. Copy it to keep your draft, then dismiss it.

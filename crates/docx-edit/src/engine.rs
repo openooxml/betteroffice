@@ -7528,7 +7528,7 @@ impl EngineSession {
         {
             let scratch = EditingDoc::new(1);
             scratch
-                .apply_update_v1(&state)
+                .load_state_v1(&state)
                 .map_err(|error| error.to_string())?;
             *cache = Some(LoweredNoteSeparators {
                 state,

@@ -24,10 +24,12 @@ export function coalesceInputDrafts(
     (a.echo.contextFrameEpoch !== b.echo.contextFrameEpoch ||
       a.echo.intent.kind !== 'insertText' || b.echo.intent.kind !== 'insertText'))) return undefined;
   const payload = { text: previous.text + next.text };
+  const lastInputTime = b.lastInputTime ?? b.inputTime;
   return {
     kind: 'insertText', payload,
     options: {
       ...a,
+      ...(lastInputTime !== undefined ? { lastInputTime } : {}),
       echo: a.echo && b.echo ? {
         intent: { kind: 'insertText', payload },
         originalIntentCount: a.echo.originalIntentCount + b.echo.originalIntentCount,

@@ -144,6 +144,18 @@ test('chained typing behind held acks sends one coalesced insertText per in-flig
   await h.session.dispose();
 });
 
+test('coalesced typing carries the input times of its first and last keystrokes', async () => {
+  const h = typingSession();
+  [...'abcdefg'].forEach((text, index) => {
+    admitIntent(h.admission, { kind: 'insertText', payload: { text } }, { inputTime: 100 + index * 150 });
+    h.pump();
+  });
+  expect(h.calls.map(({ envelope }) => [envelope.inputTime, envelope.lastInputTime]))
+    .toEqual([[100, undefined], [250, undefined], [400, undefined], [550, undefined]]);
+  await h.acknowledge(1);
+  expect(h.calls[4]!.envelope).toMatchObject({ payload: { text: 'efg' }, inputTime: 700, lastInputTime: 1000 });
+});
+
 test('chained typing never coalesces across a selection or format change', async () => {
   const h = typingSession();
   h.type('abcdef');

@@ -1,22 +1,17 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useTranslation } from '../../i18n';
-import { toolbarColors } from '../ui/ToolbarPrimitives';
+import {
+  toolbarButtonStyle,
+  toolbarPrimaryButtonStyle,
+  toolbarTheme,
+  useFocusRing,
+} from '../../../../../shared/react-toolbar/theme';
 import type { OverflowPrompt } from './overflowRegistry';
 
 const FOCUSABLE = 'input, button:not([disabled])';
 
-const buttonStyle = {
-  appearance: 'none',
-  minHeight: 30,
-  padding: '0 12px',
-  border: `1px solid ${toolbarColors.border}`,
-  borderRadius: 4,
-  background: toolbarColors.surface,
-  color: toolbarColors.text,
-  font: '500 13px ui-sans-serif, system-ui, sans-serif',
-  cursor: 'pointer',
-} as const;
+const DIALOG_BUTTON = { height: 30, padding: '0 12px' } as const;
 
 /** A modal dialog asking for one value an overflow action needs. */
 export function ToolbarPromptDialog({
@@ -27,6 +22,8 @@ export function ToolbarPromptDialog({
   onClose(): void;
 }) {
   const { t } = useTranslation();
+  const cancelFocus = useFocusRing<HTMLButtonElement>();
+  const applyFocus = useFocusRing<HTMLButtonElement>();
   const [value, setValue] = useState(prompt.initialValue ?? '');
   const dialogRef = useRef<HTMLFormElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -95,10 +92,10 @@ export function ToolbarPromptDialog({
           boxSizing: 'border-box',
           padding: 16,
           borderRadius: 8,
-          background: toolbarColors.surface,
-          color: toolbarColors.text,
+          background: toolbarTheme.surface,
+          color: toolbarTheme.ink,
           font: '13px ui-sans-serif, system-ui, sans-serif',
-          boxShadow: '0 8px 24px rgba(60, 64, 67, 0.3)',
+          boxShadow: '0 8px 24px rgba(0, 0, 0, 0.18)',
         }}
       >
         <h2 id={titleId} style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 600 }}>
@@ -118,20 +115,38 @@ export function ToolbarPromptDialog({
             width: '100%',
             boxSizing: 'border-box',
             padding: '6px 8px',
-            border: `1px solid ${toolbarColors.border}`,
-            borderRadius: 4,
-            background: toolbarColors.surface,
-            color: toolbarColors.text,
+            border: `1px solid ${toolbarTheme.line}`,
+            borderRadius: 6,
+            background: toolbarTheme.surface,
+            color: toolbarTheme.ink,
+            outlineColor: toolbarTheme.accent,
           }}
         />
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
-          <button type="button" onClick={onClose} style={buttonStyle}>
+          <button
+            type="button"
+            onClick={onClose}
+            {...cancelFocus.focusProps}
+            style={{
+              ...toolbarButtonStyle({ focusRing: cancelFocus.focusRing }),
+              ...DIALOG_BUTTON,
+              border: `1px solid ${toolbarTheme.line}`,
+              color: toolbarTheme.ink,
+            }}
+          >
             {t('commands.cancel')}
           </button>
           <button
             type="submit"
             disabled={!valid}
-            style={{ ...buttonStyle, opacity: valid ? 1 : 0.48, cursor: valid ? 'pointer' : 'default' }}
+            {...applyFocus.focusProps}
+            style={{
+              ...toolbarPrimaryButtonStyle({
+                disabled: !valid,
+                focusRing: applyFocus.focusRing,
+              }),
+              ...DIALOG_BUTTON,
+            }}
           >
             {t('commands.apply')}
           </button>
