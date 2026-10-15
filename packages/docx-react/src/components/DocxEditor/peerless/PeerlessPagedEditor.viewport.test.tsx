@@ -62,7 +62,7 @@ function frame(revision: number, indices: number[], caretPage = 0): DocxCommandF
   } };
 }
 
-async function mount(zoom = 1, caretPage = 0, prefix = false, mirrors = false) {
+async function mount(zoom = 1, caretPage = 0, prefix = false, mirrors = false, pageMirror?: 'full' | 'text') {
   let complete = !prefix;
   const scroller = document.createElement('div');
   scroller.style.overflowY = 'auto';
@@ -154,7 +154,7 @@ async function mount(zoom = 1, caretPage = 0, prefix = false, mirrors = false) {
     },
   };
   let binding: PeerlessEditSessionBinding | undefined;
-  const view = render(<PeerlessPagedEditor sessionOptions={options} zoom={zoom} onReady={(ready) => { binding = ready; }} />, { container: scroller });
+  const view = render(<PeerlessPagedEditor sessionOptions={options} zoom={zoom} pageMirror={pageMirror} onReady={(ready) => { binding = ready; }} />, { container: scroller });
   await waitFor(() => expect(binding).toBeDefined());
   return { ...view, scroller, requests, edits, frames, pixels, readbacks, drawnAfterClose, initialScales, binding: binding!,
     async complete() {
@@ -379,4 +379,28 @@ test('pages entering the window while scrolling build their mirror at idle time 
   while (scheduler.idleWork.size > 0) act(() => scheduler.flushIdle());
   expect(entered.filter(full)).toEqual(entered);
   expect(mirror(10)!.textContent).toContain('Readable page 11');
+});
+
+test('a text page mirror keeps readable text and pointer selection without building the full mirror', async () => {
+  const scheduler = fakeIdleScheduler();
+  restorers.push(() => scheduler.restore());
+  const editor = await mount(1, 0, false, true, 'text');
+  const mirror = (pageIndex: number) => editor.container.querySelector<HTMLElement>(
+    `[data-page-id="${pageIndex + 1}"] .canvas-page-mirror`);
+  const idle = () => { while (scheduler.idleWork.size > 0) act(() => scheduler.flushIdle()); };
+  await waitFor(() => expect(mirror(1)).not.toBeNull());
+  idle();
+  expect(mirror(1)!.textContent?.trim()).toBe('Readable page 2');
+  await editor.scrollTo(10);
+  await waitFor(() => expect(mirror(10)).not.toBeNull());
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 200)); });
+  idle();
+  const { start, end } = editor.requests.at(-1)!;
+  for (let pageIndex = start; pageIndex < end; pageIndex += 1) {
+    expect(mirror(pageIndex)!.textContent?.trim()).toBe(`Readable page ${pageIndex + 1}`);
+  }
+  expect(editor.container.querySelector('.layout-run-text')).toBeNull();
+  const pages = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  fireEvent.pointerDown(pages, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
+  await waitFor(() => expect(editor.edits.map(({ kind }) => kind)).toContain('selectPoint'));
 });
