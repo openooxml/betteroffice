@@ -2101,6 +2101,16 @@ pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
                 {
                     names.push(name);
                 }
+                // Fields nested past the parser's limit stay raw runs of their parent field.
+                if string(map.get("type")) == Some("complexField") {
+                    for runs in [map.get("fieldCode"), map.get("fieldResult")] {
+                        let (mut instructions, mut raw) = (Vec::new(), Vec::new());
+                        for run in array(runs) {
+                            raw_field_sequence_names(run, &mut instructions, &mut raw);
+                        }
+                        names.extend(raw.into_iter().filter(|name| seen.insert(name.clone())));
+                    }
+                }
                 if string(map.get("type")) == Some("hyperlink") && !scanned_hyperlink {
                     names.extend(
                         hyperlink_sequence_names(value)
@@ -2168,34 +2178,42 @@ pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
         if kind != Some("run") {
             continue;
         }
-        for content in array(field(Some(node), "content")) {
-            let instruction = match string(field(Some(content), "type")) {
-                Some("fieldChar") => match string(field(Some(content), "charType")) {
-                    Some("begin") => {
-                        instructions.push(Some(String::new()));
-                        None
-                    }
-                    Some("separate") => instructions.last_mut().and_then(Option::take),
-                    Some("end") => instructions.pop().flatten(),
-                    _ => None,
-                },
-                Some("instrText") => {
-                    if let Some(Some(instruction)) = instructions.last_mut() {
-                        instruction
-                            .push_str(string(field(Some(content), "text")).unwrap_or_default());
-                    }
-                    None
-                }
-                _ => None,
-            };
-            names.extend(
-                instruction
-                    .as_deref()
-                    .and_then(docx_layout::sequence_fields::sequence_name),
-            );
-        }
+        raw_field_sequence_names(node, &mut instructions, &mut names);
     }
     names
+}
+
+/// SEQ names of the fields a run opens as raw `fldChar` and `instrText` content.
+fn raw_field_sequence_names(
+    run: &Value,
+    instructions: &mut Vec<Option<String>>,
+    names: &mut Vec<String>,
+) {
+    for content in array(field(Some(run), "content")) {
+        let instruction = match string(field(Some(content), "type")) {
+            Some("fieldChar") => match string(field(Some(content), "charType")) {
+                Some("begin") => {
+                    instructions.push(Some(String::new()));
+                    None
+                }
+                Some("separate") => instructions.last_mut().and_then(Option::take),
+                Some("end") => instructions.pop().flatten(),
+                _ => None,
+            },
+            Some("instrText") => {
+                if let Some(Some(instruction)) = instructions.last_mut() {
+                    instruction.push_str(string(field(Some(content), "text")).unwrap_or_default());
+                }
+                None
+            }
+            _ => None,
+        };
+        names.extend(
+            instruction
+                .as_deref()
+                .and_then(docx_layout::sequence_fields::sequence_name),
+        );
+    }
 }
 
 fn math_payload(math: &Value) -> JsonObject {

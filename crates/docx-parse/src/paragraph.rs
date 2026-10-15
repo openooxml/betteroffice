@@ -11,8 +11,9 @@ use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
     ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
     OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
-    StructuredFieldTree, has_bookmark_id, parse_bookmark_end, parse_bookmark_start,
-    parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties, run_content_length,
+    StructuredFieldTree, absorb_beyond_field_nesting, check_container_beyond_field_nesting,
+    field_depth_error, has_bookmark_id, parse_bookmark_end, parse_bookmark_start, parse_field_type,
+    parse_hyperlink, parse_run, parse_sdt_properties, run_content_length,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -28,7 +29,6 @@ use crate::theme::Theme;
 use crate::vml::{parse_horizontal_rule, vml_image_content};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode, parse_javascript_integer_prefix};
 
-const MAX_FIELD_NESTING: usize = 32;
 const MAX_HEX_ID_EXCLUSIVE: u32 = 0x7fff_ffff;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -477,6 +477,7 @@ fn parse_paragraph_contents(
     };
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
+    let mut beyond_nesting = 0;
     for child in transparent_children(element, false) {
         let normalized;
         let child = if tracked_context == TrackedContext::Deletion
@@ -487,6 +488,7 @@ fn parse_paragraph_contents(
         } else {
             child
         };
+        check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
                 let run = parse_run_composed(
@@ -499,7 +501,7 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     in_header_footer,
                 )?;
-                process_field_run(run, &mut fields, &mut output, part)?;
+                process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
             }
             "hyperlink" => {
                 let hyperlink = parse_hyperlink_composed(
@@ -689,6 +691,9 @@ fn parse_paragraph_contents(
             }
         }
     }
+    if beyond_nesting > 0 {
+        return Err(field_depth_error(part));
+    }
     while let Some(field) = fields.pop() {
         let completed = field.finish();
         if let Some(parent) = fields.last_mut() {
@@ -706,6 +711,7 @@ fn parse_paragraph_contents(
 fn process_field_run(
     run: Run,
     fields: &mut Vec<OpenComplexField>,
+    beyond_nesting: &mut usize,
     output: &mut Vec<ParagraphContent>,
     part: &str,
 ) -> Result<(), ParseError> {
@@ -724,13 +730,10 @@ fn process_field_run(
             _ => {}
         }
     }
+    let Some(run) = absorb_beyond_field_nesting(fields, beyond_nesting, run, part)? else {
+        return Ok(());
+    };
     if has_begin {
-        if fields.len() >= MAX_FIELD_NESTING {
-            return Err(ParseError::ResourceLimit {
-                kind: "fieldDepth",
-                part: part.to_owned(),
-            });
-        }
         fields.push(OpenComplexField::opening(&run));
     }
     if let Some(active) = fields.last_mut() {
@@ -803,13 +806,15 @@ fn parse_simple_field_composed(
         inline: Some(result),
         blocks: None,
     });
-    let field_tree = structured_result.clone().map(|result| StructuredFieldTree {
-        version: Some(1.0),
-        code: None,
-        result: Some(result),
-        children: None,
-        display_mode: None,
-    });
+    let field_tree = structured_result
+        .as_ref()
+        .map(|result| StructuredFieldTree {
+            version: Some(1.0),
+            code: None,
+            result: (!result.holds_field()).then(|| result.clone()),
+            children: None,
+            display_mode: None,
+        });
     Ok(SimpleField {
         node_type: SimpleFieldType::SimpleField,
         field_type: parse_field_type(&instruction),
