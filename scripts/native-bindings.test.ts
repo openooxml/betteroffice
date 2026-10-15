@@ -344,7 +344,7 @@ describe('native package release wiring', () => {
   test('CI builds every path and checks declarations and all three runtimes', () => {
     const job = ci.jobs.native;
     expect(job.name).toBe('Native gate');
-    expect(job['runs-on']).toEndWith("|| 'kyora-4x8' }}");
+    expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job['timeout-minutes']).toBe(45);
     expect(job.strategy).toBeUndefined();
     expect(job.steps[0].uses).toBe('actions/checkout@v7');
