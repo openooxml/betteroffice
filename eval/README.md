@@ -241,6 +241,62 @@ python3 eval/formats/test-runner.py
 bun eval/formats/generate-fixtures.ts /tmp/format-fixtures
 ```
 
+### Real-world suite v3
+
+`formats/v3/fixtures.json` pins 36 byte-identical corpus originals, with titles,
+publishers, retrieval dates, source links, licences and redistribution attribution.
+The licences are public-domain-us-gov, OGL-UK-3.0, OGL-Canada-2.0 and CC-BY-4.0.
+Fixtures are downloaded from `https://corpus.betteroffice.dev/eval/formats/v3/`;
+`FORMAT_EVAL_FIXTURES` still overrides the directory, with size and SHA-256 checks.
+
+`formats/v3/tasks.json` contains 14 tasks per format across 12 originals, with
+four `cross_model` tasks per format. Tasks were written from document contents
+and genre without inspecting toolkit APIs: 13 easy, 23 medium and six multistep
+edits. Spreadsheet corrections enumerate every expected dependent formula cache.
+Use `check.py --suite v3 <task> <output>` or
+`validate-checkers.py --suite v3`; the default remains v2.
+
+The whole package is compared. Word stories include headers, footers, footnotes,
+endnotes and comments; revisions are accepted only when requested. Presentation
+text includes tables and notes. Unmodeled content remains canonical XML or exact
+binary hashes. The explicit representation/save allowances are:
+
+- ZIP metadata/order, XML prefixes, attribute order and insignificant whitespace;
+  relationship IDs resolve to their targets, and content-type/relationship lists
+  compare without ordering. Binary payloads remain exact.
+- Word/DrawingML text-run splits preserve character properties, fields, bookmarks
+  and empty formatted runs. Word run properties resolve through document defaults,
+  paragraph/character styles and direct formatting, including toggle properties;
+  absent/empty properties and the explicit default paragraph style are equivalent.
+  Word proofing markers and run revision-session stamps may change on save.
+- Existing paragraph IDs remain exact. Missing IDs may receive fresh, unique IDs;
+  Word may add `w14` to root `mc:Ignorable`. Existing repeated IDs in the originals,
+  including Word's repeated `77777777` text IDs and fallback content, remain exact;
+  no new duplicates are allowed. Existing `mc:Ignorable` namespaces remain required.
+- Excel style/string pool indexes and unused pool entries may change. Cell formats
+  resolve through cell-style, row and column formats; named styles compare by name.
+  Inline/shared strings, adjacent identical rich-text runs, shared/expanded formulas,
+  numeric forms with the same IEEE 754 value and omitted normal formula types are equivalent. Array
+  formula ranges/properties, rich-text properties and extensions remain compared.
+- Excel's worksheet dimensions, row spans and shared-string counts are derived;
+  default empty cells are optional. Tab selection includes the active sheet, with
+  absent selection meaning false. Inapplicable `apply*` flags and solid/absent fill
+  backgrounds do not affect formatting. `calcChain.xml`, its relationship and
+  content type may be rebuilt or removed. Sheet renames update the matching
+  `TitlesOfParts` entry as well as formulas and defined names.
+- Optional save metadata may change: core `modified` and `lastModifiedBy`; app
+  `Pages`, `Words`, `Characters`, `CharactersWithSpaces`, `Lines`, `Paragraphs`,
+  `TotalTime`, `Slides`, `Notes`, `HiddenSlides` and `MMClips`. Other properties stay
+  compared. No other metadata exemption applies.
+
+Validation independently constructs minimal XML patches and byte-copies unchanged
+parts. It checks reference acceptance, untouched-input rejection, partial edits,
+format-appropriate generic corruption, and allowed representations, printing
+per-format counts and `V3 VALIDATE accepted=… untouched_rejected=… mutants_rejected=…`.
+VM validation counts are pending: this worker's sandbox blocked writes to the VM
+launcher's shared queue. The required v2 regression counts remain 65/30/157 for
+checker validation and 25/25 for runner tests; these were not rerun here.
+
 ## Usability tasks
 
 These are a small sample for reviewing how an agent works with the tools, not a
