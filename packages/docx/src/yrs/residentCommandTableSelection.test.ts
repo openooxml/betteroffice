@@ -201,6 +201,21 @@ test('plain_click_arrow_and_typing_clear_the_range_into_the_caret_cell', async (
   expect(arm.engine.cellSelection()).toBeNull();
 }, TIMEOUT);
 
+test('delete_backward_at_cell_start_clears_multi_cell_range_to_caret_cell', async () => {
+  const arm = await inCell();
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'row' })).status).toBe('noop');
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 0, column: 1 } });
+  const deleted = execute(arm, command(arm, 'deleteBackward', {}));
+  expect(deleted.status).toBe('noop');
+  const range = arm.engine.cellSelection();
+  expect(range).not.toBeNull();
+  expect(range!.anchor).toMatchObject({ row: 0, column: 0 });
+  expect(range!.head).toMatchObject({ row: 0, column: 0 });
+  expect(range!.anchor.row).toBe(range!.head.row);
+  expect(range!.anchor.column).toBe(range!.head.column);
+  expect(deleted.editState?.tableContext?.hasMultiCellSelection).toBe(false);
+}, TIMEOUT);
+
 test('cell_selection_runtime_error_propagates_through_shift_arrow_range', async () => {
   const arm = await inCell();
   const base = arm.state.selection!;
