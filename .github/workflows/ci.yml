@@ -14,10 +14,12 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Fork pull requests run on GitHub-hosted runners, everything else on kyora VMs.
+# Repository variable BO_CI_RUNNER=ubuntu-latest sends every job back to GitHub-hosted runners.
 jobs:
   packages:
     name: Package gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || vars.BO_CI_RUNNER == 'ubuntu-latest') && 'ubuntu-latest' || vars.BO_CI_RUNNER_HEAVY || 'kyora-16x32' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -100,7 +102,7 @@ jobs:
 
   audit:
     name: Security audit
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -124,7 +126,7 @@ jobs:
 
   rust:
     name: Rust gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository || vars.BO_CI_RUNNER == 'ubuntu-latest') && 'ubuntu-latest' || vars.BO_CI_RUNNER_HEAVY || 'kyora-16x32' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -192,24 +194,23 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: node scripts/publish-crates.mjs --dry-run
 
+      # cargo-deny-action runs in Docker, which kyora VMs lack: its v2.1.1 release of cargo-deny, run directly.
+      - uses: taiki-e/install-action@v2
+        if: steps.ws.outputs.present == 'true'
+        with:
+          tool: cargo-deny@0.20.2
+
       - name: License and advisory gate
         if: steps.ws.outputs.present == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          command: check bans licenses advisories sources
+        run: cargo deny --log-level warn --all-features check bans licenses advisories sources
 
       - name: License and advisory gate for the fuzz package
         if: steps.ws.outputs.present == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.0.20
-        with:
-          manifest-path: fuzz/Cargo.toml
-          arguments: --all-features
-          command: check
-          command-arguments: --config deny.toml bans licenses advisories sources
+        run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features check --config deny.toml bans licenses advisories sources
 
   python:
     name: Python gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -238,7 +239,7 @@ jobs:
 
   native:
     name: Native gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
