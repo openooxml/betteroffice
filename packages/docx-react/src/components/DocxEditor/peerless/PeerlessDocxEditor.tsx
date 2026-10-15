@@ -153,7 +153,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const fileIO = useWorkerFileIO(props, controller.ref, loadBuffer, () => active.current?.binding ?? null);
   const getBinding = useCallback(() => active.current?.binding ?? null, []);
   const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, props);
-  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, search: search.host, pickImage: fileIO.pickImage, perform: async (id) => {
+  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, perform: async (id) => {
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
     if (id === 'watermark') return propertyDialogs.openWatermark();
     if (id === 'insertLink') return propertyDialogs.openLink();
