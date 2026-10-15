@@ -294,6 +294,110 @@
     }
   },
   {
+    "id": "docx-v3-15-exposure-citation",
+    "format": "docx",
+    "title": "Align the exposure-age citation",
+    "difficulty": 1,
+    "fixture": "h-r4b-heidata-3d4a51e16e3a.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the note below Table 5, change “using the equations of (Eugster, 1988)” to “using the equations of Eugster (1988)” to match the citation style in the note below Table 6. Keep all sample data, units and section references unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "using the equations of (Eugster, 1988)",
+          "new": "using the equations of Eugster (1988)"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-16-purpose-overview",
+    "format": "docx",
+    "title": "Add a purpose-section overview",
+    "difficulty": 2,
+    "fixture": "open-government-canada-30575885e154.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, immediately after the body heading “Purpose”, add these two paragraphs in order: “This plan sets out the activities, deliverables and responsibilities for implementing open government at FedDev Ontario.” and “The following sections describe the Agency’s operating context, intended outcomes and governance arrangements.” Use the body paragraph style and opening text formatting of the first existing body paragraph after that heading. Keep that existing paragraph, its implementation deadline and all planning tables unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "insert_paragraphs": {
+        "heading": "Purpose",
+        "texts": [
+          "This plan sets out the activities, deliverables and responsibilities for implementing open government at FedDev Ontario.",
+          "The following sections describe the Agency’s operating context, intended outcomes and governance arrangements."
+        ]
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "docx-v3-17-introduction-spacing",
+    "format": "docx",
+    "title": "Correct the introduction sentence spacing",
+    "difficulty": 1,
+    "fixture": "h-zen-zenodo-oai-1af668035309.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the first paragraph under “Introduction to the Study”, correct “workforce.This” to “workforce. This”. Keep the birth-year range, keywords, author details and all other manuscript text unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "workforce.This",
+          "new": "workforce. This"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-19-poverty-emphasis",
+    "format": "docx",
+    "title": "Emphasise the link between poverty and homelessness",
+    "difficulty": 2,
+    "fixture": "welsh-government-publications-7d69253b496b.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, in the assessment table paragraph beginning “Poverty is therefore a fundamental pillar”, italicise only the phrase “both a cause and a consequence of homelessness”. Retain its font, size and all other formatting; keep the surrounding evidence, links and table structure unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "format_phrase": {
+        "paragraph": "Poverty is therefore a fundamental pillar which shapes homelessness risk across the UK; the socio-economic profile of Wales will impact likelihood of homelessness, as will the individual experience of poverty.  Socio-economic disadvantage can therefore be both a cause and a consequence of homelessness. Ending homelessness in Wales will bring long-term economic benefits and social improvements by breaking the interdependencies that exist between homelessness and socio-economic disadvantage.  ",
+        "phrase": "both a cause and a consequence of homelessness",
+        "property": "i"
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "docx-v3-20-single-year-award",
+    "format": "docx",
+    "title": "Prepare the single-year award details",
+    "difficulty": 3,
+    "fixture": "h-us-doe-ef9c3850f77b.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "In input.docx, prepare the award-details portion of the Section 301 notification template for a single-year award. Change “The grant number is (fill-in).” to “The grant number is DE-EE0012345.” and “The selectee is (name of the selectee), located in (name city and state).” to “The selectee is Front Range Energy Research, located in Denver, Colorado.” Remove the entire optional paragraph beginning “For applicable multi-year action, provide a brief explanation justifying future funds.”, including its example and deletion instruction. Keep all other placeholders, the statutory award categories, recipients, contact details and archive labels unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "The grant number is (fill-in).",
+          "new": "The grant number is DE-EE0012345."
+        },
+        {
+          "part": "word/document.xml",
+          "old": "The selectee is (name of the selectee), located in (name city and state).",
+          "new": "The selectee is Front Range Energy Research, located in Denver, Colorado."
+        }
+      ],
+      "delete_paragraph": "For applicable multi-year action, provide a brief explanation justifying future funds. (Ex. This multi-year action will use future funds to (insert explanation).)  If it is not a multi-year action, then delete this bullet."
+    },
+    "cross_model": true
+  },
+  {
     "id": "xlsx-v3-01-spending-label",
     "format": "xlsx",
     "title": "Clarify the spending units",
@@ -685,6 +789,411 @@
     "cross_model": true
   },
   {
+    "id": "xlsx-v3-15-census-imprace-diff",
+    "format": "xlsx",
+    "title": "Add IMPRACE minus CENRACE difference column for one-race categories in Census 2020 table",
+    "difficulty": 2,
+    "fixture": "h-us-census-f2542e3f6fe2.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'US-MR2020-01' sheet, add a difference column in column F comparing the Modified Race (IMPRACE) counts in column D against the Census 2020 Race (CENRACE) counts in column B for the top 'One race' section. Set cell F4 to 'IMPRACE - CENRACE'. In cells F6:F12 (covering 'One race' in row 6, the '.OMB race category1' line in row 7, and the five OMB one-race categories from '..White' in row 8 through '..Native Hawaiian and Other Pacific Islander' in row 12), enter the formula =D6-B6 filled down through =D12-B12, formatted with number format '#,##0', and cache the exact integer differences. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "US-MR2020-01": {
+          "F4": {
+            "value": "IMPRACE - CENRACE",
+            "formula": null
+          },
+          "F6": {
+            "value": 19292219,
+            "formula": "D6-B6",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F7": {
+            "value": 47207934,
+            "formula": "D7-B7",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F8": {
+            "value": 40496233,
+            "formula": "D8-B8",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F9": {
+            "value": 3156756,
+            "formula": "D9-B9",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F10": {
+            "value": 2601461,
+            "formula": "D10-B10",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F11": {
+            "value": 783188,
+            "formula": "D11-B11",
+            "style": {
+              "number_format": "#,##0"
+            }
+          },
+          "F12": {
+            "value": 170296,
+            "formula": "D12-B12",
+            "style": {
+              "number_format": "#,##0"
+            }
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-16-faa-cargo-fleet",
+    "format": "xlsx",
+    "title": "Revise 2027 2-engine cargo jet forecast and recalculate row totals in FAA Table 22",
+    "difficulty": 2,
+    "fixture": "h-r23-faa-forecast-93b594354fe5.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'Main Cargo Aircraft 22' sheet (Table 22, U.S. Mainline Air Carriers Cargo Jet Aircraft), revise the 2027 forecast row (row 30) by updating Large Narrowbody 2 Engine aircraft in C30 from 215 to 220 and Large Widebody 2 Engine aircraft in G30 from 650 to 658. Keep the existing formulas in F30 (=SUM(C30:E30)), J30 (=SUM(G30:I30)), and K30 (=F30+J30) and update their cached values to match the revised counts. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Main Cargo Aircraft 22": {
+          "C30": {
+            "value": 220,
+            "formula": null
+          },
+          "F30": {
+            "value": 222,
+            "formula": "SUM(C30:E30)"
+          },
+          "G30": {
+            "value": 658,
+            "formula": null
+          },
+          "J30": {
+            "value": 837,
+            "formula": "SUM(G30:I30)"
+          },
+          "K30": {
+            "value": 1059,
+            "formula": "F30+J30"
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-17-heidata-dosing-header-totals",
+    "format": "xlsx",
+    "title": "Restyle TB drug dosing headers, update Pyrazinamide 500 mg daily dose, and add weekly units column",
+    "difficulty": 3,
+    "fixture": "h-r4b-heidata-31beaa8f3a1c.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'TB drug dosing' sheet, make three updates. First, restyle the header cells A1:N1 so they remain bold and have a solid light blue fill (#D9EAF7). Second, on row 30 (Pyrazinamide 500 mg, gdf_code 'Z-500-(B)-672'), update 'dose per day' in J30 from 1750 to 2000 and keep the formula =J30/I30 in K30 ('units per day') with the updated cached value. Third, add a new column in column O with header 'units per week' in O1 (also bold with solid fill #D9EAF7), and in O31:O36 (covering the final six rows from 'Rifampicin 300 mg' in row 31 through 'Water for injection 5 ml' in row 36) enter the formula =K31*7 filled down through =K36*7 with exact cached values. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "TB drug dosing": {
+          "A1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "B1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "C1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "D1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "E1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "F1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "G1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "H1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "I1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "J1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "K1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "L1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "M1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "N1": {
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "O1": {
+            "value": "units per week",
+            "formula": null,
+            "style": {
+              "bold": true,
+              "fill": "FFD9EAF7",
+              "fill_pattern": "solid"
+            }
+          },
+          "J30": {
+            "value": 2000,
+            "formula": null
+          },
+          "K30": {
+            "value": 4,
+            "formula": "J30/I30"
+          },
+          "O31": {
+            "value": 14,
+            "formula": "K31*7"
+          },
+          "O32": {
+            "value": 56,
+            "formula": "K32*7"
+          },
+          "O33": {
+            "value": 21,
+            "formula": "K33*7"
+          },
+          "O34": {
+            "value": 28,
+            "formula": "K34*7"
+          },
+          "O35": {
+            "value": 28,
+            "formula": "K35*7"
+          },
+          "O36": {
+            "value": 7,
+            "formula": "K36*7"
+          }
+        }
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "xlsx-v3-18-hud-lender-omb",
+    "format": "xlsx",
+    "title": "Enter Lender Name and update OMB expiration date on HUD Section 232 Inputs sheet",
+    "difficulty": 1,
+    "fixture": "h-r23-hud-forms-5da3612c8c2e.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'Inputs' sheet, enter 'Berkadia Commercial Mortgage LLC' in cell I5 (next to 'Lender Name:' in H5), and in cell J1 update the OMB approval expiration date from '01/31/2026' to '01/31/2029'. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Inputs": {
+          "I5": {
+            "value": "Berkadia Commercial Mortgage LLC",
+            "formula": null
+          }
+        }
+      },
+      "cell_replace": {
+        "Inputs": {
+          "J1": {
+            "old": "01/31/2026",
+            "new": "01/31/2029"
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-19-london-night-ytd-totals",
+    "format": "xlsx",
+    "title": "Add a year-to-date total row",
+    "difficulty": 2,
+    "fixture": "h-r23-london-0a9a19805667.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'Prev&Prot_Night' sheet, add a bold year-to-date summary row in row 49 for 2023/24 so far, summing the April, May, June and July 2023 rows (rows 45 through 48). Set A49 to '2023/24 YTD Total' and in B49:K49 (from 'CFS' in column B through 'Total Available' in column K) enter the formulas =SUM(B45:B48) through =SUM(K45:K48) with exact cached integer sums, styling A49:K49 as bold. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "cells": {
+        "Prev&Prot_Night": {
+          "A49": {
+            "value": "2023/24 YTD Total",
+            "formula": null,
+            "style": {
+              "bold": true
+            }
+          },
+          "B49": {
+            "value": 235230,
+            "formula": "SUM(B45:B48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "C49": {
+            "value": 112420,
+            "formula": "SUM(C45:C48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "D49": {
+            "value": 21008,
+            "formula": "SUM(D45:D48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "E49": {
+            "value": 0,
+            "formula": "SUM(E45:E48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "F49": {
+            "value": 0,
+            "formula": "SUM(F45:F48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "G49": {
+            "value": 2648,
+            "formula": "SUM(G45:G48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "H49": {
+            "value": 4877,
+            "formula": "SUM(H45:H48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "I49": {
+            "value": 0,
+            "formula": "SUM(I45:I48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "J49": {
+            "value": 23440,
+            "formula": "SUM(J45:J48)",
+            "style": {
+              "bold": true
+            }
+          },
+          "K49": {
+            "value": 75848850,
+            "formula": "SUM(K45:K48)",
+            "style": {
+              "bold": true
+            }
+          }
+        }
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "xlsx-v3-20-canada-agriculture-sort",
+    "format": "xlsx",
+    "title": "Sort Minister of Agriculture and Agri-Food mandate commitments alphabetically",
+    "difficulty": 1,
+    "fixture": "open-government-canada-7d70b20f9f21.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx on the 'MLC' sheet, sort the 11 rows where Reporting Lead is 'Minister of Agriculture and Agri-Food' (range A81:D91, MLC IDs 400 through 419) in ascending alphabetical order by the 'Commitment' text in column B, moving entire rows A through D together. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "expected": {
+      "sort_range": {
+        "sheet": "MLC",
+        "range": "A81:D91",
+        "key": "B",
+        "ascending": true
+      }
+    },
+    "cross_model": false
+  },
+  {
     "id": "pptx-v3-01-policy-title",
     "format": "pptx",
     "title": "Correct the policy timeline title",
@@ -966,5 +1475,132 @@
         }
       ]
     }
+  },
+  {
+    "id": "pptx-v3-15-pay-update-corrections",
+    "format": "pptx",
+    "title": "Correct the contents title, metrics label and context notes",
+    "difficulty": 3,
+    "fixture": "open-government-canada-07a9fabcd00a.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 2 change the title “Table of Content” to “Table of Contents”; on slide 10, in the Key Metrics table, change “Collective Agreement Implantation” to “Collective Agreement Implementation”; and replace the speaker-note body on slide 5, “Context – 2024/25 Q1 Pay Operations Overview”, with exactly one paragraph: “Introduce the scale of pay operations, covering payment volumes, client departments and service channels.” Keep the notes body’s first paragraph formatting, the slide-number placeholder, all other slide text, tables and notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide2.xml",
+          "old": "Table of Content",
+          "new": "Table of Contents"
+        }
+      ],
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide10.xml",
+          "table": 1,
+          "row": 3,
+          "column": 1,
+          "text": "Collective Agreement Implementation"
+        }
+      ],
+      "notes": {
+        "5": "Introduce the scale of pay operations, covering payment volumes, client departments and service channels."
+      }
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-16-decisions-heading",
+    "format": "pptx",
+    "title": "Fix the scientific decisions heading",
+    "difficulty": 1,
+    "fixture": "h-r23-noaa-ngs-070d878c2e41.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 16, change the title “Scientific Decisions!!” to “Scientific Decisions”. Keep the title formatting and all other slide text and notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide16.xml",
+          "old": "Decisions!!",
+          "new": "Decisions"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-17-doab-notes",
+    "format": "pptx",
+    "title": "Condense the DOAB eligibility notes",
+    "difficulty": 2,
+    "fixture": "h-zen-eifl-af90f1639cb2.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, replace the speaker-note body on slide 6, “About the Directory of Open Access Books”, with exactly one paragraph: “Explain the two DOAB eligibility requirements (open licence and independent external peer review), then outline the application form and evaluation timeline.” Keep the notes body’s first paragraph formatting, the slide-number placeholder and all visible slide content. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "notes": {
+        "6": "Explain the two DOAB eligibility requirements (open licence and independent external peer review), then outline the application form and evaluation timeline."
+      }
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-18-disability-share",
+    "format": "pptx",
+    "title": "Correct the disability percentage",
+    "difficulty": 2,
+    "fixture": "open-government-canada-fcefbffc07fc.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 12, in the Employment Equity Group table, change the Persons with a disability percentage from 38.8% to 39.8%. Keep every other table entry, percentage and note unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "table_cells": [
+        {
+          "part": "ppt/slides/slide12.xml",
+          "table": 1,
+          "row": 6,
+          "column": 2,
+          "text": "39.8%"
+        }
+      ]
+    },
+    "cross_model": true
+  },
+  {
+    "id": "pptx-v3-19-gps-units",
+    "format": "pptx",
+    "title": "Correct the GPS survey wording",
+    "difficulty": 1,
+    "fixture": "h-r23-noaa-ngs-bd03058100a1.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, on slide 7, “Surveys Performed”, change “20 identical. units” to “20 identical units” in the GPS bullet. Keep all other survey details, titles and speaker notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "edits": [
+        {
+          "part": "ppt/slides/slide7.xml",
+          "old": "20 identical. units",
+          "new": "20 identical units"
+        }
+      ]
+    },
+    "cross_model": false
+  },
+  {
+    "id": "pptx-v3-20-nims-overview-order",
+    "format": "pptx",
+    "title": "Bring the NIMS overview table forward",
+    "difficulty": 2,
+    "fixture": "h-us-fema-004ef95e0344.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, move slide 6, “Overview of NIMS”, to immediately after slide 3, “NIMS Overview”. Keep every other slide in relative order and keep all slide content unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "expected": {
+      "move_slide": {
+        "from": 6,
+        "to": 4
+      }
+    },
+    "cross_model": false
   }
 ]
