@@ -95,7 +95,11 @@ function equals(left: unknown, right: unknown): boolean {
   }
   if (typeof left === typeof right) return left === right;
   const number = (value: unknown) =>
-    value === null || (typeof value === 'string' && value.trim() === '') ? 0 : Number(value);
+    value === null || (typeof value === 'string' && value.trim() === '')
+      ? 0
+      : typeof value === 'object'
+        ? NaN
+        : Number(value);
   return number(left) === number(right);
 }
 
@@ -217,6 +221,7 @@ describe('CI runner routing', () => {
     expect(evaluate("vars.BO_CI_RUNNER || 'kyora-4x8'", context)).toBe('kyora-4x8');
     expect(evaluate("!(matrix.suite == 'CORPUS') && 'a' || 'b'", context)).toBe('b');
     expect(evaluate("null == ''", context)).toBe(true);
+    expect(evaluate('matrix.guard == false', { matrix: { guard: [] } })).toBe(false);
     expect(() => evaluate("fromJSON('[]')", context)).toThrow('unsupported expression');
     expect(combinations({ os: ['a', 'b'], include: [{ os: 'a', x: 1 }, { os: 'c' }, { y: 2 }] })).toEqual([
       { os: 'a', x: 1, y: 2 },
