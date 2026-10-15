@@ -253,6 +253,61 @@ describe('readClipboardSlice', () => {
   });
 });
 
+describe('vertically merged rows on copy', () => {
+  test('keeps a fully covered row and the rowspan of its covering cell', () => {
+    const reader = fakeReader(
+      { a: [textSegment('A'), pilcrowSegment('pa')] },
+      {
+        'body:0': {
+          tblPr: {},
+          grid: [2000],
+          rows: [
+            { trPr: { height: 10 }, cells: [{ story: 'a', tcPr: { rowspan: 2, colspan: 1 } }] },
+            { trPr: { height: 20 }, cells: [] },
+          ],
+        },
+      },
+    );
+    const fragment = readTableFragment(reader, { story: 'body', tableIndex: 0 });
+    expect(fragment.rows).toHaveLength(2);
+    expect(fragment.rows[0]!.cells[0]!.tcPr).toMatchObject({ rowspan: 2 });
+    expect(fragment.rows[1]).toEqual({ trPr: { height: 20 }, cells: [] });
+    expect(validClipboardFragment({ paragraphs: [{ tables: [fragment], text: '' }] })).toBe(true);
+  });
+
+  test('keeps the covered row of a 2x2 table with a merged first column', () => {
+    const reader = fakeReader(
+      {
+        a: [textSegment('A'), pilcrowSegment('pa')],
+        b: [textSegment('B'), pilcrowSegment('pb')],
+        c: [textSegment('C'), pilcrowSegment('pc')],
+      },
+      {
+        'body:0': {
+          tblPr: {},
+          grid: [2000, 2000],
+          rows: [
+            {
+              trPr: {},
+              cells: [
+                { story: 'a', tcPr: { rowspan: 2, colspan: 1 } },
+                { story: 'b', tcPr: { rowspan: 1, colspan: 1 } },
+              ],
+            },
+            { trPr: {}, cells: [{ story: 'c', tcPr: { rowspan: 1, colspan: 1 } }] },
+          ],
+        },
+      },
+    );
+    const fragment = readTableFragment(reader, { story: 'body', tableIndex: 0 });
+    expect(fragment.rows).toHaveLength(2);
+    expect(fragment.rows[0]!.cells[0]!.tcPr).toMatchObject({ rowspan: 2 });
+    expect(fragment.rows[1]!.cells).toHaveLength(1);
+    expect(fragment.rows[1]!.cells[0]!.content[0]).toEqual({ kind: 'text', text: 'C' });
+    expect(validClipboardFragment({ paragraphs: [{ tables: [fragment], text: '' }] })).toBe(true);
+  });
+});
+
 describe('validClipboardFragment spans', () => {
   function fragmentWithSpan(tcPr: Record<string, unknown>): unknown {
     return {

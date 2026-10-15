@@ -3944,6 +3944,63 @@ mod tests {
     }
 
     #[test]
+    fn fragment_fully_covered_row_inserts_and_round_trips() {
+        let doc = fragment_doc();
+        let fragment = serde_json::json!({
+            "tblPr": {}, "grid": [2000],
+            "rows": [
+                {"trPr": {"height": 10}, "cells": [
+                    {"tcPr": {"rowspan": 2, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "A", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                ]},
+                {"trPr": {"height": 20}, "cells": []},
+            ],
+        });
+        let receipt = doc
+            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+            .unwrap();
+        assert_eq!((receipt.rows, receipt.columns), (2, 1));
+        assert_eq!(receipt.created_story_ids.len(), 1);
+        let payload = doc.table_payload(&receipt.table).unwrap();
+        let rows = match payload.get("rows") {
+            Some(Any::Array(rows)) => rows.clone(),
+            other => panic!("expected rows array, got {other:?}"),
+        };
+        assert_eq!(rows.len(), 2);
+        let Any::Map(second) = &rows[1] else {
+            panic!("expected row map")
+        };
+        assert_eq!(
+            second.get("cells"),
+            Some(&Any::from_json("[]").unwrap())
+        );
+        assert_eq!(
+            second.get("trPr"),
+            Some(&Any::from_json(r#"{"height":20}"#).unwrap())
+        );
+    }
+
+    #[test]
+    fn fragment_uncovered_empty_row_is_rejected() {
+        let uncovered = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [
+                {"trPr": {}, "cells": [fragment_cell("a")]},
+                {"trPr": {}, "cells": []},
+            ],
+        });
+        assert_fragment_refused(&fragment_doc(), &uncovered);
+        let empty = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": []}],
+        });
+        assert_fragment_refused(&fragment_doc(), &empty);
+    }
+
+    #[test]
     fn fragment_rowspan_occupancy_inserts() {
         let doc = fragment_doc();
         let fragment = serde_json::json!({
