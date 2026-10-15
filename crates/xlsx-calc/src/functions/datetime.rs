@@ -536,9 +536,10 @@ pub(crate) fn is_date_text(raw: &str) -> bool {
         _ => None,
     };
     let valid = |(year, month, day): (Option<i64>, i64, i64)| {
-        (1..=12).contains(&month)
-            && (1..=31).contains(&day)
-            && year.is_none_or(|year| (1900..=9999).contains(&year))
+        let year = year.unwrap_or(2000);
+        (1900..=9999).contains(&year)
+            && (1..=12).contains(&month)
+            && (1..=days_in_month(year, month)).contains(&day)
     };
     if date(&fields).is_some_and(valid) {
         return true;

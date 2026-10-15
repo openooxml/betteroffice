@@ -397,6 +397,13 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         expr,
         Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. }
     ) {
+        if let Expr::Name {
+            scope: Some(scope), ..
+        } = &expr
+            && scope.contains('[')
+        {
+            ctx.record_unsupported_function();
+        }
         return Err(ErrorValue::Ref);
     }
     as_area(&expr, ctx).ok_or(ErrorValue::Ref)

@@ -487,9 +487,9 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             Some(binding) => kept(ctx, binding.scalar()),
             None => evaluate_defined_name(scope, name, ctx),
         },
-        Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
+        Expr::Unary { op, expr } => coerced(&evaluate(expr, ctx), ctx, |v| apply_unary(*op, v)),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
-        Expr::Percent(inner) => apply_percent(&evaluate(inner, ctx)),
+        Expr::Percent(inner) => coerced(&evaluate(inner, ctx), ctx, apply_percent),
         Expr::Literal(value) => kept(ctx, normalize_provider_value(value.clone())),
         Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
         Expr::FuncCall { func, name, args } => match func {
@@ -676,10 +676,6 @@ fn missing_sheet(name: &str, ctx: &EvalContext<'_>) -> Option<SheetId> {
     None
 }
 
-fn eval_unary(op: UnaryOp, expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
-    apply_unary(op, &evaluate(expr, ctx))
-}
-
 pub(crate) fn apply_unary(op: UnaryOp, v: &CellValue) -> CellValue {
     // the lotus-style leading `+` passes its operand through whatever it is,
     // so `+A1` on text is that text; only negation needs a number
@@ -755,17 +751,37 @@ pub(crate) fn apply_binary(
     }
 }
 
-/// an arithmetic operand as a number. excel reads date text through the
-/// author's locale, which the file does not record, so such text is an
-/// engine gap rather than `#VALUE!`.
+/// excel reads date text as a number through the author's locale, which the
+/// file does not record, so failing to coerce such text is an engine gap
+/// rather than `#VALUE!`.
+fn date_text_gap(operand: &CellValue, ctx: &EvalContext<'_>) {
+    if let CellValue::Text { value } = operand
+        && crate::functions::datetime::is_date_text(value)
+    {
+        ctx.record_unsupported_function();
+    }
+}
+
 fn operand(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
-    to_number(value).inspect_err(|_| {
-        if let CellValue::Text { value } = value
-            && crate::functions::datetime::is_date_text(value)
-        {
-            ctx.record_unsupported_function();
+    to_number(value).inspect_err(|_| date_text_gap(value, ctx))
+}
+
+/// a numeric operator over one value; see [`date_text_gap`].
+fn coerced(
+    value: &CellValue,
+    ctx: &EvalContext<'_>,
+    apply: impl Fn(&CellValue) -> CellValue,
+) -> CellValue {
+    let result = apply(value);
+    if matches!(
+        result,
+        CellValue::Error {
+            value: ErrorValue::Value
         }
-    })
+    ) {
+        date_text_gap(value, ctx);
+    }
+    result
 }
 
 fn arithmetic(op: BinaryOp, a: f64, b: f64) -> CellValue {

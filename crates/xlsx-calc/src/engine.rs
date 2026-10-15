@@ -1343,6 +1343,7 @@ mod tests {
         put_formula(&mut wb, s, "B3", "INDIRECT(\"R1C1\",FALSE)");
         put_cached_formula(&mut wb, s, "B4", "INDIRECT(\"A1\")", num(-1.0));
         put_cached_formula(&mut wb, s, "B5", "INDIRECT(\"Nowhere!A1\")", num(-1.0));
+        put_cached_formula(&mut wb, s, "B6", "INDIRECT(\"'[1]Book'!Rate\")", num(0.25));
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(8.0));
         assert_eq!(value(&wb, s, "B2"), num(9.0));
@@ -1352,6 +1353,7 @@ mod tests {
         assert_eq!(value(&wb, s, "B3"), reference);
         assert_eq!(value(&wb, s, "B4"), num(5.0));
         assert_eq!(value(&wb, s, "B5"), reference);
+        assert_eq!(value(&wb, s, "B6"), num(0.25));
     }
 
     #[test]
@@ -1365,7 +1367,11 @@ mod tests {
         }
         put_num(&mut wb, s, "D10", 4.0);
         put_num(&mut wb, s, "E10", 5.0);
+        for (address, index) in [("E1", 1.0), ("E2", 4.0), ("E3", 2.0)] {
+            put_num(&mut wb, s, address, index);
+        }
         defined(&mut wb, "Pay", "Sheet1!$A$1:$A$5");
+        put_recorded(&mut wb, s, "H1", "A1:A5*2", "H1:H5");
         for (address, formula) in [
             ("C3", "A1:A5"),
             ("C4", "Pay*2"),
@@ -1374,6 +1380,9 @@ mod tests {
             ("C1", "SUM(A1:A5)"),
             ("G4", "Data!A1:A5"),
             ("E12", "D10:F10"),
+            ("D2", "INDEX(A1:A5,E1:E3)"),
+            ("F3", "Pay+SUMPRODUCT(Pay*1)"),
+            ("F4", "SUMPRODUCT(Pay*1)+Pay"),
             ("C7", "A1:A5"),
             ("C8", "A1:B5"),
             ("H12", "D10:F10"),
@@ -1389,6 +1398,11 @@ mod tests {
             ("C1", num(150.0)),
             ("G4", num(4.0)),
             ("E12", num(5.0)),
+            ("D2", num(40.0)),
+            ("F3", num(180.0)),
+            ("F4", num(190.0)),
+            ("H3", num(60.0)),
+            ("H5", num(100.0)),
         ] {
             assert_eq!(value(&wb, s, address), expected, "{address}");
         }
@@ -1413,8 +1427,14 @@ mod tests {
         put_formula(&mut wb, s, "B2", "B1+1");
         put_cached_formula(&mut wb, s, "B3", "A2+1", num(-1.0));
         put_cached_formula(&mut wb, s, "B4", "A3+1", num(-1.0));
+        put_cached_formula(&mut wb, s, "B5", "-A1", num(-44_519.0));
+        put_cached_formula(&mut wb, s, "B6", "A1%", num(445.19));
+        put_text(&mut wb, s, "A7", "31/04/2021");
+        put_cached_formula(&mut wb, s, "B7", "A7+1", num(-1.0));
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(44_520.0));
+        assert_eq!(value(&wb, s, "B5"), num(-44_519.0));
+        assert_eq!(value(&wb, s, "B6"), num(445.19));
         assert_eq!(value(&wb, s, "B2"), num(44_521.0));
         assert_eq!(
             value(&wb, s, "B3"),
@@ -1423,6 +1443,12 @@ mod tests {
             }
         );
         assert_eq!(value(&wb, s, "B4"), num(6.0));
+        assert_eq!(
+            value(&wb, s, "B7"),
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        );
     }
 
     /// the array form of a supported function is still a gap in the engine, so
