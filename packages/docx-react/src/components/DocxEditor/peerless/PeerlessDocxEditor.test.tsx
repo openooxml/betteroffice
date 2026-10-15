@@ -738,7 +738,7 @@ test('worker context menu reads selection and table context without a session', 
   fireEvent.contextMenu(view.getByTestId('peerless-paged-editor'), { clientX: 40, clientY: 60 });
   expect(view.getByRole('menu')).toBeTruthy();
   expect(view.getByRole('menuitem', { name: /^Copy/ }).getAttribute('aria-disabled')).not.toBe('true');
-  expect(view.getByRole('menuitem', { name: /Insert row above/ }).getAttribute('aria-disabled')).toBe('true');
+  expect(view.getByRole('menuitem', { name: /Insert row above/ }).getAttribute('aria-disabled')).not.toBe('true');
   expect(coreSession).not.toHaveBeenCalled();
 });
 
