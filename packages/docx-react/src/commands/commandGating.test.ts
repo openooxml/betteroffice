@@ -195,7 +195,8 @@ describe('command gate', () => {
     expect(codeOf('tableAction', limited, 'mergeCells')).toBe('unsupported-command');
   });
 
-  test('table structure limits are argument specific', () => {    const env = testEnvironment({
+  test('table structure limits are argument specific', () => {
+    const env = testEnvironment({
       table: {
         isInTable: true,
         rowCount: 1,
