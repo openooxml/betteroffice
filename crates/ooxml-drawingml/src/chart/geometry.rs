@@ -1422,6 +1422,9 @@ fn secondary_axis_band<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     family: PlotFamily<'_>,
 ) -> f64 {
+    if family.axis.is_some_and(|axis| axis.hidden) {
+        return 38.0;
+    }
     let style = family.scoped(family.axis.map(|axis| axis.text).unwrap_or_default());
     let scale = value_scale(family);
     let format = family.axis.and_then(|axis| axis.number_format);
@@ -5540,6 +5543,53 @@ mod tests {
                 assert!(x >= rect().x);
             }
         }
+    }
+
+    #[test]
+    fn axis_label_regression_hidden_secondary_axis_keeps_base_reserve() {
+        let data = source(&[200_000.0, 600_000.0]);
+        let mut primary = group("column", vec![series("Units", &data)]);
+        primary.axis_ids = vec!["1"];
+        let mut secondary = group("line", vec![series("Revenue", &data)]);
+        secondary.axis_ids = vec!["2"];
+        let mut axis = value_axis("2", 0.0, 600_000.0);
+        axis.number_format = Some("\"$\"#,##0");
+        axis.hidden = true;
+        let mut chart = combo_with_axes(
+            primary,
+            secondary,
+            vec![value_axis("1", 0.0, 600_000.0), axis],
+        );
+        chart.legend = Some(PlotLegend {
+            visible: Some(false),
+            ..Default::default()
+        });
+        let frame = rect();
+        let mut sink = AxisLabelSink {
+            ops: Vec::new(),
+            end_aligned: Vec::new(),
+            measured: false,
+        };
+        plot_chart_into(&chart, frame, &mut sink);
+        let (plot_x, plot_right) = sink
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    ..
+                } if y1 == y2 && x2 > x1 && *width == 1.0 => Some((*x1, *x2)),
+                _ => None,
+            })
+            .expect("the bottom plot axis is drawn");
+        let gutter = plot_x - frame.x;
+        let expected_right =
+            frame.x + gutter + (frame.w - gutter - (CHART_PAD + PLOT_INSET) - 38.0).max(MIN_PLOT);
+        assert_eq!(plot_right, expected_right);
     }
 
     #[test]
