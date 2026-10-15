@@ -65,7 +65,6 @@
     --header: 4rem;
   }
   html {
-    color-scheme: light dark;
     scroll-padding-top: calc(var(--header) + 16px);
     overflow-x: clip;
   }

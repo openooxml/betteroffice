@@ -90,7 +90,7 @@ function drawStrip(): void {
       const button = window.document.createElement('button');
       button.type = 'button';
       button.className =
-        'min-w-[30px] flex-none cursor-pointer border border-transparent px-1.5 py-[3px] font-mono text-dim tabular-nums hover:border-line aria-[current=true]:bg-fg aria-[current=true]:text-bg data-[missing=true]:border-dashed data-[missing=true]:text-dim';
+        'min-w-[30px] flex-none cursor-pointer border border-transparent px-1.5 py-[3px] font-mono text-dim tabular-nums hover:border-line aria-[current=true]:bg-fg aria-[current=true]:text-bg data-[missing=true]:border-dashed data-[missing=true]:border-line data-[missing=true]:text-dim';
       button.textContent = String(entry.page);
       button.ariaCurrent = String(entry.page === page);
       button.dataset.missing = String(!hasRender(latest, current!.id, entry.page));
@@ -121,6 +121,7 @@ function drawHeader(): void {
   scores.replaceChildren(
     ...parts.map(([label, value]) => {
       const element = window.document.createElement('span');
+      element.className = 'whitespace-nowrap';
       element.append(`${label} `, bold(value!));
       return element;
     })

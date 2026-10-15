@@ -7,6 +7,7 @@ import {
   duration,
   h,
   mount,
+  s,
   spectrum,
   tipCard,
   waffle,
@@ -64,7 +65,6 @@ const WAFFLES = 'grid grid-cols-2 gap-3.5 md:gap-7';
 const MONO = 'font-mono leading-[normal]';
 const LABEL = 'font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-dim';
 const LINK = 'text-fg underline decoration-faint underline-offset-[3px] transition-colors hover:decoration-fg';
-const BODY_LINK = LINK;
 
 /** Overrides may only name this origin, so a shared link cannot pass off someone else's numbers. */
 const local = (name: string) => sameOrigin(params.get(name), window.location.href);
@@ -102,11 +102,19 @@ function views(summary: Summary, format: Format): Record<Engine, EngineView> {
   };
 }
 
-function legendItem(cls: string, label: string, sub: string): HTMLElement {
+function lineSample(cls: string): SVGSVGElement {
+  return s(
+    'svg',
+    { width: 22, height: 8, viewBox: '0 0 22 8', class: 'cdf flex-none', 'aria-hidden': 'true' },
+    s('line', { x1: 0, x2: 22, y1: 4, y2: 4, class: `line ${cls}` })
+  );
+}
+
+function legendItem(cls: string, label: string, sub: string, sample: Node | null = null): HTMLElement {
   return h(
     'li',
     { class: 'flex items-center gap-[7px]' },
-    h('i', { class: `${SWATCH} ${cls}` }),
+    sample ?? h('i', { class: `${SWATCH} ${cls}` }),
     label,
     h('span', { class: `${MONO} text-[11px] text-dim` }, sub)
   );
@@ -710,14 +718,16 @@ interface Line {
   values: number[];
 }
 
-function lines(series: Line[], options: { noun: string; frame?: number; height?: number }): HTMLElement {
+function lines(series: Line[], options: { noun: string; frame?: number; height?: number; lineLegend?: boolean }): HTMLElement {
   return h(
     'div',
     {},
     h(
       'ul',
       { class: 'mb-3.5 flex flex-wrap gap-x-[18px] gap-y-1.5 text-[13px]' },
-      ...series.map((entry) => legendItem(entry.cls, entry.label, `median ${duration(median(entry.values))}`))
+      ...series.map((entry) =>
+        legendItem(entry.cls, entry.label, `median ${duration(median(entry.values))}`, options.lineLegend ? lineSample(entry.cls) : null)
+      )
     ),
     chart(
       (width) => cdf(series, width, options),
@@ -1094,7 +1104,7 @@ function latencySection(latency: Latency | null, published: boolean, n: number, 
     stat(headlineText(latency.withinFrame, latency.ops, 1), 'inside one 60 Hz frame', 'up'),
     lines(
       present.map((format) => ({ cls: `f-${format}`, label: format.toUpperCase(), values: latency.formats[format]!.values })),
-      { frame: FRAME_MS, noun: 'calls', height: 260 }
+      { frame: FRAME_MS, noun: 'calls', height: 260, lineLegend: true }
     )
   );
 
@@ -1198,7 +1208,7 @@ function methodSection(
     h(
       'ul',
       { class: 'mt-7 flex flex-wrap gap-x-6 gap-y-2.5' },
-      ...links.map(([label, href]) => h('li', {}, h('a', { class: `text-[13px] ${BODY_LINK}`, href }, `${label} ↗`)))
+      ...links.map(([label, href]) => h('li', {}, h('a', { class: `text-[13px] ${LINK}`, href }, `${label} ↗`)))
     )
   );
 }
@@ -1251,9 +1261,10 @@ async function boot(): Promise<void> {
     fail(error instanceof Error ? error.message : String(error));
   }
   const latency = await latencyPromise;
+  const present = loaded ? FORMATS.filter((format) => loaded.summary.formats[format].documents > 0) : [];
+  const sectionTotal = loaded ? present.length + 3 : 2;
   if (loaded) {
     const { summary, publishedAt, href } = loaded;
-    const present = FORMATS.filter((format) => summary.formats[format].documents > 0);
     const total = present.reduce((sum, format) => sum + summary.formats[format].documents, 0);
     const releases = present.map((format) => `${format.toUpperCase()} ${summary.versions[format]}`).join(' · ');
     const span = (versions: string[]) =>
@@ -1271,7 +1282,6 @@ async function boot(): Promise<void> {
       },
       `Microsoft Office ${span(officeVersions)}`.trim()
     );
-    const sectionTotal = present.length + 3;
     const facts: [string, Node | string][] = [
       ['Documents', thousands(total)],
       ['Release', h('a', { class: LINK, href: 'https://www.npmjs.com/org/betteroffice' }, releases)],
@@ -1305,7 +1315,6 @@ async function boot(): Promise<void> {
     present.forEach((format, index) => formats.append(formatSection(summary, format, index + 2, sectionTotal)));
   }
   const published = !local('e2e');
-  const sectionTotal = loaded ? FORMATS.filter((format) => loaded.summary.formats[format].documents > 0).length + 3 : 2;
   const latencyNode = latencySection(latency, published, sectionTotal - 1, sectionTotal);
   find('latency').replaceWith(latencyNode);
   const method = methodSection(loaded?.summary ?? null, loaded?.href ?? null, latency, published, sectionTotal, sectionTotal);
