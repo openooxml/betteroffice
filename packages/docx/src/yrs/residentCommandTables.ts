@@ -156,7 +156,9 @@ function nearestCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): st
   const column = anchors
     .filter((anchor) => anchor.column <= at.column && at.column < anchor.column + anchor.colspan)
     .sort((left, right) => Math.abs(left.row - at.row) - Math.abs(right.row - at.row));
-  const ordered = anchors.slice().sort((left, right) => (left.row - at.row) || (left.column - at.column));
+  const ordered = anchors.slice().sort((left, right) =>
+    (Math.abs(left.row - at.row) - Math.abs(right.row - at.row)) ||
+    (Math.abs(left.column - at.column) - Math.abs(right.column - at.column)));
   return (column[0] ?? ordered[0])?.story ?? null;
 }
 
