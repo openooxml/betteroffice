@@ -2,25 +2,20 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { renderPages, type SiteData } from './render';
 import { newestFirst, type Suite } from './stats';
+import { validateSuite } from '../../../eval/formats/collect-results';
 
 export async function loadData(): Promise<SiteData> {
   const directory = resolve(import.meta.dir, '../../../eval/results');
   const suites: Suite[] = [];
   for (const name of (await readdir(directory)).sort()) {
-    if (!name.endsWith('.json') || name.endsWith('.reasons.json')) continue;
+    if (!name.endsWith('.json') || name.endsWith('.reasons.json') || name.endsWith('.meta.json')) continue;
     const suite = JSON.parse(await readFile(resolve(directory, name), 'utf8')) as Suite;
-    if (suite.schema !== 1 || !suite.suite || !suite.runs.length) throw new Error(`Invalid suite: ${name}`);
+    validateSuite(suite);
     if (suites.some(s => s.suite === suite.suite)) throw new Error(`Duplicate suite: ${suite.suite}`);
     suites.push(suite);
   }
-  const readme = await readFile(resolve(import.meta.dir, '../../../eval/README.md'), 'utf8');
-  const running = readme.split('### Running')[1]?.split('## Usability tasks')[0];
-  const commands = [...(running ?? '').matchAll(/```sh\n([\s\S]*?)```/g)].map(match => match[1]!.trim());
-  if (commands.length !== 3) throw new Error('Expected build/run, generic, and checker commands in eval/README.md');
   return {
-    suites: newestFirst(suites), commands,
-    fixtures: JSON.parse(await readFile(resolve(import.meta.dir, '../../../eval/formats/fixtures.json'), 'utf8')),
-    tasks: JSON.parse(await readFile(resolve(import.meta.dir, '../../../eval/formats/tasks.json'), 'utf8')),
+    suites: newestFirst(suites),
     frame: await readFile(resolve(import.meta.dir, 'frame.html'), 'utf8'),
   };
 }

@@ -33,10 +33,20 @@ export const formats = (suite: Suite) => [...new Set(suite.tasks.map(t => t.form
   const order = ['docx', 'xlsx', 'pptx'];
   return (order.includes(a) ? order.indexOf(a) : order.length) - (order.includes(b) ? order.indexOf(b) : order.length) || a.localeCompare(b);
 });
-export const newestFirst = (suites: Suite[]) => [...suites].sort((a, b) => b.date.localeCompare(a.date) || b.suite.localeCompare(a.suite, 'en', { numeric: true }));
+export const newestFirst = (suites: Suite[]) => [...suites].sort((a, b) => b.suite.localeCompare(a.suite, 'en', { numeric: true }) || b.date.localeCompare(a.date));
 export const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
 export function repetitions(counts: number[]) {
   if (!counts.length) return 'No runs';
   if (counts.length === 1) return counts[0] === 1 ? 'one run per task' : `${counts[0]} runs per task`;
   return `${counts[0]} to ${counts.at(-1)} runs per task`;
+}
+
+export function modelRepetitions(suite: Suite) {
+  const names = models(suite);
+  return names.map(model => {
+    const description = repetitions(aggregate(suite, { model }).runsPerTask);
+    const taskCount = new Set(suite.runs.filter(r => r.model === model).map(r => r.task)).size;
+    const subset = taskCount < suite.tasks.length ? ` on ${taskCount} ${taskCount === 1 ? 'task' : 'tasks'}` : '';
+    return names.length === 1 && !subset ? description : `${description} with ${model}${subset}`;
+  }).join('; ');
 }
