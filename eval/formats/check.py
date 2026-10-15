@@ -40,8 +40,10 @@ TRACKED = {f'{{{NS["w"]}}}{name}' for name in ('ins', 'del', 'moveFrom', 'moveTo
                                          'cellIns', 'cellDel', 'cellMerge', 'numberingChange')}
 
 
-def tasks():
-    return json.loads((ROOT / 'tasks.json').read_text())
+def tasks(suite='v2'):
+    require(suite in ('v2', 'v3'), f'unknown suite: {suite}')
+    path = ROOT / 'v3' / 'tasks.json' if suite == 'v3' else ROOT / 'tasks.json'
+    return [dict(task, suite=suite) for task in json.loads(path.read_text())]
 
 
 def verified(data, entry, name):
@@ -51,7 +53,7 @@ def verified(data, entry, name):
 
 
 def fixture(task):
-    manifest = json.loads((ROOT / 'fixtures.json').read_text())
+    manifest = json.loads((ROOT / ('v3/fixtures.json' if task.get('suite', 'v2') == 'v3' else 'fixtures.json')).read_text())
     name = task['fixture']
     entry = manifest['fixtures'][name]
     local = os.environ.get('FORMAT_EVAL_FIXTURES', '').strip()
@@ -71,7 +73,7 @@ def fixture(task):
     staging = cache / f'.tmp-{uuid.uuid4()}'
     try:
         subprocess.run(['curl', '-fsSL', '--retry', '3', '--max-time', '120', '--max-filesize', str(entry['bytes']),
-                        '-o', str(staging), f"{manifest['origin']}/{name}"], check=True)
+                        '-o', str(staging), f"{manifest['origin'].rstrip('/')}/{name}"], check=True)
         verified(staging.read_bytes(), entry, name)
         os.replace(staging, path)
     finally:
@@ -308,7 +310,7 @@ def indexed(items, index, kind):
     return items[index]
 
 
-def styles(archive):
+def styles(archive, real=False):
     part = related(archive, 'xl/workbook.xml', 'styles')
     require(part is not None, 'workbook styles are missing')
     root = xml(archive, part)
@@ -337,8 +339,8 @@ def styles(archive):
                 if node is not None:
                     pattern.remove(node)
         fmt = int(xf.get('numFmtId', '0'))
-        require(fmt in formats, f'unknown number format {fmt}')
-        style = rendered({'number_format': formats[fmt], 'bold': bold, 'italic': italic, 'fill_pattern': kind,
+        require(fmt in formats or (real and 0 <= fmt < 164), f'unknown number format {fmt}')
+        style = rendered({'number_format': formats.get(fmt, f'builtin:{fmt}'), 'bold': bold, 'italic': italic, 'fill_pattern': kind,
                           'fill': color.get('rgb', '').upper() if color is not None else None,
                           'fill_other': tuple(sorted((k, v) for k, v in color.attrib.items() if k != 'rgb')) if color is not None else (),
                           'fill_background': canonical(background), 'fill_rest': canonical(fill),
@@ -359,6 +361,12 @@ def styles(archive):
         style['base'] = indexed(named, xf.get('xfId', '0'), 'cell style format')
         style['applied'] = {flag: xf.get(flag, '1') in ('1', 'true') for flag in FACETS
                             if facet(style, flag) != facet(style['base'], flag)}
+        if real:
+            for flag, keys in FACETS.items():
+                if xf.get(flag) in ('0', 'false'):
+                    for key in keys:
+                        style[key] = copy.deepcopy(style['base'][key])
+            style['applied'] = {flag: True for flag in FACETS if facet(style, flag) != facet(style['base'], flag)}
         result.append(style)
     require(bool(result), 'no cell styles')
     named_styles = {}
@@ -371,10 +379,12 @@ def styles(archive):
     return result, named_styles
 
 
-def workbook(archive):
-    cell_styles, named_styles = styles(archive)
+def workbook(archive, real=False):
+    cell_styles, named_styles = styles(archive, real)
     strings_part = related(archive, 'xl/workbook.xml', 'sharedStrings')
-    strings = [''.join(n.itertext()) for n in xml(archive, strings_part).findall('s:si', NS)] if strings_part else []
+    string_root = xml(archive, strings_part) if strings_part else None
+    string_nodes = string_root.findall('s:si', NS) if string_root is not None else []
+    strings = [(''.join(n.text or '' for n in item.iter(f'{{{NS["s"]}}}t')) if real else ''.join(item.itertext())) for item in string_nodes]
     links = relations(archive, 'xl/workbook.xml')
     root = xml(archive, 'xl/workbook.xml')
     modeled = {'xl/workbook.xml', related(archive, 'xl/workbook.xml', 'styles')}
@@ -391,12 +401,22 @@ def workbook(archive):
         sheet = xml(archive, link['target'])
         modeled.add(link['target'])
         cells = {}
+        row_style = {row.get('r'): row.get('s', '0') for row in sheet.findall('s:sheetData/s:row', NS) if row.get('customFormat') in ('1', 'true')} if real else {}
+        column_styles = [(int(col.get('min')), int(col.get('max')), col.get('style', '0')) for col in sheet.findall('s:cols/s:col', NS)] if real else []
+        shared = {n.find('s:f', NS).get('si'): (n.get('r'), n.find('s:f', NS))
+                  for n in sheet.findall('s:sheetData/s:row/s:c', NS)
+                  if real and n.find('s:f', NS) is not None and n.find('s:f', NS).get('t') == 'shared' and n.find('s:f', NS).text}
         for node in sheet.findall('s:sheetData/s:row/s:c', NS):
             address = node.attrib['r']
             require(address not in cells, f'duplicate cell {address}')
             kind, value = node.get('t', 'n'), node.findtext('s:v', namespaces=NS)
             formula = node.find('s:f', NS)
-            require(formula is None or formula.get('t', 'normal') == 'normal', 'shared or array formula cannot be checked')
+            require(real or formula is None or formula.get('t', 'normal') == 'normal', 'shared or array formula cannot be checked')
+            formula_text = formula.text if formula is not None else None
+            if real and formula is not None and formula.get('t') == 'shared':
+                require(formula.get('si') in shared, 'missing shared formula master')
+                origin, master = shared[formula.get('si')]
+                formula_text = translate_formula(master.text, origin, address)
             if kind == 'inlineStr':
                 value = ''.join(n.text or '' for n in node.findall('s:is//s:t', NS))
             elif kind == 's':
@@ -407,17 +427,36 @@ def workbook(archive):
                 require(value.strip(), f'{entry.attrib["name"]}!{address}: empty cached value')
                 value = Decimal(value)
                 require(value.is_finite(), f'non-finite value in {address}')
+                if real:
+                    value = Decimal(str(float(value)))
+                    require(value.is_finite(), f'non-finite double in {address}')
             elif kind == 'e':
                 value = {'error': value}
-            style = copy.deepcopy(indexed(cell_styles, node.get('s', '0'), 'cell format'))
-            record = {'value': value, 'formula': formula.text if formula is not None else None, 'style': style}
-            if value is not None or formula is not None or style != cell_styles[0]:
+            inherited = row_style.get(re.search(r'[0-9]+$', address).group())
+            if real and inherited is None:
+                column = column_number(re.match('[A-Z]+', address).group())
+                inherited = next((style for low, high, style in column_styles if low <= column <= high), '0')
+            style = copy.deepcopy(indexed(cell_styles, node.get('s', inherited or '0'), 'cell format'))
+            record = {'value': value, 'formula': formula_text, 'style': style}
+            if real:
+                record['attributes'] = {k: v for k, v in node.attrib.items() if k not in ('r', 's', 't')}
+                record['formula_properties'] = {k: v for k, v in formula.attrib.items() if k not in ('si', 'ref', 't') or (k in ('t', 'ref') and formula.get('t') != 'shared')} if formula is not None else {}
+                if record['formula_properties'].get('t') == 'normal':
+                    record['formula_properties'].pop('t')
+                record['other'] = tuple(canonical(n) for n in node if n.tag not in {f'{{{NS["s"]}}}{t}' for t in ('f', 'v', 'is')})
+                text_node = node.find('s:is', NS) if kind == 'inlineStr' else (string_nodes[int(node.findtext('s:v', namespaces=NS))] if kind == 's' else None)
+                record['rich_text'] = rich_cell(text_node) if text_node is not None else None
+            if value is not None or formula is not None or style != cell_styles[0] or (real and (record['attributes'] or record['other'] or record['rich_text'])):
                 cells[address] = record
         views = sheet.findall('s:sheetViews/s:sheetView', NS)
         sheet_views.append([(int(view.get('workbookViewId', '0')), view.get('tabSelected') in ('1', 'true')) for view in views])
         for view in views:
             view.attrib.pop('tabSelected', None)
         metadata = []
+        if real:
+            data = sheet.find('s:sheetData', NS)
+            metadata.append(('sheetData attributes', dict(data.attrib) if data is not None else {}))
+            metadata.append(('row extensions', {row.get('r'): tuple(canonical(child) for child in row if child.tag != f'{{{NS["s"]}}}c') for row in data if any(child.tag != f'{{{NS["s"]}}}c' for child in row)} if data is not None else {}))
         for node in sheet:
             if node.tag in (f'{{{NS["s"]}}}sheetData', f'{{{NS["s"]}}}dimension'):
                 continue
@@ -443,7 +482,17 @@ def workbook(archive):
                        'sheet_attributes': dict(sheet.attrib),
                        'cells': cells, 'metadata': metadata, 'row_properties': rows})
     require(len({sheet['name'] for sheet in result}) == len(result), 'duplicate worksheet names')
-    return {'sheets': result, 'default_style': cell_styles[0], 'workbook_state': workbook_state(archive, root),
+    extra = {}
+    if real and string_root is not None:
+        string_root.attrib.pop('count', None)
+        string_root.attrib.pop('uniqueCount', None)
+        for item in list(string_root):
+            if item.tag == f'{{{NS["s"]}}}si':
+                string_root.remove(item)
+        extra['strings_state'] = canonical(string_root)
+    elif real:
+        extra['strings_state'] = canonical(ET.Element(f'{{{NS["s"]}}}sst'))
+    return {**extra, 'sheets': result, 'default_style': cell_styles[0], 'workbook_state': workbook_state(archive, root),
             'selection': selection_state(root, [sheet['name'] for sheet in result], sheet_views),
             'named_styles': named_styles, 'style_state': canonical(style_state),
             'content_types': {'workbook': content_type(archive, 'xl/workbook.xml'),
@@ -1006,11 +1055,427 @@ def check_document(expected, actual):
                 seen.add(value.upper())
 
 
+def translate_formula(formula, origin, destination):
+    def coordinates(address):
+        col, row = re.fullmatch(r'([A-Z]+)([0-9]+)', address).groups()
+        return column_number(col), int(row)
+    before, after = coordinates(origin), coordinates(destination)
+    def shift(match):
+        absolute_col, col, absolute_row, row = match.groups()
+        col = column_number(col) + (0 if absolute_col else after[0] - before[0])
+        row = int(row) + (0 if absolute_row else after[1] - before[1])
+        require(col > 0 and row > 0, 'invalid translated shared formula reference')
+        return absolute_col + column_letters(col) + absolute_row + str(row)
+    pieces = re.split(r'("(?:[^"]|"")*")', formula)
+    for i in range(0, len(pieces), 2):
+        pieces[i] = re.sub(r'(?<![\w.])(?!(?:[A-Z]+[0-9]+)\s*\()(\$?)([A-Z]{1,3})(\$?)([0-9]+)(?![\w.!])', shift, pieces[i])
+    return ''.join(pieces)
+
+
+def rich_cell(node):
+    if node is None:
+        return None
+    runs = []
+    for run in node.findall('s:r', NS):
+        style = properties(run.find('s:rPr', NS))
+        text = run.findtext('s:t', default='', namespaces=NS)
+        extra = (tuple(sorted(run.attrib.items())), tuple(canonical(child) for child in run if child.tag not in {f'{{{NS["s"]}}}rPr', f'{{{NS["s"]}}}t'}))
+        if runs and runs[-1][:2] == (style, extra):
+            runs[-1] = (style, extra, runs[-1][2] + text)
+        else:
+            runs.append((style, extra, text))
+    rest = (tuple(sorted(node.attrib.items())), tuple(canonical(child) for child in node if child.tag not in {f'{{{NS["s"]}}}r', f'{{{NS["s"]}}}t'}))
+    if not any(style is not None or extra != ((), ()) for style, extra, _ in runs) and rest == ((), ()):
+        return None
+    return (tuple(runs), rest)
+
+
+class RealPackage:
+    def __init__(self, archive):
+        self.parts = {name: archive.read(name) for name in archive.namelist() if not name.endswith('/')}
+        self.roots = {}
+        self.namespaces = {}
+
+    def namelist(self):
+        return list(self.parts)
+
+    def read(self, name):
+        return ET.tostring(self.roots[name]) if name in self.roots else self.parts[name]
+
+    def root(self, name):
+        if name not in self.roots:
+            import io
+            self.namespaces[name] = dict(item for _, item in ET.iterparse(io.BytesIO(self.parts[name]), events=('start-ns',)))
+            self.roots[name] = ET.fromstring(self.parts[name])
+        return self.roots[name]
+
+
+def paragraph_nodes(root, prefix):
+    return list(root.iter(f'{{{NS[prefix]}}}p'))
+
+
+def node_text(node, prefix):
+    return ''.join(n.text or '' for n in node.iter(f'{{{NS[prefix]}}}t'))
+
+
+def replace_xml_text(paragraph, old, new, prefix):
+    nodes = list(paragraph.iter(f'{{{NS[prefix]}}}t'))
+    text = ''.join(n.text or '' for n in nodes)
+    starts = [m.start() for m in re.finditer(re.escape(old), text)]
+    for start in reversed(starts):
+        offset = 0
+        end = start + len(old)
+        for node in nodes:
+            value = node.text or ''
+            left, right = max(0, start - offset), min(len(value), end - offset)
+            if left < right:
+                node.text = value[:left] + (new if offset <= start < offset + len(value) else '') + value[right:]
+                if prefix == 'w' and node.text and (node.text[0].isspace() or node.text[-1].isspace()):
+                    node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            offset += len(value)
+    return len(starts)
+
+
+def accept_revisions(root):
+    discard = {w(name) for name in ('del', 'moveFrom', 'moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd',
+                                   'rPrChange', 'pPrChange', 'sectPrChange', 'tblPrChange', 'tblPrExChange', 'tblGridChange',
+                                   'trPrChange', 'tcPrChange', 'cellDel', 'numberingChange')}
+    unwrap = {w(name) for name in ('ins', 'moveTo')}
+    for parent in root.iter():
+        for child in list(parent):
+            if child.tag in discard:
+                parent.remove(child)
+            elif child.tag in unwrap:
+                index = list(parent).index(child)
+                parent.remove(child)
+                parent[index:index] = list(child)
+            elif child.tag in {w('cellIns'), w('cellMerge')}:
+                raise ValueError('unsupported table revision in fixture')
+
+
+def real_expected_package(package, spec, fmt):
+    prefix = 'w' if fmt == 'docx' else 'a'
+    if spec.get('accept_changes'):
+        for name in package.namelist():
+            if name.startswith('word/') and name.endswith('.xml'):
+                accept_revisions(package.root(name))
+    for edit in spec.get('edits', []):
+        matches = 0
+        root = package.root(edit['part'])
+        parents = {child: parent for parent in root.iter() for child in parent}
+        for paragraph in paragraph_nodes(root, prefix):
+            if any(ancestor.tag == f'{{{NS[prefix]}}}p' for ancestor in ancestors(paragraph, parents)):
+                continue
+            if 'paragraph' not in edit or node_text(paragraph, prefix) == edit['paragraph']:
+                matches += replace_xml_text(paragraph, edit['old'], edit['new'], prefix)
+        require(matches > 0, f'fixture edit does not match: {edit}')
+    if 'slide_replace' in spec:
+        change = spec['slide_replace']
+        for name in package.namelist():
+            if re.fullmatch(r'ppt/slides/slide[0-9]+.xml', name):
+                for paragraph in paragraph_nodes(package.root(name), 'a'):
+                    replace_xml_text(paragraph, change['old'], change['new'], 'a')
+    for change in spec.get('table_cells', []):
+        root = package.root(change['part'])
+        table = root.findall('.//a:tbl', NS)[change['table'] - 1]
+        cell = table.findall('a:tr', NS)[change['row'] - 1].findall('a:tc', NS)[change['column'] - 1]
+        paragraphs = cell.findall('a:txBody/a:p', NS)
+        require(len(paragraphs) == 1, 'table target must have one paragraph')
+        replace_xml_text(paragraphs[0], node_text(paragraphs[0], 'a'), change['text'], 'a')
+    for change in spec.get('delete_rows', []):
+        root = package.root(change['part'])
+        parents = {child: parent for parent in root.iter() for child in parent}
+        rows = [row for row in root.iter(w('tr')) if change['contains'] in node_text(row, 'w')]
+        require(len(rows) == 1, 'row deletion must identify exactly one row')
+        parents[rows[0]].remove(rows[0])
+    for text, style in spec.get('styles', {}).items():
+        matches = [p for p in package.root('word/document.xml').iter(w('p')) if node_text(p, 'w') == text]
+        require(len(matches) == 1, 'style target must be unique')
+        props = matches[0].find('w:pPr', NS)
+        if props is None:
+            props = ET.Element(w('pPr'))
+            matches[0].insert(0, props)
+        item = props.find('w:pStyle', NS)
+        if item is None:
+            item = ET.Element(w('pStyle'))
+            props.insert(0, item)
+        item.set(w('val'), style)
+    for slide, text in spec.get('notes', {}).items():
+        part = slide_parts(package)[int(slide) - 1]
+        target = related(package, part, 'notesSlide')
+        require(target is not None, 'notes task requires an existing notes part')
+        root = package.root(target)
+        bodies = [shape.find('p:txBody', NS) for shape in root.findall('p:cSld/p:spTree/p:sp', NS)
+                  if shape.find('p:nvSpPr/p:nvPr/p:ph', NS) is not None and shape.find('p:nvSpPr/p:nvPr/p:ph', NS).get('type') == 'body']
+        require(len(bodies) == 1, 'notes task requires one body placeholder')
+        body = bodies[0]
+        paragraphs = body.findall('a:p', NS)
+        require(bool(paragraphs), 'notes task requires a source paragraph')
+        template = copy.deepcopy(paragraphs[0])
+        for p in paragraphs:
+            body.remove(p)
+        for child in list(template):
+            if child.tag not in {f'{{{NS["a"]}}}pPr', f'{{{NS["a"]}}}endParaRPr'}:
+                template.remove(child)
+        source_run = paragraphs[0].find('a:r', NS)
+        run = ET.Element(f'{{{NS["a"]}}}r')
+        if source_run is not None and source_run.find('a:rPr', NS) is not None:
+            run.append(copy.deepcopy(source_run.find('a:rPr', NS)))
+        ET.SubElement(run, f'{{{NS["a"]}}}t').text = text
+        template.insert(1 if template.find('a:pPr', NS) is not None else 0, run)
+        body.append(template)
+    if spec.get('swap_last_slides'):
+        listing = package.root('ppt/presentation.xml').find('p:sldIdLst', NS)
+        listing[-2], listing[-1] = listing[-1], listing[-2]
+
+
+def ancestors(node, parents):
+    while node in parents:
+        node = parents[node]
+        yield node
+
+
+def slide_parts(archive):
+    links = relations(archive, 'ppt/presentation.xml')
+    return [links[n.get(f'{{{NS["r"]}}}id')]['target'] for n in xml(archive, 'ppt/presentation.xml').findall('p:sldIdLst/p:sldId', NS)]
+
+
+class RealIdentity(NewParagraphAttributes):
+    def __init__(self, attributes, input_ids, paragraph=True):
+        dict.__init__(self, attributes)
+        self.input_ids = input_ids
+        self.paragraph = paragraph
+
+    def compare(self, actual, path):
+        expected = dict(self)
+        ignorable = f'{{{NS["mc"]}}}Ignorable'
+        actual = dict(actual)
+        if not self.paragraph and NS['w14'] not in self.get(ignorable, '').split():
+            tokens = set(actual.get(ignorable, '').split()) - {NS['w14']}
+            if tokens:
+                actual[ignorable] = ' '.join(sorted(tokens))
+            else:
+                actual.pop(ignorable, None)
+        for key in PARAGRAPH_IDS if self.paragraph else ():
+            if key not in self and key in actual:
+                value = actual[key]
+                require(re.fullmatch('[0-9A-Fa-f]{8}', value) and 0 < int(value, 16) < 0x80000000,
+                        f'{path}: invalid fresh paragraph identity')
+                require(value.upper() not in self.input_ids, f'{path}: new identity reuses an input id')
+                expected[key] = value
+        compare(expected, actual, path)
+
+
+def real_metadata(package):
+    for name in ('docProps/core.xml', 'docProps/app.xml'):
+        if name not in package.parts:
+            continue
+        root = package.root(name)
+        tags = {SAVE_TIME, '{http://schemas.openxmlformats.org/package/2006/metadata/core-properties}lastModifiedBy'} if name.endswith('core.xml') else {f'{{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}}{key}' for key in ('Pages', 'Words', 'Characters', 'CharactersWithSpaces', 'Lines', 'Paragraphs', 'TotalTime', 'Slides', 'Notes', 'HiddenSlides', 'MMClips')}
+        for child in list(root):
+            if child.tag in tags:
+                root.remove(child)
+
+
+def effective_run_properties(node, styles_root, paragraph_style):
+    definitions = {style.get(w('styleId')): style for style in styles_root.findall('w:style', NS)} if styles_root is not None else {}
+    values = {}
+    defaults = styles_root.find('w:docDefaults/w:rPrDefault/w:rPr', NS) if styles_root is not None else None
+    toggles = {w(name) for name in ('b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps', 'strike', 'outline', 'shadow', 'emboss', 'imprint', 'vanish')}
+    def apply(props, toggle=False):
+        if props is not None:
+            for child in props:
+                if child.tag in toggles:
+                    enabled = child.get(w('val'), '1') not in ('0', 'false', 'off')
+                    if toggle and enabled:
+                        enabled = child.tag not in values
+                    if enabled:
+                        values[child.tag] = (child.tag, (), None, ())
+                    elif not toggle:
+                        values.pop(child.tag, None)
+                    elif child.get(w('val'), '1') not in ('0', 'false', 'off'):
+                        values.pop(child.tag, None)
+                elif child.tag != w('rStyle'):
+                    values[child.tag] = canonical(child)
+    def inherit(identity, seen):
+        require(identity not in seen, 'cyclic Word style inheritance')
+        style = definitions.get(identity)
+        if style is not None:
+            base = style.find('w:basedOn', NS)
+            if base is not None:
+                inherit(base.get(w('val')), seen | {identity})
+            apply(style.find('w:rPr', NS), toggle=True)
+    apply(defaults)
+    inherit(paragraph_style, set())
+    props = node.find('w:rPr', NS)
+    char_style = props.find('w:rStyle', NS) if props is not None else None
+    if char_style is not None:
+        inherit(char_style.get(w('val')), set())
+    apply(props)
+    return tuple(sorted(values.items()))
+
+
+def real_xml_state(package, name, expected=False, input_ids=frozenset()):
+    root = copy.deepcopy(package.root(name))
+    namespaces = package.namespaces[name]
+    links = relations(package, name)
+    styles_root = package.root('word/styles.xml') if 'word/styles.xml' in package.parts and name.startswith('word/') else None
+    defaults = [s.get(w('styleId')) for s in styles_root.findall('w:style', NS) if s.get(w('type')) == 'paragraph' and s.get(w('default')) in ('1', 'true', 'on')] if styles_root is not None else []
+    default_style = defaults[0] if defaults else None
+    def model(node, paragraph_style=None):
+        attrs = dict(node.attrib)
+        for key, value in list(attrs.items()):
+            if key.startswith(f'{{{NS["r"]}}}'):
+                require(value in links, f'missing relationship ID in {name}: {value}')
+                attrs[key] = json.dumps(links[value], sort_keys=True)
+        if node.tag == f'{{{NS["mc"]}}}Choice' and 'Requires' in attrs:
+            attrs['Requires'] = ' '.join(sorted(namespaces.get(value, value) for value in attrs['Requires'].split()))
+        if f'{{{NS["mc"]}}}Ignorable' in attrs:
+            key = f'{{{NS["mc"]}}}Ignorable'
+            uris = {namespaces.get(value, value) for value in attrs[key].split()}
+            if uris:
+                attrs[key] = ' '.join(sorted(uris))
+            else:
+                del attrs[key]
+        if expected and node is root and name.startswith('word/'):
+            attrs = RealIdentity(attrs, input_ids, paragraph=False)
+        if node.tag == w('p'):
+            props = node.find('w:pPr', NS)
+            style = props.find('w:pStyle', NS) if props is not None else None
+            paragraph_style = style.get(w('val')) if style is not None else default_style
+            if expected:
+                attrs = RealIdentity(attrs, input_ids)
+        tokens = []
+        for child in node:
+            if child.tag == w('proofErr'):
+                continue
+            if node.tag == w('p') and child.tag == w('pPr'):
+                props = copy.deepcopy(child)
+                item = props.find('w:pStyle', NS)
+                if item is not None and item.get(w('val')) == default_style:
+                    props.remove(item)
+                if props.attrib or len(props):
+                    tokens.append(model(props, paragraph_style))
+            elif child.tag in (w('r'), f'{{{NS["a"]}}}r'):
+                prefix = 'w' if child.tag == w('r') else 'a'
+                run_attrs = {k: v for k, v in child.attrib.items() if not (prefix == 'w' and k in {w('rsidR'), w('rsidRPr'), w('rsidDel')})}
+                props = effective_run_properties(child, styles_root, paragraph_style) if prefix == 'w' else properties(child.find('a:rPr', NS))
+                content = []
+                for item in child:
+                    if item.tag == f'{{{NS[prefix]}}}t':
+                        text = item.text or ''
+                        if prefix == 'w' and text and (text[0].isspace() or text[-1].isspace()):
+                            require(item.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve', 'significant Word whitespace lacks xml:space')
+                        content.extend(('character', char, props, tuple(sorted(run_attrs.items()))) for char in text)
+                    elif item.tag != f'{{{NS[prefix]}}}rPr':
+                        content.append(model(item, paragraph_style))
+                tokens.extend(content or [('empty-run', props, tuple(sorted(run_attrs.items())))])
+            else:
+                tokens.append(model(child, paragraph_style))
+        return {'tag': node.tag, 'attributes': attrs, 'text': node.text if node.text and (local(node.tag) in ('t', 'instrText', 'delText') or node.text.strip()) else None,
+                'children': tokens}
+    return model(root)
+
+
+def real_ids(package):
+    from collections import Counter
+    return Counter((key, value.upper()) for name in package.namelist() if name.startswith('word/') and name.endswith('.xml')
+                   for p in package.root(name).iter(w('p')) for key, value in p.attrib.items() if key in PARAGRAPH_IDS)
+
+
+def real_package_state(package, expected=False, input_ids=frozenset()):
+    real_metadata(package)
+    state = {}
+    for name in package.namelist():
+        if name == 'xl/calcChain.xml':
+            continue
+        if name.endswith('.rels'):
+            folder, filename = posixpath.split(name)
+            part = posixpath.join(posixpath.dirname(folder), filename[:-5]) if name != '_rels/.rels' else ''
+            records = relationship_state(package, part)
+            if records:
+                state[name] = records
+        elif name == '[Content_Types].xml':
+            state[name] = tuple(sorted(canonical(n) for n in package.root(name) if n.get('PartName') != '/xl/calcChain.xml'))
+        elif name.endswith('.xml'):
+            state[name] = real_xml_state(package, name, expected, input_ids)
+        else:
+            state[name] = hashlib.sha256(package.read(name)).hexdigest()
+    return state
+
+
+def check_real(task, source, revised):
+    original, actual = RealPackage(source), RealPackage(revised)
+    spec = copy.deepcopy(task['expected'])
+    if task['format'] == 'xlsx':
+        for changes in spec.get('cells', {}).values():
+            for patch in changes.values():
+                if 'fill' in patch.get('style', {}):
+                    patch['style']['fill_other'] = ()
+                    patch['style']['fill_rest'] = canonical(ET.fromstring(f'<fill xmlns="{NS["s"]}"><patternFill/></fill>'))
+        real_metadata(original)
+        real_metadata(actual)
+        renames = spec.get('rename', {})
+        if renames and 'docProps/app.xml' in original.parts:
+            app = original.root('docProps/app.xml')
+            for node in app.iter():
+                if local(node.tag) == 'TitlesOfParts':
+                    for item in node.iter():
+                        if local(item.tag) == 'lpstr' and item.text in renames:
+                            item.text = renames[item.text]
+        before = workbook(original, real=True)
+        cell_styles, _ = styles(original, real=True)
+        links = relations(original, 'xl/workbook.xml')
+        sheet_parts = {n.get('name'): links[n.get(f'{{{NS["r"]}}}id')]['target'] for n in xml(original, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
+        for sheet in before['sheets']:
+            root = xml(original, sheet_parts[sheet['name']])
+            for address in spec.get('cells', {}).get(sheet['name'], {}):
+                if address in sheet['cells']:
+                    continue
+                number = re.search('[0-9]+$', address).group()
+                row = root.find(f's:sheetData/s:row[@r="{number}"]', NS)
+                column = column_number(re.match('[A-Z]+', address).group())
+                inherited = row.get('s', '0') if row is not None and row.get('customFormat') in ('1', 'true') else next((n.get('style', '0') for n in root.findall('s:cols/s:col', NS) if int(n.get('min')) <= column <= int(n.get('max'))), '0')
+                sheet['cells'][address] = {'value': None, 'formula': None, 'style': copy.deepcopy(indexed(cell_styles, inherited, 'cell format')),
+                                           'attributes': {}, 'formula_properties': {}, 'other': (), 'rich_text': None}
+        wanted = expected_workbook(before, spec)
+        renames = spec.get('rename', {})
+        for sheet in wanted['sheets']:
+            for record in sheet['cells'].values():
+                record['formula'] = rename_formula(record['formula'], renames)
+            for address, change in spec.get('cell_replace', {}).get(sheet['name'], {}).items():
+                record = sheet['cells'][address]
+                require(change['old'] in record['value'], 'cell replacement does not match fixture')
+                record['value'] = record['value'].replace(change['old'], change['new'])
+            for address, patch in spec.get('cells', {}).get(sheet['name'], {}).items():
+                record = sheet['cells'][address]
+                record.setdefault('attributes', {})
+                record.setdefault('formula_properties', {})
+                record.setdefault('other', ())
+                record.setdefault('rich_text', None)
+                if 'value' in patch:
+                    require(record['rich_text'] is None, 'edited rich text cell requires explicit formatting expectation')
+        compare(wanted, workbook(actual, real=True))
+        return
+    ids = real_ids(original) if task['format'] == 'docx' else {}
+    all_ids = {value for _, value in ids}
+    real_expected_package(original, spec, task['format'])
+    if task['format'] == 'docx':
+        compare(tracked_changes(original), tracked_changes(actual), 'tracked revisions')
+        after = real_ids(actual)
+        for key, count in after.items():
+            require(count <= max(1, ids.get(key, 0)), f'new duplicate paragraph identity: {key}')
+    compare(real_package_state(original, True, all_ids), real_package_state(actual))
+
+
 def check(task, output):
     output = Path(output)
     require(output.is_file(), f'missing output file: {output.name}')
     with ZipFile(fixture(task)) as source, ZipFile(output) as revised:
         validate_package(revised)
+        if task.get('suite', 'v2') == 'v3':
+            check_real(task, source, revised)
+            return 'requested edit and all preserved package content verified'
         if task['format'] == 'xlsx':
             compare(expected_workbook(workbook(source), task['expected']), workbook(revised))
         elif task['format'] == 'docx':
@@ -1022,10 +1487,13 @@ def check(task, output):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('task', choices=[task['id'] for task in tasks()])
+    parser.add_argument('--suite', choices=('v2', 'v3'), default='v2')
+    parser.add_argument('task')
     parser.add_argument('output', type=Path)
     args = parser.parse_args()
-    task = next(task for task in tasks() if task['id'] == args.task)
+    task = next((task for task in tasks(args.suite) if task['id'] == args.task), None)
+    if task is None:
+        parser.error(f'unknown {args.suite} task: {args.task}')
     try:
         print(f'PASS: {task["id"]}: {check(task, args.output)}')
     except Exception as error:
