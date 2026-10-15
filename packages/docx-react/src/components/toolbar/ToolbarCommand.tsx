@@ -1004,7 +1004,7 @@ function CommandInsertTable({ className }: { className?: string }) {
     <Button
       variant="ghost"
       size="icon-sm"
-      className={cn('oox-toolbar-toggle text-muted-foreground', disabled && 'opacity-30', className)}
+      className={cn('oox-toolbar-toggle text-muted-foreground', disabled && 'opacity-[0.38]', className)}
       onMouseDown={handleMouseDown}
       onClick={() => !disabled && setOpen((value) => !value)}
       disabled={disabled && !reason}

@@ -72,6 +72,12 @@ import type {
 import { SHAPE_PRESETS, shapePresetFromTool } from './components/toolbarTypes';
 import { createPptxCommandController } from './commands/createPptxCommandStore';
 import { usePptxCommands, usePptxCommandState } from './commands/hooks';
+import {
+  TOOLBAR_DISABLED_OPACITY,
+  toolbarFocusStyle,
+  toolbarTheme,
+  useFocusRing,
+} from '../../../shared/react-toolbar/theme';
 import { useDisabledDescription } from './components/ui/ToolbarPrimitives';
 import {
   createInputCoordinator,
@@ -3359,6 +3365,7 @@ function ProposalsButton({
   const state = usePptxCommandState('proposalsPanel');
   const { t } = useTranslation();
   const described = useDisabledDescription(!state.enabled, reasonOf(state));
+  const focus = useFocusRing<HTMLButtonElement>();
   return (
     <>
       <button
@@ -3368,7 +3375,8 @@ function ProposalsButton({
         {...described.props}
         aria-expanded={state.value ?? false}
         title={described.reason}
-        style={styles.presentButton}
+        {...focus.focusProps}
+        style={{ ...styles.proposalsButton, ...toolbarFocusStyle(focus.focusRing) }}
         onClick={() => {
           if (state.enabled) void store.execute('proposalsPanel', null);
         }}
@@ -3385,6 +3393,7 @@ function PresentButton() {
   const state = usePptxCommandState('slideshow');
   const { t } = useTranslation();
   const described = useDisabledDescription(!state.enabled, reasonOf(state));
+  const focus = useFocusRing<HTMLButtonElement>();
   return (
     <>
       <button
@@ -3395,7 +3404,12 @@ function PresentButton() {
         {...described.props}
         title={described.reason}
         data-testid="pptx-present"
-        style={{ ...styles.presentButton, opacity: state.enabled ? 1 : 0.6 }}
+        {...focus.focusProps}
+        style={{
+          ...styles.presentButton,
+          opacity: state.enabled ? 1 : TOOLBAR_DISABLED_OPACITY,
+          ...toolbarFocusStyle(focus.focusRing),
+        }}
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M6 4.5v15l13-7.5Z" />
@@ -4043,14 +4057,30 @@ const styles: Record<string, CSSProperties> = {
     gap: 6,
     flex: '0 0 auto',
     margin: '0 12px 0 4px',
-    padding: '0 14px',
-    height: 30,
+    padding: '0 12px',
+    height: 28,
     border: 0,
-    borderRadius: 15,
-    background: '#1a73e8',
-    color: '#ffffff',
-    font: '600 13px ui-sans-serif, system-ui, sans-serif',
+    borderRadius: 6,
+    background: toolbarTheme.accent,
+    color: toolbarTheme.accentInk,
+    font: '500 13px ui-sans-serif, system-ui, sans-serif',
     cursor: 'pointer',
+  },
+  proposalsButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    flex: '0 0 auto',
+    margin: '0 0 0 4px',
+    padding: '0 10px',
+    height: 28,
+    border: `1px solid ${toolbarTheme.line}`,
+    borderRadius: 6,
+    background: toolbarTheme.surface,
+    color: toolbarTheme.ink,
+    font: '500 13px ui-sans-serif, system-ui, sans-serif',
+    cursor: 'pointer',
+    boxSizing: 'border-box',
   },
 
 };

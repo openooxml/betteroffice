@@ -16,6 +16,12 @@ import {
   type OverflowMenuHandle,
 } from '../../../../../shared/react-toolbar/OverflowMenu';
 import {
+  inheritedToolbarTokens,
+  toolbarButtonStyle,
+  toolbarMenuStyle,
+  toolbarRailStyle,
+} from '../../../../../shared/react-toolbar/theme';
+import {
   representsUnit,
   useToolbarOverflow,
 } from '../../../../../shared/react-toolbar/useToolbarOverflow';
@@ -23,7 +29,6 @@ import { pptxCommandController } from '../../commands/createPptxCommandStore';
 import { useCommandChromeRef, usePptxCommands } from '../../commands/hooks';
 import { useTranslation } from '../../i18n';
 import { ToolbarIcon } from '../ui/ToolbarIcon';
-import { interactiveButtonStyle, toolbarColors } from '../ui/ToolbarPrimitives';
 import {
   ToolbarOverflowContext,
   useOverflowRegistry,
@@ -33,15 +38,6 @@ import {
   type OverflowSource,
 } from './overflowRegistry';
 import { ToolbarPromptDialog } from './ToolbarPromptDialog';
-
-const MENU_COLORS = {
-  surface: toolbarColors.surface,
-  text: toolbarColors.text,
-  mutedText: toolbarColors.muted,
-  border: toolbarColors.border,
-  hover: toolbarColors.hover,
-  shadow: 'rgba(60, 64, 67, 0.24)',
-};
 
 function isInteractive(target: EventTarget | null): boolean {
   return (
@@ -163,12 +159,8 @@ export function ToolbarRail({ children, className, style, testId }: ToolbarRailP
         display: 'flex',
         alignItems: 'center',
         minWidth: 0,
-        minHeight: 36,
-        margin: '0 8px 5px',
-        padding: '4px 7px',
-        borderRadius: 18,
-        background: toolbarColors.rail,
-        color: toolbarColors.text,
+        ...toolbarRailStyle,
+        margin: '0 8px 4px',
         boxSizing: 'border-box',
         ...style,
       }}
@@ -196,8 +188,7 @@ export function ToolbarRail({ children, className, style, testId }: ToolbarRailP
             label={t('toolbar.more')}
             trigger={<ToolbarIcon name="more" />}
             entries={menuEntries}
-            colors={MENU_COLORS}
-            triggerStyle={interactiveButtonStyle(false, false, false)}
+            triggerStyle={toolbarButtonStyle}
             testId="pptx-toolbar-more"
             onItemSelected={(modality) => {
               if (modality === 'pointer') pptxCommandController(store)?.focusEditor();
@@ -288,6 +279,7 @@ export function LegacyToolbarContent({ children }: { children: ReactNode }) {
   const label = t('commands.moreControls');
   const [popup, setPopup] = useState<{ anchor: HTMLElement | null; width: number } | null>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const [tokens, setTokens] = useState<CSSProperties>({});
   useOverflowSource(unitRef, () => [
     {
       kind: 'item',
@@ -320,6 +312,7 @@ export function LegacyToolbarContent({ children }: { children: ReactNode }) {
     const width = element.offsetWidth;
     const left = Math.max(8, Math.min((anchor?.right ?? 8) - width, window.innerWidth - width - 8));
     setPosition({ top: (anchor?.bottom ?? 8) + 4, left });
+    setTokens(inheritedToolbarTokens(popup.anchor));
     element
       .querySelector<HTMLElement>('button, input, select, textarea, a[href], [tabindex]')
       ?.focus();
@@ -381,13 +374,8 @@ export function LegacyToolbarContent({ children }: { children: ReactNode }) {
               alignItems: 'center',
               gap: 2,
               maxWidth: 'calc(100vw - 16px)',
-              padding: 6,
-              border: `1px solid ${toolbarColors.border}`,
-              borderRadius: 8,
-              background: toolbarColors.surface,
-              boxShadow: '0 4px 16px rgba(60, 64, 67, 0.24)',
-              boxSizing: 'border-box',
-              outline: 'none',
+              ...toolbarMenuStyle,
+              ...tokens,
             }}
           >
             {children}

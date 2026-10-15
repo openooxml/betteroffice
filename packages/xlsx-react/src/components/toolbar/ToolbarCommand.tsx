@@ -556,7 +556,7 @@ function BordersControl() {
         trigger={
           <>
             <BorderGlyph preset={state.value ?? 'all'} />
-            <ToolbarIcon name="chevronDown" size={12} />
+            <ToolbarIcon name="chevronDown" size={18} />
           </>
         }
       >
@@ -600,7 +600,7 @@ function MergeControl() {
         disabled={!all.enabled}
         description={reasonOf(all as XlsxCommandState)}
         onClick={() => run(store, 'merge', { value: 'all' })}
-        style={{ borderRadius: '4px 0 0 4px' }}
+        style={{ borderRadius: '6px 0 0 6px' }}
         testId="xlsx-merge-all"
         overflow={null}
       >
@@ -611,8 +611,8 @@ function MergeControl() {
         disabled={!state.enabled}
         description={reasonOf(state as XlsxCommandState)}
         menuWidth={220}
-        style={{ minWidth: 20, width: 20, padding: 0, borderRadius: '0 4px 4px 0' }}
-        trigger={<ToolbarIcon name="chevronDown" size={13} />}
+        style={{ minWidth: 20, width: 20, padding: 0, borderRadius: '0 6px 6px 0' }}
+        trigger={<ToolbarIcon name="chevronDown" size={18} />}
       >
         {(close) => <OptionMenu id="merge" close={close} />}
       </ToolbarDropdown>

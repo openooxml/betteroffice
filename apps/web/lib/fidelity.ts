@@ -70,7 +70,7 @@ const CHARTS: {
 ];
 
 // "63/63", "99.60%", "430 ms" and "0.8519" as numbers; anything else (a dash, a new unit) is not drawn
-function quantity(value: string): number | null {
+export function quantity(value: string): number | null {
   const plain = value.replace(/,/g, "");
   const ratio = plain.match(/^(\d+)\/(\d+)$/);
   if (ratio) return Number(ratio[2]) > 0 ? Number(ratio[1]) / Number(ratio[2]) : null;

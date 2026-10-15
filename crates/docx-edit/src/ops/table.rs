@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
@@ -22,8 +23,9 @@ use crate::op::{OpError, OpResult};
 use crate::ops::paragraph_content_before;
 use crate::seed::border_side_sources;
 use crate::{
-    EditCtx, EditingDoc, KIND_KEY, ParagraphIdOrigin, Position, STORIES, check_position,
-    insertion_attrs, map_string, out_len, revision_value, story_ref,
+    DEL, EditCtx, EditingDoc, HYPERLINK, INS, KIND_KEY, PARA_ID, PILCROW_KIND, ParagraphIdOrigin,
+    Position, STORIES, check_position, insertion_attrs, is_identity_key, is_pilcrow, map_string,
+    out_len, revision_value, story_ref,
 };
 
 const TR_INS: &str = "trIns";
@@ -111,6 +113,32 @@ pub struct TableReceipt {
     pub deleted_table: bool,
     #[serde(default)]
     pub revision_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableFragmentReceipt {
+    pub table: TableLocator,
+    pub rows: u32,
+    pub columns: u32,
+    pub created_story_ids: Vec<String>,
+    pub deleted_story_ids: Vec<String>,
+    #[serde(default)]
+    pub changed_story_ids: Vec<String>,
+    pub new_para_ids: Vec<String>,
+    pub deleted_table: bool,
+    #[serde(default)]
+    pub revision_ids: Vec<String>,
+    pub after: FragmentCaret,
+}
+
+/// Caret position right after an inserted table fragment's embed.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FragmentCaret {
+    pub story: String,
+    pub para_id: String,
+    pub offset: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -414,6 +442,497 @@ fn set_spans(cell: &mut CellData, rowspan: usize, colspan: usize) {
     cell.tc_pr.remove("vMerge");
 }
 
+const MAX_FRAGMENT_ROWS: usize = 1000;
+const MAX_FRAGMENT_COLUMNS: usize = 1000;
+const MAX_FRAGMENT_CELLS: usize = 10_000;
+const MAX_FRAGMENT_DEPTH: usize = 8;
+
+struct FragmentText {
+    text: String,
+    attrs: Attrs,
+}
+
+struct FragmentTabBreak {
+    kind: &'static str,
+    payload: Vec<(String, Any)>,
+    attrs: Attrs,
+}
+
+struct FragmentPilcrow {
+    props: Vec<(String, Any)>,
+    attrs: Attrs,
+}
+
+struct FragmentNested {
+    table: FragmentTable,
+    attrs: Attrs,
+}
+
+enum FragmentSegment {
+    Text(FragmentText),
+    TabBreak(FragmentTabBreak),
+    Pilcrow(FragmentPilcrow),
+    Table(FragmentNested),
+}
+
+struct FragmentCell {
+    tc_pr: HashMap<String, Any>,
+    content: Vec<FragmentSegment>,
+    shading: Option<String>,
+}
+
+struct FragmentRow {
+    tr_pr: HashMap<String, Any>,
+    cells: Vec<FragmentCell>,
+}
+
+struct FragmentTable {
+    tbl_pr: HashMap<String, Any>,
+    grid: Vec<Any>,
+    rows: Vec<FragmentRow>,
+}
+
+#[derive(Default)]
+struct FragmentBuild {
+    created_story_ids: Vec<String>,
+    new_para_ids: Vec<String>,
+}
+
+fn json_shaped(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::String(_) => true,
+        Value::Number(number) => number.as_f64().is_some_and(f64::is_finite),
+        Value::Array(items) => items.iter().all(json_shaped),
+        Value::Object(map) => map.values().all(json_shaped),
+    }
+}
+
+fn fragment_any(value: &Value, detail: &str) -> OpResult<Any> {
+    if !json_shaped(value) {
+        return Err(invalid(format!("{detail} is not JSON-shaped")));
+    }
+    Any::from_json(&value.to_string())
+        .map_err(|error| invalid(format!("{detail} is not JSON-shaped: {error:?}")))
+}
+
+fn fragment_object<'a>(
+    value: &'a Value,
+    detail: &str,
+) -> OpResult<&'a serde_json::Map<String, Value>> {
+    value
+        .as_object()
+        .ok_or_else(|| invalid(format!("{detail} must be an object")))
+}
+
+fn sanitize_fragment_hyperlink(value: &Value, detail: &str) -> OpResult<Any> {
+    match value {
+        Value::String(href) => Ok(Any::Map(Arc::new(HashMap::from([(
+            "href".to_owned(),
+            Any::from(href.as_str()),
+        )])))),
+        Value::Object(map) => {
+            let href = map
+                .get("href")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid(format!("{detail} hyperlink requires a string href")))?;
+            let mut link = HashMap::from([("href".to_owned(), Any::from(href))]);
+            if let Some(Value::String(tooltip)) = map.get("tooltip") {
+                link.insert("tooltip".to_owned(), Any::from(tooltip.as_str()));
+            }
+            Ok(Any::Map(Arc::new(link)))
+        }
+        _ => Err(invalid(format!("{detail} hyperlink must be an object"))),
+    }
+}
+
+fn sanitize_fragment_attrs(value: Option<&Value>, detail: &str) -> OpResult<Attrs> {
+    let Some(entries) = value else {
+        return Ok(Attrs::new());
+    };
+    let map = entries
+        .as_object()
+        .ok_or_else(|| invalid(format!("{detail} attributes must be an object")))?;
+    let mut attrs = Attrs::new();
+    for (key, entry) in map {
+        if key == INS || key == DEL {
+            continue;
+        }
+        if key == HYPERLINK {
+            attrs.insert(
+                Arc::from(HYPERLINK),
+                sanitize_fragment_hyperlink(entry, detail)?,
+            );
+            continue;
+        }
+        attrs.insert(
+            Arc::from(key.as_str()),
+            fragment_any(entry, &format!("{detail} attribute {key:?}"))?,
+        );
+    }
+    Ok(attrs)
+}
+
+fn fragment_deleted(attributes: Option<&Value>) -> bool {
+    attributes
+        .and_then(Value::as_object)
+        .and_then(|map| map.get("del"))
+        .is_some_and(|stamp| !stamp.is_null())
+}
+
+fn validate_fragment_table(
+    value: &Value,
+    depth: usize,
+    remaining: &mut usize,
+) -> OpResult<(FragmentTable, usize)> {
+    if depth > MAX_FRAGMENT_DEPTH {
+        return Err(invalid("table nesting exceeds eight levels"));
+    }
+    let object = fragment_object(value, "table")?;
+    let tbl_pr = match object.get("tblPr") {
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(key, entry)| Ok((key.clone(), fragment_any(entry, "tblPr entry")?)))
+            .collect::<OpResult<HashMap<String, Any>>>()?,
+        _ => return Err(invalid("table tblPr must be an object")),
+    };
+    let grid = match object.get("grid") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|entry| fragment_any(entry, "grid entry"))
+            .collect::<OpResult<Vec<Any>>>()?,
+        _ => return Err(invalid("table grid must be an array")),
+    };
+    let rows = match object.get("rows") {
+        Some(Value::Array(rows)) if !rows.is_empty() => rows,
+        _ => return Err(invalid("table must contain at least one row")),
+    };
+    if rows.len() > MAX_FRAGMENT_ROWS {
+        return Err(invalid("table holds more than 1000 rows"));
+    }
+    let mut validated = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        validated.push(validate_fragment_row(
+            row,
+            depth,
+            remaining,
+            &format!("row {index}"),
+        )?);
+    }
+    let valid = FragmentTable {
+        tbl_pr,
+        grid,
+        rows: validated,
+    };
+    let columns = validation_anchors(&valid, depth)?;
+    Ok((valid, columns))
+}
+
+fn validate_fragment_row(
+    value: &Value,
+    depth: usize,
+    remaining: &mut usize,
+    detail: &str,
+) -> OpResult<FragmentRow> {
+    let object = fragment_object(value, detail)?;
+    let tr_pr = match object.get("trPr") {
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(key, entry)| {
+                Ok((
+                    key.clone(),
+                    fragment_any(entry, &format!("{detail} trPr entry"))?,
+                ))
+            })
+            .collect::<OpResult<HashMap<String, Any>>>()?,
+        _ => return Err(invalid(format!("{detail} trPr must be an object"))),
+    };
+    let cells = match object.get("cells") {
+        Some(Value::Array(cells)) => cells,
+        _ => return Err(invalid(format!("{detail} cells must be an array"))),
+    };
+    if cells.len() > MAX_FRAGMENT_COLUMNS {
+        return Err(invalid(format!("{detail} holds more than 1000 cells")));
+    }
+    let mut validated = Vec::with_capacity(cells.len());
+    for (index, cell) in cells.iter().enumerate() {
+        validated.push(validate_fragment_cell(
+            cell,
+            depth,
+            remaining,
+            &format!("{detail} cell {index}"),
+        )?);
+    }
+    Ok(FragmentRow {
+        tr_pr,
+        cells: validated,
+    })
+}
+
+fn validate_fragment_cell(
+    value: &Value,
+    depth: usize,
+    remaining: &mut usize,
+    detail: &str,
+) -> OpResult<FragmentCell> {
+    let object = fragment_object(value, detail)?;
+    let tc_pr = match object.get("tcPr") {
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(key, entry)| {
+                Ok((
+                    key.clone(),
+                    fragment_any(entry, &format!("{detail} tcPr entry"))?,
+                ))
+            })
+            .collect::<OpResult<HashMap<String, Any>>>()?,
+        _ => return Err(invalid(format!("{detail} tcPr must be an object"))),
+    };
+    for (key, cap) in [
+        ("rowspan", MAX_FRAGMENT_ROWS),
+        ("colspan", MAX_FRAGMENT_COLUMNS),
+    ] {
+        let span = any_usize(tc_pr.get(key), 1, key)?;
+        if span > cap {
+            return Err(invalid(format!("{detail} {key} exceeds {cap}")));
+        }
+    }
+    if *remaining == 0 {
+        return Err(invalid("fragment holds more than 10000 cells"));
+    }
+    *remaining -= 1;
+    let shading = match object.get("shading") {
+        None => None,
+        Some(Value::String(color)) => {
+            let plain = color.trim_start_matches('#');
+            if plain.len() != 6 || !plain.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(invalid(format!(
+                    "{detail} shading must be a six-digit hex color"
+                )));
+            }
+            Some(plain.to_owned())
+        }
+        Some(_) => {
+            return Err(invalid(format!(
+                "{detail} shading must be a six-digit hex color"
+            )));
+        }
+    };
+    let content = match object.get("content") {
+        Some(Value::Array(items)) if !items.is_empty() => items,
+        _ => {
+            return Err(invalid(format!(
+                "{detail} content must be a non-empty array"
+            )));
+        }
+    };
+    let mut validated = Vec::with_capacity(content.len());
+    for (index, segment) in content.iter().enumerate() {
+        if let Some(segment) = validate_fragment_segment(
+            segment,
+            depth,
+            remaining,
+            &format!("{detail} segment {index}"),
+        )? {
+            validated.push(segment);
+        }
+    }
+    if validated.is_empty() {
+        return Err(invalid(format!(
+            "{detail} content must be a non-empty array"
+        )));
+    }
+    if !matches!(validated.last(), Some(FragmentSegment::Pilcrow(_))) {
+        return Err(invalid(format!("{detail} content must end with a pilcrow")));
+    }
+    Ok(FragmentCell {
+        tc_pr,
+        content: validated,
+        shading,
+    })
+}
+
+fn validate_fragment_segment(
+    value: &Value,
+    depth: usize,
+    remaining: &mut usize,
+    detail: &str,
+) -> OpResult<Option<FragmentSegment>> {
+    let object = fragment_object(value, detail)?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(format!("{detail} requires a string kind")))?;
+    let attrs = sanitize_fragment_attrs(object.get("attributes"), detail)?;
+    match kind {
+        "text" => {
+            if fragment_deleted(object.get("attributes")) {
+                return Ok(None);
+            }
+            let text = object
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid(format!("{detail} requires text")))?;
+            if text.is_empty() || text.contains(['\n', '\r', '\u{000B}', '\u{2028}', '\u{2029}']) {
+                return Err(invalid(format!(
+                    "{detail} text must be non-empty without line breaks"
+                )));
+            }
+            let mut merged = attrs;
+            if let Some(format) = object.get("format") {
+                let map = format
+                    .as_object()
+                    .ok_or_else(|| invalid(format!("{detail} format must be an object")))?;
+                let delta = crate::format::parse_inline_format_delta(map)
+                    .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
+                let lowered = delta
+                    .to_attrs()
+                    .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
+                for (key, entry) in lowered {
+                    if entry == Any::Null {
+                        merged.remove(&key);
+                    } else {
+                        merged.insert(key, entry);
+                    }
+                }
+            }
+            Ok(Some(FragmentSegment::Text(FragmentText {
+                text: text.to_owned(),
+                attrs: merged,
+            })))
+        }
+        "tab" | "break" => {
+            let mut payload = Vec::new();
+            if let Some(entries) = object.get("payload") {
+                let map = entries
+                    .as_object()
+                    .ok_or_else(|| invalid(format!("{detail} payload must be an object")))?;
+                for (key, entry) in map {
+                    if key == KIND_KEY {
+                        continue;
+                    }
+                    payload.push((
+                        key.clone(),
+                        fragment_any(entry, &format!("{detail} payload entry"))?,
+                    ));
+                }
+            }
+            Ok(Some(FragmentSegment::TabBreak(FragmentTabBreak {
+                kind: if kind == "tab" { "tab" } else { "break" },
+                payload,
+                attrs,
+            })))
+        }
+        "pilcrow" => {
+            let mut props = Vec::new();
+            if let Some(entries) = object.get("properties") {
+                let map = entries
+                    .as_object()
+                    .ok_or_else(|| invalid(format!("{detail} properties must be an object")))?;
+                for (key, entry) in map {
+                    if is_identity_key(key) {
+                        continue;
+                    }
+                    props.push((
+                        key.clone(),
+                        fragment_any(entry, &format!("{detail} property {key:?}"))?,
+                    ));
+                }
+            }
+            Ok(Some(FragmentSegment::Pilcrow(FragmentPilcrow {
+                props,
+                attrs,
+            })))
+        }
+        "table" => {
+            let nested = object
+                .get("table")
+                .ok_or_else(|| invalid(format!("{detail} requires a table")))?;
+            let (table, _) = validate_fragment_table(nested, depth + 1, remaining)?;
+            Ok(Some(FragmentSegment::Table(FragmentNested {
+                table,
+                attrs,
+            })))
+        }
+        _ => Err(invalid(format!(
+            "{detail} has an unknown segment kind {kind:?}"
+        ))),
+    }
+}
+
+fn validation_anchors(valid: &FragmentTable, depth: usize) -> OpResult<usize> {
+    let mut rows = Vec::with_capacity(valid.rows.len());
+    for (row_index, row) in valid.rows.iter().enumerate() {
+        let mut cells = Vec::with_capacity(row.cells.len());
+        for (cell_index, cell) in row.cells.iter().enumerate() {
+            cells.push(CellData {
+                tc_pr: cell.tc_pr.clone(),
+                story: format!("frag:{depth}:{row_index}:{cell_index}"),
+            });
+        }
+        rows.push(RowData {
+            tr_pr: row.tr_pr.clone(),
+            cells,
+        });
+    }
+    let data = TableData {
+        tbl_pr: valid.tbl_pr.clone(),
+        grid: valid.grid.clone(),
+        rows,
+    };
+    let (cell_anchors, columns) = anchors(&data)?;
+    if columns > MAX_FRAGMENT_COLUMNS {
+        return Err(invalid("table holds more than 1000 columns"));
+    }
+    if cell_anchors.is_empty() {
+        return Err(invalid("table must contain at least one cell"));
+    }
+    for (row_index, row) in data.rows.iter().enumerate() {
+        if row.cells.is_empty()
+            && (0..columns).any(|column| covering(&cell_anchors, row_index, column).is_none())
+        {
+            return Err(invalid(format!(
+                "row {row_index} is not covered by a merged cell"
+            )));
+        }
+    }
+    Ok(columns)
+}
+
+fn caret_after_insert(
+    story: &TextRef,
+    txn: &TransactionMut<'_>,
+    story_id: &str,
+    insert_index: u32,
+) -> OpResult<FragmentCaret> {
+    let mut offset = 0u32;
+    let mut para_start = 0u32;
+    let mut fallback: Option<(String, u32)> = None;
+    for diff in story.diff(txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if let Out::YMap(map) = &diff.insert
+            && is_pilcrow(map, txn)
+        {
+            let para_id = map_string(map, txn, PARA_ID).unwrap_or_default();
+            fallback = Some((para_id.clone(), para_start));
+            if offset > insert_index {
+                return Ok(FragmentCaret {
+                    story: story_id.to_owned(),
+                    para_id,
+                    offset: insert_index + 1 - para_start,
+                });
+            }
+            para_start = offset + 1;
+        }
+        offset += len;
+    }
+    let (para_id, start) = fallback.unwrap_or_default();
+    Ok(FragmentCaret {
+        story: story_id.to_owned(),
+        para_id,
+        offset: insert_index + 1 - start,
+    })
+}
+
 fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
     let mut occupied: Vec<Vec<bool>> = vec![Vec::new(); data.rows.len()];
     let mut result = Vec::new();
@@ -426,9 +945,27 @@ fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
                 column += 1;
             }
             let (rowspan, colspan) = span(cell)?;
-            if row_index + rowspan > data.rows.len() {
+            if colspan > MAX_FRAGMENT_COLUMNS {
+                return Err(invalid(format!(
+                    "cell {} exceeds the column limit",
+                    cell.story
+                )));
+            }
+            let row_end = row_index.checked_add(rowspan).ok_or_else(|| {
+                invalid(format!("cell {} spans beyond the final row", cell.story))
+            })?;
+            if row_end > data.rows.len() {
                 return Err(invalid(format!(
                     "cell {} spans beyond the final row",
+                    cell.story
+                )));
+            }
+            let column_end = column
+                .checked_add(colspan)
+                .ok_or_else(|| invalid(format!("cell {} exceeds the column limit", cell.story)))?;
+            if column_end > MAX_FRAGMENT_COLUMNS {
+                return Err(invalid(format!(
+                    "cell {} exceeds the column limit",
                     cell.story
                 )));
             }
@@ -758,7 +1295,7 @@ fn ensure_grid(data: &mut TableData, columns: usize) {
         && data
             .grid
             .iter()
-            .all(|width| any_number(Some(width)).is_some())
+            .all(|width| any_number(Some(width)).is_some_and(|width| width > 0.0))
     {
         return;
     }
@@ -1242,6 +1779,254 @@ impl EditingDoc {
         )?;
         receipt.revision_ids = revision_id.into_iter().collect();
         Ok(receipt)
+    }
+
+    pub fn validate_table_fragment(fragment: &Value) -> OpResult<()> {
+        let mut remaining = MAX_FRAGMENT_CELLS;
+        validate_fragment_table(fragment, 1, &mut remaining)?;
+        Ok(())
+    }
+
+    /// Inserts a clipboard table fragment at a story position, creating one
+    /// story per cell with the fragment's content. Mirrors [`EditingDoc::insert_table`].
+    pub fn insert_table_fragment(
+        &self,
+        ctx: &EditCtx,
+        mut at: Position,
+        fragment: &Value,
+    ) -> OpResult<TableFragmentReceipt> {
+        let mut remaining = MAX_FRAGMENT_CELLS;
+        let (valid, columns) = validate_fragment_table(fragment, 1, &mut remaining)?;
+        let revision_id = ctx.is_suggesting().then(|| self.next_id());
+        let mut txn = self.transact_for(ctx);
+        let story = story_ref(&txn, &at.story)?;
+        check_position(&story, &txn, at.index)?;
+        at.index = crate::ops::code_point_range(&story, &txn, at.index, at.index).0;
+        let split_para_id = if paragraph_content_before(&story, &txn, at.index) {
+            let split = self.split_paragraph_in_transaction(
+                ctx,
+                &mut txn,
+                at.clone(),
+                None,
+                revision_id.clone(),
+            )?;
+            at.index += 1;
+            Some(split.second_para_id)
+        } else {
+            None
+        };
+        let mut ordinal = 0u32;
+        let mut offset = 0u32;
+        for diff in story.diff(&txn, YChange::identity) {
+            if offset >= at.index {
+                break;
+            }
+            if let Out::YMap(map) = &diff.insert
+                && map_string(map, &txn, KIND_KEY).as_deref() == Some("table")
+            {
+                ordinal += 1;
+            }
+            offset += out_len(&diff.insert);
+        }
+        let locator = TableLocator::new(at.story.clone(), ordinal);
+        let mut used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
+        let slot = fresh_table_slot(&used, &at.story, ordinal as usize);
+        let revision = revision_id
+            .as_ref()
+            .map(|id| revision_value(id, &ctx.revision_author()));
+        let mut build = FragmentBuild::default();
+        build.new_para_ids.extend(split_para_id);
+        let data = self.insert_fragment_table_data(
+            &mut txn,
+            &mut ids,
+            &mut used,
+            &story,
+            &at.story,
+            at.index,
+            slot,
+            &valid,
+            revision.as_ref(),
+            insertion_attrs(None, None),
+            &mut build,
+        )?;
+        let after = caret_after_insert(&story, &txn, &at.story, at.index)?;
+        debug_assert_eq!(data.rows.len() as u32, valid.rows.len() as u32);
+        Ok(TableFragmentReceipt {
+            table: locator,
+            rows: data.rows.len() as u32,
+            columns: columns as u32,
+            created_story_ids: build.created_story_ids,
+            deleted_story_ids: Vec::new(),
+            changed_story_ids: vec![at.story.clone()],
+            new_para_ids: build.new_para_ids,
+            deleted_table: false,
+            revision_ids: revision_id.into_iter().collect(),
+            after,
+        })
+    }
+
+    /// Builds one validated table's rows, creating each cell story with the
+    /// fragment's content, then inserts the table embed. Nested tables
+    /// recurse under their cell story.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_fragment_table_data(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ids: &mut IdAllocator,
+        used: &mut HashSet<String>,
+        parent: &TextRef,
+        parent_story_id: &str,
+        index: u32,
+        slot: usize,
+        valid: &FragmentTable,
+        revision: Option<&Any>,
+        embed_attrs: Attrs,
+        build: &mut FragmentBuild,
+    ) -> OpResult<TableData> {
+        let base = format!("{parent_story_id}:t{slot}");
+        let mut table_rows = Vec::with_capacity(valid.rows.len());
+        for (row_index, row) in valid.rows.iter().enumerate() {
+            let mut cells = Vec::with_capacity(row.cells.len());
+            for (cell_index, cell) in row.cells.iter().enumerate() {
+                let story_id = fresh_cell_story(used, &base, row_index, cell_index);
+                let stories = txn
+                    .get_map(STORIES)
+                    .expect("stories root is declared by EditingDoc::new");
+                if stories.contains_key(txn, &story_id) {
+                    return Err(OpError::StoryExists(story_id));
+                }
+                let cell_story = stories.insert(txn, story_id.as_str(), TextPrelim::new(""));
+                build.created_story_ids.push(story_id.clone());
+                self.write_fragment_content(
+                    txn,
+                    ids,
+                    used,
+                    &cell_story,
+                    &story_id,
+                    &cell.content,
+                    revision,
+                    build,
+                )?;
+                let rowspan = any_usize(cell.tc_pr.get("rowspan"), 1, "rowspan")?;
+                let colspan = any_usize(cell.tc_pr.get("colspan"), 1, "colspan")?;
+                let mut data = CellData {
+                    tc_pr: cell.tc_pr.clone(),
+                    story: story_id,
+                };
+                set_spans(&mut data, rowspan, colspan);
+                if let Some(shading) = cell.shading.as_ref() {
+                    data.tc_pr.insert(
+                        "backgroundColor".to_owned(),
+                        Any::from(shading.trim_start_matches('#')),
+                    );
+                }
+                cells.push(data);
+            }
+            let mut tr_pr = row.tr_pr.clone();
+            tr_pr.remove(TR_INS);
+            tr_pr.remove(TR_DEL);
+            if let Some(stamp) = revision {
+                tr_pr.insert(TR_INS.to_owned(), stamp.clone());
+            }
+            table_rows.push(RowData { tr_pr, cells });
+        }
+        let mut tbl_pr = valid.tbl_pr.clone();
+        if tbl_pr.is_empty() {
+            tbl_pr.insert("width".to_owned(), Any::Number(9360.0));
+            tbl_pr.insert("widthType".to_owned(), Any::from("dxa"));
+        }
+        let mut data = TableData {
+            tbl_pr,
+            grid: valid.grid.clone(),
+            rows: table_rows,
+        };
+        let (_, columns) = anchors(&data)?;
+        ensure_grid(&mut data, columns);
+        let table =
+            parent.insert_embed_with_attributes(txn, index, MapPrelim::default(), embed_attrs);
+        table.insert(txn, KIND_KEY, "table");
+        write_table(txn, &table, &data);
+        Ok(data)
+    }
+
+    /// Writes validated cell content into a fresh cell story. Every pilcrow
+    /// is minted a fresh paragraph id; nested tables recurse.
+    #[allow(clippy::too_many_arguments)]
+    fn write_fragment_content(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ids: &mut IdAllocator,
+        used: &mut HashSet<String>,
+        story: &TextRef,
+        story_id: &str,
+        content: &[FragmentSegment],
+        revision: Option<&Any>,
+        build: &mut FragmentBuild,
+    ) -> OpResult<()> {
+        let mut at = 0u32;
+        let mut nested = 0usize;
+        for segment in content {
+            match segment {
+                FragmentSegment::Text(part) => {
+                    story.insert_with_attributes(txn, at, part.text.as_str(), part.attrs.clone());
+                    at += part.text.encode_utf16().count() as u32;
+                }
+                FragmentSegment::TabBreak(part) => {
+                    let map = story.insert_embed_with_attributes(
+                        txn,
+                        at,
+                        MapPrelim::default(),
+                        part.attrs.clone(),
+                    );
+                    map.insert(txn, KIND_KEY, part.kind);
+                    for (key, value) in &part.payload {
+                        map.insert(txn, key.clone(), value.clone());
+                    }
+                    at += 1;
+                }
+                FragmentSegment::Pilcrow(part) => {
+                    let key = ids.session_key(self);
+                    let map = story.insert_embed_with_attributes(
+                        txn,
+                        at,
+                        MapPrelim::default(),
+                        part.attrs.clone(),
+                    );
+                    map.insert(txn, KIND_KEY, PILCROW_KIND);
+                    map.insert(txn, PARA_ID, key.as_str());
+                    for (prop_key, prop_value) in &part.props {
+                        map.insert(txn, prop_key.clone(), prop_value.clone());
+                    }
+                    ids.bind(txn, &map, &key, ParagraphIdOrigin::Authored);
+                    build.new_para_ids.push(key);
+                    at += 1;
+                }
+                FragmentSegment::Table(part) => {
+                    let slot = fresh_table_slot(used, story_id, nested);
+                    nested += 1;
+                    let mut attrs = insertion_attrs(None, None);
+                    for (key, value) in part.attrs.iter() {
+                        attrs.insert(key.clone(), value.clone());
+                    }
+                    self.insert_fragment_table_data(
+                        txn,
+                        ids,
+                        used,
+                        story,
+                        story_id,
+                        at,
+                        slot,
+                        &part.table,
+                        revision,
+                        attrs,
+                        build,
+                    )?;
+                    at += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Inserts a row above (`after = false`) or below (`after = true`) the
@@ -2863,6 +3648,534 @@ mod tests {
             );
             assert_eq!(rule_counts(&doc), (5, 6));
         }
+    }
+
+    fn fragment_doc() -> EditingDoc {
+        let doc = EditingDoc::new(77);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc
+    }
+
+    fn fragment_cell(text: &str) -> Value {
+        serde_json::json!({
+            "tcPr": {},
+            "content": [
+                {"kind": "text", "text": text, "attributes": {}},
+                {"kind": "pilcrow", "properties": {}, "attributes": {}},
+            ],
+        })
+    }
+
+    fn fragment_table(cells: Vec<Value>) -> Value {
+        serde_json::json!({
+            "tblPr": {},
+            "grid": [],
+            "rows": [{"trPr": {}, "cells": cells}],
+        })
+    }
+
+    fn fragment_texts(doc: &EditingDoc, story: &str) -> Vec<String> {
+        doc.story_segments(story)
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_fragment_refused(doc: &EditingDoc, fragment: &Value) {
+        let before = project_story(doc, "body").unwrap();
+        let stories = doc.story_ids_for_test();
+        let result = doc.insert_table_fragment(&direct(), Position::new("body", 0), fragment);
+        assert!(
+            matches!(result, Err(OpError::InvalidTable(_))),
+            "expected InvalidTable, got {result:?}"
+        );
+        assert_eq!(project_story(doc, "body").unwrap(), before);
+        assert_eq!(doc.story_ids_for_test(), stories);
+    }
+
+    #[test]
+    fn fragment_round_trip_preserves_content_and_ids() {
+        let doc = fragment_doc();
+        let fragment = serde_json::json!({
+            "tblPr": {"width": 4000, "widthType": "dxa"},
+            "grid": [2000, 2000],
+            "rows": [
+                {"trPr": {"height": 360}, "cells": [
+                    {"tcPr": {"rowspan": 1, "colspan": 1}, "content": [
+                        {"kind": "text", "text": "A", "attributes": {"bold": true}},
+                        {"kind": "pilcrow", "properties": {"alignment": "center"}, "attributes": {}},
+                    ]},
+                    {"tcPr": {"rowspan": 1, "colspan": 1}, "content": [
+                        {"kind": "text", "text": "B", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                    ]},
+                ]},
+                {"trPr": {"height": 360}, "cells": [
+                    {"tcPr": {"rowspan": 1, "colspan": 2}, "content": [
+                        {"kind": "text", "text": "C", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                    ]},
+                ]},
+            ],
+        });
+        let receipt = doc
+            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+            .unwrap();
+        assert_eq!((receipt.rows, receipt.columns), (2, 2));
+        assert_eq!(receipt.created_story_ids.len(), 3);
+        assert!(!receipt.deleted_table);
+        assert!(receipt.deleted_story_ids.is_empty());
+        let mut para_ids = receipt.new_para_ids.clone();
+        para_ids.sort();
+        para_ids.dedup();
+        assert_eq!(para_ids.len(), receipt.new_para_ids.len());
+        assert_eq!(
+            fragment_texts(&doc, &receipt.created_story_ids[0]),
+            vec!["A"]
+        );
+        let segments = doc.story_segments(&receipt.created_story_ids[0]).unwrap();
+        assert_eq!(segments[0].attributes.get("bold"), Some(&Any::Bool(true)));
+        let payload = doc.table_payload(&receipt.table).unwrap();
+        assert_eq!(
+            payload.get("tblPr"),
+            Some(&Any::from_json(r#"{"width":4000,"widthType":"dxa"}"#).unwrap())
+        );
+        assert_eq!(
+            payload.get("grid"),
+            Some(&Any::from_json("[2000,2000]").unwrap())
+        );
+        assert_eq!(receipt.after.story, "body");
+        assert_eq!(receipt.after.offset, 1);
+        let paragraphs = doc.paragraphs("body").unwrap();
+        assert_eq!(receipt.after.para_id, paragraphs[0].para_id);
+    }
+
+    #[test]
+    fn fragment_insertion_mid_paragraph_splits() {
+        let doc = EditingDoc::new(77);
+        doc.create_story("body", "Seed", "Normal", "left").unwrap();
+        let receipt = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 2),
+                &fragment_table(vec![fragment_cell("x")]),
+            )
+            .unwrap();
+        let paragraphs = doc.paragraphs("body").unwrap();
+        assert_eq!(
+            paragraphs
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Se", "ed"]
+        );
+        assert_eq!(receipt.after.para_id, paragraphs[1].para_id);
+        assert_eq!(receipt.after.offset, 1);
+        assert_eq!(receipt.new_para_ids.len(), 2);
+    }
+
+    #[test]
+    fn fragment_nested_table_creates_stories_under_its_cell() {
+        let doc = fragment_doc();
+        let nested = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [fragment_cell("deep")]}],
+        });
+        let fragment = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {}, "content": [
+                    {"kind": "table", "table": nested, "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        let receipt = doc
+            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+            .unwrap();
+        assert_eq!(receipt.created_story_ids.len(), 2);
+        let cell_story = &receipt.created_story_ids[0];
+        let nested_story = &receipt.created_story_ids[1];
+        assert!(nested_story.starts_with(&format!("{cell_story}:")));
+        assert_eq!(fragment_texts(&doc, nested_story), vec!["deep"]);
+    }
+
+    #[test]
+    fn fragment_suggesting_stamps_and_reject_removes_table() {
+        let doc = EditingDoc::new(77);
+        doc.create_story("body", "Seed", "Normal", "left").unwrap();
+        let before = project_story(&doc, "body").unwrap();
+        let receipt = doc
+            .insert_table_fragment(
+                &suggesting(),
+                Position::new("body", 2),
+                &fragment_table(vec![fragment_cell("x")]),
+            )
+            .unwrap();
+        assert_eq!(receipt.revision_ids.len(), 1);
+        let payload = doc.table_payload(&receipt.table).unwrap();
+        let rows = match payload.get("rows") {
+            Some(Any::Array(rows)) => rows.clone(),
+            other => panic!("expected rows array, got {other:?}"),
+        };
+        for row in rows.iter() {
+            let Any::Map(row) = row else {
+                panic!("expected row map")
+            };
+            let tr_pr = match row.get("trPr") {
+                Some(Any::Map(tr_pr)) => tr_pr,
+                other => panic!("expected trPr map, got {other:?}"),
+            };
+            assert!(tr_pr.contains_key("trIns"), "suggesting stamps trIns");
+        }
+        doc.reject_change(
+            &direct(),
+            &crate::ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+        assert_eq!(project_story(&doc, "body").unwrap(), before);
+        assert_eq!(doc.story_ids_for_test(), vec!["body".to_owned()]);
+    }
+
+    #[test]
+    fn fragment_undo_removes_the_whole_insertion() {
+        let doc = EditingDoc::new(77);
+        doc.create_story("body", "Seed", "Normal", "left").unwrap();
+        let before = project_story(&doc, "body").unwrap();
+        let mut undo = doc.undo_manager();
+        doc.insert_table_fragment(
+            &direct(),
+            Position::new("body", 2),
+            &fragment_table(vec![fragment_cell("x")]),
+        )
+        .unwrap();
+        assert!(undo.undo());
+        assert_eq!(project_story(&doc, "body").unwrap(), before);
+        assert_eq!(doc.story_ids_for_test(), vec!["body".to_owned()]);
+    }
+
+    #[test]
+    fn fragment_grid_mismatch_is_recomputed() {
+        for grid in [
+            serde_json::json!([1]),
+            serde_json::json!([2000, -5]),
+            serde_json::json!([2000, "wide"]),
+        ] {
+            let doc = fragment_doc();
+            let fragment = serde_json::json!({
+                "tblPr": {}, "grid": grid,
+                "rows": [{"trPr": {}, "cells": [fragment_cell("a"), fragment_cell("b")]}],
+            });
+            let receipt = doc
+                .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+                .unwrap();
+            assert_eq!((receipt.rows, receipt.columns), (1, 2));
+            let payload = doc.table_payload(&receipt.table).unwrap();
+            assert_eq!(
+                payload.get("grid"),
+                Some(&Any::from_json("[4680,4680]").unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn fragment_empty_tbl_pr_gets_default_width() {
+        let doc = fragment_doc();
+        let receipt = doc
+            .insert_table_fragment(
+                &direct(),
+                Position::new("body", 0),
+                &fragment_table(vec![fragment_cell("a")]),
+            )
+            .unwrap();
+        let payload = doc.table_payload(&receipt.table).unwrap();
+        assert_eq!(
+            payload.get("tblPr"),
+            Some(&Any::from_json(r#"{"width":9360,"widthType":"dxa"}"#).unwrap())
+        );
+    }
+
+    #[test]
+    fn fragment_sanitizes_revisions_and_identity_keys() {
+        let doc = fragment_doc();
+        let fragment = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {"trIns": {"id": "r1"}, "height": 100}, "cells": [{
+                "tcPr": {"gridSpan": 2, "vMerge": "rest", "rowspan": 1, "colspan": 1, "backgroundColor": "old"},
+                "shading": "FF0000",
+                "content": [
+                    {"kind": "text", "text": "gone", "attributes": {"del": {"id": "r2"}}},
+                    {"kind": "text", "text": "kept", "attributes": {
+                        "ins": {"id": "r3"}, "bold": true,
+                        "hyperlink": {"href": "https://example.com", "tooltip": "t", "rId": "rId9", "extra": 1}
+                    }},
+                    {"kind": "pilcrow", "properties": {
+                        "paraId": "p", "_kind": "pilcrow", "ooxmlParaId": "1",
+                        "sourceParaId": "s", "paraOrigin": "synthetic", "alignment": "right"
+                    }, "attributes": {}},
+                ]}]}],
+        });
+        let receipt = doc
+            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+            .unwrap();
+        assert_eq!(
+            fragment_texts(&doc, &receipt.created_story_ids[0]),
+            vec!["kept"]
+        );
+        let segments = doc.story_segments(&receipt.created_story_ids[0]).unwrap();
+        assert_eq!(segments[0].attributes.get("bold"), Some(&Any::Bool(true)));
+        assert!(!segments[0].attributes.contains_key("ins"));
+        assert_eq!(
+            segments[0].attributes.get("hyperlink"),
+            Some(&Any::from_json(r#"{"href":"https://example.com","tooltip":"t"}"#).unwrap())
+        );
+        let payload = doc.table_payload(&receipt.table).unwrap();
+        let rows = match payload.get("rows") {
+            Some(Any::Array(rows)) => rows.clone(),
+            other => panic!("expected rows array, got {other:?}"),
+        };
+        let Any::Map(row) = &rows[0] else {
+            panic!("expected row map")
+        };
+        let tr_pr = match row.get("trPr") {
+            Some(Any::Map(tr_pr)) => tr_pr.clone(),
+            other => panic!("expected trPr map, got {other:?}"),
+        };
+        assert!(!tr_pr.contains_key("trIns"));
+        let cells = match row.get("cells") {
+            Some(Any::Array(cells)) => cells.clone(),
+            other => panic!("expected cells array, got {other:?}"),
+        };
+        let Any::Map(cell) = &cells[0] else {
+            panic!("expected cell map")
+        };
+        let tc_pr = match cell.get("tcPr") {
+            Some(Any::Map(tc_pr)) => tc_pr.clone(),
+            other => panic!("expected tcPr map, got {other:?}"),
+        };
+        assert!(!tc_pr.contains_key("gridSpan"));
+        assert!(!tc_pr.contains_key("vMerge"));
+        assert_eq!(tc_pr.get("backgroundColor"), Some(&Any::from("FF0000")));
+    }
+
+    #[test]
+    fn fragment_fully_covered_row_inserts_and_round_trips() {
+        let doc = fragment_doc();
+        let fragment = serde_json::json!({
+            "tblPr": {}, "grid": [2000],
+            "rows": [
+                {"trPr": {"height": 10}, "cells": [
+                    {"tcPr": {"rowspan": 2, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "A", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                ]},
+                {"trPr": {"height": 20}, "cells": []},
+            ],
+        });
+        let receipt = doc
+            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+            .unwrap();
+        assert_eq!((receipt.rows, receipt.columns), (2, 1));
+        assert_eq!(receipt.created_story_ids.len(), 1);
+        let payload = doc.table_payload(&receipt.table).unwrap();
+        let rows = match payload.get("rows") {
+            Some(Any::Array(rows)) => rows.clone(),
+            other => panic!("expected rows array, got {other:?}"),
+        };
+        assert_eq!(rows.len(), 2);
+        let Any::Map(second) = &rows[1] else {
+            panic!("expected row map")
+        };
+        assert_eq!(second.get("cells"), Some(&Any::from_json("[]").unwrap()));
+        assert_eq!(
+            second.get("trPr"),
+            Some(&Any::from_json(r#"{"height":20}"#).unwrap())
+        );
+    }
+
+    #[test]
+    fn fragment_uncovered_empty_row_is_rejected() {
+        let uncovered = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [
+                {"trPr": {}, "cells": [fragment_cell("a")]},
+                {"trPr": {}, "cells": []},
+            ],
+        });
+        assert_fragment_refused(&fragment_doc(), &uncovered);
+        let empty = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": []}],
+        });
+        assert_fragment_refused(&fragment_doc(), &empty);
+    }
+
+    #[test]
+    fn fragment_rowspan_occupancy_inserts() {
+        let doc = fragment_doc();
+        let fragment = serde_json::json!({
+            "tblPr": {}, "grid": [2000, 2000],
+            "rows": [
+                {"trPr": {}, "cells": [
+                    {"tcPr": {"rowspan": 2, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "A", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                    {"tcPr": {"rowspan": 1, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "B", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                ]},
+                {"trPr": {}, "cells": [
+                    {"tcPr": {"rowspan": 1, "colspan": 1},
+                     "content": [
+                        {"kind": "text", "text": "C", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                     ]},
+                ]},
+            ],
+        });
+        let receipt = doc
+            .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+            .unwrap();
+        assert_eq!((receipt.rows, receipt.columns), (2, 2));
+        assert_eq!(receipt.created_story_ids.len(), 3);
+        assert_eq!(
+            fragment_texts(&doc, &receipt.created_story_ids[2]),
+            vec!["C"]
+        );
+    }
+
+    #[test]
+    fn fragment_huge_span_is_rejected_without_panic() {
+        let colspan = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {"colspan": 1_000_000_000},
+                "content": [
+                    {"kind": "text", "text": "a", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        assert_fragment_refused(&fragment_doc(), &colspan);
+        let rowspan = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {"rowspan": 1_000_000_000},
+                "content": [
+                    {"kind": "text", "text": "a", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        assert_fragment_refused(&fragment_doc(), &rowspan);
+    }
+
+    #[test]
+    fn fragment_refusals_leave_the_document_unchanged() {
+        let overlapping = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [
+                {"trPr": {}, "cells": [
+                    {"tcPr": {"colspan": 2}, "content": [
+                        {"kind": "text", "text": "a", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                    ]},
+                    {"tcPr": {"rowspan": 2}, "content": [
+                        {"kind": "text", "text": "b", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                    ]},
+                ]},
+                {"trPr": {}, "cells": [
+                    {"tcPr": {"colspan": 3}, "content": [
+                        {"kind": "text", "text": "c", "attributes": {}},
+                        {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                    ]},
+                ]},
+            ],
+        });
+        let no_pilcrow = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {}, "content": [{"kind": "text", "text": "a", "attributes": {}}],
+            }]}],
+        });
+        let line_break = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {}, "content": [
+                    {"kind": "text", "text": "a\nb", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        let span_beyond = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {"rowspan": 5}, "content": [
+                    {"kind": "text", "text": "a", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        let wide = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {"colspan": 1001}, "content": [
+                    {"kind": "text", "text": "a", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        let bad_shading = serde_json::json!({
+            "tblPr": {}, "grid": [],
+            "rows": [{"trPr": {}, "cells": [{
+                "tcPr": {}, "shading": "xyz",
+                "content": [
+                    {"kind": "text", "text": "a", "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ]}]}],
+        });
+        let cases: Vec<Value> = vec![
+            serde_json::json!({"tblPr": {}, "grid": [], "rows": []}),
+            serde_json::json!({"tblPr": {}, "grid": [], "rows": [{"trPr": {}, "cells": []}]}),
+            serde_json::json!({"tblPr": [], "grid": [], "rows": [{"trPr": {}, "cells": [fragment_cell("a")]}]}),
+            overlapping,
+            no_pilcrow,
+            line_break,
+            span_beyond,
+            wide,
+            bad_shading,
+        ];
+        for fragment in &cases {
+            assert_fragment_refused(&fragment_doc(), fragment);
+        }
+        let mut many_rows = Vec::new();
+        for _ in 0..1001 {
+            many_rows.push(serde_json::json!({"trPr": {}, "cells": [fragment_cell("a")]}));
+        }
+        assert_fragment_refused(
+            &fragment_doc(),
+            &serde_json::json!({"tblPr": {}, "grid": [], "rows": many_rows}),
+        );
+        let deep = (0..9).fold(fragment_cell("x"), |content, _| {
+            serde_json::json!({
+                "tcPr": {}, "content": [
+                    {"kind": "table", "table": {
+                        "tblPr": {}, "grid": [],
+                        "rows": [{"trPr": {}, "cells": [content]}],
+                    }, "attributes": {}},
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}},
+                ],
+            })
+        });
+        assert_fragment_refused(
+            &fragment_doc(),
+            &serde_json::json!({"tblPr": {}, "grid": [], "rows": [{"trPr": {}, "cells": [deep]}]}),
+        );
     }
 
     #[test]

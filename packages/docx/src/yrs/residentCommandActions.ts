@@ -20,6 +20,7 @@ import { validSectionMargins, nativeTabStops, residentSectionPropertiesAt } from
 import { validFontEnvironment } from './residentFontEnvironment';
 import { resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
+import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -152,7 +153,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     setSectionMargins: ['section', 'margins', 'expectVersion'],
     setTabStops: ['tabs', 'expectVersion'], removeTabStop: ['positionTwips', 'expectVersion'],
     formatSelection: ['delta'], toggleStrike: [], toggleList: ['kind'], changeIndent: ['direction'],
-    insertImage: ['image'], insertTable: ['rows', 'columns'], insertPageBreak: [], insertSectionBreak: ['type'],
+    insertImage: ['image'], insertTable: ['rows', 'columns'], pasteFragment: ['fragment'], insertPageBreak: [], insertSectionBreak: ['type'],
     insertTableRow: ['side'], insertTableColumn: ['side'],
     deleteTableRow: [], deleteTableColumn: [], deleteTable: [],
     mergeTableCells: [], splitTableCell: ['rows', 'columns'], setTableCellShading: ['color'],
@@ -272,6 +273,9 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
       break;
     case 'insertTable':
       if (![payload.rows, payload.columns].every(entry => typeof entry === 'number' && Number.isSafeInteger(entry) && entry > 0 && entry <= 1000) || Number(payload.rows) * Number(payload.columns) > 10_000) return refuse('invalid-table-size');
+      break;
+    case 'pasteFragment':
+      if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
       break;
     case 'insertTableRow':
       if (!oneOf('above', 'below')(payload.side)) return refuse('invalid-payload');
@@ -862,7 +866,7 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'insertPageBreak', 'insertSectionBreak'].includes(command.kind) ||
+  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak'].includes(command.kind) ||
     isTableCommandKind(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
@@ -961,6 +965,11 @@ function applyPreparedDocxCommand(
       break;
     }
     case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
+    case 'pasteFragment': {
+      state.storedMarks = null;
+      caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
+      break;
+    }
     case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
     case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta); break;
     case 'clearFormatting': engine.clearFormatting(range); break;

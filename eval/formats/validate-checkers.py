@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('format_check', ROOT / 'check.py')
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
-NS = checker.NS
+NS = {**checker.NS, 'w14': 'http://schemas.microsoft.com/office/word/2010/wordml',
+      'mc': 'http://schemas.openxmlformats.org/markup-compatibility/2006'}
+for prefix in ('w', 'r', 'w14', 'mc'):
+    ET.register_namespace(prefix, NS[prefix])
 ACCEPTED, UNTOUCHED, CORRUPTED = 'correct outputs accepted', 'untouched fixtures rejected', 'corrupted outputs rejected'
 COUNTS = {kind: [0, 0] for kind in (ACCEPTED, UNTOUCHED, CORRUPTED)}
 FAILURES = []
@@ -342,6 +345,19 @@ def insert_word_paragraph(package, after, text):
     return paragraph
 
 
+def fresh_word_ids(package, paragraphs):
+    used = {int(value, 16) for paragraph in package.xml(DOCUMENT).iter(tag('w', 'p'))
+            for name in ('paraId', 'textId') if (value := paragraph.get(tag('w14', name))) is not None}
+    value = 1
+    for paragraph in paragraphs:
+        for name in ('paraId', 'textId'):
+            while value in used:
+                value += 1
+            assert value < 0x80000000
+            paragraph.set(tag('w14', name), f'{value:08X}')
+            used.add(value)
+
+
 def correct_docx(package, number):
     if number == 1:
         set_word_text(word_paragraph(package, 'Sumary'), 'Summary')
@@ -356,6 +372,7 @@ def correct_docx(package, number):
         table, rows = word_body(package).find('w:tbl', NS), word_rows(package)
         if number == 4:
             row = copy.deepcopy(rows[3])
+            fresh_word_ids(package, row.iter(tag('w', 'p')))
             for cell, text in zip(row.findall('w:tc', NS), ['Training', 'Avery', '80', '75']):
                 set_word_text(cell.find('w:p', NS), text)
             table.insert(list(table).index(rows[4]), row)
@@ -1309,6 +1326,63 @@ def drop_word_empty_run(package):
     paragraph.remove(paragraph.findall('w:r', NS)[-1])
 
 
+def paragraph_identity(text, name, value):
+    def edit(package):
+        paragraph = word_paragraph(package, text)
+        if value is None:
+            paragraph.attrib.pop(tag('w14', name))
+        elif value == 'fresh':
+            original = dict(paragraph.attrib)
+            fresh_word_ids(package, [paragraph])
+            fresh = paragraph.get(tag('w14', name))
+            paragraph.attrib = original
+            paragraph.set(tag('w14', name), fresh)
+        else:
+            paragraph.set(tag('w14', name), value)
+    return edit
+
+
+def fresh_inserted_paragraph_ids(package):
+    fresh_word_ids(package, [word_paragraph(package, 'The steering group meets on 20 October.')])
+
+
+def reused_inserted_paragraph_id(package):
+    value = word_paragraph(package, 'Next steps').get(tag('w14', 'paraId'))
+    word_paragraph(package, 'The steering group meets on 20 October.').set(tag('w14', 'paraId'), value)
+
+
+def template_row_ids(package):
+    rows = word_rows(package)
+    for template, paragraph in zip(rows[3].iter(tag('w', 'p')), rows[4].iter(tag('w', 'p')), strict=True):
+        for name in ('paraId', 'textId'):
+            paragraph.set(tag('w14', name), template.get(tag('w14', name)))
+
+
+def shared_inserted_row_paraid(package):
+    first, second = list(word_rows(package)[4].iter(tag('w', 'p')))[:2]
+    second.set(tag('w14', 'paraId'), first.get(tag('w14', 'paraId')))
+
+
+def without_inserted_row_ids(package):
+    for paragraph in word_rows(package)[4].iter(tag('w', 'p')):
+        for name in ('paraId', 'textId'):
+            paragraph.attrib.pop(tag('w14', name))
+
+
+def swap_untouched_paragraph_ids(package):
+    first = word_paragraph(package, 'Collect the remaining feedback forms.')
+    second = word_paragraph(package, 'Prepare the final report for the steering group.')
+    for name in ('paraId', 'textId'):
+        attribute = tag('w14', name)
+        before, after = first.get(attribute), second.get(attribute)
+        first.set(attribute, after)
+        second.set(attribute, before)
+
+
+def without_word_ignorable(package):
+    package.xml(DOCUMENT).attrib.pop(tag('mc', 'Ignorable'))
+
+
 def validate_docx(directory):
     docx = {int(task['id'].split('-')[1]): task for task in checker.tasks() if task['format'] == 'docx'}
     output = {number: directory / f'{task["id"]}.docx' for number, task in docx.items()}
@@ -1333,7 +1407,22 @@ def validate_docx(directory):
             ('docx-01 save time updated', 1, save_time('2026-10-13T12:00:00Z'), True, None),
             ('docx-01 save time removed', 1, save_time(None), False, None),
             ('docx-01 style formatting written as direct run properties', 1, direct_heading_formatting, False, None),
-            ('docx-03 table style spacing written into a cell paragraph', 3, direct_cell_spacing, False, None)]:
+            ('docx-03 table style spacing written into a cell paragraph', 3, direct_cell_spacing, False, None),
+            ('docx-01 untouched paragraph paraId removed', 1, paragraph_identity('Collect the remaining feedback forms.', 'paraId', None), False, None),
+            ('docx-01 untouched paragraph textId removed', 1, paragraph_identity('Collect the remaining feedback forms.', 'textId', None), False, None),
+            ('docx-01 untouched paragraph paraId rewritten', 1, paragraph_identity('Collect the remaining feedback forms.', 'paraId', 'fresh'), False, None),
+            ('docx-01 edited heading textId rewritten', 1, paragraph_identity('Summary', 'textId', 'fresh'), False, None),
+            ('docx-03 edited cell paragraph paraId removed', 3, paragraph_identity('130', 'paraId', None), False, None),
+            ('docx-08 inserted paragraph with fresh ids', 8, fresh_inserted_paragraph_ids, True, None),
+            ('docx-08 inserted paragraph reusing an existing paraId', 8, reused_inserted_paragraph_id, False, None),
+            ('docx-08 inserted paragraph paraId out of range', 8, paragraph_identity('The steering group meets on 20 October.', 'paraId', '80000000'), False, None),
+            ('docx-08 inserted paragraph paraId not eight hex digits', 8, paragraph_identity('The steering group meets on 20 October.', 'paraId', '0000001'), False, None),
+            ('docx-04 inserted row keeping template ids', 4, template_row_ids, False, None),
+            ('docx-04 inserted row without ids', 4, without_inserted_row_ids, True, None),
+            ('docx-04 inserted row cells sharing a fresh paraId', 4, shared_inserted_row_paraid, False, None),
+            ('docx-08 inserted paragraph with a fresh paraId only', 8, paragraph_identity('The steering group meets on 20 October.', 'paraId', 'fresh'), True, None),
+            ('docx-01 untouched paragraphs swapped ids', 1, swap_untouched_paragraph_ids, False, None),
+            ('docx-01 document Ignorable removed', 1, without_word_ignorable, False, None)]:
         slug = name.split(' ', 1)[1].replace(' ', '-')
         expect(name, docx[number], variant(directory, f'word-{slug}', output[number], edit), accept, reason=reason)
     expect('docx-09 note kept as a tracked deletion', docx[9],

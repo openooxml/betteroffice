@@ -200,12 +200,12 @@ jobs:
 
       - name: License and advisory gate for the fuzz package
         if: steps.ws.outputs.present == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.0.20
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           manifest-path: fuzz/Cargo.toml
-          arguments: --all-features
+          arguments: --all-features --config deny.toml
           command: check
-          command-arguments: --config deny.toml bans licenses advisories sources
+          command-arguments: bans licenses advisories sources
 
   python:
     name: Python gate
@@ -264,7 +264,7 @@ jobs:
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}

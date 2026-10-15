@@ -5,6 +5,8 @@ import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../..
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
 import { PeerlessInput, type PeerlessInputProps } from './PeerlessInput';
+import { clipboardFragmentHtml } from '../internals/clipboardHtml';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import { admitIntent, createInputAdmission, submitFormattingIntent } from './inputAdmission';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 
@@ -18,7 +20,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell'> = {}) {
+function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment'> = {}) {
   const submitted: string[] = [];
   const entries: Array<{
     payload: DocxCommandPayload; options: SubmitOptions<PeerlessEchoIntent>; ticket: CommandTicket;
@@ -692,4 +694,64 @@ test('table Tab delegates to the shell controller and leaves modified or composi
   fireEvent.keyDown(input.textarea, { key: 'Tab', isComposing: true });
   expect(directions).toEqual(['forward', 'backward']);
   expect(input.submitted).toEqual([]);
+});
+
+function tableFragment(): DocxClipboardFragment {
+  return {
+    paragraphs: [{
+      tables: [{
+        tblPr: { width: 9360, widthType: 'dxa' },
+        grid: [],
+        rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'Cell' }, { kind: 'pilcrow' }] }] }],
+      }],
+      text: '',
+    }],
+  };
+}
+
+function pasteWith(input: { textarea: HTMLTextAreaElement }, html: string, text: string) {
+  fireEvent.paste(input.textarea, { clipboardData: { getData: (type: string) => type === 'text/html' ? html : text } });
+}
+
+test('paste_html_table_calls_onPasteFragment_and_suppresses_text_intents', () => {
+  const seen: Array<{ fragment: DocxClipboardFragment; inputTime: number }> = [];
+  const input = mount(false, { onPasteFragment: (fragment, inputTime) => { seen.push({ fragment, inputTime }); return true; } });
+  try {
+    const fragment = tableFragment();
+    pasteWith(input, clipboardFragmentHtml(fragment), 'fallback');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.fragment).toEqual(fragment);
+    expect(input.submitted).toEqual([]);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+  }
+});
+
+test('paste_text_only_html_keeps_text_intents', () => {
+  let calls = 0;
+  const input = mount(false, { onPasteFragment: () => { calls += 1; return true; } });
+  try {
+    pasteWith(input, '<html><body><p>Hello</p></body></html>', 'Hello');
+    expect(calls).toBe(0);
+    expect(input.submitted).toEqual(['replaceSelection']);
+    expect(input.entries.map(({ payload }) => payload)).toEqual([{ text: 'Hello' }]);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+  }
+});
+
+test('paste_fragment_callback_false_falls_back_to_text', () => {
+  let calls = 0;
+  const input = mount(false, { onPasteFragment: () => { calls += 1; return false; } });
+  try {
+    pasteWith(input, clipboardFragmentHtml(tableFragment()), 'fallback');
+    expect(calls).toBe(1);
+    expect(input.submitted).toEqual(['replaceSelection']);
+    expect(input.entries.map(({ payload }) => payload)).toEqual([{ text: 'fallback' }]);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+  }
 });

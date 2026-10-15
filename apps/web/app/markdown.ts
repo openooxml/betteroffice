@@ -1,5 +1,7 @@
 import { fidelityCharts, sharedVersion, type FidelityChart, type FidelityFormat } from "../lib/fidelity";
+import { agentEvalCards, agentEvalTasks, type AgentEvals } from "../lib/agent-evals";
 import {
+  AGENT_EVALS,
   BENCHMARKS_SECTION,
   BENCHMARKS_SITE,
   CAPABILITIES,
@@ -40,7 +42,7 @@ function chartLines(list: FidelityChart[]): string[] {
 
 // each card as on the page: quality bars, then time bars, then the README's full table;
 // in suite order, passed in by callers (see publishedFidelity)
-function benchmarks(formats: FidelityFormat[]): string {
+function benchmarks(formats: FidelityFormat[], evals: AgentEvals | null): string {
   if (formats.length === 0) return "";
   const cards = [...formats]
     .sort((a, b) => editorOrder(a.format) - editorOrder(b.format))
@@ -70,11 +72,28 @@ ${cards.join("\n\n")}
 
 ${version}[${BENCHMARKS_SECTION.more}](${BENCHMARKS_SITE})
 
+${agentEdits(evals)}`;
+}
+
+function agentEdits(evals: AgentEvals | null): string {
+  const cards = agentEvalCards(evals).sort((a, b) => editorOrder(a.format) - editorOrder(b.format));
+  if (cards.length === 0) return "";
+  const lines = cards.map((card) =>
+    `- **${EDITORS.find((editor) => editor.format === card.format)?.name ?? card.format.toUpperCase()}** (.${card.format}): ${card.bars.map((bar) => `${bar.who} ${bar.text}`).join(", ")}`,
+  );
+  return `### ${AGENT_EVALS.heading}
+
+${AGENT_EVALS.lead(agentEvalTasks(evals))}
+
+${lines.join("\n")}
+
+[${AGENT_EVALS.more}](${AGENT_EVALS.method})
+
 `;
 }
 
 // the page's sections in the page's order; page-twin.test.js holds the two together
-export function homepageMarkdown(fidelity: FidelityFormat[] = []): string {
+export function homepageMarkdown(fidelity: FidelityFormat[] = [], evals: AgentEvals | null = null): string {
   const editors = EDITORS.map(
     (editor) =>
       `- **${editor.name}** (\`.${editor.format}\`, ${editor.status}) — ${editor.desc}${editor.demo ? ` [Demo](${DEMO}/${editor.format})` : ""}`,
@@ -115,7 +134,7 @@ ${named(CAPABILITIES)}
 
 [${FEATURES_LINK.label}](${FEATURES_LINK.href})
 
-${benchmarks(fidelity)}## ${COLLABORATION.heading}
+${benchmarks(fidelity, evals)}## ${COLLABORATION.heading}
 
 ${COLLABORATION.prose}
 

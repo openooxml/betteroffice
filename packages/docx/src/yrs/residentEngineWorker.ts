@@ -81,6 +81,8 @@ import {
   resolveSelectionUnit,
 } from './viewerSelection';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
+import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -1255,6 +1257,7 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
+    kind === 'pasteFragment' ||
     kind === 'insertPageBreak' || kind === 'insertSectionBreak';
 }
 
@@ -1875,6 +1878,33 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         const { anchor, focus } = request.read.selection;
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
         value = session.selectionText({ story: anchor.story, start: anchor, end: focus });
+        break;
+      }
+      case 'clipboardSlice': {
+        const { anchor, focus } = request.read.selection;
+        const cells = session.cellSelection();
+        const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
+          cells.anchor.tableIndex !== cells.head.tableIndex ||
+          cells.anchor.row !== cells.head.row || cells.anchor.column !== cells.head.column);
+        if (multiCell && cells) {
+          const payload = clipboardTablePayload(
+            session.tablePayload(cells.anchor.story, cells.anchor.tableIndex),
+          );
+          const holds = !!payload &&
+            tableAnchors(payload).anchors.some(
+              (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
+            );
+          if (holds) {
+            value = readClipboardSlice(session, { cells });
+            break;
+          }
+        }
+        if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
+        value = readClipboardSlice(session, {
+          story: anchor.story,
+          from: storyOffsetForLoc(session.geometryReader, anchor),
+          to: storyOffsetForLoc(session.geometryReader, focus),
+        });
         break;
       }
       case 'validateEdits':

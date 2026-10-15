@@ -883,7 +883,21 @@ impl PlotSink for ChartSink<'_> {
         true
     }
 
+    fn anchors_text_end(&self) -> bool {
+        true
+    }
+
+    fn push_end_aligned_text(&mut self, op: PlotOp) -> bool {
+        self.push_anchored(op, true)
+    }
+
     fn push_op(&mut self, op: PlotOp) -> bool {
+        self.push_anchored(op, false)
+    }
+}
+
+impl ChartSink<'_> {
+    fn push_anchored(&mut self, op: PlotOp, end_aligned: bool) -> bool {
         if self.failure.is_some() {
             return false;
         }
@@ -892,7 +906,7 @@ impl PlotSink for ChartSink<'_> {
             return false;
         };
         *self.remaining = next;
-        let command = match translate_op(op, self.clip) {
+        let command = match translate_op(op, self.clip, end_aligned) {
             Ok(command) => command,
             Err(()) => {
                 self.failure = Some(SinkFailure::Geometry);
@@ -911,7 +925,7 @@ impl PlotSink for ChartSink<'_> {
     }
 }
 
-fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
+fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Option<DrawCmd>, ()> {
     match op {
         PlotOp::Rect { x, y, w, h, fill } => Ok(Some(DrawCmd::FillRect {
             x: finite_f32(x)?,
@@ -936,10 +950,14 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             let width = positive_f32(width)?;
             let font_size_px = positive_f32(font.size_px)?;
             let font_size = positive_f32(font.size_px * 72.0 / 96.0)?;
-            let text_clip = text_clip(x, y, width, font_size_px, chart_clip)?;
-            let (x, align) = match align {
-                PlotTextAlign::Center => (x + width / 2.0, Align::Center),
-                PlotTextAlign::Start => (x, Align::Left),
+            let text_clip = text_clip(x, y, width, font_size_px, end_aligned, chart_clip)?;
+            let (x, align) = if end_aligned {
+                (x + width, Align::Right)
+            } else {
+                match align {
+                    PlotTextAlign::Center => (x + width / 2.0, Align::Center),
+                    PlotTextAlign::Start => (x, Align::Left),
+                }
             };
             Ok(text_clip.map(|clip| DrawCmd::Text {
                 x,
@@ -1008,12 +1026,21 @@ fn text_clip(
     baseline_y: f32,
     width: f32,
     font_size_px: f32,
+    end_aligned: bool,
     chart_clip: Rect,
 ) -> Result<Option<Rect>, ()> {
+    let (clip_x, clip_width) = if end_aligned {
+        (
+            f64::from(chart_clip.x),
+            f64::from(x + width) - f64::from(chart_clip.x),
+        )
+    } else {
+        (f64::from(x), f64::from(width))
+    };
     let bounds = PlotRect {
-        x: f64::from(x),
+        x: clip_x,
         y: f64::from(baseline_y - font_size_px),
-        w: f64::from(width),
+        w: clip_width,
         h: f64::from(font_size_px * 1.25),
     };
     let chart = PlotRect {
@@ -1395,6 +1422,244 @@ mod tests {
             refs: Vec::new(),
         });
         sheet
+    }
+
+    #[test]
+    fn axis_label_regression_currency_ticks_fit_wide_fallback_fonts() {
+        for chart_type in ["column", "line"] {
+            let space = ChartSpace {
+                chart_type: chart_type.into(),
+                plot_groups: vec![ChartPlotGroup {
+                    chart_type: Some(chart_type.into()),
+                    axis_ids: vec!["value".into()],
+                    series: vec![ChartSeries {
+                        categories: vec!["Q1".into(), "Q2".into()],
+                        values: vec![200_000.0, 600_000.0],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                axis_list: Some(vec![ChartAxis {
+                    id: Some("value".into()),
+                    axis_type: "value".into(),
+                    position: Some("left".into()),
+                    min: Some(0.0),
+                    max: Some(600_000.0),
+                    number_format: Some("\"$\"#,##0".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+            let (commands, _) = render_scatter(&space);
+            let plot_left = commands
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::Line { x1, x2, width, .. } if x1 == x2 && *width == 1.0 => Some(*x1),
+                    _ => None,
+                })
+                .fold(f32::INFINITY, f32::min);
+            let (x, clip, align, size) = commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text {
+                        text,
+                        x,
+                        clip,
+                        align,
+                        font_size,
+                        ..
+                    } if text.as_ref() == "$600,000" => {
+                        Some((*x, *clip, *align, *font_size * 96.0 / 72.0))
+                    }
+                    _ => None,
+                })
+                .expect("the currency tick is drawn");
+            let anchor = plot_left - (7.0 + 0.6 * size);
+            let wide_width = "$600,000".chars().count() as f32 * 0.64 * size;
+            assert!(
+                clip.x <= anchor - wide_width && clip.x + clip.w >= anchor - 1e-4,
+                "{chart_type}: clip {clip:?} must span {wide_width} left of {anchor}"
+            );
+            assert_eq!(align, Align::Right);
+            assert!((x - anchor).abs() < 1e-4, "{chart_type}: {x} vs {anchor}");
+            assert!(clip.x >= 0.0 && clip.y >= 0.0);
+            assert!(clip.x + clip.w <= 400.0 && clip.y + clip.h <= 300.0);
+        }
+    }
+
+    #[test]
+    fn axis_label_regression_billion_currency_ticks_fit_wide_fallback_fonts() {
+        let label = "$1,000,000,000";
+        for chart_type in ["column", "line"] {
+            let space = ChartSpace {
+                chart_type: chart_type.into(),
+                plot_groups: vec![ChartPlotGroup {
+                    chart_type: Some(chart_type.into()),
+                    axis_ids: vec!["value".into()],
+                    series: vec![ChartSeries {
+                        categories: vec!["Q1".into(), "Q2".into()],
+                        values: vec![200_000_000.0, 1_000_000_000.0],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                axis_list: Some(vec![ChartAxis {
+                    id: Some("value".into()),
+                    axis_type: "value".into(),
+                    position: Some("left".into()),
+                    min: Some(0.0),
+                    max: Some(1_000_000_000.0),
+                    number_format: Some("\"$\"#,##0".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+            let (commands, _) = render_scatter(&space);
+            let plot_left = commands
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::Line { x1, x2, width, .. } if x1 == x2 && *width == 1.0 => Some(*x1),
+                    _ => None,
+                })
+                .fold(f32::INFINITY, f32::min);
+            let (x, clip, align, size) = commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text {
+                        text,
+                        x,
+                        clip,
+                        align,
+                        font_size,
+                        ..
+                    } if text.as_ref() == label => {
+                        Some((*x, *clip, *align, *font_size * 96.0 / 72.0))
+                    }
+                    _ => None,
+                })
+                .expect("the billion currency tick is drawn");
+            let anchor = plot_left - (7.0 + 0.6 * size);
+            let wide_width = label.chars().count() as f32 * 0.64 * size;
+            assert!(
+                clip.x <= anchor - wide_width && clip.x + clip.w >= anchor - 1e-4,
+                "{chart_type}: clip {clip:?} must span {wide_width} left of {anchor}"
+            );
+            assert_eq!(align, Align::Right);
+            assert!((x - anchor).abs() < 1e-4, "{chart_type}: {x} vs {anchor}");
+            assert!((clip.x + clip.w - anchor).abs() < 1e-4);
+            assert!(clip.x >= 0.0 && clip.y >= 0.0);
+            assert!(clip.x + clip.w <= 400.0 && clip.y + clip.h <= 300.0);
+        }
+    }
+
+    #[test]
+    fn axis_label_regression_start_aligned_legend_keeps_box_clip() {
+        let space = ChartSpace {
+            legend: Some(ChartLegend {
+                position: Some("bottom".into()),
+                visible: true,
+                ..Default::default()
+            }),
+            ..scatter_space()
+        };
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 300.0,
+        };
+        let mut ops = Vec::new();
+        plot_chart_into(&PlotChart::from(&space), frame, &mut ops);
+        let op = ops
+            .into_iter()
+            .find(|op| matches!(op, PlotOp::Text { text, .. } if text == "Series1"))
+            .expect("the legend label is drawn");
+        let PlotOp::Text {
+            x,
+            baseline_y,
+            width,
+            ref font,
+            align,
+            ..
+        } = op
+        else {
+            unreachable!();
+        };
+        assert_eq!(align, PlotTextAlign::Start);
+        let bounds = Rect {
+            x: x as f32,
+            y: baseline_y as f32 - font.size_px as f32,
+            w: width as f32,
+            h: font.size_px as f32 * 1.25,
+        };
+        let chart_clip = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 300.0,
+        };
+        assert!(bounds.x > chart_clip.x);
+        assert!(bounds.x + bounds.w < chart_clip.x + chart_clip.w);
+        assert!(bounds.y >= chart_clip.y);
+        assert!(bounds.y + bounds.h <= chart_clip.y + chart_clip.h);
+        let DrawCmd::Text { x, clip, align, .. } =
+            translate_op(op, chart_clip, false).unwrap().unwrap()
+        else {
+            unreachable!();
+        };
+        assert_eq!(align, Align::Left);
+        assert_eq!(x, bounds.x);
+        assert_eq!(clip, bounds);
+    }
+
+    #[test]
+    fn axis_label_regression_bar_categories_fit_wide_fallback_fonts() {
+        let label = "Northern region";
+        let space = ChartSpace {
+            chart_type: "bar".into(),
+            plot_groups: vec![ChartPlotGroup {
+                chart_type: Some("bar".into()),
+                series: vec![ChartSeries {
+                    categories: vec![label.into(), "South".into()],
+                    values: vec![200_000.0, 600_000.0],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (commands, _) = render_scatter(&space);
+        let plot_left = commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::Line { x1, x2, width, .. } if x1 == x2 && *width == 1.0 => Some(*x1),
+                _ => None,
+            })
+            .fold(f32::INFINITY, f32::min);
+        let (x, clip, align, size) = commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::Text {
+                    text,
+                    x,
+                    clip,
+                    align,
+                    font_size,
+                    ..
+                } if text.as_ref() == label => Some((*x, *clip, *align, *font_size * 96.0 / 72.0)),
+                _ => None,
+            })
+            .expect("the long category label is drawn");
+        let anchor = plot_left - (7.0 + 0.6 * size);
+        let wide_width = label.chars().count() as f32 * 0.64 * size;
+        assert!(
+            clip.x <= anchor - wide_width && clip.x + clip.w >= anchor - 1e-4,
+            "clip {clip:?} must span {wide_width} left of {anchor}"
+        );
+        assert_eq!(align, Align::Right);
+        assert!((x - anchor).abs() < 1e-4, "{x} vs {anchor}");
+        assert!(clip.x >= 0.0 && clip.y >= 0.0);
+        assert!(clip.x + clip.w <= 400.0 && clip.y + clip.h <= 300.0);
     }
 
     fn scatter_space() -> ChartSpace {

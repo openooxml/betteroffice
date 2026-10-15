@@ -17,6 +17,11 @@ import {
   type OverflowMenuHandle,
 } from '../../../../../shared/react-toolbar/OverflowMenu';
 import {
+  toolbarButtonStyle,
+  toolbarMenuStyle,
+  toolbarRailStyle,
+} from '../../../../../shared/react-toolbar/theme';
+import {
   representsUnit,
   useToolbarOverflow,
 } from '../../../../../shared/react-toolbar/useToolbarOverflow';
@@ -24,7 +29,6 @@ import { xlsxCommandController } from '../../commands/createXlsxCommandStore';
 import { useXlsxCommands } from '../../commands/hooks';
 import { useTranslation } from '../../i18n';
 import { ToolbarIcon } from '../ui/ToolbarIcon';
-import { toolbarColors } from '../ui/ToolbarPrimitives';
 import {
   ToolbarOverflowContext,
   useOverflowSource,
@@ -35,30 +39,6 @@ import {
 } from './overflowRegistry';
 import { openColorPicker } from './ToolbarCommand';
 import { ToolbarPromptDialog } from './ToolbarPromptDialog';
-
-const MENU_COLORS = {
-  surface: toolbarColors.surface,
-  text: toolbarColors.text,
-  mutedText: toolbarColors.muted,
-  border: toolbarColors.border,
-  hover: toolbarColors.hover,
-  shadow: 'rgba(60, 64, 67, 0.24)',
-};
-
-const MORE_STYLE: CSSProperties = {
-  appearance: 'none',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  width: 28,
-  height: 28,
-  padding: 0,
-  border: 0,
-  borderRadius: 4,
-  background: 'transparent',
-  color: toolbarColors.text,
-  cursor: 'pointer',
-};
 
 function isInteractive(target: EventTarget | null): boolean {
   return (
@@ -188,12 +168,8 @@ export function ToolbarRail({ children, className, style }: ToolbarRailProps) {
         display: 'flex',
         alignItems: 'center',
         minWidth: 0,
-        minHeight: 36,
-        margin: '0 8px 5px',
-        padding: '4px 7px',
-        borderRadius: 18,
-        background: toolbarColors.rail,
-        color: toolbarColors.text,
+        ...toolbarRailStyle,
+        margin: '0 8px 4px',
         overflow: 'hidden',
         boxSizing: 'border-box',
         outline: 'none',
@@ -223,8 +199,7 @@ export function ToolbarRail({ children, className, style }: ToolbarRailProps) {
             label={t('toolbar.more')}
             trigger={<ToolbarIcon name="more" />}
             entries={menuEntries}
-            colors={MENU_COLORS}
-            triggerStyle={MORE_STYLE}
+            triggerStyle={toolbarButtonStyle}
             testId="xlsx-toolbar-more"
             onItemSelected={(modality) => {
               if (modality === 'pointer') xlsxCommandController(store)?.focusEditor();
@@ -394,12 +369,7 @@ export function ToolbarLegacyContent({ children }: { children: ReactNode }) {
               alignItems: 'center',
               gap: 2,
               maxWidth: 'calc(100vw - 16px)',
-              padding: 6,
-              border: `1px solid ${toolbarColors.border}`,
-              borderRadius: 8,
-              background: toolbarColors.surface,
-              boxShadow: '0 4px 16px rgba(60, 64, 67, 0.24)',
-              boxSizing: 'border-box',
+              ...toolbarMenuStyle,
             }}
           />,
           popupHost

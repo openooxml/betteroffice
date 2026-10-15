@@ -147,7 +147,9 @@ pub use ops::paragraph::{
     STYLE_CONTROLLED_MARKS, STYLE_CONTROLLED_PARA_ATTRS, TabStop,
 };
 pub use ops::resolve::ChangeTarget;
-pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};
+pub use ops::table::{
+    CellLoc, FragmentCaret, TableFragmentReceipt, TableLocator, TableRange, TableReceipt,
+};
 pub use ops::text::RichRun;
 pub use peer_bootstrap::{PeerBootstrap, PeerBootstrapSource, PeerMetadataError};
 pub use queries::{

@@ -39,6 +39,7 @@ const MENU_COLORS = {
   border: 'var(--doc-border)',
   hover: 'var(--doc-bg-hover)',
   shadow: 'var(--doc-shadow)',
+  focus: 'var(--bo-toolbar-accent, var(--doc-toolbar-accent))',
 };
 
 function isInteractive(target: EventTarget | null): boolean {
@@ -151,7 +152,7 @@ export function ToolbarRail({ children, className, style, label, testId }: Toolb
   return (
     <div
       className={cn(
-        'flex items-center px-2 py-1 bg-muted rounded-full min-h-[36px] mx-2 mb-1 min-w-0',
+        'oox-toolbar-rail flex items-center px-2 py-1 rounded-full min-h-[36px] mx-2 mb-1 min-w-0',
         className
       )}
       style={style}
