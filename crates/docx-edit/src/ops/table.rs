@@ -960,9 +960,9 @@ fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
                     cell.story
                 )));
             }
-            let column_end = column.checked_add(colspan).ok_or_else(|| {
-                invalid(format!("cell {} exceeds the column limit", cell.story))
-            })?;
+            let column_end = column
+                .checked_add(colspan)
+                .ok_or_else(|| invalid(format!("cell {} exceeds the column limit", cell.story)))?;
             if column_end > MAX_FRAGMENT_COLUMNS {
                 return Err(invalid(format!(
                     "cell {} exceeds the column limit",
@@ -3991,10 +3991,7 @@ mod tests {
         let Any::Map(second) = &rows[1] else {
             panic!("expected row map")
         };
-        assert_eq!(
-            second.get("cells"),
-            Some(&Any::from_json("[]").unwrap())
-        );
+        assert_eq!(second.get("cells"), Some(&Any::from_json("[]").unwrap()));
         assert_eq!(
             second.get("trPr"),
             Some(&Any::from_json(r#"{"height":20}"#).unwrap())
