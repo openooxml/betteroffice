@@ -549,6 +549,12 @@ function sameSelection(left: DocxCommandSelection | null, right: DocxCommandSele
     left[key].paraId === right[key].paraId && left[key].offset === right[key].offset);
 }
 
+const CELL_RESET_KINDS = new Set(['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak']);
+
+function resetCellSelectionForEdit(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, kind: string): void {
+  if (state.selection && CELL_RESET_KINDS.has(kind)) writeCellSelection(engine, cellsForCaret(engine, state.selection.focus.story));
+}
+
 function writeCellSelection(engine: ResidentDocxCommandEngine, cells: PreparedDocxCommand['cells']): void {
   try {
     if (cells) engine.setCellSelection(cells);
@@ -889,6 +895,7 @@ function applyPreparedDocxCommand(
     };
     return result('noop', toolbar);
   }
+  resetCellSelectionForEdit(engine, state, command.kind);
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection') && command.payload.text === '' && collapsed(range)) return result('noop');
   if ((command.kind === 'deleteBackward' || command.kind === 'deleteForward') && collapsed(range)) return result('noop');
   if ((command.kind === 'formatRange' || command.kind === 'formatSelection') && Object.keys(command.payload.delta).length === 0) return result('noop');
@@ -1000,9 +1007,7 @@ function applyPreparedDocxCommand(
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }
-  if (state.selection && ['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak'].includes(command.kind)) {
-    writeCellSelection(engine, cellsForCaret(engine, state.selection.focus.story));
-  }
+  resetCellSelectionForEdit(engine, state, command.kind);
   if (discrete) engine.addUndoBoundary();
   return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
 }
