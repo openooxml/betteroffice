@@ -45,7 +45,7 @@
     "@betteroffice/fonts-cjk": "workspace:*"
   },
   "devDependencies": {
-    "@opennextjs/cloudflare": "^1.20.1",
+    "@opennextjs/cloudflare": "^1.20.2",
     "@types/node": "^26.1.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
