@@ -45,6 +45,7 @@ export function EditableCombobox({
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
   const [hoveredOption, setHoveredOption] = useState<string | null>(null);
+  const [focusedOption, setFocusedOption] = useState<string | null>(null);
   const focus = useFocusRing<HTMLInputElement>();
   const [position, setPosition] = useState({ top: 0, left: 0, width });
   const rootRef = useRef<HTMLDivElement>(null);
@@ -215,8 +216,13 @@ export function EditableCombobox({
               }}
               onMouseEnter={() => setHoveredOption(option.value)}
               onMouseLeave={() => setHoveredOption(null)}
+              onFocus={() => setFocusedOption(option.value)}
+              onBlur={() => setFocusedOption(null)}
               style={{
-                ...toolbarMenuItemStyle({ hovered: hoveredOption === option.value }),
+                ...toolbarMenuItemStyle({
+                  hovered: hoveredOption === option.value,
+                  focusRing: focusedOption === option.value,
+                }),
                 gap: 6,
                 minHeight: 28,
                 padding: '4px 8px 4px 4px',

@@ -87,6 +87,7 @@ import { EditorChromeContext } from './components/EditorToolbarContext';
 import type { BorderStyle } from './components/Toolbar';
 import { FormulaBarContext, type FormulaBarBinding } from './components/toolbar/FormulaBar';
 import { ToolbarCommandButton } from './components/toolbar/ToolbarCommand';
+import { toolbarTheme } from '../../../shared/react-toolbar/theme';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
 import { ToolbarButtonBase, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import {
@@ -550,9 +551,9 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     flex: '0 0 auto',
     minHeight: DEFAULT_XLSX_TOOLBAR_HEIGHT,
     padding: '4px 0 5px',
-    borderBottom: '1px solid #e2e8f0',
+    borderBottom: `1px solid ${toolbarTheme.line}`,
     background: '#ffffff',
-    color: '#0f172a',
+    color: toolbarTheme.ink,
     boxSizing: 'border-box',
   },
   rail: {
@@ -572,7 +573,7 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 1,
     padding: '0 6px',
-    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
+    borderRight: `1px solid ${toolbarTheme.line}`,
     flex: '0 0 auto',
   },
   host: {
@@ -591,8 +592,8 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     marginLeft: -3,
     padding: '0 4px',
     borderRadius: 8,
-    background: '#0f172a',
-    color: '#ffffff',
+    background: toolbarTheme.accent,
+    color: toolbarTheme.accentInk,
     fontSize: 10,
     fontWeight: 700,
     lineHeight: 1,

@@ -56,17 +56,17 @@ export function ColorPicker({
     >
       <ToolbarIcon
         name={mode === 'text' ? 'textColor' : mode === 'fill' ? 'fillColor' : 'borderColor'}
-        size={20}
       />
       <span
         aria-hidden="true"
         style={{
           position: 'absolute',
-          left: 6,
-          right: 6,
-          bottom: 4,
+          left: 7,
+          right: 7,
+          bottom: 5,
           height: 3,
           borderRadius: 1,
+          boxShadow: `inset 0 0 0 1px ${toolbarTheme.line}`,
           background: value,
         }}
       />

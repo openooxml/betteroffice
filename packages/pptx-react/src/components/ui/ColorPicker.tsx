@@ -66,16 +66,17 @@ export function ColorPicker({
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       >
-        <ToolbarIcon name={icon} size={20} />
+        <ToolbarIcon name={icon} />
         <span
           aria-hidden="true"
           style={{
             position: 'absolute',
-            left: 6,
-            right: 6,
-            bottom: 4,
+            left: 7,
+            right: 7,
+            bottom: 5,
             height: 3,
             borderRadius: 1,
+            boxShadow: `inset 0 0 0 1px ${toolbarTheme.line}`,
             background: none ? 'transparent' : value,
             border: none ? `1px solid ${toolbarTheme.inkMuted}` : 0,
             boxSizing: 'border-box',
@@ -86,9 +87,9 @@ export function ColorPicker({
             aria-hidden="true"
             style={{
               position: 'absolute',
-              left: 6,
-              bottom: 5,
-              width: 16,
+              left: 7,
+              bottom: 6,
+              width: 14,
               height: 1,
               background: '#d93025',
               transform: 'rotate(-18deg)',

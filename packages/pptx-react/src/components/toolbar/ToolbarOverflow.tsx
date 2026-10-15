@@ -16,6 +16,7 @@ import {
   type OverflowMenuHandle,
 } from '../../../../../shared/react-toolbar/OverflowMenu';
 import {
+  inheritedToolbarTokens,
   toolbarButtonStyle,
   toolbarMenuStyle,
   toolbarRailStyle,
@@ -278,6 +279,7 @@ export function LegacyToolbarContent({ children }: { children: ReactNode }) {
   const label = t('commands.moreControls');
   const [popup, setPopup] = useState<{ anchor: HTMLElement | null; width: number } | null>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const [tokens, setTokens] = useState<CSSProperties>({});
   useOverflowSource(unitRef, () => [
     {
       kind: 'item',
@@ -310,6 +312,7 @@ export function LegacyToolbarContent({ children }: { children: ReactNode }) {
     const width = element.offsetWidth;
     const left = Math.max(8, Math.min((anchor?.right ?? 8) - width, window.innerWidth - width - 8));
     setPosition({ top: (anchor?.bottom ?? 8) + 4, left });
+    setTokens(inheritedToolbarTokens(popup.anchor));
     element
       .querySelector<HTMLElement>('button, input, select, textarea, a[href], [tabindex]')
       ?.focus();
@@ -372,6 +375,7 @@ export function LegacyToolbarContent({ children }: { children: ReactNode }) {
               gap: 2,
               maxWidth: 'calc(100vw - 16px)',
               ...toolbarMenuStyle,
+              ...tokens,
             }}
           >
             {children}

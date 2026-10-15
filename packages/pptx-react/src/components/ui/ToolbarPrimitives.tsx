@@ -12,6 +12,7 @@ import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } fr
 import { createPortal } from 'react-dom';
 import { ToolbarSymbol } from '../../../../../shared/react-toolbar/icons';
 import {
+  inheritedToolbarTokens,
   toolbarButtonStyle,
   toolbarMenuItemStyle,
   toolbarMenuSeparatorStyle,
@@ -253,6 +254,7 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
     const [hovered, setHovered] = useState(false);
     const focus = useFocusRing<HTMLButtonElement>();
     const [detected, setDetected] = useState<'menu' | 'dialog'>('menu');
+    const [tokens, setTokens] = useState<CSSProperties>({});
     const [position, setPosition] = useState<{
       top: number;
       left: number;
@@ -307,8 +309,10 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
         const menu = focusable.every((item) => item.matches(MENU_ITEM_SELECTOR));
         setDetected(menu ? 'menu' : 'dialog');
       }
-      const anchor = (open.anchor ?? triggerRef.current)?.getBoundingClientRect();
+      const anchorElement = open.anchor ?? triggerRef.current;
+      const anchor = anchorElement?.getBoundingClientRect();
       if (anchor) setPosition(placePopup(anchor, element, menuWidth));
+      setTokens(inheritedToolbarTokens(anchorElement));
     }, [open, popup, menuWidth]);
 
     useLayoutEffect(() => {
@@ -437,6 +441,7 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
                 maxHeight: position ? Math.min(440, position.maxHeight) : 440,
                 overflowY: 'auto',
                 ...toolbarMenuStyle,
+                ...tokens,
               }}
             >
               {children(() => {
