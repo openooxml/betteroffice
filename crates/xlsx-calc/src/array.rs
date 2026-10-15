@@ -345,6 +345,11 @@ impl<'c, 'a> Cells<'c, 'a> {
 
 /// evaluate an expression as a possibly rectangular value.
 pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
+    let _scope = ctx.array_scope();
+    array_value(expr, ctx)
+}
+
+fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
     match expr {
         Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
             match as_array_area(expr, ctx) {

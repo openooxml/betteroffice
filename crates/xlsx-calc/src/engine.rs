@@ -1305,7 +1305,13 @@ mod tests {
             put_cached_formula(&mut wb, s, address, formula, num(cached));
         }
         let cached_false = CellValue::Bool { value: false };
-        put_cached_formula(&mut wb, s, "A6", "ISERROR('[1]Data'!A1)", cached_false.clone());
+        put_cached_formula(
+            &mut wb,
+            s,
+            "A6",
+            "ISERROR('[1]Data'!A1)",
+            cached_false.clone(),
+        );
         put_formula(&mut wb, s, "B1", "A1+1");
         put_cached_formula(&mut wb, s, "C1", "Missing!A1", num(7.0));
         rebuild_and_recalc_all(&mut wb, None);
