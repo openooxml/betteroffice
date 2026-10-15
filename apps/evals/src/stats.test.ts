@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { aggregate, newestFirst, repetitions, wilson, type Suite } from './stats';
+import { aggregate, modelRepetitions, newestFirst, repetitions, wilson, type Suite } from './stats';
 import data from '../../../eval/results/v2.json';
 
 const suite = data as Suite;
@@ -31,4 +31,21 @@ test('repeated runs and a second model subset keep their own denominators', () =
   expect(repetitions([1])).toBe('one run per task');
   expect(repetitions([1, 3])).toBe('1 to 3 runs per task');
   expect(newestFirst([suite, { ...future, date: '2026-10-16' }])[0]!.suite).toBe('v3');
+});
+
+test('per-model repetitions do not combine model denominators', () => {
+  const tasks = suite.tasks.slice(0, 2);
+  const runs = tasks.flatMap(t => [1, 2, 3].map(run => ({ ...suite.runs[0]!, task: t.id, model: 'model-a', run })));
+  runs.push({ ...runs[0]!, model: 'model-b' });
+  expect(modelRepetitions({ ...suite, tasks, runs })).toBe('3 runs per task with model-a; one run per task with model-b on 1 task');
+  expect(modelRepetitions(suite)).toBe('one run per task');
+});
+
+test('numeric suite version precedes date, with date breaking version ties', () => {
+  const v3 = { ...suite, suite: 'v3', date: '2026-01-01' };
+  const v10 = { ...suite, suite: 'v10', date: '2025-01-01' };
+  const older = { ...v3, date: '2025-01-01' };
+  expect(newestFirst([suite, older, v10, v3]).map(s => [s.suite, s.date])).toEqual([
+    ['v10', '2025-01-01'], ['v3', '2026-01-01'], ['v3', '2025-01-01'], ['v2', suite.date],
+  ]);
 });
