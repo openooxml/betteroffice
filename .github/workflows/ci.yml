@@ -41,7 +41,7 @@ jobs:
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
       # rust-cache prunes the workspace's own artifacts, and wasm-opt costs minutes per module.
-      - uses: actions/cache@v6
+      - uses: actions/cache@v6.1.0
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
@@ -130,7 +130,7 @@ jobs:
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@v6.1.0
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
@@ -367,7 +367,7 @@ jobs:
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@v6.1.0
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
