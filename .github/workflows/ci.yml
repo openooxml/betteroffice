@@ -15,11 +15,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Every job here runs on a fresh kyora VM of the leanest class that fits it. Fork pull requests stay
+  # GitHub-hosted, and repository variable BO_CI_RUNNER overrides every job (ubuntu-latest moves them back).
   packages:
     name: Package gate
-    needs: route
-    if: ${{ !cancelled() }}
-    runs-on: ${{ needs.route.result == 'success' && fromJSON(needs.route.outputs.runners || '{}').packages || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -106,9 +106,7 @@ jobs:
 
   package-tests:
     name: Package tests (${{ matrix.shard }}/2)
-    needs: route
-    if: ${{ !cancelled() }}
-    runs-on: ${{ needs.route.result == 'success' && fromJSON(needs.route.outputs.runners || '{}')[format('package-tests-{0}', matrix.shard)] || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -152,9 +150,7 @@ jobs:
 
   audit:
     name: Security audit
-    needs: route
-    if: ${{ !cancelled() }}
-    runs-on: ${{ needs.route.result == 'success' && fromJSON(needs.route.outputs.runners || '{}').audit || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -177,21 +173,9 @@ jobs:
       - name: Fail on high or critical advisories
         run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj --ignore=GHSA-vfj7-8cjw-p6xm
 
-  # Picks every job's runner: GitHub-hosted for fork pull requests, BO_CI_RUNNER for every job when set
-  # (ubuntu-latest sends all back), else free kyora slots under BO_KYORA_CAP go to the longest jobs first.
-  route:
-    name: Route
-    uses: ./.github/workflows/route.yml
-    permissions:
-      actions: read
-    with:
-      jobs: rust package-tests-1 package-tests-2 packages python native audit
-
   rust:
     name: Rust gate
-    needs: route
-    if: ${{ !cancelled() }}
-    runs-on: ${{ needs.route.result == 'success' && fromJSON(needs.route.outputs.runners || '{}').rust || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x16' }}
     timeout-minutes: 90
     # Full debuginfo in every test binary fills a kyora VM's disk; backtraces keep file:line.
     env:
@@ -279,9 +263,7 @@ jobs:
 
   python:
     name: Python gate
-    needs: route
-    if: ${{ !cancelled() }}
-    runs-on: ${{ needs.route.result == 'success' && fromJSON(needs.route.outputs.runners || '{}').python || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -311,9 +293,7 @@ jobs:
 
   native:
     name: Native gate
-    needs: route
-    if: ${{ !cancelled() }}
-    runs-on: ${{ needs.route.result == 'success' && fromJSON(needs.route.outputs.runners || '{}').native || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7

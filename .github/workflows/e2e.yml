@@ -14,35 +14,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  route:
-    name: Route
-    uses: ./.github/workflows/route.yml
-    permissions:
-      actions: read
-    with:
-      jobs: corpus browser-1 browser-2
-
   scenarios:
     name: ${{ matrix.name }}
-    needs: route
-    if: ${{ !cancelled() }}
-    # Each scenario shard runs on a fresh kyora VM when a slot under BO_KYORA_CAP is free.
-    runs-on: ${{ needs.route.result == 'success' && fromJSON(needs.route.outputs.runners || '{}')[matrix.route] || 'ubuntu-latest' }}
+    # A fresh kyora VM per job; fork pull requests stay GitHub-hosted and BO_CI_RUNNER overrides (see ci.yml).
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: corpus
-            route: corpus
             name: Corpus scenarios
           - suite: browser
             shard: 1
-            route: browser-1
             name: Browser editors (1/2)
           - suite: browser
             shard: 2
-            route: browser-2
             name: Browser editors (2/2)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
