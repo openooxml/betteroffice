@@ -2081,7 +2081,11 @@ def v3_partial(source, task, output):
         old = next(iter(spec['rename']))
         spec['rename'][old] = 'Partial Version'
     elif 'insert_paragraphs' in spec:
-        spec['insert_paragraphs']['texts'] = spec['insert_paragraphs']['texts'][:1]
+        texts = spec['insert_paragraphs']['texts']
+        if len(texts) > 1:
+            spec['insert_paragraphs']['texts'] = texts[:1]
+        else:
+            spec['insert_paragraphs']['texts'] = [texts[0][:max(1, len(texts[0]) // 2)]]
     elif 'format_phrase' in spec:
         change = spec['format_phrase']
         change['phrase'] = change['phrase'][:max(1, len(change['phrase']) // 2)]
