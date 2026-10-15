@@ -114,6 +114,12 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
     return entry.rows.every(row => plainObject(row) && row.trPr !== undefined && optionalMap(row.trPr) &&
       Array.isArray(row.cells) && row.cells.length > 0 && row.cells.length <= 1000 && row.cells.every(cell => {
         if (!plainObject(cell) || cell.tcPr === undefined || !optionalMap(cell.tcPr)) return false;
+        const tcPr = cell.tcPr as Record<string, unknown>;
+        for (const key of ['rowspan', 'colspan'] as const) {
+          const span = tcPr[key];
+          if (span !== undefined && span !== null &&
+            (typeof span !== 'number' || !Number.isInteger(span) || span < 1 || span > 1000)) return false;
+        }
         if (cell.shading !== undefined && (typeof cell.shading !== 'string' || !/^[0-9a-f]{6}$/iu.test(cell.shading))) return false;
         if (--budget.cells < 0 || !Array.isArray(cell.content) || cell.content.length === 0) return false;
         const last = cell.content.at(-1);
