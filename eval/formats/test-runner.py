@@ -779,6 +779,53 @@ class RunnerTests(unittest.TestCase):
                 self.invoke(*arguments, self.command(), self.root / 'invalid')
             self.assertEqual(error.exception.code, 2)
 
+    def test_v3_tier_selection_and_report(self):
+        basic = dict(runner.checker.tasks()[0], suite='v3')
+        complex_task = dict(basic, id='xlsx-complex-runner', tier='complex')
+        def available(suite='v2', tier='basic'):
+            self.assertEqual(suite, 'v3')
+            return [basic] if tier == 'basic' else [complex_task] if tier == 'complex' else [basic, complex_task]
+        def run(task, cli, model, results, arm, python, index):
+            return {'task': task['id'], 'format': task['format'], 'run': index,
+                    'pass': True, 'passed': True, 'check_message': 'verified', 'tool_calls': 1,
+                    'duration_seconds': 0.01, 'seconds': 0.01, 'agent_exit_code': 0, 'timed_out': False}
+        for tier, ids in [('basic', [basic['id']]), ('complex', [complex_task['id']]), ('all', [basic['id'], complex_task['id']])]:
+            results = self.root / ('tier-' + tier)
+            with self.subTest(tier=tier), patch.object(runner.checker, 'tasks', side_effect=available), \
+                    patch.object(runner, 'mcp_ready', return_value=0), patch.object(runner, 'run_task', side_effect=run):
+                arguments = [] if tier == 'basic' else ['--tier', tier]
+                self.assertEqual(self.invoke('--suite', 'v3', *arguments, self.command(), results, 'test-model'), 0)
+                report = json.loads((results / 'results.json').read_text())
+                self.assertEqual(report['tier'], tier)
+                self.assertEqual(report['task_ids'], ids)
+                self.assertEqual([record['task'] for record in report['results']], ids)
+        with self.assertRaises(ValueError):
+            runner.suite_tasks('v2', 'complex')
+
+    def test_answer_artifact_without_document_output(self):
+        from types import SimpleNamespace
+        base = runner.checker.tasks()[0]
+        source = runner.checker.fixture(base)
+        task = dict(base, id='xlsx-complex-answer-runner', suite='v3', tier='complex',
+                    expected={'answer': {'width': 10, 'hidden': False}})
+        results = self.root / 'answer-results'
+        results.mkdir()
+        def process(command, cwd, stdout, **kwargs):
+            (Path(cwd) / 'answer.json').write_text(json.dumps(task['expected']['answer']))
+            stdout.write(json.dumps({'type': 'item.completed', 'item': {'id': 'answer-write',
+                         'type': 'file_change', 'changes': [{'path': 'answer.json'}]}}) + '\n')
+            return SimpleNamespace(returncode=0, stdin=None, stdout=None, stderr=None,
+                                   poll=lambda: 0, wait=lambda timeout: 0)
+        with patch.object(runner.checker, 'fixture', return_value=source), \
+                patch.object(runner, 'command_line', return_value=['stand-in']), \
+                patch.object(runner.subprocess, 'Popen', side_effect=process):
+            record = runner.run_task(task, None, 'test-model', results, arm='generic', python=self.python)
+        self.assertTrue(record['pass'], record['check_message'])
+        self.assertEqual(record['tool_calls'], 1)
+        output = results / task['id']
+        self.assertEqual(json.loads((output / 'answer.json').read_text()), task['expected']['answer'])
+        self.assertFalse((output / task['output']).exists())
+
     def test_fixture_sha256_is_reverified_before_each_run(self):
         results = self.root / 'pins'
         results.mkdir()

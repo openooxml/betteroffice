@@ -1,0 +1,82 @@
+[
+  {
+    "id": "docx-v3-complex-review-agreement",
+    "tier": "complex",
+    "format": "docx",
+    "title": "Prepare the host agreement for scheduling review",
+    "difficulty": 3,
+    "fixture": "h-us-doe-2ce2bcc3619c.docx",
+    "input": "input.docx",
+    "output": "output.docx",
+    "prompt": "Prepare input.docx for scheduling review. In the FEMP team's list, immediately after “Provide free, regional training at an agreed upon time and location.”, add “Confirm the training dates with the hosting agency before booking travel.” as another item in the same bulleted list, at the same level. Add a comment by Scheduling Review on the exact phrase “agreed upon time and location.” in the original item, saying “Please confirm the dates before travel is booked.” Preserve all other text, formatting, sections and document content. Save output.docx and leave input.docx unchanged.",
+    "expected": {
+      "comments": [
+        {
+          "action": "add",
+          "part": "word/document.xml",
+          "paragraph": "Provide free, regional training at an agreed upon time and location.",
+          "phrase": "agreed upon time and location.",
+          "author": "Scheduling Review",
+          "text": "Please confirm the dates before travel is booked."
+        }
+      ],
+      "list_items": [
+        {
+          "part": "word/document.xml",
+          "after": "Provide free, regional training at an agreed upon time and location.",
+          "text": "Confirm the training dates with the hosting agency before booking travel."
+        }
+      ]
+    }
+  },
+  {
+    "id": "xlsx-v3-complex-review-request",
+    "tier": "complex",
+    "format": "xlsx",
+    "title": "Make the NSF request easier to review",
+    "difficulty": 3,
+    "fixture": "h-r23-nsf-budget-5379eed7c127.xlsx",
+    "input": "input.xlsx",
+    "output": "output.xlsx",
+    "prompt": "In input.xlsx, on NSF Summary (headed “NATIONAL SCIENCE FOUNDATION SUMMARY TABLE”), make E8:E15 easier to review: add conditional formatting for values below 300, with pale red fill FFFFC7CE and bold dark red font FF9C0006. Create the workbook-scoped defined name DirectorateRequests referring to 'NSF Summary'!$E$8:$E$15. Keep every budget figure, formula, existing format and other workbook content intact. Save output.xlsx and leave input.xlsx unchanged.",
+    "expected": {
+      "conditional_formats": [
+        {
+          "sheet": "NSF Summary",
+          "sqref": "E8:E15",
+          "type": "cellIs",
+          "operator": "lessThan",
+          "formulas": ["300"],
+          "dxf": {"fill": "FFFFC7CE", "font": {"bold": true, "color": "FF9C0006"}}
+        }
+      ],
+      "defined_names": [
+        {"action": "add", "name": "DirectorateRequests", "formula": "'NSF Summary'!$E$8:$E$15"}
+      ]
+    }
+  },
+  {
+    "id": "pptx-v3-complex-review-cover",
+    "tier": "complex",
+    "format": "pptx",
+    "title": "Prepare a review cover and spare slide",
+    "difficulty": 3,
+    "fixture": "govuk-publication-attachments-1d3ddf0a4a56.pptx",
+    "input": "input.pptx",
+    "output": "output.pptx",
+    "prompt": "In input.pptx, change the first slide, titled “Tackling high blood pressure”, to the existing “Title (1 line) and Content” layout. Map Title 1 to that layout's Title 1 placeholder and keep its text “Tackling high blood pressure”; map Subtitle 2 to the layout's Content Placeholder 2 and change its text to “Review copy – prepared for discussion”. Keep the slide's direct formatting. Duplicate this revised slide immediately after slide 1, including its layout, images and an independent copy of its speaker notes. Preserve all remaining slides and package content. Save output.pptx and leave input.pptx unchanged.",
+    "expected": {
+      "layout": [
+        {
+          "slide": 1,
+          "name": "Title (1 line) and Content",
+          "placeholders": {
+            "Title 1": {"layout_placeholder": "Title 1", "text": "Tackling high blood pressure"},
+            "Subtitle 2": {"layout_placeholder": "Content Placeholder 2", "text": "Review copy – prepared for discussion"}
+          }
+        }
+      ],
+      "duplicate_slide": [{"slide": 1, "after": 1}]
+    }
+  }
+]

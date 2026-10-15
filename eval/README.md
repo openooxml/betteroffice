@@ -346,6 +346,123 @@ per-format counts and `V3 VALIDATE accepted=… untouched_rejected=… mutants_r
 The required v2 checker regression counts remain 65/30/157. Runner tests need the
 v2 fixture directory in `FORMAT_EVAL_FIXTURES` when running without downloads.
 
+#### Complex tier
+
+`formats/v3/complex.json` uses the same task schema with `"tier":"complex"`.
+`run.py --suite v3 --tier basic|complex|all` defaults to basic; the validator
+checks both tiers and reports each separately. All edits preserve the rest of
+the package. Complex outputs additionally require a content type for every
+part, valid relationship targets and references, unique touched identities,
+and independent notes parts with the correct owning slides.
+
+Each op is a nonempty array under `expected`. Part paths are package-relative;
+paragraphs, phrases, comment bodies, shape names and layout names are exact,
+unique anchors. Indexes are one-based; a duplicate's `after:0` means first.
+Ops execute in the order shown below, with array entries applied sequentially;
+anchors refer to the state at that point. Formula strings omit the leading `=`.
+These are the JSON record shapes (optional fields are stated below):
+
+```json
+{
+  "tracked_changes": [
+    {"action":"insert","part":"word/document.xml","paragraph":"Exact paragraph","after":"Exact phrase","text":" inserted text","author":"Reviewer"},
+    {"action":"delete","part":"word/document.xml","paragraph":"Exact paragraph","text":"deleted phrase","author":"Reviewer"},
+    {"action":"accept","part":"word/document.xml","text":"Exact existing revision text"},
+    {"action":"reject","part":"word/document.xml","text":"Exact existing revision text"}
+  ],
+  "comments": [
+    {"action":"add","part":"word/document.xml","paragraph":"Exact paragraph","phrase":"Exact phrase","author":"Reviewer","text":"Comment body"},
+    {"action":"reply","part":"word/document.xml","comment":"Exact parent body","author":"Reviewer","text":"Reply body"},
+    {"action":"resolve","part":"word/document.xml","comment":"Exact parent body"}
+  ],
+  "list_items": [{"part":"word/document.xml","after":"Exact list item","text":"New item"}],
+  "merge_cells": [{"part":"word/document.xml","table":1,"range":[1,1,2,3]}],
+  "section_setup": [{"part":"word/document.xml","anchor":"Exact body paragraph","position":"before","orientation":"landscape","width":15840,"height":12240,"margins":{"top":720,"bottom":720,"left":720,"right":720,"header":360,"footer":360,"gutter":0}}]
+}
+```
+
+Word accepts/rejects only the identified insertion/deletion, preserving other
+revisions. New revisions retain the phrase's character formatting. New list
+items copy the anchor's paragraph/run properties and effective `numId`/`ilvl`.
+Word `table` is a one-based index in XML order or an exact `tblCaption` string;
+`range` is inclusive
+`[firstRow,firstColumn,lastRow,lastColumn]` on initially unmerged cells. Merges
+keep all paragraphs in row-major order in the top-left cell, with summed cell
+widths, `gridSpan` and vertical continuations. `position` is `before` or `after`;
+the new section runs from that boundary to the enclosing section's original
+end. Page sizes and margins use twips, and `orientation` is `portrait` or
+`landscape`. Existing section properties and header/footer links stay intact.
+
+```json
+{
+  "conditional_formats": [{"sheet":"Data","sqref":"B2:B9","type":"cellIs","operator":"lessThan","formulas":["0"],"dxf":{"fill":"FFFFC7CE","font":{"bold":true,"italic":false,"color":"FF9C0006"}}}],
+  "chart": [{"part":"xl/charts/chart1.xml","title":"Costs","series":[{"name":"Actual","categories":"Data!$A$2:$A$9","values":"Data!$B$2:$B$9"}]}],
+  "defined_names": [
+    {"action":"add","name":"Costs","formula":"Data!$B$2:$B$9"},
+    {"action":"rename","old":"OldCosts","name":"ReviewCosts"}
+  ],
+  "autofilter_sort": [{"sheet":"Data","ref":"A1:C10","range":"A2:C9","keys":[{"column":"A","ascending":true},{"column":"B","ascending":false}],"fixed_rows":[1,10]}],
+  "dependents": [{"input":{"sheet":"Data","cell":"B2","value":5},"cells":[{"sheet":"Data","cell":"C2","formula":"B2*2","value":10}]}]
+}
+```
+
+Conditional-format `operator` and `stopIfTrue` (boolean, default false) are
+optional. `dxf.fill` is an ARGB solid fill; `dxf.font` accepts any subset of
+`bold`, `italic`, `color`; both are optional. Chart specs list every existing
+series in order, including scatter `xVal`/`yVal` references. Series/title text
+and data references are compared independently of optional chart caches.
+Names optionally take `localSheetId` (zero-based workbook index); omission
+means workbook scope. Renames update worksheet, defined-name, chart,
+validation and conditional formulas respecting scope, string literals and
+external/structured references. Sort keys are ordered by precedence, sorting
+text case-insensitively, numbers numerically and ties stably. The data range
+excludes fixed header/summary rows. Cell styles move with their cells; row
+properties and cells outside the range stay fixed. Relative formulas move
+with cells; shared and expanded formulas are equivalent. Sort ranges cannot
+contain array formulas. `dependents.cells`
+must enumerate every dependent's formula and exact cache. No other formula
+cache may change. Cell values are JSON numbers, strings, booleans, null or
+`{"error":"#VALUE!"}`; cached string formulas use string cache storage.
+
+```json
+{
+  "layout": [{"slide":1,"name":"Title and Content","placeholders":{"Title 1":{"layout_placeholder":"Title 1","text":"Review"}}}],
+  "group_edits": [{"part":"ppt/slides/slide1.xml","group":"Group 1","shape":"Text 2","old":"Exact phrase","new":"Replacement"}],
+  "table_structure": [
+    {"part":"ppt/slides/slide1.xml","table":1,"axis":"row","action":"insert","index":2,"template":1,"texts":["A","B"]},
+    {"part":"ppt/slides/slide1.xml","table":1,"axis":"column","action":"delete","index":3}
+  ],
+  "duplicate_slide": [{"slide":1,"after":2}],
+  "comments": [{"slide":1,"comment":"Exact parent body","author":"Reviewer","text":"Reply body"}]
+}
+```
+
+Layout mappings identify source shapes and target layout placeholders by name;
+they preserve direct shape/text formatting. Group edits preserve nesting and
+every transform. Table axes are `row`/`column`, actions `insert`/`delete`;
+`index` is the insertion position or deletion index. Inserts require `template`
+and `texts`, one text per cell along the inserted axis, and copy all template
+properties. Structure edits start with unmerged cells. Duplicates clone the
+slide's relationships, sharing image/layout assets and copying notes/comments
+parts. Slide comment replies keep a native `p15:threadingInfo` parent link.
+
+Equivalent encodings accepted by complex checks include Word comment ranges or
+point references at the exact phrase's start/end, revision/run splits,
+numbering inherited from styles or direct `numPr`, legacy horizontal `hMerge`
+or `gridSpan`, implicit/explicit vertical merge continuation, arbitrary fresh
+comment/revision/relationship IDs and
+new part names, Excel differential-format pool reorderings, split/grouped
+conditional-format ranges with the same rule priority, inline/reference chart
+names/titles, and omitted/regenerated chart caches. All basic-tier allowances
+continue to apply; untouched content still counts.
+
+An answer task has only `"expected":{"answer":<exact JSON value>}`. Its prompt
+asks a layout question and specifies `answer.json`, written beside the usual
+output path; `output` may itself be `answer.json`. No document output is
+required. Object key order is irrelevant; extra keys, wrong types (including
+booleans substituted for numbers), duplicate keys and invalid JSON fail. The
+runner retains `answer.json` in the task/run results directory.
+
 ## Usability tasks
 
 These are a small sample for reviewing how an agent works with the tools, not a

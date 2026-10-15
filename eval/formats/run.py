@@ -364,7 +364,9 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
     log, errors = directory / 'codex.jsonl', directory / 'codex.stderr'
     if arm.startswith('scripted-'):
         log, errors = directory / 'script.jsonl', directory / 'script.stderr'
-    for artifact in (log, errors, directory / task['output']):
+    answer_task = task.get('tier') == 'complex' and 'answer' in task['expected']
+    artifact_name = 'answer.json' if answer_task else task['output']
+    for artifact in (log, errors, directory / artifact_name):
         artifact.unlink(missing_ok=True)
     started = time.monotonic()
     exit_code, timed_out, failure, calls = None, False, None, 0
@@ -442,9 +444,9 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None, run=Non
             if not calls:
                 message = 'agent made no tool calls' + ('; ' + message if not passed else '')
                 passed = False
-            output = workspace / task['output']
+            output = workspace / artifact_name
             if output.is_file():
-                shutil.copyfile(output, directory / task['output'])
+                shutil.copyfile(output, directory / artifact_name)
         else:
             message = failure
     seconds = round(time.monotonic() - started, 3)
@@ -492,11 +494,13 @@ def positive_integer(value):
     return number
 
 
-def suite_tasks(suite):
+def suite_tasks(suite, tier='basic'):
+    if suite != 'v3' and tier != 'basic':
+        raise ValueError('--tier complex|all requires --suite v3')
     if suite == 'v2':
         return checker.tasks()
     try:
-        return checker.tasks(suite=suite)
+        return checker.tasks(suite=suite) if tier == 'basic' else checker.tasks(suite=suite, tier=tier)
     except TypeError:
         raise ValueError('v3 tasks are unavailable: check.py must support tasks(suite=...)') from None
 
@@ -526,6 +530,7 @@ def main():
     parser.add_argument('--arm', choices=(*ALLOWED_ITEMS, 'scripted-lib', 'scripted-bo'), default='betteroffice')
     parser.add_argument('--python', help='generic/scripted-lib arm: a Python that imports openpyxl, pptx and docx')
     parser.add_argument('--suite', choices=('v2', 'v3'), default='v2')
+    parser.add_argument('--tier', choices=('basic', 'complex', 'all'), default='basic')
     parser.add_argument('--runs', type=positive_integer, default=None, help='independent runs per task (default: 1)')
     parser.add_argument('--jobs', type=positive_integer, default=1, help='concurrent task/runs (default: 1, maximum: 4)')
     parser.add_argument('--tasks', help='comma-separated task IDs')
@@ -559,7 +564,7 @@ def main():
             raise ValueError('results-dir must be outside the repository')
         if results.exists() and any(results.iterdir()) and not args.resume:
             raise ValueError('results-dir must be new or empty')
-        tasks = suite_tasks(args.suite)
+        tasks = suite_tasks(args.suite, args.tier)
         selected = {name.strip() for name in args.tasks.split(',')} if args.tasks is not None else None
         if selected is not None and not selected <= {task['id'] for task in tasks}:
             raise ValueError('unknown task IDs: ' + ', '.join(sorted(selected - {task['id'] for task in tasks})))
@@ -570,6 +575,8 @@ def main():
         metadata = {'suite': args.suite, 'runs': runs, 'agent': 'none' if scripted else args.agent,
                     'task_ids': [task['id'] for task in tasks], 'cross_model': args.cross_model,
                     'run_directories': run_directories}
+        if args.suite == 'v3':
+            metadata['tier'] = args.tier
         if library:
             metadata['python'] = str(python)
         else:
