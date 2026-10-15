@@ -1,8 +1,6 @@
 ---
 "@betteroffice/xlsx": patch
-"@betteroffice/docx": patch
-"@betteroffice/pptx": patch
 "@betteroffice/rust-crates": patch
 ---
 
-Left axis labels in xlsx charts are no longer clipped when chart fonts fall back to wider fonts and are right-aligned to the axis. Docx charts leave a little more room for these labels.
+Prevents clipped currency ticks and bar category labels in xlsx charts by default. Adds opt-in `PlotSink::anchors_text_end` and `PlotSink::push_end_aligned_text` capabilities for anchoring text at its right edge.
