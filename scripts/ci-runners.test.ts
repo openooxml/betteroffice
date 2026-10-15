@@ -316,7 +316,8 @@ describe('CI runner routing', () => {
         .filter(({ file }) => file === 'ci.yml' || file === 'e2e.yml')
         .filter((entry) => !kyoraJobs.includes(entry))
         .map(({ name }) => name)
-    ).toEqual(['ci.yml route', 'e2e.yml route', 'e2e.yml publish']);
+        .sort()
+    ).toEqual(['ci.yml route', 'e2e.yml publish', 'e2e.yml route']);
     for (const { file, name, runners } of jobs) {
       if (file === 'ci.yml' || file === 'e2e.yml') continue;
       for (const labels of resolved(runners)) {
