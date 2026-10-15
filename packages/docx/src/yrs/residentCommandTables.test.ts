@@ -62,6 +62,19 @@ function validFocus(arm: Arm, result: { selection: unknown }): { story: string; 
   return focus!;
 }
 
+function selectCells(arm: Arm, anchor: [number, number], head: [number, number], index = 0): void {
+  const at = ([row, column]: [number, number]) => ({ story: 'body', tableIndex: index, row, column });
+  arm.engine.setCellSelection({ anchor: at(anchor), head: at(head) });
+}
+
+function typedAfterTable(arm: Arm, text: string, ordinal = 0): boolean {
+  const segments = arm.engine.geometryReader.storySegments('body');
+  const tables = segments.flatMap((segment, index) => segment.kind === 'embed' && segment.embedKind === 'table' ? [index] : []);
+  const typed = segments.findIndex((segment) => segment.kind === 'text' && segment.text.includes(text));
+  const next = tables[ordinal + 1] ?? Infinity;
+  return tables[ordinal] !== undefined && tables[ordinal]! < typed && typed < next;
+}
+
 function undo(arm: Arm) {
   return execute(arm, tableCommand(arm, 'undo', {}));
 }
@@ -93,9 +106,12 @@ test('insert_table_row_above_targets_the_focused_row', async () => {
   const arm = await inCell('C');
   const before = JSON.stringify(payload(arm));
   const story = cellStory(arm, 'C');
-  expect(execute(arm, tableCommand(arm, 'insertTableRow', { side: 'above' })).status).toBe('applied');
+  const applied = execute(arm, tableCommand(arm, 'insertTableRow', { side: 'above' }));
+  expect(applied.status).toBe('applied');
   expect(payload(arm)!.rows).toHaveLength(3);
   expect(cellText(arm, story)).toBe('C');
+  expect(validFocus(arm, applied).story).toBe(story);
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 2, column: 0 }, head: { row: 2, column: 0 } });
   expect(undo(arm).status).toBe('applied');
   expect(JSON.stringify(payload(arm))).toBe(before);
   expect(redo(arm).status).toBe('applied');
@@ -121,8 +137,12 @@ test('insert_table_column_right_applies_undoes_redoes_and_types', async () => {
 test('insert_table_column_left_targets_the_focused_column', async () => {
   const arm = await inCell('B');
   const before = JSON.stringify(payload(arm));
-  expect(execute(arm, tableCommand(arm, 'insertTableColumn', { side: 'left' })).status).toBe('applied');
+  const story = cellStory(arm, 'B');
+  const applied = execute(arm, tableCommand(arm, 'insertTableColumn', { side: 'left' }));
+  expect(applied.status).toBe('applied');
   expect(anchors(arm).filter((anchor) => anchor.row === 0)).toHaveLength(3);
+  expect(validFocus(arm, applied).story).toBe(story);
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 2 }, head: { row: 0, column: 2 } });
   expect(undo(arm).status).toBe('applied');
   expect(JSON.stringify(payload(arm))).toBe(before);
   expect(redo(arm).status).toBe('applied');
@@ -180,18 +200,12 @@ test('merge_table_cells_merges_split_restores_and_round_trips', async () => {
   const arm = await inCell();
   const before = JSON.stringify(payload(arm));
   const storyA = cellStory(arm, 'A');
-  const storyB = cellStory(arm, 'B');
   const paraA = arm.engine.paragraphs(storyA)[0]!.paraId;
-  const paraB = arm.engine.paragraphs(storyB)[0]!.paraId;
   expect(execute(arm, tableCommand(arm, 'mergeTableCells', {
     selection: selection(paraA, 0, 0, storyA),
   }))).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
-  const ranged = execute(arm, tableCommand(arm, 'mergeTableCells', {
-    selection: {
-      anchor: { story: storyA, paraId: paraA, offset: 0 },
-      focus: { story: storyB, paraId: paraB, offset: 0 },
-    },
-  }));
+  selectCells(arm, [0, 0], [0, 1]);
+  const ranged = execute(arm, tableCommand(arm, 'mergeTableCells', {}));
   expect(ranged.status).toBe('applied');
   expect(anchors(arm).filter((anchor) => anchor.row === 0)).toHaveLength(1);
   expect(anchors(arm)[0]).toMatchObject({ column: 0, colspan: 2 });
@@ -216,19 +230,12 @@ test('merge_table_cells_merges_split_restores_and_round_trips', async () => {
 test('split_table_cell_subdivides_and_reports_size_refusals', async () => {
   const arm = await inCell();
   const storyA = cellStory(arm, 'A');
-  const storyD = cellStory(arm, 'D');
-  const paraA = arm.engine.paragraphs(storyA)[0]!.paraId;
-  const paraD = arm.engine.paragraphs(storyD)[0]!.paraId;
   const version = arm.engine.proposalEngine.version();
   expect(execute(arm, tableCommand(arm, 'splitTableCell', { rows: 1, columns: 1 })))
     .toMatchObject({ status: 'refused', reason: 'invalid-table-size' });
   expect(arm.engine.proposalEngine.version()).toBe(version);
-  const merged = execute(arm, tableCommand(arm, 'mergeTableCells', {
-    selection: {
-      anchor: { story: storyA, paraId: paraA, offset: 0 },
-      focus: { story: storyD, paraId: paraD, offset: 1 },
-    },
-  }));
+  selectCells(arm, [0, 0], [1, 1]);
+  const merged = execute(arm, tableCommand(arm, 'mergeTableCells', {}));
   expect(merged.status).toBe('applied');
   expect(anchors(arm)).toHaveLength(1);
   const mergedJson = JSON.stringify(payload(arm));
@@ -361,6 +368,53 @@ test('explicit_selection_targets_that_cell_when_the_caret_is_elsewhere', async (
   expect(validFocus(arm, applied).story).toBe(storyC);
   expect(undo(arm).status).toBe('applied');
   expect(payload(arm)!.rows).toHaveLength(2);
+}, TIMEOUT);
+
+test('cell_range_commands_apply_to_every_selected_cell', async () => {
+  const arm = await inCell('A');
+  selectCells(arm, [0, 0], [1, 1]);
+  expect(execute(arm, tableCommand(arm, 'setTableCellShading', { color: '00FF00' })).status).toBe('applied');
+  expect(payload(arm)!.rows.flatMap((row) => row.cells.map((cell) => cell.tcPr?.backgroundColor))).toEqual(['00FF00', '00FF00', '00FF00', '00FF00']);
+  selectCells(arm, [0, 0], [1, 0]);
+  const deleted = execute(arm, tableCommand(arm, 'deleteTableRow', {}));
+  expect(deleted.status).toBe('applied');
+  expect(payload(arm)).toBeNull();
+  expect(validFocus(arm, deleted).story).toBe('body');
+}, TIMEOUT);
+
+test('undo_of_a_row_holding_the_caret_parks_it_after_the_table', async () => {
+  const arm = await inCell('A');
+  const before = JSON.stringify(payload(arm));
+  expect(execute(arm, tableCommand(arm, 'insertTableRow', { side: 'below' })).status).toBe('applied');
+  const added = anchors(arm).find((anchor) => anchor.row === 1 && anchor.column === 0)!.story;
+  const paraId = arm.engine.paragraphs(added)[0]!.paraId;
+  expect(execute(arm, tableCommand(arm, 'select', { selection: selection(paraId, 0, 0, added) })).status).toBe('noop');
+  const undone = undo(arm);
+  expect(undone.status).toBe('applied');
+  expect(JSON.stringify(payload(arm))).toBe(before);
+  expect(validFocus(arm, undone).story).toBe('body');
+  expect(execute(arm, tableCommand(arm, 'insertText', { text: 'x' })).status).toBe('applied');
+  expect(JSON.stringify(payload(arm))).toBe(before);
+  expect(typedAfterTable(arm, 'x')).toBe(true);
+}, TIMEOUT);
+
+test('undo_parks_the_caret_after_the_live_table_when_a_table_was_inserted_before_it', async () => {
+  const arm = await openCommandEngine([], { bodyXml: body });
+  const first = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, tableCommand(arm, 'select', { selection: selection(first, 6, 6, 'body') })).status).toBe('noop');
+  expect(execute(arm, tableCommand(arm, 'insertTable', { rows: 1, columns: 1 })).status).toBe('applied');
+  await inCellOn(arm, 'A');
+  const tableIndex = arm.engine.geometryReader.storySegments('body')
+    .filter((segment) => segment.kind === 'embed' && segment.embedKind === 'table').length - 1;
+  expect(tableIndex).toBe(1);
+  expect(execute(arm, tableCommand(arm, 'insertTableRow', { side: 'below' })).status).toBe('applied');
+  const added = anchors(arm, 'body', 1).find((anchor) => anchor.row === 1 && anchor.column === 0)!.story;
+  const paraId = arm.engine.paragraphs(added)[0]!.paraId;
+  expect(execute(arm, tableCommand(arm, 'select', { selection: selection(paraId, 0, 0, added) })).status).toBe('noop');
+  expect(undo(arm).status).toBe('applied');
+  expect(payload(arm, 'body', 1)!.rows).toHaveLength(2);
+  expect(execute(arm, tableCommand(arm, 'insertText', { text: 'x' })).status).toBe('applied');
+  expect(typedAfterTable(arm, 'x', 1)).toBe(true);
 }, TIMEOUT);
 
 test('suggesting_insert_table_row_stamps_a_revision_that_reject_removes', async () => {

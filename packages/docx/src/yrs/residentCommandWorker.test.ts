@@ -2398,7 +2398,7 @@ test('worker orders table structure commands with single version steps duplicate
     expect(selected.version).toBe(0);
     const inserted = await client.edit(intent(2, 0, 'insertTableColumn', { side: 'right' }));
     expect(inserted).toMatchObject({ version: 1, outcomes: [{ status: 'applied' }] });
-    expect(inserted.selection?.focus.story).toBe(cellA.story);
+    expect(engine.selection()?.head.story).toBe(cellA.story);
     expect(cellObjects(inserted)).toHaveLength(6);
     expect(cellObjects(inserted).map((cell) => cell.rects[0]))
       .not.toEqual(cellObjects(initial).map((cell) => cell.rects[0]));
@@ -2432,12 +2432,14 @@ test('worker refreshes deleted cell handles and resizes merged cells', async () 
     expect(refused.version).toBe(1);
     const undone = await client.edit(intent(3, 1, 'undo', {}));
     expect(undone.outcomes[0]?.status).toBe('applied');
-    const anchor = cellPoint(engine, 'A').selection.anchor;
-    const focus = cellPoint(engine, 'B').selection.focus;
-    const merged = await client.edit(intent(4, 2, 'mergeTableCells', { selection: { anchor, focus } }));
+    expect((await client.edit(intent(4, 2, 'select', { selection: cellPoint(engine, 'A').selection }))).outcomes[0]?.status).toBe('noop');
+    engine.setCellSelection({
+      anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 }, head: { story: 'body', tableIndex: 0, row: 0, column: 1 },
+    });
+    const merged = await client.edit(intent(5, 2, 'mergeTableCells', {}));
     expect(merged.outcomes[0]?.status).toBe('applied');
     const mergedCell = cellObjects(merged).find((cell) => cell.story === cellPoint(engine, 'A').story)!;
-    const resized = await client.edit(intent(5, 3, 'resizeObject', {
+    const resized = await client.edit(intent(6, 3, 'resizeObject', {
       handle: mergedCell.handle, widthTwips: 2160, expectVersion: merged.frame!.payload.documentVersion!,
     }));
     expect(resized.outcomes[0]?.status).toBe('applied');
