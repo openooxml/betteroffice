@@ -441,6 +441,7 @@ describe('validClipboardFragment rust parity', () => {
 describe('applyClipboardFragment', () => {
   function fakeEngine(calls: string[]): ClipboardPasteEngine {
     const engine = {
+      validateTableFragment: () => {},
       deleteRange: (range: { story: string; start: { paraId: string; offset: number } }) => {
         calls.push('delete');
         return {

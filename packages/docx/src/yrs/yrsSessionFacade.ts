@@ -920,6 +920,9 @@ export function wrapSession(
           )
       );
     },
+    validateTableFragment: (table) => {
+      session.validate_table_fragment(JSON.stringify(table));
+    },
     insertRow: (at, side, suggesting) => {
       ensureUndo(at.story);
       return mutate(

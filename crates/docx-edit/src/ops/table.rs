@@ -1781,6 +1781,12 @@ impl EditingDoc {
         Ok(receipt)
     }
 
+    pub fn validate_table_fragment(fragment: &Value) -> OpResult<()> {
+        let mut remaining = MAX_FRAGMENT_CELLS;
+        validate_fragment_table(fragment, 1, &mut remaining)?;
+        Ok(())
+    }
+
     /// Inserts a clipboard table fragment at a story position, creating one
     /// story per cell with the fragment's content. Mirrors [`EditingDoc::insert_table`].
     pub fn insert_table_fragment(

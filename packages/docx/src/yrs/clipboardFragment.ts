@@ -97,10 +97,51 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
     budget.text -= entry.length;
     return budget.text >= 0;
   };
+  const spanOf = (tcPr: Record<string, unknown>, key: 'rowspan' | 'colspan'): number | null => {
+    const span = tcPr[key];
+    if (span === undefined || span === null) return 1;
+    if (typeof span !== 'number' || !Number.isInteger(span) || span < 1 || span > 1000) return null;
+    return span;
+  };
+  const formatOk = (format: unknown): boolean => {
+    if (format === undefined) return true;
+    if (!plainObject(format) || !jsonValue(format)) return false;
+    const boolOrNull = (entry: unknown): boolean => entry === undefined || entry === null || typeof entry === 'boolean';
+    if (!boolOrNull(format.bold) || !boolOrNull(format.italic)) return false;
+    const underline = format.underline;
+    if (underline !== undefined && underline !== null && typeof underline !== 'boolean' &&
+      !(plainObject(underline) &&
+        (underline.style === undefined || typeof underline.style === 'string') &&
+        (underline.color === undefined || typeof underline.color === 'string'))) return false;
+    const strike = format.strike;
+    if (strike !== undefined && strike !== null && typeof strike !== 'boolean' &&
+      !(plainObject(strike) && (strike.double === undefined || typeof strike.double === 'boolean'))) return false;
+    const color = format.color;
+    if (color !== undefined && color !== null) {
+      if (!plainObject(color)) return false;
+      const rgb = typeof color.rgb === 'string';
+      const theme = typeof color.themeColor === 'string';
+      if (rgb === theme) return false;
+      if (color.rgb !== undefined && !rgb) return false;
+      if (color.themeColor !== undefined && !theme) return false;
+    }
+    if (format.highlight !== undefined && format.highlight !== null && typeof format.highlight !== 'string') return false;
+    const fontSize = format.fontSize;
+    if (fontSize !== undefined && fontSize !== null &&
+      (typeof fontSize !== 'number' || !Number.isFinite(fontSize) || fontSize <= 0)) return false;
+    const fontFamily = format.fontFamily;
+    if (fontFamily !== undefined && fontFamily !== null &&
+      !(plainObject(fontFamily) && typeof fontFamily.ascii === 'string' &&
+        (fontFamily.hAnsi === undefined || typeof fontFamily.hAnsi === 'string'))) return false;
+    const other = format.other;
+    if (other !== undefined &&
+      !(plainObject(other) && !('ins' in other) && !('del' in other) && !('hyperlink' in other))) return false;
+    return true;
+  };
   const segment = (entry: unknown, depth: number): boolean => {
     if (!plainObject(entry) || !optionalMap(entry.attributes)) return false;
     switch (entry.kind) {
-      case 'text': return text(entry.text, false) && optionalMap(entry.format);
+      case 'text': return text(entry.text, false) && formatOk(entry.format);
       case 'tab': case 'break': return optionalMap(entry.payload);
       case 'pilcrow': return optionalMap(entry.properties);
       case 'table': return table(entry.table, depth + 1);
@@ -111,20 +152,49 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
     if (depth > MAX_FRAGMENT_DEPTH || !plainObject(entry) || !optionalMap(entry.tblPr) || entry.tblPr === undefined) return false;
     if (!Array.isArray(entry.grid) || !entry.grid.every(width => typeof width === 'number' && Number.isFinite(width) && width > 0)) return false;
     if (!Array.isArray(entry.rows) || entry.rows.length === 0 || entry.rows.length > 1000) return false;
-    return entry.rows.every(row => plainObject(row) && row.trPr !== undefined && optionalMap(row.trPr) &&
+    const rowsOk = entry.rows.every(row => plainObject(row) && row.trPr !== undefined && optionalMap(row.trPr) &&
       Array.isArray(row.cells) && row.cells.length <= 1000 && row.cells.every(cell => {
         if (!plainObject(cell) || cell.tcPr === undefined || !optionalMap(cell.tcPr)) return false;
         const tcPr = cell.tcPr as Record<string, unknown>;
-        for (const key of ['rowspan', 'colspan'] as const) {
-          const span = tcPr[key];
-          if (span !== undefined && span !== null &&
-            (typeof span !== 'number' || !Number.isInteger(span) || span < 1 || span > 1000)) return false;
-        }
+        if (spanOf(tcPr, 'rowspan') === null || spanOf(tcPr, 'colspan') === null) return false;
         if (cell.shading !== undefined && (typeof cell.shading !== 'string' || !/^[0-9a-f]{6}$/iu.test(cell.shading))) return false;
         if (--budget.cells < 0 || !Array.isArray(cell.content) || cell.content.length === 0) return false;
         const last = cell.content.at(-1);
         return plainObject(last) && last.kind === 'pilcrow' && cell.content.every(item => segment(item, depth));
       }));
+    if (!rowsOk) return false;
+    const rows = entry.rows as Array<{ cells: Array<{ tcPr: Record<string, unknown> }> }>;
+    const occupied: boolean[][] = rows.map(() => []);
+    let columns = 0;
+    let cellCount = 0;
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      let column = 0;
+      for (const cell of rows[rowIndex]!.cells) {
+        while (occupied[rowIndex]![column]) column += 1;
+        const rowspan = spanOf(cell.tcPr, 'rowspan')!;
+        const colspan = spanOf(cell.tcPr, 'colspan')!;
+        if (rowIndex + rowspan > rows.length || column + colspan > 1000) return false;
+        for (let r = rowIndex; r < rowIndex + rowspan; r += 1) {
+          for (let c = column; c < column + colspan; c += 1) {
+            if (occupied[r]![c]) return false;
+            occupied[r]![c] = true;
+          }
+        }
+        cellCount += 1;
+        column += colspan;
+        columns = Math.max(columns, column);
+      }
+    }
+    if (cellCount === 0) return false;
+    if (entry.grid.length > 0 && entry.grid.length !== columns) return false;
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      if (rows[rowIndex]!.cells.length === 0) {
+        for (let column = 0; column < columns; column += 1) {
+          if (!occupied[rowIndex]![column]) return false;
+        }
+      }
+    }
+    return true;
   };
   if (!plainObject(value) || !Array.isArray(value.paragraphs) || value.paragraphs.length === 0 ||
     value.paragraphs.length > MAX_FRAGMENT_PARAGRAPHS) return false;
@@ -138,7 +208,7 @@ export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegme
 /** @internal Engine surface a fragment paste needs. */
 export type ClipboardPasteEngine = Pick<
   YrsSession,
-  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment'
+  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment'
 >;
 
 /** @internal Inclusive grid bounds for {@link readTableFragment}. */
@@ -447,6 +517,9 @@ export function applyClipboardFragment(
   fragment: DocxClipboardFragment,
   suggesting?: YrsAuthor,
 ): YrsLoc {
+  for (const paragraph of fragment.paragraphs) {
+    for (const table of paragraph.tables ?? []) engine.validateTableFragment(table);
+  }
   let caret: YrsLoc = {
     story: range.story,
     paraId: range.start.paraId,

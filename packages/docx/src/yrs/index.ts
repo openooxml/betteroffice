@@ -1272,6 +1272,8 @@ export interface YrsSession extends CollaborationReplica {
     table: DocxTableFragment,
     suggesting?: YrsAuthor
   ): YrsTableFragmentReceipt;
+  /** Validates a clipboard table fragment without mutating; throws when invalid. */
+  validateTableFragment(table: DocxTableFragment): void;
   /** Inserts a column left or right of the cell that `at` resolves into. */
   insertColumn(at: YrsCellLoc, side: 'left' | 'right'): YrsTableReceipt;
   /** Deletes every row covered by an explicit rectangular cell range. */

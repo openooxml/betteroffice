@@ -3340,6 +3340,11 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
+    pub fn validate_table_fragment(&self, fragment_json: &str) -> Result<(), JsValue> {
+        let fragment: Value = serde_json::from_str(fragment_json).map_err(js_err)?;
+        EditingDoc::validate_table_fragment(&fragment).map_err(js_err)
+    }
+
     /// Inserts a row above (`after = false`) or below (`after = true`) the
     /// cell `at_json` names. `at_json` is a [`CellLoc`].
     pub fn insert_row(

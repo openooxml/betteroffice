@@ -551,6 +551,7 @@ export class EditSession {
      * caret right after the inserted table embed.
      */
     insert_table_fragment(story: string, para_id: string, offset: number, fragment_json: string, author_name?: string | null, author_date?: string | null): string;
+    validate_table_fragment(fragment_json: string): void;
     /**
      * Inserts `text` at `(story, para_id, offset)`. It must contain no
      * paragraph or line breaks, and it inherits the formatting at the
@@ -1878,6 +1879,7 @@ export interface InitOutput {
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_validate_table_fragment: (a: number, b: number, c: number) => [number, number];
     readonly editsession_version: (a: number) => [number, number];
     readonly editsession_written_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
