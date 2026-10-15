@@ -228,3 +228,25 @@ test('multi_cell_range_reports_one_rect_per_selected_cell', async () => {
   }
   expect(readResidentCellSelectionRects(arm.engine, frame, null)).toBeNull();
 }, TIMEOUT);
+
+test('merged_cell_range_reports_one_rect_per_distinct_cell_without_overlap', async () => {
+  const merged = paragraph('Before') + table([
+    cell('Merged', '<w:gridSpan w:val="2"/>'),
+    cell('C') + cell('D'),
+  ]) + paragraph('After');
+  const arm = await inCell(merged, 'Merged');
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+  const { frame } = layout(arm);
+  const rects = readResidentCellSelectionRects(arm.engine, frame, arm.engine.cellSelection());
+  expect(rects?.length).toBe(3);
+  for (let first = 0; first < (rects?.length ?? 0); first += 1) {
+    for (let second = first + 1; second < (rects?.length ?? 0); second += 1) {
+      const left = rects![first]!;
+      const right = rects![second]!;
+      const overlaps = left.pageIndex === right.pageIndex &&
+        left.x < right.x + right.width && right.x < left.x + left.width &&
+        left.y < right.y + right.height && right.y < left.y + left.height;
+      expect(overlaps).toBe(false);
+    }
+  }
+}, TIMEOUT);
