@@ -160,7 +160,7 @@ export function FormatGlyph({ format }: { format: string }) {
   return (
     <svg
       viewBox="0 0 240 180"
-      className="h-full w-full"
+      className="block h-full w-full"
       preserveAspectRatio="xMidYMid meet"
       aria-hidden="true"
     >
