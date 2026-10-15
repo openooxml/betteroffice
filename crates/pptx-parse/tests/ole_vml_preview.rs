@@ -22,7 +22,7 @@ fn ole_preview_resolves_media_through_the_vml_relationships() {
     let package = parse_pptx(&bytes).unwrap();
     let preview = picture(&package).expect("expected the legacy preview");
     assert_eq!(preview.media_part_path.as_deref(), Some(fixture::MEDIA));
-    assert_eq!(preview.relationship_id.as_deref(), Some("rId1"));
+    assert_eq!(preview.relationship_id, None);
     assert!(preview.crop.is_whole());
     assert_eq!(preview.geometry, "rect");
     let ShapeNode::GraphicFrame(frame) = &package.slides[0].shapes[0] else {
@@ -44,7 +44,10 @@ fn ole_preview_resolves_media_through_the_vml_relationships() {
 #[test]
 fn ole_fallback_resolves_office_spid_and_relationship_id() {
     let vml = fixture::VML
-        .replace("id=\"_x0000_s3075\"", "id=\"local\" o:spid=\"_x0000_s3075\"")
+        .replace(
+            "id=\"_x0000_s3075\"",
+            "id=\"local\" o:spid=\"_x0000_s3075\"",
+        )
         .replace("o:relid=", "r:id=");
     let object = format!(
         "<mc:AlternateContent><mc:Choice Requires=\"v\"><p:oleObj spid=\"wrong\"/></mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>",
@@ -127,7 +130,11 @@ fn vml_over_the_parse_limits_keeps_the_placeholder_and_opens() {
             },
             fixture::VML.replace(
                 "</xml>",
-                &format!("{}{}</xml>", "<v:group>".repeat(32), "</v:group>".repeat(32)),
+                &format!(
+                    "{}{}</xml>",
+                    "<v:group>".repeat(32),
+                    "</v:group>".repeat(32)
+                ),
             ),
         ),
     ] {

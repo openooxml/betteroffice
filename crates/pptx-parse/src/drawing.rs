@@ -56,7 +56,14 @@ pub(crate) fn common_slide_data(
     budget: &mut ParseBudget<'_>,
     elements: ShapeElements,
 ) -> Result<CommonSlideData, PptxError> {
-    common_slide_data_with_vml(root, relationships, part, budget, elements, &BTreeMap::new())
+    common_slide_data_with_vml(
+        root,
+        relationships,
+        part,
+        budget,
+        elements,
+        &BTreeMap::new(),
+    )
 }
 
 pub(crate) fn common_slide_data_with_vml(
@@ -148,7 +155,14 @@ pub(crate) fn parse_diagram_drawing(
     let Some(tree) = root.descendants_named("spTree").first().copied() else {
         return Ok(Vec::new());
     };
-    parse_shape_children(tree, relationships, part, budget, elements, &BTreeMap::new())
+    parse_shape_children(
+        tree,
+        relationships,
+        part,
+        budget,
+        elements,
+        &BTreeMap::new(),
+    )
 }
 
 fn parse_shape_children(
@@ -418,7 +432,7 @@ fn parse_graphic_frame(
                     .and_then(|spid| previews.get(spid))?;
                 Some(Picture {
                     base: base.clone(),
-                    relationship_id: preview.relationship_id.clone(),
+                    relationship_id: None,
                     media_part_path: preview.media_part_path.clone(),
                     crop: PictureCrop::default(),
                     effects: Vec::new(),

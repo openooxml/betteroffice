@@ -450,7 +450,10 @@ fn parse_vml_previews(
             let Some(image) = shape.child("imagedata") else {
                 continue;
             };
-            let Some(id) = image.attribute("o:relid").or_else(|| image.attribute("r:id")) else {
+            let Some(id) = image
+                .attribute("o:relid")
+                .or_else(|| image.attribute("r:id"))
+            else {
                 continue;
             };
             let Some(media_path) = vml_relationships
@@ -466,11 +469,12 @@ fn parse_vml_previews(
                 .flatten()
                 .filter(|spid| wanted.contains(spid))
             {
-                previews.entry(spid.to_owned()).or_insert_with(|| PictureFill {
-                    relationship_id: Some(id.to_owned()),
-                    media_part_path: Some(media_path.to_owned()),
-                    ..PictureFill::default()
-                });
+                previews
+                    .entry(spid.to_owned())
+                    .or_insert_with(|| PictureFill {
+                        media_part_path: Some(media_path.to_owned()),
+                        ..PictureFill::default()
+                    });
             }
         }
     }
