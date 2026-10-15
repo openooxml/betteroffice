@@ -85,6 +85,48 @@ outside the task directory. The workspace-write sandbox restricts writes and dis
 network access. Reads are not sandboxed: this is an audit of logged commands, not
 filesystem isolation.
 
+### Repeated runs and statistics
+
+The default suite is `--suite v2`; `--suite v3` selects the corpus tasks.
+Use `--runs 3 --jobs 4` for three independent runs per task with at most four
+concurrent agents. Each run re-verifies its fixture and uses a fresh task
+directory. `--tasks id1,id2` selects task IDs; `--cross-model` selects tasks
+marked `cross_model`. Results go under `<task>/run-<n>/` when `--runs` is
+explicit or the suite is v3. The default v2 layout stays `<task>/`.
+`--resume` skips finished task/run pairs, including failures, using the
+atomically saved `results.json`; use the same selection and run settings.
+`--agent codex` is the default. Muse execution is unavailable until equivalent
+configuration isolation and file-access auditing can be established.
+
+| Arm | What runs | Proves | Does not prove |
+| --- | --- | --- | --- |
+| `generic` (A) | Model with sandboxed shell and Python libraries, network off, no MCP | How well the agent uses the standard open-source toolchain on these files | That this is the best possible generic workflow |
+| `betteroffice` (B) | Same model with only BetterOffice MCP tools | How well the agent uses BetterOffice's tools | Engine capability independently of tool use |
+| `scripted-lib` (C-lib) | Fixed Python scripts using python-docx, openpyxl or python-pptx, no model | Whether the libraries can express each edit without collateral damage | General library limits beyond these files or these best-effort scripts |
+| `scripted-bo` (C-bo) | Fixed BetterOffice MCP requests, no model | Whether BetterOffice can express each edit without collateral damage | General engine superiority beyond these files or these best-effort scripts |
+
+The gap between A and C-lib measures agent/workflow errors; C-lib versus C-bo
+compares toolkit capability on the tested files. Scripted arms use the same
+checker. `--arm scripted-lib --python <python> <results-dir>` runs
+`formats/scripted/lib/<task-id>.py` in the task directory; scripts write
+`output.<ext>` and emit one JSONL `{"type":"script.call","name":"..."}`
+event per library call counted. `--arm scripted-bo <agents-cli-command>
+<results-dir>` replays `formats/scripted/bo/<task-id>.json`, a list of
+`tools/call` requests. A value such as `{"$ref":"0.document"}` copies a
+field from an earlier reply's structured content (zero-based call index;
+dotted fields and array indices). Missing scripts fail with `no script`.
+
+Run `python3 eval/formats/aggregate.py <results.json>... --out <summary.json>
+--md <table.md>` to group by suite, arm, model and agent. It reports the pooled
+task/run pass rate, a task-level cluster bootstrap 95% interval (10,000
+resamples, seed 0), a pooled Wilson interval, observed all-runs-pass
+(`pass^N`) and any-pass (`pass@N`) rates, per-task pass counts and `p(1-p)`
+variance, and median calls and seconds. Paired comparisons report A minus B
+per-task pass rates and their bootstrap interval when suite, model and task
+sets match. `runs` is the observed runs per task, or null for mixed counts;
+`task_runs` is the pooled count. Combine disjoint shards only; duplicate
+task/run records fail. Partial results describe only recorded runs.
+
 ### Scoring
 
 A task passes only if all of these hold:

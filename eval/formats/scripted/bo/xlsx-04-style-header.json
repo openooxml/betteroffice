@@ -1,0 +1,5 @@
+[
+  {"method": "tools/call", "params": {"name": "office_open", "arguments": {"path": "input.xlsx"}}},
+  {"method": "tools/call", "params": {"name": "xlsx_format", "arguments": {"document": {"$ref": "0.document"}, "version": {"$ref": "0.version"}, "edits": [{"sheet": "Sales", "range": "A1:C1", "bold": true, "fill": "#D9EAF7"}]}}},
+  {"method": "tools/call", "params": {"name": "office_export", "arguments": {"document": {"$ref": "0.document"}, "path": "output.xlsx"}}}
+]

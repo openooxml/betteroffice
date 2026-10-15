@@ -1,0 +1,6 @@
+[
+  {"method": "tools/call", "params": {"name": "office_open", "arguments": {"path": "input.docx"}}},
+  {"method": "tools/call", "params": {"name": "office_grep", "arguments": {"document": {"$ref": "0.document"}, "query": "Sumary", "caseSensitive": true}}},
+  {"method": "tools/call", "params": {"name": "office_propose", "arguments": {"document": {"$ref": "0.document"}, "author": "Scripted eval", "edits": [{"match": {"$ref": "1.matches.0.match"}, "newText": "Summary"}]}}},
+  {"method": "tools/call", "params": {"name": "office_export", "arguments": {"document": {"$ref": "0.document"}, "proposal": {"$ref": "2.id"}, "path": "output.docx"}}}
+]

@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import concurrent.futures
 import hashlib
 import importlib.util
 import json
@@ -33,6 +34,11 @@ SHELL_FEATURES = ('shell_tool', 'unified_exec', 'unified_exec_tty')
 ALLOWED_ITEMS = {'betteroffice': ('agent_message', 'reasoning', 'error'),
                  'generic': ('agent_message', 'reasoning', 'error', 'command_execution', 'file_change')}
 TOOL_CALLS = {'betteroffice': 'BetterOffice MCP calls', 'generic': 'shell commands and file changes'}
+TOOL_CALLS.update({'scripted-bo': 'BetterOffice MCP calls', 'scripted-lib': 'logged library calls'})
+SCRIPTED = ROOT / 'scripted'
+MUSE_BLOCKER = ('Muse execution is unavailable: muse exec --help and muse --help expose --json and sandbox controls, '
+                'but do not establish how to ignore user configuration and configure exactly one MCP server '
+                'with no other file-reading tools, or the JSONL file-access audit schema.')
 module_spec = importlib.util.spec_from_file_location('format_check', ROOT / 'check.py')
 checker = importlib.util.module_from_spec(module_spec)
 module_spec.loader.exec_module(checker)
@@ -65,7 +71,21 @@ def required_tools(tasks):
     return sorted({'office_open', 'office_export', *(tool for task in tasks for tool in FORMAT_TOOLS[task['format']])})
 
 
-def mcp_tools(process, deadline):
+def script_value(value, replies):
+    if isinstance(value, dict):
+        if set(value) == {'$ref'}:
+            parts = value['$ref'].split('.')
+            result = replies[int(parts[0])]
+            for part in parts[1:]:
+                result = result[int(part)] if isinstance(result, list) else result[part]
+            return result
+        return {key: script_value(item, replies) for key, item in value.items()}
+    if isinstance(value, list):
+        return [script_value(item, replies) for item in value]
+    return value
+
+
+def mcp_tools(process, deadline, requests=None, log=None):
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     pending = b''
@@ -99,22 +119,46 @@ def mcp_tools(process, deadline):
                     return reply.get('result') or {}
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not selector.select(remaining):
-                raise RuntimeError(f'did not answer {method} within {STARTUP_TIMEOUT_SECONDS} seconds')
+                error = RuntimeError if requests is None else TimeoutError
+                raise error(f'did not answer {method} within {STARTUP_TIMEOUT_SECONDS if requests is None else TIMEOUT_SECONDS} seconds')
             chunk = os.read(process.stdout.fileno(), 65536)
             if not chunk:
                 raise RuntimeError(gone(method))
             pending += chunk
 
-    call(1, 'initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
-                           'clientInfo': {'name': 'format-eval-preflight', 'version': '1'}})
-    call(None, 'notifications/initialized')
-    names, cursor, identity = set(), None, 2
-    while True:
-        page = call(identity, 'tools/list', {'cursor': cursor} if cursor else {})
-        names.update(tool.get('name') for tool in page.get('tools', []))
-        cursor, identity = page.get('nextCursor'), identity + 1
-        if not cursor:
-            return names
+    try:
+        call(1, 'initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
+                               'clientInfo': {'name': 'format-eval-preflight', 'version': '1'}})
+        call(None, 'notifications/initialized')
+        names, cursor, identity = set(), None, 2
+        while True:
+            page = call(identity, 'tools/list', {'cursor': cursor} if cursor else {})
+            names.update(tool.get('name') for tool in page.get('tools', []))
+            cursor, identity = page.get('nextCursor'), identity + 1
+            if not cursor:
+                break
+        replies = []
+        for index, request in enumerate(requests or []):
+            if request.get('method') != 'tools/call':
+                raise ValueError('scripted-bo accepts only tools/call requests')
+            params = script_value(request['params'], replies)
+            if params['name'] not in names:
+                raise ValueError(f'unknown scripted tool: {params["name"]}')
+            item = {'id': f'script-{index}', 'type': 'mcp_tool_call', 'server': 'betteroffice', **params}
+            log.write(json.dumps({'type': 'item.started', 'item': item}) + '\n')
+            log.flush()
+            result = call(identity + index, 'tools/call', params)
+            log.write(json.dumps({'type': 'item.completed', 'item': item, 'result': result}) + '\n')
+            log.flush()
+            if result.get('isError'):
+                raise RuntimeError(f'{params["name"]} failed: {result}')
+            value = result.get('structuredContent')
+            if value is None:
+                value = json.loads(next(block['text'] for block in result.get('content', []) if block.get('type') == 'text'))
+            replies.append(value)
+        return names
+    finally:
+        selector.close()
 
 
 def mcp_ready(cli, required):
@@ -311,13 +355,20 @@ def stop_process(process):
     process.wait()
 
 
-def run_task(task, cli, model, results, arm='betteroffice', python=None):
+def run_task(task, cli, model, results, arm='betteroffice', python=None, run=None):
     environment = None if python is None else dict(os.environ, PATH=str(python.parent) + os.pathsep + os.environ.get('PATH', ''))
     directory = results / task['id']
-    directory.mkdir()
+    if run is not None:
+        directory /= f'run-{run}'
+    directory.mkdir(parents=True, exist_ok=True)
     log, errors = directory / 'codex.jsonl', directory / 'codex.stderr'
+    if arm.startswith('scripted-'):
+        log, errors = directory / 'script.jsonl', directory / 'script.stderr'
+    for artifact in (log, errors, directory / task['output']):
+        artifact.unlink(missing_ok=True)
     started = time.monotonic()
-    exit_code, timed_out, failure = None, False, None
+    exit_code, timed_out, failure, calls = None, False, None, 0
+    passed, message = False, ''
     temporary_root = Path(tempfile.gettempdir()).resolve()
     if temporary_root.is_relative_to(REPO):
         temporary_root = Path('/tmp').resolve()
@@ -326,55 +377,99 @@ def run_task(task, cli, model, results, arm='betteroffice', python=None):
     with tempfile.TemporaryDirectory(prefix='office-format-', dir=temporary_root) as temporary:
         workspace = Path(temporary).resolve()
         source = workspace / task['input']
-        shutil.copyfile(checker.fixture(task), source)
-        original_hash = hashlib.sha256(source.read_bytes()).digest()
-        with log.open('w') as stdout, errors.open('w') as stderr:
-            try:
-                process = subprocess.Popen(command_line(cli, workspace, model, task['prompt'], arm),
-                                           cwd=workspace, stdin=subprocess.DEVNULL, stdout=stdout,
-                                           stderr=stderr, env=environment, start_new_session=True)
+        try:
+            shutil.copyfile(checker.fixture(task), source)
+            original_hash = hashlib.sha256(source.read_bytes()).digest()
+        except Exception as error:
+            failure = f'fixture verification failed: {error}'
+        script = SCRIPTED / ('lib' if arm == 'scripted-lib' else 'bo') / (task['id'] + ('.py' if arm == 'scripted-lib' else '.json'))
+        if failure is None and arm.startswith('scripted-') and not script.is_file():
+            failure = 'no script'
+        if failure is None:
+            with log.open('w') as stdout, errors.open('w') as stderr:
+                process = None
                 try:
-                    exit_code = process.wait(timeout=TIMEOUT_SECONDS)
+                    if arm == 'scripted-bo':
+                        requests = json.loads(script.read_text())
+                        if not isinstance(requests, list):
+                            raise ValueError('scripted-bo requires a list of tools/call requests')
+                        process = subprocess.Popen([*cli, '--root', str(workspace)], cwd=workspace,
+                                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
+                                                   start_new_session=True)
+                        mcp_tools(process, started + TIMEOUT_SECONDS, requests, stdout)
+                        exit_code = 0
+                    else:
+                        command = [str(python), str(script)] if arm == 'scripted-lib' else command_line(cli, workspace, model, task['prompt'], arm)
+                        process = subprocess.Popen(command, cwd=workspace, stdin=subprocess.DEVNULL, stdout=stdout,
+                                                   stderr=stderr, env=environment, start_new_session=True)
+                        exit_code = process.wait(timeout=TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
                     timed_out = True
-                    stop_process(process)
-                    exit_code = process.returncode
-                except BaseException:
-                    stop_process(process)
-                    raise
-            except OSError as error:
-                failure = f'agent could not start: {error}'
-        try:
-            checker.check(task, workspace / task['output'])
-            if not source.is_file() or hashlib.sha256(source.read_bytes()).digest() != original_hash:
-                raise ValueError('input fixture was changed or removed')
-            passed, message = True, 'requested changes and preserved content verified; input unchanged'
-        except Exception as error:
-            passed, message = False, str(error)
-        runtime_error = failure or ('agent timed out after 600 seconds' if timed_out else
-                                   f'agent exited with code {exit_code}' if exit_code != 0 else None)
-        if runtime_error:
-            message = runtime_error + ('; ' + message if not passed else '')
-            passed = False
-        violation = access_violation(log, arm, workspace)
-        if violation:
-            message = violation + ('; ' + message if not passed else '')
-            passed = False
-        calls = tool_calls(log, arm)
-        if not calls:
-            message = 'agent made no tool calls' + ('; ' + message if not passed else '')
-            passed = False
-        output = workspace / task['output']
-        if output.is_file():
-            shutil.copyfile(output, directory / task['output'])
-    return {'task': task['id'], 'format': task['format'], 'pass': passed, 'check_message': message,
-            'tool_calls': calls, 'duration_seconds': round(time.monotonic() - started, 3),
+                except TimeoutError as error:
+                    timed_out, failure = True, str(error)
+                except Exception as error:
+                    failure = f'agent could not start: {error}' if isinstance(error, OSError) else str(error)
+                finally:
+                    if process is not None:
+                        if process.poll() is None:
+                            stop_process(process)
+                        if exit_code is None:
+                            exit_code = process.returncode
+                        for pipe in (process.stdin, process.stdout):
+                            if pipe is not None:
+                                pipe.close()
+            try:
+                checker.check(task, workspace / task['output'])
+                if not source.is_file() or hashlib.sha256(source.read_bytes()).digest() != original_hash:
+                    raise ValueError('input fixture was changed or removed')
+                passed, message = True, 'requested changes and preserved content verified; input unchanged'
+            except Exception as error:
+                passed, message = False, str(error)
+            runtime_error = failure or (f'agent timed out after {TIMEOUT_SECONDS} seconds' if timed_out else
+                                       f'agent exited with code {exit_code}' if exit_code != 0 else None)
+            if runtime_error:
+                message = runtime_error + ('; ' + message if not passed else '')
+                passed = False
+            if arm == 'scripted-lib':
+                calls = sum(event.get('type') == 'script.call' for event in events(log))
+            else:
+                audit_arm = 'betteroffice' if arm == 'scripted-bo' else arm
+                violation = access_violation(log, audit_arm, workspace)
+                if violation:
+                    message = violation + ('; ' + message if not passed else '')
+                    passed = False
+                calls = tool_calls(log, audit_arm)
+            if not calls:
+                message = 'agent made no tool calls' + ('; ' + message if not passed else '')
+                passed = False
+            output = workspace / task['output']
+            if output.is_file():
+                shutil.copyfile(output, directory / task['output'])
+        else:
+            message = failure
+    seconds = round(time.monotonic() - started, 3)
+    return {'task': task['id'], 'format': task['format'], 'run': run or 1,
+            'pass': passed, 'passed': passed, 'check_message': message, 'reason': message,
+            'tool_calls': calls, 'duration_seconds': seconds, 'seconds': seconds,
             'agent_exit_code': exit_code, 'timed_out': timed_out}
 
 
+def atomic_write(path, content):
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.' + path.name, delete=False) as stream:
+        staging = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(staging, path)
+        finally:
+            staging.unlink(missing_ok=True)
+
+
 def write_results(results, model, records, arm='betteroffice', formats=FORMATS, **metadata):
-    (results / 'results.json').write_text(json.dumps({'model': model, 'arm': arm, 'formats': list(formats), **metadata,
-                                                    'timeout_seconds': TIMEOUT_SECONDS, 'results': records}, indent=2) + '\n')
+    atomic_write(results / 'results.json', json.dumps({'model': model, 'arm': arm, 'formats': list(formats),
+                 'suite': 'v2', 'runs': 1, 'agent': 'codex', **metadata,
+                 'timeout_seconds': TIMEOUT_SECONDS, 'results': records}, indent=2) + '\n')
     passed = sum(record['pass'] for record in records)
     idle = sum(record['tool_calls'] == 0 for record in records)
     rows = [f'Model: `{model}`. Arm: `{arm}`. Formats: {", ".join(formats)}. Passed: {passed}/{len(records)}. '
@@ -385,56 +480,139 @@ def write_results(results, model, records, arm='betteroffice', formats=FORMATS, 
     for record in records:
         message = record['check_message'].replace('|', '\\|').replace('\n', ' ')
         calls = record['tool_calls'] if record['tool_calls'] is not None else 'n/a'
-        rows.append(f'| {record["task"]} | {"PASS" if record["pass"] else "FAIL"} | {message} | {calls} | {record["duration_seconds"]:.3f} |')
-    (results / 'results.md').write_text('\n'.join(rows) + '\n')
+        label = record['task'] + (f' / run-{record["run"]}' if metadata.get('run_directories') else '')
+        rows.append(f'| {label} | {"PASS" if record["pass"] else "FAIL"} | {message} | {calls} | {record["duration_seconds"]:.3f} |')
+    atomic_write(results / 'results.md', '\n'.join(rows) + '\n')
+
+
+def positive_integer(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return number
+
+
+def suite_tasks(suite):
+    if suite == 'v2':
+        return checker.tasks()
+    try:
+        return checker.tasks(suite=suite)
+    except TypeError:
+        raise ValueError('v3 tasks are unavailable: check.py must support tasks(suite=...)') from None
+
+
+def resume_records(path, expected, pairs):
+    report = json.loads(path.read_text())
+    for name, value in expected.items():
+        if report.get(name) != value:
+            raise ValueError(f'cannot resume: {name} differs from results.json')
+    records, seen = [], set()
+    pairs = set(pairs)
+    for record in report['results']:
+        pair = (record['task'], record.get('run', 1))
+        if type(pair[1]) is not int or pair[1] < 1:
+            raise ValueError('cannot resume: invalid run index')
+        if pair not in pairs or pair in seen:
+            raise ValueError('cannot resume: unexpected or duplicate task/run in results.json')
+        seen.add(pair)
+        if isinstance(record.get('pass'), bool) and all(key in record for key in ('check_message', 'tool_calls', 'duration_seconds')):
+            records.append(record)
+    return records
 
 
 def main():
-    parser = argparse.ArgumentParser(usage='%(prog)s [--arm betteroffice] [--formats <list>] <agents-cli-command> <results-dir> [model]\n'
-                                           '       %(prog)s --arm generic --python <python> [--formats <list>] <results-dir> [model]')
-    parser.add_argument('--arm', choices=tuple(ALLOWED_ITEMS), default='betteroffice')
-    parser.add_argument('--python', help='generic arm: a Python that imports openpyxl, pptx and docx')
+    parser = argparse.ArgumentParser(usage='%(prog)s [options] <agents-cli-command> <results-dir> [model]\n'
+                                           '       %(prog)s --arm generic|scripted-lib --python <python> [options] <results-dir> [model]')
+    parser.add_argument('--arm', choices=(*ALLOWED_ITEMS, 'scripted-lib', 'scripted-bo'), default='betteroffice')
+    parser.add_argument('--python', help='generic/scripted-lib arm: a Python that imports openpyxl, pptx and docx')
+    parser.add_argument('--suite', choices=('v2', 'v3'), default='v2')
+    parser.add_argument('--runs', type=positive_integer, default=None, help='independent runs per task (default: 1)')
+    parser.add_argument('--jobs', type=positive_integer, default=1, help='concurrent task/runs (default: 1, maximum: 4)')
+    parser.add_argument('--tasks', help='comma-separated task IDs')
+    parser.add_argument('--cross-model', action='store_true', help='select only cross_model tasks')
+    parser.add_argument('--resume', action='store_true', help='skip finished task/runs in results.json')
+    parser.add_argument('--agent', choices=('codex', 'muse'), default='codex')
     parser.add_argument('--formats', type=format_selection, default=FORMATS, metavar='<list>',
                         help=f'comma-separated formats to run, from {",".join(FORMATS)} (default: all)')
     parser.add_argument('arguments', nargs='+', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    generic = args.arm == 'generic'
-    names = ('results_dir', 'model') if generic else ('agents_cli_command', 'results_dir', 'model')
+    library = args.arm in ('generic', 'scripted-lib')
+    scripted = args.arm.startswith('scripted-')
+    names = ('results_dir', 'model') if library else ('agents_cli_command', 'results_dir', 'model')
     if not len(names) - 1 <= len(args.arguments) <= len(names):
         parser.error(f'--arm {args.arm} takes ' + ' '.join(f'<{name}>' for name in names[:-1]) + ' [model]')
     values = dict(zip(names, args.arguments))
-    model = values.get('model') or 'gpt-6-luna'
+    model = 'none' if scripted else values.get('model') or 'gpt-6-luna'
+    runs = args.runs or 1
+    run_directories = args.runs is not None or args.suite != 'v2'
     try:
-        if generic != (args.python is not None):
-            raise ValueError('--python <python> is required with --arm generic and accepted only there')
-        cli = None if generic else cli_command(values['agents_cli_command'])
-        python = Path(args.python).expanduser().absolute() if generic else None
+        if args.agent == 'muse':
+            raise ValueError(MUSE_BLOCKER)
+        if args.jobs > 4:
+            raise ValueError('--jobs must be at most 4')
+        if library != (args.python is not None):
+            raise ValueError('--python <python> is required with --arm generic or scripted-lib and accepted only there')
+        cli = None if library else cli_command(values['agents_cli_command'])
+        python = Path(args.python).expanduser().absolute() if library else None
         results = Path(values['results_dir']).expanduser().resolve()
         if results == REPO or REPO in results.parents:
             raise ValueError('results-dir must be outside the repository')
-        if results.exists() and any(results.iterdir()):
+        if results.exists() and any(results.iterdir()) and not args.resume:
             raise ValueError('results-dir must be new or empty')
-        if shutil.which('codex') is None:
-            raise ValueError('codex is not on PATH')
-    except (ValueError, OSError) as error:
-        parser.error(str(error))
-    tasks = [task for task in checker.tasks() if task['format'] in args.formats]
-    try:
-        if generic:
-            python_ready(python)
-            metadata = {'python': str(python)}
+        tasks = suite_tasks(args.suite)
+        selected = {name.strip() for name in args.tasks.split(',')} if args.tasks is not None else None
+        if selected is not None and not selected <= {task['id'] for task in tasks}:
+            raise ValueError('unknown task IDs: ' + ', '.join(sorted(selected - {task['id'] for task in tasks})))
+        tasks = [task for task in tasks if task['format'] in args.formats
+                 and (selected is None or task['id'] in selected) and (not args.cross_model or task.get('cross_model') is True)]
+        if not tasks:
+            raise ValueError('no tasks selected')
+        metadata = {'suite': args.suite, 'runs': runs, 'agent': 'none' if scripted else args.agent,
+                    'task_ids': [task['id'] for task in tasks], 'cross_model': args.cross_model,
+                    'run_directories': run_directories}
+        if library:
+            metadata['python'] = str(python)
         else:
-            metadata = {'mcp_startup_seconds': mcp_ready(cli, required_tools(tasks))}
+            metadata['mcp_command'] = cli
+        pairs = [(task['id'], index) for task in tasks for index in range(1, runs + 1)]
+        expected = {'model': model, 'arm': args.arm, 'formats': list(args.formats), **metadata}
+        records = resume_records(results / 'results.json', expected, pairs) if args.resume else []
+        finished = {(record['task'], record.get('run', 1)) for record in records}
+        pending = [(task, index) for task in tasks for index in range(1, runs + 1) if (task['id'], index) not in finished]
+        if pending and not scripted and shutil.which('codex') is None:
+            raise ValueError('codex is not on PATH')
+    except (ValueError, OSError, KeyError) as error:
+        parser.error(str(error))
+    try:
+        if pending:
+            if library:
+                python_ready(python)
+                metadata['python'] = str(python)
+            else:
+                metadata['mcp_startup_seconds'] = mcp_ready(cli, required_tools(tasks))
+        elif args.resume:
+            previous = json.loads((results / 'results.json').read_text())
+            metadata.update({name: previous[name] for name in ('python', 'mcp_startup_seconds') if name in previous})
         results.mkdir(parents=True, exist_ok=True)
     except (RuntimeError, OSError) as error:
         sys.exit(f'run.py: {error}')
-    records = []
-    write_results(results, model, records, args.arm, args.formats, **metadata)
-    for task in tasks:
-        record = run_task(task, cli, model, results, args.arm, python)
-        records.append(record)
+    order = {pair: index for index, pair in enumerate(pairs)}
+
+    def save(record=None):
+        if record is not None:
+            records.append(record)
+        records.sort(key=lambda item: order[(item['task'], item.get('run', 1))])
         write_results(results, model, records, args.arm, args.formats, **metadata)
-        print(f'{record["task"]}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)
+        if record is not None:
+            label = record['task'] + (f' / run-{record["run"]}' if run_directories else '')
+            print(f'{label}: {"PASS" if record["pass"] else "FAIL"} ({record["duration_seconds"]:.3f}s): {record["check_message"]}', flush=True)
+
+    save()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
+        futures = [executor.submit(run_task, task, cli, model, results, args.arm, python,
+                                   index if run_directories else None) for task, index in pending]
+        for future in concurrent.futures.as_completed(futures):
+            save(future.result())
     return 0 if all(record['pass'] for record in records) else 1
 
 
