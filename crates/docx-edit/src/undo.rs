@@ -53,6 +53,8 @@ struct CaptureClockState {
     mode: UndoCaptureMode,
     ticks: u64,
     last_source: u64,
+    input: Option<(u64, u64)>,
+    last_input: Option<u64>,
 }
 
 impl CaptureClock {
@@ -62,6 +64,8 @@ impl CaptureClock {
                 mode: UndoCaptureMode::Auto,
                 ticks: 1,
                 last_source: source.now(),
+                input: None,
+                last_input: None,
             }),
             source,
         }
@@ -74,6 +78,10 @@ impl CaptureClock {
     fn set_mode(&self, mode: UndoCaptureMode) {
         self.state.lock().unwrap().mode = mode;
     }
+
+    fn set_input_time(&self, span: Option<(u64, u64)>) {
+        self.state.lock().unwrap().input = span.map(|(first, last)| (first, first.max(last)));
+    }
 }
 
 impl Clock for CaptureClock {
@@ -82,10 +90,14 @@ impl Clock for CaptureClock {
         let now = self.source.now();
         // Yrs has no runtime timeout setter; its clock controls capture policy.
         let elapsed = match state.mode {
-            UndoCaptureMode::Auto => now.saturating_sub(state.last_source),
+            UndoCaptureMode::Auto => match (state.input, state.last_input) {
+                (Some((first, _)), Some(previous)) => first.saturating_sub(previous),
+                _ => now.saturating_sub(state.last_source),
+            },
             UndoCaptureMode::Manual => 0,
         };
         state.last_source = now;
+        state.last_input = state.input.map(|(_, last)| last);
         state.ticks = state.ticks.saturating_add(elapsed);
         state.ticks
     }
@@ -235,6 +247,11 @@ impl DocUndoManager {
 
     pub fn capture_mode(&self) -> UndoCaptureMode {
         self.clock.mode()
+    }
+
+    /// Pins the input span used to measure the next capture gap.
+    pub fn set_input_time(&self, span: Option<(u64, u64)>) {
+        self.clock.set_input_time(span);
     }
 
     /// Changes capture policy and closes the current group, retaining history.
@@ -438,6 +455,7 @@ pub struct UndoSession {
     story: RefCell<Option<String>>,
     mode: Cell<UndoCaptureMode>,
     doc: Cell<Option<u64>>,
+    input_time: Cell<Option<(u64, u64)>>,
 }
 
 impl Default for UndoSession {
@@ -459,6 +477,7 @@ impl UndoSession {
             story: RefCell::new(None),
             mode: Cell::new(UndoCaptureMode::Auto),
             doc: Cell::new(None),
+            input_time: Cell::new(None),
         }
     }
 
@@ -468,6 +487,7 @@ impl UndoSession {
         if manager.is_none() {
             let mut next = DocUndoManager::new(doc, Arc::clone(&self.clock));
             next.set_capture_mode(self.mode.get());
+            next.set_input_time(self.input_time.get());
             *manager = Some(next);
             self.doc.set(Some(doc.instance));
         }
@@ -493,6 +513,14 @@ impl UndoSession {
 
     pub fn capture_mode(&self) -> UndoCaptureMode {
         self.mode.get()
+    }
+
+    /// Pins the input span used to measure the next capture gap.
+    pub fn set_input_time(&self, span: Option<(u64, u64)>) {
+        self.input_time.set(span);
+        if let Some(manager) = self.manager.borrow().as_ref() {
+            manager.set_input_time(span);
+        }
     }
 
     /// Sets capture policy before or during tracking without clearing history.

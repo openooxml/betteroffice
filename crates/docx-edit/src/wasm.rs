@@ -3014,6 +3014,16 @@ impl EditSession {
         Ok(())
     }
 
+    /// Pins the input span used to measure the next capture gap.
+    pub fn set_undo_input_time(&self, first: f64, last: f64) {
+        self.undo.set_input_time(Some((first as u64, last as u64)));
+    }
+
+    /// Clears the pinned input span.
+    pub fn clear_undo_input_time(&self) {
+        self.undo.set_input_time(None);
+    }
+
     /// Current undo grouping policy.
     pub fn undo_capture_mode(&self) -> String {
         match self.undo.capture_mode() {

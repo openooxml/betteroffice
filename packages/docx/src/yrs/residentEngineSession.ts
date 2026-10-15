@@ -151,6 +151,7 @@ export type ResidentEngineSession = Pick<
   | 'storiesChangedSince'
   | 'yrsBlocksForStory'
 > & {
+  setUndoInputTime(span: readonly [first: number, last: number] | null): void;
   splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
   /**
    * Display ranges of the paragraphs, tables and block controls of `root` that `ranges` touch.
@@ -666,6 +667,10 @@ export async function createResidentEngineSession(
     setColumnWidth: (at, width) => applyCommandMutation(at.story, () =>
       JSON.parse(session.set_column_width(JSON.stringify(at), width))),
     beginUndoCapture: ensureUndo,
+    setUndoInputTime: (span) => {
+      if (span) session.set_undo_input_time(span[0], span[1]);
+      else session.clear_undo_input_time();
+    },
     addUndoBoundary: () => session.add_undo_boundary(),
     undo: () => {
       const changed = session.undo();

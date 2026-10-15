@@ -32,6 +32,7 @@ export type CommandEnvelope<P> = {
   kind: string;
   payload: P;
   inputTime?: number;
+  lastInputTime?: number;
   group?: string;
   replay?: true;
 };
@@ -104,6 +105,7 @@ export type SubmitOptions<X> = {
   after?: CommandTicket;
   expectVersion?: boolean;
   inputTime?: number;
+  lastInputTime?: number;
   group?: string;
   coalesceKey?: string;
   fence?: boolean;
@@ -401,6 +403,7 @@ export function isCommandEnvelope(value: unknown): value is CommandEnvelope<unkn
     (value.expectVersion === undefined || typeof value.expectVersion === 'boolean') &&
     typeof value.kind === 'string' && hasOwn(value, 'payload') &&
     (value.inputTime === undefined || finite(value.inputTime)) &&
+    (value.lastInputTime === undefined || finite(value.lastInputTime)) &&
     (value.group === undefined || typeof value.group === 'string') &&
     (value.replay === undefined || value.replay === true);
 }

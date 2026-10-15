@@ -24,10 +24,14 @@ export function coalesceInputDrafts(
     (a.echo.contextFrameEpoch !== b.echo.contextFrameEpoch ||
       a.echo.intent.kind !== 'insertText' || b.echo.intent.kind !== 'insertText'))) return undefined;
   const payload = { text: previous.text + next.text };
+  const lastInputTime = b.lastInputTime ?? b.inputTime;
+  const options: PeerlessCommandDraft['options'] = { ...a };
+  delete options.lastInputTime;
+  if (lastInputTime !== undefined) options.lastInputTime = lastInputTime;
   return {
     kind: 'insertText', payload,
     options: {
-      ...a,
+      ...options,
       echo: a.echo && b.echo ? {
         intent: { kind: 'insertText', payload },
         originalIntentCount: a.echo.originalIntentCount + b.echo.originalIntentCount,
