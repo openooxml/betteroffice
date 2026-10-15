@@ -1,7 +1,10 @@
 //! ECMA-376 preset guide and path formulas.
 
-use super::{Frame, Outline, PresetGeometryPath, PresetPathFill, ooxml_angle};
+use super::{Frame, Outline, PresetGeometryPath, PresetPathFill, elliptical_point, ooxml_angle};
 use std::collections::HashMap;
+use std::f64::consts::{FRAC_PI_2, PI};
+
+use crate::GeometryPathCommand;
 
 pub(super) fn paths(
     kind: &str,
@@ -24,6 +27,49 @@ pub(super) fn paths(
         "circularArrow" => circular_arrow(frame, adjustments),
         "foldedCorner" => folded_corner(frame, adjustments),
         "cloudCallout" => cloud_callout(frame, adjustments),
+        "round1Rect" => normal(round1_rect(frame, adjustments)),
+        "round2SameRect" => normal(round2_same_rect(frame, adjustments)),
+        "round2DiagRect" => normal(round2_diag_rect(frame, adjustments)),
+        "snip1Rect" => normal(snip1_rect(frame, adjustments)),
+        "snip2SameRect" => normal(snip2_same_rect(frame, adjustments)),
+        "snip2DiagRect" => normal(snip2_diag_rect(frame, adjustments)),
+        "frame" => normal(rectangular_frame(frame, adjustments)),
+        "mathEqual" => normal(math_equal(frame, adjustments)),
+        "mathPlus" => normal(math_plus(frame, adjustments)),
+        "pie" | "chord" => normal(pie_or_chord(frame, adjustments, kind == "pie")),
+        "blockArc" => normal(block_arc(frame, adjustments)),
+        "flowChartExtract" => normal(
+            Outline::new(Frame { w: 2.0, h: 2.0 })
+                .move_to(0.0, 2.0)
+                .line_to(1.0, 0.0)
+                .line_to(2.0, 2.0)
+                .close()
+                .finish(),
+        ),
+        "flowChartMerge" => normal(
+            Outline::new(Frame { w: 2.0, h: 2.0 })
+                .move_to(0.0, 0.0)
+                .line_to(2.0, 0.0)
+                .line_to(1.0, 2.0)
+                .close()
+                .finish(),
+        ),
+        "flowChartDelay" => normal(
+            Outline::new(frame)
+                .move_to(0.0, 0.0)
+                .line_to(frame.w / 2.0, 0.0)
+                .arc_to(frame.w / 2.0, frame.h / 2.0, 3.0 * FRAC_PI_2, PI)
+                .line_to(0.0, frame.h)
+                .close()
+                .finish(),
+        ),
+        "bentUpArrow" => normal(bent_up_arrow(frame, adjustments)),
+        "notchedRightArrow" => normal(notched_right_arrow(frame, adjustments)),
+        "stripedRightArrow" => normal(striped_right_arrow(frame, adjustments)),
+        "teardrop" => normal(teardrop(frame, adjustments)),
+        "leftBracket" => bracket(frame, adjustments, true),
+        "rightBracket" => bracket(frame, adjustments, false),
+        "can" => can(frame, adjustments),
         _ => return None,
     };
     let mut paths: Vec<PresetGeometryPath> = Vec::new();
@@ -58,6 +104,22 @@ pub(super) fn defaults(kind: &str) -> &'static [(&'static str, f64)] {
         ],
         "foldedCorner" => &[("adj", 0.16667)],
         "cloudCallout" => &[("adj1", -0.20833), ("adj2", 0.625)],
+        "round1Rect" | "snip1Rect" => &[("adj", 0.16667)],
+        "round2SameRect" | "round2DiagRect" | "snip2SameRect" => {
+            &[("adj1", 0.16667), ("adj2", 0.0)]
+        }
+        "snip2DiagRect" => &[("adj1", 0.0), ("adj2", 0.16667)],
+        "frame" => &[("adj1", 0.125)],
+        "mathEqual" => &[("adj1", 0.2352), ("adj2", 0.1176)],
+        "mathPlus" => &[("adj1", 0.2352)],
+        "pie" => &[("adj1", 0.0), ("adj2", 162.0)],
+        "chord" => &[("adj1", 27.0), ("adj2", 162.0)],
+        "blockArc" => &[("adj1", 108.0), ("adj2", 0.0), ("adj3", 0.25)],
+        "bentUpArrow" => &[("adj1", 0.25), ("adj2", 0.25), ("adj3", 0.25)],
+        "notchedRightArrow" | "stripedRightArrow" => &[("adj1", 0.5), ("adj2", 0.5)],
+        "teardrop" => &[("adj", 1.0)],
+        "leftBracket" | "rightBracket" => &[("adj", 0.08333)],
+        "can" => &[("adj", 0.25)],
         _ => &[],
     }
 }
@@ -80,6 +142,428 @@ fn divide(numerator: f64, denominator: f64) -> f64 {
     }
 }
 
+fn normal(commands: Vec<GeometryPathCommand>) -> Vec<PresetGeometryPath> {
+    vec![PresetGeometryPath {
+        commands,
+        fill: PresetPathFill::Normal,
+        stroke: true,
+    }]
+}
+
+fn pie_or_chord(
+    frame: Frame,
+    adjustments: &HashMap<String, f64>,
+    pie: bool,
+) -> Vec<GeometryPathCommand> {
+    let (wd2, hd2) = (frame.w / 2.0, frame.h / 2.0);
+    let st_ang =
+        adjustment(adjustments, "adj1", if pie { 0.0 } else { 27.0 }).clamp(0.0, 21599999.0);
+    let en_ang = adjustment(adjustments, "adj2", 162.0).clamp(0.0, 21599999.0);
+    let sw1 = en_ang - st_ang;
+    let sw_ang = if sw1 > 0.0 { sw1 } else { sw1 + 21600000.0 };
+    let (dx1, dy1) = elliptical_point(ooxml_angle(st_ang), wd2, hd2, frame);
+    let mut outline = Outline::new(frame).move_to(wd2 + dx1, hd2 + dy1).arc_to(
+        wd2,
+        hd2,
+        ooxml_angle(st_ang),
+        ooxml_angle(sw_ang),
+    );
+    if pie {
+        outline = outline.line_to(wd2, hd2);
+    }
+    outline.close().finish()
+}
+
+fn block_arc(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (wd2, hd2) = (frame.w / 2.0, frame.h / 2.0);
+    let st_ang = adjustment(adjustments, "adj1", 108.0).clamp(0.0, 21599999.0);
+    let ist_ang = adjustment(adjustments, "adj2", 0.0).clamp(0.0, 21599999.0);
+    let a3 = adjustment(adjustments, "adj3", 0.25).clamp(0.0, 50000.0);
+    let sw11 = ist_ang - st_ang;
+    let sw_ang = if sw11 > 0.0 { sw11 } else { sw11 + 21600000.0 };
+    let (dx1, dy1) = elliptical_point(ooxml_angle(st_ang), wd2, hd2, frame);
+    let iwd2 = wd2 - a3;
+    let ihd2 = hd2 - a3;
+    let (dx2, dy2) = elliptical_point(ooxml_angle(ist_ang), iwd2, ihd2, frame);
+    Outline::new(frame)
+        .move_to(wd2 + dx1, hd2 + dy1)
+        .arc_to(wd2, hd2, ooxml_angle(st_ang), ooxml_angle(sw_ang))
+        .line_to(wd2 + dx2, hd2 + dy2)
+        .arc_to(iwd2, ihd2, ooxml_angle(ist_ang), ooxml_angle(-sw_ang))
+        .close()
+        .finish()
+}
+
+fn bent_up_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = adjustment(adjustments, "adj1", 0.25).clamp(0.0, 50000.0);
+    let a2 = adjustment(adjustments, "adj2", 0.25).clamp(0.0, 50000.0);
+    let a3 = adjustment(adjustments, "adj3", 0.25).clamp(0.0, 50000.0);
+    let y1 = a3;
+    let x1 = w - a2 * 2.0;
+    let x3 = w - a2;
+    let dx2 = a1 / 2.0;
+    let x2 = x3 - dx2;
+    let x4 = x3 + dx2;
+    let y2 = h - a1;
+    Outline::new(frame)
+        .move_to(0.0, y2)
+        .line_to(x2, y2)
+        .line_to(x2, y1)
+        .line_to(x1, y1)
+        .line_to(x3, 0.0)
+        .line_to(w, y1)
+        .line_to(x4, y1)
+        .line_to(x4, h)
+        .line_to(0.0, h)
+        .close()
+        .finish()
+}
+
+fn notched_right_arrow(
+    frame: Frame,
+    adjustments: &HashMap<String, f64>,
+) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = adjustment(adjustments, "adj1", 0.5).clamp(0.0, 100000.0);
+    let a2 = adjustment(adjustments, "adj2", 0.5).clamp(0.0, w);
+    let dx2 = a2;
+    let x2 = w - dx2;
+    let dy1 = h * a1 / 200000.0;
+    let y1 = h / 2.0 - dy1;
+    let y2 = h / 2.0 + dy1;
+    let x1 = dy1 * dx2 / (h / 2.0);
+    Outline::new(frame)
+        .move_to(0.0, y1)
+        .line_to(x2, y1)
+        .line_to(x2, 0.0)
+        .line_to(w, h / 2.0)
+        .line_to(x2, h)
+        .line_to(x2, y2)
+        .line_to(0.0, y2)
+        .line_to(x1, h / 2.0)
+        .close()
+        .finish()
+}
+
+fn striped_right_arrow(
+    frame: Frame,
+    adjustments: &HashMap<String, f64>,
+) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = adjustment(adjustments, "adj1", 0.5).clamp(0.0, 100000.0);
+    let a2 = adjustment(adjustments, "adj2", 0.5).clamp(0.0, 0.84375 * w);
+    let x4 = 100000.0 * 5.0 / 32.0;
+    let x5 = w - a2;
+    let dy1 = h * a1 / 200000.0;
+    let y1 = h / 2.0 - dy1;
+    let y2 = h / 2.0 + dy1;
+    Outline::new(frame)
+        .move_to(0.0, y1)
+        .line_to(100000.0 / 32.0, y1)
+        .line_to(100000.0 / 32.0, y2)
+        .line_to(0.0, y2)
+        .close()
+        .move_to(100000.0 / 16.0, y1)
+        .line_to(100000.0 / 8.0, y1)
+        .line_to(100000.0 / 8.0, y2)
+        .line_to(100000.0 / 16.0, y2)
+        .close()
+        .move_to(x4, y1)
+        .line_to(x5, y1)
+        .line_to(x5, 0.0)
+        .line_to(w, h / 2.0)
+        .line_to(x5, h)
+        .line_to(x5, y2)
+        .line_to(x4, y2)
+        .close()
+        .finish()
+}
+
+fn teardrop(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a = adjustment(adjustments, "adj", 1.0).clamp(0.0, 200000.0);
+    let tw = w / 2.0 * 2.0f64.sqrt();
+    let th = h / 2.0 * 2.0f64.sqrt();
+    let sw = tw * a / 100000.0;
+    let sh = th * a / 100000.0;
+    let dx1 = sw * ooxml_angle(2700000.0).cos();
+    let dy1 = sh * ooxml_angle(2700000.0).sin();
+    let x1 = w / 2.0 + dx1;
+    let y1 = h / 2.0 - dy1;
+    let x2 = (w / 2.0 + x1) / 2.0;
+    let y2 = (h / 2.0 + y1) / 2.0;
+    Outline::new(frame)
+        .move_to(0.0, h / 2.0)
+        .arc_to(w / 2.0, h / 2.0, PI, FRAC_PI_2)
+        .quad_to(x2, 0.0, x1, y1)
+        .quad_to(w, y2, w, h / 2.0)
+        .arc_to(w / 2.0, h / 2.0, 0.0, FRAC_PI_2)
+        .arc_to(w / 2.0, h / 2.0, FRAC_PI_2, FRAC_PI_2)
+        .close()
+        .finish()
+}
+
+fn bracket(
+    frame: Frame,
+    adjustments: &HashMap<String, f64>,
+    left: bool,
+) -> Vec<PresetGeometryPath> {
+    let (w, h) = (frame.w, frame.h);
+    let y1 = adjustment(adjustments, "adj", 0.08333).clamp(0.0, h / 2.0);
+    let y2 = h - y1;
+    let outline = if left {
+        Outline::new(frame)
+            .move_to(w, h)
+            .arc_to(w, y1, FRAC_PI_2, FRAC_PI_2)
+            .line_to(0.0, y1)
+            .arc_to(w, y1, PI, FRAC_PI_2)
+    } else {
+        Outline::new(frame)
+            .move_to(0.0, 0.0)
+            .arc_to(w, y1, 3.0 * FRAC_PI_2, FRAC_PI_2)
+            .line_to(w, y2)
+            .arc_to(w, y1, 0.0, FRAC_PI_2)
+    };
+    let commands = outline.finish();
+    let mut fill = commands.clone();
+    fill.push(GeometryPathCommand::Close);
+    vec![
+        PresetGeometryPath {
+            commands: fill,
+            fill: PresetPathFill::Normal,
+            stroke: false,
+        },
+        PresetGeometryPath {
+            commands,
+            fill: PresetPathFill::None,
+            stroke: true,
+        },
+    ]
+}
+
+fn can(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<PresetGeometryPath> {
+    let (w, h) = (frame.w, frame.h);
+    let a = adjustment(adjustments, "adj", 0.25).clamp(0.0, h / 2.0);
+    let y1 = a / 2.0;
+    let y3 = h - y1;
+    vec![
+        PresetGeometryPath {
+            fill: PresetPathFill::Normal,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(0.0, y1)
+                .arc_to(w / 2.0, y1, PI, -PI)
+                .line_to(w, y3)
+                .arc_to(w / 2.0, y1, 0.0, PI)
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::Lighten,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(0.0, y1)
+                .arc_to(w / 2.0, y1, PI, PI)
+                .arc_to(w / 2.0, y1, 0.0, PI)
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::None,
+            stroke: true,
+            commands: Outline::new(frame)
+                .move_to(w, y1)
+                .arc_to(w / 2.0, y1, 0.0, PI)
+                .arc_to(w / 2.0, y1, PI, PI)
+                .line_to(w, y3)
+                .arc_to(w / 2.0, y1, 0.0, PI)
+                .line_to(0.0, y1)
+                .finish(),
+        },
+    ]
+}
+
+fn round1_rect(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let dx1 = adjustment(adjustments, "adj", 0.16667).clamp(0.0, 50000.0);
+    let x1 = w - dx1;
+    Outline::new(frame)
+        .move_to(0.0, 0.0)
+        .line_to(x1, 0.0)
+        .arc_to(dx1, dx1, 3.0 * FRAC_PI_2, FRAC_PI_2)
+        .line_to(w, h)
+        .line_to(0.0, h)
+        .close()
+        .finish()
+}
+
+fn round2_same_rect(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let tx1 = adjustment(adjustments, "adj1", 0.16667).clamp(0.0, 50000.0);
+    let tx2 = w - tx1;
+    let bx1 = adjustment(adjustments, "adj2", 0.0).clamp(0.0, 50000.0);
+    let by1 = h - bx1;
+    Outline::new(frame)
+        .move_to(tx1, 0.0)
+        .line_to(tx2, 0.0)
+        .arc_to(tx1, tx1, 3.0 * FRAC_PI_2, FRAC_PI_2)
+        .line_to(w, by1)
+        .arc_to(bx1, bx1, 0.0, FRAC_PI_2)
+        .line_to(bx1, h)
+        .arc_to(bx1, bx1, FRAC_PI_2, FRAC_PI_2)
+        .line_to(0.0, tx1)
+        .arc_to(tx1, tx1, PI, FRAC_PI_2)
+        .close()
+        .finish()
+}
+
+fn round2_diag_rect(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let x1 = adjustment(adjustments, "adj1", 0.16667).clamp(0.0, 50000.0);
+    let y1 = h - x1;
+    let a = adjustment(adjustments, "adj2", 0.0).clamp(0.0, 50000.0);
+    let x2 = w - a;
+    Outline::new(frame)
+        .move_to(x1, 0.0)
+        .line_to(x2, 0.0)
+        .arc_to(a, a, 3.0 * FRAC_PI_2, FRAC_PI_2)
+        .line_to(w, y1)
+        .arc_to(x1, x1, 0.0, FRAC_PI_2)
+        .line_to(a, h)
+        .arc_to(a, a, FRAC_PI_2, FRAC_PI_2)
+        .line_to(0.0, x1)
+        .arc_to(x1, x1, PI, FRAC_PI_2)
+        .close()
+        .finish()
+}
+
+fn snip1_rect(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let dx1 = adjustment(adjustments, "adj", 0.16667).clamp(0.0, 50000.0);
+    let x1 = w - dx1;
+    Outline::new(frame)
+        .move_to(0.0, 0.0)
+        .line_to(x1, 0.0)
+        .line_to(w, dx1)
+        .line_to(w, h)
+        .line_to(0.0, h)
+        .close()
+        .finish()
+}
+
+fn snip2_same_rect(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let tx1 = adjustment(adjustments, "adj1", 0.16667).clamp(0.0, 50000.0);
+    let tx2 = w - tx1;
+    let bx1 = adjustment(adjustments, "adj2", 0.0).clamp(0.0, 50000.0);
+    let bx2 = w - bx1;
+    let by1 = h - bx1;
+    Outline::new(frame)
+        .move_to(tx1, 0.0)
+        .line_to(tx2, 0.0)
+        .line_to(w, tx1)
+        .line_to(w, by1)
+        .line_to(bx2, h)
+        .line_to(bx1, h)
+        .line_to(0.0, by1)
+        .line_to(0.0, tx1)
+        .close()
+        .finish()
+}
+
+fn snip2_diag_rect(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let lx1 = adjustment(adjustments, "adj1", 0.0).clamp(0.0, 50000.0);
+    let lx2 = w - lx1;
+    let ly1 = h - lx1;
+    let rx1 = adjustment(adjustments, "adj2", 0.16667).clamp(0.0, 50000.0);
+    let rx2 = w - rx1;
+    let ry1 = h - rx1;
+    Outline::new(frame)
+        .move_to(lx1, 0.0)
+        .line_to(rx2, 0.0)
+        .line_to(w, rx1)
+        .line_to(w, ly1)
+        .line_to(lx2, h)
+        .line_to(rx1, h)
+        .line_to(0.0, ry1)
+        .line_to(0.0, lx1)
+        .close()
+        .finish()
+}
+
+fn rectangular_frame(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let x1 = adjustment(adjustments, "adj1", 0.125).clamp(0.0, 50000.0);
+    let x4 = w - x1;
+    let y4 = h - x1;
+    Outline::new(frame)
+        .move_to(0.0, 0.0)
+        .line_to(w, 0.0)
+        .line_to(w, h)
+        .line_to(0.0, h)
+        .close()
+        .move_to(x1, x1)
+        .line_to(x1, y4)
+        .line_to(x4, y4)
+        .line_to(x4, x1)
+        .close()
+        .finish()
+}
+
+fn math_equal(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = adjustment(adjustments, "adj1", 0.2352).clamp(0.0, 36745.0);
+    let a2 = adjustment(adjustments, "adj2", 0.1176).clamp(0.0, 100000.0 - 2.0 * a1);
+    let dy1 = h * a1 / 100000.0;
+    let dy2 = h * a2 / 200000.0;
+    let dx1 = w * 73490.0 / 200000.0;
+    let y2 = h / 2.0 - dy2;
+    let y3 = h / 2.0 + dy2;
+    let y1 = y2 - dy1;
+    let y4 = y3 + dy1;
+    let x1 = w / 2.0 - dx1;
+    let x2 = w / 2.0 + dx1;
+    Outline::new(frame)
+        .move_to(x1, y1)
+        .line_to(x2, y1)
+        .line_to(x2, y2)
+        .line_to(x1, y2)
+        .close()
+        .move_to(x1, y3)
+        .line_to(x2, y3)
+        .line_to(x2, y4)
+        .line_to(x1, y4)
+        .close()
+        .finish()
+}
+
+fn math_plus(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = adjustment(adjustments, "adj1", 0.2352).clamp(0.0, 73490.0);
+    let dx1 = w * 73490.0 / 200000.0;
+    let dy1 = h * 73490.0 / 200000.0;
+    let dx2 = a1 / 2.0;
+    let (x1, x2, x3, x4) = (w / 2.0 - dx1, w / 2.0 - dx2, w / 2.0 + dx2, w / 2.0 + dx1);
+    let (y1, y2, y3, y4) = (h / 2.0 - dy1, h / 2.0 - dx2, h / 2.0 + dx2, h / 2.0 + dy1);
+    Outline::new(frame)
+        .move_to(x1, y2)
+        .line_to(x2, y2)
+        .line_to(x2, y1)
+        .line_to(x3, y1)
+        .line_to(x3, y2)
+        .line_to(x4, y2)
+        .line_to(x4, y3)
+        .line_to(x3, y3)
+        .line_to(x3, y4)
+        .line_to(x2, y4)
+        .line_to(x2, y3)
+        .line_to(x1, y3)
+        .close()
+        .finish()
+}
+
 fn arc(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<PresetGeometryPath> {
     let (w, h) = (frame.w, frame.h);
     let adj1 = adjustment(adjustments, "adj1", 162.0);
@@ -89,10 +573,7 @@ fn arc(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<PresetGeometryPa
     let sw11: f64 = en_ang + 0.0 - st_ang;
     let sw12: f64 = sw11 + 21600000.0 - 0.0;
     let sw_ang: f64 = if sw11 > 0.0 { sw11 } else { sw12 };
-    let wt1: f64 = (w / 2.0) * ooxml_angle(st_ang).sin();
-    let ht1: f64 = (h / 2.0) * ooxml_angle(st_ang).cos();
-    let dx1: f64 = (w / 2.0) * f64::atan2(wt1, ht1).cos();
-    let dy1: f64 = (h / 2.0) * f64::atan2(wt1, ht1).sin();
+    let (dx1, dy1) = elliptical_point(ooxml_angle(st_ang), w / 2.0, h / 2.0, frame);
     let x1: f64 = (w / 2.0) + dx1 - 0.0;
     let y1: f64 = (h / 2.0) + dy1 - 0.0;
     vec![
@@ -595,10 +1076,7 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let rh2: f64 = rh1 + 0.0 - th;
     let rw3: f64 = rw2 + th2 - 0.0;
     let rh3: f64 = rh2 + th2 - 0.0;
-    let wt_h: f64 = rw3 * ooxml_angle(en_ang).sin();
-    let ht_h: f64 = rh3 * ooxml_angle(en_ang).cos();
-    let dx_h: f64 = rw3 * f64::atan2(wt_h, ht_h).cos();
-    let dy_h: f64 = rh3 * f64::atan2(wt_h, ht_h).sin();
+    let (dx_h, dy_h) = elliptical_point(ooxml_angle(en_ang), rw3, rh3, frame);
     let x_h: f64 = (w / 2.0) + dx_h - 0.0;
     let y_h: f64 = (h / 2.0) + dy_h - 0.0;
     let r_i: f64 = f64::min(rw2, rh2);
@@ -626,16 +1104,10 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let max_ang: f64 = f64::abs(u21);
     let a_ang: f64 = f64::clamp(adj2, 0.0, f64::max(max_ang, 0.0));
     let pt_ang: f64 = en_ang + a_ang - 0.0;
-    let wt_a: f64 = rw3 * ooxml_angle(pt_ang).sin();
-    let ht_a: f64 = rh3 * ooxml_angle(pt_ang).cos();
-    let dx_a: f64 = rw3 * f64::atan2(wt_a, ht_a).cos();
-    let dy_a: f64 = rh3 * f64::atan2(wt_a, ht_a).sin();
+    let (dx_a, dy_a) = elliptical_point(ooxml_angle(pt_ang), rw3, rh3, frame);
     let x_a: f64 = (w / 2.0) + dx_a - 0.0;
     let y_a: f64 = (h / 2.0) + dy_a - 0.0;
-    let wt_e: f64 = rw1 * ooxml_angle(st_ang).sin();
-    let ht_e: f64 = rh1 * ooxml_angle(st_ang).cos();
-    let dx_e: f64 = rw1 * f64::atan2(wt_e, ht_e).cos();
-    let dy_e: f64 = rh1 * f64::atan2(wt_e, ht_e).sin();
+    let (dx_e, dy_e) = elliptical_point(ooxml_angle(st_ang), rw1, rh1, frame);
     let x_e: f64 = (w / 2.0) + dx_e - 0.0;
     let y_e: f64 = (h / 2.0) + dy_e - 0.0;
     let dx_g: f64 = thh * ooxml_angle(pt_ang).cos();
