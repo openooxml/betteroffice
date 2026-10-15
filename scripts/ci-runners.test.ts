@@ -221,7 +221,7 @@ const jobs = await Promise.all(
           for (const [event, github] of Object.entries(EVENTS)) {
             runners[event] = {};
             for (const [variables, vars] of Object.entries(VARIABLES)) {
-              const needs = needsRoute ? { route: { outputs: { runner: (await route(github, vars, IDLE)).runner } } } : {};
+              const needs = needsRoute ? { route: { result: 'success', outputs: { runner: (await route(github, vars, IDLE)).runner } } } : {};
               runners[event][variables] = job.uses ? [REUSABLE] : resolve(job['runs-on'], { github, vars, matrix, needs });
             }
           }
@@ -343,8 +343,9 @@ describe('CI runner routing', () => {
         noApiCalls: true,
       },
       { name: 'BO_KYORA_CLASS=kyora-8x8, idle', vars: { BO_KYORA_CLASS: 'kyora-8x8' }, expected: 'kyora-8x8' },
-      { name: '3 busy kyora jobs under default cap 4', api: threeBusy, expected: 'kyora-8x16' },
-      { name: '4 busy kyora jobs at default cap 4', api: fourBusy, expected: 'ubuntu-latest' },
+      { name: '3 busy kyora jobs under BO_KYORA_CAP=4', vars: { BO_KYORA_CAP: '4' }, api: threeBusy, expected: 'kyora-8x16' },
+      { name: '4 busy kyora jobs at BO_KYORA_CAP=4', vars: { BO_KYORA_CAP: '4' }, api: fourBusy, expected: 'ubuntu-latest' },
+      { name: '4 busy kyora jobs under the default cap 20', api: fourBusy, expected: 'kyora-8x16' },
       {
         name: '4 busy kyora jobs with BO_KYORA_CAP=6',
         vars: { BO_KYORA_CAP: '6' },
@@ -415,6 +416,10 @@ describe('CI runner routing', () => {
         }
       }
     }
+    const full = { status: 'queued', labels: ['kyora-8x16'] };
+    const early = await route(EVENTS['push to main'], { BO_KYORA_CAP: '1' }, { runs: { queued: [{ id: 1 }, { id: 2 }], in_progress: [] }, jobs: { 1: [full], 2: [full] } });
+    expect(early.runner).toBe('ubuntu-latest');
+    expect(early.calls.filter((call) => call.endpoint === 'jobs')).toHaveLength(1);
   });
 
   test('the route job reads only Actions metadata and the Rust gate survives its failure', () => {
@@ -438,12 +443,17 @@ describe('CI runner routing', () => {
     const rustJob = ciWorkflow.jobs.rust;
     expect([rustJob.needs].flat()).toEqual(['route']);
     expect(rustJob.if).toBe('${{ !cancelled() }}');
+    const routeEnds = [
+      { result: 'success', outputs: { runner: '' } },
+      { result: 'failure', outputs: { runner: 'kyora-8x16' } },
+      { result: 'cancelled', outputs: { runner: 'kyora-8x16' } },
+      { result: 'skipped', outputs: {} },
+    ];
     for (const [event, github] of Object.entries(EVENTS)) {
       for (const vars of Object.values(VARIABLES)) {
-        expect(
-          resolve(rustJob['runs-on'], { github, vars, needs: { route: { outputs: { runner: '' } } } }),
-          event
-        ).toEqual(['ubuntu-latest']);
+        for (const route of routeEnds) {
+          expect(resolve(rustJob['runs-on'], { github, vars, needs: { route } }), `${event}, ${route.result}`).toEqual(['ubuntu-latest']);
+        }
       }
     }
   });
