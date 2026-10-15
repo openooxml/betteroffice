@@ -940,6 +940,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             let (x, align) = match align {
                 PlotTextAlign::Center => (x + width / 2.0, Align::Center),
                 PlotTextAlign::Start => (x, Align::Left),
+                PlotTextAlign::End => (x + width, Align::Right),
             };
             Ok(text_clip.map(|clip| DrawCmd::Text {
                 x,
@@ -1395,6 +1396,69 @@ mod tests {
             refs: Vec::new(),
         });
         sheet
+    }
+
+    #[test]
+    fn axis_label_regression_currency_ticks_fit_wide_fallback_fonts() {
+        for chart_type in ["column", "line"] {
+            let space = ChartSpace {
+                chart_type: chart_type.into(),
+                plot_groups: vec![ChartPlotGroup {
+                    chart_type: Some(chart_type.into()),
+                    axis_ids: vec!["value".into()],
+                    series: vec![ChartSeries {
+                        categories: vec!["Q1".into(), "Q2".into()],
+                        values: vec![200_000.0, 600_000.0],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                axis_list: Some(vec![ChartAxis {
+                    id: Some("value".into()),
+                    axis_type: "value".into(),
+                    position: Some("left".into()),
+                    min: Some(0.0),
+                    max: Some(600_000.0),
+                    number_format: Some("\"$\"#,##0".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+            let (commands, _) = render_scatter(&space);
+            let plot_left = commands
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCmd::Line { x1, x2, width, .. } if x1 == x2 && *width == 1.0 => Some(*x1),
+                    _ => None,
+                })
+                .fold(f32::INFINITY, f32::min);
+            let (x, clip, align, size) = commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text {
+                        text,
+                        x,
+                        clip,
+                        align,
+                        font_size,
+                        ..
+                    } if text.as_ref() == "$600,000" => {
+                        Some((*x, *clip, *align, *font_size * 96.0 / 72.0))
+                    }
+                    _ => None,
+                })
+                .expect("the currency tick is drawn");
+            let anchor = plot_left - (7.0 + 0.6 * size);
+            let wide_width = "$600,000".chars().count() as f32 * 0.64 * size;
+            assert!(
+                clip.x <= anchor - wide_width && clip.x + clip.w >= anchor - 1e-4,
+                "{chart_type}: clip {clip:?} must span {wide_width} left of {anchor}"
+            );
+            assert_eq!(align, Align::Right);
+            assert!((x - anchor).abs() < 1e-4, "{chart_type}: {x} vs {anchor}");
+            assert!(clip.x >= 0.0 && clip.y >= 0.0);
+            assert!(clip.x + clip.w <= 400.0 && clip.y + clip.h <= 300.0);
+        }
     }
 
     fn scatter_space() -> ChartSpace {

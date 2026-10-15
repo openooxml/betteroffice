@@ -8829,6 +8829,10 @@ impl PlotSink for PrimitiveSink<'_> {
             } => {
                 let (x, width) = match align {
                     PlotTextAlign::Start => (x, width),
+                    PlotTextAlign::End => {
+                        let run = fallback_label_width(&text, &font);
+                        (x + width - run, run)
+                    }
                     PlotTextAlign::Center => {
                         let run = fallback_label_width(&text, &font);
                         (x + (width - run) / 2.0, run)
@@ -13693,7 +13697,11 @@ mod tests {
             attrs: &attrs,
         };
         let font = ooxml_drawingml::chart::chart_label_font();
-        for align in [PlotTextAlign::Start, PlotTextAlign::Center] {
+        for align in [
+            PlotTextAlign::Start,
+            PlotTextAlign::Center,
+            PlotTextAlign::End,
+        ] {
             sink.push_op(PlotOp::Text {
                 text: "Revenue".to_owned(),
                 x: 10.0,
@@ -13714,6 +13722,7 @@ mod tests {
             .collect();
         let estimate = fallback_label_width("Revenue", &font);
         assert_eq!(starts[0], 10.0);
+        assert!((starts[2] - (210.0 - estimate)).abs() < 0.01);
         assert!(
             (starts[1] - (10.0 + (200.0 - estimate) / 2.0)).abs() < 0.01,
             "{starts:?}"
@@ -13729,6 +13738,7 @@ mod tests {
             (widths[1] - estimate).abs() < 0.01,
             "a centred run reports its own width"
         );
+        assert!((widths[2] - estimate).abs() < 0.01);
     }
 
     #[test]
