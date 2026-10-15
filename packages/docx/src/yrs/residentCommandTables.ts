@@ -31,10 +31,6 @@ export function isTableCommandKind(kind: string): kind is TableCommandKind {
   return Object.hasOwn(TABLE_COMMANDS, kind);
 }
 
-function sameGridCell(left: YrsCellLoc, right: YrsCellLoc): boolean {
-  return left.row === right.row && left.column === right.column;
-}
-
 function resolveTableTarget(
   engine: ResidentDocxCommandEngine,
   selection: DocxCommandSelection
@@ -45,7 +41,10 @@ function resolveTableTarget(
   const selected = readCellSelection(engine);
   const range = selected && [selected.anchor, selected.head].every((end) =>
     end.story === focused.story && end.tableIndex === focused.tableIndex) &&
-    (sameGridCell(selected.anchor, focused) || sameGridCell(selected.head, focused))
+    Math.min(selected.anchor.row, selected.head.row) <= focused.row &&
+    focused.row <= Math.max(selected.anchor.row, selected.head.row) &&
+    Math.min(selected.anchor.column, selected.head.column) <= focused.column &&
+    focused.column <= Math.max(selected.anchor.column, selected.head.column)
     ? selected : { anchor: focused, head: focused };
   return { focused, range, table };
 }
