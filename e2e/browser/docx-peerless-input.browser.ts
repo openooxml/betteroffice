@@ -23,6 +23,7 @@ interface InputProbe {
   holdFrames: boolean;
   contextBytes: number | null;
   refuseNext: boolean;
+  editDelayMs: number;
   heldAcks: HeldMessage[];
   heldFrames: HeldMessage[];
   mainInstances: number;
@@ -77,6 +78,7 @@ async function installProbe(page: Page) {
       holdFrames: false,
       contextBytes: null,
       refuseNext: false,
+      editDelayMs: 0,
       heldAcks: [],
       heldFrames: [],
       mainInstances: 0,
@@ -111,6 +113,8 @@ async function installProbe(page: Page) {
       if (context && probe.contextBytes !== null) context.serializedBytes = probe.contextBytes;
     };
     const NativeWorker = window.Worker;
+    let delivery = Promise.resolve();
+    let delayed = 0;
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
         super(url, options);
@@ -178,8 +182,17 @@ async function installProbe(page: Page) {
           }
           probe.commands.push(structuredClone((outgoing as typeof request).command));
         }
-        if (Array.isArray(transferOrOptions)) super.postMessage(outgoing, transferOrOptions);
-        else super.postMessage(outgoing, transferOrOptions);
+        const post = () => {
+          if (Array.isArray(transferOrOptions)) super.postMessage(outgoing, transferOrOptions);
+          else super.postMessage(outgoing, transferOrOptions);
+        };
+        const delay = request.type === 'edit' ? probe.editDelayMs : 0;
+        if (delay === 0 && delayed === 0) return post();
+        delayed += 1;
+        delivery = delivery.then(() => new Promise((resolve) => setTimeout(resolve, delay))).then(() => {
+          delayed -= 1;
+          post();
+        });
       }
     };
   });
@@ -455,6 +468,18 @@ test('d2d_typing_paste_formatting_share_chain', async ({ page }) => {
     return !!run?.getElementsByTagNameNS('*', 'b').length;
   }, xml)).toBe(true);
   expect(await savedText(page)).toBe('TPASTEBabcd');
+});
+
+test('typing_applied_late_undoes_in_one_step', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  await page.evaluate(() => { window.__docxPeerlessInput.editDelayMs = 700; });
+  await input.pressSequentially('Beta');
+  await settled(page);
+  expect(await savedText(page)).toBe('Betaabcd');
+  await input.press('ControlOrMeta+z');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
 });
 
 test('save_includes_typing_deferred_after_vertical_navigation', async ({ page }) => {

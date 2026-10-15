@@ -687,6 +687,69 @@ mod tests {
         assert_eq!(text(&doc, BODY), "body");
     }
 
+    fn type_at(doc: &EditingDoc, undo: &UndoSession, key: &str, first: u64, last: u64) {
+        undo.set_input_time(Some((first, last)));
+        append(doc, BODY, key);
+        undo.set_input_time(None);
+    }
+
+    #[test]
+    fn input_time_groups_keystrokes_that_apply_late() {
+        let doc = seed();
+        let (undo, now) = stepped_session();
+        undo.track(&doc);
+        for (index, key) in ["a", "b", "c"].into_iter().enumerate() {
+            let at = 5_000 + 50 * index as u64;
+            type_at(&doc, &undo, key, at, at);
+            now.fetch_add(700, Ordering::Relaxed);
+        }
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "body");
+    }
+
+    #[test]
+    fn input_pauses_split_steps_that_apply_together() {
+        let doc = seed();
+        let (undo, _now) = stepped_session();
+        undo.track(&doc);
+        type_at(&doc, &undo, "a", 5_000, 5_000);
+        type_at(&doc, &undo, "b", 5_600, 5_600);
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "bodya");
+    }
+
+    #[test]
+    fn input_spans_group_from_their_last_input() {
+        let doc = seed();
+        let (undo, now) = stepped_session();
+        undo.track(&doc);
+        type_at(&doc, &undo, "ab", 5_000, 5_600);
+        now.fetch_add(700, Ordering::Relaxed);
+        type_at(&doc, &undo, "c", 5_700, 5_700);
+        now.fetch_add(700, Ordering::Relaxed);
+        type_at(&doc, &undo, "d", 6_300, 6_300);
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "bodyabc");
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "body");
+    }
+
+    #[test]
+    fn edits_without_input_time_measure_apply_time() {
+        let doc = seed();
+        let (undo, now) = stepped_session();
+        undo.track(&doc);
+        type_at(&doc, &undo, "a", 5_000, 5_000);
+        now.fetch_add(100, Ordering::Relaxed);
+        append(&doc, BODY, "b");
+        now.fetch_add(700, Ordering::Relaxed);
+        type_at(&doc, &undo, "c", 5_050, 5_050);
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "bodyab");
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "body");
+    }
+
     #[test]
     fn moving_the_caret_to_another_story_closes_the_capture_group() {
         let doc = seed();
