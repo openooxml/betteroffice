@@ -646,6 +646,63 @@ test('worker file picker delegates to the host and save can be intercepted', asy
   expect(workers).toHaveLength(1);
 });
 
+test('a throwing file-open callback reports a recoverable error and keeps the document open', async () => {
+  const failure = new Error('Open request failed');
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} onOpen={() => { throw failure; }} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const editor = view.getByTestId('peerless-paged-editor');
+  await act(async () => {
+    fireEvent.change(view.getByTestId('docx-file-input'), { target: { files: [new File([source], 'picked.docx')] } });
+  });
+  expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
+  expect(view.getByTestId('peerless-paged-editor')).toBe(editor);
+  expect(editor.dataset.opened).toBe('true');
+});
+
+test('a superseded file open reports a recoverable error while the replacement opens', async () => {
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const read = spyOn(utils, 'toArrayBuffer').mockResolvedValue(source.buffer);
+  restorers.push(() => read.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => {
+    const input = view.getByTestId('docx-file-input');
+    fireEvent.change(input, { target: { files: [new File([source], 'first.docx')] } });
+    fireEvent.change(input, { target: { files: [new File([source], 'second.docx')] } });
+  });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(onError.mock.calls).toEqual([[new Error('Document was replaced'), { recoverable: true }]]);
+});
+
+test('a property-dialog command failure reports a recoverable error and keeps the document open', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const failure = new Error('Watermark properties failed');
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentRead').mockRejectedValueOnce(failure);
+  restorers.push(() => read.mockRestore());
+  await act(async () => { expect(await ref.current!.commands.execute('watermark', null)).toMatchObject({ ok: false }); });
+  expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
+  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+});
+
+test('a find-dialog search failure reports a recoverable error and keeps the document open', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const failure = new Error('Search failed');
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { await ref.current!.commands.execute('find', null); });
+  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockRejectedValueOnce(failure);
+  restorers.push(() => read.mockRestore());
+  fireEvent.change(view.getByTestId('find-replace-dialog').querySelector('#find-text')!, { target: { value: 'cat' } });
+  await waitFor(() => expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]));
+  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+});
+
 test('worker save downloads the worker bytes with the host document name', async () => {
   const ref = createRef<DocxEditorRef>();
   const downloads: string[] = [];

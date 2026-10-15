@@ -34,7 +34,7 @@ export function useWorkerFileIO(props: DocxEditorProps, ref: DocxEditorRef,
       return { ok: true, status: 'executed' };
     }).catch((cause): DocxCommandResult => {
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      latest.current.props.onError?.(error, { recoverable: true });
+      latest.current.props.onError?.(error);
       return { ok: false, failure: { code: 'command-failed', message: error.message } };
     }).finally(() => { if (pending.current === job) pending.current = null; });
     pending.current = job;
@@ -60,7 +60,7 @@ export function useWorkerFileIO(props: DocxEditorProps, ref: DocxEditorRef,
     imageInsert.current = null;
     event.currentTarget.value = '';
     if (!file || !insert) return;
-    const report = (error: Error) => latest.current.props.onError?.(error, { recoverable: true });
+    const report = (error: Error) => latest.current.props.onError?.(error);
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result !== 'string') return;

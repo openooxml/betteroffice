@@ -253,6 +253,21 @@ test("recoverable DOCX errors preserve serialization and the mounted editor", as
   expect(view.getByTestId("docx-mode")).toBe(editor);
 });
 
+test("recoverable DOCX errors are logged without reaching the host failure callback", async () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const { errors, view } = await mount();
+    const editor = view.getByTestId("docx-mode");
+    const failure = new Error("Open request failed");
+    act(() => docxProps.onError(failure, { recoverable: true }));
+    expect(warn.mock.calls).toEqual([[failure]]);
+    expect(errors).toEqual([]);
+    expect(view.getByTestId("docx-mode")).toBe(editor);
+  } finally {
+    warn.mockRestore();
+  }
+});
+
 test("a failed save rejects with the editor's error and a retry saves", async () => {
   const { api, errors, saved } = await mount();
   save = async ({ onError }) => {

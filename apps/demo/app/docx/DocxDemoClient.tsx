@@ -274,6 +274,7 @@ export function DocxDemoClient() {
             onOpen={handleOpen}
             onError={(cause, info) => {
               if (isFatalDocxError(info)) setError(cause.message);
+              else console.warn(cause);
             }}
             plugins={plugins}
             pluginGrants={pluginGrants}

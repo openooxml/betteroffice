@@ -153,7 +153,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (element) element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + rect.y * controller.ref.getZoom() - element.clientHeight / 2;
   }));
   const searchState = useSyncExternalStore(search.subscribe, search.getSnapshot, search.getSnapshot);
-  const fileIO = useWorkerFileIO(props, controller.ref, loadBuffer, () => active.current?.binding ?? null);
+  const fileIO = useWorkerFileIO(recoverableProps, controller.ref, loadBuffer, () => active.current?.binding ?? null);
   const getBinding = useCallback(() => active.current?.binding ?? null, []);
   const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, recoverableProps);
   useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, search: search.host, pickImage: fileIO.pickImage, perform: async (id) => {

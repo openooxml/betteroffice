@@ -205,7 +205,8 @@ export default function Editor({
     callbacks.current.onError(error);
   }, [file.format, apiUnavailable]);
   const docxError = useCallback((cause: Error, info?: DocxErrorInfo) => {
-    if (!info?.recoverable) error(cause);
+    if (info?.recoverable) console.warn(cause);
+    else error(cause);
   }, [error]);
   const apiReady = useCallback(
     <Api,>(ref: { current: Api | null }, api: Api, disposed: string) => {
