@@ -1151,6 +1151,16 @@ test('an edit overtakes sliced completion and finishes it before changing the do
   } finally { f.destroy(); }
 });
 
+/** Each engine mints its own revision ids; numbers them by first appearance so two engines' pages compare. */
+function revisionOrdinals<T>(value: T): T {
+  const ids = new Map<unknown, number>();
+  return JSON.parse(JSON.stringify(value, (key, item: unknown) => {
+    if (key !== 'revisionId') return item;
+    if (!ids.has(item)) ids.set(item, ids.size);
+    return ids.get(item);
+  })) as T;
+}
+
 async function proposeFirstParagraph(f: CommandFixture): Promise<DocxCommandAck> {
   const paragraph = f.engine.paragraphIdentities().paragraphs[0]!.session!;
   const reply = await f.w.interleave({ type: 'edit', command: {
@@ -1185,7 +1195,7 @@ for (const begun of [false, true]) {
       const proposed = commandFramesAfter(f.frame, frames).displayList.pages;
       const expected = commandFramesAfter(full.frame, referenceFrames).displayList.pages;
       expect(proposed).toHaveLength(expected.length);
-      expect(proposed.slice(0, 3)).toEqual(expected.slice(0, 3));
+      expect(revisionOrdinals(proposed.slice(0, 3))).toEqual(revisionOrdinals(expected.slice(0, 3)));
       await f.w.advance(INPUT_IDLE_HOLD_MS);
       expect(f.calls.slice(before)).toEqual([f.editLayout]);
     } finally { f.destroy(); full.destroy(); }
