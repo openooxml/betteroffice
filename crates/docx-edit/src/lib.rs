@@ -1644,7 +1644,13 @@ impl EditingDoc {
         ))
     }
 
+    /// Applies a peer's update, refusing one over [`MAX_UPDATE_BYTES`].
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
+        self.integrate_update(decode_peer_update_v1(bytes)?, UpdateOrigin::Remote)
+    }
+
+    /// Loads a whole document state, which the peer update cap does not cover.
+    pub(crate) fn load_state_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         self.integrate_update(update, UpdateOrigin::Remote)
@@ -1733,6 +1739,15 @@ impl EditingDoc {
         let counter = self.id_counter.fetch_add(1, Ordering::Relaxed);
         format!("{}:{counter}", self.client_id)
     }
+}
+
+pub(crate) fn decode_peer_update_v1(bytes: &[u8]) -> EditResult<Update> {
+    if bytes.len() > MAX_UPDATE_BYTES {
+        return Err(EditError::InvalidUpdate(format!(
+            "update exceeds {MAX_UPDATE_BYTES} bytes"
+        )));
+    }
+    Update::decode_v1(bytes).map_err(|error| EditError::InvalidUpdate(error.to_string()))
 }
 
 fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
@@ -2028,6 +2043,10 @@ mod tests {
 
         b.apply_update_v1(&update).unwrap();
         assert_eq!(b.encode_state_vector_v1(), a.encode_state_vector_v1());
+
+        let loaded = EditingDoc::new(3);
+        loaded.load_state_v1(&oversized).unwrap();
+        assert_eq!(loaded.encode_state_vector_v1(), a.encode_state_vector_v1());
     }
 
     #[test]
