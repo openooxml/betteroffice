@@ -69,7 +69,7 @@ export function AgentEditCards({ cards, names }: { cards: AgentEvalCard[]; names
             </h4>
             <span className={`${mono} text-dim`}>.{card.format}</span>
           </div>
-          <Bars bars={card.bars} labelColumn="grid-cols-[7.75rem_1fr]" />
+          <Bars bars={card.bars} labelColumn="grid-cols-[8.25rem_1fr]" />
         </li>
       ))}
     </ul>
