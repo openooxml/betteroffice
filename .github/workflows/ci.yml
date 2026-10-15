@@ -175,6 +175,9 @@ jobs:
     # Repository variable BO_CI_RUNNER=ubuntu-latest sends it back to GitHub-hosted runners.
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
     timeout-minutes: 90
+    # Full debuginfo in every test binary outgrows a kyora-4x8 VM's 40 GB disk; backtraces keep file:line.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v7
 
