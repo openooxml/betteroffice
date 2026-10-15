@@ -32,8 +32,7 @@ jobs:
   assemble:
     name: Assemble ${{ matrix.binding }}-native
     needs: dist
-    # Fork pull requests run on GitHub-hosted runners, everything else on kyora VMs (BO_CI_RUNNER=ubuntu-latest: all GitHub-hosted).
-    runs-on: ${{ (github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         binding: [docx, pptx, xlsx]
