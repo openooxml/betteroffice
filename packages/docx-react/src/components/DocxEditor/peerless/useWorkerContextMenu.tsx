@@ -10,6 +10,28 @@ import { parseClipboardHtml } from '../internals/clipboardHtml';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+
+async function readClipboardFragment(): Promise<DocxClipboardFragment | null> {
+  if (typeof navigator === 'undefined' || !navigator.clipboard || !('read' in navigator.clipboard)) return null;
+  let items: ClipboardItem[];
+  try {
+    items = await navigator.clipboard.read();
+  } catch {
+    return null;
+  }
+  for (const item of items) {
+    if (!item.types.includes('text/html')) continue;
+    let html: string;
+    try {
+      html = await (await item.getType('text/html')).text();
+    } catch {
+      return null;
+    }
+    return parseClipboardHtml(html);
+  }
+  return null;
+}
 
 export function useWorkerContextMenu(options: {
   binding(): PeerlessEditSessionBinding | null;
@@ -98,28 +120,21 @@ export function useWorkerContextMenu(options: {
       if (options.environment().readOnly || options.environment().mode === 'viewing') return;
       if (action === 'delete' && selection) current.commands.submit({ kind: 'replaceSelection', payload: { text: '', selection } }, { fence: true, source: 'paste' });
       else if (action === 'paste' || action === 'pasteAsPlainText') {
-        if (action === 'paste' && typeof navigator !== 'undefined' && navigator.clipboard && 'read' in navigator.clipboard) {
-          try {
-            const items = await navigator.clipboard.read();
-            for (const item of items) {
-              if (!item.types.includes('text/html')) continue;
-              const html = await (await item.getType('text/html')).text();
-              const fragment = parseClipboardHtml(html);
-              if (!fragment) break;
-              if (current !== options.binding()) throw new Error('Document was replaced');
-              const latestFragment = current.viewStore.getSnapshot();
-              if (latestFragment.version !== menu.snapshot.version || JSON.stringify(latestFragment.workerSelection) !== JSON.stringify(selection)) {
-                throw new Error('Context menu target changed');
-              }
-              if (options.environment().readOnly || options.environment().mode === 'viewing') return;
-              if (!isPasteFragmentAllowed(options.commands)) break;
+        if (action === 'paste') {
+          const fragment = await readClipboardFragment();
+          if (fragment) {
+            if (current !== options.binding()) throw new Error('Document was replaced');
+            const latest = current.viewStore.getSnapshot();
+            if (latest.version !== menu.snapshot.version || JSON.stringify(latest.workerSelection) !== JSON.stringify(selection)) {
+              throw new Error('Context menu target changed');
+            }
+            if (options.environment().readOnly || options.environment().mode === 'viewing') return;
+            if (isPasteFragmentAllowed(options.commands)) {
               admitInputIntents(current.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
                 { source: 'paste', fence: true });
               options.onPaste?.();
               return;
             }
-          } catch (error) {
-            if (error instanceof Error && (error.message === 'Document was replaced' || error.message === 'Context menu target changed')) throw error;
           }
         }
         const text = await navigator.clipboard.readText();
