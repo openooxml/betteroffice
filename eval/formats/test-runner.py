@@ -132,16 +132,18 @@ for line in sys.stdin:
             result['nextCursor'] = str(start + 10)
     print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
 '''
-GENERIC_SUFFIX = (' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
+GENERIC_SUFFIX = (' Read and edit the documents however you like: by hand (for example unzip the package, edit its XML parts and zip it again), with any shell tool, or with Python; openpyxl, python-pptx and python-docx are installed but optional.'
                   ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.'
-                  ' Use only this directory, the Python interpreter and its standard library/site-packages.'
+                  ' Work only inside this directory; temporary files may go in it.'
                   ' Commands that reference the repository, evaluation sources or task metadata, and file changes outside this directory disqualify the task.')
 FAKE_GENERIC_CODEX = '''#!/usr/bin/env python3
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 args = sys.argv[1:]
 assert args[:3] == ['exec', '-m', os.environ['FAKE_MODEL']]
 assert args[args.index('--sandbox') + 1] == 'workspace-write'
@@ -154,8 +156,19 @@ assert 'sandbox_workspace_write.network_access=false' in overrides
 assert not any(value.startswith(('mcp_servers', 'sandbox_workspace_write.writable_roots')) for value in overrides)
 assert args[-1].endswith(os.environ['FAKE_GENERIC_SUFFIX'])
 task = next(task for task in json.loads(Path(os.environ['FAKE_TASKS']).read_text()) if args[-1].startswith(task['prompt']))
-shutil.copyfile(Path(os.environ['FAKE_CORRECT']) / (task['id'] + '.' + task['format']), workspace / task['output'])
 mode = os.environ.get('FAKE_MODE')
+if mode == 'hand-edit':
+    scratch = workspace / 'work'
+    with ZipFile(workspace / task['input']) as archive:
+        archive.extractall(scratch)
+    subprocess.run("sed 's/Sumary/Summary/' work/word/document.xml > work/document.xml && mv work/document.xml work/word/document.xml",
+                   shell=True, check=True)
+    with ZipFile(workspace / task['output'], 'w', compression=ZIP_DEFLATED) as archive:
+        for path in sorted(scratch.rglob('*')):
+            if path.is_file():
+                archive.write(path, path.relative_to(scratch).as_posix())
+else:
+    shutil.copyfile(Path(os.environ['FAKE_CORRECT']) / (task['id'] + '.' + task['format']), workspace / task['output'])
 if mode == 'empty-log':
     sys.exit(0)
 if mode == 'unstructured-log':
@@ -165,9 +178,15 @@ if mode == 'message-only':
     print(json.dumps({'type': 'item.completed', 'item': {'id': 'message-1', 'type': 'agent_message', 'text': 'Done'}}))
     sys.exit(0)
 print(json.dumps({'type': 'thread.started'}))
-for item in [] if os.environ.get('FAKE_MODE') == 'no-tools' else [
-        {'id': 'shell-1', 'type': 'command_execution', 'command': 'python3 edit.py'},
-        {'id': 'patch-1', 'type': 'file_change', 'changes': [{'path': 'edit.py', 'kind': 'add'}]}]:
+items = [
+    {'id': 'shell-1', 'type': 'command_execution', 'command': 'unzip -o input.docx -d work/'},
+    {'id': 'shell-2', 'type': 'command_execution',
+     'command': "sed 's/Sumary/Summary/' work/word/document.xml > work/document.xml && mv work/document.xml work/word/document.xml"},
+    {'id': 'shell-3', 'type': 'command_execution', 'command': 'cd work && zip -X -r ../output.docx .'},
+] if mode == 'hand-edit' else [] if mode == 'no-tools' else [
+    {'id': 'shell-1', 'type': 'command_execution', 'command': 'python3 edit.py'},
+    {'id': 'patch-1', 'type': 'file_change', 'changes': [{'path': 'edit.py', 'kind': 'add'}]}]
+for item in items:
     for event in ['item.started', 'item.completed']:
         print(json.dumps({'type': event, 'item': item}))
 mode = os.environ.get('FAKE_MODE')
@@ -486,6 +505,17 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(record['pass'], reason is None, record['check_message'])
                 if reason:
                     self.assertIn(reason, record['check_message'])
+
+    def test_generic_hand_edit_in_scratch_directory_passes(self):
+        results = self.root / 'generic-hand-edit'
+        results.mkdir()
+        task = next(task for task in runner.checker.tasks() if task['id'] == 'docx-01-fix-heading')
+        with self.generic_environment(FAKE_MODE='hand-edit'):
+            record = runner.run_task(task, None, 'test-model', results, arm='generic', python=self.python)
+        runner.checker.check(task, results / task['id'] / task['output'])
+        self.assertEqual(record['agent_exit_code'], 0)
+        self.assertTrue(record['pass'], record['check_message'])
+        self.assertEqual(record['tool_calls'], 3)
 
     def test_generic_repository_reads_and_outside_file_changes_fail_with_correct_output(self):
         home_relative = os.path.relpath(runner.REPO, Path.home())

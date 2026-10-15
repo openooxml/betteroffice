@@ -67,19 +67,21 @@ startup time as `mcp_startup_seconds`.
 ### Generic arm
 
 `--arm generic --python <python>` runs the same tasks, prompts and checker with
-the same model but without the BetterOffice MCP server: the agent reads and
-edits the documents with shell commands and Python with openpyxl, python-pptx
-and python-docx. The runner first checks that `<python>` imports the three
-libraries and puts its directory first on `PATH`. codex runs with
-`--sandbox workspace-write` in the task directory, network access off, no
-additional writable roots and no MCP servers. `shell_tool`, `unified_exec` and
-`unified_exec_tty` are enabled; every other feature listed in `run.py` stays
-disabled, including `shell_snapshot`, so commands inherit the runner's
-environment. Shell commands and file changes are allowed and counted as tool
-calls; an MCP call, a web search or any other tool item fails the task.
+the same model but without the BetterOffice MCP server: the agent may read and
+edit the documents however it likes, by hand (unzipping the package, editing
+its XML parts and zipping it again), with any shell tool, or with Python, where
+openpyxl, python-pptx and python-docx are installed but optional. The runner
+first checks that `<python>` imports the three libraries and puts its directory
+first on `PATH`. codex runs with `--sandbox workspace-write` in the task
+directory, network access off, no additional writable roots and no MCP servers.
+`shell_tool`, `unified_exec` and `unified_exec_tty` are enabled; every other
+feature listed in `run.py` stays disabled, including `shell_snapshot`, so
+commands inherit the runner's environment. Shell commands and file changes are
+allowed and counted as tool calls; an MCP call, a web search or any other tool
+item fails the task.
 Each task starts in a fresh temporary directory outside the repository containing
-only its input file; the generic arm is told to use only this directory, the Python
-interpreter and its standard library/site-packages. The audit fails logged commands
+only its input file; the generic arm is told to work only inside this directory,
+where temporary files may go. The audit fails logged commands
 that reference the repository, evaluation sources or task metadata, and file changes
 outside the task directory. The workspace-write sandbox restricts writes and disables
 network access. Reads are not sandboxed: this is an audit of logged commands, not
@@ -100,7 +102,7 @@ configuration isolation and file-access auditing can be established.
 
 | Arm | What runs | Proves | Does not prove |
 | --- | --- | --- | --- |
-| `generic` (A) | Model with sandboxed shell and Python libraries, network off, no MCP | How well the agent uses the standard open-source toolchain on these files | That this is the best possible generic workflow |
+| `generic` (A) | Model with sandboxed shell, free choice of hand-editing XML, shell tools or optional Python libraries, network off, no MCP | How well the agent edits these files with general-purpose shell and Python tools | That this is the best possible generic workflow |
 | `betteroffice` (B) | Same model with only BetterOffice MCP tools | How well the agent uses BetterOffice's tools | Engine capability independently of tool use |
 | `scripted-lib` (C-lib) | Fixed Python scripts using python-docx, openpyxl or python-pptx, no model | Whether the libraries can express each edit without collateral damage | General library limits beyond these files or these best-effort scripts |
 | `scripted-bo` (C-bo) | Fixed BetterOffice MCP requests, no model | Whether BetterOffice can express each edit without collateral damage | General engine superiority beyond these files or these best-effort scripts |

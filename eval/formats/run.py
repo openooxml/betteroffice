@@ -205,9 +205,9 @@ def command_line(cli, workspace, model, prompt, arm='betteroffice'):
                 '-c', 'approval_policy="never"',
                 '-c', 'web_search="disabled"',
                 '-c', 'sandbox_workspace_write.network_access=false',
-                prompt + ' Use shell commands and Python with openpyxl, python-pptx and python-docx to read and edit the documents.'
+                prompt + ' Read and edit the documents however you like: by hand (for example unzip the package, edit its XML parts and zip it again), with any shell tool, or with Python; openpyxl, python-pptx and python-docx are installed but optional.'
                 ' There is no network access. All other tool calls disqualify the task. The documents live in the current directory.'
-                ' Use only this directory, the Python interpreter and its standard library/site-packages.'
+                ' Work only inside this directory; temporary files may go in it.'
                 ' Commands that reference the repository, evaluation sources or task metadata, and file changes outside this directory disqualify the task.']
     return ['codex', 'exec', '-m', model, '--sandbox', 'read-only', '--skip-git-repo-check',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '-C', str(workspace),
