@@ -171,7 +171,7 @@ are merged, and a paragraph without a style has the default paragraph style.
 The DOCX fixtures carry `w14:paraId` and `w14:textId` on every paragraph, as Word
 writes them. Paragraphs from the input keep both exactly, edited or not. A new
 paragraph (an inserted paragraph or the paragraphs of an inserted row) may
-carry fresh ids or none. Duplicate ids fail. Rsid attributes are compared as
+carry fresh ids or none. Duplicate paraIds or duplicate textIds fail. Rsid attributes are compared as
 written; the fixtures have none.
 
 The checkers are validated against known answers:
@@ -183,8 +183,9 @@ two enriched fixtures also check view and defined-name remapping and metadata
 preservation, and targeted variants check tab selection, notes parts, slide
 shape elements, paragraph end properties, fields and empty formatted runs,
 cell, row, column and named style formats, and for DOCX tracked-change markup,
-run splits and formatting, row placement, style resolution, reordered content
-and package parts (62 accepted, 30 untouched rejected, 145 corrupted rejected).
+run splits and formatting, row placement, style resolution, reordered content,
+package parts and paragraph ids (65 accepted, 30 untouched rejected, 157
+corrupted rejected).
 [`formats/test-runner.py`](formats/test-runner.py) tests the runner itself with
 a stand-in agent.
 

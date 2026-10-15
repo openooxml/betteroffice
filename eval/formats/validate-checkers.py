@@ -1358,6 +1358,11 @@ def template_row_ids(package):
             paragraph.set(tag('w14', name), template.get(tag('w14', name)))
 
 
+def shared_inserted_row_paraid(package):
+    first, second = list(word_rows(package)[4].iter(tag('w', 'p')))[:2]
+    second.set(tag('w14', 'paraId'), first.get(tag('w14', 'paraId')))
+
+
 def without_inserted_row_ids(package):
     for paragraph in word_rows(package)[4].iter(tag('w', 'p')):
         for name in ('paraId', 'textId'):
@@ -1414,6 +1419,8 @@ def validate_docx(directory):
             ('docx-08 inserted paragraph paraId not eight hex digits', 8, paragraph_identity('The steering group meets on 20 October.', 'paraId', '0000001'), False, None),
             ('docx-04 inserted row keeping template ids', 4, template_row_ids, False, None),
             ('docx-04 inserted row without ids', 4, without_inserted_row_ids, True, None),
+            ('docx-04 inserted row cells sharing a fresh paraId', 4, shared_inserted_row_paraid, False, None),
+            ('docx-08 inserted paragraph with a fresh paraId only', 8, paragraph_identity('The steering group meets on 20 October.', 'paraId', 'fresh'), True, None),
             ('docx-01 untouched paragraphs swapped ids', 1, swap_untouched_paragraph_ids, False, None),
             ('docx-01 document Ignorable removed', 1, without_word_ignorable, False, None)]:
         slug = name.split(' ', 1)[1].replace(' ', '-')
