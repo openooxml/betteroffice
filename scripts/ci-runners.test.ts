@@ -67,9 +67,11 @@ function evaluate(source: string, context: Record<string, unknown>): unknown {
       if (token === 'format') {
         const [fmt, ...rest] = args;
         if (typeof fmt !== 'string') throw unsupported();
-        return fmt.replace(/\{\{|\}\}|\{(\d+)\}/g, (match, index) =>
-          match === '{{' ? '{' : match === '}}' ? '}' : String(rest[Number(index)] ?? '')
-        );
+        return fmt.replace(/\{\{|\}\}|\{(\d+)\}|[{}]/g, (match, index) => {
+          if (match === '{{' || match === '}}') return match[0];
+          if (index === undefined || Number(index) >= rest.length) throw unsupported();
+          return String(rest[Number(index)] ?? '');
+        });
       }
       throw unsupported();
     }
@@ -695,6 +697,9 @@ describe('CI runner routing', () => {
     expect(evaluate("fromJSON('{\"package-tests-2\":\"kyora-8x8\"}')['missing']", context)).toBeNull();
     expect(evaluate("format('package-tests-{0}', matrix.shard)", context)).toBe('package-tests-2');
     expect(evaluate("format('{{escaped}} {0}-{1}', 'a', 'b')", context)).toBe('{escaped} a-b');
+    expect(() => evaluate("format('package-tests-{0}{1}', matrix.shard)", context)).toThrow('unsupported expression');
+    expect(() => evaluate("format('package-tests-{0', matrix.shard)", context)).toThrow('unsupported expression');
+    expect(() => evaluate("format('package-tests}', matrix.shard)", context)).toThrow('unsupported expression');
     expect(
       evaluate("fromJSON(needs.route.outputs.runners || '{}').rust", {
         needs: { route: { outputs: { runners: '' } } },
