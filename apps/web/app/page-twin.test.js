@@ -4,15 +4,17 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parseFidelity } from "../lib/fidelity.ts";
+import { parseAgentEvals } from "../lib/agent-evals.ts";
 import { homepageMarkdown } from "./markdown.ts";
 import { USED_BY, USED_BY_LABEL, USED_BY_MORE } from "./used-by.ts";
 
 const README = readFileSync(join(import.meta.dir, "..", "..", "..", "README.md"), "utf8");
 process.env.BETTEROFFICE_BENCHMARKS = README;
+process.env.BETTEROFFICE_AGENT_EVALS = README;
 const { default: Home } = await import("./page.tsx");
 
 const html = renderToStaticMarkup(createElement(Home));
-const markdown = homepageMarkdown(parseFidelity(README));
+const markdown = homepageMarkdown(parseFidelity(README), parseAgentEvals(README));
 
 const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', "#x27": "'", "#39": "'" };
 const plain = (fragment) =>
@@ -31,6 +33,7 @@ const read = markdown
 describe("markdown twin of the page", () => {
   test("renders the benchmark section it is checked against", () => {
     expect(elements("h2")).toContain("Benchmarks");
+    expect(elements("h3")).toContain("Agent edits");
   });
 
   test("carries every heading on the page", () => {

@@ -134,6 +134,13 @@ export const BENCHMARKS_SECTION = {
   more: "Per-document results",
 };
 
+export const AGENT_EVALS = {
+  heading: "Agent edits",
+  lead: (tasks: number) => `Same model, same ${tasks} editing tasks, two toolsets. An edit counts only if the requested change is there and nothing else in the file moved.`,
+  method: `${REPO}#evals`,
+  more: "Method, tasks and fixtures",
+};
+
 export const CAPABILITIES = [
   {
     name: "Documents, spreadsheets, and slides",

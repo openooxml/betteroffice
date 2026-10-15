@@ -3,8 +3,9 @@ import { prefersMarkdown } from "../../../shared/accept.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fidelityCharts, parseFidelity } from "../lib/fidelity.ts";
+import { agentEvalCards, agentEvalTasks, parseAgentEvals } from "../lib/agent-evals.ts";
 import { homepageMarkdown } from "./markdown.ts";
-import { BENCHMARKS_SECTION, BENCHMARKS_SITE, DEMO, ECOSYSTEMS, EDITORS, HERO, PACKAGES } from "./content.ts";
+import { AGENT_EVALS, BENCHMARKS_SECTION, BENCHMARKS_SITE, DEMO, ECOSYSTEMS, EDITORS, editorOrder, HERO, PACKAGES } from "./content.ts";
 import { USED_BY, USED_BY_LABEL, USED_BY_MORE, usedByLine } from "./used-by.ts";
 
 describe("accept negotiation", () => {
@@ -136,6 +137,45 @@ describe("homepage markdown benchmarks", () => {
   });
 
   test("stays free of HTML with the tables in", () => {
+    expect(markdown).not.toMatch(/<[a-z][^>]*>/i);
+  });
+});
+
+describe("homepage markdown agent evals", () => {
+  const readme = readFileSync(join(import.meta.dir, "..", "..", "..", "README.md"), "utf8");
+  const formats = parseFidelity(readme);
+  const evals = parseAgentEvals(readme);
+  const markdown = homepageMarkdown(formats, evals);
+
+  test("carries the heading, task total and method link", () => {
+    expect(markdown).toContain("### Agent edits\n");
+    expect(markdown).toContain(AGENT_EVALS.lead(agentEvalTasks(evals)));
+    expect(markdown).toContain(`[${AGENT_EVALS.more}](${AGENT_EVALS.method})`);
+  });
+
+  test("prints every drawn card in suite order with the published labels and values", () => {
+    const cards = agentEvalCards(evals).sort((a, b) => editorOrder(a.format) - editorOrder(b.format));
+    const lines = cards.map((card) => {
+      const name = EDITORS.find((editor) => editor.format === card.format).name;
+      return `- **${name}** (.${card.format}): ${evals.ours} ${card.bars[0].text}, ${evals.theirs} ${card.bars[1].text}`;
+    });
+    expect(markdown).toContain(lines.join("\n"));
+    expect(homepageMarkdown(formats, { ...evals, rows: [{ format: "docx", ours: "n/a", theirs: "6/10" }] })).not.toContain("### Agent edits");
+  });
+
+  test("sits after the fidelity results and before collaboration", () => {
+    const start = markdown.indexOf("### Agent edits");
+    expect(start).toBeGreaterThan(markdown.indexOf(`[${BENCHMARKS_SECTION.more}](${BENCHMARKS_SITE})`));
+    expect(start).toBeLessThan(markdown.indexOf("## People and agents, one document"));
+  });
+
+  test("leaves the block out without evals or fidelity", () => {
+    expect(homepageMarkdown(formats)).not.toContain("### Agent edits");
+    expect(homepageMarkdown(formats, null)).not.toContain("### Agent edits");
+    expect(homepageMarkdown([], evals)).not.toContain("### Agent edits");
+  });
+
+  test("stays free of HTML with the evals in", () => {
     expect(markdown).not.toMatch(/<[a-z][^>]*>/i);
   });
 });
