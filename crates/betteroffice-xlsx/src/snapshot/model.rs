@@ -2234,6 +2234,191 @@ mod tests {
         assert_eq!(builder.finish().unwrap(), model);
     }
 
+    fn zero_height_model() -> Workbook {
+        let mut sheet = Sheet::new("Rows");
+        sheet.format.zero_height = true;
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.row_heights.extend([(0, 15.0), (3, 0.0)]);
+        sheet.row_styles.insert(4, 0);
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "visible".into(),
+                },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            Cell {
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        let mut styles = Stylesheet::default();
+        styles.cell_xfs = vec![Xf::default()];
+        Workbook {
+            sheets: vec![sheet],
+            styles,
+            ..Workbook::default()
+        }
+    }
+
+    fn old_zero_height_snapshot() -> Vec<Vec<u8>> {
+        let globals = Workbook {
+            styles: zero_height_model().styles,
+            ..Workbook::default()
+        };
+        let mut cursor = MetadataCursor::default();
+        let mut records = Vec::new();
+        loop {
+            let mut record = Writer::new();
+            if !cursor.write_next(&mut record, &globals).unwrap() {
+                break;
+            }
+            records.push(record.into_bytes());
+        }
+        let mut sheet = Writer::new();
+        sheet.u8(25);
+        sheet.str("Rows");
+        sheet.bool(false);
+        sheet.bool(true);
+        sheet.f64(12.75);
+        sheet.bool(false);
+        sheet.bool(true);
+        for count in [0, 0, 0, 2, 0, 0, 0, 2, 1] {
+            sheet.var_usize(count);
+        }
+        records.push(sheet.into_bytes());
+        for (row, height) in [(0, 15.0), (3, 0.0)] {
+            let mut record = Writer::new();
+            record.u8(16);
+            record.var_u32(row);
+            record.f64(height);
+            records.push(record.into_bytes());
+        }
+        let mut style = Writer::new();
+        style.u8(24);
+        style.var_u32(4);
+        style.var_u32(0);
+        records.push(style.into_bytes());
+
+        let mut counts = global_counts(&globals);
+        counts[9] = 1;
+        let mut header = Writer::new();
+        header.u8(0);
+        header.u8(0);
+        header.var_usize(records.len() + 1);
+        header.var_usize(2);
+        for count in counts {
+            header.var_usize(count);
+        }
+        let mut chunks = vec![frame(ChunkKind::Model, 0, &header.into_bytes())];
+        for record in records {
+            chunks.push(frame(ChunkKind::Model, chunks.len() as u64, &record));
+        }
+        let mut cells = Writer::new();
+        for value in [0, 0, 0, 2, 1, 0] {
+            cells.var_u32(value);
+        }
+        cells.u8(2);
+        cells.str("visible");
+        cells.bool(false);
+        cells.bool(false);
+        cells.var_u32(1);
+        cells.var_u32(0);
+        cells.u8(0);
+        cells.bool(false);
+        cells.bool(true);
+        cells.var_u32(0);
+        chunks.push(frame(
+            ChunkKind::Cells,
+            chunks.len() as u64,
+            &cells.into_bytes(),
+        ));
+        chunks
+    }
+
+    #[test]
+    fn zero_height_snapshots_use_only_preexisting_record_tags() {
+        for styled in [false, true] {
+            let mut model = zero_height_model();
+            if !styled {
+                model.sheets[0].row_styles.clear();
+            }
+            let budget = SnapshotBudget::new(1, 1024).unwrap();
+            let chunks = encode(&model, budget);
+            let tags = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .collect::<Vec<_>>();
+            assert!(tags.iter().all(|&tag| tag <= 25), "{tags:?}");
+            assert!(tags.contains(&if styled { 25 } else { 12 }));
+            assert_eq!(decode(&chunks), model);
+            assert_eq!(advance_all(&chunks, budget).unwrap(), model);
+        }
+    }
+
+    #[test]
+    fn zero_height_old_snapshot_decodes_content_rows_visible() {
+        let chunks = old_zero_height_snapshot();
+        let budget = SnapshotBudget::new(3, 1024).unwrap();
+        for restored in [decode(&chunks), advance_all(&chunks, budget).unwrap()] {
+            assert_eq!(restored, zero_height_model());
+            let sheet = &restored.sheets[0];
+            for row in [0, 1, 2, 4] {
+                assert!(!sheet.row_hidden(row), "row {row}");
+            }
+            assert!(sheet.row_hidden(3));
+            assert!(sheet.row_hidden(5));
+            let workbook = crate::Workbook::from_model(restored).unwrap();
+            let frame = workbook
+                .display_list_for(
+                    SheetId(0),
+                    &crate::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1600.0,
+                        height: 1000.0,
+                    },
+                )
+                .unwrap();
+            assert!(frame.commands.iter().any(|command| {
+                matches!(command, crate::DrawCmd::Text { text, .. } if text.as_ref() == "visible")
+            }));
+            let geometry = crate::GridGeometry::new(
+                workbook.sheet(SheetId(0)).unwrap(),
+                &workbook.model().styles,
+            );
+            assert_eq!(geometry.row_y(3) - geometry.row_y(2), 17.0);
+            assert_eq!(geometry.row_y(5) - geometry.row_y(4), 17.0);
+            assert_eq!(geometry.row_y(6), geometry.row_y(5));
+        }
+    }
+
+    #[test]
+    fn zero_height_old_snapshot_reencode_preserves_cells_heights_and_row_styles() {
+        let original = decode(&old_zero_height_snapshot());
+        let budget = SnapshotBudget::new(3, 1024).unwrap();
+        let chunks = encode(&original, budget);
+        for restored in [decode(&chunks), advance_all(&chunks, budget).unwrap()] {
+            assert_eq!(
+                restored.sheets[0].iter_cells().collect::<Vec<_>>(),
+                original.sheets[0].iter_cells().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                restored.sheets[0].row_heights,
+                original.sheets[0].row_heights
+            );
+            assert_eq!(restored.sheets[0].row_styles, original.sheets[0].row_styles);
+            assert_eq!(restored, original);
+        }
+    }
+
     fn declared_header(records: usize, counts: [usize; 10]) -> Vec<u8> {
         let mut w = Writer::new();
         w.u8(HEADER);
