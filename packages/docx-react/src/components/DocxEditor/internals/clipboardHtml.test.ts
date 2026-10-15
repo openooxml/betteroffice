@@ -114,6 +114,24 @@ test('paragraph table paragraph shares the table paragraph text', () => {
   expect(trailing!.paragraphs[1]!.text).toBe('');
 });
 
+test('rowspan occupancy places the next row cell in the first free column', () => {
+  const html = `<body><table><tbody>`
+    + `<tr><td rowspan="2">A</td><td>B</td></tr>`
+    + `<tr><td>C</td></tr></tbody></table></body>`;
+  const parsed = parseClipboardHtml(html);
+  expect(parsed).not.toBeNull();
+  const table = parsed!.paragraphs[0]!.tables![0]!;
+  expect(table.rows).toHaveLength(2);
+  expect(table.rows[0]!.cells.map((c) => c.content[0])).toEqual([
+    { kind: 'text', text: 'A' },
+    { kind: 'text', text: 'B' },
+  ]);
+  expect(table.rows[0]!.cells[0]!.tcPr).toMatchObject({ rowspan: 2 });
+  expect(table.rows[1]!.cells).toHaveLength(1);
+  expect(table.rows[1]!.cells[0]!.content[0]).toMatchObject({ kind: 'text', text: 'C' });
+  expect(table.grid.length === 0 || table.grid.length === 2).toBe(true);
+});
+
 test('huge colspan is clamped to a bounded table', () => {
   const parsed = parseClipboardHtml(
     `<body><table><tbody><tr><td colspan="1000000000">Wide</td></tr></tbody></table></body>`
