@@ -22,6 +22,7 @@ test('default worker API stages proposals after typing and supports accepting an
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBe(0);
   await page.getByTestId('xlsx-scroll').focus();
   await page.getByTestId('xlsx-scroll').press('F2');
+  await expect(page.getByTestId('xlsx-cell-editor')).toHaveValue('initial');
   await page.getByTestId('xlsx-cell-editor').fill('typed before proposal');
   const proposed = await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.editor.proposeChanges!({
     agentId: 'browser', note: 'accept this edit', edits: [{ sheet: 0, row: 0, col: 0, input: 'accepted' }],
