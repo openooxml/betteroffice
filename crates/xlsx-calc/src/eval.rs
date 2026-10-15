@@ -767,7 +767,7 @@ fn operand(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> 
 }
 
 /// a numeric operator over one value; see [`date_text_gap`].
-fn coerced(
+pub(crate) fn coerced(
     value: &CellValue,
     ctx: &EvalContext<'_>,
     apply: impl Fn(&CellValue) -> CellValue,
