@@ -68,7 +68,7 @@ async function caretIntoTable(page: Page, input: ReturnType<Page['locator']>) {
 async function tableMenuAction(page: Page, label: string) {
   await page.getByTestId('toolbar-table-more').click();
   const menu = page.locator('[role="menu"]');
-  await menu.getByRole('button', { name: label, exact: true }).click();
+  await menu.getByRole('menuitem', { name: label, exact: true }).click();
 }
 
 async function savedGrid(page: Page, info: TestInfo, step: string) {
