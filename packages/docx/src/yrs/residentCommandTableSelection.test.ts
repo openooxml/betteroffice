@@ -111,6 +111,18 @@ test('select_table_cells_reports_merged_spans_and_targets_the_innermost_table', 
   expect([range.head.row, range.head.column]).toEqual([1, 1]);
 }, TIMEOUT);
 
+test('table_context_reports_spans_of_the_caret_cell_not_the_range_head', async () => {
+  const merged = paragraph('Before') + table([
+    cell('Merged', '<w:gridSpan w:val="2"/>'),
+    cell('C') + cell('D'),
+  ]) + paragraph('After');
+  const arm = await inCell(merged, 'Merged');
+  const selected = execute(arm, command(arm, 'selectTableCells', { target: 'table' }));
+  expect(selected.status).toBe('noop');
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 1, column: 1 } });
+  expect(selected.editState?.tableContext).toMatchObject({ rowIndex: 1, columnIndex: 1, columnSpan: 2, hasMultiCellSelection: true });
+}, TIMEOUT);
+
 test('select_table_cells_refuses_outside_tables_and_allows_read_only', async () => {
   const arm = await openEngine([], { bodyXml: body });
   const first = arm.engine.paragraphs('body')[0]!;
