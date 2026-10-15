@@ -150,7 +150,7 @@ type CellMoves = Vec<((RowId, ColId), Option<(RowId, ColId)>)>;
 pub struct SheetFormat {
     pub default_row_height_pt: Option<f64>,
     pub custom_height: bool,
-    /// `zeroHeight`: every row without its own `ht` is hidden.
+    /// `zeroHeight`: rows without height, cells or row style are hidden.
     pub zero_height: bool,
 }
 
@@ -528,12 +528,19 @@ impl Sheet {
         }
     }
 
-    /// whether `row` has no height: hidden, authored at zero, or unsized under
-    /// `zeroHeight`. rendering and export share this reading.
+    /// Whether `row` has no visible extent.
     pub fn row_hidden(&self, row: RowId) -> bool {
         match self.row_heights.get(&row) {
             Some(&height) => no_extent(height),
-            None => self.format.zero_height,
+            None => {
+                self.format.zero_height
+                    && !self.row_styles.contains_key(&row)
+                    && self
+                        .cells
+                        .range((row, 0)..=(row, ColId::MAX))
+                        .next()
+                        .is_none()
+            }
         }
     }
 
@@ -545,18 +552,52 @@ impl Sheet {
     }
 
     /// maximal runs of rows inside `rows` that [`Sheet::row_hidden`] hides, as
-    /// inclusive pairs in order; costs one step per sized row, not per row.
+    /// inclusive pairs in order; skips empty rows in bulk.
     pub fn hidden_row_spans(
         &self,
         rows: RangeInclusive<RowId>,
     ) -> impl Iterator<Item = (RowId, RowId)> + '_ {
-        HiddenSpans::new(
-            self.row_heights
-                .range(rows.clone())
-                .map(|(&row, &height)| (row, no_extent(height))),
-            rows,
-            self.format.zero_height,
-        )
+        let mut heights = self.row_heights.range(rows.clone()).peekable();
+        let mut styles = self
+            .row_styles
+            .range(rows.clone())
+            .take(if self.format.zero_height {
+                usize::MAX
+            } else {
+                0
+            })
+            .peekable();
+        let (first, last) = (*rows.start(), *rows.end());
+        let mut next = (self.format.zero_height && first <= last).then_some(first);
+        let mut cells = std::iter::from_fn(move || {
+            let start = next?;
+            let (&(row, _), _) = self.cells.range((start, 0)..=(last, ColId::MAX)).next()?;
+            next = row.checked_add(1).filter(|&row| row <= last);
+            Some(row)
+        })
+        .peekable();
+        let entries = std::iter::from_fn(move || {
+            let height_row = heights.peek().map(|entry| *entry.0);
+            let style_row = styles.peek().map(|entry| *entry.0);
+            let cell_row = cells.peek().copied();
+            let row = [height_row, style_row, cell_row]
+                .into_iter()
+                .flatten()
+                .min()?;
+            let hidden = if height_row == Some(row) {
+                no_extent(*heights.next()?.1)
+            } else {
+                false
+            };
+            if style_row == Some(row) {
+                styles.next();
+            }
+            if cell_row == Some(row) {
+                cells.next();
+            }
+            Some((row, hidden))
+        });
+        HiddenSpans::new(entries, rows, self.format.zero_height)
     }
 
     /// maximal runs of columns inside `cols` that [`Sheet::col_hidden`] hides.
@@ -1027,6 +1068,18 @@ mod tests {
         for (col, width) in [(0, 0.0), (1, 8.0), (2, 0.0), (3, 0.0), (7, 0.0)] {
             sheet.col_widths.insert(col, width);
         }
+        for row in [0, 3, 4] {
+            for col in [0, 3] {
+                sheet.set_cell(
+                    CellRef::new(row, col),
+                    Cell {
+                        style: Some(0),
+                        ..Cell::default()
+                    },
+                );
+            }
+        }
+        sheet.row_styles.extend([(7, 0), (9, 0)]);
         let brute = |hidden: &dyn Fn(u32) -> bool, first: u32, last: u32| {
             let mut spans: Vec<(u32, u32)> = Vec::new();
             for index in first..=last {
@@ -1060,6 +1113,36 @@ mod tests {
         assert_eq!(
             sheet.hidden_row_spans(0..=crate::addr::MAX_ROWS - 1).last(),
             Some((10, crate::addr::MAX_ROWS - 1))
+        );
+    }
+
+    #[test]
+    fn zero_height_hidden_spans_skip_long_empty_ranges() {
+        let mut sheet = Sheet::new("Rows");
+        sheet.format.zero_height = true;
+        sheet.row_styles.insert(0, 0);
+        sheet.row_heights.insert(500_000, 0.0);
+        let last = crate::addr::MAX_ROWS - 1;
+        sheet.set_cell(
+            CellRef::new(last, 0),
+            Cell {
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        assert_eq!(
+            sheet.hidden_row_spans(0..=last).collect::<Vec<_>>(),
+            [(1, last - 1)]
+        );
+        sheet.set_cell(CellRef::new(last, 0), Cell::default());
+        assert_eq!(
+            sheet.hidden_row_spans(0..=last).collect::<Vec<_>>(),
+            [(1, last)]
+        );
+        sheet.row_styles.clear();
+        assert_eq!(
+            sheet.hidden_row_spans(0..=last).collect::<Vec<_>>(),
+            [(0, last)]
         );
     }
 

@@ -36,6 +36,65 @@ fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, Pars
     crate::parse_workbook(&owned_parts(parts))
 }
 
+fn zero_height_parts() -> Vec<(String, Vec<u8>)> {
+    package(
+        r#"<sheetFormatPr defaultRowHeight="12.75" zeroHeight="1"/><sheetData><row r="1" ht="15" customHeight="1"/><row r="2"><c r="A2" t="inlineStr"><is><t>visible</t></is></c></row><row r="4" hidden="1"/><row r="5"/><row r="7"><c r="A7" s="0"/></row><row r="8" s="0" customFormat="1"/></sheetData>"#,
+        &[],
+        false,
+    )
+}
+
+#[test]
+fn zero_height_keeps_content_rows_visible_and_empty_rows_hidden() {
+    let workbook = parse_workbook(&zero_height_parts()).unwrap();
+    let sheet = &workbook.sheets[0];
+    assert!(!sheet.row_hidden(0));
+    assert!(!sheet.row_hidden(1));
+    assert!(sheet.row_hidden(2));
+    assert!(sheet.row_hidden(3));
+    assert!(sheet.row_hidden(4));
+    assert!(!sheet.row_hidden(6));
+    assert!(!sheet.row_hidden(7));
+    assert_eq!(
+        sheet.hidden_row_spans(0..=8).collect::<Vec<_>>(),
+        [(2, 5), (8, 8)]
+    );
+}
+
+#[test]
+fn zero_height_round_trip_preserves_row_visibility_and_attributes() {
+    let parts = zero_height_parts();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let unchanged = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    for (path, source) in &parts {
+        assert_eq!(&part_bytes(&unchanged, path), source);
+    }
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(
+        CellRef::new(1, 0),
+        Cell {
+            value: CellValue::Text {
+                value: "edited".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    assert!(xml.contains(r#"<row r="2">"#));
+    assert!(xml.contains(r#"<row r="5"/>"#));
+    assert!(xml.contains(r#"<row r="7">"#));
+    assert!(xml.contains(r#"<row r="8" s="0" customFormat="1"/>"#));
+    let reopened = parse_workbook(&saved).unwrap();
+    assert!(!reopened.sheets[0].row_hidden(1));
+    assert!(reopened.sheets[0].row_hidden(4));
+    assert!(reopened.sheets[0].row_hidden(2));
+    assert!(reopened.sheets[0].row_hidden(3));
+    assert!(!reopened.sheets[0].row_hidden(6));
+    assert!(!reopened.sheets[0].row_hidden(7));
+    assert_eq!(cell_at(&reopened, "A2").value, cell_at(&edited, "A2").value);
+}
+
 #[test]
 fn row_style_defaults_are_sparse_and_require_custom_format() {
     let parts = package(

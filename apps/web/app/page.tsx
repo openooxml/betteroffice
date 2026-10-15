@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import type { CSSProperties, ReactNode } from "react";
 import { ArrowRight, ArrowUpRight } from "lucide-react";
 import { publishedFidelity } from "../lib/fidelity";
-import { BenchmarkCards } from "./components/Benchmarks";
+import { agentEvalCards, agentEvalTasks, publishedAgentEvals } from "../lib/agent-evals";
+import { AgentEditCards, BenchmarkCards } from "./components/Benchmarks";
 import { CoEdit } from "./components/CoEdit";
 import { CopyButton } from "./components/CopyButton";
 import { FormatGlyph } from "./components/FormatGlyph";
@@ -10,6 +11,7 @@ import { HeroBackdrop } from "./components/HeroBackdrop";
 import { Logo } from "./components/Logo";
 import { UsedBy } from "./components/UsedBy";
 import {
+  AGENT_EVALS,
   CAPABILITIES,
   BENCHMARKS_SECTION,
   CODA,
@@ -59,6 +61,8 @@ const cells = "grid gap-px border border-line-soft bg-line-soft";
 const pad = "py-[clamp(4.5rem,10vw,8.5rem)]";
 
 const FIDELITY = publishedFidelity().sort((a, b) => editorOrder(a.format) - editorOrder(b.format));
+const EVALS = publishedAgentEvals();
+const EVAL_CARDS = agentEvalCards(EVALS).sort((a, b) => editorOrder(a.format) - editorOrder(b.format));
 const EDITOR_NAMES = Object.fromEntries(EDITORS.map((e) => [e.format, e.name]));
 const BENCH = FIDELITY.length > 0 ? 1 : 0;
 const SECTIONS = 4 + BENCH;
@@ -282,6 +286,24 @@ export default function Home() {
                 </a>
               </BenchmarkCards>
             </div>
+            {EVAL_CARDS.length > 0 && (
+              <>
+                <div className="mt-[clamp(3.5rem,7vw,5.5rem)] grid items-end gap-x-12 gap-y-4 lg:grid-cols-12">
+                  <h3 className="text-[clamp(1.375rem,2.4vw,1.75rem)] leading-[1.1] font-[560] tracking-[-0.03em] lg:col-span-7">
+                    {AGENT_EVALS.heading}
+                  </h3>
+                  <p className={`${small} lg:col-span-5`}>{AGENT_EVALS.lead(agentEvalTasks(EVALS))}</p>
+                </div>
+                <div className="mt-8">
+                  <AgentEditCards cards={EVAL_CARDS} names={EDITOR_NAMES} />
+                </div>
+                <p className="mt-6">
+                  <a href={AGENT_EVALS.method} className={miniLink}>
+                    {AGENT_EVALS.more} <ArrowUpRight size={11} strokeWidth={2} />
+                  </a>
+                </p>
+              </>
+            )}
           </div>
         </section>
       )}

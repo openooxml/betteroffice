@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
-import { fidelityCharts, sharedVersion, type FidelityChart, type FidelityFormat } from "../../lib/fidelity";
+import { fidelityCharts, sharedVersion, type FidelityBar, type FidelityChart, type FidelityFormat } from "../../lib/fidelity";
+import type { AgentEvalCard } from "../../lib/agent-evals";
 
 const mono = "font-mono text-[0.6875rem]";
 
@@ -31,23 +32,47 @@ function Chart({ chart }: { chart: FidelityChart }) {
         </div>
         <span className="text-xs text-dim">{chart.hint}</span>
       </div>
-      <dl className="grid gap-2">
-        {chart.bars.map((bar) => (
-          <div key={bar.who} className="grid grid-cols-[5.5rem_1fr] items-center gap-2.5">
-            <dt className={`${mono} ${bar.ours ? "text-fg" : "text-dim"}`}>{bar.who}</dt>
-            <dd className="grid grid-cols-[1fr_3.25rem] items-center gap-2.5">
-              <span aria-hidden="true" className="h-2 bg-line-soft">
-                <span
-                  className={`block h-full ${bar.ours ? "bg-acc" : "bg-dim/55"}`}
-                  style={{ width: `${(bar.share * 100).toFixed(2)}%` }}
-                />
-              </span>
-              <span className={`${mono} text-right tabular-nums ${bar.ours ? "text-fg" : "text-ink"}`}>{bar.text}</span>
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <Bars bars={chart.bars} labelColumn="grid-cols-[5.5rem_1fr]" />
     </div>
+  );
+}
+
+function Bars({ bars, labelColumn }: { bars: FidelityBar[]; labelColumn: string }) {
+  return (
+    <dl className="grid gap-2">
+      {bars.map((bar) => (
+        <div key={bar.who} className={`grid ${labelColumn} items-center gap-2.5`}>
+          <dt className={`${mono} ${bar.ours ? "text-fg" : "text-dim"}`}>{bar.who}</dt>
+          <dd className="grid grid-cols-[1fr_3.25rem] items-center gap-2.5">
+            <span aria-hidden="true" className="h-2 bg-line-soft">
+              <span
+                className={`block h-full ${bar.ours ? "bg-acc" : "bg-dim/55"}`}
+                style={{ width: `${(bar.share * 100).toFixed(2)}%` }}
+              />
+            </span>
+            <span className={`${mono} text-right tabular-nums ${bar.ours ? "text-fg" : "text-ink"}`}>{bar.text}</span>
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+export function AgentEditCards({ cards, names }: { cards: AgentEvalCard[]; names: Record<string, string> }) {
+  return (
+    <ul className="grid list-none gap-px border border-line-soft bg-line-soft lg:grid-cols-3">
+      {cards.map((card) => (
+        <li key={card.format} className="grid content-start gap-5 bg-bg p-7 max-sm:p-6">
+          <div className="flex items-baseline justify-between gap-4">
+            <h4 className="text-sm leading-snug font-[560] tracking-[-0.01em]">
+              {names[card.format] ?? card.format.toUpperCase()}
+            </h4>
+            <span className={`${mono} text-dim`}>.{card.format}</span>
+          </div>
+          <Bars bars={card.bars} labelColumn="grid-cols-[8.25rem_1fr]" />
+        </li>
+      ))}
+    </ul>
   );
 }
 
