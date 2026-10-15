@@ -3495,6 +3495,48 @@ fn edits_save_over_parts_that_start_with_a_byte_order_mark() {
     assert_eq!(cell_at(&reopened, "D5").formula.as_deref(), Some("A1*2"));
 }
 
+#[test]
+fn edits_save_over_a_byte_order_mark_without_a_declaration_and_a_self_closing_root() {
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".into(), b"<sst/>".to_vec()));
+    for (_, bytes) in &mut parts {
+        bytes.splice(0..0, BOM.iter().copied());
+    }
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut wb = parsed.workbook.clone();
+    wb.shared_strings.push("added".into());
+    wb.sheets[0].set_cell(
+        CellRef::parse_a1("B1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "added".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let strings = part_bytes(&saved, "xl/sharedStrings.xml");
+    assert!(strings.starts_with(BOM));
+    assert!(strings.ends_with(b"</sst>"));
+    for path in ["xl/workbook.xml", "xl/worksheets/sheet1.xml"] {
+        assert!(part_bytes(&saved, path).starts_with(BOM), "{path}");
+    }
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(cell_at(&reopened, "A1").value, CellValue::Number { value: 1.0 });
+    assert_eq!(
+        cell_at(&reopened, "B1").value,
+        CellValue::Text {
+            value: "added".into()
+        }
+    );
+}
+
 /// Two `<si>` entries can carry the same text with different runs. A cell must
 /// keep pointing at the entry it was authored against.
 #[test]

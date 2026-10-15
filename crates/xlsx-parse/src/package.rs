@@ -8,7 +8,7 @@ use xlsx_model::{SheetId, Workbook};
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, bom_len, find_part, local_name, next_event, reader, resolve_part_path, xml_err,
+    attr, find_part, local_name, next_event, reader, resolve_part_path, utf8_bom_len, xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -497,7 +497,7 @@ impl XmlTemplate {
         changes: &[(&str, Option<String>)],
     ) -> Result<Vec<u8>, ParseError> {
         let mut template = self.clone();
-        let bom = bom_len(&self.prefix);
+        let bom = utf8_bom_len(&self.prefix);
         let mut reader = Reader::from_reader(&self.prefix[bom..]);
         let mut writer = Writer::new(self.prefix[..bom].to_vec());
         loop {
@@ -526,7 +526,7 @@ impl XmlTemplate {
     }
 
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
-        let bom = bom_len(data);
+        let bom = utf8_bom_len(data);
         let mut reader = NsReader::from_reader(&data[bom..]);
         let config = reader.config_mut();
         config.expand_empty_elements = false;
@@ -942,7 +942,7 @@ impl XmlTemplate {
         if changes.is_empty() {
             return Ok(self.prefix.clone());
         }
-        let bom = bom_len(&self.prefix);
+        let bom = utf8_bom_len(&self.prefix);
         let mut reader = Reader::from_reader(&self.prefix[bom..]);
         loop {
             let before = bom + reader.buffer_position() as usize;

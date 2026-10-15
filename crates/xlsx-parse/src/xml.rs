@@ -8,7 +8,7 @@ use crate::{MAX_DEPTH, ParseError};
 
 /// length of a leading utf-8 byte order mark. quick-xml skips one without
 /// counting it in `buffer_position`.
-pub(crate) fn bom_len(data: &[u8]) -> usize {
+pub(crate) fn utf8_bom_len(data: &[u8]) -> usize {
     if data.starts_with(b"\xEF\xBB\xBF") {
         3
     } else {
