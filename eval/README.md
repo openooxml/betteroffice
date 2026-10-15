@@ -293,8 +293,10 @@ Fixtures are downloaded from `https://corpus.betteroffice.dev/eval/formats/v3/`;
 
 `formats/v3/tasks.json` contains 14 tasks per format across 12 originals, with
 four `cross_model` tasks per format. Tasks were written from document contents
-and genre without inspecting toolkit APIs: 13 easy, 23 medium and six multistep
-edits. Spreadsheet corrections enumerate every expected dependent formula cache.
+and genre without inspecting toolkit APIs: seven easy, 30 medium and five multistep
+edits. Structural tasks include paragraph insertion/deletion, phrase italics,
+range sorting, a formula column, a total row, slide deletion with notes and slide
+moves. Spreadsheet corrections enumerate every expected dependent formula cache.
 Use `check.py --suite v3 <task> <output>` or
 `validate-checkers.py --suite v3`; the default remains v2.
 
@@ -311,6 +313,8 @@ binary hashes. The explicit representation/save allowances are:
   paragraph/character styles and direct formatting, including toggle properties;
   absent/empty properties and the explicit default paragraph style are equivalent.
   Word proofing markers and run revision-session stamps may change on save.
+  Significant XML whitespace requires `xml:space="preserve"`; nonbreaking spaces
+  are ordinary text characters.
 - Existing paragraph IDs remain exact. Missing IDs may receive fresh, unique IDs;
   Word may add `w14` to root `mc:Ignorable`. Existing repeated IDs in the originals,
   including Word's repeated `77777777` text IDs and fallback content, remain exact;
@@ -326,6 +330,9 @@ binary hashes. The explicit representation/save allowances are:
   backgrounds do not affect formatting. `calcChain.xml`, its relationship and
   content type may be rebuilt or removed. Sheet renames update the matching
   `TitlesOfParts` entry as well as formulas and defined names.
+- After slide moves/deletions, PowerPoint's `HeadingPairs`/`TitlesOfParts` may
+  retain the original title list or refresh it to the exact resulting slide order
+  and count. Other groups and title text remain compared.
 - Optional save metadata may change: core `modified` and `lastModifiedBy`; app
   `Pages`, `Words`, `Characters`, `CharactersWithSpaces`, `Lines`, `Paragraphs`,
   `TotalTime`, `Slides`, `Notes`, `HiddenSlides` and `MMClips`. Other properties stay
@@ -335,9 +342,8 @@ Validation independently constructs minimal XML patches and byte-copies unchange
 parts. It checks reference acceptance, untouched-input rejection, partial edits,
 format-appropriate generic corruption, and allowed representations, printing
 per-format counts and `V3 VALIDATE accepted=… untouched_rejected=… mutants_rejected=…`.
-VM validation counts are pending: this worker's sandbox blocked writes to the VM
-launcher's shared queue. The required v2 regression counts remain 65/30/157 for
-checker validation and 25/25 for runner tests; these were not rerun here.
+The required v2 checker regression counts remain 65/30/157. Runner tests need the
+v2 fixture directory in `FORMAT_EVAL_FIXTURES` when running without downloads.
 
 ## Usability tasks
 

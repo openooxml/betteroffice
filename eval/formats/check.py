@@ -1130,7 +1130,7 @@ def replace_xml_text(paragraph, old, new, prefix):
             left, right = max(0, start - offset), min(len(value), end - offset)
             if left < right:
                 node.text = value[:left] + (new if offset <= start < offset + len(value) else '') + value[right:]
-                if prefix == 'w' and node.text and (node.text[0].isspace() or node.text[-1].isspace()):
+                if prefix == 'w' and node.text and (node.text[0] in ' \t\r\n' or node.text[-1] in ' \t\r\n'):
                     node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             offset += len(value)
     return len(starts)
@@ -1156,9 +1156,73 @@ def accept_revisions(root):
 def real_expected_package(package, spec, fmt):
     prefix = 'w' if fmt == 'docx' else 'a'
     if spec.get('accept_changes'):
+        require(bool(tracked_changes(package)), 'fixture contains no Word revisions to accept')
         for name in package.namelist():
             if name.startswith('word/') and name.endswith('.xml'):
                 accept_revisions(package.root(name))
+    if 'insert_paragraphs' in spec:
+        change = spec['insert_paragraphs']
+        body = package.root('word/document.xml').find('w:body', NS)
+        headings = [p for p in body if p.tag == w('p') and node_text(p, 'w') == change['heading']]
+        require(len(headings) == 1, 'insertion heading must be unique')
+        index = list(body).index(headings[0]) + 1
+        template = body[index]
+        require(template.tag == w('p'), 'insertion requires a following body paragraph')
+        for offset, text in enumerate(change['texts']):
+            paragraph = ET.Element(w('p'))
+            props = template.find('w:pPr', NS)
+            if props is not None:
+                paragraph.append(copy.deepcopy(props))
+            run = ET.SubElement(paragraph, w('r'))
+            props = template.find('w:r/w:rPr', NS)
+            if props is not None:
+                run.append(copy.deepcopy(props))
+            ET.SubElement(run, w('t')).text = text
+            body.insert(index + offset, paragraph)
+    if 'delete_paragraph' in spec:
+        body = package.root('word/document.xml').find('w:body', NS)
+        matches = [p for p in body if p.tag == w('p') and node_text(p, 'w') == spec['delete_paragraph']]
+        require(len(matches) == 1, 'deleted paragraph must be unique')
+        body.remove(matches[0])
+    if 'format_phrase' in spec:
+        change = spec['format_phrase']
+        matches = [p for p in package.root('word/document.xml').iter(w('p')) if node_text(p, 'w') == change['paragraph']]
+        require(len(matches) == 1, 'formatted paragraph must be unique')
+        paragraph = matches[0]
+        require(change['paragraph'].count(change['phrase']) == 1, 'formatted phrase must be unique')
+        start = change['paragraph'].index(change['phrase'])
+        end, position = start + len(change['phrase']), 0
+        for run in list(paragraph):
+            if run.tag != w('r'):
+                continue
+            text = node_text(run, 'w')
+            low, high = max(0, start - position), min(len(text), end - position)
+            position += len(text)
+            if low >= high:
+                continue
+            require(len(run.findall('w:t', NS)) == 1 and all(n.tag in {w('rPr'), w('t')} for n in run), 'phrase run must contain only text')
+            index = list(paragraph).index(run)
+            paragraph.remove(run)
+            pieces = [(text[:low], False), (text[low:high], True), (text[high:], False)]
+            for value, formatted in pieces:
+                if not value:
+                    continue
+                new = copy.deepcopy(run)
+                node = new.find('w:t', NS)
+                node.text = value
+                if value[0] in ' \t\r\n' or value[-1] in ' \t\r\n':
+                    node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                if formatted:
+                    props = new.find('w:rPr', NS)
+                    if props is None:
+                        props = ET.Element(w('rPr'))
+                        new.insert(0, props)
+                    prop = props.find('w:' + change['property'], NS)
+                    if prop is None:
+                        prop = ET.SubElement(props, w(change['property']))
+                    prop.set(w('val'), '1')
+                paragraph.insert(index, new)
+                index += 1
     for edit in spec.get('edits', []):
         matches = 0
         root = package.root(edit['part'])
@@ -1227,6 +1291,29 @@ def real_expected_package(package, spec, fmt):
     if spec.get('swap_last_slides'):
         listing = package.root('ppt/presentation.xml').find('p:sldIdLst', NS)
         listing[-2], listing[-1] = listing[-1], listing[-2]
+    if 'move_slide' in spec:
+        change = spec['move_slide']
+        listing = package.root('ppt/presentation.xml').find('p:sldIdLst', NS)
+        slide = listing[change['from'] - 1]
+        listing.remove(slide)
+        listing.insert(change['to'] - 1, slide)
+    if 'delete_slide' in spec:
+        listing = package.root('ppt/presentation.xml').find('p:sldIdLst', NS)
+        slide = listing[spec['delete_slide'] - 1]
+        identity = slide.get(f'{{{NS["r"]}}}id')
+        part = relations(package, 'ppt/presentation.xml')[identity]['target']
+        notes = related(package, part, 'notesSlide')
+        listing.remove(slide)
+        links = package.root(relpath('ppt/presentation.xml'))
+        links.remove(next(n for n in links if n.get('Id') == identity))
+        removed = {part, relpath(part)} | ({notes, relpath(notes)} if notes else set())
+        types = package.root('[Content_Types].xml')
+        for node in list(types):
+            if node.get('PartName', '').lstrip('/') in removed:
+                types.remove(node)
+        for name in removed:
+            package.parts.pop(name, None)
+            package.roots.pop(name, None)
 
 
 def ancestors(node, parents):
@@ -1364,7 +1451,7 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
                 for item in child:
                     if item.tag == f'{{{NS[prefix]}}}t':
                         text = item.text or ''
-                        if prefix == 'w' and text and (text[0].isspace() or text[-1].isspace()):
+                        if prefix == 'w' and text and (text[0] in ' \t\r\n' or text[-1] in ' \t\r\n'):
                             require(item.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve', 'significant Word whitespace lacks xml:space')
                         content.extend(('character', char, props, tuple(sorted(run_attrs.items()))) for char in text)
                     elif item.tag != f'{{{NS[prefix]}}}rPr':
@@ -1404,6 +1491,50 @@ def real_package_state(package, expected=False, input_ids=frozenset()):
     return state
 
 
+def real_slide_metadata(original, actual, spec):
+    if not ({'move_slide', 'delete_slide', 'swap_last_slides'} & spec.keys()) or 'docProps/app.xml' not in original.parts:
+        return
+    root = original.root('docProps/app.xml')
+    headings = next((n for n in root if local(n.tag) == 'HeadingPairs'), None)
+    titles = next((n for n in root if local(n.tag) == 'TitlesOfParts'), None)
+    if headings is None or titles is None:
+        return
+    updated_headings, updated_titles = copy.deepcopy(headings), copy.deepcopy(titles)
+    variants = list(updated_headings[0])
+    offset = 0
+    for index in range(0, len(variants), 2):
+        count = variants[index + 1][0]
+        number = int(count.text)
+        if variants[index][0].text == 'Slide Titles':
+            require(number == len(slide_parts(original)), 'slide title metadata does not match source slide count')
+            vector = updated_titles[0]
+            items = list(vector)
+            group = items[offset:offset + number]
+            if 'move_slide' in spec:
+                change = spec['move_slide']
+                group.insert(change['to'] - 1, group.pop(change['from'] - 1))
+            elif 'delete_slide' in spec:
+                del group[spec['delete_slide'] - 1]
+            else:
+                group[-2:] = reversed(group[-2:])
+            vector[:] = items[:offset] + group + items[offset + number:]
+            vector.set('size', str(len(vector)))
+            count.text = str(len(group))
+            break
+        offset += number
+    else:
+        return
+    actual_root = actual.root('docProps/app.xml')
+    found = [next((n for n in actual_root if n.tag == source.tag), None) for source in (headings, titles)]
+    state = tuple(canonical(n) for n in found)
+    require(state in (tuple(map(canonical, (headings, titles))), tuple(map(canonical, (updated_headings, updated_titles)))),
+            'unexpected slide title metadata')
+    for source, node in zip((headings, titles), found):
+        index = list(actual_root).index(node)
+        actual_root.remove(node)
+        actual_root.insert(index, copy.deepcopy(source))
+
+
 def check_real(task, source, revised):
     original, actual = RealPackage(source), RealPackage(revised)
     spec = copy.deepcopy(task['expected'])
@@ -1439,6 +1570,21 @@ def check_real(task, source, revised):
                 sheet['cells'][address] = {'value': None, 'formula': None, 'style': copy.deepcopy(indexed(cell_styles, inherited, 'cell format')),
                                            'attributes': {}, 'formula_properties': {}, 'other': (), 'rich_text': None}
         wanted = expected_workbook(before, spec)
+        if 'sort_range' in spec:
+            change = spec['sort_range']
+            sheet = next(s for s in wanted['sheets'] if s['name'] == change['sheet'])
+            first, low, last, high = re.fullmatch(r'([A-Z]+)([0-9]+):([A-Z]+)([0-9]+)', change['range']).groups()
+            low, high = int(low), int(high)
+            columns = range(column_number(first), column_number(last) + 1)
+            source_cells = copy.deepcopy(sheet['cells'])
+            order = sorted(range(low, high + 1), key=lambda row: source_cells[f'{change["key"]}{row}']['value'].casefold(), reverse=not change['ascending'])
+            for destination, origin in zip(range(low, high + 1), order):
+                for column in columns:
+                    address = f'{column_letters(column)}{destination}'
+                    previous = f'{column_letters(column)}{origin}'
+                    sheet['cells'].pop(address, None)
+                    if previous in source_cells:
+                        sheet['cells'][address] = copy.deepcopy(source_cells[previous])
         renames = spec.get('rename', {})
         for sheet in wanted['sheets']:
             for record in sheet['cells'].values():
@@ -1459,6 +1605,8 @@ def check_real(task, source, revised):
         return
     ids = real_ids(original) if task['format'] == 'docx' else {}
     all_ids = {value for _, value in ids}
+    if task['format'] == 'pptx':
+        real_slide_metadata(original, actual, spec)
     real_expected_package(original, spec, task['format'])
     if task['format'] == 'docx':
         compare(tracked_changes(original), tracked_changes(actual), 'tracked revisions')

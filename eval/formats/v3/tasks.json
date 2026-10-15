@@ -52,54 +52,56 @@
   {
     "id": "docx-v3-03-accept-revisions",
     "format": "docx",
-    "title": "Accept the cancellation form revisions",
-    "difficulty": 2,
+    "title": "Correct the cancellation notice period",
+    "difficulty": 1,
     "fixture": "govuk-publication-attachments-7048793b464d.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, accept all existing tracked changes throughout the cancellation form, including moves and formatting changes. Retain the accepted text, content controls, comments, and section structure; leave no revision markup or move-range markers. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, in the instructions before Part A, correct “at least three months' before” to “at least three months before”. Keep the notice period, forms, drawings and all other wording unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
-      "accept_changes": true
+      "edits": [
+        {
+          "part": "word/document.xml",
+          "old": "at least three months' before",
+          "new": "at least three months before"
+        }
+      ]
     }
   },
   {
     "id": "docx-v3-04-outlook-title",
     "format": "docx",
-    "title": "Space the economic outlook title",
-    "difficulty": 1,
+    "title": "Add a domestic outlook introduction",
+    "difficulty": 2,
     "fixture": "h-r23-au-budget-bbfa0b290f31.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, change the opening title “Statement 2:Economic Outlook” to “Statement 2: Economic Outlook”. Keep its existing style, and leave the contents, forecasts and running headers unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, immediately after the body heading “Outlook for the domestic economy”, add these two paragraphs in order: “The domestic outlook brings together forecasts for demand, employment and prices.” and “The following sections explain the main drivers and risks.” Use the body paragraph style and opening text formatting of the first existing body paragraph after that heading. Keep that existing paragraph and all headings, forecasts and tables. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
-      "edits": [
-        {
-          "part": "word/document.xml",
-          "old": "Statement 2:Economic Outlook",
-          "new": "Statement 2: Economic Outlook",
-          "paragraph": "Statement 2:Economic Outlook"
-        }
-      ]
+      "insert_paragraphs": {
+        "heading": "Outlook for the domestic economy",
+        "texts": [
+          "The domestic outlook brings together forecasts for demand, employment and prices.",
+          "The following sections explain the main drivers and risks."
+        ]
+      }
     }
   },
   {
     "id": "docx-v3-05-annual-nnt",
     "format": "docx",
-    "title": "Clarify the annual NNT column label",
-    "difficulty": 1,
+    "title": "Emphasise the annual NNT header",
+    "difficulty": 2,
     "fixture": "scottish-government-publications-2ee270533580.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, change the drug-efficacy table column heading “Annual NNT” to “Annualised NNT”. Keep all numerical evidence, merged cells, reference markers and endnotes unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, italicise only the phrase “Annual NNT” in the first table’s header row. Retain its bold formatting, font, colour and footnote marker; keep all medicine data unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
-      "edits": [
-        {
-          "part": "word/document.xml",
-          "old": "Annual NNT",
-          "new": "Annualised NNT",
-          "paragraph": "Annual NNT"
-        }
-      ]
+      "format_phrase": {
+        "paragraph": "Annual NNT",
+        "phrase": "Annual NNT",
+        "property": "i"
+      }
     }
   },
   {
@@ -124,38 +126,26 @@
   {
     "id": "docx-v3-07-address-officer",
     "format": "docx",
-    "title": "Address the procurement delegation",
-    "difficulty": 1,
+    "title": "Remove the scope compliance responsibility",
+    "difficulty": 2,
     "fixture": "h-us-gsa-568ebe9684b7.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, fill the Ordering Contracting Officer’s name in the TO line: replace {{FirstName}} with Morgan and {{LastName}} with Lee. Keep the role label and all delegation terms unchanged. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, remove the entire responsibility paragraph beginning “Scope Compliance – Ensure Task Order work is within the GWAC’s scope.” Keep all other responsibilities, the officer placeholders, signature fields and contact details. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
-      "edits": [
-        {
-          "part": "word/document.xml",
-          "old": "{{FirstName}}",
-          "new": "Morgan"
-        },
-        {
-          "part": "word/document.xml",
-          "old": "{{LastName}}",
-          "new": "Lee"
-        }
-      ]
+      "delete_paragraph": "Scope Compliance – Ensure Task Order work is within the GWAC’s scope. The GWAC program team is available to assist with this determination at any time upon request. You may request a review of your requirements (e.g. Statement of Work/Statement of Objectives/Performance Work Statement) prior to Task Order solicitation/modification from the GWAC CO(s) at free scope compatibility reviews."
     }
   },
   {
     "id": "docx-v3-08-finalize-agreement",
     "format": "docx",
-    "title": "Finalize the host agreement",
-    "difficulty": 3,
+    "title": "Correct the host agreement commitments",
+    "difficulty": 1,
     "fixture": "h-us-doe-2ce2bcc3619c.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, accept all existing tracked changes throughout the Re-tuning host agreement, retaining accepted text and removing revision and move-range markup. In the FEMP team commitments, correct “Offers attendees” to “Offer attendees”. Keep the signature fields and all other commitments. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, in the FEMP team commitments of the Re-tuning host agreement, correct “Offers attendees” to “Offer attendees”. Keep the signature fields and all other commitments. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
-      "accept_changes": true,
       "edits": [
         {
           "part": "word/document.xml",
@@ -218,14 +208,13 @@
   {
     "id": "docx-v3-11-finalize-manuscript",
     "format": "docx",
-    "title": "Accept the manuscript revisions",
-    "difficulty": 2,
+    "title": "Correct the manuscript keyword",
+    "difficulty": 1,
     "fixture": "h-zen-zenodo-oai-8777f376a44d.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, accept all existing tracked changes in the mycoviruses manuscript, retaining the accepted text and removing revision and move-range markup. In its Keywords paragraph, change the singular keyword “Mycovirus,” to “Mycoviruses,”. Retain citations, author details and all other keywords. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, in the mycoviruses manuscript’s Keywords paragraph, change the singular keyword “Mycovirus,” to “Mycoviruses,”. Retain citations, author details and all other keywords. Edit directly, without adding tracked changes. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
-      "accept_changes": true,
       "edits": [
         {
           "part": "word/document.xml",
@@ -416,20 +405,18 @@
   {
     "id": "xlsx-v3-05-account-typo",
     "format": "xlsx",
-    "title": "Correct an account-guide typo",
-    "difficulty": 1,
+    "title": "Alphabetise the account groupings",
+    "difficulty": 2,
     "fixture": "h-r23-hud-forms-5df2d042bb12.xlsx",
     "input": "input.xlsx",
     "output": "output.xlsx",
-    "prompt": "In input.xlsx, on Account Groupings in A4, correct “chart showings” to “chart shows”. Preserve the rest of that explanatory paragraph, all account groupings and reporting sheets. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "prompt": "In input.xlsx, on Account Groupings, sort A7:B40 in ascending alphabetical order by the Main Heading in column A. Each heading must move with its Typical Accounts cell and both cells’ formatting. Keep row heights, the header row, footnotes, other sheets and formulas unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
     "expected": {
-      "cell_replace": {
-        "Account Groupings": {
-          "A4": {
-            "old": "chart showings",
-            "new": "chart shows"
-          }
-        }
+      "sort_range": {
+        "sheet": "Account Groupings",
+        "range": "A7:B40",
+        "key": "A",
+        "ascending": true
       }
     }
   },
@@ -451,18 +438,39 @@
   {
     "id": "xlsx-v3-07-forecast-label",
     "format": "xlsx",
-    "title": "Clarify the winter forecast heading",
-    "difficulty": 1,
+    "title": "Add a forecast difference column",
+    "difficulty": 2,
     "fixture": "h-us-eia-0c5f191c6e33.xlsx",
     "input": "input.xlsx",
     "output": "output.xlsx",
-    "prompt": "In input.xlsx, on Seasonal WFO, change G3 from Forecast to Baseline forecast. Preserve the scenario headings, cross-sheet formulas and every energy forecast value. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "prompt": "In input.xlsx, on Seasonal WFO, add column M after the existing scenario columns, headed “26–27 minus 25–26” in M4. In M7:M9 show the Northeast natural-gas forecast minus the prior winter, rounded to two decimals, using =ROUND(G7-F7,2) filled down. Keep these as formulas with calculated values -6.02, -0.77, -143.53 respectively, formatted 0.00. Use the existing column defaults for all other new-cell formatting. Leave the rest of the new column blank and keep all existing columns, formulas and charts unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
     "expected": {
       "cells": {
         "Seasonal WFO": {
-          "G3": {
-            "value": "Baseline forecast",
+          "M4": {
+            "value": "26–27 minus 25–26",
             "formula": null
+          },
+          "M7": {
+            "value": -6.02,
+            "formula": "ROUND(G7-F7,2)",
+            "style": {
+              "number_format": "0.00"
+            }
+          },
+          "M8": {
+            "value": -0.77,
+            "formula": "ROUND(G8-F8,2)",
+            "style": {
+              "number_format": "0.00"
+            }
+          },
+          "M9": {
+            "value": -143.53,
+            "formula": "ROUND(G9-F9,2)",
+            "style": {
+              "number_format": "0.00"
+            }
           }
         }
       }
@@ -471,18 +479,25 @@
   {
     "id": "xlsx-v3-08-contents-year",
     "format": "xlsx",
-    "title": "Correct the calculations contents year",
-    "difficulty": 1,
+    "title": "Add a residents abroad component total",
+    "difficulty": 2,
     "fixture": "ons-published-workbooks-f4cffd0f35ee.xlsx",
     "input": "input.xlsx",
     "output": "output.xlsx",
-    "prompt": "In input.xlsx, on Contents in B13, replace the final year 2022 with 2024. Keep all other wording and the energy bridging tables unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
+    "prompt": "In input.xlsx, on Bridging table calculations, add a check row at row 70 with A70 “UK residents abroad components check” and D70 =SUM(D25:D28), calculated as 388.98 and formatted #,##0.00. Use the existing column defaults for all other new-cell formatting. Keep all published totals, notes and the other sheets unchanged. Save the result as output.xlsx, leaving input.xlsx unchanged and preserving everything else.",
     "expected": {
-      "cell_replace": {
-        "Contents": {
-          "B13": {
-            "old": "2022",
-            "new": "2024"
+      "cells": {
+        "Bridging table calculations": {
+          "A70": {
+            "value": "UK residents abroad components check",
+            "formula": null
+          },
+          "D70": {
+            "value": 388.98,
+            "formula": "SUM(D25:D28)",
+            "style": {
+              "number_format": "#,##0.00"
+            }
           }
         }
       }
@@ -713,20 +728,14 @@
   {
     "id": "pptx-v3-03-programme-grammar",
     "format": "pptx",
-    "title": "Correct the board description",
-    "difficulty": 1,
+    "title": "Remove the variation atlas slide",
+    "difficulty": 2,
     "fixture": "govuk-publication-attachments-1d3ddf0a4a56.pptx",
     "input": "input.pptx",
     "output": "output.pptx",
-    "prompt": "In input.pptx, on slide 8, in the Blood Pressure System Leadership Board description, correct “programme of work improve” to “programme of work to improve”. Keep the other wording, logos and notes unchanged. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "prompt": "In input.pptx, delete slide 17, “Healthier Lives variation atlas”, together with its speaker notes. Keep all remaining slides in their original order and retain their notes, layouts and media. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
     "expected": {
-      "edits": [
-        {
-          "part": "ppt/slides/slide8.xml",
-          "old": "programme of work improve",
-          "new": "programme of work to improve"
-        }
-      ]
+      "delete_slide": 17
     }
   },
   {
@@ -782,20 +791,17 @@
   {
     "id": "pptx-v3-07-activity-time",
     "format": "pptx",
-    "title": "Extend the religious-symbol activity",
-    "difficulty": 1,
+    "title": "Show the symbol reference before the activity",
+    "difficulty": 2,
     "fixture": "h-us-fema-11050bb61042.pptx",
     "input": "input.pptx",
     "output": "output.pptx",
-    "prompt": "In input.pptx, on slide 16, in the Identifying Religious Symbols activity, change “Estimated Time: 5 minutes” to “Estimated Time: 10 minutes”. Keep its purpose, instructions and speaker notes. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "prompt": "In input.pptx, move slide 17, “Common Religious Symbols”, immediately before slide 16, “Activity 2.1: Identifying Religious Symbols”. Keep every other slide in relative order, and keep all slide content and each slide’s speaker notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
     "expected": {
-      "edits": [
-        {
-          "part": "ppt/slides/slide16.xml",
-          "old": "Estimated Time: 5 minutes",
-          "new": "Estimated Time: 10 minutes"
-        }
-      ]
+      "move_slide": {
+        "from": 17,
+        "to": 16
+      }
     }
   },
   {
@@ -825,20 +831,17 @@
   {
     "id": "pptx-v3-09-monsoon-title",
     "format": "pptx",
-    "title": "Clarify the monsoon outlook title",
-    "difficulty": 1,
+    "title": "Bring the monsoon summary forward",
+    "difficulty": 2,
     "fixture": "h-r23-noaa-cpc-4f47beba1526.pptx",
     "input": "input.pptx",
     "output": "output.pptx",
-    "prompt": "In input.pptx, on slide 1 change “Include Week-1 and Week-2 Outlooks” to “Including Week-1 and Week-2 Outlooks”. Retain the report date 12 October 2026, links, forecasts and every other slide. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
+    "prompt": "In input.pptx, move the final slide, currently slide 12, immediately after slide 3, “Highlights: Last 7 Days”. Keep every other slide in relative order, and keep all slide content, report dates and each slide’s notes attached. Save the result as output.pptx, leaving input.pptx unchanged and preserving everything else.",
     "expected": {
-      "edits": [
-        {
-          "part": "ppt/slides/slide1.xml",
-          "old": "Include Week-1 and Week-2 Outlooks",
-          "new": "Including Week-1 and Week-2 Outlooks"
-        }
-      ]
+      "move_slide": {
+        "from": 12,
+        "to": 4
+      }
     }
   },
   {

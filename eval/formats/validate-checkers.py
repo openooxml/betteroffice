@@ -1493,7 +1493,7 @@ def v3_replace(paragraph, old, new, prefix):
             nodes[last].text = nodes[last].text[right + 1:]
         for node in nodes:
             value = node.text or ''
-            if prefix == 'w' and value and (value[0].isspace() or value[-1].isspace()):
+            if prefix == 'w' and value and (value[0] in ' \t\r\n' or value[-1] in ' \t\r\n'):
                 node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
         text = v3_text(paragraph, prefix)
     return count
@@ -1603,6 +1603,7 @@ def v3_style(package, node, patch):
 def v3_correct(package, task):
     spec = task['expected']
     prefix = 'w' if task['format'] == 'docx' else 'a'
+    v3_structural(package, spec)
     if spec.get('accept_changes'):
         for name in package.parts:
             if name.startswith('word/') and name.endswith('.xml'):
@@ -1697,6 +1698,115 @@ def v3_correct(package, task):
             for node in package.xml('docProps/app.xml').iter():
                 if node.tag.endswith('}lpstr') and node.text == old:
                     node.text = new
+
+
+def v3_structural(package, spec):
+    if 'insert_paragraphs' in spec:
+        change = spec['insert_paragraphs']
+        body = package.xml('word/document.xml').find('w:body', NS)
+        index = next(i for i, p in enumerate(body) if p.tag == tag('w', 'p') and v3_text(p, 'w') == change['heading']) + 1
+        source = body[index]
+        additions = []
+        for text in change['texts']:
+            paragraph = ET.Element(tag('w', 'p'))
+            props = source.find('w:pPr', NS)
+            if props is not None:
+                paragraph.append(copy.deepcopy(props))
+            run = ET.SubElement(paragraph, tag('w', 'r'))
+            props = source.find('w:r/w:rPr', NS)
+            if props is not None:
+                run.append(copy.deepcopy(props))
+            ET.SubElement(run, tag('w', 't')).text = text
+            additions.append(paragraph)
+        body[index:index] = additions
+    if 'delete_paragraph' in spec:
+        body = package.xml('word/document.xml').find('w:body', NS)
+        paragraph = next(p for p in body if p.tag == tag('w', 'p') and v3_text(p, 'w') == spec['delete_paragraph'])
+        body.remove(paragraph)
+    if 'format_phrase' in spec:
+        change = spec['format_phrase']
+        paragraph = next(p for p in package.xml('word/document.xml').iter(tag('w', 'p')) if v3_text(p, 'w') == change['paragraph'])
+        begin = change['paragraph'].index(change['phrase'])
+        finish = begin + len(change['phrase'])
+        offset = 0
+        for run in list(paragraph):
+            if run.tag != tag('w', 'r'):
+                continue
+            value = v3_text(run, 'w')
+            cuts = sorted({0, len(value), max(0, min(len(value), begin - offset)), max(0, min(len(value), finish - offset))})
+            if offset < finish and offset + len(value) > begin:
+                index = list(paragraph).index(run)
+                paragraph.remove(run)
+                for left, right in zip(cuts, cuts[1:]):
+                    piece = copy.deepcopy(run)
+                    text = piece.find('w:t', NS)
+                    text.text = value[left:right]
+                    if text.text[0] in ' \t\r\n' or text.text[-1] in ' \t\r\n':
+                        text.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    if begin <= offset + left < finish:
+                        props = piece.find('w:rPr', NS)
+                        if props is None:
+                            props = ET.Element(tag('w', 'rPr'))
+                            piece.insert(0, props)
+                        prop = props.find('w:' + change['property'], NS)
+                        if prop is None:
+                            prop = ET.SubElement(props, tag('w', change['property']))
+                        prop.set(tag('w', 'val'), '1')
+                    paragraph.insert(index, piece)
+                    index += 1
+            offset += len(value)
+    if 'sort_range' in spec:
+        change = spec['sort_range']
+        sheet = v3_sheet_map(package)[change['sheet']]
+        import re
+        first, low, last, high = re.fullmatch(r'([A-Z]+)([0-9]+):([A-Z]+)([0-9]+)', change['range']).groups()
+        data = package.xml(sheet).find('s:sheetData', NS)
+        strings = [v3_text(si, 's') for si in package.xml('xl/sharedStrings.xml')]
+        rows = {int(row.get('r')): row for row in data}
+        def value(row):
+            node = rows[row].find(f's:c[@r="{change["key"]}{row}"]', NS)
+            return (strings[int(node.findtext('s:v', namespaces=NS))] if node.get('t') == 's' else v3_text(node, 's')).casefold()
+        order = sorted(range(int(low), int(high) + 1), key=value, reverse=not change['ascending'])
+        snapshots = {number: copy.deepcopy(rows[number]) for number in order}
+        for destination, origin in zip(range(int(low), int(high) + 1), order):
+            target = rows[destination]
+            for cell in list(target):
+                col = re.sub('[0-9]+$', '', cell.get('r', ''))
+                if checker.column_number(first) <= checker.column_number(col) <= checker.column_number(last):
+                    target.remove(cell)
+            for cell in snapshots[origin]:
+                col = re.sub('[0-9]+$', '', cell.get('r', ''))
+                if checker.column_number(first) <= checker.column_number(col) <= checker.column_number(last):
+                    cell = copy.deepcopy(cell)
+                    cell.set('r', col + str(destination))
+                    target.append(cell)
+            target[:] = sorted(target, key=lambda c: checker.column_number(re.sub('[0-9]+$', '', c.get('r'))))
+    if 'move_slide' in spec:
+        change = spec['move_slide']
+        listing = package.xml('ppt/presentation.xml').find('p:sldIdLst', NS)
+        order = list(listing)
+        order.insert(change['to'] - 1, order.pop(change['from'] - 1))
+        listing[:] = order
+    if 'delete_slide' in spec:
+        import posixpath
+        index = spec['delete_slide'] - 1
+        listing = package.xml('ppt/presentation.xml').find('p:sldIdLst', NS)
+        part = v3_slides(package)[index]
+        links = package.xml(checker.relpath(part))
+        notes = [posixpath.normpath(posixpath.join(posixpath.dirname(part), n.get('Target'))).lstrip('/')
+                 for n in links if n.get('Type').endswith('/notesSlide')]
+        identity = listing[index].get(tag('r', 'id'))
+        del listing[index]
+        links = package.xml('ppt/_rels/presentation.xml.rels')
+        links[:] = [n for n in links if n.get('Id') != identity]
+        removed = {part, checker.relpath(part)}
+        for note in notes:
+            removed.update((note, checker.relpath(note)))
+        for name in removed:
+            package.parts.pop(name, None)
+            package.xml_parts.pop(name, None)
+        types = package.xml('[Content_Types].xml')
+        types[:] = [n for n in types if n.get('PartName', '').lstrip('/') not in removed]
 
 
 def v3_slides(package):
@@ -1807,6 +1917,12 @@ def v3_mutants(package, task, original):
             listing = p.xml('ppt/presentation.xml').find('p:sldIdLst', NS)
             listing[:] = list(listing)[1:] + list(listing)[:1]
         result.append(('slide-order', order))
+        if {'move_slide', 'delete_slide', 'swap_last_slides'} & task['expected'].keys():
+            def title_metadata(p):
+                root = p.xml('docProps/app.xml')
+                titles = next(n for n in root if n.tag.endswith('}TitlesOfParts'))[0]
+                titles[-1].text = 'CORRUPTED TITLE'
+            result.append(('slide-title-metadata', title_metadata))
         notes = [n for n in package.parts if n.startswith('ppt/notesSlides/notesSlide') and n.endswith('.xml')]
         if notes:
             def note(p):
@@ -1898,7 +2014,134 @@ def v3_allowances(task):
                         cell.set('t', 'inlineStr')
                         cell.append(item)
         result.append(('inline-string-storage', inline_strings))
+    if {'move_slide', 'delete_slide', 'swap_last_slides'} & task['expected'].keys():
+        def slide_metadata(package):
+            root = package.xml('docProps/app.xml')
+            headings = next(n for n in root if n.tag.endswith('}HeadingPairs'))[0]
+            titles = next(n for n in root if n.tag.endswith('}TitlesOfParts'))[0]
+            offset = 0
+            for index in range(0, len(headings), 2):
+                count = headings[index + 1][0]
+                size = int(count.text)
+                if headings[index][0].text == 'Slide Titles':
+                    items = list(titles)
+                    group = items[offset:offset + size]
+                    spec = task['expected']
+                    if 'move_slide' in spec:
+                        change = spec['move_slide']
+                        group.insert(change['to'] - 1, group.pop(change['from'] - 1))
+                    elif 'delete_slide' in spec:
+                        group.pop(spec['delete_slide'] - 1)
+                    else:
+                        group[-2:] = group[-2:][::-1]
+                    titles[:] = items[:offset] + group + items[offset + size:]
+                    titles.set('size', str(len(titles)))
+                    count.text = str(len(group))
+                    return
+                offset += size
+            raise ValueError('no slide titles metadata group')
+        result.append(('updated-slide-title-metadata', slide_metadata))
     return result
+
+
+def v3_partial(source, task, output):
+    original = Package(source)
+    partial_task = copy.deepcopy(task)
+    spec = partial_task['expected']
+    if len(spec) > 1:
+        del spec[next(reversed(spec))]
+    elif 'edits' in spec:
+        if len(spec['edits']) > 1:
+            spec['edits'] = spec['edits'][:1]
+        else:
+            change = spec['edits'][0]
+            change['new'] = change['new'][:max(1,len(change['new'])//2)]
+    elif 'cells' in spec:
+        sheet, cells = next(iter(spec['cells'].items()))
+        if len(cells) > 1:
+            spec['cells'] = {sheet:{next(iter(cells)):next(iter(cells.values()))}}
+        else:
+            change = next(iter(cells.values()))
+            if 'value' in change:
+                change['value'] = change['value'][:max(1,len(change['value'])//2)] if isinstance(change['value'],str) else 0
+            else:
+                del change['style'][next(iter(change['style']))]
+    elif 'table_cells' in spec:
+        if len(spec['table_cells']) > 1:
+            spec['table_cells'] = spec['table_cells'][:1]
+        else:
+            spec['table_cells'][0]['text'] += ' partial'
+    elif 'notes' in spec:
+        slide, text = next(iter(spec['notes'].items()))
+        spec['notes'][slide] = text[:len(text)//2]
+    elif 'cell_replace' in spec:
+        change = next(iter(next(iter(spec['cell_replace'].values())).values()))
+        change['new'] = change['new'][:max(1,len(change['new'])//2)]
+    elif 'rename' in spec:
+        old = next(iter(spec['rename']))
+        spec['rename'][old] = 'Partial Version'
+    elif 'insert_paragraphs' in spec:
+        spec['insert_paragraphs']['texts'] = spec['insert_paragraphs']['texts'][:1]
+    elif 'format_phrase' in spec:
+        change = spec['format_phrase']
+        change['phrase'] = change['phrase'][:max(1, len(change['phrase']) // 2)]
+    else:
+        spec.clear()
+    partial = Package(source)
+    v3_correct(partial, partial_task)
+    if 'rename' in task['expected'] and len(task['expected']) == 1:
+        partial = Package(source)
+        old, new = next(iter(task['expected']['rename'].items()))
+        next(n for n in partial.xml('xl/workbook.xml').findall('s:sheets/s:sheet', NS) if n.get('name') == old).set('name', new)
+    elif 'accept_changes' in task['expected'] and len(task['expected']) == 1:
+        candidates = [(root, node) for name in partial.parts if name.startswith('word/') and name.endswith('.xml')
+                      for root in [partial.xml(name)] for node in root.iter() if node.tag in checker.TRACKED]
+        assert candidates, 'fixture contains no Word revisions to partially accept'
+        root, node = candidates[0]
+        parents = {child: parent for parent in root.iter() for child in parent}
+        parent = parents[node]
+        index = list(parent).index(node)
+        parent.remove(node)
+        if node.tag in (tag('w', 'moveTo'), tag('w', 'ins')):
+            parent[index:index] = list(node)
+    elif 'delete_paragraph' in task['expected']:
+        paragraph = next(p for p in partial.xml('word/document.xml').iter(tag('w', 'p')) if v3_text(p, 'w') == task['expected']['delete_paragraph'])
+        text = next(n for n in paragraph.iter(tag('w', 't')) if n.text)
+        text.text = text.text[len(text.text) // 2:]
+    elif 'sort_range' in task['expected']:
+        partial = Package(output)
+        change = task['expected']['sort_range']
+        part = v3_sheet_map(partial)[change['sheet']]
+        import re
+        first, low, last, high = re.fullmatch(r'([A-Z]+)([0-9]+):([A-Z]+)([0-9]+)', change['range']).groups()
+        for number in range(int(low), int(high) + 1):
+            row = partial.xml(part).find(f's:sheetData/s:row[@r="{number}"]', NS)
+            address = f'{last}{number}'
+            row.remove(row.find(f's:c[@r="{address}"]', NS))
+            row.append(copy.deepcopy(original.xml(part).find(f's:sheetData/s:row/s:c[@r="{address}"]', NS)))
+    elif 'move_slide' in task['expected']:
+        change = task['expected']['move_slide']
+        listing = partial.xml('ppt/presentation.xml').find('p:sldIdLst', NS)
+        node = listing[change['from'] - 1]
+        listing.remove(node)
+        if abs(change['from'] - change['to']) > 1:
+            listing.insert((change['from'] + change['to']) // 2 - 1, node)
+    elif 'delete_slide' in task['expected']:
+        listing = partial.xml('ppt/presentation.xml').find('p:sldIdLst', NS)
+        del listing[task['expected']['delete_slide'] - 1]
+    elif 'delete_rows' in task['expected'] and len(task['expected']) == 1:
+        change = task['expected']['delete_rows'][0]
+        row = next(n for n in partial.xml(change['part']).iter(tag('w', 'tr')) if change['contains'] in v3_text(n, 'w'))
+        first = next(row.iter(tag('w', 't')))
+        first.text = ''
+    elif 'swap_last_slides' in task['expected'] and len(task['expected']) == 1:
+        listing = partial.xml('ppt/presentation.xml').find('p:sldIdLst', NS)
+        key = tag('r', 'id')
+        left, right = listing[-2], listing[-1]
+        left_id, right_id = left.get(key), right.get(key)
+        left.set(key, right_id)
+        right.set(key, left_id)
+    return partial
 
 
 def validate_v3(directory):
@@ -1934,71 +2177,15 @@ def validate_v3(directory):
         v3_save(correct, output)
         score(task, 'reference', output, True, 'accepted')
         score(task, 'untouched', source, False, 'untouched_rejected')
-        partial_task = copy.deepcopy(task)
-        spec = partial_task['expected']
-        if len(spec) > 1:
-            del spec[next(reversed(spec))]
-        elif 'edits' in spec:
-            if len(spec['edits']) > 1:
-                spec['edits'] = spec['edits'][:1]
-            else:
-                change = spec['edits'][0]
-                change['new'] = change['new'][:max(1,len(change['new'])//2)]
-        elif 'cells' in spec:
-            sheet, cells = next(iter(spec['cells'].items()))
-            if len(cells) > 1:
-                spec['cells'] = {sheet:{next(iter(cells)):next(iter(cells.values()))}}
-            else:
-                change = next(iter(cells.values()))
-                if 'value' in change:
-                    change['value'] = change['value'][:max(1,len(change['value'])//2)] if isinstance(change['value'],str) else 0
-                else:
-                    del change['style'][next(iter(change['style']))]
-        elif 'table_cells' in spec:
-            if len(spec['table_cells']) > 1:
-                spec['table_cells'] = spec['table_cells'][:1]
-            else:
-                spec['table_cells'][0]['text'] += ' partial'
-        elif 'notes' in spec:
-            slide, text = next(iter(spec['notes'].items()))
-            spec['notes'][slide] = text[:len(text)//2]
-        elif 'cell_replace' in spec:
-            change = next(iter(next(iter(spec['cell_replace'].values())).values()))
-            change['new'] = change['new'][:max(1,len(change['new'])//2)]
-        elif 'rename' in spec:
-            old = next(iter(spec['rename']))
-            spec['rename'][old] = 'Partial Version'
-        else:
-            spec.clear()
-        partial = Package(source)
-        v3_correct(partial, partial_task)
-        if 'rename' in task['expected'] and len(task['expected']) == 1:
-            partial = Package(source)
-            old, new = next(iter(task['expected']['rename'].items()))
-            next(n for n in partial.xml('xl/workbook.xml').findall('s:sheets/s:sheet', NS) if n.get('name') == old).set('name', new)
-        elif 'accept_changes' in task['expected'] and len(task['expected']) == 1:
-            root = partial.xml('word/document.xml')
-            parents = {child: parent for parent in root.iter() for child in parent}
-            node = next(n for n in root.iter() if n.tag in (tag('w', 'moveTo'), tag('w', 'ins')))
-            parent = parents[node]
-            index = list(parent).index(node)
-            parent.remove(node)
-            parent[index:index] = list(node)
-        elif 'delete_rows' in task['expected'] and len(task['expected']) == 1:
-            change = task['expected']['delete_rows'][0]
-            row = next(n for n in partial.xml(change['part']).iter(tag('w', 'tr')) if change['contains'] in v3_text(n, 'w'))
-            first = next(row.iter(tag('w', 't')))
-            first.text = ''
-        elif 'swap_last_slides' in task['expected'] and len(task['expected']) == 1:
-            listing = partial.xml('ppt/presentation.xml').find('p:sldIdLst', NS)
-            key = tag('r', 'id')
-            left, right = listing[-2], listing[-1]
-            left_id, right_id = left.get(key), right.get(key)
-            left.set(key, right_id)
-            right.set(key, left_id)
-        path = directory / ('partial-' + task['id'] + '.' + task['format'])
-        v3_save(partial, path)
-        score(task, 'partial-edit', path, False, 'mutants_rejected')
+        try:
+            partial = v3_partial(source, task, output)
+            path = directory / ('partial-' + task['id'] + '.' + task['format'])
+            v3_save(partial, path)
+            score(task, 'partial-edit', path, False, 'mutants_rejected')
+        except Exception as error:
+            counts[task['format']]['mutants_rejected'][1] += 1
+            failures.append(f'{task["id"]} partial construction: {error}')
+            print('FAIL ' + failures[-1], flush=True)
         for name, mutate in v3_mutants(correct, task, original):
             package = Package(output)
             try:
@@ -2010,19 +2197,21 @@ def validate_v3(directory):
                 counts[task['format']]['mutants_rejected'][1] += 1
                 failures.append(f'{task["id"]} mutant construction {name}: {error}')
                 print('FAIL ' + failures[-1], flush=True)
-        if task['format'] not in checked_allowances:
-            checked_allowances.add(task['format'])
-            for name, mutate in v3_allowances(task):
-                package = Package(output)
-                try:
-                    mutate(package)
-                    path = directory / ('allowance-' + task['id'] + '.' + task['format'])
-                    v3_save(package, path)
-                    score(task, name, path, True, 'accepted')
-                except Exception as error:
-                    counts[task['format']]['accepted'][1] += 1
-                    failures.append(f'{task["id"]} allowance construction {name}: {error}')
-                    print('FAIL ' + failures[-1], flush=True)
+        allowances = v3_allowances(task)
+        if task['format'] in checked_allowances:
+            allowances = [(name, mutate) for name, mutate in allowances if name == 'updated-slide-title-metadata']
+        checked_allowances.add(task['format'])
+        for name, mutate in allowances:
+            package = Package(output)
+            try:
+                mutate(package)
+                path = directory / ('allowance-' + task['id'] + '.' + task['format'])
+                v3_save(package, path)
+                score(task, name, path, True, 'accepted')
+            except Exception as error:
+                counts[task['format']]['accepted'][1] += 1
+                failures.append(f'{task["id"]} allowance construction {name}: {error}')
+                print('FAIL ' + failures[-1], flush=True)
     for fmt, values in counts.items():
         print('V3 ' + fmt.upper() + ' ' + ' '.join(f'{key}={p}/{n}' for key,(p,n) in values.items()))
     totals = {key: [sum(values[key][i] for values in counts.values()) for i in (0,1)] for key in ('accepted','untouched_rejected','mutants_rejected')}
