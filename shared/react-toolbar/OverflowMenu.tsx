@@ -160,6 +160,7 @@ function MenuList({
   const [placement, setPlacement] = useState<Placement | null>(null);
   const focused = useRef(false);
   const [focusedEntry, setFocusedEntry] = useState<string | null>(null);
+  const [hoveredEntry, setHoveredEntry] = useState<string | null>(null);
   const [submenu, setSubmenu] = useState<{ id: string; focus: InitialFocus } | null>(null);
   const submenuAnchors = useRef(new Map<string, HTMLElement>());
   const roving = useRovingFocus({
@@ -306,17 +307,12 @@ function MenuList({
               if (isSubmenu && element) submenuAnchors.current.set(entry.id, element);
             }}
             onMouseDown={(event: ReactMouseEvent) => event.preventDefault()}
-            onMouseEnter={(event) => {
+            onMouseEnter={() => {
               if (isSubmenu && !entry.disabled) openSubmenu(entry.id, 'none');
               else if (submenu) setSubmenu(null);
-              (event.currentTarget as HTMLElement).style.background = entry.disabled
-                ? 'transparent'
-                : colors.hover;
+              setHoveredEntry(entry.id);
             }}
-            onMouseLeave={(event) => {
-              (event.currentTarget as HTMLElement).style.background =
-                focusedEntry === entry.id ? colors.hover : 'transparent';
-            }}
+            onMouseLeave={() => setHoveredEntry(null)}
             onFocus={() => setFocusedEntry(entry.id)}
             onBlur={() => setFocusedEntry((current) => (current === entry.id ? null : current))}
             onClick={() => {
@@ -336,12 +332,12 @@ function MenuList({
               cursor: entry.disabled ? 'default' : 'pointer',
               color: entry.disabled ? colors.mutedText : colors.text,
               opacity: entry.disabled ? 0.6 : 1,
+              background:
+                !entry.disabled && (hoveredEntry === entry.id || focusedEntry === entry.id)
+                  ? colors.hover
+                  : 'transparent',
               ...(focusedEntry === entry.id
-                ? {
-                    background: colors.hover,
-                    outline: `2px solid ${colors.focus}`,
-                    outlineOffset: -2,
-                  }
+                ? { outline: `2px solid ${colors.focus}`, outlineOffset: -2 }
                 : { outline: 'none' }),
             }}
           >

@@ -6,6 +6,17 @@ import type { CSSProperties, FocusEvent } from 'react';
  * setting any `--bo-toolbar-*` property on an ancestor; the second value is
  * the neutral default. The docx stylesheet reads the same properties.
  */
+const TOKENS = [
+  'ink',
+  'ink-muted',
+  'rail',
+  'surface',
+  'hover',
+  'line',
+  'accent',
+  'accent-ink',
+] as const;
+
 export const toolbarTheme = {
   ink: 'var(--bo-toolbar-ink, #1f1f1f)',
   inkMuted: 'var(--bo-toolbar-ink-muted, #444746)',
@@ -18,7 +29,7 @@ export const toolbarTheme = {
 } as const;
 
 export const TOOLBAR_CONTROL_SIZE = 28;
-export const TOOLBAR_ICON_SIZE = 20;
+export const TOOLBAR_ICON_SIZE = 18;
 export const TOOLBAR_RADIUS = 6;
 export const TOOLBAR_DISABLED_OPACITY = 0.38;
 export const TOOLBAR_FONT_FAMILY =
@@ -32,14 +43,32 @@ export interface ToolbarControlState {
   /** Open popup trigger: hover fill. */
   open?: boolean;
   hovered?: boolean;
+  /** Keyboard focus from `useFocusRing`; omitted, the browser's own focus ring shows. */
   focusRing?: boolean;
 }
 
 /** Focus ring for keyboard focus: a 2px accent outline just outside the control. */
 export function toolbarFocusStyle(visible: boolean | undefined, offset = 1): CSSProperties {
+  if (visible === undefined) return {};
   return visible
     ? { outline: `2px solid ${toolbarTheme.accent}`, outlineOffset: offset }
     : { outline: 'none' };
+}
+
+/**
+ * The host's `--bo-toolbar-*` values at `element`, for popups portaled
+ * outside the editor tree where they would not inherit.
+ */
+export function inheritedToolbarTokens(element: Element | null): CSSProperties {
+  if (!element) return {};
+  const computed = getComputedStyle(element);
+  const tokens: Record<string, string> = {};
+  for (const token of TOKENS) {
+    const name = `--bo-toolbar-${token}`;
+    const value = computed.getPropertyValue(name).trim();
+    if (value) tokens[name] = value;
+  }
+  return tokens as CSSProperties;
 }
 
 /** Icon and text buttons on the rail. */
@@ -48,7 +77,7 @@ export function toolbarButtonStyle({
   pressed = false,
   open = false,
   hovered = false,
-  focusRing = false,
+  focusRing,
 }: ToolbarControlState): CSSProperties {
   return {
     appearance: 'none',
@@ -84,7 +113,7 @@ export function toolbarButtonStyle({
 /** Text fields and comboboxes on the rail. */
 export function toolbarFieldStyle({
   disabled = false,
-  focusRing = false,
+  focusRing,
 }: Pick<ToolbarControlState, 'disabled' | 'focusRing'>): CSSProperties {
   return {
     height: TOOLBAR_CONTROL_SIZE,
@@ -138,7 +167,7 @@ export const toolbarMenuStyle: CSSProperties = {
 export function toolbarMenuItemStyle({
   disabled = false,
   hovered = false,
-  focusRing = false,
+  focusRing,
 }: Pick<ToolbarControlState, 'disabled' | 'hovered' | 'focusRing'>): CSSProperties {
   return {
     appearance: 'none',
