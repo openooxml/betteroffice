@@ -69,8 +69,11 @@ jobs:
           bun run typecheck:packages
           bun run --filter '@betteroffice/collaboration-relay' typecheck
 
-      - name: Test
-        run: bun run test
+      # What `bun run test` builds; the tests themselves run in the package-tests shards.
+      - name: Build the Wasm modules
+        run: |
+          bun run build:wasm
+          bun run build:fonts
 
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
@@ -99,6 +102,49 @@ jobs:
 
       - name: Import every package entry in plain Node
         run: node scripts/check-node-import.mjs
+
+  package-tests:
+    name: Package tests (${{ matrix.shard }}/2)
+    runs-on: ${{ (github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - name: Fingerprint the wasm inputs
+        id: wasm
+        run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: target/wasm-pack
+          key: wasm-pack-${{ steps.wasm.outputs.key }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun run test --shard=${{ matrix.shard }}/2
 
   audit:
     name: Security audit

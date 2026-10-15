@@ -106,15 +106,15 @@ A strict performance gate needs repeated base/PR runs on a controlled runner.
 
 ## CI
 
-`.github/workflows/e2e.yml` runs two independent jobs on every PR:
+`.github/workflows/e2e.yml` runs independent jobs on every PR:
 
 - **Corpus scenarios** checks the harness, builds Python and WASM, executes all
   111 required cases, and uploads results, including partial failures.
-- **Browser editors** installs Chromium with its Linux dependencies, builds the
-  production app, starts the local server, runs all three formats, and uploads
-  the Playwright report and failure traces.
+- **Browser editors (1/2)** and **(2/2)** each install Chromium with its Linux
+  dependencies, build the production app, start the local servers, run their
+  Playwright shard of both browser suites, and upload the report and failure traces.
 
-Both jobs fail on test failures, have a 40-minute deadline, and cancel superseded
+The jobs fail on test failures, have a 40-minute deadline, and cancel superseded
 runs. Repository branch protection must require their check names if they are to
 block merges; workflow code does not change that repository setting.
 
