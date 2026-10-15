@@ -8979,3 +8979,45 @@ fn excel_max_row_height_survives_save() {
     );
     assert!(sheet.contains("<v>3</v>"), "{sheet}");
 }
+
+/// Excel opens a column authored wider than its 255-character limit at 255.
+fn oversized_column_width_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="2" width="300" customWidth="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn oversized_column_width_opens_at_excel_limit_and_survives_save() {
+    let original = oversized_column_width_fixture();
+    assert!(Workbook::open_for_read(&original).is_ok());
+    let mut workbook = Workbook::open(&original).unwrap();
+    assert_eq!(
+        workbook.sheet(SheetId(0)).unwrap().col_widths.get(&1),
+        Some(&255.0)
+    );
+    assert_eq!(
+        workbook.cell_rect(SheetId(0), cell("B1")).unwrap().w,
+        xlsx_render::geometry::col_chars_to_px(255.0)
+    );
+    assert_eq!(
+        package_map(&workbook.save().unwrap())["xl/worksheets/sheet1.xml"],
+        package_map(&original)["xl/worksheets/sheet1.xml"]
+    );
+
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "3", CalculationOptions::default())
+        .unwrap();
+    let sheet = saved_sheet_text(&workbook);
+    assert!(
+        sheet.contains(r#"<col min="2" max="2" width="300" customWidth="1"/>"#),
+        "{sheet}"
+    );
+    assert!(sheet.contains("<v>3</v>"), "{sheet}");
+}

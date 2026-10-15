@@ -56,6 +56,7 @@ export {
 
 export {
   drawDisplayPage,
+  drawGlyphRunPrimitive,
   drawPrimitive,
   presentDisplayPageBackBuffer,
   presentOffscreenPageBackBuffer,
@@ -100,6 +101,7 @@ export {
   applyFrameDeltaOwned,
   decodeFrameDelta,
   decodeFrameDeltaSteps,
+  displayPageIsShiftOf,
   displayPageNoteAnchorRevision,
   displayPageRevision,
   FRAME_DELTA_HEADER_BYTES,

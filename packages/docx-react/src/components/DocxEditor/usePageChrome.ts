@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type RefObject } from 'react';
-import { displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
+import { displayPageIsShiftOf, displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { scheduleIdleWork } from './hooks/pageBuildScheduler';
 
@@ -14,13 +14,11 @@ export interface PageChromeOptions {
   active: boolean;
   /** A first build may wait for idle time. */
   defer: boolean;
+  /** While held, first builds and leaving the window wait, then run in the shared idle slices. */
+  hold?: PageChromeHold | null;
   /** A rebuild after a content change never waits. */
   rebuildAtOnce: boolean;
-  /**
-   * Counts in-place changes that are content changes for this chrome. Other
-   * in-place changes (position shifts, see `displayPageRevision`) rebuild it
-   * at idle time.
-   */
+  /** Counts urgent changes; other position shifts rebuild at idle time. */
   urgentRevision: number;
   /** Receives the handle that builds the chrome at once, for a page needed before it is active. */
   register?: (handle: PageChromeHandle | null) => void;
@@ -92,6 +90,55 @@ function enqueueFallback(work: () => void): () => void {
   };
 }
 
+/** Holds back page chrome work, for example while the pages scroll. */
+export interface PageChromeHold {
+  readonly held: boolean;
+  /** Runs `work` once the hold ends; returns its cancel. */
+  whenReleased(work: () => void): () => void;
+}
+
+export function createPageChromeHold(): PageChromeHold & { set(held: boolean): void } {
+  let held = false;
+  const waiting = new Set<() => void>();
+  return {
+    get held() {
+      return held;
+    },
+    set(next) {
+      held = next;
+      if (held) return;
+      const released = [...waiting];
+      waiting.clear();
+      for (const work of released) work();
+    },
+    whenReleased(work) {
+      if (!held) {
+        work();
+        return () => {};
+      }
+      const entry = (): void => work();
+      waiting.add(entry);
+      return () => {
+        waiting.delete(entry);
+      };
+    },
+  };
+}
+
+/** Queues `work` in the shared idle slices once `hold` is not held. */
+function afterHold(hold: PageChromeHold | null, work: () => void): () => void {
+  let cancel = (): void => {};
+  const queue = (): void => {
+    cancel = enqueueFallback(() => (hold?.held ? wait() : work()));
+  };
+  const wait = (): void => {
+    cancel = hold!.whenReleased(queue);
+  };
+  if (hold?.held) wait();
+  else queue();
+  return () => cancel();
+}
+
 const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
 
 /** The elements under `root` that Tab stops at, in document order. */
@@ -143,6 +190,7 @@ export function usePageChrome(
     t,
     active,
     defer,
+    hold = null,
     rebuildAtOnce,
     urgentRevision,
     register,
@@ -166,7 +214,8 @@ export function usePageChrome(
     const wanted = latest.current;
     return (
       built?.kind === kind &&
-      built.page === wanted.page &&
+      (built.page === wanted.page ||
+        (kind === 'fallback' && displayPageIsShiftOf(wanted.page, built.page))) &&
       built.t === wanted.t &&
       // A fallback's links do not move with a position shift.
       (kind === 'fallback' ||
@@ -232,25 +281,30 @@ export function usePageChrome(
       return () => clearTimeout(id);
     };
     if (!active) {
-      if (shows('fallback')) return;
-      // Leaving the window frees the chrome at once; a first fallback waits.
-      if (builtForRef.current?.kind === 'chrome' || !fallback) {
+      if (shows('fallback')) {
+        builtForRef.current!.page = page;
+        return;
+      }
+      // Leaving the window frees the chrome at once unless held; a first fallback waits.
+      if ((builtForRef.current?.kind === 'chrome' || !fallback) && !hold?.held) {
         showFallback();
         return;
       }
-      return enqueueFallback(showFallback);
+      return afterHold(hold, showFallback);
     }
     if (shows('chrome')) return;
     const built = builtForRef.current?.kind === 'chrome' ? builtForRef.current : null;
     const { defer, rebuildAtOnce } = scheduling.current;
     const changed =
       built !== null &&
-      (built.page !== page || built.t !== t || built.urgentRevision !== urgentRevision);
+      ((built.page !== page && !displayPageIsShiftOf(page, built.page)) ||
+        built.t !== t || built.urgentRevision !== urgentRevision);
     if (built ? changed && rebuildAtOnce : !defer) {
+      if (!built && hold?.held) return afterHold(hold, build);
       build();
       return;
     }
-    return idle(build);
+    return hold?.held ? afterHold(hold, build) : idle(build);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, t, revision, urgentRevision, active, defer, build, showFallback, fallback]);
+  }, [page, t, revision, urgentRevision, active, defer, hold, build, showFallback, fallback]);
 }

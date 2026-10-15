@@ -145,6 +145,7 @@ pub(crate) fn play_nested(
 
 /// An EMF with EMF+ records plays them, as Office does, when they draw
 /// without omissions; otherwise, and for plain EMF, its GDI records play.
+/// A GDI rendition that fails falls back to EMF+ only when that draws.
 fn play_full_emf(
     bytes: &[u8],
     depth: usize,
@@ -169,6 +170,7 @@ fn play_full_emf(
     }
     match gdi {
         Ok(gdi) if !gdi.ops.is_empty() => Ok(gdi),
+        Err(error) if plus.as_ref().is_ok_and(|plus| plus.ops.is_empty()) => Err(error),
         gdi => plus.or(gdi),
     }
 }

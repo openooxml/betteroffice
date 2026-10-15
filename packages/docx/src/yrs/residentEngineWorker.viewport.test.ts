@@ -110,6 +110,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       return { bytes, delta, caret: engine.residentCaretSnapshot() };
     },
     projectCommandEchoContext: () => undefined,
+    commandEchoGlyphs: () => ({ provider: () => undefined, unsent: () => [], sent() {} }),
     readResidentRangeHighlights: async () => ({ rects: [[]] }),
     retainedPageByKey: (_frame: unknown, id: string) => pages[Number(id) - 1],
     offscreenDpr: 1, offscreenZoom: 1,

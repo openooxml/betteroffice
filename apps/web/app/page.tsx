@@ -204,7 +204,7 @@ export default function Home() {
           <div className={`${cells} mt-[clamp(3rem,6vw,4.5rem)] sm:grid-cols-2 lg:grid-cols-4`}>
             {EDITORS.map((editor) => (
               <article className="flex flex-col bg-bg" key={editor.format}>
-                <div className="aspect-[4/3] border-b border-line-soft bg-surface px-3 pt-3 text-fg">
+                <div className="aspect-[4/3] min-h-0 border-b border-line-soft bg-surface px-3 pt-3 text-fg">
                   <FormatGlyph format={editor.format} />
                 </div>
                 <div className="flex flex-1 flex-col gap-3 p-6">

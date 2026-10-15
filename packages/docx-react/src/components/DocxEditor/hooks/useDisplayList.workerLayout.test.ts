@@ -2624,7 +2624,7 @@ test.each([true, false])('viewer=%s selects the reply mode across decisions and 
     pageWidth: 4320, pageHeight: 2880,
     marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
   } }] } });
-  const { native, engine } = setup(9401, 'Meta decision pages. '.repeat(600), request);
+  const { native, engine } = setup(9401, 'Meta decision pages. '.repeat(120), request);
   const fontId = native.register_measure_font(font);
   request = JSON.stringify({ ...JSON.parse(request), measurement: {
     ...JSON.parse(request).measurement,

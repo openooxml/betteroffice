@@ -767,19 +767,22 @@ function applyFramePageOperation(
 }
 
 const DISPLAY_PAGE_REVISION = '__betterofficePageRevision';
+const displayPageShiftOrigins = new WeakMap<DisplayPage, object>();
 
-/**
- * Hidden in-place mutation counter for one display page. The owned delta path
- * (`applyFrameDeltaOwned`) patches primitive positions through the SAME page
- * object, so page identity alone cannot prove content equality; identity-based
- * consumers (query-facade handle adoption) must compare this revision too. The
- * property is non-enumerable, so serialization and structural reads never see
- * it.
- */
+/** Position shift revision, omitted from serialization. */
 export function displayPageRevision(page: DisplayPage): number {
   return ((page as unknown as Record<string, unknown>)[DISPLAY_PAGE_REVISION] as
     | number
     | undefined) ?? 0;
+}
+
+/** @internal Whether `page` has only copied position shifts since `base`. */
+export function displayPageIsShiftOf(page: DisplayPage, base: DisplayPage): boolean {
+  const origin = displayPageShiftOrigins.get(page);
+  return (
+    origin !== undefined && origin === displayPageShiftOrigins.get(base) &&
+    page.pageIndex === base.pageIndex && displayPageRevision(page) > displayPageRevision(base)
+  );
 }
 
 function bumpDisplayPageRevision(page: DisplayPage): void {
@@ -793,11 +796,7 @@ function bumpDisplayPageRevision(page: DisplayPage): void {
 
 const DISPLAY_PAGE_NOTE_ANCHOR_REVISION = '__betterofficeNoteAnchorRevision';
 
-/**
- * Counts the owned shifts that moved this page's note anchors in place, for
- * consumers that render the anchors (the accessibility mirror) and otherwise
- * key on page identity.
- */
+/** Counts shifts touching this page's note anchors. */
 export function displayPageNoteAnchorRevision(page: DisplayPage): number {
   return ((page as unknown as Record<string, unknown>)[DISPLAY_PAGE_NOTE_ANCHOR_REVISION] as
     | number
@@ -1308,7 +1307,7 @@ function shiftDisplayPagePositions(
     setNoteAnchor(note, anchor);
     area.notes![anchor.note] = note;
   });
-  return {
+  const next: DisplayPage = {
     ...page,
     pageIndex,
     ...(positionSpan ? { positionSpan } : {}),
@@ -1317,6 +1316,27 @@ function shiftDisplayPagePositions(
     ...(header ? { header } : {}),
     ...(footer ? { footer } : {}),
   };
+  Object.defineProperties(next, {
+    [DISPLAY_PAGE_REVISION]: {
+      value: displayPageRevision(page) + 1,
+      enumerable: false, configurable: true, writable: true,
+    },
+    [DISPLAY_PAGE_NOTE_ANCHOR_REVISION]: {
+      value: displayPageNoteAnchorRevision(page) + (shift.anchors.length > 0 ? 1 : 0),
+      enumerable: false, configurable: true, writable: true,
+    },
+    [DISPLAY_PAGE_SHIFT_LOG]: {
+      value: displayPageShiftLog(page).slice(),
+      enumerable: false, configurable: true, writable: true,
+    },
+  });
+  recordDisplayPageShift(next, shift);
+  if (pageIndex === page.pageIndex && shift.anchors.length === 0) {
+    const origin = displayPageShiftOrigins.get(page) ?? {};
+    displayPageShiftOrigins.set(page, origin);
+    displayPageShiftOrigins.set(next, origin);
+  }
+  return next;
 }
 
 function shiftPrimitivePositions(

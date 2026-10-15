@@ -1,6 +1,7 @@
 use betteroffice_xlsx::{
-    Cell, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, MAX_COLS,
-    MAX_DISPLAY_CELLS, MAX_ROWS, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
+    Cell, CellRange, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, MAX_COLS,
+    MAX_DISPLAY_CELLS, MAX_ROWS, RenderOptions, RowId, Sheet, SheetId, Viewport, Workbook,
+    WorkbookModel,
 };
 
 fn workbook() -> Workbook {
@@ -250,6 +251,160 @@ fn display_lists_reject_excessive_in_sheet_spans() {
             width: 100.0,
             height: 6_000_000.0,
         })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::DisplayTooLarge { cells, max } if cells > max && max == MAX_DISPLAY_CELLS
+    ));
+}
+
+const SCREEN: Viewport = Viewport {
+    x: 0.0,
+    y: 0.0,
+    width: 1600.0,
+    height: 1000.0,
+};
+
+/// Excel's "hide unused columns and rows" layout: everything right of `cols`
+/// has no extent, and with `hidden_through` every row below `rows` is hidden by
+/// `zeroHeight`, with explicit hidden rows through that row.
+fn hidden_tail(cols: u32, rows: u32, hide_cols: bool, hidden_through: Option<RowId>) -> Sheet {
+    let mut sheet = Sheet::new("Form");
+    for row in 0..rows {
+        for col in 0..cols {
+            sheet.set_cell(
+                CellRef::new(row, col),
+                Cell {
+                    value: CellValue::Text {
+                        value: format!("r{row}c{col}"),
+                    },
+                    ..Cell::default()
+                },
+            );
+        }
+    }
+    if hide_cols {
+        for col in cols..MAX_COLS {
+            sheet.col_widths.insert(col, 0.0);
+        }
+    }
+    if let Some(through) = hidden_through {
+        sheet.format.zero_height = true;
+        for row in 0..rows {
+            sheet.row_heights.insert(row, 15.0);
+        }
+        for row in (rows..rows + 40).chain([through]) {
+            sheet.row_heights.insert(row, 0.0);
+        }
+    }
+    sheet
+}
+
+fn open(sheet: Sheet) -> Workbook {
+    Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap()
+}
+
+fn has_text(frame: &betteroffice_xlsx::DisplayList, wanted: &str) -> bool {
+    frame
+        .commands
+        .iter()
+        .any(|command| matches!(command, DrawCmd::Text { text, .. } if text.as_ref() == wanted))
+}
+
+#[test]
+fn display_lists_end_at_the_last_track_with_extent() {
+    for (hide_cols, hidden_through) in [
+        (true, None),
+        (false, Some(60)),
+        (false, Some(MAX_ROWS - 1)),
+        (true, Some(60)),
+        (true, Some(MAX_ROWS - 1)),
+    ] {
+        let workbook = open(hidden_tail(8, 20, hide_cols, hidden_through));
+        let geometry = GridGeometry::new(
+            workbook.sheet(SheetId(0)).unwrap(),
+            &workbook.model().styles,
+        );
+        let (rows, cols) = geometry.viewport_range(&SCREEN);
+        let frame = workbook.display_list_for(SheetId(0), &SCREEN).unwrap();
+        assert_eq!(frame.grid.start_row, 0);
+        assert_eq!(frame.grid.start_col, 0);
+        if hide_cols {
+            assert_eq!(cols, 0..8);
+            assert_eq!(frame.grid.col_offsets.len(), 9);
+            assert_eq!(frame.grid.col_offsets[8], geometry.col_x(MAX_COLS));
+        }
+        if hidden_through.is_some() {
+            assert_eq!(rows, 0..20);
+            assert_eq!(frame.grid.row_offsets.len(), 21);
+            assert_eq!(frame.grid.row_offsets[20], geometry.row_y(MAX_ROWS));
+        }
+        assert!(has_text(&frame, "r0c0") && has_text(&frame, "r19c7"));
+        assert!(
+            workbook
+                .visible_merged_ranges(SheetId(0), &SCREEN)
+                .unwrap()
+                .is_empty()
+        );
+        let png = workbook
+            .render_sheet(
+                SheetId(0),
+                &RenderOptions {
+                    range: Some(CellRange::new(CellRef::new(0, 0), CellRef::new(59, 25))),
+                    ..RenderOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+}
+
+#[test]
+fn display_lists_keep_interior_hidden_tracks() {
+    let mut sheet = hidden_tail(8, 20, true, Some(MAX_ROWS - 1));
+    for col in 2..5 {
+        sheet.col_widths.insert(col, 0.0);
+    }
+    sheet.row_heights.insert(4, 0.0);
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(6, 1), CellRef::new(6, 6)));
+    let workbook = open(sheet);
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
+    assert_eq!(geometry.viewport_range(&SCREEN), (0..20, 0..8));
+    let frame = workbook.display_list_for(SheetId(0), &SCREEN).unwrap();
+    let cols = &frame.grid.col_offsets;
+    assert_eq!(cols.len(), 9);
+    assert_eq!((cols[2], cols[3], cols[4]), (cols[5], cols[5], cols[5]));
+    assert!(cols[1] < cols[2] && cols[5] < cols[6]);
+    let rows = &frame.grid.row_offsets;
+    assert_eq!(rows.len(), 21);
+    assert_eq!(rows[4], rows[5]);
+    assert!(has_text(&frame, "r0c5") && has_text(&frame, "r19c7"));
+    assert_eq!(
+        workbook.visible_merged_ranges(SheetId(0), &SCREEN).unwrap(),
+        vec![CellRange::new(CellRef::new(6, 1), CellRef::new(6, 6))]
+    );
+}
+
+#[test]
+fn display_lists_still_refuse_large_regions_beside_hidden_tracks() {
+    let workbook = open(hidden_tail(8, 20, true, None));
+    let error = workbook
+        .display_list_for(
+            SheetId(0),
+            &Viewport {
+                height: 6_000_000.0,
+                ..SCREEN
+            },
+        )
         .unwrap_err();
     assert!(matches!(
         error,

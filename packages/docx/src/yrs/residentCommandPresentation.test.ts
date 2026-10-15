@@ -15,7 +15,7 @@ const echoContext: DocxCommandEchoContext = {
   boundaries: [0, 1].map((utf16) => ({ utf16, grapheme: utf16,
     caret: { x: utf16 * 5, y: 0, width: 1, height: 10 } })),
   selection: { anchorGrapheme: 1, focusGrapheme: 1 }, transform: [1, 0, 0, 1, 0, 0],
-  damage: [{ page, rect, backgroundId: 'background', primitiveIds: ['shade', 'media'] }],
+  damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: ['shade', 'media'] }],
   shaping: 'simple-ltr',
 };
 
@@ -42,7 +42,7 @@ test('d2c_staging_transfers_authoritative_and_text_free_bitmaps', async () => {
   const background = { close() {} } as ImageBitmap;
   const staged = await stageCommandPresentation({ layout, pages: [page], pixelRatio: 2, echoContext,
     async rasterizePage() { calls.push('page'); return bitmap; },
-    async rasterizeBackground(dependency) { calls.push(dependency.primitiveIds.join(',')); return background; },
+    async rasterizeBackground(dependency) { calls.push(dependency.omittedPrimitiveIds.join(',')); return background; },
   });
   expect(calls).toEqual(['page', 'shade,media']);
   expect(staged.value).toEqual({ frameEpoch: 3, pages: [{ page, frameEpoch: 3,

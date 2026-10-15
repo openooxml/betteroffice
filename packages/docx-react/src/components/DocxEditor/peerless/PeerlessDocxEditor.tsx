@@ -46,6 +46,7 @@ import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import type { PagedEditorRef } from '../PagedEditor';
 import { openPrintWindow } from '@betteroffice/docx';
 import { createWorkerPrintCapture, printBitmap } from './printPages';
+import { decodeCommandFrameDeltas } from './frameDeltas';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createWorkerSearch } from './workerSearch';
@@ -59,7 +60,6 @@ import { WorkerDocumentPreview, type WorkerPreviewJob } from './WorkerDocumentPr
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
-import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
 
@@ -254,7 +254,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
-  const workerOnlyFonts = useRef(new Set<string>());
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
     theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
   useLayoutEffect(() => {
@@ -490,7 +489,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       await current.binding.admission.whenCompositionSettled?.();
       await current.binding.session.flush();
       if (!isCurrent()) return;
-      for (const font of fonts ?? []) workerOnlyFonts.current.add(font.family.toLowerCase());
       let payload: ResidentFontEnvironment;
       if (opened.signature === null && !fonts?.length && provider === opened.provider) payload = structuredClone(opened.initial);
       else {
@@ -582,8 +580,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (cached) return cached;
     try {
       let next = retained.current;
-      for (const bytes of frame.payload.pageFrames ?? []) next = applyFrameDelta(next, decodeFrameDelta(bytes));
-      next = applyFrameDelta(next, decodeFrameDelta(frame.payload.frame));
+      for (const delta of decodeCommandFrameDeltas(frame)) next = applyFrameDelta(next, delta);
+      if (!next) return undefined;
       const caret = residentCaretSnapshotForFrame(frame.payload.caret, next);
       if (!caret) return undefined;
       const pages = commandPageGeometry(next, frame.payload);
@@ -615,7 +613,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
 
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
     source, openConnection, canvasForPage, prepareGeometry, onError: reportError,
-    canEchoFont: family => !workerOnlyFonts.current.has(getPrimaryFontFamily(family).toLowerCase()),
+    onRecoverableError: error => errorHandler.current?.(error),
   } : null, [source, openConnection, canvasForPage, prepareGeometry, reportError]);
   const onClipboard = useCallback(async (cut: boolean) => {
     const current = active.current;
@@ -775,7 +773,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}
-          pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={props.onError} /></>} />
+          pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={props.onError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />
   </DocxCommandProvider>;

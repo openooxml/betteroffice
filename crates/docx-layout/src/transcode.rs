@@ -1,7 +1,7 @@
 //! Typed-to-typed conversion through serde without a JSON tree.
 //!
 //! The display compiler reads its own input types, which mirror the resident
-//! pagination types field for field in their JSON shape. [`transcode`] records
+//! pagination types field for field in their JSON shape. [`Transcoder`] records
 //! the source's `Serialize` output as a flat token tape and replays it into the
 //! target's `Deserialize`, with exactly the semantics of
 //! `serde_json::to_value` followed by an integral-number normalization and
@@ -22,6 +22,7 @@ use serde::de::{self, DeserializeOwned, DeserializeSeed, Visitor};
 use serde::ser::{self, Serialize};
 
 /// Convert `value` into `U` as a JSON round trip would, without the JSON.
+#[cfg(test)]
 pub(crate) fn transcode<T: Serialize + ?Sized, U: DeserializeOwned>(
     value: &T,
 ) -> Result<U, String> {
@@ -39,6 +40,8 @@ impl Transcoder {
         &mut self,
         value: &T,
     ) -> Result<U, String> {
+        #[cfg(any(test, feature = "test-support"))]
+        crate::work_counters::transcoded();
         self.tape.clear();
         value.serialize(&mut self.tape).map_err(|error| error.0)?;
         let mut reader = Reader {

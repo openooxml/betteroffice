@@ -310,6 +310,12 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    */
   previewFirstPage?: boolean;
   /**
+   * Accessible page DOM in the worker-only editor. `'full'` (default) places each line where
+   * it is painted; `'text'` keeps only readable text, links and tables, which costs less but
+   * gives assistive tech no on-page positions and plugin DOM range queries no elements.
+   */
+  pageMirror?: 'full' | 'text';
+  /**
    * Lets the ref's proposal methods run while the editor is read-only or viewing. Typing,
    * `applyEdits`, commands and plugin writes stay blocked. Default: false.
    */

@@ -9,7 +9,7 @@ use std::rc::Rc;
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS};
 
 use crate::eval::{
-    Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, cmp_values, err,
+    Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, cmp_values, coerced, err,
     evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
 };
 use crate::functions::Func;
@@ -345,6 +345,11 @@ impl<'c, 'a> Cells<'c, 'a> {
 
 /// evaluate an expression as a possibly rectangular value.
 pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
+    let _scope = ctx.array_scope();
+    array_value(expr, ctx)
+}
+
+fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
     match expr {
         Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
             match as_array_area(expr, ctx) {
@@ -380,8 +385,12 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
             },
         },
         Expr::ArrayLiteral { cols, values } => array_literal(*cols, values, ctx),
-        Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| apply_unary(*op, v)),
-        Expr::Percent(inner) => map1(evaluate_array(inner, ctx), ctx, apply_percent),
+        Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| {
+            coerced(v, ctx, |v| apply_unary(*op, v))
+        }),
+        Expr::Percent(inner) => map1(evaluate_array(inner, ctx), ctx, |v| {
+            coerced(v, ctx, apply_percent)
+        }),
         Expr::Binary { op, lhs, rhs } => {
             let left = evaluate_array(lhs, ctx);
             let right = evaluate_array(rhs, ctx);

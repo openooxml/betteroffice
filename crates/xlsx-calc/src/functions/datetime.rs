@@ -12,16 +12,22 @@ use super::{nth_int, nth_number, omitted};
 const PHANTOM: i64 = 60;
 /// serial = unix day count + 25568 below the phantom day (serial 1 = 1900-01-01).
 const SERIAL_OFFSET: i64 = 25_568;
+/// 9999-12-31, the last date excel can hold.
+const MAX_SERIAL: i64 = 2_958_465;
+
+fn in_date_range(serial: i64) -> bool {
+    (0..=MAX_SERIAL).contains(&serial)
+}
 
 // howard hinnant's civil-date algorithms
-/// days since 1970-01-01 for a proleptic gregorian date.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
+/// days since 1970-01-01 for a proleptic gregorian date, `None` past i64.
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
+    let y = if m <= 2 { y.checked_sub(1)? } else { y };
+    let era = if y >= 0 { y } else { y.checked_sub(399)? } / 400;
     let yoe = y - era * 400;
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    era.checked_mul(146_097)?.checked_add(doe - 719_468)
 }
 
 /// (year, month, day) for a day count since 1970-01-01.
@@ -39,15 +45,19 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// convert a unix day count to a 1900-system serial, inserting the phantom day.
-fn unix_to_serial(unix: i64) -> i64 {
-    let base = unix + SERIAL_OFFSET;
-    if base < PHANTOM { base } else { base + 1 }
+fn unix_to_serial(unix: i64) -> Option<i64> {
+    let base = unix.checked_add(SERIAL_OFFSET)?;
+    if base < PHANTOM {
+        Some(base)
+    } else {
+        base.checked_add(1)
+    }
 }
 
 /// (year, month, day) for a serial. serial 60 is the phantom 1900-02-29;
-/// serial < 1 has no calendar date here (returns None).
+/// a serial outside excel's date range has no calendar date (returns None).
 fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
-    if serial < 0 {
+    if !in_date_range(serial) {
         return None;
     }
     // excel calls serial 0 "january 0, 1900", which is what a blank date cell
@@ -63,16 +73,17 @@ fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
 }
 
 /// serial for a (year, month, day) under excel's DATE rules: months and day
-/// overflow roll over, phantom 1900-02-29 maps to serial 60.
-fn date_to_serial(year: i64, month: i64, day: i64) -> i64 {
+/// overflow roll over, phantom 1900-02-29 maps to serial 60. `None` for a
+/// date outside excel's range.
+fn date_to_serial(year: i64, month: i64, day: i64) -> Option<i64> {
     if year == 1900 && month == 2 && day == 29 {
-        return PHANTOM;
+        return Some(PHANTOM);
     }
-    let mut y = year;
-    let mut m = month;
-    y += (m - 1).div_euclid(12);
-    m = (m - 1).rem_euclid(12) + 1;
-    unix_to_serial(days_from_civil(y, m, 1) + (day - 1))
+    let month = month.checked_sub(1)?;
+    let y = year.checked_add(month.div_euclid(12))?;
+    let m = month.rem_euclid(12) + 1;
+    let unix = days_from_civil(y, m, 1)?.checked_add(day.checked_sub(1)?)?;
+    unix_to_serial(unix).filter(|serial| in_date_range(*serial))
 }
 
 fn days_in_month(year: i64, month: i64) -> i64 {
@@ -103,11 +114,12 @@ pub(crate) fn date(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err(e),
     };
     let y = if (0..1900).contains(&y) { y + 1900 } else { y };
-    let serial = date_to_serial(y, m, d);
-    if serial < 0 {
-        err(ErrorValue::Num)
-    } else {
-        num(serial as f64)
+    if !(0..=9999).contains(&y) {
+        return err(ErrorValue::Num);
+    }
+    match date_to_serial(y, m, d) {
+        Some(serial) => num(serial as f64),
+        None => err(ErrorValue::Num),
     }
 }
 
@@ -164,10 +176,9 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         None if serial == 0 => 1900,
         None => return err(ErrorValue::Num),
     };
-    let jan1 = date_to_serial(year, 1, 1);
-    if jan1 < 0 {
+    let Some(jan1) = date_to_serial(year, 1, 1) else {
         return err(ErrorValue::Num);
-    }
+    };
     // serial 1 is a sunday, so `(serial - 1) % 7` is the offset from sunday
     let offset = ((jan1 - 1).rem_euclid(7) - start).rem_euclid(7);
     num(((serial - jan1 + offset).div_euclid(7) + 1) as f64)
@@ -176,8 +187,10 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// ISOWEEKNUM(serial): ISO 8601 — weeks start monday, week 1 holds the first
 /// thursday of the year.
 pub(crate) fn isoweeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
     match serial_arg(args, ctx, 0) {
-        Ok(_) if args.len() != 1 => err(ErrorValue::Value),
         Ok(n) => iso_week(n.floor() as i64),
         Err(e) => err(e),
     }
@@ -194,10 +207,9 @@ fn iso_week(serial: i64) -> CellValue {
     let Some((iso_year, _, _)) = serial_to_ymd(thursday) else {
         return err(ErrorValue::Num);
     };
-    let jan1 = date_to_serial(iso_year, 1, 1);
-    if jan1 < 0 {
+    let Some(jan1) = date_to_serial(iso_year, 1, 1) else {
         return err(ErrorValue::Num);
-    }
+    };
     num(((thursday - jan1) / 7 + 1) as f64)
 }
 
@@ -217,6 +229,9 @@ pub(crate) fn weekday(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         1
     };
+    if !in_date_range(serial) {
+        return err(ErrorValue::Num);
+    }
     // d0: 0=Sat,1=Sun,...,6=Fri (serial 1 = sunday)
     let d0 = serial.rem_euclid(7);
     let result = match kind {
@@ -353,10 +368,9 @@ pub(crate) fn datedif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             }
         }
         "YD" => {
-            let anchor = if (m1, d1) <= (m2, d2) {
-                date_to_serial(y2, m1, d1)
-            } else {
-                date_to_serial(y2 - 1, m1, d1)
+            let anchor_year = if (m1, d1) <= (m2, d2) { y2 } else { y2 - 1 };
+            let Some(anchor) = date_to_serial(anchor_year, m1, d1) else {
+                return err(ErrorValue::Num);
             };
             (s2 - anchor) as f64
         }
@@ -422,7 +436,9 @@ fn shifted_month(args: &[Expr], ctx: &EvalContext<'_>, end_of_month: bool) -> Ce
         Some(v) => v,
         None => return err(ErrorValue::Num),
     };
-    let total = (y * 12 + (m - 1)) + months;
+    let Some(total) = (y * 12 + (m - 1)).checked_add(months) else {
+        return err(ErrorValue::Num);
+    };
     let ty = total.div_euclid(12);
     let tm = total.rem_euclid(12) + 1;
     let target_day = if end_of_month {
@@ -430,11 +446,9 @@ fn shifted_month(args: &[Expr], ctx: &EvalContext<'_>, end_of_month: bool) -> Ce
     } else {
         d.min(days_in_month(ty, tm))
     };
-    let serial = date_to_serial(ty, tm, target_day);
-    if serial < 0 {
-        err(ErrorValue::Num)
-    } else {
-        num(serial as f64)
+    match date_to_serial(ty, tm, target_day) {
+        Some(serial) => num(serial as f64),
+        None => err(ErrorValue::Num),
     }
 }
 
@@ -489,7 +503,7 @@ fn serial_argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result
         CellValue::Text { value } => parse_date_text(&value, ctx).ok_or(ErrorValue::Value),
         other => {
             let serial = crate::eval::to_number(&other)?.trunc();
-            if serial < 0.0 {
+            if !(0.0..=MAX_SERIAL as f64).contains(&serial) {
                 return Err(ErrorValue::Num);
             }
             Ok(serial as i64)
@@ -520,7 +534,30 @@ pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
     if d < 1 || d > days_in_month(y, m) {
         return None;
     }
-    Some(date_to_serial(y, m, d))
+    date_to_serial(y, m, d)
+}
+
+/// whether `raw` reads as a date in month-first or day-first order.
+pub(crate) fn is_date_text(raw: &str) -> bool {
+    let Some(mut fields) = date_fields(raw) else {
+        return false;
+    };
+    let date = |fields: &[String]| match fields {
+        [a, b, c] => three_fields(a, b, c),
+        [a, b] => two_fields(a, b),
+        _ => None,
+    };
+    let valid = |(year, month, day): (Option<i64>, i64, i64)| {
+        let year = year.unwrap_or(2000);
+        (1900..=9999).contains(&year)
+            && (1..=12).contains(&month)
+            && (1..=days_in_month(year, month)).contains(&day)
+    };
+    if date(&fields).is_some_and(valid) {
+        return true;
+    }
+    fields.swap(0, 1);
+    date(&fields).is_some_and(valid)
 }
 
 /// the date words and numbers of a timestamp: time-of-day chunks, meridiem
@@ -704,7 +741,7 @@ pub(crate) fn yearfrac(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         0
     };
-    if start < 0 || end < 0 {
+    if !in_date_range(start) || !in_date_range(end) {
         return err(ErrorValue::Num);
     }
     let (lo, hi) = if start <= end {
@@ -770,10 +807,10 @@ fn actual_denominator(lo: i64, hi: i64) -> Option<f64> {
     if y1 == y2 && is_leap(y1) {
         return Some(366.0);
     }
-    let leap_day = |y: i64| is_leap(y).then(|| date_to_serial(y, 2, 29));
     let covered = [y1, y2]
         .into_iter()
-        .filter_map(leap_day)
+        .filter(|y| is_leap(*y))
+        .filter_map(|y| date_to_serial(y, 2, 29))
         .any(|serial| (lo..=hi).contains(&serial));
     Some(if covered { 366.0 } else { 365.0 })
 }
@@ -894,7 +931,7 @@ fn networkdays_core(
         Ok(h) => h,
         Err(e) => return err(e),
     };
-    if start < 0 || end < 0 {
+    if !in_date_range(start) || !in_date_range(end) {
         return err(ErrorValue::Num);
     }
     let (lo, hi) = if start <= end {
@@ -974,7 +1011,8 @@ fn workday_core(
         Ok(h) => h,
         Err(e) => return err(e),
     };
-    if start < 0 {
+    // a workday count past the whole date range lands outside it
+    if !in_date_range(start) || days.unsigned_abs() > MAX_SERIAL as u64 {
         return err(ErrorValue::Num);
     }
     if weekend.days() == 7 {
@@ -1009,6 +1047,3 @@ fn workday_core(
     }
     num(current as f64)
 }
-
-/// 9999-12-31, the last date excel can hold.
-const MAX_SERIAL: i64 = 2_958_465;
