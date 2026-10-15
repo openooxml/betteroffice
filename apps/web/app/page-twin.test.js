@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parseFidelity } from "../lib/fidelity.ts";
 import { homepageMarkdown } from "./markdown.ts";
+import { USED_BY, USED_BY_LABEL, USED_BY_MORE } from "./used-by.ts";
 
 const README = readFileSync(join(import.meta.dir, "..", "..", "..", "README.md"), "utf8");
 process.env.BETTEROFFICE_BENCHMARKS = README;
@@ -60,6 +61,14 @@ describe("markdown twin of the page", () => {
     const sentences = elements("p").filter((text) => /[.!?]$/.test(text));
     expect(sentences.length).toBeGreaterThan(10);
     for (const sentence of sentences) expect(read).toContain(sentence);
+  });
+
+  test("prints the used-by names as text, not only as logos", () => {
+    const start = html.indexOf('<section aria-labelledby="used-by"');
+    const band = html.slice(start, html.indexOf("</section>", start));
+    const names = USED_BY.filter((entry) => entry.enabled).map((entry) => entry.name);
+    expect(band.split(/<[^>]+>/).map(plain).filter(Boolean)).toEqual([USED_BY_LABEL, ...names, USED_BY_MORE]);
+    expect(band).not.toMatch(/aria-label=/);
   });
 
   test("keeps the page's section order", () => {

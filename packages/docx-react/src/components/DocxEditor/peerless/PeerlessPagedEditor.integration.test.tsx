@@ -3,10 +3,15 @@ import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import type {
   DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection,
 } from '@betteroffice/docx/peerless';
+import {
+  applyFrameDeltaOwned, displayPageRevision, FRAME_DELTA_VERSION,
+  type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
+} from '@betteroffice/docx/layout/render';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import * as composition from './composition';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PeerlessPagedEditor, type PeerlessPagedEditorProps } from './PeerlessPagedEditor';
+import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -56,21 +61,24 @@ function frame(revision: number, coverage: number, text = ''): DocxCommandFrame 
       boundaries: Array.from({ length: text.length + 1 }, (_, utf16) => ({ utf16, grapheme: utf16,
         caret: { x: utf16 * 10, y: 0, width: 1, height: 40 } })),
       selection: { anchorGrapheme: text.length, focusGrapheme: text.length },
-      damage: [{ page, rect, backgroundId: 'background', primitiveIds: [] }],
+      damage: [{ page, rect, backgroundId: 'background', omittedPrimitiveIds: [] }],
+      glyphs: testEchoGlyphLine({ device: { x: 0, y: 0, width: 200, height: 40 } }),
     },
+    echoGlyphSets: [testEchoGlyphSet],
   } };
 }
 
-async function mount(selection = false, accessible = false, table = false, caretX: (revision: number) => number = () => 10,
+async function mount(selection = false, accessible = false, table = false,
+  prepare?: UsePeerlessEditSessionOptions['prepareGeometry'], caretX: (revision: number) => number = () => 10,
   props: Partial<PeerlessPagedEditorProps> = {}) {
   const events: string[] = [];
+  restorers.push(installGlyphPaths());
   const canvas = document.createElement('canvas');
   const ctx = {
     save() {}, restore() {}, setTransform() {}, clearRect() {}, putImageData() {},
     getImageData: () => ({ width: canvas.width, height: canvas.height }) as ImageData,
     transform() {}, beginPath() {}, rect() {}, clip() {}, fillRect() {},
-    measureText: (text: string) => ({ width: text.length * 10 }),
-    fillText: (text: string) => { events.push(`echo:${text}`); },
+    translate() {}, scale() {}, fill: (path: unknown) => { events.push(`echo:${glyphChar(path)}`); },
     drawImage: () => { events.push('pixels'); },
   };
   Object.defineProperty(canvas, 'getContext', { value: () => ctx });
@@ -103,7 +111,7 @@ async function mount(selection = false, accessible = false, table = false, caret
   };
   const sessionOptions: UsePeerlessEditSessionOptions = {
     source: Uint8Array.of(1), openConnection: async () => connection, canvasForPage: () => canvas,
-    prepareGeometry(candidate) {
+    prepareGeometry: prepare ?? function (candidate) {
       return { identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
         layoutRevision: candidate.payload.layoutRevision,
         pages: accessible ? Array.from({ length: 20 }, (_, pageIndex) => ({
@@ -141,6 +149,34 @@ test('peerless accessibility exposes retained offscreen pages without allocating
   expect(editor.container.querySelector('[data-page-id="13"] canvas')).toBeNull();
   expect(editor.getByRole('status').getAttribute('aria-live')).toBe('polite');
 });
+
+test('a page whose positions changed in place rebuilds its accessibility mirror', async () => {
+  const displayPage: DisplayPage = { pageIndex: 0, width: 200, height: 40, positionSpan: [1, 9], primitives: [{
+    kind: 'text', text: 'Shifted page', x: 0, baselineY: 14, width: 100, font: '12px Arial', color: '#000', docStart: 1, docEnd: 9,
+  }] };
+  const delta = (frameEpoch: number, operations: FramePageOperation[]): DecodedFrameDelta => ({
+    protocolVersion: FRAME_DELTA_VERSION, full: frameEpoch === 1, docEpoch: frameEpoch, layoutEpoch: frameEpoch, frameEpoch,
+    baseFrameEpoch: frameEpoch - 1, pageCount: 1, bytes: new Uint8Array(), operations });
+  let retained = applyFrameDeltaOwned(null, delta(1, [{ kind: 'upsert', pageId: 1n, pageIndex: 0, fingerprint: 1n,
+    primitiveIds: new BigUint64Array([1n]), page: displayPage }]));
+  const editor = await mount(false, false, false, (candidate) => {
+    if (candidate.revision > retained.frameEpoch) {
+      retained = applyFrameDeltaOwned(retained, delta(candidate.revision,
+        [{ kind: 'shift-range', pageIndex: 0, pageId: 1n, count: 1, delta: 2, salt: 3n }]));
+    }
+    return { identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision, caret: null, selectionRects: [],
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0],
+        displayPage: retained.pages[0]!.page }] };
+  });
+  const mirror = () => editor.container.querySelector('[data-page-id="1"] .canvas-page-mirror')?.firstElementChild;
+  await waitFor(() => expect(mirror()).toBeTruthy());
+  const before = mirror();
+  editor.present(frame(2, 0));
+  expect(retained.pages[0]!.page).toBe(displayPage);
+  expect(displayPageRevision(displayPage)).toBe(1);
+  await waitFor(() => expect(mirror()).not.toBe(before), { timeout: 5_000 });
+}, 15_000);
 
 function preedit(textarea: HTMLTextAreaElement, type: 'compositionstart' | 'compositionupdate' | 'compositionend', data = '') {
   const event = type === 'compositionstart' ? fireEvent.compositionStart
@@ -325,7 +361,7 @@ test('worker_frame_installs_through_frame_presentation_and_retires_echo', async 
 });
 
 test('worker caret blinks on the hybrid interval only while the input is focused', async () => {
-  const editor = await mount(false, false, false, (revision) => revision * 10);
+  const editor = await mount(false, false, false, undefined, (revision) => revision * 10);
   jest.useFakeTimers();
   restorers.push(() => jest.useRealTimers());
   const caret = () => {
@@ -364,7 +400,7 @@ test('worker caret blinks on the hybrid interval only while the input is focused
 
 test('a press outside the pages ends their click sequence', async () => {
   const counts: number[] = [];
-  const editor = await mount(false, false, false, undefined, {
+  const editor = await mount(false, false, false, undefined, undefined, {
     onPartPoint: ({ clickCount }) => { counts.push(clickCount); return true; },
     pageOverlays: <button type="button">Close header editing</button>,
   });

@@ -537,6 +537,29 @@ pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
     date_to_serial(y, m, d)
 }
 
+/// whether `raw` reads as a date in month-first or day-first order.
+pub(crate) fn is_date_text(raw: &str) -> bool {
+    let Some(mut fields) = date_fields(raw) else {
+        return false;
+    };
+    let date = |fields: &[String]| match fields {
+        [a, b, c] => three_fields(a, b, c),
+        [a, b] => two_fields(a, b),
+        _ => None,
+    };
+    let valid = |(year, month, day): (Option<i64>, i64, i64)| {
+        let year = year.unwrap_or(2000);
+        (1900..=9999).contains(&year)
+            && (1..=12).contains(&month)
+            && (1..=days_in_month(year, month)).contains(&day)
+    };
+    if date(&fields).is_some_and(valid) {
+        return true;
+    }
+    fields.swap(0, 1);
+    date(&fields).is_some_and(valid)
+}
+
 /// the date words and numbers of a timestamp: time-of-day chunks, meridiem
 /// markers and the separators between fields are stripped.
 fn date_fields(raw: &str) -> Option<Vec<String>> {

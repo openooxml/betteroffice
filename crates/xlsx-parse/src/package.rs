@@ -7,7 +7,9 @@ use xlsx_model::{SheetId, Workbook};
 
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
-use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
+use crate::xml::{
+    attr, find_part, local_name, next_event, reader, resolve_part_path, utf8_bom_len, xml_err,
+};
 use crate::{MAX_DEPTH, ParseError};
 
 /// Source package data retained for ownership-aware writes.
@@ -68,10 +70,7 @@ impl PreservedPackage {
             .map(parse_relationships)
             .transpose()?
             .unwrap_or_default();
-        let relationship_by_id = workbook_relationships
-            .iter()
-            .filter_map(|relationship| relationship.id().map(|id| (id.to_owned(), relationship)))
-            .collect::<HashMap<_, _>>();
+        let relationship_by_id = relationships_by_id(&workbook_relationships);
 
         let sheet_entries = parse_sheet_entries(workbook_xml)?;
         let mut sheets = Vec::with_capacity(sheet_entries.len());
@@ -119,6 +118,11 @@ impl PreservedPackage {
             .and_then(|part| find_part(&parts, &part.path))
             .map(XmlTemplate::capture)
             .transpose()?;
+        // a part a sheet resolves to is never a calc chain an edited save drops
+        let sheet_paths = sheets
+            .iter()
+            .map(|sheet| normalized_part_name(&sheet.path))
+            .collect::<HashSet<_>>();
         let mut calc_chains = workbook_relationships
             .iter()
             .filter(|relationship| relationship.has_type("calcChain"))
@@ -135,6 +139,7 @@ impl PreservedPackage {
                 relationship_id: None,
             });
         }
+        calc_chains.retain(|chain| !sheet_paths.contains(&normalized_part_name(&chain.path)));
         let stylesheet_template = styles
             .as_ref()
             .and_then(|part| find_part(&parts, &part.path))
@@ -495,8 +500,9 @@ impl XmlTemplate {
         changes: &[(&str, Option<String>)],
     ) -> Result<Vec<u8>, ParseError> {
         let mut template = self.clone();
-        let mut reader = Reader::from_reader(self.prefix.as_slice());
-        let mut writer = Writer::new(Vec::new());
+        let bom = utf8_bom_len(&self.prefix);
+        let mut reader = Reader::from_reader(&self.prefix[bom..]);
+        let mut writer = Writer::new(self.prefix[..bom].to_vec());
         loop {
             match reader.read_event().map_err(xml_err)? {
                 Event::Start(element) => {
@@ -523,7 +529,8 @@ impl XmlTemplate {
     }
 
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
-        let mut reader = NsReader::from_reader(data);
+        let bom = utf8_bom_len(data);
+        let mut reader = NsReader::from_reader(&data[bom..]);
         let config = reader.config_mut();
         config.expand_empty_elements = false;
         config.check_end_names = true;
@@ -539,10 +546,10 @@ impl XmlTemplate {
         let mut spans = Vec::new();
 
         loop {
-            let before = reader.buffer_position() as usize;
+            let before = bom + reader.buffer_position() as usize;
             let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
             let namespace = resolved_namespace(namespace);
-            let after = reader.buffer_position() as usize;
+            let after = bom + reader.buffer_position() as usize;
             match event {
                 Event::Start(element) => {
                     if depth == 0 {
@@ -938,12 +945,13 @@ impl XmlTemplate {
         if changes.is_empty() {
             return Ok(self.prefix.clone());
         }
-        let mut reader = Reader::from_reader(self.prefix.as_slice());
+        let bom = utf8_bom_len(&self.prefix);
+        let mut reader = Reader::from_reader(&self.prefix[bom..]);
         loop {
-            let before = reader.buffer_position() as usize;
+            let before = bom + reader.buffer_position() as usize;
             match reader.read_event().map_err(xml_err)? {
                 Event::Start(element) => {
-                    let after = reader.buffer_position() as usize;
+                    let after = bom + reader.buffer_position() as usize;
                     let mut attributes = attributes(&element)?;
                     for (name, value) in changes {
                         set_attribute(&mut attributes, name, name, value.clone());
@@ -1177,7 +1185,7 @@ fn parse_sheet_entries(data: &[u8]) -> Result<Vec<SheetEntry>, ParseError> {
     let mut entries = Vec::new();
     loop {
         match next_event(&mut reader, &mut buffer, &mut depth)? {
-            Event::Start(element) if local_name(&element) == b"sheets" => {
+            Event::Start(element) if local_name(&element) == b"sheets" && depth == 2 => {
                 sheets_depth = Some(depth);
             }
             Event::Start(element)
@@ -1201,6 +1209,17 @@ fn parse_sheet_entries(data: &[u8]) -> Result<Vec<SheetEntry>, ParseError> {
         }
     }
     Ok(entries)
+}
+
+/// The relationship each id names, read as the reader reads it: the last one
+/// with that id that has a target, so duplicate ids resolve the same way on
+/// open, on save and on reopen.
+pub(crate) fn relationships_by_id(relationships: &[Relationship]) -> HashMap<&str, &Relationship> {
+    relationships
+        .iter()
+        .filter(|relationship| relationship.target().is_some())
+        .filter_map(|relationship| relationship.id().map(|id| (id, relationship)))
+        .collect()
 }
 
 fn part_reference(
