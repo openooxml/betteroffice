@@ -1151,6 +1151,45 @@ test('an edit overtakes sliced completion and finishes it before changing the do
   } finally { f.destroy(); }
 });
 
+async function proposeFirstParagraph(f: CommandFixture): Promise<DocxCommandAck> {
+  const paragraph = f.engine.paragraphIdentities().paragraphs[0]!.session!;
+  const reply = await f.w.interleave({ type: 'edit', command: {
+    session: f.init.session, incarnation: 1, seq: 1, basis: { epoch: 1, version: 0 }, kind: 'propose',
+    payload: { expectVersion: f.engine.proposalEngine.version(), proposals: [{ id: 'one', paragraph, op: 'replaceText',
+      search: 'Paragraph 1.', replaceWith: 'Omega 1.', suggest: { author: 'Ada', date: '2026-01-01' } }] },
+  } });
+  if (!reply.ok || !reply.commandAck?.frame) throw new Error(JSON.stringify(reply));
+  return reply.commandAck;
+}
+
+for (const begun of [false, true]) {
+  test(`a proposal round on the prefix${begun ? ' while its completion runs' : ''} lays out the proposed document once`, async () => {
+    const f = await commandFixture('plain', false, { virtualTime: true });
+    const full = await commandFixture('plain', false, { full: true, virtualTime: true });
+    try {
+      expect(f.initial.frame.payload.layoutProvisional).toBe(true);
+      if (begun) {
+        await f.present();
+        await f.w.turn();
+        await full.present();
+        expect(f.calls).toEqual(['beginRegionLayout']);
+      }
+      const before = f.calls.length;
+      const ack = await proposeFirstParagraph(f);
+      const reference = await proposeFirstParagraph(full);
+      expect(ack.outcomes[0]?.status).toBe('applied');
+      expect(f.calls.slice(before)).toEqual([f.editLayout]);
+      expect(ack.frame!.payload.layoutProvisional).not.toBe(true);
+      const frames = [...f.w.frames, ack.frame!].sort((a, b) => a.revision - b.revision);
+      const referenceFrames = [...full.w.frames, reference.frame!].sort((a, b) => a.revision - b.revision);
+      expect(commandFramesAfter(f.frame, frames).displayList.pages)
+        .toEqual(commandFramesAfter(full.frame, referenceFrames).displayList.pages);
+      await f.w.advance(INPUT_IDLE_HOLD_MS);
+      expect(f.calls.slice(before)).toEqual([f.editLayout]);
+    } finally { f.destroy(); full.destroy(); }
+  });
+}
+
 /** Longer than the worker holds background work after user input. */
 const INPUT_IDLE_HOLD_MS = 400;
 

@@ -449,10 +449,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     paragraph: { backward: 'interior', forward: 'interior', up: 'complete', down: 'complete' },
     'document-boundary': { backward: 'result', forward: 'complete', up: 'complete', down: 'complete' },
   } satisfies Record<DocxNavigationIntent['unit'], Record<DocxNavigationIntent['direction'], 'result' | 'interior' | 'complete'>>;
+  const geometryIndependent = new Set<DocxCommandEnvelope['kind']>(['propose', 'setProposalStates', 'withdrawProposals']);
   const canUsePrefix = (
     command: DocxCommandEnvelope, context: DocxCommandApplyContext, result?: DocxCommandSelection | null
   ): boolean => {
     if (!prefix || changes.layoutStale) return false;
+    if (geometryIndependent.has(command.kind)) return true;
     if (result !== undefined) {
       if (!result || result.anchor.story !== result.focus.story || result.anchor.paraId !== result.focus.paraId ||
         result.anchor.offset !== result.focus.offset || result.focus.story !== 'body') return false;
