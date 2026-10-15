@@ -8,6 +8,7 @@ import {
   createYrsSession,
   displayPositionToYrsLoc,
   yrsLocToDisplayPosition,
+  type DocxClipboardFragment,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { YrsInput } from './YrsInput';
@@ -122,6 +123,19 @@ test('read-only select all takes the document from inside a table cell', async (
   expect(selection.anchor.offset).toBe(0);
 });
 
+function tableFragment(): DocxClipboardFragment {
+  return {
+    paragraphs: [{
+      tables: [{
+        tblPr: { width: 9360, widthType: 'dxa' },
+        grid: [],
+        rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'pilcrow' }] }] }],
+      }],
+      text: '',
+    }],
+  };
+}
+
 function pasteWith(textarea: HTMLTextAreaElement, html: string, text: string) {
   fireEvent.paste(textarea, {
     clipboardData: { getData: (type: string) => type === 'text/html' ? html : text },
@@ -164,6 +178,22 @@ test('paste of html with a table inserts inside one undo group', async () => {
   await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
   expect(boundaries).toBe(2);
   expect(session.storySegments('body').some((segment) => segment.kind === 'embed')).toBe(true);
+  expect(session.undo()).toBe(true);
+  expect(session.storySegments('body').some((segment) => segment.kind === 'embed')).toBe(false);
+});
+
+test('paste of html with a table lands after text typed in the same tick', async () => {
+  const { session, textarea } = await mount(false);
+  fireEvent.input(textarea, { target: { value: 'Z' } });
+  pasteWith(textarea, clipboardFragmentHtml(tableFragment()), 'fallback');
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+  const segments = session.storySegments('body');
+  expect(segments.some((segment) => segment.kind === 'embed')).toBe(true);
+  expect(session.paragraphs('body').map((p) => p.text).join('\n')).toContain('Z');
+  const embedIndex = segments.findIndex((segment) => segment.kind === 'embed');
+  const textIndex = segments.findIndex((segment) => segment.kind === 'text' && segment.text.includes('Z'));
+  expect(textIndex).toBeGreaterThanOrEqual(0);
+  expect(textIndex).toBeLessThan(embedIndex);
 });
 
 test('suggesting mode pastes plain text', async () => {
