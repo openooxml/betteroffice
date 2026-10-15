@@ -122,7 +122,8 @@ export function preflightTableCommand(
     command.kind !== 'insertTableRow' && command.kind !== 'deleteTableRow') {
     return { reason: 'unsupported-suggesting' };
   }
-  if (command.kind === 'mergeTableCells' && sameGridCell(resolved.range.anchor, resolved.range.head)) {
+  if (command.kind === 'mergeTableCells' &&
+    expandedRangeAnchorCount(engine, resolved.focused, resolved.range) < 2) {
     return { reason: 'invalid-selection' };
   }
   if (command.kind === 'splitTableCell') {
@@ -146,6 +147,38 @@ function coveringAnchor(anchors: readonly TableCellAnchor[], at: YrsCellLoc): Ta
   return anchors.find((anchor) =>
     anchor.row <= at.row && at.row < anchor.row + anchor.rowspan &&
     anchor.column <= at.column && at.column < anchor.column + anchor.colspan) ?? null;
+}
+
+function expandedRangeAnchorCount(
+  engine: ResidentDocxCommandEngine,
+  at: YrsCellLoc,
+  range: YrsTableRange
+): number {
+  const anchors = liveAnchors(engine, at);
+  if (!anchors) return 0;
+  let top = Math.min(range.anchor.row, range.head.row);
+  let bottom = Math.max(range.anchor.row, range.head.row) + 1;
+  let left = Math.min(range.anchor.column, range.head.column);
+  let right = Math.max(range.anchor.column, range.head.column) + 1;
+  for (;;) {
+    const beforeTop = top;
+    const beforeBottom = bottom;
+    const beforeLeft = left;
+    const beforeRight = right;
+    for (const anchor of anchors) {
+      const intersects = anchor.row < bottom && anchor.row + anchor.rowspan > top &&
+        anchor.column < right && anchor.column + anchor.colspan > left;
+      if (!intersects) continue;
+      top = Math.min(top, anchor.row);
+      bottom = Math.max(bottom, anchor.row + anchor.rowspan);
+      left = Math.min(left, anchor.column);
+      right = Math.max(right, anchor.column + anchor.colspan);
+    }
+    if (beforeTop === top && beforeBottom === bottom && beforeLeft === left && beforeRight === right) break;
+  }
+  return anchors.filter((anchor) =>
+    anchor.row >= top && anchor.row + anchor.rowspan <= bottom &&
+    anchor.column >= left && anchor.column + anchor.colspan <= right).length;
 }
 
 function liveAnchor(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
