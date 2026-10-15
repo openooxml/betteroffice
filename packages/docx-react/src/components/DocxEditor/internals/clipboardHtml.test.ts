@@ -114,6 +114,17 @@ test('paragraph table paragraph shares the table paragraph text', () => {
   expect(trailing!.paragraphs[1]!.text).toBe('');
 });
 
+test('huge colspan is clamped to a bounded table', () => {
+  const parsed = parseClipboardHtml(
+    `<body><table><tbody><tr><td colspan="1000000000">Wide</td></tr></tbody></table></body>`
+  );
+  expect(parsed).not.toBeNull();
+  const table = parsed!.paragraphs[0]!.tables![0]!;
+  expect(table.rows).toHaveLength(1);
+  expect(table.rows[0]!.cells).toHaveLength(1);
+  expect(table.rows[0]!.cells[0]!.tcPr).toMatchObject({ colspan: 1000 });
+});
+
 test('text only html returns null', () => {
   expect(parseClipboardHtml(`<body><p>Hello <b>world</b></p></body>`)).toBeNull();
   expect(parseClipboardHtml(`<body><div>Just text</div></body>`)).toBeNull();
