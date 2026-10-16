@@ -66,7 +66,7 @@ use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Assoc, ClientID, DeepObservable, Doc, In, IndexedSequence, Map, MapPrelim, MapRef,
     OffsetKind, Options, Out, ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim,
-    TextRef, Transact, Update,
+    TextRef, Transact, TransactionAcqError, Update,
 };
 
 mod batch;
@@ -102,6 +102,7 @@ mod queries;
 mod raw;
 mod read_state;
 pub mod read_types;
+mod remote_cleanup;
 mod repeating_controls;
 mod script_fonts;
 mod search;
@@ -648,6 +649,7 @@ pub struct EditingDoc {
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
+    remote_deletions: remote_cleanup::RemoteDeletions,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
     _seen_subs: Vec<Subscription>,
@@ -712,6 +714,7 @@ impl EditingDoc {
             seen,
             scan_cache: identity::ScanCache::default(),
             story_revisions,
+            remote_deletions: remote_cleanup::RemoteDeletions::default(),
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
             _seen_subs: seen_subs,
@@ -1705,15 +1708,25 @@ impl EditingDoc {
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
-        let mut txn = match origin {
-            UpdateOrigin::Remote => self.doc.transact_mut(),
-            UpdateOrigin::Local => self.doc.transact_mut_with(self.client_id),
-            UpdateOrigin::Host => self.doc.transact_mut_with(batch::HOST_ORIGIN),
+        let result = match origin {
+            UpdateOrigin::Remote => {
+                let mut integration = self.remote_deletions.integrate(self.doc.transact_mut());
+                updates.into_iter().try_for_each(|update| {
+                    integration.carry(update.delete_set());
+                    integration.apply_update(update)
+                })
+            }
+            UpdateOrigin::Local | UpdateOrigin::Host => {
+                let mut txn = match origin {
+                    UpdateOrigin::Local => self.doc.transact_mut_with(self.client_id),
+                    UpdateOrigin::Host => self.doc.transact_mut_with(batch::HOST_ORIGIN),
+                    UpdateOrigin::Remote => unreachable!(),
+                };
+                updates
+                    .into_iter()
+                    .try_for_each(|update| txn.apply_update(update))
+            }
         };
-        let result = updates
-            .into_iter()
-            .try_for_each(|update| txn.apply_update(update));
-        drop(txn);
         result.map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         if watch.changed() {
             drop(watch);
@@ -1725,6 +1738,26 @@ impl EditingDoc {
             comment_references::reconcile(&mut txn, &reanchored, false);
         }
         Ok(())
+    }
+
+    /// Subscribes `callback(update, remote)` to every committed transaction; `remote` is true when
+    /// it had no local origin. A remote update whose integration also deleted formatting it did
+    /// not carry is followed by a local delete-only update with those deletions, for peers.
+    pub fn observe_update_v1<F>(&self, mut callback: F) -> Result<Subscription, TransactionAcqError>
+    where
+        F: FnMut(&[u8], bool) + 'static,
+    {
+        let remote_deletions = self.remote_deletions.clone();
+        self.doc.observe_update_v1(move |txn, event| {
+            let remote = txn.origin().is_none();
+            callback(&event.update, remote);
+            if !remote {
+                return;
+            }
+            if let Some(residual) = remote_deletions.residual_update_v1(txn) {
+                callback(&residual, false);
+            }
+        })
     }
 
     /// Applies an update as it is, without the identity repair [`Self::apply_update_v1`] runs.

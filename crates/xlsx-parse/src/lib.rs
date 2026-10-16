@@ -34,6 +34,8 @@ pub use reference::UnpatchableReference;
 #[cfg(any(test, feature = "test-oracle"))]
 #[doc(hidden)]
 pub use save_oracle::with_legacy_save_path;
+#[cfg(feature = "test-counters")]
+pub use styles::legacy_style_reads;
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
@@ -54,6 +56,13 @@ pub struct ParsedWorkbook {
     /// The style table releases that needed an explicit `applyX` flag read.
     /// Only a legacy collaboration fingerprint needs it.
     pub legacy_styles: Option<xlsx_model::Stylesheet>,
+}
+
+#[doc(hidden)]
+pub struct LegacyStyleReadings {
+    pub workbook: Workbook,
+    pub dimensions: Vec<LegacySheetDimensions>,
+    pub styles: Vec<xlsx_model::Stylesheet>,
 }
 
 /// Parses the model and captures source package state.

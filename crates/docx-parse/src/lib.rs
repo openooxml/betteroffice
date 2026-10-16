@@ -86,12 +86,12 @@ pub use document::{
 pub use fonts::{FontEmbed, FontInfo, FontTable, parse_font_table};
 pub use formatting::{
     CellMargins, ConditionalFormatStyle, FloatingTableProperties, FontFamily, NumberingProperties,
-    ParagraphFormatting, ParagraphFrame, RunLanguage, SpacingExplicit, TableCellFormatting,
-    TableFormatting, TableLook, TableMeasurement, TableRowFormatting, TextFill, TextFormatting,
-    TextGlow, TextGradientStop, TextModernEffects, TextOutline, TextReflection, TextShadow,
-    merge_paragraph_formatting, merge_text_formatting, parse_paragraph_properties,
-    parse_run_properties, parse_table_cell_properties, parse_table_properties,
-    parse_table_row_properties,
+    ParagraphCnfStyle, ParagraphFormatting, ParagraphFrame, RunLanguage, SpacingExplicit,
+    TableCellFormatting, TableFormatting, TableLook, TableMeasurement, TableRowFormatting,
+    TextFill, TextFormatting, TextGlow, TextGradientStop, TextModernEffects, TextOutline,
+    TextReflection, TextShadow, merge_paragraph_formatting, merge_text_formatting,
+    parse_paragraph_properties, parse_run_properties, parse_table_cell_properties,
+    parse_table_properties, parse_table_row_properties,
 };
 pub use header_footer::{
     HeaderFooter, HeaderFooterAliasGroup, normalize_header_footer_type, parse_header_footer,

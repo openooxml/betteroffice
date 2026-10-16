@@ -478,6 +478,37 @@ pub struct ParagraphFrame {
     pub wrap: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParagraphCnfStyle {
+    #[serde(rename = "val", skip_serializing_if = "Option::is_none")]
+    pub val: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_row: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_row: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub odd_v_band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub even_v_band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub odd_h_band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub even_h_band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_row_first_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_row_last_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_row_first_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_row_last_column: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphFormatting {
@@ -566,7 +597,31 @@ pub struct ParagraphFormatting {
     #[serde(rename = "autoSpaceDN", skip_serializing_if = "Option::is_none")]
     pub auto_space_dn: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjust_right_ind: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cnf_style: Option<ParagraphCnfStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub run_properties: Option<TextFormatting>,
+}
+
+fn parse_paragraph_cnf_style(element: Option<&XmlElement>) -> Option<ParagraphCnfStyle> {
+    let element = element?;
+    let attribute = |name: &str| element.attribute(Some("w"), name).map(str::to_owned);
+    Some(ParagraphCnfStyle {
+        val: attribute("val"),
+        first_row: attribute("firstRow"),
+        last_row: attribute("lastRow"),
+        first_column: attribute("firstColumn"),
+        last_column: attribute("lastColumn"),
+        odd_v_band: attribute("oddVBand"),
+        even_v_band: attribute("evenVBand"),
+        odd_h_band: attribute("oddHBand"),
+        even_h_band: attribute("evenHBand"),
+        first_row_first_column: attribute("firstRowFirstColumn"),
+        first_row_last_column: attribute("firstRowLastColumn"),
+        last_row_first_column: attribute("lastRowFirstColumn"),
+        last_row_last_column: attribute("lastRowLastColumn"),
+    })
 }
 
 pub fn parse_paragraph_properties(
@@ -645,6 +700,8 @@ pub fn parse_paragraph_properties(
     value.snap_to_grid = boolean_child(p_pr, "snapToGrid");
     value.auto_space_de = boolean_child(p_pr, "autoSpaceDE");
     value.auto_space_dn = boolean_child(p_pr, "autoSpaceDN");
+    value.adjust_right_ind = boolean_child(p_pr, "adjustRightInd");
+    value.cnf_style = parse_paragraph_cnf_style(p_pr.child("w", "cnfStyle"));
     let run_properties_element = p_pr.child("w", "rPr");
     value.run_properties = parse_run_properties(run_properties_element, theme);
     (value != ParagraphFormatting::default()
@@ -737,6 +794,8 @@ pub fn merge_paragraph_formatting(
                 &source.suppress_auto_hyphens,
             );
             overlay(&mut result.snap_to_grid, &source.snap_to_grid);
+            overlay(&mut result.adjust_right_ind, &source.adjust_right_ind);
+            overlay(&mut result.cnf_style, &source.cnf_style);
             result.run_properties = merge_text_formatting(
                 target.run_properties.as_ref(),
                 source.run_properties.as_ref(),
@@ -1475,6 +1534,79 @@ mod tests {
         assert_eq!(reparsed, merged);
         assert!(xml.contains("w:beforeLines=\"50\""));
         assert!(xml.contains("w:afterLines=\"0\""));
+    }
+
+    #[test]
+    fn adjust_right_ind_survives_parsing_and_serialization_in_schema_order() {
+        let save = |xml: &str| {
+            let parsed = parse_paragraph_properties(Some(&root(xml)), None);
+            crate::serializer::serialize_paragraph_formatting(
+                parsed.as_ref(),
+                None,
+                None,
+                None,
+                false,
+                None,
+            )
+            .unwrap()
+        };
+        let off = save(r#"<w:pPr><w:bidi/><w:adjustRightInd w:val="0"/><w:snapToGrid/></w:pPr>"#);
+        assert_eq!(
+            off,
+            "<w:pPr><w:bidi/><w:adjustRightInd w:val=\"0\"/><w:snapToGrid/></w:pPr>"
+        );
+        assert_eq!(save(&off), off);
+        let spaced = save(
+            r#"<w:pPr><w:autoSpaceDE w:val="0"/><w:autoSpaceDN/><w:bidi/><w:adjustRightInd w:val="0"/><w:snapToGrid w:val="0"/><w:spacing w:after="200"/><w:ind w:left="720"/></w:pPr>"#,
+        );
+        assert_eq!(
+            spaced,
+            "<w:pPr><w:autoSpaceDE w:val=\"0\"/><w:autoSpaceDN/><w:bidi/><w:adjustRightInd w:val=\"0\"/><w:snapToGrid w:val=\"0\"/><w:spacing w:after=\"200\"/><w:ind w:left=\"720\"/></w:pPr>"
+        );
+        assert_eq!(save(&spaced), spaced);
+        let bare = save(r#"<w:pPr><w:adjustRightInd/></w:pPr>"#);
+        assert_eq!(bare, "<w:pPr><w:adjustRightInd/></w:pPr>");
+        let absent = save(r#"<w:pPr><w:bidi/></w:pPr>"#);
+        assert_eq!(absent, "<w:pPr><w:bidi/></w:pPr>");
+        assert!(!absent.contains("adjustRightInd"));
+    }
+
+    #[test]
+    fn paragraph_cnf_style_survives_parsing_and_serialization_byte_identical() {
+        let cnf = "<w:cnfStyle w:val=\"010000000001\" w:firstRow=\"1\" w:lastRow=\"off\" \
+                   w:firstColumn=\"true\" w:lastColumn=\"0\" w:oddVBand=\"on\" \
+                   w:evenVBand=\"false\" w:oddHBand=\"1\" w:evenHBand=\"off\" \
+                   w:firstRowFirstColumn=\"true\" w:firstRowLastColumn=\"0\" \
+                   w:lastRowFirstColumn=\"on\" w:lastRowLastColumn=\"false\"/>";
+        let parsed =
+            parse_paragraph_properties(Some(&root(&format!("<w:pPr>{cnf}</w:pPr>"))), None);
+        let xml = crate::serializer::serialize_paragraph_formatting(
+            parsed.as_ref(),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(xml, format!("<w:pPr>{cnf}</w:pPr>"));
+        let zero = "<w:cnfStyle w:val=\"000000000000\" w:firstRow=\"0\" w:lastRow=\"0\" \
+                    w:firstColumn=\"0\" w:lastColumn=\"0\" w:oddVBand=\"0\" w:evenVBand=\"0\" \
+                    w:oddHBand=\"0\" w:evenHBand=\"0\" w:firstRowFirstColumn=\"0\" \
+                    w:firstRowLastColumn=\"0\" w:lastRowFirstColumn=\"0\" \
+                    w:lastRowLastColumn=\"0\"/>";
+        let parsed =
+            parse_paragraph_properties(Some(&root(&format!("<w:pPr>{zero}</w:pPr>"))), None);
+        let xml = crate::serializer::serialize_paragraph_formatting(
+            parsed.as_ref(),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(xml, format!("<w:pPr>{zero}</w:pPr>"));
     }
 
     fn root(xml: &str) -> XmlElement {

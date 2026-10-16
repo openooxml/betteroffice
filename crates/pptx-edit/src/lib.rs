@@ -25,6 +25,7 @@ pub mod paragraph;
 mod peer;
 mod proposal_diff;
 mod proposals;
+mod remote_cleanup;
 mod replay;
 mod save;
 mod search;
@@ -98,6 +99,7 @@ pub struct DeckSession {
     replay_state: RefCell<replay::ReplayState>,
     _epoch_observer: UpdateSubscription,
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
+    remote_deletions: remote_cleanup::RemoteDeletions,
 }
 
 fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
@@ -209,6 +211,7 @@ impl DeckSession {
             replay_state: Default::default(),
             _epoch_observer,
             state_update: RefCell::new(None),
+            remote_deletions: Default::default(),
         })
     }
 
@@ -341,6 +344,7 @@ impl DeckSession {
             )));
         }
         let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
+        let carried = incoming.delete_set().clone();
         let staged = doc_with_client_id(self.client_id);
         hydrate_doc(&staged, &self.encode_state_as_update_v1())?;
         staged
@@ -353,23 +357,29 @@ impl DeckSession {
             .transact()
             .encode_state_as_update_v1(&self.doc.transact().state_vector());
         let diff = decode_update_v1(&diff).map_err(EditError::InvalidUpdate)?;
-        self.doc
-            .transact_mut_with(REMOTE_ORIGIN)
+        let mut integration = self
+            .remote_deletions
+            .integrate(self.doc.transact_mut_with(REMOTE_ORIGIN));
+        integration.carry(&carried);
+        integration
             .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         Ok(snapshot)
     }
 
+    /// A remote update whose integration also deleted formatting it did not carry is followed by
+    /// a local delete-only update with those deletions, for peers.
     pub fn observe_update_v1<F>(&self, callback: F) -> EditResult<Subscription>
     where
         F: Fn(UpdateEvent) + 'static,
     {
+        let remote_deletions = self.remote_deletions.clone();
         self.doc
             .observe_update_v1(move |txn, event| {
-                let origin = if txn
+                let remote = txn
                     .origin()
-                    .is_some_and(|origin| origin.as_ref() == REMOTE_ORIGIN.as_bytes())
-                {
+                    .is_some_and(|origin| origin.as_ref() == REMOTE_ORIGIN.as_bytes());
+                let origin = if remote {
                     UpdateOrigin::Remote
                 } else {
                     UpdateOrigin::Local
@@ -379,6 +389,16 @@ impl DeckSession {
                     origin,
                 };
                 let _ = catch_unwind(AssertUnwindSafe(|| callback(update)));
+                if !remote {
+                    return;
+                }
+                if let Some(update) = remote_deletions.residual_update_v1(txn) {
+                    let update = UpdateEvent {
+                        update,
+                        origin: UpdateOrigin::Local,
+                    };
+                    let _ = catch_unwind(AssertUnwindSafe(|| callback(update)));
+                }
             })
             .map_err(|error| EditError::Observer(error.to_string()))
     }
