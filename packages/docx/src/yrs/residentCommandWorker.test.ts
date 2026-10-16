@@ -2589,3 +2589,21 @@ test('a reply comment links its parent in one undo step and comment commands rep
     expect(engine.listComments().map(comment => comment.id)).toEqual([parent.id]);
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+test('worker saves a reply added through comment commands with its parent and the parent done state', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const replied = await client.edit(intent(1, 0, 'addComment', { ranges, author: 'B', date: '2026-01-02T00:00:00Z', body: 'Reply',
+      parentId: parent.id, expectVersion: engine.proposalEngine.version() }));
+    const done = await client.edit(intent(2, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.outcomes[0]?.status).toBe('applied');
+    const saved = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments ?? [];
+    expect(saved.find(comment => comment.id === parentId)).toMatchObject({ done: true });
+    expect(saved.find(comment => comment.id === replied.editState!.comment!.id)).toMatchObject({ parentId, author: 'B' });
+  } finally { client.destroy(); }
+}, TIMEOUT);
