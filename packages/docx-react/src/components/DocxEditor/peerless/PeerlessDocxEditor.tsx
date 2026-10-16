@@ -177,7 +177,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (id === 'print') { await print(); return { ok: true, status: 'executed' }; }
     return fileIO.perform(id);
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
-    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph }));
+    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph,
+    scrollToReviewTarget: navigation.scrollToReviewTarget }));
   const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const documentReady = shellState.status === 'ready' && openedSource.current === sourceKey;
   useEffect(() => {

@@ -15,6 +15,7 @@ import { createYrsSession } from './index';
 import { resolveReservations, type DocxReservation } from './reservations';
 import type { DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { ResidentReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
 
@@ -2838,5 +2839,26 @@ test('worker refuses table structure commands in header stories', async () => {
     const refused = await client.edit(intent(2, 1, 'insertTableRow', { side: 'below' }));
     expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
     expect(refused.version).toBe(1);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const TRACKED_PARAGRAPH = '<w:p w14:paraId="00000003"><w:r><w:t>Old </w:t></w:r>' +
+  '<w:ins w:id="9" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins></w:p>';
+
+test('review target reads resolve a comment by its public id and a revision by its id', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body + TRACKED_PARAGRAPH, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [comment] = engine.listComments();
+    const [revision] = engine.geometryReader.listRevisions();
+    if (!comment || !revision) throw new Error('Source review items unavailable');
+    const publicId = engine.commentProjection()!.ids[comment.id]!;
+    const first = engine.paragraphs('body')[0]!.paraId;
+    const read = async (target: ResidentReviewTarget) => (await client.documentRead({ kind: 'reviewTarget', target })).value;
+    expect(await read({ kind: 'comment', id: publicId })).toEqual({ id: comment.id,
+      ranges: [{ story: 'body', start: { paraId: first, offset: 0 }, end: { paraId: first, offset: 4 } }] });
+    expect(await read({ kind: 'revision', revisionId: revision.revisionId })).toEqual({ id: revision.revisionId,
+      ranges: [{ story: revision.story, start: revision.range.start, end: revision.range.end }] });
+    expect(await read({ kind: 'comment', id: publicId + 40 })).toBeNull();
+    expect(await read({ kind: 'revision', revisionId: 'missing' })).toBeNull();
   } finally { client.destroy(); }
 }, TIMEOUT);

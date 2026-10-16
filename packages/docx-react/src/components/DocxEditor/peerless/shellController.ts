@@ -22,7 +22,7 @@ import type { DocxHostSearch } from '../hooks/useHostSearch';
 import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
-import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
@@ -64,6 +64,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   currentPage?(): number;
   scrollToPage?(number: number): void;
   scrollToParagraph?(paraId: string): Promise<boolean>;
+  scrollToReviewTarget?(target: ResidentReviewTarget): Promise<boolean>;
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
@@ -491,6 +492,9 @@ export function createPeerlessShellController(initial: Options) {
     commentTail = pending.catch(() => null);
     return pending;
   };
+  /** Selects a comment's or revision's first anchored range and scrolls it into view; false when it does not exist. */
+  const revealReviewTarget = (target: ResidentReviewTarget): Promise<boolean> =>
+    options.scrollToReviewTarget?.(target) ?? Promise.resolve(false);
   const batchPolicy = (request: DocxEditRequest) => {
     const env = environment();
     if (env.readOnly || env.mode === 'viewing') return { ok: false as const, version: request.expectVersion, failure: { code: 'read-only' as const, message: 'The editor is read-only' } };
@@ -587,6 +591,8 @@ export function createPeerlessShellController(initial: Options) {
     getTotalPages: () => snapshot.view?.geometry?.pages.length ?? 0,
     scrollToPage: (number) => options.scrollToPage?.(number),
     scrollToParagraph: (paraId) => options.scrollToParagraph?.(paraId) ?? Promise.resolve(false),
+    scrollToComment: (commentId) => Number.isSafeInteger(commentId) ? revealReviewTarget({ kind: 'comment', id: commentId }) : Promise.resolve(false),
+    scrollToChange: (revisionId) => revealReviewTarget({ kind: 'revision', revisionId: String(revisionId) }),
     focus: () => options.focus(),
     setZoom: (zoom) => { if (!Number.isFinite(zoom) || zoom <= 0) return;
       options = { ...options, zoom }; options.onZoom?.(zoom); publish(); },
@@ -602,7 +608,7 @@ export function createPeerlessShellController(initial: Options) {
     },
   });
   return {
-    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview,
+    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview, revealReviewTarget,
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
