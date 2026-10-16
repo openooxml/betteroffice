@@ -375,7 +375,7 @@ export function createPeerlessShellController(initial: Options) {
         return revisionId ? submit({ kind: id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', payload: { revisionId } }) : { ok: true, status: 'noop' };
       }
       if (id === 'reviewNext' || id === 'reviewPrevious') {
-        const target = await query({ kind: 'adjacentRevision', selection: ready().viewStore.getSnapshot().workerSelection, direction: id === 'reviewNext' ? 'next' : 'previous' });
+        const target = await query({ kind: 'adjacentRevision', selection: ready().viewStore.getSnapshot().workerSelection ?? null, direction: id === 'reviewNext' ? 'next' : 'previous' });
         return target.value && await revealReviewTarget({ kind: 'revision', revisionId: target.value.revisionId }) ? { ok: true, status: 'executed' }
           : { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } };
       }

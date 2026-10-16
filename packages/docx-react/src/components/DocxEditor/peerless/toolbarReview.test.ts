@@ -22,7 +22,7 @@ function reviewFixture() {
     { key: 'revision-7', start: { story: 'body', position: 4 } }, { key: 'revision-11', start: { story: 'body', position: 30 } }],
   trackedChanges: { entries: [entry(9, 20), entry(7, 4), entry(11, 30)], commentToRevision: [] } };
   const adjacent: { value: { revisionId: string } | null } = { value: null };
-  const readAt = mock(async (request: { kind: string }) => ({ status: 'ok', version: 'native',
+  const readAt = mock(async (request: { kind: string } & Record<string, unknown>) => ({ status: 'ok', version: 'native',
     value: request.kind === 'sidebar' ? sidebar : request.kind === 'adjacentRevision' ? adjacent.value : review }));
   const view = fixture.viewStore.getSnapshot();
   fixture.viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: fixture.selection,
