@@ -28,10 +28,14 @@ impl Workbook {
                 Op::SetCell { sheet, at, .. } => {
                     delta.sheets.entry(*sheet).or_default().rows.insert(at.row);
                 }
-                Op::SetRowHeight { sheet, row, .. } => {
+                Op::SetRowHeight { sheet, row, .. }
+                | Op::SetRowVisibility { sheet, row, .. }
+                | Op::RestoreRowDimension { sheet, row, .. } => {
                     delta.sheets.entry(*sheet).or_default().rows.insert(*row);
                 }
-                Op::SetColWidth { sheet, col, .. } => {
+                Op::SetColWidth { sheet, col, .. }
+                | Op::SetColVisibility { sheet, col, .. }
+                | Op::RestoreColDimension { sheet, col, .. } => {
                     delta.sheets.entry(*sheet).or_default().columns.insert(*col);
                 }
                 Op::PatchRangeStyle { sheet, range, .. }

@@ -2961,6 +2961,7 @@ pub(crate) struct ColRun {
     pub(crate) first: ColId,
     last: ColId,
     width: Option<f64>,
+    hidden_width: Option<f64>,
     style: Option<u32>,
 }
 
@@ -3019,6 +3020,7 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
                 first,
                 last,
                 width,
+                hidden_width: sheet.hidden_col_widths.get(&first).copied(),
                 style,
             }),
         }
@@ -3029,7 +3031,14 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
 pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io::Result<()> {
     let first = (u64::from(run.first) + 1).to_string();
     let last = (u64::from(run.last) + 1).to_string();
-    let width = run.width.map(fmt_num);
+    let hidden = run.width == Some(0.0);
+    let width = run.width.map(|width| {
+        fmt_num(if hidden {
+            run.hidden_width.unwrap_or(width)
+        } else {
+            width
+        })
+    });
     let style = run.style.map(|style| style.to_string());
     let mut element = BytesStart::new("col");
     element.push_attribute(("min", first.as_str()));
@@ -3041,7 +3050,7 @@ pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io
     if let Some(style) = &style {
         element.push_attribute(("style", style.as_str()));
     }
-    if width.as_deref() == Some("0") {
+    if hidden {
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Empty(element))?;
@@ -3071,11 +3080,18 @@ where
         start.push_attribute(("s", style.as_str()));
         start.push_attribute(("customFormat", "1"));
     }
-    let ht = sheet.row_heights.get(&row).map(|h| fmt_num(*h));
+    let hidden = sheet.row_heights.get(&row) == Some(&0.0);
+    let ht = sheet.row_heights.get(&row).map(|h| {
+        fmt_num(if hidden {
+            sheet.hidden_row_heights.get(&row).copied().unwrap_or(*h)
+        } else {
+            *h
+        })
+    });
     if let Some(h) = &ht {
         start.push_attribute(("ht", h.as_str()));
         start.push_attribute(("customHeight", "1"));
-        if h == "0" {
+        if hidden {
             start.push_attribute(("hidden", "1"));
         }
     }
