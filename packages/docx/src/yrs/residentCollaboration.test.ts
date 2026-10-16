@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { createResidentDocxCommandHooks } from './residentCommandActions';
+import { MAX_UPDATE_BYTES, createResidentDocxCommandHooks } from './residentCommandActions';
 import { createResidentCollaboration, readResidentPresence } from './residentCollaboration';
 import { createYrsSession } from './index';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
@@ -132,7 +132,8 @@ test('remote merges are admitted from the command policy in a collaborating sess
     };
     expect(await admit({ update: new Uint8Array([1]).buffer })).toMatchObject({ status: 'ready' });
     expect(await admit({ update: new Uint8Array([1]).buffer }, { basis: { epoch: 2, version: 999 } })).toMatchObject({ status: 'ready' });
-    for (const payload of [{}, { update: new ArrayBuffer(0) }, { update: new ArrayBuffer(MAX_COLLABORATION_FRAME_BYTES + 1) },
+    expect(await admit({ update: new ArrayBuffer(MAX_COLLABORATION_FRAME_BYTES + 1) })).toMatchObject({ status: 'ready' });
+    for (const payload of [{}, { update: new ArrayBuffer(0) }, { update: new ArrayBuffer(MAX_UPDATE_BYTES + 1) },
       { update: new Uint8Array([1]) }, { update: new Uint8Array([1]).buffer, selection: null }]) {
       expect(await admit(payload)).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
     }

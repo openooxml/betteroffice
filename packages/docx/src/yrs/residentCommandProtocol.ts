@@ -442,7 +442,10 @@ export type ResidentCommandHooksFactory = (
   engine: ResidentEngineSession,
   init: ResidentCommandInitRequest,
   environment?: ResidentCommandHooksEnvironment
-) => Pick<ResidentCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState'>;
+) => Pick<ResidentCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState'> & {
+  /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
+  afterRemoteMerge?(context: DocxCommandApplyContext): void;
+};
 
 export interface ResidentCommandRegistry {
   handlers: Partial<MethodHandlers<DocxCommandMethods, unknown>>;
@@ -525,6 +528,8 @@ export interface ResidentDocxCommandState {
   storedMarks: DocxStoredMarks | null;
   stickyPositions: Map<string, YrsStickyPosition>;
   proposals?: DocxProposalRegistry;
+  /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
+  remoteMerges?: { from: number; to: number };
 }
 
 export type ResidentDocxCommandEngine = ResidentEngineSession & Pick<YrsSession,

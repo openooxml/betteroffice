@@ -64,7 +64,9 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
               try { anchors.set(insertion.clientId, { key: inferenceKey(loc), sticky: engine.encodeStickyPosition(loc) }); } catch {}
               if (anchors.size > 64) anchors.delete(anchors.keys().next().value!);
             }
-            return { status: engine.proposalEngine.version() === before ? 'noop' : 'applied', ...state() };
+            if (engine.proposalEngine.version() === before) return { status: 'noop', ...state() };
+            hooks.afterRemoteMerge?.(context);
+            return { status: 'applied', ...state() };
           } catch (error) {
             if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
             return { status: 'refused', reason: 'invalid-update', ...state() };

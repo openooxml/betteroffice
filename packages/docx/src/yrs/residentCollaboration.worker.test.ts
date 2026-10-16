@@ -9,6 +9,8 @@ import { createResidentCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
+import { MAX_UPDATE_BYTES } from './residentCommandActions';
+import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
 import type { Document } from '../types/document';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -289,4 +291,75 @@ test('a byte source saves the shared stories it joined with and leaves a plain o
   } finally { remote.destroy(); plain.session.dispose(); }
 }, TIMEOUT);
 
-test.todo('a merge that deletes the story holding the local selection repairs the confirmed selection', () => {});
+test('a merge that deletes the story holding the local selection repairs the confirmed selection', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const table = remote.insertTable({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 0 }, 1, 1);
+    const cell = table.createdStoryIds[0]!;
+    expect((await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack).status).toBe('applied');
+    const inCell = { story: cell, paraId: a.engine.paragraphs(cell)[0]!.paraId, offset: 0 };
+    await a.session.submit('select', { selection: { anchor: inCell, focus: inCell } }).ack;
+    expect(a.session.state.selection?.focus.story).toBe(cell);
+    remote.deleteTable(table.table);
+    expect((await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack).status).toBe('applied');
+    const repaired = a.session.state.selection;
+    expect(repaired?.focus.story).toBe('body');
+    expect(a.engine.paragraphs('body').map(paragraph => paragraph.paraId)).toContain(repaired!.focus.paraId);
+    expect((await a.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body').some(paragraph => paragraph.text.includes('Z'))).toBe(true);
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('ordinary typing behind an unacknowledged merge resolves through sticky positions', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    remote.insertText({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 0 }, 'R');
+    const merged = a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge);
+    const typing = a.session.submit('insertText', { text: '!' });
+    expect((await merged.ack).status).toBe('applied');
+    expect((await typing.ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('RSeed!');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('input behind an unacknowledged local edit or expecting its version is still refused across a merge', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const paraId = a.engine.paragraphs('body')[0]!.paraId;
+    remote.insertText({ story: 'body', paraId, offset: 0 }, 'R');
+    const local = a.session.submit('insertText', { text: 'a' });
+    const merged = a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge);
+    const behindLocal = a.session.submit('insertText', { text: 'b' });
+    expect((await local.ack).status).toBe('applied');
+    expect((await merged.ack).status).toBe('applied');
+    expect(await behindLocal.ack).toMatchObject({ status: 'refused', reason: 'stale-anchor' });
+    remote.insertText({ story: 'body', paraId, offset: 0 }, 'Q');
+    const again = a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge);
+    const expecting = a.session.submit('insertText', { text: 'c' }, { expectVersion: true });
+    expect((await again.ack).status).toBe('applied');
+    expect(await expecting.ack).toMatchObject({ status: 'refused', reason: 'stale-version' });
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('QRSeeda');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('a remote update past the relay frame cap applies and one past the engine cap is refused', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    remote.setParagraphAttr(a.engine.paragraphs('body')[0]!.paraId, 'bulk', 'x'.repeat(20 * 1024 * 1024));
+    const update = remoteUpdate(a, remote);
+    expect(update.byteLength).toBeGreaterThan(MAX_COLLABORATION_FRAME_BYTES);
+    expect((await a.session.submit('applyRemoteUpdate', { update }, merge).ack).status).toBe('applied');
+    expect(await a.session.submit('applyRemoteUpdate', { update: new ArrayBuffer(MAX_UPDATE_BYTES + 1) }, merge).ack)
+      .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed!');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);

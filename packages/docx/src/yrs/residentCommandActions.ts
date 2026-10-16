@@ -22,7 +22,6 @@ import { validFontEnvironment } from './residentFontEnvironment';
 import { resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
-import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -149,9 +148,12 @@ interface DocxCommandPolicy {
   payload?(payload: Record<string, unknown>): boolean;
 }
 
+/** Mirrors docx-edit's `MAX_UPDATE_BYTES`: the engine refuses a larger peer update. */
+export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
+
 const DOCX_COMMAND_POLICIES = {
   applyRemoteUpdate: { keys: ['update'], exact: true, session: 'collaboration', origin: 'remote',
-    payload: ({ update }) => update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_COLLABORATION_FRAME_BYTES },
+    payload: ({ update }) => update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_UPDATE_BYTES },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
   setFontEnvironment: { keys: ['faces', 'chains', 'families'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
@@ -1117,6 +1119,14 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
       return result;
     },
     apply: (command, context) => remember(applyDocxCommand(engine, state, command, context, environment)),
+    afterRemoteMerge: (context) => {
+      const run = state.remoteMerges;
+      state.remoteMerges = { from: run?.to === context.currentVersion ? run.from : context.currentVersion, to: context.currentVersion + 1 };
+      const storedMarks = state.storedMarks;
+      const live = state.selection !== null && readCommandSelection(engine, state).ok;
+      repairCommandSelection(engine, state);
+      if (live) state.storedMarks = storedMarks;
+    },
     selection: () => projected().selection,
     editState: () => projected().editState,
   };
