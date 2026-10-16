@@ -181,39 +181,37 @@ impl WorkbookBase {
     /// The current fingerprint hashes the format facets under its own domain,
     /// where no reading drops one. Releases before facets wrote the others,
     /// over their reading of the styles.
+    #[cfg(test)]
     fn from_model_with_legacy_dimensions(
         model: &WorkbookModel,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, String> {
+        Self::from_model_with_style_readings(model, legacy_dimensions, legacy_styles, &[])
+    }
+
+    fn from_model_with_style_readings(
+        model: &WorkbookModel,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+        legacy_style_readings: &[Stylesheet],
+    ) -> Result<Self, String> {
         let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
-        let styles = FingerprintStyles::new(&model.styles);
         let ((fingerprint, bootstrap_client_id), fingerprints) = builder.batched(|builder| {
-            let current_styles = if released_styles(&model.styles) {
+            let styles = FingerprintStyles::new(&model.styles);
+            let current = builder.current(if released_styles(&model.styles) {
                 styles
             } else {
                 styles.with_written_fills()
-            };
-            let current = builder.current(current_styles)?;
-            let mut fingerprints =
-                builder.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
-            let released = fingerprints.remove(&SCHEMA_VERSION).unwrap_or_default();
-            let mut accepted = builder.current_fingerprints(current_styles, legacy_styles)?;
-            if current_styles.as_written {
-                for reading in [styles, current_styles.without_xf_facets()] {
-                    for fingerprint in builder.current_fingerprints(reading, legacy_styles)? {
-                        if !accepted.contains(&fingerprint) {
-                            accepted.push(fingerprint);
-                        }
+            })?;
+            let mut fingerprints = builder.style_fingerprints(&model.styles, legacy_styles)?;
+            for reading in legacy_style_readings {
+                for (version, accepted) in builder.style_fingerprints(reading, None)? {
+                    for fingerprint in accepted {
+                        append_fingerprint(&mut fingerprints, version, fingerprint);
                     }
                 }
             }
-            for fingerprint in released {
-                if !accepted.contains(&fingerprint) {
-                    accepted.push(fingerprint);
-                }
-            }
-            fingerprints.insert(SCHEMA_VERSION, accepted);
             Ok((current, fingerprints))
         })?;
         Ok(Self {
@@ -870,7 +868,7 @@ impl WorkbookAuthority {
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, AuthorityError> {
-        Self::from_source_with_projection(model, client_id, legacy_dimensions, legacy_styles)
+        Self::from_source_with_projection(model, client_id, legacy_dimensions, legacy_styles, &[])
             .map(|(authority, _, _)| authority)
     }
 
@@ -879,11 +877,13 @@ impl WorkbookAuthority {
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
+        legacy_style_readings: &[Stylesheet],
     ) -> Result<(Self, WorkbookModel, WorkbookStructure), AuthorityError> {
-        let base = WorkbookBase::from_model_with_legacy_dimensions(
+        let base = WorkbookBase::from_model_with_style_readings(
             model,
             legacy_dimensions,
             legacy_styles,
+            legacy_style_readings,
         )
         .map_err(AuthorityError::InvalidState)?;
         if client_id == Some(base.bootstrap_client_id) {
@@ -5041,6 +5041,39 @@ impl<'a> FingerprintBuilder<'a> {
         }
     }
 
+    fn style_fingerprints(
+        &mut self,
+        stylesheet: &'a Stylesheet,
+        legacy_styles: Option<&'a Stylesheet>,
+    ) -> Result<BTreeMap<i64, Vec<String>>, String> {
+        let styles = FingerprintStyles::new(stylesheet);
+        let current_styles = if released_styles(stylesheet) {
+            styles
+        } else {
+            styles.with_written_fills()
+        };
+        let mut fingerprints =
+            self.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
+        let released = fingerprints.remove(&SCHEMA_VERSION).unwrap_or_default();
+        let mut accepted = self.current_fingerprints(current_styles, legacy_styles)?;
+        if current_styles.as_written {
+            for reading in [styles, current_styles.without_xf_facets()] {
+                for fingerprint in self.current_fingerprints(reading, legacy_styles)? {
+                    if !accepted.contains(&fingerprint) {
+                        accepted.push(fingerprint);
+                    }
+                }
+            }
+        }
+        for fingerprint in released {
+            if !accepted.contains(&fingerprint) {
+                accepted.push(fingerprint);
+            }
+        }
+        fingerprints.insert(SCHEMA_VERSION, accepted);
+        Ok(fingerprints)
+    }
+
     /// Runs `build` once to learn the fingerprints it needs, hashes them all
     /// in one pass over the cells, then runs it again on the results.
     fn batched<T>(
@@ -5747,13 +5780,29 @@ impl WorkbookAuthority {
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
+        legacy_style_readings: &[Stylesheet],
     ) -> Result<Self, AuthorityError> {
-        let base = WorkbookBase::from_model_with_legacy_dimensions_oracle(
+        let mut base = WorkbookBase::from_model_with_legacy_dimensions_oracle(
             model,
             legacy_dimensions,
             legacy_styles,
         )
         .map_err(AuthorityError::InvalidState)?;
+        for reading in legacy_style_readings {
+            let mut legacy_model = model.clone();
+            legacy_model.styles = reading.clone();
+            let projected = WorkbookBase::from_model_with_legacy_dimensions_oracle(
+                &legacy_model,
+                legacy_dimensions,
+                None,
+            )
+            .map_err(AuthorityError::InvalidState)?;
+            for (version, accepted) in projected.fingerprints {
+                for fingerprint in accepted {
+                    append_fingerprint(&mut base.fingerprints, version, fingerprint);
+                }
+            }
+        }
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
@@ -6888,6 +6937,7 @@ mod tests {
                 Some(11),
                 &case.legacy_dimensions,
                 case.legacy_styles.as_ref(),
+                &[],
             )
             .unwrap();
             let expected = WorkbookAuthority::from_source_oracle(
@@ -6895,6 +6945,7 @@ mod tests {
                 Some(11),
                 &case.legacy_dimensions,
                 case.legacy_styles.as_ref(),
+                &[],
             )
             .unwrap();
             let projection = expected.materialize_internal_oracle(false).unwrap();

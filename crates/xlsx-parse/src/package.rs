@@ -944,18 +944,27 @@ impl XmlTemplate {
         reader.config_mut().expand_empty_elements = false;
         let mut depth = 0_usize;
         let mut names = Vec::new();
+        let mut wrappers = Vec::new();
+        let mut logical_depth = 0_usize;
         loop {
             let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
             let namespace = resolved_namespace(namespace);
-            let branch_content = depth == 3 && namespace.as_deref() == self.root_namespace();
+            let branch_content =
+                logical_depth == 1 && namespace.as_deref() == self.root_namespace();
             match event {
                 Event::Start(element) => {
-                    if branch_content {
+                    let wrapper = matches!(
+                        element.local_name().as_ref(),
+                        b"AlternateContent" | b"Choice" | b"Fallback"
+                    );
+                    wrappers.push(wrapper);
+                    if !wrapper && branch_content {
                         names.push(
                             String::from_utf8_lossy(element.name().local_name().as_ref())
                                 .into_owned(),
                         );
                     }
+                    logical_depth += usize::from(!wrapper);
                     depth += 1;
                     if depth > MAX_DEPTH {
                         return Err(ParseError::DepthExceeded);
@@ -969,12 +978,32 @@ impl XmlTemplate {
                         );
                     }
                 }
-                Event::End(_) => depth = depth.saturating_sub(1),
+                Event::End(_) => {
+                    if wrappers.pop() == Some(false) {
+                        logical_depth = logical_depth.saturating_sub(1);
+                    }
+                    depth = depth.saturating_sub(1);
+                }
                 Event::Eof => break,
                 _ => {}
             }
         }
         Ok(names)
+    }
+
+    pub(crate) fn require_unwrapped_child(&self, name: &str) -> Result<(), ParseError> {
+        for child in &self.children {
+            if self
+                .alternate_content_names(child)?
+                .iter()
+                .any(|covered| covered == name)
+            {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "{name} lives inside an mc:AlternateContent branch"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Replaces every child with `local_name` by the supplied fragments, in

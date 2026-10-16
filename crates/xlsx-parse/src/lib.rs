@@ -54,6 +54,8 @@ pub struct ParsedWorkbook {
     /// The style table releases that needed an explicit `applyX` flag read.
     /// Only a legacy collaboration fingerprint needs it.
     pub legacy_styles: Option<xlsx_model::Stylesheet>,
+    /// Additional style readings used only for legacy collaboration fingerprints.
+    pub legacy_style_readings: Vec<xlsx_model::Stylesheet>,
 }
 
 /// Parses the model and captures source package state.
@@ -84,6 +86,7 @@ pub fn parse_workbook_with_owned_package(
         package,
         legacy_dimensions: parsed.legacy_dimensions,
         legacy_styles: parsed.legacy_styles,
+        legacy_style_readings: parsed.legacy_style_readings,
     })
 }
 

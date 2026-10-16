@@ -588,7 +588,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            parsed.legacy_styles.as_ref(),
+            (parsed.legacy_styles.as_ref(), &parsed.legacy_style_readings),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -656,7 +656,7 @@ impl Workbook {
             build_graph,
             client_id,
             &[],
-            None,
+            (None, &[]),
         )
     }
 
@@ -667,7 +667,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-        legacy_styles: Option<&Stylesheet>,
+        legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -683,7 +683,8 @@ impl Workbook {
             &model,
             client_id,
             legacy_dimensions,
-            legacy_styles,
+            legacy_styles.0,
+            legacy_styles.1,
         )
         .map_err(authority_error)?;
         if client_id.is_some() {
@@ -5061,7 +5062,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            parsed.legacy_styles.as_ref(),
+            (parsed.legacy_styles.as_ref(), &parsed.legacy_style_readings),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -5074,7 +5075,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-        legacy_styles: Option<&Stylesheet>,
+        legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -5090,7 +5091,8 @@ impl Workbook {
             &model,
             client_id,
             legacy_dimensions,
-            legacy_styles,
+            legacy_styles.0,
+            legacy_styles.1,
         )
         .map_err(authority_error)?;
         if client_id.is_some() {
@@ -5321,7 +5323,7 @@ mod tests {
                     true,
                     client_id,
                     &case.legacy_dimensions,
-                    case.legacy_styles.as_ref(),
+                    (case.legacy_styles.as_ref(), &[]),
                 )
                 .unwrap();
                 assert_eq!(
@@ -5337,7 +5339,7 @@ mod tests {
                     true,
                     client_id,
                     &case.legacy_dimensions,
-                    case.legacy_styles.as_ref(),
+                    (case.legacy_styles.as_ref(), &[]),
                 )
                 .unwrap();
                 assert!(assert_open_paths_equal(
@@ -5359,7 +5361,7 @@ mod tests {
                             false,
                             client_id,
                             &case.legacy_dimensions,
-                            case.legacy_styles.as_ref(),
+                            (case.legacy_styles.as_ref(), &[]),
                         ),
                         Workbook::from_source_oracle(
                             case.model.clone(),
@@ -5368,7 +5370,7 @@ mod tests {
                             false,
                             client_id,
                             &case.legacy_dimensions,
-                            case.legacy_styles.as_ref(),
+                            (case.legacy_styles.as_ref(), &[]),
                         ),
                         &case.label,
                     ));

@@ -15,7 +15,7 @@ use crate::{MAX_STYLE_ENTRIES, ParseError};
 pub(crate) fn parse_stylesheet(
     styles: Option<&[u8]>,
     theme: Option<&[u8]>,
-) -> Result<(Stylesheet, Option<Stylesheet>), ParseError> {
+) -> Result<(Stylesheet, Option<Stylesheet>, Vec<Stylesheet>), ParseError> {
     let theme = match theme {
         Some(bytes) => parse_theme(bytes)?,
         None => Theme::default(),
@@ -30,12 +30,23 @@ pub(crate) fn parse_stylesheet(
         legacy.cell_xfs = legacy_xfs;
         legacy
     });
-    Ok((sheet, legacy))
+    let mut readings = Vec::new();
+    if let Some(bytes) = styles {
+        let (mut unfiltered, xfs) = parse_style_pools(bytes, true)?;
+        unfiltered.theme = sheet.theme.clone();
+        let mut held = unfiltered.clone();
+        held.cell_xfs = xfs;
+        for reading in [unfiltered, held] {
+            if reading != sheet && legacy.as_ref() != Some(&reading) && !readings.contains(&reading)
+            {
+                readings.push(reading);
+            }
+        }
+    }
+    Ok((sheet, legacy, readings))
 }
 
-/// which top-level pool the cursor is inside; disambiguates elements that recur
-/// across sections (`<xf>` in cellStyleXfs vs cellXfs, `<numFmt>` and `<font>`
-/// in dxfs, `<color>` everywhere). only direct `styleSheet` children open one.
+/// A stylesheet pool selected by logical parentage.
 #[derive(PartialEq)]
 enum Section {
     None,
@@ -50,9 +61,22 @@ enum Section {
 /// parse the style pools (numFmts, fonts, fills, borders, cellXfs). the theme is
 /// filled in by the caller.
 fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    parse_style_pools(data, false)
+}
+
+struct Scope {
+    depth: usize,
+    read: bool,
+    transparent: bool,
+    alternate: bool,
+    taken: bool,
+}
+
+fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
-    let mut depth = 0;
+    let mut physical_depth = 0;
+    let mut scopes: Vec<Scope> = Vec::new();
 
     let mut ss = Stylesheet::default();
     let mut section = Section::None;
@@ -73,7 +97,47 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut plain_xfs = Vec::new();
 
     loop {
-        let event = next_event(&mut reader, &mut buf, &mut depth)?;
+        let event = next_event(&mut reader, &mut buf, &mut physical_depth)?;
+        let depth = if unfiltered {
+            physical_depth
+        } else {
+            match &event {
+                Event::Start(e) => {
+                    let name = local_name(e);
+                    let parent = scopes.last_mut();
+                    let mut read = parent.as_ref().is_none_or(|parent| parent.read);
+                    let parent_depth = parent.as_ref().map_or(0, |parent| parent.depth);
+                    let alternate = name == b"AlternateContent";
+                    let branch = matches!(name.as_slice(), b"Choice" | b"Fallback")
+                        && parent.as_ref().is_some_and(|parent| parent.alternate);
+                    if branch && let Some(parent) = parent {
+                        read &= !parent.taken;
+                        parent.taken = true;
+                    }
+                    let transparent = alternate || branch;
+                    let depth = parent_depth + usize::from(!transparent);
+                    scopes.push(Scope {
+                        depth,
+                        read,
+                        transparent,
+                        alternate,
+                        taken: false,
+                    });
+                    if !read || transparent {
+                        continue;
+                    }
+                    depth
+                }
+                Event::End(_) => {
+                    let scope = scopes.pop();
+                    if scope.is_some_and(|scope| !scope.read || scope.transparent) {
+                        continue;
+                    }
+                    scopes.last().map_or(0, |scope| scope.depth)
+                }
+                _ => scopes.last().map_or(0, |scope| scope.depth),
+            }
+        };
         if let (Event::Start(e), Some(open)) = (&event, markup.as_mut()) {
             open.child(e, depth)?;
         }
@@ -93,13 +157,19 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     };
                     ss.indexed_colors.push(rgb);
                 }
-                b"numFmts" if depth == 2 => section = Section::NumFmts,
-                b"fonts" if depth == 2 => section = Section::Fonts,
-                b"fills" if depth == 2 => section = Section::Fills,
-                b"borders" if depth == 2 => section = Section::Borders,
-                b"cellStyleXfs" if depth == 2 => section = Section::CellStyleXfs,
-                b"cellXfs" if depth == 2 => section = Section::CellXfs,
-                b"numFmt" if section == Section::NumFmts && depth == 3 => {
+                b"numFmts" if unfiltered || depth == 2 => {
+                    section = if unfiltered {
+                        Section::None
+                    } else {
+                        Section::NumFmts
+                    }
+                }
+                b"fonts" if unfiltered || depth == 2 => section = Section::Fonts,
+                b"fills" if unfiltered || depth == 2 => section = Section::Fills,
+                b"borders" if unfiltered || depth == 2 => section = Section::Borders,
+                b"cellStyleXfs" if unfiltered || depth == 2 => section = Section::CellStyleXfs,
+                b"cellXfs" if unfiltered || depth == 2 => section = Section::CellXfs,
+                b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
                     if let (Some(id), Some(code)) = (
                         attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
                         attr(&e, b"formatCode")?,
@@ -108,15 +178,15 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                         ss.num_fmts.push((id, code));
                     }
                 }
-                b"font" if section == Section::Fonts => {
+                b"font" if section == Section::Fonts && (unfiltered || depth == 3) => {
                     font = Some(Font::default());
                     markup = Some(Markup::open(Entry::Font, &e, depth)?);
                 }
-                b"fill" if section == Section::Fills => {
+                b"fill" if section == Section::Fills && (unfiltered || depth == 3) => {
                     fill = Some(Fill::None);
                     markup = Some(Markup::open(Entry::Fill, &e, depth)?);
                 }
-                b"border" if section == Section::Borders => {
+                b"border" if section == Section::Borders && (unfiltered || depth == 3) => {
                     border = Some(Border::default());
                     markup = Some(Markup::open(Entry::Border, &e, depth)?);
                 }
@@ -176,7 +246,7 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                         ed.color = parse_color(&e)?;
                     }
                 }
-                b"xf" if section == Section::CellXfs => {
+                b"xf" if section == Section::CellXfs && (unfiltered || depth == 3) => {
                     let (parsed, flags) = parse_xf(&e)?;
                     xf = Some(parsed);
                     explicit = flags;
@@ -199,11 +269,12 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                 }
                 _ => {}
             },
-            Event::End(_) if depth == 1 => {
+            Event::End(_) if !unfiltered && depth == 1 => {
                 section = Section::None;
                 colors_depth = None;
             }
             Event::End(e) => match e.name().local_name().as_ref() {
+                b"colors" if colors_depth == Some(depth + 1) => colors_depth = None,
                 b"indexedColors" if indexed_colors_depth == Some(depth + 1) => {
                     indexed_colors_depth = None;
                 }

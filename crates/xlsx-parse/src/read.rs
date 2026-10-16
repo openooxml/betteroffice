@@ -47,6 +47,7 @@ pub(crate) struct IndexedWorkbook {
     /// present only when it differs. A legacy collaboration fingerprint is the
     /// only thing that asks for it.
     pub(crate) legacy_styles: Option<Stylesheet>,
+    pub(crate) legacy_style_readings: Vec<Stylesheet>,
     /// The drawing and chart parts no sheet's charts were built from, which
     /// no save rewrites.
     pub(crate) declined_parts: Vec<String>,
@@ -82,7 +83,8 @@ pub(crate) fn parse_workbook_indexed(
         };
     let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
     let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
-    let (mut styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;
+    let (mut styles, legacy_styles, mut legacy_style_readings) =
+        parse_stylesheet(styles_bytes, theme_bytes)?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
@@ -132,14 +134,20 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
-    if styles.cell_xfs.is_empty()
-        && sheets.iter().any(|sheet| {
+    if std::iter::once(&styles)
+        .chain(&legacy_style_readings)
+        .any(|reading| reading.cell_xfs.is_empty())
+    {
+        let references_zero_style = sheets.iter().any(|sheet| {
             sheet.row_styles.values().any(|&style| style == 0)
                 || sheet.col_styles.iter().any(|run| run.xf == 0)
                 || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
-        })
-    {
-        styles.cell_xfs.push(xlsx_model::Xf::default());
+        });
+        for reading in std::iter::once(&mut styles).chain(&mut legacy_style_readings) {
+            if reading.cell_xfs.is_empty() && references_zero_style {
+                reading.cell_xfs.push(xlsx_model::Xf::default());
+            }
+        }
     }
     Ok(IndexedWorkbook {
         workbook: Workbook {
@@ -155,6 +163,7 @@ pub(crate) fn parse_workbook_indexed(
         cell_facts,
         legacy_dimensions,
         legacy_styles,
+        legacy_style_readings,
         declined_parts,
         rich_shared_strings,
     })

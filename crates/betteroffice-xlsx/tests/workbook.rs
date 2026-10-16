@@ -1481,6 +1481,54 @@ fn saving_rejects_invalid_palette_colors_from_model_json() {
 }
 
 #[test]
+fn persisted_dxf_base_fingerprints_keep_pre_filter_pool_readings() {
+    for flags in [
+        "",
+        r#"applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1""#,
+    ] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.styles.cell_xfs.push(xlsx_model::Xf::default());
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let prefix = r#"<numFmts><numFmt numFmtId="164" formatCode="0.000"/></numFmts>"#;
+        let fonts = "<font/><font><b/></font>";
+        let fills = r#"<fill/><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>"#;
+        let borders = r#"<border/><border><left style="thin"/></border>"#;
+        let xf = format!(r#"<xf numFmtId="164" fontId="0" fillId="0" borderId="0" {flags}/>"#);
+        let extension_xf = format!(r#"<xf numFmtId="164" fontId="0" {flags}/>"#);
+        let legacy_projection = format!(
+            r#"<styleSheet><numFmts><numFmt numFmtId="164" formatCode="0.000"/><numFmt numFmtId="14" formatCode="0%"/><numFmt numFmtId="165" formatCode="@"/></numFmts><fonts>{fonts}</fonts><fills>{fills}</fills><borders>{borders}</borders><cellXfs>{xf}{extension_xf}</cellXfs></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", legacy_projection.into_bytes());
+        let pre_fix = xlsx_parse::parse_workbook(&parts).unwrap();
+        let legacy = Workbook::from_model_collaborative(pre_fix, 901).unwrap();
+        let state = legacy.encode_state_as_update_v1();
+        let source_xml = format!(
+            r#"<styleSheet>{prefix}<fonts><font/></fonts><dxfs><dxf><font><b/></font></dxf></dxfs><fills><fill/></fills><extLst><ext><fills><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills></ext></extLst><borders><border/></borders><dxfs><dxf><border><left style="thin"/></border></dxf></dxfs><cellXfs>{xf}</cellXfs><dxfs><dxf><numFmt numFmtId="14" formatCode="0%"/></dxf></dxfs><extLst><ext><numFmt numFmtId="165" formatCode="@"/><cellXfs>{extension_xf}</cellXfs></ext></extLst></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", source_xml.into_bytes());
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut restored = Workbook::open_collaborative(&source, 902).unwrap();
+        restored
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap();
+        assert_eq!(restored.model().styles.num_fmts, [(164, "0.000".into())]);
+        assert_eq!(restored.model().styles.fonts.len(), 1);
+        assert_eq!(restored.model().styles.fills.len(), 1);
+        assert_eq!(restored.model().styles.borders.len(), 1);
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", br#"<worksheet><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#.to_vec());
+        let different = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut different = Workbook::open_collaborative(&different, 903).unwrap();
+        let before = different.model().clone();
+        let error = different
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("base fingerprint"), "{error}");
+        assert_eq!(different.model(), &before);
+    }
+}
+
+#[test]
 fn restored_legacy_snapshots_publish_the_current_palette_identity() {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Data"));
