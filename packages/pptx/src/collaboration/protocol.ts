@@ -20,6 +20,10 @@ const SYNC_UPDATE = 2;
 
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
+const MAX_STATE_VECTOR_VAR_UINT_BYTES = 10;
+const DOCUMENT_FINGERPRINT_TAG = new TextEncoder().encode(
+  '\0betteroffice-document-fingerprint-v1\0'
+);
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -260,6 +264,47 @@ export function decodeAwarenessUpdate(
   }
   if (!decoder.done) throw new ProtocolError('Awareness update has trailing bytes');
   return entries;
+}
+
+export function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
+  const suffixLength = DOCUMENT_FINGERPRINT_TAG.byteLength + 32;
+  const tagOffset = payload.byteLength - suffixLength;
+  if (tagOffset < 0) return payload;
+  for (let index = 0; index < DOCUMENT_FINGERPRINT_TAG.byteLength; index += 1) {
+    if (payload[tagOffset + index] !== DOCUMENT_FINGERPRINT_TAG[index]) return payload;
+  }
+  return payload.subarray(0, tagOffset);
+}
+
+function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
+  let offset = 0;
+  const read = (): bigint => {
+    let value = 0n;
+    for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES; index += 1) {
+      if (offset >= payload.byteLength) throw new ProtocolError('Truncated state vector');
+      const byte = payload[offset++];
+      value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+      if (byte < 0x80) return value;
+    }
+    throw new ProtocolError('State vector varUint exceeds 64 bits');
+  };
+  const clocks = new Map<bigint, bigint>();
+  for (let count = read(); count > 0n; count -= 1n) clocks.set(read(), read());
+  return clocks;
+}
+
+/** Whether `vector` has every client clock of `other`; both are v1 state vectors, optionally fingerprinted. */
+export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boolean {
+  const own = withoutDocumentFingerprint(vector);
+  const remote = withoutDocumentFingerprint(other);
+  if (own.byteLength === remote.byteLength && own.every((byte, index) => byte === remote[index])) {
+    return true;
+  }
+  const clocks = decodeStateVector(own);
+  for (const [client, clock] of decodeStateVector(remote)) {
+    if (clock > (clocks.get(client) ?? 0n)) return false;
+  }
+  return true;
 }
 
 export function decodeMessages(
