@@ -6,9 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use yrs::encoding::write::Write;
 use yrs::error::UpdateError;
-use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
-use yrs::{IdSet, ReadTxn, StateVector, TransactionMut, Update};
+use yrs::{IdSet, ReadTxn, StateVector, TransactionMut, Update, WriteTxn};
 
 /// Deletions an open remote integration must not republish: what its updates carried, the
 /// deletions earlier remote integrations left pending, and what applying its updates deleted,
@@ -82,18 +81,16 @@ impl RemoteIntegration<'_, '_> {
         Ok(())
     }
 
-    /// A copy of the structs yrs holds once every dependency they wait on has arrived. yrs
-    /// retries held structs only when a missing client's clock passes the one it recorded, so
-    /// structs that wait on a skipped range stay held after that range fills below the clock.
-    fn stranded(&self, before: &StateVector) -> Option<Update> {
+    /// Takes back what yrs holds once a client it waits on reaches the clock yrs recorded. yrs
+    /// retries held structs only when a missing client's clock passes that one, so structs that
+    /// wait on a skipped range stay held after that range fills below it.
+    fn stranded(&mut self, before: &StateVector) -> Option<Update> {
         let now = self.txn.state_vector();
         let pending = self.txn.store().pending_update()?;
-        let mut missing = pending.missing.iter();
-        let arrived = missing
-            .clone()
-            .all(|(client, &clock)| clock <= now.get(client))
-            && missing.any(|(client, _)| now.get(client) > before.get(client));
-        arrived.then(|| Update::decode_v1(&pending.update.encode_v1()).ok())?
+        let arrived = pending.missing.iter().any(|(client, &clock)| {
+            clock <= now.get(client) && now.get(client) > before.get(client)
+        });
+        arrived.then(|| self.txn.prune_pending())?
     }
 }
 
@@ -245,6 +242,34 @@ mod tests {
         assert_eq!(
             ReadTxn::state_vector(&peer.transact()),
             ReadTxn::state_vector(&origin.transact())
+        );
+    }
+
+    #[test]
+    fn another_clients_structs_held_on_a_skipped_range_leave_nothing_pending_once_it_fills() {
+        let origin = replica(7);
+        let base = edit(&origin, |txn, text| text.insert(txn, 0, "abc"));
+        let late = edit(&origin, |txn, text| text.insert(txn, 3, "d"));
+        let early = edit(&origin, |txn, text| text.insert(txn, 0, "x"));
+        let author = replica(9);
+        for update in [&base, &late, &early] {
+            let update = Update::decode_v1(update).unwrap();
+            author.transact_mut().apply_update(update).unwrap();
+        }
+        let held = edit(&author, |txn, text| text.insert(txn, 5, "z"));
+        let peer = replica(8);
+        let deletions = RemoteDeletions::default();
+        for update in [&base, &early, &held] {
+            integrate(&peer, &deletions, update);
+        }
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_some());
+        integrate(&peer, &deletions, &late);
+
+        assert_eq!(text(&peer), "xabcdz");
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_none());
+        assert_eq!(
+            ReadTxn::state_vector(&peer.transact()),
+            ReadTxn::state_vector(&author.transact())
         );
     }
 

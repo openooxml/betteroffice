@@ -170,6 +170,7 @@ test('a worker replica survives a remote update that arrives before the update i
       for (const update of back) await a.session.submit('applyRemoteUpdate', { update }, merge).ack;
       expect(clocks(b.engine.encodeStateVector())).toEqual(clocks(a.engine.encodeStateVector()));
       expect(b.engine.paragraphs('body').map(p => p.text)).toEqual(a.engine.paragraphs('body').map(p => p.text));
+      expect(b.engine.hasPendingUpdate()).toBe(false);
       const at = { story: 'body', paraId: b.engine.paragraphs('body')[0]!.paraId, offset: 0 };
       expect((await b.session.submit('insertText', { selection: { anchor: at, focus: at }, text: 'x' }).ack).status).toBe('applied');
     } finally { offA(); offB(); a.session.dispose(); b.session.dispose(); }
