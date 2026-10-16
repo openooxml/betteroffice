@@ -1,7 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { useRef } from 'react';
-import { createPeerlessShellController } from './shellController';
+import { createPeerlessShellController, WorkerReadSupersededError } from './shellController';
 import { createPeerlessViewStore } from './viewStore';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
@@ -69,7 +69,7 @@ function reviewNavigation(targets: Record<string, unknown>, shown: Shown = { car
     return <div ref={scroller} data-testid="scroll"><div ref={host} /></div>;
   }
   const view = render(<Harness />);
-  return { controller, read, submit, scroller: view.getByTestId('scroll'), dispose() { controller.dispose(); viewStore.dispose(); } };
+  return { controller, binding, viewStore, read, submit, scroller: view.getByTestId('scroll'), dispose() { controller.dispose(); viewStore.dispose(); } };
 }
 
 test('review navigation selects the first anchored range of a comment or revision and scrolls its caret into view', async () => {
@@ -108,5 +108,66 @@ test('review navigation resolves false for an unknown comment or revision withou
     expect(await controller.ref.scrollToChange(99)).toBe(false);
     expect(submit).not.toHaveBeenCalled();
     expect(scroller.scrollTop).toBe(0);
+  } finally { dispose(); }
+});
+
+
+const reviewRange = { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'q', offset: 9 } };
+const reviewTargets = { [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native', ranges: [reviewRange] },
+  [JSON.stringify({ kind: 'revision', revisionId: '12' })]: { id: '12', ranges: [reviewRange] } };
+
+for (const member of ['scrollToComment', 'scrollToChange'] as const) {
+  test(`${member} resolves false while opening and when typing or replacement supersedes its read`, async () => {
+    const { controller, read, viewStore, dispose } = reviewNavigation(reviewTargets);
+    const id = member === 'scrollToComment' ? 7 : 12;
+    try {
+      read.mockImplementationOnce(async () => { viewStore.getSnapshot().version += 1; return { status: 'ok', version: 'native', value: reviewTargets[JSON.stringify({ kind: 'comment', id: 7 })] }; });
+      expect(await controller.ref[member](id)).toBe(false);
+      read.mockImplementationOnce(async () => { controller.opening({}); return { status: 'ok', version: 'native', value: null }; });
+      expect(await controller.ref[member](id)).toBe(false);
+      expect(await controller.ref[member](id)).toBe(false);
+    } finally { dispose(); }
+  });
+}
+
+for (const phase of ['ack', 'presented'] as const) {
+  test(`review navigation resolves false when ${phase} is superseded`, async () => {
+    const { controller, submit, dispose } = reviewNavigation(reviewTargets);
+    try {
+      submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1,
+        ack: phase === 'ack' ? Promise.reject(new WorkerReadSupersededError('Worker read was superseded')) : Promise.resolve({ status: 'applied', seq: 1 }),
+        presented: phase === 'presented' ? Promise.reject(new WorkerReadSupersededError('Document was replaced')) : Promise.resolve('presented') } }));
+      expect(await controller.ref.scrollToComment(7)).toBe(false);
+    } finally { dispose(); }
+  });
+}
+
+test('review navigation preserves unrelated worker failures', async () => {
+  const { controller, read, dispose } = reviewNavigation(reviewTargets);
+  try {
+    read.mockRejectedValueOnce(new Error('Worker failed'));
+    await expect(controller.ref.scrollToComment(7)).rejects.toThrow('Worker failed');
+  } finally { dispose(); }
+});
+
+test('review navigation refuses a target without start geometry', async () => {
+  const { controller, dispose } = reviewNavigation(reviewTargets, { caret: null, selectionRects: [] });
+  try { expect(await controller.ref.scrollToComment(7)).toBe(false); } finally { dispose(); }
+});
+
+test('review navigation builds the start before scrolling a range whose end is the only available rectangle', async () => {
+  const { controller, submit, viewStore, scroller, dispose } = reviewNavigation(reviewTargets,
+    { caret: null, selectionRects: [{ x: 0, y: 900, width: 20, height: 12 }] });
+  const original = submit.getMockImplementation()!;
+  submit.mockImplementation((intent, options) => {
+    const selection = (intent as { payload: { selection: { anchor: { paraId: string }; focus: { paraId: string } } } }).payload.selection;
+    if (selection.anchor.paraId === 'p' && selection.focus.paraId === 'p') {
+      viewStore.getSnapshot().geometry!.caret = { x: 0, y: 200, width: 1, height: 12 };
+    }
+    return original(intent, options);
+  });
+  try {
+    expect(await controller.ref.scrollToComment(7)).toBe(true);
+    expect(scroller.scrollTop).toBe(200 * 2 - 24);
   } finally { dispose(); }
 });

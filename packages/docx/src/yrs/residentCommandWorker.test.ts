@@ -2607,3 +2607,39 @@ test('worker saves a reply added through comment commands with its parent and th
     expect(saved.find(comment => comment.id === replied.editState!.comment!.id)).toMatchObject({ parentId, author: 'B' });
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+
+test('reopening an imported resolved comment updates the projection and saved extended metadata', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended });
+  try {
+    const result = await client.edit(intent(1, 0, 'updateComment', { id: '0', patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(result.outcomes[0]?.status).toBe('applied');
+    expect(result.editState?.commentChange?.comments.find(comment => comment.id === 0)?.done).toBe(false);
+    const bytes = (await client.save({ comments: [] })).bytes;
+    const comments = (await parseDocx(bytes)).package.document.comments!;
+    expect(comments.find(comment => comment.id === 0)?.done ?? false).toBe(false);
+    const parts = unzipContainer(new Uint8Array(bytes));
+    expect(new TextDecoder().decode(parts['word/commentsExtended.xml'])).toMatch(/w15:paraId="0C000001"[^>]*w15:done="0"/);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('an imported reply without range markers inherits its ancestor anchor and supports reply resolve and removal', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended });
+  try {
+    const parent = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 0 } })).value!;
+    const reply = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value;
+    expect(reply).toEqual({ id: '1', ranges: parent.ranges });
+    const added = await client.edit(intent(1, 0, 'addComment', { ranges: reply!.ranges, parentId: reply!.id, body: 'Nested reply', author: 'C', date: '2026-01-03', expectVersion: engine.proposalEngine.version() }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    expect(added.editState?.comment?.comments.find(comment => comment.id === added.editState?.comment?.id)?.parentId).toBe(1);
+    const reopened = await client.edit(intent(2, 1, 'updateComment', { id: reply!.id, patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(reopened.outcomes[0]?.status).toBe('applied');
+    expect(reopened.editState?.commentChange?.comments.find(comment => comment.id === 1)?.done).toBe(false);
+    const removed = await client.edit(intent(3, 2, 'removeComment', { id: reply!.id, expectVersion: engine.proposalEngine.version() }));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    expect(removed.editState?.commentChange?.comments.some(comment => comment.id === 1)).toBe(false);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.some(comment => comment.id === 1)).toBe(false);
+  } finally { client.destroy(); }
+}, TIMEOUT);

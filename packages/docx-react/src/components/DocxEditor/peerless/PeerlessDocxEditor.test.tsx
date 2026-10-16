@@ -1868,3 +1868,18 @@ test('worker-only opens request the font-ready certified initial display window'
     provisionalPages: 3, displayWindow: [0, 3], layoutWithRegions: true,
   });
 });
+
+
+test('loading the same parsed prop document reopens exactly once for every load', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
+  const view = render(<DocxEditor document={parsed} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  for (const count of [2, 3]) {
+    act(() => { ref.current!.loadDocument(parsed); });
+    await waitFor(() => expect(workers).toHaveLength(count));
+    await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(count);
+  }
+  view.unmount();
+});
