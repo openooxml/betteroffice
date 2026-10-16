@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -14,6 +14,7 @@ import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import type { Document } from '../types/document';
 import type { DocxProposalInput } from './proposals';
+import * as wasm from './wasm/index';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
 beforeAll(async () => {
@@ -549,19 +550,31 @@ const outcomes = async (pending: Promise<unknown>[]) => (await Promise.allSettle
 test('worker death during a collaboration read settles the read and every pending ticket with a failure', async () => {
   const a = await open(9201);
   try {
+    const before = a.engine.encodeState();
+    const version = a.engine.proposalEngine.version();
+    let atDeath: Uint8Array | undefined;
+    const destroy = a.engine.destroy;
+    a.engine.destroy = () => { atDeath ??= a.engine.encodeState(); destroy(); };
     const pending = [presenceRead(a), a.session.submit('insertText', { text: '!' }).ack];
     die(a);
     expect(await outcomes(pending)).toEqual(['rejected', 'rejected']);
+    expect(atDeath).toEqual(before);
+    expect(await outcomes([presenceRead(a, version), a.client.documentRead({ kind: 'collabStateVector' })])).toEqual(['rejected', 'rejected']);
   } finally { a.session.dispose(); }
 }, TIMEOUT);
 
 for (const failure of ['a thrown merge', 'worker death in a merge'] as const) {
   test(`${failure} settles every pending ticket and later collaboration read with a failure`, async () => {
-    const a = await open(9201);
-    const remote = await createYrsSession({ clientId: 9203 });
+    const create = wasm.createEditSession;
+    let raw: ReturnType<typeof create> | undefined;
+    const capture = spyOn(wasm, 'createEditSession').mockImplementation(clientId => {
+      const session = create(clientId);
+      if (clientId === 9201) raw = session;
+      return session;
+    });
+    let a: Replica;
+    try { a = await open(9201); } finally { capture.mockRestore(); }
     try {
-      remote.loadState(a.engine.encodeState());
-      remote.insertText({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 4 }, ' remote');
       const version = a.engine.proposalEngine.version();
       const before = a.engine.encodeState();
       let stateAtFailure: Uint8Array | undefined;
@@ -570,18 +583,32 @@ for (const failure of ['a thrown merge', 'worker death in a merge'] as const) {
         stateAtFailure ??= a.engine.encodeState();
         destroy();
       };
-      a.engine.applyUpdate = () => {
-        if (failure === 'worker death in a merge') die(a);
-        throw new WebAssembly.RuntimeError('injected merge failure');
+      const payloadText = 'PRIVATE-UPDATE-CONTENT';
+      const payload = new TextEncoder().encode(payloadText);
+      const apply = raw!.apply_update_with_inference.bind(raw!);
+      let entered = false;
+      raw!.apply_update_with_inference = update => {
+        entered = true;
+        try { return apply(update); }
+        catch {
+          if (failure === 'worker death in a merge') die(a);
+          throw new WebAssembly.RuntimeError(payloadText);
+        }
       };
-      expect(await outcomes([a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack,
-        a.session.submit('insertText', { text: '!' }).ack])).toEqual([
+      const pending = [a.session.submit('applyRemoteUpdate', { update: payload.buffer }, merge).ack,
+        a.session.submit('insertText', { text: '!' }).ack];
+      const settled = await Promise.allSettled(pending);
+      expect(await outcomes(pending)).toEqual([
           failure === 'a thrown merge' ? 'refused:unknown-outcome' : 'rejected', 'rejected',
         ]);
+      expect(entered).toBe(true);
+      const messages = settled.map(result => result.status === 'rejected' ? String(result.reason) : JSON.stringify(result.value)).join('\n');
+      expect(messages).not.toContain(payloadText);
+      expect(messages).not.toContain([...payload].join(','));
       expect(stateAtFailure ?? a.engine.encodeState()).toEqual(before);
       expect(await outcomes([presenceRead(a, version)])).toEqual(['rejected']);
       expect(await outcomes([a.session.submit('insertText', { text: 'later' }).ack])).toEqual(['rejected']);
       expect(await outcomes([a.session.submit('insertText', { text: 'again' }).ack])).toEqual(['rejected']);
-    } finally { remote.destroy(); a.session.dispose(); }
+    } finally { a.session.dispose(); }
   }, TIMEOUT);
 }

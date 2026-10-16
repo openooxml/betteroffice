@@ -1027,13 +1027,9 @@ export async function createResidentEngineSession(
     applyUpdate: (update) => {
       sectionLayout = null;
       const before = session.resident_section_revision().split(':')[1];
-      try {
-        return JSON.parse(
-          session.apply_update_with_inference(update)
-        ) as CollaborationTextInsertion | null;
-      } finally {
-        if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
-      }
+      const raw = session.apply_update_with_inference(update);
+      if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
+      return JSON.parse(raw) as CollaborationTextInsertion | null;
     },
     onUpdate: (listener) => {
       listeners.add(listener);

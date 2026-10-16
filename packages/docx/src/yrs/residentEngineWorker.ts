@@ -1312,10 +1312,12 @@ function replyFailure(id: number, error: unknown): void {
   // Once trapped, every failure is the trap's, answered once per request.
   const failure = trap ?? error;
   if (isCommandOutcomeUnknownError(failure) || failure instanceof SessionFailure) {
+    const message = collaboration && isCommandOutcomeUnknownError(failure)
+      ? `Command ${failure.refusal.seq} has an unknown outcome` : failure.message;
     reply({
-      id, ok: false, error: failure.message,
+      id, ok: false, error: message,
       commandError: {
-        name: failure.name, message: failure.message,
+        name: failure.name, message,
         ...(isCommandOutcomeUnknownError(failure) ? { refusal: failure.refusal } : {}),
       },
       ...(failure instanceof SessionFailure ? { failureCode: failure.code } : {}),
