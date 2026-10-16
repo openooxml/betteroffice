@@ -185,12 +185,12 @@ for (const barrier of ['save', 'flushPendingInput'] as const) {
   });
 }
 
-test('getComments invalidates an old version and accepts a lower version in a new incarnation', async () => {
+test('getComments preserves its projection through ordinary versions and accepts a lower version in a new incarnation', async () => {
   const { controller, viewStore, host } = reviewFixture();
   await controller.setCommentDone(7, true);
   const previous = viewStore.getSnapshot();
   viewStore.acceptWorkerState(previous.identity, { epoch: 1, version: 10, throughSeq: 2, presentedThroughSeq: 0, selection: null, editState });
-  expect(controller.ref.getComments()).toEqual(host);
+  expect(controller.ref.getComments()).toEqual([{ ...host[0]!, done: true }]);
   const identity = { ...previous.identity, incarnation: 2, epoch: 2 };
   viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, presentedThroughSeq: 0, selection: null, editState });
   viewStore.installFrameGeometry({ identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });

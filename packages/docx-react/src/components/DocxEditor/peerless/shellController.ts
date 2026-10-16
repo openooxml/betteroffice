@@ -470,7 +470,7 @@ export function createPeerlessShellController(initial: Options) {
   let commentTail: Promise<unknown> = Promise.resolve();
   let commentList: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; comments: Comment[] } | null = null;
   const commentsMatch = (view: PeerlessViewSnapshot) => commentList?.binding === binding &&
-    sameIdentity(commentList.identity, view.identity) && commentList.version === view.version;
+    sameIdentity(commentList.identity, view.identity) && commentList.version <= view.version;
   const rememberComments = (current: PeerlessEditSessionBinding, view: PeerlessViewSnapshot, comments: Comment[] | undefined) => {
     const latest = current.viewStore.getSnapshot();
     if (!comments || current !== binding || !sameIdentity(view.identity, latest.identity) || view.version !== latest.version) return;
