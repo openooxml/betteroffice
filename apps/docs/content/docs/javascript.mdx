@@ -223,6 +223,11 @@ preview the pixels show.
 A target in a header or footer has fragments on every built page that paints it
 and its anchor on the first; one that no laid-out page paints, built or not, is
 `missing-target` once the layout is complete.
+A plugin's `reservations(context)` returns `{ version, items }`: inline boxes,
+blocks beside a paragraph and hidden ranges, in pixels at zoom 1, which the editor
+lays out without painting and saves and paged exports leave out;
+`{ kind: 'reservation', id }` answers a box once `layout.reservationsVersion` is
+the set's `version`.
 `geometry.readAnchorGeometries(targets)` answers every target in order and never
 rejects or answers `pending`. Only the worker-only editor awaits reads: targets
 asked in one tick share one worker read, and `getAnchorGeometry` answers

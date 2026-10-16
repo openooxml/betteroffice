@@ -11,6 +11,7 @@ import type {
   DocxListStoriesResult,
   DocxReadStoriesRequest,
   DocxReadStoriesResult,
+  DocxReservation,
   DocxTextRange,
   DocxValidationResult,
 } from '@betteroffice/docx/yrs';
@@ -46,6 +47,11 @@ export type {
   PluginGrant,
   PluginLoadReason,
 } from '../../../../shared/host-contracts/plugins';
+export type {
+  DocxReservation,
+  DocxReservationAnchor,
+  DocxReservationParagraph,
+} from '@betteroffice/docx/yrs';
 
 /**
  * What the host lets one plugin do. Without a grant a plugin reads, validates and navigates only.
@@ -139,6 +145,8 @@ export interface DocxPluginLayout {
   version: string;
   /** The proposal preview its pixels show. */
   previewVersion: number;
+  /** The `version` of the reservation sets its pixels include; null or absent before any. */
+  reservationsVersion?: string | null;
   zoom: number;
   pageCount: number;
 }
@@ -186,7 +194,9 @@ export type DocxGeometryTarget =
       text: string;
       occurrence?: DocxOccurrence;
     }
-  | { kind: 'range'; version: string; range: DocxTextRange };
+  | { kind: 'range'; version: string; range: DocxTextRange }
+  /** This plugin's reservation: its box, or a hidden range's boundary. */
+  | { kind: 'reservation'; id: string };
 
 export type DocxAnchorGeometryResult =
   | {
@@ -336,6 +346,17 @@ export interface DocxPluginPanel<S> {
   render: ComponentType<{ context: DocxPluginContext<S>; width: number; height: number }>;
 }
 
+/**
+ * The layout space a plugin reserves, computed at document `version` (normally
+ * `context.snapshot.version`). Applied only while the document is still at `version`.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export interface DocxReservationSet {
+  version: string;
+  items: readonly DocxReservation[];
+}
+
 export interface DocxPluginSidebarItem<S> {
   /** Unique within the plugin. */
   id: string;
@@ -370,8 +391,8 @@ export interface DocxPluginCommand<S> {
 }
 
 /**
- * A plugin. `createState`, renderers, `getSidebarItems` and command `getState` must be pure;
- * `initialize`, `onEvent`, command `execute` and `context.run` are managed effects.
+ * A plugin. `createState`, renderers, `getSidebarItems`, `reservations` and command `getState`
+ * must be pure; `initialize`, `onEvent`, command `execute` and `context.run` are managed effects.
  *
  * @experimental The plugin API may change in minor releases.
  */
@@ -389,6 +410,12 @@ export interface DocxPluginDefinition<S> {
    */
   overlay?: ComponentType<{ context: DocxPluginContext<S>; geometry: DocxPluginGeometry }>;
   getSidebarItems?(context: DocxPluginContext<S>): readonly DocxPluginSidebarItem<S>[];
+  /**
+   * Layout space to reserve; the editor lays it out and paints nothing there. Evaluated on load,
+   * state and document changes, never on layout changes. An invalid set fails the plugin with
+   * `invalid-payload`.
+   */
+  reservations?(context: DocxPluginContext<S>): DocxReservationSet | null;
   commands?: readonly DocxPluginCommand<S>[];
   /** Local command ids, in display order. */
   toolbar?: readonly string[];
@@ -407,7 +434,7 @@ export interface DocxPlugin {
   readonly [docxPluginBrand]: true;
 }
 
-export type DocxPluginErrorPhase = PluginErrorPhase | 'sidebar';
+export type DocxPluginErrorPhase = PluginErrorPhase | 'sidebar' | 'reservations';
 
 /**
  * A plugin failure; the failing activation has already been stopped and cleaned up.

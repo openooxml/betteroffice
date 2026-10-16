@@ -14,7 +14,7 @@ import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
+import type { DocxReservationsPayload, DocxResolvedReservations, YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
 import type {
   DisplayPageNavigation,
   FontRequirementsInWorker,
@@ -65,6 +65,8 @@ export function DocxEditorPagedArea({
   document,
   yrsCore,
   pluginHostOpen,
+  reservations,
+  reservationSets,
   collaboration,
   theme,
   initialSectionProperties,
@@ -158,6 +160,8 @@ export function DocxEditorPagedArea({
   document: Document | null;
   yrsCore: YrsCoreSession;
   pluginHostOpen?: boolean;
+  reservations?: DocxResolvedReservations | null;
+  reservationSets?: DocxReservationsPayload | null;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -456,6 +460,8 @@ export function DocxEditorPagedArea({
         document={document}
         yrsCore={yrsCore}
         pluginHostOpen={pluginHostOpen}
+        reservations={reservations}
+        reservationSets={reservationSets}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}

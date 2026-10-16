@@ -7,6 +7,7 @@ import type {
   DocxEditState,
   DocxEchoRect,
   DocxEchoTransform,
+  DocxFrameReservations,
 } from '@betteroffice/docx/yrs';
 
 /** @internal */
@@ -31,6 +32,8 @@ export interface PeerlessFrameGeometry {
   layoutRevision: number;
   documentWidth?: number;
   layoutProvisional?: boolean;
+  /** The reservation set the layout includes. */
+  reservations?: DocxFrameReservations;
   pages: readonly {
     page: DocxCommandPageIdentity;
     bounds: DocxEchoRect;
