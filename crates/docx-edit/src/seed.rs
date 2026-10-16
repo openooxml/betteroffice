@@ -2014,14 +2014,14 @@ fn shape_payload(shape: &Value, source: &BTreeMap<String, String>) -> JsonObject
     map_from_value(json!({ "shapeJson": source_json(shape, source) }))
 }
 
-fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject {
+pub(crate) fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject {
     let size = field(Some(chart), "size");
     map_from_value(json!({
         "chartJson": source_json(chart, source),
         "chartType": nullish(field(Some(chart), "chartType")),
         "title": nullish(field(Some(chart), "title")),
-        "width": number(field(size, "width")).filter(|value| *value != 0.0).map(emu_to_pixels).unwrap_or(320.0),
-        "height": number(field(size, "height")).filter(|value| *value != 0.0).map(emu_to_pixels).unwrap_or(220.0),
+        "width": number(field(size, "width")).map(emu_to_pixels).filter(|value| *value > 0.0).unwrap_or(320.0),
+        "height": number(field(size, "height")).map(emu_to_pixels).filter(|value| *value > 0.0).unwrap_or(220.0),
         "rId": nullish(field(Some(chart), "rId")),
         "path": nullish(field(Some(chart), "path"))
     }))

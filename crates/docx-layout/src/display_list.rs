@@ -1894,6 +1894,8 @@ struct ImageRunIn {
     #[serde(default)]
     inline_shape: Option<Value>,
     #[serde(default)]
+    inline_chart: Option<Value>,
+    #[serde(default)]
     is_insertion: Option<bool>,
     #[serde(default)]
     is_deletion: Option<bool>,
@@ -3891,19 +3893,15 @@ fn stamp_hyperlink_attrs(
     }
 }
 
-fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64) {
+fn stamp_image_run_metadata(
+    attrs: &mut DocAttrs,
+    run: &ImageRunIn,
+    logical_order: Option<u64>,
+    bidi_level: Option<u8>,
+) {
     stamp_hyperlink_attrs(attrs, run.hyperlink.as_ref(), run.hlink_href.as_deref());
-    attrs.image_flip_h = (run.flip_h == Some(true)
-        || transform_has_flip(run.transform.as_deref(), 'x'))
-    .then_some(true);
-    attrs.image_flip_v = (run.flip_v == Some(true)
-        || transform_has_flip(run.transform.as_deref(), 'y'))
-    .then_some(true);
-    attrs.content_frame =
-        content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref()).map(Box::new);
-    attrs.image_shape_type = run.shape_type.clone();
-    attrs.effects = run.effects.clone();
-    attrs.border = run.outline.clone().map(Box::new);
+    attrs.logical_order = attrs.logical_order.or(logical_order);
+    attrs.bidi_level = attrs.bidi_level.or(bidi_level);
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
         attrs.revision = Some(Box::new(Revision {
             author: run.change_author.clone().unwrap_or_default(),
@@ -3919,6 +3917,21 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
             },
         }));
     }
+}
+
+fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64) {
+    stamp_image_run_metadata(attrs, run, None, None);
+    attrs.image_flip_h = (run.flip_h == Some(true)
+        || transform_has_flip(run.transform.as_deref(), 'x'))
+    .then_some(true);
+    attrs.image_flip_v = (run.flip_v == Some(true)
+        || transform_has_flip(run.transform.as_deref(), 'y'))
+    .then_some(true);
+    attrs.content_frame =
+        content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref()).map(Box::new);
+    attrs.image_shape_type = run.shape_type.clone();
+    attrs.effects = run.effects.clone();
+    attrs.border = run.outline.clone().map(Box::new);
 }
 
 fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y: f64) {
@@ -6662,29 +6675,47 @@ fn emit_line(
                     for primitive in &mut prims[stamp_from..] {
                         if let Some(attrs) = doc_attrs_mut(primitive) {
                             attrs.inline_shape_atom = Some(true);
-                            stamp_hyperlink_attrs(
+                            stamp_image_run_metadata(
                                 attrs,
-                                imr.hyperlink.as_ref(),
-                                imr.hlink_href.as_deref(),
+                                imr,
+                                *logical_order,
+                                logical_order.map(|_| *level),
                             );
-                            attrs.logical_order = attrs.logical_order.or(*logical_order);
-                            attrs.bidi_level =
-                                attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
-                            if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
-                                attrs.revision = Some(Box::new(Revision {
-                                    author: imr.change_author.clone().unwrap_or_default(),
-                                    date: imr.change_date.clone().unwrap_or_default(),
-                                    revision_id: imr
-                                        .change_revision_id
-                                        .map(|id| id.to_string())
-                                        .unwrap_or_default(),
-                                    kind: if imr.is_insertion == Some(true) {
-                                        RevisionKind::Ins
-                                    } else {
-                                        RevisionKind::Del
-                                    },
-                                }));
-                            }
+                        }
+                    }
+                    if imr.display_mode.as_deref() != Some("block")
+                        && imr.wrap_type.as_deref() != Some("topAndBottom")
+                    {
+                        pen_x += layout_width;
+                    }
+                    continue;
+                }
+                if let Some(inline_value) = imr.inline_chart.as_ref()
+                    && let Some(chart_block) = serde_json::to_string(inline_value)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<ChartBlockIn>(&s).ok())
+                {
+                    let stamp_from = prims.len();
+                    let fragment = ChartFragmentIn {
+                        block_id: chart_block.id.clone(),
+                        x: pen_x,
+                        y,
+                        width: layout_width,
+                        height: layout_height,
+                        doc_start: *pm_start,
+                        doc_end: *pm_end,
+                        pm_start: *pm_start,
+                        pm_end: *pm_end,
+                    };
+                    emit_chart_fragment(prims, &fragment, &chart_block);
+                    for primitive in &mut prims[stamp_from..] {
+                        if let Some(attrs) = doc_attrs_mut(primitive) {
+                            stamp_image_run_metadata(
+                                attrs,
+                                imr,
+                                *logical_order,
+                                logical_order.map(|_| *level),
+                            );
                         }
                     }
                     if imr.display_mode.as_deref() != Some("block")
@@ -15021,6 +15052,71 @@ mod tests {
             .expect("child shape with original id");
         assert!(child.get("docStart").is_none());
         assert!(child.get("docEnd").is_none());
+    }
+
+    #[test]
+    fn inline_chart_preserves_run_attributes() {
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph", "id": "inline-para", "pmStart": 0, "pmEnd": 3,
+                    "runs": [{
+                        "kind": "image", "width": 192, "height": 96,
+                        "pmStart": 1, "pmEnd": 2,
+                        "hyperlink": {"href": "https://example.com", "tooltip": "Sales link"},
+                        "isInsertion": true, "changeAuthor": "Ada",
+                        "changeDate": "2026-01-01", "changeRevisionId": 9,
+                        "inlineChart": {
+                            "id": "chart:inline", "width": 192, "height": 96,
+                            "chart": {"chartType": "column", "title": "Sales", "series": [{
+                                "name": "North", "categories": ["Q1"], "values": [2.0]
+                            }]}
+                        }
+                    }]
+                },
+                "measure": {
+                    "kind": "paragraph", "totalHeight": 96,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                        "width": 192, "ascent": 96, "descent": 0, "lineHeight": 96,
+                        "bidiSlices": [{
+                            "runIndex": 0, "startChar": 0, "endChar": 1,
+                            "advance": 192, "bidiLevel": 1, "visualOrder": 0, "logicalOrder": 7
+                        }]
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {"pages": [{
+                "number": 1, "size": {"w": 400, "h": 400},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20},
+                "fragments": [{
+                    "kind": "paragraph", "blockId": "inline-para", "x": 20, "y": 20,
+                    "width": 360, "height": 96, "fromLine": 0, "toLine": 1,
+                    "pmStart": 0, "pmEnd": 3
+                }]
+            }]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let charts: Vec<_> = output["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|primitive| !primitive["chart"].is_null())
+            .collect();
+        assert!(!charts.is_empty());
+        for primitive in charts {
+            assert_eq!(primitive["href"], "https://example.com");
+            assert_eq!(primitive["tooltip"], "Sales link");
+            assert_eq!(primitive["logicalOrder"], 7);
+            assert_eq!(primitive["bidiLevel"], 1);
+            assert_eq!(primitive["revision"]["kind"], "ins");
+            assert_eq!(primitive["revision"]["author"], "Ada");
+            assert_eq!(primitive["revision"]["date"], "2026-01-01");
+            assert_eq!(primitive["revision"]["revisionId"], "9");
+        }
     }
 
     /// A body paragraph followed by a three-category column chart.

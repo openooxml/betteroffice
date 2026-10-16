@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
-use xlsx_model::{SheetId, Workbook};
+use xlsx_model::{CellRef, SheetId, Workbook};
 
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, find_part, local_name, next_event, reader, resolve_part_path, utf8_bom_len, xml_err,
+    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path, utf8_bom_len,
+    xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -234,6 +235,105 @@ impl PreservedPackage {
         self.stranded(|reference| reference.moved_by_cols(sheet, at))
     }
 
+    /// A worksheet part whose preserved features cannot follow a cell move.
+    #[doc(hidden)]
+    pub fn range_move_unsupported_part(
+        &self,
+        cell_moved: impl Fn(usize, CellRef) -> bool,
+        comment_affected: impl Fn(usize, CellRef) -> bool,
+        formula_affected: impl Fn(usize, &str) -> bool,
+    ) -> Option<&str> {
+        for (index, sheet) in self.sheets.iter().enumerate() {
+            if sheet
+                .cell_facts
+                .rich_inline
+                .keys()
+                .any(|&(row, col)| cell_moved(index, CellRef::new(row, col)))
+                || sheet
+                    .shared_string_cells
+                    .iter()
+                    .any(|(&(row, col), entry)| {
+                        self.shared_string_is_rich(*entry)
+                            && cell_moved(index, CellRef::new(row, col))
+                    })
+            {
+                return Some(&sheet.path);
+            }
+            let Some(bytes) = find_part(&self.parts, &sheet.path) else {
+                return Some(&sheet.path);
+            };
+            let mut xml = Reader::from_reader(bytes);
+            let mut buffer = Vec::new();
+            loop {
+                match xml.read_event_into(&mut buffer) {
+                    Ok(Event::Start(start) | Event::Empty(start)) => {
+                        let name = local_name(&start);
+                        if matches!(
+                            name.as_slice(),
+                            b"conditionalFormatting"
+                                | b"dataValidations"
+                                | b"sheetProtection"
+                                | b"protectedRanges"
+                                | b"autoFilter"
+                                | b"sortState"
+                                | b"drawing"
+                                | b"legacyDrawing"
+                                | b"picture"
+                                | b"extLst"
+                                | b"pivotTableParts"
+                                | b"controls"
+                                | b"oleObjects"
+                        ) {
+                            return Some(&sheet.path);
+                        }
+                    }
+                    Ok(Event::Eof) => break,
+                    Err(_) => return Some(&sheet.path),
+                    _ => {}
+                }
+                buffer.clear();
+            }
+            let relationships = match find_part(&self.parts, &relationship_part_path(&sheet.path)) {
+                Some(bytes) => match parse_relationships(bytes) {
+                    Ok(relationships) => relationships,
+                    Err(_) => return Some(&sheet.path),
+                },
+                None => continue,
+            };
+            for relationship in relationships {
+                let table = relationship.has_type("table");
+                let comments =
+                    relationship.has_type("comments") || relationship.has_type("threadedComment");
+                if !table && !comments {
+                    continue;
+                }
+                let Some(target) = relationship.target() else {
+                    return Some(&sheet.path);
+                };
+                if relationship
+                    .attribute("TargetMode")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"))
+                {
+                    return Some(&sheet.path);
+                }
+                let base = sheet.path.rsplit_once('/').map_or("", |(base, _)| base);
+                let path = resolve_part_path(base, target);
+                let Some(bytes) = find_part(&self.parts, &path) else {
+                    return Some(&sheet.path);
+                };
+                let unsupported = if table {
+                    table_move_unsupported(bytes, |formula| formula_affected(index, formula))
+                } else {
+                    comment_move_unsupported(bytes, |at| comment_affected(index, at))
+                };
+                if unsupported.unwrap_or(true) {
+                    return Some(&sheet.path);
+                }
+            }
+        }
+        None
+    }
+
     fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
         self.unpatchable_references
             .iter()
@@ -256,6 +356,15 @@ impl PreservedPackage {
         self.sheets
             .get(index)
             .is_none_or(PreservedSheet::is_worksheet)
+    }
+
+    /// The original name of a source sheet.
+    #[doc(hidden)]
+    pub fn source_sheet_name(&self, index: usize) -> Option<&str> {
+        self.original_workbook
+            .sheets
+            .get(index)
+            .map(|sheet| sheet.name.as_str())
     }
 
     /// The part path of a source sheet.
@@ -323,6 +432,62 @@ impl PreservedPackage {
                     })
                 })
             })
+    }
+}
+
+fn table_move_unsupported(
+    bytes: &[u8],
+    affected: impl Fn(&str) -> bool,
+) -> Result<bool, ParseError> {
+    let mut xml = reader(bytes);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    loop {
+        match next_event(&mut xml, &mut buffer, &mut depth)? {
+            Event::Start(start)
+                if matches!(
+                    local_name(&start).as_slice(),
+                    b"calculatedColumnFormula" | b"totalsRowFormula"
+                ) =>
+            {
+                let formula = collect_text(&mut xml, &mut buffer, &mut depth)?;
+                if affected(&formula) {
+                    return Ok(true);
+                }
+            }
+            Event::Eof => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+fn comment_move_unsupported(
+    bytes: &[u8],
+    affected: impl Fn(CellRef) -> bool,
+) -> Result<bool, ParseError> {
+    let mut xml = reader(bytes);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    loop {
+        match next_event(&mut xml, &mut buffer, &mut depth)? {
+            Event::Start(start)
+                if matches!(
+                    local_name(&start).as_slice(),
+                    b"comment" | b"threadedComment"
+                ) =>
+            {
+                let Some(at) =
+                    attr(&start, b"ref")?.and_then(|reference| CellRef::parse_a1(&reference).ok())
+                else {
+                    return Ok(true);
+                };
+                if affected(at) {
+                    return Ok(true);
+                }
+            }
+            Event::Eof => return Ok(false),
+            _ => {}
+        }
     }
 }
 

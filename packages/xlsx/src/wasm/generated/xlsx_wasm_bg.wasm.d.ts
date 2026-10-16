@@ -50,6 +50,7 @@ export const xlsxdocument_historyStateJson: (a: number) => [number, number, numb
 export const xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_nextPeerSnapshotChunk: (a: number) => [number, number, number];
 export const xlsxdocument_open: (a: number, b: number) => [number, number, number];
 export const xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];

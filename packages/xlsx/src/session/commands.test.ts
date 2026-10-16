@@ -16,6 +16,7 @@ import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod } from './replay';
 import { batchRequests, capturedWorkbookCommand, createTestWorkbookSession } from './testHelpers';
 
 let bytes: Uint8Array;
+let plainBytes: Uint8Array;
 
 beforeAll(async () => {
   await wasm.initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
@@ -31,6 +32,14 @@ beforeAll(async () => {
   zip.file('xl/drawings/_rels/drawing1.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>');
   zip.file('xl/charts/chart1.xml', '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>Data!$A$1:$B$1</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>');
   bytes = await zip.generateAsync({ type: 'uint8array' });
+  const plain = new JSZip();
+  plain.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  plain.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  plain.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Other" sheetId="2" r:id="rId2"/></sheets></workbook>');
+  plain.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>');
+  plain.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>A1*2</f><v>2</v></c></row></sheetData></worksheet>');
+  plain.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>');
+  plainBytes = await plain.generateAsync({ type: 'uint8array' });
 });
 
 function command<K extends WorkbookCommand['kind']>(
@@ -1899,12 +1908,42 @@ describe('workbook commands', () => {
     } finally { failing.mockRestore(); await session.dispose(); }
   });
 
+  test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'moveRange', {
+        args: [0, 'A1', 'C3'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A1:C3')).cells).toEqual([
+        [{ a1: 'A1', input: '', isFormula: false }, { a1: 'B1', input: '=C3*2', isFormula: true }, { a1: 'C1', input: '', isFormula: false }],
+        [{ a1: 'A2', input: '', isFormula: false }, { a1: 'B2', input: '', isFormula: false }, { a1: 'C2', input: '', isFormula: false }],
+        [{ a1: 'A3', input: '', isFormula: false }, { a1: 'B3', input: '', isFormula: false }, { a1: 'C3', input: '1', isFormula: false }],
+      ]);
+      expect(await session.submit(command(session, 2, 'editCell', {
+        args: [0, 0, 2, '=SUM(B1:C3)'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect(await session.submit(command(session, 3, 'moveRange', {
+        args: [0, 'C3', 'D4'],
+      }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+      expect(await session.submit(command(session, 4, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(await session.submit(command(session, 5, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A1:B1')).cells[0]).toEqual([
+        { a1: 'A1', input: '1', isFormula: false },
+        { a1: 'B1', input: '=A1*2', isFormula: true },
+      ]);
+      expect((await session.call.cellInputs(0, 'C3')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+  });
+
   for (const kind of Object.keys(WORKBOOK_REPLAY_MUTATORS) as WorkbookReplayMethod[]) {
     test(`applies replay mutator ${kind} without an edit peer`, async () => {
-      const session = await createTestWorkbookSession(bytes);
+      const source = kind === 'moveRange' ? plainBytes : bytes;
+      const session = await createTestWorkbookSession(source);
       let seq = 0;
       const send = (op: WorkbookCommand) => session.submit(op);
-      const main = wasm.openWorkbook(bytes);
+      const main = wasm.openWorkbook(source);
       try {
         let payload: WorkbookCommandPayload<WorkbookReplayMethod>;
         switch (kind) {
@@ -1925,6 +1964,7 @@ describe('workbook commands', () => {
             payload = { args: [0, chart.id, 24, 12] };
             break;
           }
+          case 'moveRange': payload = { args: [0, 'A1', 'A2'] }; break;
           case 'setActiveSheet': payload = { args: [1] }; break;
           case 'undo':
           case 'redo':
@@ -1957,6 +1997,7 @@ describe('workbook commands', () => {
         if (['editCell', 'editCells', 'applyEdits', 'acceptProposal', 'redo', 'undo'].includes(kind)) {
           expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe(kind === 'undo' ? '1' : '7');
         }
+        if (kind === 'moveRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
         if (kind === 'patchRangeStyle' || kind === 'applyFormat') expect(session.editState.formatting?.bold).toBe(true);
         if (kind === 'setNumberFormat') expect(session.editState.formatting?.numberFormat).toBe('percent');
         if (kind === 'setActiveSheet') expect(session.state.activeSheet).toBe(1);

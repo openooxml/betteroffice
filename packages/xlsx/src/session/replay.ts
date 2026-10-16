@@ -15,6 +15,7 @@ export const WORKBOOK_REPLAY_MUTATORS = {
   setNumberFormat: true,
   applyFormat: true,
   moveChart: true,
+  moveRange: true,
   undo: true,
   redo: true,
   setActiveSheet: true,
@@ -275,6 +276,9 @@ function validOp(value: unknown): boolean {
     case 'moveChart':
       return args.length === 4 && integer(args[0]) && typeof args[1] === 'string' &&
         args.slice(2).every(finite);
+    case 'moveRange':
+      return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
+        typeof args[2] === 'string';
     case 'undo':
     case 'redo': return args.length === 0;
     case 'setActiveSheet': return args.length === 1 && integer(args[0]);
@@ -319,6 +323,7 @@ export function applyWorkbookReplayOp(
     case 'setNumberFormat': return handle.setNumberFormat(...op.args);
     case 'applyFormat': return handle.applyFormat(...op.args);
     case 'moveChart': return handle.moveChart(...op.args);
+    case 'moveRange': return handle.moveRange(...op.args);
     case 'undo': return handle.undo(...op.args);
     case 'redo': return handle.redo(...op.args);
     case 'setActiveSheet': return handle.setActiveSheet(...op.args);

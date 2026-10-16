@@ -58,6 +58,7 @@ use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
     StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
 };
+use crate::move_range::{move_range_ops, preserved_move_unsupported_part};
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
@@ -846,7 +847,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let staged = self.stage_remote_updates(&[update], None)?;
-        if staged.structure != structure {
+        if !staged.structure.same_except_freeze_panes(&structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -887,7 +888,9 @@ impl Workbook {
             SnapshotAdoption::Replacement(candidate) => *candidate,
         };
         let structure = candidate.structure().map_err(authority_error)?;
-        if !structure.describes_same_workbook(&frozen) {
+        if !structure.describes_same_workbook(&frozen)
+            && !structure.snapshot_same_except_freeze_panes(&frozen)
+        {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
@@ -996,7 +999,7 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged) if &staged.structure != structure => {
+                Ok(staged) if !staged.structure.same_except_freeze_panes(structure) => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -1055,6 +1058,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
 
+        let new_structure = staged.structure;
         let commit_update = staged.commit_update;
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
@@ -1067,6 +1071,9 @@ impl Workbook {
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: new_structure,
+        };
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
@@ -1759,6 +1766,59 @@ impl Workbook {
         Ok(result)
     }
 
+    /// Moves a bounded range within one worksheet in one undoable transaction.
+    /// Formulas that refer to the moved cells follow them; partially moved
+    /// ranges and package features that cannot be rewritten are refused.
+    pub fn move_range(
+        &mut self,
+        sheet: SheetId,
+        source: CellRange,
+        destination: CellRef,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let (rows, cols) = self.validate_bounded_range(sheet, source)?;
+        self.validate_target(sheet, destination)?;
+        let end_row = destination
+            .row
+            .checked_add(rows as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let end_col = destination
+            .col
+            .checked_add(cols as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let target = CellRange::new(destination, CellRef::new(end_row, end_col));
+        self.validate_bounded_range(sheet, target)?;
+        if source.start.row == destination.row && source.start.col == destination.col {
+            return Ok(MutationResult::default());
+        }
+        if let Some(package) = self.source_package.as_ref() {
+            let package = package.materialize()?;
+            if let Some(part) = preserved_move_unsupported_part(
+                package,
+                &self.model,
+                &self.preserved,
+                sheet,
+                source,
+                target,
+            ) {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} contains worksheet features a cell move cannot safely preserve"
+                )));
+            }
+            let name = &self.sheet(sheet)?.name;
+            let stranded = package
+                .reference_moved_by_rows(name, source.start.row)
+                .or_else(|| package.reference_moved_by_cols(name, source.start.col));
+            if let Some(part) = stranded {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} references cells this move would relocate, and it cannot be rewritten"
+                )));
+            }
+        }
+        let ops = move_range_ops(&self.model, sheet, source, target)?;
+        self.apply_ops(ops, options)
+    }
+
     pub fn apply_ops(
         &mut self,
         ops: Vec<Op>,
@@ -1786,7 +1846,11 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative() && ops.iter().any(is_structural_op) {
+        if self.is_collaborative()
+            && ops
+                .iter()
+                .any(|op| is_structural_op(op) && !matches!(op, Op::SetFreezePane { .. }))
+        {
             return Err(Error::CollaborativeStructureOperation);
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
@@ -2077,14 +2141,18 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if &history.structure != structure {
+        if !history.structure.same_except_freeze_panes(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
+        let new_structure = history.structure;
         let active_sheet = self.active_sheet;
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
         self.install_model(restored)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: new_structure,
+        };
         self.invalidate_sheet_info();
         self.edited_since_open = true;
         self.restore_active_sheet(Some(active_sheet));
@@ -2719,6 +2787,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(ops);
         let update = if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
+            let new_structure = staged.structure.clone();
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
@@ -2726,6 +2795,9 @@ impl Workbook {
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
             self.install_model_with_ops(model, ops)?;
+            self.mode = WorkbookMode::Collaborative {
+                structure: new_structure,
+            };
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
         } else {
@@ -2795,7 +2867,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin, &self.model.styles)
             .map_err(authority_error)?;
-        if &staged.structure != structure {
+        if !staged.structure.same_except_freeze_panes(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
