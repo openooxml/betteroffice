@@ -419,6 +419,12 @@ const PARENTS: [&str; 6] = [
 /// Range ends by kind, ID and whether the end opens its range, with how often each occurs.
 type Ends<'x> = BTreeMap<(&'x str, String, bool), usize>;
 
+struct Ranges<'x> {
+    all: Ends<'x>,
+    unpaired: Ends<'x>,
+    field_or_move: bool,
+}
+
 /// Whether `xml`, one paragraph, holds no equations or content controls and pairs only within
 /// itself, so that rewriting it leaves every other paragraph's markup whole.
 fn simple(xml: &str) -> Option<bool> {
@@ -443,10 +449,19 @@ fn unwrapped(xml: &str) -> Option<bool> {
 /// whose other end lies outside the paragraph. Proofing marks are left out of the comparison,
 /// as the model drops them and Word recomputes them.
 fn keeps_ranges(source: &str, written: &str) -> Option<bool> {
-    fn crossing(xml: &str) -> Option<Ends<'_>> {
-        let mut ends = unpaired(xml)?;
-        ends.retain(|(kind, _, _), _| !matches!(*kind, "spell" | "gram"));
-        Some(ends)
+    fn crossing(xml: &str) -> Option<(Ends<'_>, Ends<'_>)> {
+        let mut ranges = ranges(xml)?;
+        if ranges.field_or_move {
+            return None;
+        }
+        ranges
+            .unpaired
+            .retain(|(kind, _, _), _| !matches!(*kind, "spell" | "gram"));
+        ranges.all.retain(|(kind, id, _), _| {
+            ranges.unpaired.contains_key(&(*kind, id.clone(), true))
+                || ranges.unpaired.contains_key(&(*kind, id.clone(), false))
+        });
+        Some((ranges.unpaired, ranges.all))
     }
     Some(unwrapped(source)? && unwrapped(written)? && crossing(source)? == crossing(written)?)
 }
@@ -463,8 +478,15 @@ fn pairs_within(xml: &str) -> Option<bool> {
 /// or opens what it does not close. `None` on a field character or move, whose partners lie
 /// elsewhere, on a range marker without an ID and on a proofing mark without a type.
 fn unpaired(xml: &str) -> Option<Ends<'_>> {
+    let ranges = ranges(xml)?;
+    (!ranges.field_or_move).then_some(ranges.unpaired)
+}
+
+fn ranges(xml: &str) -> Option<Ranges<'_>> {
     let mut open: HashMap<(&str, String), usize> = HashMap::new();
     let mut ends = Ends::new();
+    let mut all = Ends::new();
+    let mut field_or_move = false;
     for tag in tags(xml)? {
         if tag.end {
             continue;
@@ -474,7 +496,7 @@ fn unpaired(xml: &str) -> Option<Ends<'_>> {
             .rsplit_once(':')
             .map_or(tag.name, |(_, local)| local);
         if local == "fldChar" || local.starts_with("move") || local.starts_with("customXmlMove") {
-            return None;
+            field_or_move = true;
         }
         let (kind, id, opens) = if local == "proofErr" {
             let (kind, opens) = match &*unescaped(xml, attribute(&tag, "w:type")?)? {
@@ -502,6 +524,7 @@ fn unpaired(xml: &str) -> Option<Ends<'_>> {
             };
             (kind, unescaped(xml, attribute(&tag, "w:id")?)?, opens)
         };
+        *all.entry((kind, id.clone(), opens)).or_insert(0) += 1;
         let count = open.entry((kind, id.clone())).or_insert(0);
         if opens {
             *count += 1;
@@ -516,7 +539,28 @@ fn unpaired(xml: &str) -> Option<Ends<'_>> {
             ends.insert((kind, id, true), count);
         }
     }
-    Some(ends)
+    Some(Ranges {
+        all,
+        unpaired: ends,
+        field_or_move,
+    })
+}
+
+fn unique_ranges<'x>(fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
+    let mut ends = Ends::new();
+    for fragment in fragments {
+        for ((kind, id, opens), count) in ranges(fragment)?.all {
+            if matches!(kind, "spell" | "gram") {
+                continue;
+            }
+            let total = ends.entry((kind, id, opens)).or_insert(0);
+            *total += count;
+            if *total > 1 {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
 }
 
 /// The comment markers `written`, the XML written for an unchanged paragraph, adds to `source`,
@@ -1009,18 +1053,18 @@ pub(crate) fn splice_story_part(
         });
     }
     edits.sort_by_key(|(range, rank, _)| (range.start, *rank));
-    let mut output = String::with_capacity(source.len());
+    let mut fragments = Vec::with_capacity(edits.len() * 2 + 1);
     let mut cursor = 0;
     for (range, _, text) in edits {
         if range.start < cursor {
             return None;
         }
-        output.push_str(&source[cursor..range.start]);
-        output.push_str(text);
+        fragments.push(&source[cursor..range.start]);
+        fragments.push(text);
         cursor = range.end;
     }
-    output.push_str(&source[cursor..]);
-    Some(output)
+    fragments.push(&source[cursor..]);
+    unique_ranges(fragments.iter().copied())?.then(|| fragments.concat())
 }
 
 #[cfg(test)]
@@ -1795,6 +1839,61 @@ mod tests {
             "<w:customXmlInsRangeStart w:id=\"1\" w:author=\"A\"/>",
             "<w:customXmlInsRangeEnd w:id=\"1\"/>",
         );
+    }
+
+    #[test]
+    fn a_new_local_pair_cannot_duplicate_a_range_in_retained_tracked_changes() {
+        let opening = "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"crossing\"/><w:ins w:id=\"3\" w:author=\"A\"><w:bookmarkStart w:id=\"2\" w:name=\"retained\"/><w:r><w:t>a</w:t></w:r><w:bookmarkEnd w:id=\"2\"/></w:ins></w:p>";
+        let written_opening = "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"crossing\"/><w:ins w:id=\"3\" w:author=\"A\"><w:r><w:t>a</w:t></w:r></w:ins></w:p>";
+        let closing = "<w:p><w:r><w:t>b</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>";
+        let rebuilt = "<w:p><w:bookmarkStart w:id=\"2\" w:name=\"added\"/><w:r><w:t>b, edited</w:t></w:r><w:bookmarkEnd w:id=\"2\"/><w:bookmarkEnd w:id=\"1\"/></w:p>";
+        assert_whole_part_fallback(
+            &body(&format!("{opening}{closing}")),
+            &[(Some(0), written_opening), (Some(1), rebuilt)],
+            Edit {
+                changed: &[1],
+                ..Edit::default()
+            },
+        );
+        let source = body(&format!("{opening}{closing}"));
+        assert_eq!(splice(&source, &[(1, rebuilt)], &[1]), None);
+        assert_eq!(
+            splice(&source, &[(0, written_opening), (1, rebuilt)], &[0, 1]),
+            Some(body(&format!("{written_opening}{rebuilt}")))
+        );
+    }
+
+    #[test]
+    fn an_added_same_id_pair_cannot_cancel_out_of_a_crossing_range() {
+        for (start, end) in [
+            (
+                "<w:bookmarkStart w:id=\"1\" w:name=\"crossing\"/>",
+                "<w:bookmarkEnd w:id=\"1\"/>",
+            ),
+            ("<w:permStart w:id=\"1\"/>", "<w:permEnd w:id=\"1\"/>"),
+            (
+                "<w:commentRangeStart w:id=\"1\"/>",
+                "<w:commentRangeEnd w:id=\"1\"/>",
+            ),
+            (
+                "<w:customXmlInsRangeStart w:id=\"1\"/>",
+                "<w:customXmlInsRangeEnd w:id=\"1\"/>",
+            ),
+        ] {
+            let opening = format!("<w:p>{start}<w:r><w:t>a</w:t></w:r></w:p>");
+            let closing = format!("<w:p><w:r><w:t>b</w:t></w:r>{end}</w:p>");
+            let source = body(&format!("{opening}{closing}"));
+            for (ordinal, original) in [(0, &opening), (1, &closing)] {
+                let rebuilt = original.replace("</w:p>", &format!("{start}{end}</w:p>"));
+                assert_eq!(keeps_ranges(original, &rebuilt), Some(false), "{rebuilt}");
+                let written = if ordinal == 0 {
+                    [(0, rebuilt.as_str()), (1, closing.as_str())]
+                } else {
+                    [(0, opening.as_str()), (1, rebuilt.as_str())]
+                };
+                assert_eq!(splice(&source, &written, &[ordinal]), None, "{rebuilt}");
+            }
+        }
     }
 
     #[test]
