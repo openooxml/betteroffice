@@ -466,7 +466,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   commands.attach(commandBinding);
   const batchResults = new Map<number, DocxEditResult>();
-  const commentResults = new Map<number, NonNullable<DocxEditState['comment']>>();
+  const commentResults = new Map<number, NonNullable<DocxEditState['comment'] | DocxEditState['commentChange']>>();
   let commentTail: Promise<unknown> = Promise.resolve();
   let commentList: { binding: PeerlessEditSessionBinding; version: number; comments: Comment[] } | null = null;
   const rememberComments = (current: PeerlessEditSessionBinding, version: number, comments: Comment[] | undefined) => {
@@ -499,7 +499,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const addComment = async (current: PeerlessEditSessionBinding, payload: Extract<PeerlessInputIntent, { kind: 'addComment' }>['payload']) => {
     const { result, comment } = await commentCommand(current, { kind: 'addComment', payload });
-    return result.ok && result.status === 'executed' && binding === current ? comment?.id ?? null : null;
+    return result.ok && result.status === 'executed' && binding === current && comment && 'id' in comment ? comment.id : null;
   };
   const insertComment = (request: DocxCommentInsertion): Promise<number | null> => commentRound(() => null, async current => {
     const target = await query({ kind: 'commentInsertionRange', paraId: request.paraId,
@@ -711,8 +711,8 @@ export function createPeerlessShellController(initial: Options) {
           batchResults.set(view.editState.batch.seq, view.editState.batch.result);
           if (batchResults.size > 256) batchResults.delete(batchResults.keys().next().value!);
         }
-        const comment = view.editState?.comment;
-        if (comment && comment !== snapshot.view?.editState?.comment) {
+        for (const comment of [view.editState?.comment, view.editState?.commentChange]) {
+          if (!comment || comment === snapshot.view?.editState?.comment || comment === snapshot.view?.editState?.commentChange) continue;
           rememberComments(next, view.version, comment.comments);
           commentResults.set(comment.seq, comment);
           if (commentResults.size > 256) commentResults.delete(commentResults.keys().next().value!);

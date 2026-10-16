@@ -1,5 +1,5 @@
 import { commandSelectionRange } from './residentCommandAnchors';
-import type { DocxCommandIntent, DocxCommentResult, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
+import type { DocxCommandIntent, DocxCommentChangeResult, DocxCommentResult, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
 import type { DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 
 export const reviewCommandKeys = {
@@ -51,7 +51,7 @@ export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state:
 }
 
 export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, command: ReviewCommand):
-  { status: 'applied' | 'noop'; comment?: Omit<DocxCommentResult, 'seq'> } | { status: 'refused'; reason: string } {
+  { status: 'applied' | 'noop'; comment?: Omit<DocxCommentResult, 'seq'>; commentChange?: Omit<DocxCommentChangeResult, 'seq'> } | { status: 'refused'; reason: string } {
   const version = engine.proposalEngine.version();
   const before = state.proposals?.snapshot();
   if (command.kind === 'propose' || command.kind === 'setProposalStates' || command.kind === 'withdrawProposals') {
@@ -80,9 +80,10 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   engine.addUndoBoundary();
   engine.markProjectionStories(engine.geometryReader.storyIds());
   const status = engine.proposalEngine.version() === version ? 'noop' : 'applied';
-  const commented = command.kind === 'addComment' || command.kind === 'updateComment' || command.kind === 'setCommentRanges' || command.kind === 'removeComment';
-  const projection = commented ? engine.commentProjection() : null;
-  const id = added === undefined ? undefined : projection?.ids[added];
-  if (!projection || (added !== undefined && id === undefined)) return { status };
-  return { status, comment: { ...(id === undefined ? {} : { id }), comments: projection.comments } };
+  const changed = command.kind === 'updateComment' || command.kind === 'setCommentRanges' || command.kind === 'removeComment';
+  const projection = added !== undefined || changed ? engine.commentProjection() : null;
+  if (!projection) return { status };
+  if (added === undefined) return { status, commentChange: { comments: projection.comments } };
+  const id = projection.ids[added];
+  return id === undefined ? { status } : { status, comment: { id, comments: projection.comments } };
 }
