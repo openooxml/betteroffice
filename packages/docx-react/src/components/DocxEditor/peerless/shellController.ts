@@ -21,13 +21,21 @@ import { flushAdmittedInput, type PeerlessAdmissionResult, type PeerlessFormatti
 import type { DocxHostSearch } from '../hooks/useHostSearch';
 import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
-import { readPresentedReview, reviewMatches } from './workerReview';
+import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
 import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
 
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
 export class WorkerReadSupersededError extends Error {}
+
+const OPEN_WAIT_MS = 120_000;
+const MAX_WAITING_ROUNDS = 64;
+const PROPOSAL_FAILURES = {
+  'stale-version': true, 'missing-target': true, 'ambiguous-target': true, 'content-mismatch': true, 'overlapping-steps': true,
+  'locked-target': true, 'read-only': true, 'tracked-revision-conflict': true, unsupported: true, 'invalid-step': true,
+  'limit-exceeded': true, 'stale-preview': true, 'unknown-proposal': true, 'proposal-id-conflict': true,
+} satisfies Record<Extract<DocxProposalResult, { ok: false }>['failure']['code'], true>;
 
 const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor',
   'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'setLtr', 'setRtl',
@@ -41,6 +49,7 @@ export interface PeerlessWorkerQuery<K extends ResidentDocumentRead['kind'] = Re
 
 interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
+  openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
   zoom: number;
   isDark?: boolean;
@@ -87,6 +96,9 @@ export function createPeerlessShellController(initial: Options) {
   let reviewBinding: PeerlessEditSessionBinding | null = null;
   let reviewIdentity: PeerlessViewSnapshot['identity'] | null = null;
   let proposalTail: Promise<unknown> = Promise.resolve();
+  let documentKey: unknown;
+  let generation = 0;
+  const waiting = new Set<(error: Error) => void>();
   const reviewReads = new WeakMap<PeerlessEditSessionBinding, Promise<ResidentReviewSnapshot>>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
     worker: workerMemory?.map(sample => ({ ...sample })) ?? null });
@@ -111,7 +123,7 @@ export function createPeerlessShellController(initial: Options) {
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
     fontRevision = 0; fontFamilies = []; metadata = null; firstPainted = false; workerMemory = null;
-    unsubscribe?.(); binding = null; proposalTail = Promise.resolve(); reviewValue = null; reviewBinding = null; reviewIdentity = null;
+    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
     batchResults.clear(); commentResults.clear(); snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
@@ -157,6 +169,28 @@ export function createPeerlessShellController(initial: Options) {
     if (!binding || snapshot.status !== 'ready') throw new Error('Peer-less editor is not ready');
     return binding;
   };
+  const replace = () => { generation += 1; proposalTail = Promise.resolve(); };
+  const opened = (): Promise<PeerlessEditSessionBinding> => {
+    if (binding && snapshot.status === 'ready') return Promise.resolve(binding);
+    if (closed || snapshot.status !== 'opening') return Promise.reject(new Error('Peer-less editor is not ready'));
+    if (waiting.size >= MAX_WAITING_ROUNDS) return Promise.reject(new Error('Too many calls are waiting for the document'));
+    const awaited = generation;
+    return new Promise((resolve, reject) => {
+      const settle = (error: Error | null) => {
+        clearTimeout(timer); waits.delete(check); waiting.delete(fail);
+        if (error) reject(error); else resolve(binding!);
+      };
+      const fail = (error: Error) => settle(error);
+      const check = () => {
+        if (closed) settle(new Error('Editor was closed'));
+        else if (snapshot.error) settle(snapshot.error);
+        else if (generation !== awaited) settle(new Error('Document was replaced'));
+        else if (binding && snapshot.status === 'ready') settle(null);
+      };
+      const timer = setTimeout(() => settle(new Error('The document did not open in time')), options.openTimeoutMs ?? OPEN_WAIT_MS);
+      waits.add(check); waiting.add(fail); check();
+    });
+  };
   const flush = async () => {
     const current = ready();
     await flushAdmittedInput(current);
@@ -182,7 +216,11 @@ export function createPeerlessShellController(initial: Options) {
     return result.value;
   };
   const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
-  const reviewSnapshot = () => binding && binding === reviewBinding && reviewIdentity && sameIdentity(reviewIdentity, binding.viewStore.getSnapshot().identity) && reviewValue && reviewMatches(binding.viewStore.getSnapshot(), reviewValue) ? reviewValue : null;
+  const currentReview = (matches: typeof reviewMatches) => binding && binding === reviewBinding && reviewIdentity &&
+    sameIdentity(reviewIdentity, binding.viewStore.getSnapshot().identity) && reviewValue && matches(binding.viewStore.getSnapshot(), reviewValue) ? reviewValue : null;
+  const reviewSnapshot = () => currentReview(reviewMatches);
+  /** The last review read while it still describes the presented document and preview, whichever frame shows them. */
+  const describedReview = () => currentReview(reviewDescribes);
   const readReview = (current: PeerlessEditSessionBinding, timeoutMs = options.reviewTimeoutMs ?? 30000): Promise<ResidentReviewSnapshot> => {
     const pending = reviewReads.get(current);
     if (pending) return pending;
@@ -221,12 +259,13 @@ export function createPeerlessShellController(initial: Options) {
     const view = current.viewStore.getSnapshot();
     const version = view.editState?.review?.version ?? view.editState?.documentVersion ?? view.geometry?.documentVersion ?? intent.payload.expectVersion;
     const ids = intent.kind === 'propose' ? intent.payload.proposals.map(input => input.id) : intent.kind === 'setProposalStates' ? intent.payload.changes.map(change => change.id) : intent.payload.ids;
-    const message = code === 'read-only' ? 'The editor is read-only' : code === 'stale-version' ? 'the document changed since the expected version was read' : undefined;
-    return { ok: false, version, failure: { code, ...(ids.length === 1 ? { proposalId: ids[0] } : {}), ...(message ? { message } : {}) } as Extract<DocxProposalResult, { ok: false }>['failure'] };
+    const known = Object.hasOwn(PROPOSAL_FAILURES, code);
+    const message = code === 'read-only' ? 'The editor is read-only' : code === 'stale-version' ? 'the document changed since the expected version was read' : known ? undefined : code;
+    const failure = (known ? code : code === 'invalid-payload' ? 'invalid-step' : 'unsupported') as keyof typeof PROPOSAL_FAILURES;
+    return { ok: false, version, failure: { code: failure, ...(ids.length === 1 ? { proposalId: ids[0] } : {}), ...(message ? { message } : {}) } as Extract<DocxProposalResult, { ok: false }>['failure'] };
   };
   const proposalRound = <T>(operation: (current: PeerlessEditSessionBinding) => Promise<T>): Promise<T> => {
-    const current = ready();
-    const pending = proposalTail.then(async () => {
+    const pending = Promise.all([opened(), proposalTail]).then(async ([current]) => {
       if (binding !== current) throw new Error('Document was replaced');
       await flush();
       return operation(current);
@@ -239,9 +278,15 @@ export function createPeerlessShellController(initial: Options) {
     return proposalRound(async current => {
       const env = environment();
       if ((env.readOnly || env.mode === 'viewing') && !options.allowHostProposals) return proposalFailure(current, captured, 'read-only');
-      const admitted = await released(current.commands.submit(captured, { fence: true, hostProposal: options.allowHostProposals === true }));
+      let admitted = current.commands.submit(captured, { fence: true, hostProposal: options.allowHostProposals === true });
+      try {
+        while (admitted.status === 'held') admitted = await admitted.released;
+      } catch (error) {
+        if (binding !== current) throw new Error('Document was replaced');
+        throw error;
+      }
       if (binding !== current) throw new Error('Document was replaced');
-      if (admitted?.status !== 'submitted') return proposalFailure(current, captured, 'read-only');
+      if (admitted.status === 'ignored') return proposalFailure(current, captured, admitted.reason);
       const outcome = await admitted.ticket.ack;
       if (binding !== current) throw new Error('Document was replaced');
       if (outcome.status !== 'applied' && outcome.status !== 'noop') {
@@ -480,7 +525,7 @@ export function createPeerlessShellController(initial: Options) {
       };
       const check = () => {
         if (closed) return settle(new Error('Editor was closed'));
-        if (snapshot.status === 'failed') return settle(snapshot.error ?? new Error('Document failed to open'));
+        if (snapshot.error) return settle(snapshot.error);
         if (current) {
           if (binding !== current) return settle(new Error('Document was replaced'));
           const view = current.viewStore.getSnapshot();
@@ -549,7 +594,7 @@ export function createPeerlessShellController(initial: Options) {
     },
   });
   return {
-    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot,
+    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview,
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
@@ -557,7 +602,11 @@ export function createPeerlessShellController(initial: Options) {
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
       reportMemory();
     },
-    opening() { reset('opening'); },
+    opening(document?: unknown) {
+      if (document === undefined || document !== documentKey) replace();
+      documentKey = document;
+      reset('opening');
+    },
     preview(frame: ResidentEngineWorkerFrame) {
       if (snapshot.status !== 'opening') return;
       snapshot = { ...snapshot, preview: frame, previewPainted: false }; publish();
@@ -567,6 +616,12 @@ export function createPeerlessShellController(initial: Options) {
       snapshot = { ...snapshot, previewPainted: true }; publish();
     },
     painted,
+    stalled(error: Error) {
+      if (snapshot.status === 'opening') for (const fail of [...waiting]) fail(error);
+    },
+    failOpening(error: Error) {
+      if (snapshot.status === 'opening') { snapshot = { ...snapshot, error }; publish(); }
+    },
     toolbarMetadata(result: PeerlessWorkerQuery<'toolbarMetadata'> | null) {
       const origin = result && queryOrigins.get(result);
       const view = binding?.viewStore.getSnapshot();
@@ -582,8 +637,8 @@ export function createPeerlessShellController(initial: Options) {
       fontRevision = event.revision; fontFamilies = [...event.families]; publish(); emit(options.onFontsLoaded, undefined);
     },
     memory(samples: WasmModuleMemory[]) { workerMemory = samples.map(sample => ({ ...sample })); reportMemory(); },
-    empty() { reset('empty'); },
-    fail(error: Error) { reset('failed', error); },
+    empty() { replace(); documentKey = undefined; reset('empty'); },
+    fail(error: Error) { replace(); reset('failed', error); },
     attach(next: PeerlessEditSessionBinding) {
       if (next === binding) return;
       unsubscribe?.(); binding = next;
@@ -619,6 +674,7 @@ export function createPeerlessShellController(initial: Options) {
     },
     detach(previous: PeerlessEditSessionBinding) {
       if (binding !== previous) return;
+      replace();
       reset('empty');
     },
     dispose() { unsubscribe?.(); binding = null; closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },

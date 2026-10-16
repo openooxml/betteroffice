@@ -62,7 +62,7 @@ import {
   workerFrameVersionOf,
 } from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
-import { useEditorEngineChoice, usePeerlessEngineChoice } from './DocxEditor/internals/engineChoice';
+import { useEditorEngineChoice, useDocxEditorRoute } from './DocxEditor/internals/engineChoice';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -214,11 +214,9 @@ export interface DocxErrorInfo {
 /**
  * DocxEditor props
  */
-export interface DocxEditorProps extends DocxEditorPluginProps {
-  /** @internal */
+export interface DocxEditorBaseProps extends DocxEditorPluginProps {
+  /** @internal @deprecated Ignored. */
   experimentalPeerless?: boolean;
-  /** @deprecated Enables the hybrid synchronous API, removed in 0.6.0. */
-  legacySyncApi?: boolean;
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
   /**
@@ -236,10 +234,7 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
-  /**
-   * The worker-owned editor is the default; engine choice is fixed at mount.
-   * @deprecated `false` selects the deprecated in-thread engine.
-   */
+  /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: boolean;
   /**
    * Opens images as `media:{n}` tokens read from the document file instead of
@@ -480,6 +475,26 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    */
   measurementFontProvider?: BundledFontProvider;
 }
+
+export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange' | 'experimentalWorkerOpen'> {
+  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  [LEGACY_SYNC_API_PROP]?: false;
+  experimentalWorkerOpen?: true;
+  onChange?: undefined;
+}
+
+export interface DocxLegacyEditorProps extends DocxEditorBaseProps {
+  /** @deprecated Enables the sync hybrid runtime, removed in 0.6.0. */
+  [LEGACY_SYNC_API_PROP]: true;
+}
+
+export interface DocxInThreadEditorProps extends Omit<DocxEditorBaseProps, 'experimentalWorkerOpen'> {
+  [LEGACY_SYNC_API_PROP]?: false;
+  /** @deprecated Selects the in-thread engine. */
+  experimentalWorkerOpen: false;
+}
+
+export type DocxEditorProps = DocxAsyncEditorProps | DocxLegacyEditorProps | DocxInThreadEditorProps;
 
 /**
  * DocxEditor ref interface
@@ -839,17 +854,26 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   props,
   ref
 ) {
-  const requested = props.experimentalPeerless === true && !props[LEGACY_SYNC_API_PROP] && props.experimentalWorkerOpen !== false;
-  const peerless = usePeerlessEngineChoice(requested, props[LEGACY_SYNC_API_PROP] === true);
-  if (requested) {
-    if (props.onChange) throw new PeerlessSyncApiError('onChange(Document)');
-    if (props.collaboration) throw new PeerlessSyncApiError('CollaborationReplica');
-  }
-  if (peerless) return <LazyPeerlessDocxEditor {...props} ref={ref} />;
-  return <LegacyDocxEditor {...props} ref={ref} />;
+  const choice = useDocxEditorRoute(props);
+  if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
+  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;
+  return <LegacyDocxEditor key={choice.route} {...props} ref={ref} />;
 });
 
-const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function LegacyDocxEditor(
+function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className' | 'style'>) {
+  const [error] = useState(() => new PeerlessSyncApiError('onChange(Document)'));
+  const latest = useRef(props.onError);
+  latest.current = props.onError;
+  const reported = useRef(false);
+  useEffect(() => {
+    if (reported.current) return;
+    reported.current = true;
+    try { latest.current?.(error); } catch {}
+  }, [error]);
+  return <div role="alert" className={props.className} style={props.style}>{error.message}</div>;
+}
+
+const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function LegacyDocxEditor(
   {
     documentBuffer,
     experimentalPrewarm = false,

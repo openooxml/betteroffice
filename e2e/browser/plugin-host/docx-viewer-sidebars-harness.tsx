@@ -230,6 +230,7 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <DocxEditor
+        legacySyncApi
         ref={editor}
         documentBuffer={source.buffer}
         document={source.document}

@@ -31,6 +31,7 @@ export const editsession_apply_paragraph_style: (a: number, b: number, c: number
 export const editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
+export const editsession_apply_update_chunks: (a: number, b: any) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
 export const editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
@@ -72,6 +73,7 @@ export const editsession_drain_update_event: (a: number) => [number, number];
 export const editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
 export const editsession_encode_state: (a: number) => [number, number];
 export const editsession_encode_state_vector: (a: number) => [number, number];

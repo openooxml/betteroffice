@@ -22,6 +22,10 @@ export type {
 export {
   DocxEditor,
   type DocxEditorProps,
+  type DocxEditorBaseProps,
+  type DocxAsyncEditorProps,
+  type DocxLegacyEditorProps,
+  type DocxInThreadEditorProps,
   type DocxErrorInfo,
   type DocxEditorRef,
   type DocxParagraphMatch,

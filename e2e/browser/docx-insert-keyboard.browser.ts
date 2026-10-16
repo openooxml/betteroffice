@@ -47,8 +47,8 @@ function insertTrigger(page: Page) {
   return page.getByRole('menubar').getByRole('menuitem', { name: 'Insert' });
 }
 
-for (const arm of ['', '&peerless=1']) {
-const label = arm ? 'worker' : 'default';
+for (const arm of ['&peerless=0', '']) {
+const label = arm ? 'hybrid' : 'default';
 
 test(`docx Insert menu opens from Enter, Space, ArrowDown, and ArrowUp (${label})`, async ({ page }) => {
   await open(page, arm);

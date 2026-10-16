@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -114,7 +115,7 @@ test('the worker indicator stays over the whole editor while the chrome mounts, 
   } as unknown as typeof Worker;
   const placements: Placement[] = [];
   const view = render(
-    <DocxEditor
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
       documentBuffer={await pagedDocx(2)}
       loadingIndicator={<PlacementProbe placements={placements} />}
     />

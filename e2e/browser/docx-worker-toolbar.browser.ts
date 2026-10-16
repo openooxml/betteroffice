@@ -34,8 +34,8 @@ async function savedProperties(page: Page, info: TestInfo, arm: string) {
 test('docx toolbar saves equal formatting and table properties in both arms', async ({ page }, info) => {
   await page.setViewportSize({ width: 2560, height: 1200 });
   const results: Awaited<ReturnType<typeof savedProperties>>[] = [];
-  for (const arm of ['', '&peerless=1']) {
-    const label = arm ? 'worker' : 'default';
+  for (const arm of ['&peerless=0', '']) {
+    const label = arm ? 'hybrid' : 'default';
     await test.step(label, async () => {
       await page.goto('/?format=docx' + arm);
       await page.locator('input[type=file]').last().setInputFiles(resolve(root, 'apps/demo/public/betteroffice-demo.docx'));
