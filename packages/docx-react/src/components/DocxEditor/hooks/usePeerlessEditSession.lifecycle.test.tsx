@@ -185,7 +185,7 @@ for (const reason of ['stale-version', 'stale-anchor', 'read-only']) {
 
 test('replacement source OOM preserves its classification and memory diagnostics', async () => {
   const first = resident();
-  const { ResidentWorkerOutOfMemoryError } = await import('@betteroffice/docx/peerless');
+  const { ResidentWorkerOutOfMemoryError } = await import('@betteroffice/docx/yrs');
   const memory = [{ module: 'docx-edit', bytes: 2048, limitBytes: 1024 }];
   const failure = new ResidentWorkerOutOfMemoryError('Replacement source allocation failed', memory as never);
   const onError = mock((_error: Error) => {});

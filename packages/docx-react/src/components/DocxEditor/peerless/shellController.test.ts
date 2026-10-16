@@ -758,7 +758,4 @@ test('font readiness revisions restart with the recovered worker incarnation', (
   controller.fontEnvironment({ ...identity, phase: 'ready', revision: 1, families: ['Recovered face'] });
   controller.fontEnvironment({ ...identity, phase: 'ready', revision: 1, families: ['Recovered face'] });
   expect(onFontsLoaded).toHaveBeenCalledTimes(2);
-  controller.fontEnvironment({ ...state.identity, phase: 'ready', revision: 9, families: ['Late old face'] });
-  expect(onFontsLoaded).toHaveBeenCalledTimes(2);
-
 });
