@@ -405,3 +405,46 @@ test('deletions held until their structs arrive are not republished', async () =
     for (const session of sessions) session.destroy();
   }
 });
+
+test('a held worker deletion is published once its struct arrives, a held peer one is not', async () => {
+  const sessions = await replicas(3, 'ab');
+  const [a, b, worker] = sessions;
+  const sent: Uint8Array[][] = [];
+  const published: Uint8Array[] = [];
+  const stops = [
+    ...[a, worker].map((session) => session.onUpdate((update, origin) => {
+      if (origin === 'local') sent.at(-1)?.push(update.slice());
+    })),
+    b.onUpdate((update, origin) => { if (origin === 'local') published.push(update.slice()); }),
+  ];
+  const edit = (change: () => void) => {
+    sent.push([]);
+    change();
+  };
+  try {
+    const { paraId } = paragraph(a);
+    edit(() => a.insertText({ story: 'body', paraId, offset: 1 }, 'xyz'));
+    for (const update of sent[0]) worker.applyUpdate(update);
+    edit(() => a.deleteRange({
+      story: 'body',
+      start: { paraId, offset: 3 },
+      end: { paraId, offset: 4 },
+    }));
+    edit(() => worker.deleteRange({
+      story: 'body',
+      start: { paraId, offset: 1 },
+      end: { paraId, offset: 2 },
+    }));
+    const [inserted, peerRemoval, workerRemoval] = sent;
+    for (const update of peerRemoval) b.applyUpdate(update);
+    for (const update of workerRemoval) b.applyLocalUpdate(update);
+    for (const update of inserted) b.applyUpdate(update);
+    expect(paragraph(b).text).toBe('ayb');
+    expect(published.map((update) => clocks(deleteOnly(update)).length)).toEqual([1]);
+    for (const update of published) a.applyUpdate(update);
+    expectConverged([a, b]);
+  } finally {
+    for (const stop of stops) stop();
+    for (const session of sessions) session.destroy();
+  }
+});

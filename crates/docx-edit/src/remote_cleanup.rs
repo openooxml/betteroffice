@@ -10,19 +10,27 @@ use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{IdSet, ReadTxn, TransactionMut, Update};
 
 /// Deletions an open remote integration did not make itself: what its updates carried plus the
-/// deletions yrs held pending before it, which integrating may apply. Set only while it is open.
+/// deletions earlier remote integrations left pending, which integrating may apply. Deletions a
+/// local apply left pending are not carried, so they are published once they apply.
 #[derive(Clone, Default)]
-pub(crate) struct RemoteDeletions(Arc<Mutex<Option<IdSet>>>);
+pub(crate) struct RemoteDeletions(Arc<Mutex<Carried>>);
+
+#[derive(Default)]
+struct Carried {
+    /// Set only while a remote integration is open.
+    open: Option<IdSet>,
+    /// Carried deletions yrs still held pending when their integration committed.
+    pending: IdSet,
+}
 
 impl RemoteDeletions {
     /// Opens `txn` as a remote integration. Holding `txn` keeps every other transaction out
     /// until the integration has committed and cleared its carried set on drop.
     pub(crate) fn integrate<'doc>(&self, txn: TransactionMut<'doc>) -> RemoteIntegration<'_, 'doc> {
-        let pending = ReadTxn::store(&txn)
-            .pending_ds()
-            .cloned()
-            .unwrap_or_default();
-        *self.0.lock().unwrap() = Some(pending);
+        let mut carried = self.0.lock().unwrap();
+        let held = still_pending(&txn, &carried.pending);
+        carried.open = Some(held);
+        drop(carried);
         RemoteIntegration {
             deletions: self,
             txn,
@@ -33,7 +41,7 @@ impl RemoteDeletions {
     /// outside a remote integration or when it deleted nothing else.
     pub(crate) fn residual_update_v1(&self, txn: &TransactionMut) -> Option<Vec<u8>> {
         let carried = self.0.lock().unwrap();
-        let residual = txn.delete_set().diff(carried.as_ref()?);
+        let residual = txn.delete_set().diff(carried.open.as_ref()?);
         (!residual.is_empty()).then(|| delete_only_update_v1(&residual))
     }
 }
@@ -47,7 +55,7 @@ pub(crate) struct RemoteIntegration<'a, 'doc> {
 impl RemoteIntegration<'_, '_> {
     /// Adds deletions a peer sent, so they are not republished as this replica's own.
     pub(crate) fn carry(&mut self, deletions: &IdSet) {
-        if let Some(carried) = self.deletions.0.lock().unwrap().as_mut() {
+        if let Some(carried) = self.deletions.0.lock().unwrap().open.as_mut() {
             carried.merge_with(deletions.clone());
         }
     }
@@ -60,8 +68,17 @@ impl RemoteIntegration<'_, '_> {
 impl Drop for RemoteIntegration<'_, '_> {
     fn drop(&mut self) {
         self.txn.commit();
-        *self.deletions.0.lock().unwrap() = None;
+        let mut carried = self.deletions.0.lock().unwrap();
+        let open = carried.open.take().unwrap_or_default();
+        carried.pending = still_pending(&self.txn, &open);
     }
+}
+
+/// The part of `deletions` that yrs still holds pending in `txn`'s document.
+fn still_pending(txn: &TransactionMut, deletions: &IdSet) -> IdSet {
+    ReadTxn::store(txn)
+        .pending_ds()
+        .map_or_else(IdSet::new, |pending| pending.intersect(deletions))
 }
 
 fn delete_only_update_v1(deletions: &IdSet) -> Vec<u8> {
@@ -183,5 +200,32 @@ mod tests {
 
         assert_eq!(text(&peer), "abd");
         assert!(residuals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_held_local_deletion_is_published_beside_held_remote_ones() {
+        let origin = replica(7);
+        let insert = edit(&origin, |txn, text| text.insert(txn, 0, "abcd"));
+        let worker = replica(8);
+        let state = Update::decode_v1(&insert).unwrap();
+        worker.transact_mut().apply_update(state).unwrap();
+        let local = edit(&worker, |txn, text| text.remove_range(txn, 1, 1));
+        let remote = edit(&origin, |txn, text| text.remove_range(txn, 3, 1));
+        let main = replica(9);
+        let deletions = RemoteDeletions::default();
+        let (_subscription, residuals) = published(&main, &deletions);
+
+        integrate(&main, &deletions, &remote, None);
+        let local = Update::decode_v1(&local).unwrap();
+        let expected = local.delete_set().clone();
+        main.transact_mut_with("worker")
+            .apply_update(local)
+            .unwrap();
+        integrate(&main, &deletions, &insert, None);
+
+        assert_eq!(text(&main), "ac");
+        let residuals = residuals.lock().unwrap().clone();
+        assert_eq!(residuals.len(), 1);
+        assert!(Update::decode_v1(&residuals[0]).unwrap().delete_set() == &expected);
     }
 }
