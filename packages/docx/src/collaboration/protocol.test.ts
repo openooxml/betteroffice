@@ -350,10 +350,18 @@ describe('state vector with the local clock ahead', () => {
   it('is never dominated by the vector it came from, and dominates it', () => {
     const vector = stateVector([1n, 5n], [2n, 3n]);
     for (const client of [1, 2, 9]) {
-      const ahead = withClientClockAhead(vector, client);
+      const ahead = withClientClockAhead(vector, client)!;
       expect(stateVectorDominates(vector, ahead)).toBe(false);
       expect(stateVectorDominates(ahead, vector)).toBe(true);
     }
+  });
+
+  it('crosses no native clock limit', () => {
+    expect(withClientClockAhead(stateVector([7n, 0xffff_ffffn], [5n, 3n]), 7)).toBeUndefined();
+    expect(withClientClockAhead(stateVector([7n, 0xffff_fffen], [5n, 3n]), 7))
+      .toEqual(stateVector([7n, 0xffff_ffffn], [5n, 3n]));
+    expect(withClientClockAhead(stateVector([5n, 0xffff_ffffn]), 7))
+      .toEqual(stateVector([5n, 0xffff_ffffn], [7n, 1n]));
   });
 
   it('rejects vectors that do not decode and invalid client ids', () => {

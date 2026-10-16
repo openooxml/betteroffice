@@ -5,8 +5,8 @@ import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from '../yrs';
 import { createAsyncCollaborationReplica } from './asyncReplica';
 import { CollaborationProvider } from './provider';
-import { decodeMessages, stateVectorDominates } from './protocol';
-import type { CollaborationTransport, CollaborationTransportEvent } from './types';
+import { decodeMessages, encodeVarUint, stateVectorDominates } from './protocol';
+import type { CollaborationError, CollaborationTransport, CollaborationTransportEvent } from './types';
 
 type Kind = 'sync' | 'async';
 
@@ -105,14 +105,34 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
   return { transports, setOnline, reopen, flush, sent, missing, count };
 }
 
+function clocks(vector: Uint8Array): Map<bigint, bigint> {
+  const values: bigint[] = [];
+  for (let index = 0; index < vector.length;) {
+    let value = 0n;
+    for (let shift = 0n; ; shift += 7n) {
+      const byte = vector[index++];
+      value |= BigInt(byte & 0x7f) << shift;
+      if (byte < 0x80) break;
+    }
+    values.push(value);
+  }
+  return new Map(Array.from({ length: Number(values[0]) }, (_, entry) => [values[2 * entry + 1], values[2 * entry + 2]]));
+}
+
+function phantomClockTo(client: number, from: number, to: number): Uint8Array {
+  return Uint8Array.from([1, 1, ...encodeVarUint(client), ...encodeVarUint(from), 0, ...encodeVarUint(to - from), 0]);
+}
+
 async function network(kind: Kind, size: number) {
   const peers = await Promise.all(Array.from({ length: size }, (_, index) => openPeer(kind, 201 + index)));
   const net = relay(size, async (index) => peers[index].session.encodeStateVector());
   const providers = peers.map((peer, index) => peer.connect(net.transports[index]));
+  const errors: CollaborationError[] = [];
+  for (const provider of providers) provider.onError((error) => { errors.push(error); });
   for (const provider of providers) provider.connect();
   await net.flush();
   return {
-    peers, net,
+    peers, net, errors,
     close() {
       for (const provider of providers) provider.destroy();
       for (const peer of peers) peer.session.destroy();
@@ -208,6 +228,31 @@ for (const kind of ['sync', 'async'] as const) {
         expect(left.session.encodeStateVector()).toEqual(vector);
         net.setOnline(0, true);
         await net.flush();
+        expect(right.text()).toEqual(left.text());
+        expect(right.text()[0]).toBe('beta');
+      } finally { close(); }
+    });
+
+    it('publish an offline deletion at the native clock limit', async () => {
+      const { peers: [left, right], net, errors, close } = await network(kind, 2);
+      try {
+        const own = left.session.clientId;
+        const from = Number(clocks(left.session.encodeStateVector()).get(BigInt(own)) ?? 0n);
+        const filler = phantomClockTo(own, from, 0xffff_ffff);
+        for (const peer of [left, right]) peer.session.applyUpdate(filler.slice());
+        await net.flush();
+        expect(clocks(right.session.encodeStateVector()).get(BigInt(own))).toBe(0xffff_ffffn);
+        net.setOnline(0, false);
+        left.erase(0, 0, 6);
+        const mark = net.sent.length;
+        net.setOnline(0, true);
+        await net.flush();
+        const advertised = net.sent.slice(mark)
+          .filter((frame) => frame.from === 0)
+          .flatMap((frame) => decodeMessages(frame.data))
+          .flatMap((message) => message.type === 'sync-step-1' ? [clocks(message.stateVector).get(BigInt(own))] : []);
+        expect(advertised).toEqual([0xffff_ffffn]);
+        expect(errors).toEqual([]);
         expect(right.text()).toEqual(left.text());
         expect(right.text()[0]).toBe('beta');
       } finally { close(); }
