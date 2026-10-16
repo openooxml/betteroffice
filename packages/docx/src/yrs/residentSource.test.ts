@@ -383,7 +383,7 @@ for (const dependent of [false, true]) {
         session: initial.session, incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload,
       });
       expect((await first!.edit(edit(1, 0, 'insertText', { text: 'kept' }))).outcomes[0]?.status).toBe('applied');
-      expect((await first!.edit(edit(2, 1, 'formatRange', { delta: { bold: true } }))).outcomes[0]?.status).toBe('noop');
+      expect((await first!.edit(edit(2, 1, 'formatSelection', { delta: { bold: true } }))).outcomes[0]?.status).toBe('noop');
       const checkpoint = await first!.checkpoint();
       const suffix = { ...edit(3, 1, 'insertText', { text: ' later' }), ...(dependent ? { afterSeq: 2 } : {}) };
       expect((await first!.edit(suffix)).outcomes[0]?.status).toBe('applied');
