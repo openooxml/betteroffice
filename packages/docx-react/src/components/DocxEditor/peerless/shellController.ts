@@ -327,8 +327,9 @@ export function createPeerlessShellController(initial: Options) {
     return settleCommand(current, current.commands.format(intent, { fence: true }));
   };
   const review = (kind: 'acceptRevision' | 'rejectRevision', revisionId: string): Promise<DocxCommandResult> => {
+    const current = ready();
     const pending = reviewTail.then(async () => {
-      const current = ready();
+      if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } } as const;
       await flushAdmittedInput(current);
       const expectVersion = current.viewStore.getSnapshot().editState?.documentVersion;
       if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } } as const;

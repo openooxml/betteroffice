@@ -89,3 +89,19 @@ test('worker next and previous change reveal the adjacent tracked change with wr
   reveal.mockImplementationOnce(async () => false);
   expect(await controller.commands.store.execute('reviewNext', null)).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
 });
+
+test('a queued review command settles as replaced instead of reaching the next document', async () => {
+  const { controller, submit, feed } = reviewFixture();
+  await feed();
+  let release!: () => void;
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { ack: new Promise(resolve => { release = () => resolve({ status: 'applied' }); }) } }));
+  const first = controller.commands.store.execute('reviewAccept', { revisionId: '7' });
+  const second = controller.commands.store.execute('reviewAccept', { revisionId: '9' });
+  while (!submit.mock.calls.length) await Promise.resolve();
+  const next = toolbarFixture();
+  controller.attach(next.binding);
+  release();
+  expect(await first).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+  expect(await second).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+  expect(next.submit).not.toHaveBeenCalled();
+});
