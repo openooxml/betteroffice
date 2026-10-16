@@ -39,7 +39,7 @@ import { createWorkerPluginGeometry } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
-import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
+import { copyWorkerSelection, createClipboardPrefetch, isPasteFragmentAllowed } from './clipboard';
 import { admitInputIntents } from './inputAdmission';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
@@ -272,6 +272,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     requestedReadOnly: boolean;
     requestedRenderEnvironment: string;
     barrier?: Ticket;
+    clipboard?: ReturnType<typeof createClipboardPrefetch>;
   } | null>(null);
   const [loaded, setLoaded] = useState<{ input: DocxInput; source: Uint8Array } | null>(null);
   const reportError = useCallback((error: Error) => { controller.fail(error); errorHandler.current?.(error); }, [controller]);
@@ -611,9 +612,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const onReady = useCallback((binding: PeerlessEditSessionBinding) => {
     controller.attach(binding);
     if (active.current?.binding !== binding) {
+      active.current?.clipboard?.dispose();
       active.current = {
         binding, requestedReadOnly: binding.session.state.editState?.readOnly ?? settings.current.readOnly,
         requestedRenderEnvironment: renderEnvironment.current.requested,
+        clipboard: createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding,
+          readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
+          readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }) }),
       };
     }
     updateReadOnly();
@@ -685,11 +690,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     setPreviewJob(null);
     releaseWorkerPreview(previewJob.client);
   }, [shellState.status, previewJob]);
-  const onClipboard = useCallback(async (cut: boolean) => {
+  const onClipboard = useCallback(async (cut: boolean, data?: DataTransfer | null) => {
     const current = active.current;
     if (!current) return;
     try {
-      const copied = await copyWorkerSelection({ binding: current.binding, cut,
+      const copied = await copyWorkerSelection({ binding: current.binding, cut, data, prefetched: current.clipboard?.take(),
         isCurrent: () => active.current === current,
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
         readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }),

@@ -37,8 +37,10 @@ async function settled(prefetch: ReturnType<typeof createClipboardPrefetch>) {
 const denied = async () => { throw new DOMException('Write permission denied.', 'NotAllowedError'); };
 
 test('a settled range fills the copy event synchronously when the async clipboard is denied', async () => {
-  const { binding, publish, readClipboardSlice, readSelection, prefetch } = fixture();
+  const { binding, publish, readClipboardSlice, readSelection, prefetch, setPending } = fixture();
+  setPending({ ack: Promise.resolve() });
   publish({ workerSelection: range });
+  setPending(undefined);
   expect(await settled(prefetch)).not.toBeNull();
   expect(readClipboardSlice).toHaveBeenCalledTimes(1);
   const { data, transfer: clipboardData } = transfer();
