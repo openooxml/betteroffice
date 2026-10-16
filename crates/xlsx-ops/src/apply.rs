@@ -327,6 +327,10 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             }]))
         }
         Op::MergeCells { sheet, range } => {
+            let range = &CellRange {
+                start: CellRef::new(range.start.row, range.start.col),
+                end: CellRef::new(range.end.row, range.end.col),
+            };
             let s = sheet_mut(wb, *sheet)?;
             let replaced = s
                 .merges
@@ -351,6 +355,10 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             Ok(InvertedOp(inverse))
         }
         Op::UnmergeCells { sheet, range } => {
+            let range = &CellRange {
+                start: CellRef::new(range.start.row, range.start.col),
+                end: CellRef::new(range.end.row, range.end.col),
+            };
             let s = sheet_mut(wb, *sheet)?;
             match s.merges.iter().position(|m| m == range) {
                 Some(pos) => {

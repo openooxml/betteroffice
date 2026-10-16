@@ -3,6 +3,7 @@
 import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
 import { readResidentReviewSnapshot } from './residentReview';
+import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -124,6 +125,7 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
+let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
 let commandHost: ResidentCommandHost | null = null;
 let releaseCommandHost: (() => void) | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
@@ -326,7 +328,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       !frame.pages[caret.pageIndex]!.page.unbuilt ? caret.pageIndex : undefined;
   };
   resetResidentObjectHandles(engine);
-  const hooks = commandHooksFactory(engine, init, {
+  const baseHooks = commandHooksFactory(engine, init, {
     setRenderEnvironment(environment) {
       const input = JSON.parse(init.layoutInput);
       input.renderEnv = { ...input.renderEnv, ...environment };
@@ -339,6 +341,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
     supportsFontEnvironment: true,
     proposals: registry,
+    collaboration: collaboration !== null,
     readSelectionLayout() {
       const { version, frame: selectedFrame } = readSelectionFrame();
       let frame = selectedFrame;
@@ -442,6 +445,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
+  const hooks = collaboration?.wrap(baseHooks) ?? baseHooks;
   commandFrameChanges = changes;
   const prefixNavigation = {
     character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
@@ -1310,10 +1314,12 @@ function replyFailure(id: number, error: unknown): void {
   // Once trapped, every failure is the trap's, answered once per request.
   const failure = trap ?? error;
   if (isCommandOutcomeUnknownError(failure) || failure instanceof SessionFailure) {
+    const message = collaboration && isCommandOutcomeUnknownError(failure)
+      ? `Command ${failure.refusal.seq} has an unknown outcome` : failure.message;
     reply({
-      id, ok: false, error: failure.message,
+      id, ok: false, error: message,
       commandError: {
-        name: failure.name, message: failure.message,
+        name: failure.name, message,
         ...(isCommandOutcomeUnknownError(failure) ? { refusal: failure.refusal } : {}),
       },
       ...(failure instanceof SessionFailure ? { failureCode: failure.code } : {}),
@@ -1442,6 +1448,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'commandUpdate') {
     requireCommandHost();
     if (!session) throw new Error('Resident engine worker is not initialized');
+    if (collaboration) throw new Error('Collaboration merges use the ordered applyRemoteUpdate command');
     noteDocumentChange();
     fontRequirements = null;
     completedLayout = null;
@@ -1475,7 +1482,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const started = performance.now();
     let opening: ResidentEngineSession | undefined;
     try {
-      opening = await createResidentEngineSession(source.heapLimitBytes);
+      opening = await createResidentEngineSession(source.heapLimitBytes, source.collaboration?.clientId);
       const opened = adoptResidentSource(opening, source);
       if (!opened) {
         opening.destroy();
@@ -1483,6 +1490,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         return;
       }
       const { document, hostJson } = opened;
+      if (source.collaboration) collaboration = createResidentCollaboration(opening);
       const metadata = residentSourceMetadata(document);
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
@@ -1865,6 +1873,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     switch (request.read.kind) {
       case 'commentInsertionRange':
         value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
+        break;
+      case 'collabStateVector':
+        value = session.encodeStateVector();
+        break;
+      case 'collabDiff':
+        value = readResidentCollaborationState(session, request.read.stateVector);
+        break;
+      case 'collabPresence':
+        value = !retainedFrame || engine.version() !== request.read.expectVersion || retainedLayoutVersion !== engine.version() ||
+          request.read.expectFrameEpoch !== retainedFrame.frameEpoch || request.read.expectLayoutRevision !== layoutRevision
+          ? null : await readResidentPresence(session, retainedFrame, request.read.peers, request.read.pages, layoutRevision);
         break;
       case 'rawSelectionInfo': {
         const { anchor, focus } = request.read.selection;
@@ -2961,6 +2980,7 @@ function asciiProposalFontsUnchanged(
  * showing the old pages, for a document that replaces it page for page.
  */
 function destroySession(keepSurfaces = false): void {
+  collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
   fontRequirements = null;
   forgetRequirementsCache();
@@ -3117,8 +3137,9 @@ function adoptResidentSource(
   let hostJson: string | undefined;
   let document: import('../types/document').Document;
   let partial = false;
+  const options = { ...source, initialUpdate: source.collaboration?.initialUpdate };
   if (source.document) {
-    opening.openDocument(source.document, source);
+    opening.openDocument(source.document, options);
     document = source.document;
   } else if (source.cut) {
     const cut = opening.openDocxPreview(source.bytes!, source.cut.blocks, source.cut.paragraphBudget);
@@ -3128,7 +3149,7 @@ function adoptResidentSource(
     document = host.document;
     partial = host.wholeBody !== true;
   } else {
-    hostJson = opening.openSourceDocx(source.bytes!, source);
+    hostJson = opening.openSourceDocx(source.bytes!, options);
     document = decodeDocxHostJson(hostJson, source.bytes!).document;
   }
   if (!source.cut) opening.setDirectBatches(true);
@@ -3425,5 +3446,8 @@ function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] 
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
-  scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
+  const collabUpdates = collaboration?.drain();
+  scope.postMessage({ ...response, ...(collabUpdates ? { collabUpdates: { ...collabUpdates,
+    ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
+    memory: wasmModuleMemories() }, [...transfer, ...(collabUpdates?.updates ?? [])]);
 }

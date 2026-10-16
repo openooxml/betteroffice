@@ -26,8 +26,6 @@ export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state:
   if (payload.expectVersion !== engine.proposalEngine.version()) return 'stale-version';
   if (command.kind === 'withdrawProposals') {
     if (!state.proposals) return 'review-unavailable';
-    const known = new Set(state.proposals.snapshot().proposals.map(proposal => proposal.id));
-    if (command.payload.ids.some(id => !known.has(id))) return 'unknown-proposal';
   }
   switch (command.kind) {
     case 'addComment': case 'setCommentRanges': {

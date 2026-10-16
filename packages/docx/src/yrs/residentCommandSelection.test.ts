@@ -264,6 +264,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
       buildDisplayPagesFrame: buildPages ?? (() => { throw new Error('Unexpected page build'); }),
     },
     commandHooksFactory: factory,
+    collaboration: null,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
@@ -636,7 +637,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   const source = readFileSync(new URL('./residentEngineWorker.ts', import.meta.url), 'utf8');
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    session: arm.engine, commandHooksFactory: factory,
+    session: arm.engine, commandHooksFactory: factory, collaboration: null,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,

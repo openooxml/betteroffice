@@ -49,21 +49,21 @@ async function savedTables(page: Page, info: TestInfo, name: string): Promise<st
   }, xml);
 }
 
-async function copiedFlavors(page: Page): Promise<{ types: string[]; html: string; text: string }> {
-  let flavors = { types: [] as string[], html: '', text: '' };
-  await expect.poll(async () => {
-    flavors = await pinnedEvaluate(page, async () => {
-      const items = await navigator.clipboard.read();
-      const types = items.flatMap(item => [...item.types]);
-      const read = async (type: string) => {
-        const item = items.find(entry => entry.types.includes(type));
-        return item ? (await item.getType(type)).text() : '';
-      };
-      return { types, html: await read('text/html'), text: await read('text/plain') };
-    });
-    return flavors.text.includes('RIGHT');
-  }).toBe(true);
-  return flavors;
+async function expectCopiedTable(page: Page) {
+  // A read overlapping the copy's clipboard write can return its text/plain without its text/html.
+  await expect.poll(() => pinnedEvaluate(page, async () => {
+    const items = await navigator.clipboard.read();
+    const types = items.flatMap(item => [...item.types]);
+    const read = async (type: string) => {
+      const item = items.find(entry => entry.types.includes(type));
+      return item ? (await item.getType(type)).text() : '';
+    };
+    return { types, html: await read('text/html'), text: await read('text/plain') };
+  })).toMatchObject({
+    types: expect.arrayContaining(['text/html']),
+    html: expect.stringContaining('<table'),
+    text: expect.stringContaining('RIGHT'),
+  });
 }
 
 async function selectTable(page: Page, input: Locator, arm: Arm) {
@@ -87,9 +87,7 @@ async function copyPasteAfterTable(page: Page, input: Locator, arm: Arm) {
   await pinnedEvaluate(page, () => navigator.clipboard.writeText('sentinel'));
   await selectTable(page, input, arm);
   await input.press('ControlOrMeta+c');
-  const flavors = await copiedFlavors(page);
-  expect(flavors.types).toContain('text/html');
-  expect(flavors.html).toContain('<table');
+  await expectCopiedTable(page);
   await caretAfterTable(input, arm);
   await input.press('ControlOrMeta+v');
 }
