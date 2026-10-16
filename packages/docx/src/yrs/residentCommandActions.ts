@@ -149,9 +149,6 @@ interface DocxCommandPolicy {
   payload?(payload: Record<string, unknown>): boolean;
 }
 
-const REVIEW_COMMAND_POLICIES = Object.fromEntries(Object.entries(reviewCommandKeys)
-  .map(([kind, keys]) => [kind, { keys, exact: true }])) as Record<keyof typeof reviewCommandKeys, DocxCommandPolicy>;
-
 const DOCX_COMMAND_POLICIES = {
   applyRemoteUpdate: { keys: ['update'], exact: true, session: 'collaboration', origin: 'remote',
     payload: ({ update }) => update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_COLLABORATION_FRAME_BYTES },
@@ -174,7 +171,15 @@ const DOCX_COMMAND_POLICIES = {
   moveObject: { keys: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
   replaceMatches: { keys: ['targets', 'text', 'expectVersion', 'suggesting'], exact: true },
-  ...REVIEW_COMMAND_POLICIES,
+  addComment: { keys: reviewCommandKeys.addComment, exact: true },
+  updateComment: { keys: reviewCommandKeys.updateComment, exact: true },
+  setCommentRanges: { keys: reviewCommandKeys.setCommentRanges, exact: true },
+  removeComment: { keys: reviewCommandKeys.removeComment, exact: true },
+  acceptRevision: { keys: reviewCommandKeys.acceptRevision, exact: true },
+  rejectRevision: { keys: reviewCommandKeys.rejectRevision, exact: true },
+  propose: { keys: reviewCommandKeys.propose, exact: true },
+  setProposalStates: { keys: reviewCommandKeys.setProposalStates, exact: true },
+  withdrawProposals: { keys: reviewCommandKeys.withdrawProposals, exact: true },
   select: { keys: ['selection'] }, insertText: { keys: ['text'] }, replaceSelection: { keys: ['text'] },
   navigate: { keys: ['unit', 'direction', 'extend', 'goalX'], exact: true },
   navigateCell: { keys: ['direction', 'extend', 'createLastRow'] },
