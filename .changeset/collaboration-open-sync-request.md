@@ -4,4 +4,4 @@
 "@betteroffice/pptx": patch
 ---
 
-Reconnecting replicas mark their opening sync request, and every peer answers it with one request of its own, so offline deletions reach peers that already received later edits. Pinned client ids must now stay below `Number.MAX_SAFE_INTEGER - 1`.
+Deletions made offline now reach every peer after a reconnect, even when newer edits reach those peers first. Pinned client ids must now stay below `Number.MAX_SAFE_INTEGER - 1`.
