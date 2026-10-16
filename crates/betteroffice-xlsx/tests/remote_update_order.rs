@@ -8,6 +8,7 @@ use yrs::updates::encoder::Encode;
 use yrs::{Doc, Map, ReadTxn, Transact, Update};
 
 const SAMPLE: &[u8] = include_bytes!("../../../packages/xlsx/test-fixtures/sample.xlsx");
+const SAMPLE_V5: &[u8] = include_bytes!("fixtures/workbook-schema-v5-sample.update.bin");
 
 fn open(client_id: u64) -> Workbook {
     Workbook::open_collaborative(SAMPLE, client_id).unwrap()
@@ -69,6 +70,21 @@ fn merge(updates: &[&Vec<u8>]) -> Vec<u8> {
             .map(|update| Update::decode_v1(update).unwrap()),
     )
     .encode_v1()
+}
+
+fn released_meta() -> (i64, String) {
+    let doc = Doc::new();
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(SAMPLE_V5).unwrap())
+        .unwrap();
+    let meta = doc.get_or_insert_map("xlsx");
+    let txn = doc.transact();
+    let version = meta.get(&txn, "schemaVersion");
+    let fingerprint = meta.get(&txn, "baseFingerprint");
+    (
+        version.and_then(|value| value.cast().ok()).unwrap(),
+        fingerprint.and_then(|value| value.cast().ok()).unwrap(),
+    )
 }
 
 fn assert_same_state(left: &Workbook, right: &Workbook) {
@@ -159,8 +175,13 @@ fn a_held_update_carrying_an_older_schema_from_a_higher_client_settles() {
         .apply_update(Update::decode_v1(&open(852).encode_state_as_update_v1()).unwrap())
         .unwrap();
     let before = doc.transact().state_vector();
-    doc.get_or_insert_map("xlsx")
-        .insert(&mut doc.transact_mut(), "schemaVersion", 5_i64);
+    let (version, fingerprint) = released_meta();
+    assert_eq!(version, 5);
+    let meta = doc.get_or_insert_map("xlsx");
+    let mut txn = doc.transact_mut();
+    meta.insert(&mut txn, "schemaVersion", version);
+    meta.insert(&mut txn, "baseFingerprint", fingerprint);
+    drop(txn);
     let stale = doc.transact().encode_diff_v1(&before);
 
     let target = deliver(open(853), &[&merge(&[&stale, &updates[1]])]);
