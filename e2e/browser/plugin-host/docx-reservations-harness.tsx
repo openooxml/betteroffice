@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client';
-import { useEffect, useRef, useState } from 'react';
+import { createRef, useEffect, useState } from 'react';
 import JSZip from 'jszip';
 import {
   DocxEditor,
@@ -54,8 +54,11 @@ interface ReservationProbe {
   setReadOnly(readOnly: boolean): void;
 }
 
+const editorRef = createRef<DocxEditorRef>();
 const probe: ReservationProbe = {
-  editor: null,
+  get editor() {
+    return editorRef.current;
+  },
   geometry: null,
   target: null,
   setPlugins() {},
@@ -138,12 +141,10 @@ function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [readOnly, setReadOnly] = useState(new URLSearchParams(location.search).has('readOnly'));
-  const editor = useRef<DocxEditorRef>(null);
   useEffect(() => {
     void reservationDocument().then(setBuffer);
   }, []);
   useEffect(() => {
-    probe.editor = editor.current;
     probe.setPlugins = setEnabled;
     probe.setReadOnly = setReadOnly;
   });
@@ -151,7 +152,7 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <DocxEditor
-        ref={editor}
+        ref={editorRef}
         documentBuffer={buffer}
         experimentalPeerless
         plugins={enabled ? PLUGINS : NONE}
