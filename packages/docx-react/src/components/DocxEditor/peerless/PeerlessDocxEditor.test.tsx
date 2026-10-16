@@ -142,7 +142,8 @@ class FakeWorker {
         },
         frame: {
           coversThroughSeq: 0, revision: 1,
-          payload: { frame: commandFrame(1).payload.frame, caret: { frameEpoch: 1, caretRect: null }, layoutRevision },
+          payload: { frame: commandFrame(1).payload.frame, caret: { frameEpoch: 1, caretRect: null }, layoutRevision,
+            stagedPresentation: { frameEpoch: 1, pages: [] } },
         },
       };
       this.initial = initial;
