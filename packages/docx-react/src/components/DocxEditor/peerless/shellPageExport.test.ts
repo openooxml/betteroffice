@@ -8,6 +8,7 @@ import { decodeDocxHostJson, ResidentEngineWorkerClient } from '@betteroffice/do
 import { residentWorkerFactory } from '../../../../../docx/src/yrs/__fixtures__/residentWorker';
 import { createPeerlessShellController } from './shellController';
 import { createPeerlessViewStore } from './viewStore';
+import { admitIntent, createInputAdmission } from './inputAdmission';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 
 const ROOT = resolve(import.meta.dir, '../../../../../..');
@@ -43,10 +44,12 @@ async function fixture(readOnly = false, commandFonts = false) {
   const request = JSON.stringify(layout);
   const relayout = () => resident.layoutDocumentWithRegionsRetainedJson(request);
   relayout();
+  const baseExport = JSON.parse(resident.exportStructuredWithPagesJson({ revisionView: 'markup', includeGeometry: true }, request));
+  const aliasBytes = new Uint8Array(readFileSync(resolve(ROOT, 'crates/docx-raster/tests/assets/Carlito-Regular.ttf')));
   if (commandFonts) await client.commandInit({
     session: 'page-export', incarnation: 1, epoch: 1, readOnly,
-    fonts: [fontBytes, { substituteOf: 0, family: 'MS Mincho' }],
-    fontRegistrationSlots: { fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [1]])) },
+    fonts: [fontBytes, aliasBytes, { substituteOf: 1, family: 'MS Mincho' }],
+    fontRegistrationSlots: { fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [2]])) },
     layoutInput: request, layoutWithRegions: true, layoutRevision: 1, extras: '{}', provisionalPages: 3, displayWindow: [0, 3],
   });
   const viewStore = createPeerlessViewStore({ identity: { session: 'worker', incarnation: 1, epoch: 1 },
@@ -57,7 +60,7 @@ async function fixture(readOnly = false, commandFonts = false) {
   const settings = { read: client.documentRead.bind(client), layoutRequest: () => request, zoom: 1, readOnly, focus() {} };
   const controller = createPeerlessShellController(settings);
   controller.attach(binding);
-  return { controller, binding, resident, relayout, request, settings, viewStore, client,
+  return { controller, binding, resident, relayout, request, settings, viewStore, client, baseExport,
     close: async () => { controller.dispose(); client.destroy(); } };
 }
 
@@ -123,7 +126,7 @@ test('paged worker export waits for the layout already in progress', async () =>
 
 test('paged worker export uses worker font registrations while still checking the render environment', async () => {
   const h = await fixture(true, true);
-  const options = { revisionView: 'markup' as const, stories: ['body' as const] };
+  const options = { revisionView: 'markup' as const, stories: ['body' as const], includeGeometry: true };
   try {
     const strict = JSON.parse((await h.client.documentRead({ kind: 'exportStructuredWithPages', options, currentRequest: h.request })).value);
     expect(strict).toMatchObject({ ok: false, failure: { code: 'stale-layout' } });
@@ -131,6 +134,10 @@ test('paged worker export uses worker font registrations while still checking th
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.failure.message);
     expect(result.content.layout.pages).toHaveLength(2);
+    expect(result.content.layout.fragments.map(fragment => fragment.geometry)).not.toEqual(
+      h.baseExport.content.layout.fragments.map((fragment: { geometry: unknown }) => fragment.geometry)
+    );
+    expect(result.content.layout.layoutVersion).not.toBe(h.baseExport.content.layout.layoutVersion);
     const input = JSON.parse(h.request);
     input.renderEnv = { ...input.renderEnv, showHiddenText: true };
     h.controller.update({ ...h.settings, layoutRequest: () => JSON.stringify(input) });
@@ -138,3 +145,119 @@ test('paged worker export uses worker font registrations while still checking th
       .toMatchObject({ ok: false, failure: { code: 'stale-layout' } });
   } finally { await h.close(); }
 });
+
+function presentLayout(h: Awaited<ReturnType<typeof fixture>>) {
+  h.viewStore.installFrameGeometry({ identity: h.viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
+}
+
+for (const revisionView of ['accepted', 'original'] as const) {
+  test(`paged worker export waits for markup layout when exporting ${revisionView} revisions`, async () => {
+    const h = await fixture(true);
+    const preview = JSON.parse(h.request);
+    preview.renderEnv = { ...preview.renderEnv, revisionPreview: { '1': 'accepted' } };
+    h.resident.layoutDocumentWithRegionsRetainedJson(JSON.stringify(preview));
+    const subscribe = h.viewStore.subscribe;
+    h.viewStore.subscribe = listener => {
+      const stop = subscribe(listener);
+      queueMicrotask(() => { h.relayout(); presentLayout(h); });
+      return stop;
+    };
+    try {
+      expect(JSON.parse(h.resident.exportStructuredWithPagesJson({ revisionView }, h.request)))
+        .toMatchObject({ ok: false, failure: { code: 'unsupported-revision-layout' } });
+      expect((await h.controller.ref.exportStructuredWithPages({ revisionView })).ok).toBe(true);
+    } finally { await h.close(); }
+  });
+}
+
+test('paged worker export preserves an explicit revision preview refusal without waiting', async () => {
+  const h = await fixture(true);
+  const preview = JSON.parse(h.request);
+  preview.renderEnv = { ...preview.renderEnv, revisionPreview: { '1': 'accepted' } };
+  let subscriptions = 0;
+  const subscribe = h.viewStore.subscribe;
+  h.viewStore.subscribe = listener => { subscriptions += 1; return subscribe(listener); };
+  h.controller.update({ ...h.settings, layoutRequest: () => JSON.stringify(preview) });
+  try {
+    expect(await h.controller.ref.exportStructuredWithPages({ revisionView: 'accepted' }))
+      .toMatchObject({ ok: false, failure: { code: 'unsupported-revision-layout' } });
+    expect(subscriptions).toBe(0);
+  } finally { await h.close(); }
+});
+
+test('paged worker export polls while layout converges after the first completion', async () => {
+  const h = await fixture(true);
+  const next = JSON.parse(h.request);
+  next.renderEnv = { ...next.renderEnv, showHiddenText: true };
+  const request = JSON.stringify(next);
+  let reads = 0;
+  h.controller.update({ ...h.settings, layoutRequest: () => request, read: async (...args) => {
+    const result = await h.settings.read(...args);
+    reads += 1;
+    if (reads === 2) h.resident.layoutDocumentWithRegionsRetainedJson(request);
+    return result;
+  } });
+  const subscribe = h.viewStore.subscribe;
+  h.viewStore.subscribe = listener => { const stop = subscribe(listener); queueMicrotask(() => presentLayout(h)); return stop; };
+  try {
+    expect((await h.controller.ref.exportStructuredWithPages({ revisionView: 'markup' })).ok).toBe(true);
+    expect(reads).toBe(3);
+  } finally { await h.close(); }
+});
+
+test('paged worker export polls for font readiness after layout completion', async () => {
+  const h = await fixture(true);
+  let requests = 0;
+  let fontsReady = false;
+  h.controller.update({ ...h.settings, layoutRequest: () => {
+    requests += 1;
+    if (requests === 2) queueMicrotask(() => { h.relayout(); fontsReady = true; });
+    return fontsReady ? h.request : null;
+  } });
+  const subscribe = h.viewStore.subscribe;
+  h.viewStore.subscribe = listener => { const stop = subscribe(listener); queueMicrotask(() => presentLayout(h)); return stop; };
+  try {
+    expect((await h.controller.ref.exportStructuredWithPages({ revisionView: 'markup' })).ok).toBe(true);
+    expect(requests).toBe(3);
+  } finally { await h.close(); }
+});
+
+for (const replace of [false, true]) {
+  test(`paged worker export ${replace ? 'throws on replacement' : 'refuses an edit admitted'} while its read is pending`, async () => {
+    const h = await fixture();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const reading = new Promise<void>(resolve => { entered = resolve; });
+    h.controller.update({ ...h.settings, read: async (...args) => {
+      const result = await h.settings.read(...args);
+      entered();
+      await held;
+      return result;
+    } });
+    Object.assign(h.binding.session, { state: { selection: null, editState: { readOnly: false } } });
+    h.binding.session.submit = (() => {
+      const paragraph = h.resident.paragraphs('body')[0]!;
+      const result = h.resident.proposalEngine.applyEdits({ expectVersion: h.resident.proposalEngine.version(), steps: [
+        { op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: paragraph.paraId }, at: 'end', text: ' Concurrent edit' },
+      ] });
+      expect(result.ok).toBe(true);
+      const state = h.viewStore.getSnapshot();
+      h.viewStore.acceptWorkerState(state.identity, { epoch: 1, version: state.version + 1, throughSeq: 1,
+        presentedThroughSeq: 0, selection: null, editState: state.editState });
+      return { id: 1, seq: 1, ack: Promise.resolve({ status: 'applied' }), presented: Promise.resolve('presented') };
+    }) as typeof h.binding.session.submit;
+    h.binding.admission = createInputAdmission({ session: h.binding.session, viewStore: h.viewStore,
+      echoPainter: { disable() {}, preview: () => undefined } as never });
+    try {
+      const pending = h.controller.ref.exportStructuredWithPages({ revisionView: 'markup' });
+      await reading;
+      if (replace) { h.controller.detach(h.binding); h.controller.attach({ ...h.binding }); }
+      else expect(admitIntent(h.binding.admission, { kind: 'insertText', payload: { text: ' Concurrent edit' } }).status).toBe('submitted');
+      release();
+      if (replace) await expect(pending).rejects.toThrow('Document was replaced');
+      else expect(await pending).toMatchObject({ ok: false, failure: { code: 'stale-document' } });
+    } finally { release(); h.binding.admission.dispose(); await h.close(); }
+  });
+}
