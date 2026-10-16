@@ -320,7 +320,10 @@ fn adding_a_comment_where_its_prefixes_are_unbound_writes_the_part_whole() {
         .unwrap();
     *bytes = std::str::from_utf8(bytes)
         .unwrap()
-        .replace(" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"", "")
+        .replace(
+            " xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"",
+            "",
+        )
         .into_bytes();
     let source = ooxml_opc::rezip_parts(&parts).unwrap();
     let unchanged = write_docx_s13(save_request(&source), &source).unwrap();
