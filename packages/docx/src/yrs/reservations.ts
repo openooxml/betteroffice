@@ -43,6 +43,8 @@ export type DocxReservation =
 /** @internal Every owner's reservations, computed at `version`. */
 export interface DocxReservationsPayload {
   version: string;
+  /** Names this payload in the frames laid out with it. */
+  key?: string;
   sets: readonly { owner: string; version?: string; items: readonly DocxReservation[] }[];
 }
 
@@ -141,6 +143,7 @@ function validItem(value: unknown): value is DocxReservation {
 /** @internal Whether `value` is a well-formed payload: ids unique per owner, owners unique. */
 export function validReservationsPayload(value: unknown): value is DocxReservationsPayload {
   if (!record(value) || !text(value.version) || !Array.isArray(value.sets)) return false;
+  if (value.key !== undefined && !text(value.key)) return false;
   const owners = new Set<string>();
   return value.sets.every((set: unknown) => {
     if (!record(set) || !text(set.owner) || !set.owner || owners.has(set.owner)) return false;

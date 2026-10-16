@@ -687,12 +687,13 @@ function applyPreparedDocxCommand(
   };
   if (command.kind === 'setRenderEnvironment') {
     const { reservations, ...rest } = command.payload;
+    const current = reservations?.version === String(context.currentVersion);
     environment!.setRenderEnvironment!(reservations
-      ? { ...rest, reservations: reservations.version === String(context.currentVersion)
+      ? { ...rest, reservations: current
         ? resolveReservations(engine.geometryReader, reservations, engine.proposalEngine.version(),
           environment?.getLayoutReservations?.() ?? null)
         : retainReservationOwners(reservations, environment?.getLayoutReservations?.() ?? null) }
-      : rest);
+      : rest, reservations && (current ? { version: reservations.version, key: reservations.key ?? null } : null));
     return result('noop');
   }
   if (command.kind === 'applyEdits') {

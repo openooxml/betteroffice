@@ -343,8 +343,18 @@ export type DocxCommandIntent = {
   [K in DocxCommandKind]: CommandEnvelope<DocxCommandPayloads[K]> & { kind: K };
 }[DocxCommandKind];
 
+/**
+ * @internal The reservation set a layout includes: the `version` and `key` of the payload it was
+ * resolved from, or a null `key` for entries kept from an earlier set.
+ */
+export interface DocxFrameReservations {
+  version: string;
+  key: string | null;
+}
+
 export interface DocxCommandFramePayload {
   fontEnvironment?: ResidentFontEnvironmentSnapshot;
+  reservations?: DocxFrameReservations;
   parts?: ResidentPartGeometry[];
   geometry?: ResidentFrameGeometry;
   frame: ArrayBuffer;
@@ -434,12 +444,15 @@ export interface ResidentCommandHooksEnvironment {
   proposals?: DocxProposalRegistry;
   readSelectionLayout(): DocxCommandSelectionLayout;
   getLayoutReservations?(): DocxResolvedReservations | null;
-  /** Omits `reservations` to keep the current ones. */
+  /**
+   * Omits `reservations` to keep the current ones; `set` names the payload they were resolved
+   * from, null when they were kept from an earlier set.
+   */
   setRenderEnvironment?(environment: {
     themeColors: Record<string, string>;
     showHiddenText: boolean;
     reservations?: DocxResolvedReservations;
-  }): void;
+  }, set?: DocxFrameReservations | null): void;
 }
 
 export type ResidentCommandHooksFactory = (

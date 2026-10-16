@@ -42,7 +42,7 @@ import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
 import { admitInputIntents } from './inputAdmission';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
@@ -215,8 +215,20 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }));
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
   const reservations = usePluginReservations(pluginHost, activations);
-  const reservationsRef = useRef({ payload: reservations, sent: false });
+  const reservationsRef = useRef<{ payload: DocxReservationsPayload | null; sent: boolean; source: DocxReservationsPayload | string | null;
+    keyed: DocxReservationsPayload | null; serial: number }>({ payload: reservations, sent: false, source: null, keyed: null, serial: 0 });
   reservationsRef.current.payload = reservations;
+  /** The set the editor sends, keyed so a frame names the set it was laid out with; once sent, none is an empty set. */
+  const sentReservations = useCallback((): DocxReservationsPayload | null => {
+    const reserved = reservationsRef.current;
+    const source = reserved.payload ?? (reserved.sent ? pluginHost.version() : null);
+    if (source === null) return null;
+    if (reserved.source !== source) {
+      reserved.source = source;
+      reserved.keyed = { ...(typeof source === 'string' ? { version: source, sets: [] } : source), key: String(++reserved.serial) };
+    }
+    return reserved.keyed;
+  }, [pluginHost]);
   useEffect(() => {
     pluginHost.setReporter(props.onPluginError);
     pluginHost.setGrants(props.pluginGrants);
@@ -459,8 +471,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const theme = settings.current.theme ?? renderEnvironment.current.theme;
     const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
     const reserved = reservationsRef.current;
-    const reservations = reserved.payload ??
-      (reserved.sent ? { version: pluginHost.version(), sets: [] } : undefined);
+    const reservations = sentReservations();
     const payload = {
       themeColors, showHiddenText: settings.current.showHiddenText, ...(reservations ? { reservations } : {}),
     };
@@ -483,7 +494,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       current.requestedRenderEnvironment = requested;
       reserved.sent = reserved.payload !== null;
     }
-  }, [pluginHost, reportRecoverableError]);
+  }, [sentReservations, reportRecoverableError]);
   const updateFontEnvironment = useCallback(() => {
     const current = active.current;
     const client = worker.current;
@@ -609,6 +620,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         objects: frame.payload.geometry,
         documentWidth: frame.payload.documentWidth,
         layoutProvisional: frame.payload.layoutProvisional,
+        ...(frame.payload.reservations ? { reservations: frame.payload.reservations } : {}),
         pages,
         caret: caret.caretRect ? { ...caret.caretRect,
           x: caret.caretRect.x + (pages[caret.caretRect.pageIndex]?.bounds.x ?? 0), y: caret.caretRect.y + (pages[caret.caretRect.pageIndex]?.bounds.y ?? 0), width: 1 } : null,

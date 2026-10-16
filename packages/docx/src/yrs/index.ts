@@ -82,6 +82,7 @@ export type {
   DocxCommandEchoContext,
   DocxCommandKind,
   DocxCommandFrame,
+  DocxFrameReservations,
   DocxCommandPageIdentity,
   DocxCommandPayloads,
   DocxCommandSelection,

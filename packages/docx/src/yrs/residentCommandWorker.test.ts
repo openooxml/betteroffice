@@ -376,6 +376,27 @@ test('stale render environment reservations retain listed owners and clear remov
   }
 }, TIMEOUT);
 
+test('frames name the reservation set their layout includes, or none current for a stale set', async () => {
+  const { client, initial, point } = await openWorker();
+  try {
+    const environment = (version: string, key: string) => ({ themeColors: {}, showHiddenText: false, reservations: { version, key, sets: [{ owner: 'A', items: [{
+      id: 'a', kind: 'inline', width: 30, height: 20, anchor: { kind: 'range', version, range: {
+        story: 'body', view: 'accepted', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 } } },
+    }] }] } } as never);
+    expect(initial.frame!.payload.reservations).toBeUndefined();
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment('0', 'k1')));
+    expect(set.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
+    const edited = await client.edit(intent(2, 0, 'insertText', { text: '!' }));
+    expect(edited.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
+    const stale = await client.edit(intent(3, 1, 'setRenderEnvironment', environment('0', 'k2')));
+    expect(stale.frame!.payload.reservations).toEqual({ version: '0', key: null });
+    const current = await client.edit(intent(4, 1, 'setRenderEnvironment', environment('1', 'k3')));
+    expect(current.frame!.payload.reservations).toEqual({ version: '1', key: 'k3' });
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test.each([true, false])('render environment reservations survive a review preview relayout (regions=%s)', async (layoutWithRegions) => {
   const { client, initial, point } = await openWorker({ layoutWithRegions });
   try {
