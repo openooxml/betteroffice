@@ -1,6 +1,6 @@
 //! Deterministic recursive serializer state.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::paragraph::HexIdAllocator;
 use crate::paragraph_identity::{allocate_paragraph_id, format_paragraph_id};
@@ -31,7 +31,6 @@ struct SpliceRecorder {
     expected: HashSet<u32>,
     recorded: RecordedParagraphs,
     conflict: bool,
-    permissions: BTreeMap<u32, Vec<String>>,
 }
 
 /// The paragraphs written for a spliced part, outside any other paragraph.
@@ -44,6 +43,9 @@ pub(crate) struct RecordedParagraphs {
     /// Every recorded paragraph in writing order: its `sourceOrdinal`, or `None` for the next
     /// of `inserted`.
     pub(crate) order: Vec<Option<u32>>,
+    /// Whether one source paragraph was written twice differently, or one with a
+    /// `sourceOrdinal` the part does not address was written; only the first is recorded.
+    pub(crate) conflict: bool,
 }
 
 impl SerializerContext {
@@ -135,36 +137,12 @@ impl SerializerContext {
         });
     }
 
-    /// The recorded paragraphs; `None` when one source paragraph was written twice differently,
-    /// or one with a `sourceOrdinal` the part does not address was written.
+    /// The recorded paragraphs.
     pub(crate) fn end_splice(&mut self) -> Option<RecordedParagraphs> {
-        self.splice
-            .take()
-            .filter(|recorder| !recorder.conflict)
-            .map(|recorder| recorder.recorded)
-    }
-
-    /// Carries the permission markers of `sources` into the paragraph written first for each
-    /// `sourceOrdinal` it holds until [`Self::end_splice`] (see [`super::permissions::sources`]).
-    pub(crate) fn keep_permissions(&mut self, sources: BTreeMap<u32, Vec<String>>) {
-        if let Some(splice) = self.splice.as_mut() {
-            splice.permissions = sources;
-        }
-    }
-
-    /// `xml`, written for the paragraph with `ordinal` as its `sourceOrdinal`, with the
-    /// permission markers it takes when it sits outside any other paragraph.
-    pub(crate) fn with_permissions(&mut self, ordinal: Option<u32>, xml: String) -> String {
-        if !self.rendered_page_breaks.is_empty() {
-            return xml;
-        }
-        let sources = ordinal
-            .zip(self.splice.as_mut())
-            .and_then(|(ordinal, splice)| splice.permissions.remove(&ordinal));
-        match sources {
-            Some(sources) => super::permissions::carry(&sources, &xml),
-            None => xml,
-        }
+        self.splice.take().map(|recorder| RecordedParagraphs {
+            conflict: recorder.conflict,
+            ..recorder.recorded
+        })
     }
 
     /// Records a paragraph written outside any other paragraph: by its `sourceOrdinal`, which

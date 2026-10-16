@@ -1,31 +1,54 @@
-//! Permission range markers, which the model does not keep, carried from a paragraph's source
-//! XML into the XML written for it.
+//! Permission range markers, which the model does not keep, carried from a story part's source
+//! paragraphs into the paragraphs a save writes for them.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
 
-use crate::paragraph_identity::{paragraph_occurrences, tags, unescaped};
+use crate::paragraph_identity::{attribute, paragraph_occurrences, tags, unescaped};
 
+use super::context::RecordedParagraphs;
 use super::paragraph_ids::S13SplicedPart;
 use super::splice::{POSITIONED, paragraph_span};
 
 const MARKERS: [&str; 2] = ["w:permStart", "w:permEnd"];
 
+/// The text that stands between two paragraphs read as one.
+const SEPARATOR: char = '\u{2029}';
+
+/// The most insertions and deletions [`edits`] looks for before it takes everything between
+/// the common prefix and suffix as one edit.
+const EDIT_LIMIT: usize = 256;
+
 fn has_markers(xml: &str) -> bool {
     MARKERS.iter().any(|marker| xml.contains(marker))
 }
 
-/// For each paragraph `part` writes whose permission markers a save must carry, the source XML
-/// of the paragraphs whose text and markers it takes, in order: its own, and those of removed
-/// paragraphs that hold a marker, each taken by the nearest written paragraph before it, else
-/// the nearest after it.
-pub(crate) fn sources(source: &str, part: &S13SplicedPart) -> BTreeMap<u32, Vec<String>> {
-    let mut found = BTreeMap::new();
+/// A recorded paragraph: written from the source paragraph with this ordinal, or the one at
+/// this index of those written without one.
+#[derive(Clone, Copy)]
+enum Slot {
+    Written(u32),
+    Inserted(usize),
+}
+
+/// Carries the permission markers of the paragraphs of `source` into those `recorded` holds
+/// for `part`, and into `serialized`, which holds them in writing order. Each paragraph written
+/// from a source paragraph takes, as one text, that paragraph and the removed ones whose nearest
+/// written paragraph it is (the one before them, else after), and places their markers in
+/// itself and the paragraphs written without a source paragraph that follow it, before the
+/// next one written from one. Paragraphs of groups without markers are not read.
+pub(crate) fn keep(
+    source: &str,
+    part: &S13SplicedPart,
+    recorded: &mut RecordedParagraphs,
+    serialized: &mut String,
+) {
     if !has_markers(source) {
-        return found;
+        return;
     }
     let Some(occurrences) = paragraph_occurrences(source) else {
-        return found;
+        return;
     };
     let xml = |ordinal: u32| {
         occurrences
@@ -34,45 +57,122 @@ pub(crate) fn sources(source: &str, part: &S13SplicedPart) -> BTreeMap<u32, Vec<
             .and_then(|occurrence| paragraph_span(source, occurrence))
             .map(|span| &source[span])
     };
-    let written: BTreeSet<u32> = part.paragraphs.iter().copied().collect();
-    let mut taken: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
-    for &ordinal in &written {
-        if xml(ordinal).is_some_and(has_markers) {
-            taken.entry(ordinal).or_default().insert(ordinal);
-        }
-    }
+    let written: BTreeSet<u32> = recorded.written.keys().copied().collect();
+    let mut taken: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for &ordinal in &part.removed {
-        if !xml(ordinal).is_some_and(has_markers) {
-            continue;
-        }
         let taker = written
             .range(..ordinal)
             .next_back()
             .or_else(|| written.range(ordinal..).next());
         if let Some(&taker) = taker {
-            let paragraphs = taken.entry(taker).or_default();
-            paragraphs.insert(taker);
-            paragraphs.insert(ordinal);
+            taken.entry(taker).or_default().push(ordinal);
         }
     }
-    for (taker, paragraphs) in taken {
-        let paragraphs: Option<Vec<String>> = paragraphs
-            .into_iter()
-            .map(|ordinal| xml(ordinal).map(str::to_owned))
-            .collect();
-        if let Some(paragraphs) = paragraphs {
-            found.insert(taker, paragraphs);
+    let mut sources: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    for &ordinal in &written {
+        let mut ordinals = taken.remove(&ordinal).unwrap_or_default();
+        ordinals.push(ordinal);
+        ordinals.sort_unstable();
+        let paragraphs: Vec<&str> = ordinals.into_iter().filter_map(&xml).collect();
+        if paragraphs.iter().any(|paragraph| has_markers(paragraph)) {
+            sources.insert(ordinal, paragraphs);
         }
     }
-    found
+    if sources.is_empty() {
+        return;
+    }
+    let mut slots = Vec::with_capacity(recorded.order.len());
+    let mut groups: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    let mut leading = Vec::new();
+    let mut current = None;
+    let mut inserted = 0;
+    for entry in &recorded.order {
+        let position = slots.len();
+        match *entry {
+            Some(ordinal) => {
+                slots.push(Slot::Written(ordinal));
+                current = Some(ordinal);
+                if sources.contains_key(&ordinal) {
+                    let group = groups.entry(ordinal).or_default();
+                    group.append(&mut leading);
+                    group.push(position);
+                }
+                leading.clear();
+            }
+            None => {
+                slots.push(Slot::Inserted(inserted));
+                inserted += 1;
+                match current {
+                    Some(ordinal) => {
+                        if let Some(group) = groups.get_mut(&ordinal) {
+                            group.push(position);
+                        }
+                    }
+                    None => leading.push(position),
+                }
+            }
+        }
+    }
+    let text = |slot: Slot| match slot {
+        Slot::Written(ordinal) => recorded.written.get(&ordinal).map(String::as_str),
+        Slot::Inserted(index) => recorded.inserted.get(index).map(String::as_str),
+    };
+    let mut replacements: BTreeMap<usize, String> = BTreeMap::new();
+    for (ordinal, positions) in &groups {
+        let Some(written) = positions
+            .iter()
+            .map(|&position| text(slots[position]))
+            .collect::<Option<Vec<&str>>>()
+        else {
+            continue;
+        };
+        for (position, carried) in positions.iter().zip(carry(&sources[ordinal], &written)) {
+            if let Some(carried) = carried {
+                replacements.insert(*position, carried);
+            }
+        }
+    }
+    let Some(&last) = replacements.keys().next_back() else {
+        return;
+    };
+    let mut output = String::with_capacity(serialized.len() + 256);
+    let mut cursor = 0;
+    for (position, slot) in slots.iter().enumerate().take(last + 1) {
+        let Some(old) = text(*slot) else {
+            break;
+        };
+        let Some(found) = serialized[cursor..].find(old) else {
+            break;
+        };
+        let start = cursor + found;
+        match replacements.get(&position) {
+            Some(new) => {
+                output.push_str(&serialized[cursor..start]);
+                output.push_str(new);
+            }
+            None => output.push_str(&serialized[cursor..start + old.len()]),
+        }
+        cursor = start + old.len();
+    }
+    output.push_str(&serialized[cursor..]);
+    *serialized = output;
+    for (position, new) in replacements {
+        match slots[position] {
+            Slot::Written(ordinal) => {
+                recorded.written.insert(ordinal, new);
+            }
+            Slot::Inserted(index) => recorded.inserted[index] = new,
+        }
+    }
 }
 
 /// A permission marker: the offset in its paragraph's text it sits at, how many empty siblings
-/// precede it there, and its markup.
+/// precede it there, its kind and decoded ID, and its markup.
 struct Marker<'x> {
     offset: usize,
     rank: usize,
     start: bool,
+    id: String,
     xml: &'x str,
 }
 
@@ -138,6 +238,9 @@ fn read(xml: &str) -> Option<Reading<'_>> {
                         0
                     },
                     start: tag.name == "w:permStart",
+                    id: attribute(&tag, "w:id")
+                        .and_then(|range| unescaped(xml, range))
+                        .unwrap_or_default(),
                     xml: &xml[tag.range.clone()],
                 });
             }
@@ -180,14 +283,138 @@ fn read(xml: &str) -> Option<Reading<'_>> {
     (depth == 0 && !reading.gaps.is_empty()).then_some(reading)
 }
 
-/// `written`, the XML written for a paragraph, with the permission markers of `sources`, the
-/// source XML of the paragraphs whose text it holds (see [`sources`]), copied byte for byte
-/// unless `written` already holds them. Each goes between written children where the text it
-/// stood at went, after as many of the empty children there as preceded it in the source, and
-/// none before a marker that precedes it in the source. A marker in text the save changed goes
-/// to the edit: a start before the new text, an end after it. A marker no written gap holds
-/// moves to the nearest one toward the text it stood beside that the save kept.
-pub(crate) fn carry(sources: &[String], written: &str) -> String {
+/// The edits that turn `old` into `new`, in order, each as the range of `old` it replaces and
+/// the range of `new` it writes: one for each run of changes in a shortest edit script, two
+/// joined when the text they leave between them is shorter than each, or one for everything
+/// between the common prefix and suffix when that script needs more than [`EDIT_LIMIT`]
+/// insertions and deletions.
+fn edits(old: &[char], new: &[char]) -> Vec<(Range<usize>, Range<usize>)> {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (cut, kept) = (old.len() - suffix, new.len() - suffix);
+    if prefix == cut && prefix == kept {
+        return Vec::new();
+    }
+    let whole = vec![(prefix..cut, prefix..kept)];
+    if prefix == cut || prefix == kept {
+        return whole;
+    }
+    let (a, b) = (&old[prefix..cut], &new[prefix..kept]);
+    let Some(snakes) = snakes(a, b) else {
+        return whole;
+    };
+    let size = |(old, new): &(Range<usize>, Range<usize>)| old.len().max(new.len());
+    let mut edits: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+    let (mut x, mut y) = (0, 0);
+    for (sx, sy, length) in snakes.into_iter().chain([(a.len(), b.len(), 0)]) {
+        if (sx, sy) != (x, y) {
+            let edit = (prefix + x..prefix + sx, prefix + y..prefix + sy);
+            match edits.last_mut() {
+                Some(last)
+                    if edit.0.start - last.0.end < size(last)
+                        && edit.0.start - last.0.end < size(&edit) =>
+                {
+                    *last = (last.0.start..edit.0.end, last.1.start..edit.1.end);
+                }
+                _ => edits.push(edit),
+            }
+        }
+        (x, y) = (sx + length, sy + length);
+    }
+    edits
+}
+
+/// The runs `a` and `b` share in a shortest edit script between them, each as where it starts
+/// in both and its length, in order; `None` when that script needs more than [`EDIT_LIMIT`]
+/// insertions and deletions.
+fn snakes(a: &[char], b: &[char]) -> Option<Vec<(usize, usize, usize)>> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let limit = EDIT_LIMIT.min(a.len() + b.len()) as isize;
+    let index = |k: isize| (k + limit + 1) as usize;
+    let mut v = vec![0isize; 2 * limit as usize + 3];
+    let mut trace = Vec::new();
+    for d in 0..=limit {
+        trace.push(v.clone());
+        for k in (-d..=d).step_by(2) {
+            let down = k == -d || (k != d && v[index(k - 1)] < v[index(k + 1)]);
+            let mut x = if down {
+                v[index(k + 1)]
+            } else {
+                v[index(k - 1)] + 1
+            };
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            v[index(k)] = x;
+            if x < n || y < m {
+                continue;
+            }
+            let mut snakes = Vec::new();
+            let (mut x, mut y) = (n, m);
+            for d in (1..=d).rev() {
+                let v = &trace[d as usize];
+                let k = x - y;
+                let down = k == -d || (k != d && v[index(k - 1)] < v[index(k + 1)]);
+                let previous = if down { k + 1 } else { k - 1 };
+                let (px, py) = (v[index(previous)], v[index(previous)] - previous);
+                let (mx, my) = if down { (px, py + 1) } else { (px + 1, py) };
+                if x > mx {
+                    snakes.push((mx as usize, my as usize, (x - mx) as usize));
+                }
+                (x, y) = (px, py);
+            }
+            if x > 0 {
+                snakes.push((0, 0, x as usize));
+            }
+            snakes.reverse();
+            return Some(snakes);
+        }
+    }
+    None
+}
+
+/// The written text offsets a marker at `at` in the source text may take, and whether it moves
+/// left, toward lower offsets, when no gap lies there. A marker in kept text keeps its place,
+/// moving toward the kept text beside it; one at either end of a deletion stays with the kept
+/// text on its other side; one in replaced text, or where text was inserted, spans the new
+/// text and moves to its start when `start`, else its end.
+fn mapped(edits: &[(Range<usize>, Range<usize>)], at: usize, start: bool) -> (usize, usize, bool) {
+    let next = edits.partition_point(|(old, _)| old.end < at);
+    match edits.get(next) {
+        Some((old, new)) if old.start <= at => {
+            if old.is_empty() || (old.start < at && at < old.end) {
+                (new.start, new.end, start)
+            } else if at == old.start {
+                (new.start, new.start, true)
+            } else {
+                (new.end, new.end, false)
+            }
+        }
+        _ => {
+            let offset = match next.checked_sub(1).map(|before| &edits[before]) {
+                Some((old, new)) => at - old.end + new.end,
+                None => at,
+            };
+            (offset, offset, next == 0 || next < edits.len())
+        }
+    }
+}
+
+/// The XML of each of `written`, the paragraphs a save writes for `sources`, the source
+/// paragraphs they take, with the permission markers of `sources` they lack by kind and ID, or
+/// `None` for one that takes none. Both are read as one text. Each marker goes between written
+/// children where the text it stood at went (see [`mapped`]), after as many of the empty
+/// children there as preceded it in the source, and never before a marker that precedes it in
+/// the source, copied byte for byte.
+fn carry(sources: &[&str], written: &[&str]) -> Vec<Option<String>> {
+    let mut carried = vec![None; written.len()];
     let mut text = Vec::new();
     let mut markers = Vec::new();
     for source in sources {
@@ -200,76 +427,90 @@ pub(crate) fn carry(sources: &[String], written: &str) -> String {
             ..marker
         }));
         text.extend(reading.text);
+        text.push(SEPARATOR);
     }
     if markers.is_empty() {
-        return written.to_owned();
+        return carried;
     }
-    let written: Cow<str> = match written.strip_suffix("/>") {
-        Some(open) if written.matches('<').count() == 1 => Cow::Owned(format!("{open}></w:p>")),
-        _ => Cow::Borrowed(written),
-    };
-    let Some(to) = read(&written) else {
-        return written.into_owned();
-    };
-    let mut present: HashMap<&str, usize> = HashMap::new();
-    for marker in &to.markers {
-        *present.entry(marker.xml).or_default() += 1;
+    let expanded: Vec<Cow<str>> = written
+        .iter()
+        .map(|xml| match xml.strip_suffix("/>") {
+            Some(open) if xml.matches('<').count() == 1 => Cow::Owned(format!("{open}></w:p>")),
+            _ => Cow::Borrowed(*xml),
+        })
+        .collect();
+    let mut new_text = Vec::new();
+    let mut gaps = Vec::new();
+    let mut present: HashMap<(bool, String), usize> = HashMap::new();
+    for (paragraph, xml) in expanded.iter().enumerate() {
+        let Some(reading) = read(xml) else {
+            continue;
+        };
+        let shift = new_text.len();
+        for marker in reading.markers {
+            *present.entry((marker.start, marker.id)).or_default() += 1;
+        }
+        gaps.extend(
+            reading
+                .gaps
+                .into_iter()
+                .map(|(byte, offset)| (paragraph, byte, offset + shift)),
+        );
+        new_text.extend(reading.text);
+        new_text.push(SEPARATOR);
     }
-    let prefix = text
-        .iter()
-        .zip(&to.text)
-        .take_while(|(a, b)| a == b)
-        .count();
-    let suffix = text[prefix..]
-        .iter()
-        .rev()
-        .zip(to.text[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let (cut, kept) = (text.len() - suffix, to.text.len() - suffix);
-    let gaps = &to.gaps;
+    if gaps.is_empty() {
+        return carried;
+    }
+    let edits = edits(&text, &new_text);
+    let mut placed: Vec<Vec<(usize, &str)>> = vec![Vec::new(); written.len()];
     let mut floor = 0;
-    let mut output = String::with_capacity(written.len() + 64);
-    let mut cursor = 0;
     for marker in &markers {
-        if let Some(count) = present.get_mut(marker.xml).filter(|count| **count > 0) {
+        if let Some(count) = present
+            .get_mut(&(marker.start, marker.id.clone()))
+            .filter(|count| **count > 0)
+        {
             *count -= 1;
             continue;
         }
-        let at = marker.offset;
-        let (low, high, left) = if at <= prefix && at < cut {
-            (at, at, true)
-        } else if at >= cut && at > prefix {
-            (at - cut + kept, at - cut + kept, false)
-        } else {
-            (prefix, kept, marker.start)
-        };
-        let after = gaps.partition_point(|(_, offset)| *offset < low);
-        let until = gaps.partition_point(|(_, offset)| *offset <= high);
+        let (low, high, left) = mapped(&edits, marker.offset, marker.start);
+        let after = gaps.partition_point(|(_, _, offset)| *offset < low);
+        let until = gaps.partition_point(|(_, _, offset)| *offset <= high);
         let chosen = match (after < until, left) {
             (true, true) => gaps.get(after),
             (true, false) => gaps.get(until - 1),
             (false, true) => after.checked_sub(1).and_then(|index| gaps.get(index)),
             (false, false) => gaps.get(until),
         };
-        let offset = chosen.or(gaps.last()).map_or(0, |(_, offset)| *offset);
-        let first = gaps.partition_point(|(_, other)| *other < offset);
+        let offset = chosen.or(gaps.last()).map_or(0, |(_, _, offset)| *offset);
+        let first = gaps.partition_point(|(_, _, other)| *other < offset);
         let last = gaps
-            .partition_point(|(_, other)| *other <= offset)
+            .partition_point(|(_, _, other)| *other <= offset)
             .saturating_sub(1);
         floor = (first + marker.rank).min(last).max(floor);
-        let position = gaps[floor].0;
-        output.push_str(&written[cursor..position]);
-        output.push_str(marker.xml);
-        cursor = position;
+        let (paragraph, byte, _) = gaps[floor];
+        placed[paragraph].push((byte, marker.xml));
     }
-    output.push_str(&written[cursor..]);
-    output
+    for ((slot, xml), insertions) in carried.iter_mut().zip(&expanded).zip(placed) {
+        if insertions.is_empty() {
+            continue;
+        }
+        let mut output = String::with_capacity(xml.len() + 64);
+        let mut cursor = 0;
+        for (byte, marker) in insertions {
+            output.push_str(&xml[cursor..byte]);
+            output.push_str(marker);
+            cursor = byte;
+        }
+        output.push_str(&xml[cursor..]);
+        *slot = Some(output);
+    }
+    carried
 }
 
 #[cfg(test)]
 mod tests {
-    use super::carry;
+    use super::{carry, edits};
 
     const START: &str = r#"<w:permStart w:id="1" w:edGrp="everyone"/>"#;
     const END: &str = r#"<w:permEnd w:id="1"/>"#;
@@ -283,7 +524,10 @@ mod tests {
     }
 
     fn carried(source: &str, written: &str) -> String {
-        carry(&[source.to_owned()], written)
+        carry(&[source], &[written])
+            .pop()
+            .flatten()
+            .unwrap_or_else(|| written.to_owned())
     }
 
     #[test]
@@ -353,24 +597,51 @@ mod tests {
             carried(&source, &paragraph(&link(&run("A")))),
             paragraph(&format!("{START}{}{END}", link(&run("A"))))
         );
-        assert_eq!(carried(&source, &source), source);
+        let respelled = source.replace('"', "'");
+        assert_eq!(carry(&[source.as_str()], &[respelled.as_str()]), [None]);
     }
 
     #[test]
-    fn markers_of_a_merged_paragraph_land_where_its_text_went() {
+    fn markers_of_merged_paragraphs_land_where_their_text_went() {
         let sources = [
             paragraph(&run("One")),
-            paragraph(&format!("{}{START}{}", run("Two"), run("Three"))),
+            paragraph(&run("Two")),
+            paragraph(&format!("{START}{}{END}", run("Three"))),
         ];
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
         let written = paragraph(&format!("{}{}{}", run("One"), run("Two"), run("Three")));
         assert_eq!(
-            carry(&sources, &written),
-            paragraph(&format!(
-                "{}{}{START}{}",
+            carry(&sources, &[written.as_str()]),
+            [Some(paragraph(&format!(
+                "{}{}{START}{}{END}",
                 run("One"),
                 run("Two"),
                 run("Three")
-            ))
+            )))]
         );
+    }
+
+    #[test]
+    fn a_split_paragraph_gives_each_marker_to_the_paragraph_holding_its_text() {
+        let source = paragraph(&format!("{START}{}{END}", run("AB")));
+        let (first, second) = (paragraph(&run("A")), paragraph(&run("B")));
+        assert_eq!(
+            carry(&[source.as_str()], &[first.as_str(), second.as_str()]),
+            [
+                Some(paragraph(&format!("{START}{}", run("A")))),
+                Some(paragraph(&format!("{}{END}", run("B"))))
+            ]
+        );
+    }
+
+    #[test]
+    fn edits_keep_unchanged_text_between_separate_changes() {
+        let chars = |text: &str| text.chars().collect::<Vec<_>>();
+        assert_eq!(
+            edits(&chars("AMZ"), &chars("BMY")),
+            [(0..1, 0..1), (2..3, 2..3)]
+        );
+        assert!(edits(&chars("abc"), &chars("abc")).is_empty());
+        assert_eq!(edits(&chars("ab"), &chars("axb")), [(1..1, 1..2)]);
     }
 }

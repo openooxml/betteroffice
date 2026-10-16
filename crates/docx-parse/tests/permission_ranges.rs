@@ -36,6 +36,23 @@ fn run(text: &str) -> String {
 /// Saves the body `source` with its paragraphs as the body `edited` reads, in order, but for
 /// those `removed`; `changed` among them.
 fn save(source: &str, edited: &str, changed: &[u32], removed: &[u32]) -> Result<String, String> {
+    let ordinals: Vec<Option<u32>> = (0..)
+        .filter(|ordinal| !removed.contains(ordinal))
+        .take(edited.matches("<w:p>").count())
+        .map(Some)
+        .collect();
+    save_paragraphs(source, edited, &ordinals, changed, removed)
+}
+
+/// Saves the body `source` with the paragraphs of the body `edited` written from the source
+/// paragraphs `ordinals` gives them, or inserted after the one before them when `None`.
+fn save_paragraphs(
+    source: &str,
+    edited: &str,
+    ordinals: &[Option<u32>],
+    changed: &[u32],
+    removed: &[u32],
+) -> Result<String, String> {
     let source = document(source);
     let original = package(&source);
     let parsed = parse_docx_s9_wire(&package(&document(edited)), S9ParseOptions::default())
@@ -44,13 +61,19 @@ fn save(source: &str, edited: &str, changed: &[u32], removed: &[u32]) -> Result<
         .package;
     let mut content = serde_json::to_value(&parsed.document.content).unwrap();
     let paragraphs = content.as_array_mut().unwrap();
-    let ordinals: Vec<u32> = (0..)
-        .filter(|ordinal| !removed.contains(ordinal))
-        .take(paragraphs.len())
-        .collect();
-    for (paragraph, ordinal) in paragraphs.iter_mut().zip(&ordinals) {
-        paragraph["sourceOrdinal"] = json!(ordinal);
+    assert_eq!(paragraphs.len(), ordinals.len());
+    let mut inserted = Vec::new();
+    let mut previous = None;
+    for (paragraph, ordinal) in paragraphs.iter_mut().zip(ordinals) {
+        match ordinal {
+            Some(ordinal) => {
+                paragraph["sourceOrdinal"] = json!(ordinal);
+                previous = Some(*ordinal);
+            }
+            None => inserted.push(json!({"after": previous.unwrap()})),
+        }
     }
+    let written: Vec<u32> = ordinals.iter().flatten().copied().collect();
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": {"content": content},
@@ -58,9 +81,9 @@ fn save(source: &str, edited: &str, changed: &[u32], removed: &[u32]) -> Result<
         "paragraphIds": {"splicedParts": [{
             "part": "word/document.xml",
             "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
-            "paragraphs": ordinals,
+            "paragraphs": written,
             "changed": changed,
-            "inserted": [],
+            "inserted": inserted,
             "removed": removed,
         }]},
     }))
@@ -259,4 +282,64 @@ fn merging_a_paragraph_keeps_its_permission_marker_where_its_text_went() {
     assert!(saved.contains(&format!("{}{START}{}</w:p>", run("Two"), run("Three"))));
     assert!(saved.contains(&format!("{}{END}</w:p>", run("Four"))));
     assert_eq!(saved.matches(START).count(), 1);
+}
+
+#[test]
+fn a_save_without_edits_keeps_permission_markers_in_a_text_box_byte_for_byte() {
+    let body = format!(
+        "<w:p>{}<w:r><w:pict><v:shape xmlns:v=\"urn:schemas-microsoft-com:vml\"><v:textbox><w:txbxContent><w:p><w:permStart w:id='4' w:edGrp='everyone'></w:permStart>{}<w:permEnd w:id='4'></w:permEnd></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p><w:p>{}</w:p>",
+        run("Before"),
+        run("Boxed"),
+        run("After")
+    );
+    let saved = save_paragraphs(&body, &body, &[Some(0), Some(2)], &[], &[]).unwrap();
+    assert_eq!(saved, document(&body));
+}
+
+#[test]
+fn separate_edits_on_both_sides_of_a_range_keep_it_around_its_unchanged_text() {
+    let saved = save(
+        &format!(
+            "<w:p>{}{START}{}{END}{}</w:p>",
+            run("A"),
+            run("M"),
+            run("Z")
+        ),
+        &format!("<w:p>{}{}{}</w:p>", run("B"), run("M"), run("Y")),
+        &[0],
+        &[],
+    )
+    .unwrap();
+    assert!(saved.contains(&format!("{}{START}{}{END}{}", run("B"), run("M"), run("Y"))));
+}
+
+#[test]
+fn splitting_a_paragraph_keeps_each_end_of_its_range_with_its_text() {
+    let saved = save_paragraphs(
+        &format!("<w:p>{START}{}{END}</w:p>", run("AB")),
+        &format!("<w:p>{}</w:p><w:p>{}</w:p>", run("A"), run("B")),
+        &[Some(0), None],
+        &[0],
+        &[],
+    )
+    .unwrap();
+    assert!(saved.contains(&format!("<w:p>{START}{}</w:p>", run("A"))));
+    assert!(saved.contains(&format!("{}{END}</w:p>", run("B"))));
+}
+
+#[test]
+fn merging_three_paragraphs_keeps_a_range_on_its_own_text() {
+    let saved = save(
+        &format!(
+            "<w:p>{}</w:p><w:p>{}</w:p><w:p>{START}{}{END}</w:p>",
+            run("A"),
+            run("B"),
+            run("C")
+        ),
+        &format!("<w:p>{}{}{}</w:p>", run("A"), run("B"), run("C")),
+        &[0],
+        &[1, 2],
+    )
+    .unwrap();
+    assert!(saved.contains(&format!("{}{}{START}{}{END}", run("A"), run("B"), run("C"))));
 }
