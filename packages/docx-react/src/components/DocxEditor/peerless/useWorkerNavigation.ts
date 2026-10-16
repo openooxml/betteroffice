@@ -65,8 +65,9 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     const outcome = await result.ticket.ack;
     if (current !== binding() || (outcome.status !== 'applied' && outcome.status !== 'noop')) return false;
     if (await result.ticket.presented !== 'presented' || current !== binding()) return false;
-    const caret = current.viewStore.getSnapshot().geometry?.caret;
-    if (caret && scroller.current) scroller.current.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - scroller.current.getBoundingClientRect().top + caret.y * latest.current.zoom - 24;
+    const geometry = current.viewStore.getSnapshot().geometry;
+    const shown = geometry?.caret ?? geometry?.selectionRects[0];
+    if (shown && scroller.current) scroller.current.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - scroller.current.getBoundingClientRect().top + shown.y * latest.current.zoom - 24;
     return true;
   }, [binding, host, scroller]);
   const scrollToParagraph = useCallback(async (paraId: string, story = 'body') => {
@@ -83,7 +84,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (!target || typeof target === 'string' || current !== binding()) return false;
     return revealSelection(current, { anchor: target.loc, focus: target.loc });
   }, [binding, controller, revealSelection]);
-  /** Selects the first range a comment or revision anchors and scrolls its caret into view; false when it does not exist. */
+  /** Selects the first range a comment or revision anchors and scrolls its start into view; false when it does not exist. */
   const scrollToReviewTarget = useCallback(async (target: ResidentReviewTarget) => {
     const current = binding();
     if (!current) return false;
