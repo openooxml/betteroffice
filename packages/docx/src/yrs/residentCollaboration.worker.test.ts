@@ -517,6 +517,7 @@ for (const settle of ['all', 'some', 'withdraw'] as const) {
         await toB.flush();
         expect(pendingRevisions(b).filter(id => card!.revisionIds.includes(id))).toEqual([]);
         expect(await proposalsOf(a)).toEqual([]);
+        expect(await proposalsOf(b)).toEqual([]);
         expect(b.engine.paragraphs('body')).toEqual(a.engine.paragraphs('body'));
         return;
       }
@@ -530,9 +531,49 @@ for (const settle of ['all', 'some', 'withdraw'] as const) {
       else expect(remaining.length).toBeGreaterThan(0);
       expect(remaining.length).toBeLessThan(card!.revisionIds.length);
       expect(await proposalsOf(a)).toEqual(remaining.length ? [{ id: 'proposal', revisionIds: remaining }] : []);
+      expect(await proposalsOf(b)).toEqual([]);
+      if (settle === 'all') {
+        const accepted = a.engine.paragraphs('body');
+        expect((await a.session.submit('withdrawProposals', { ids: ['proposal'], expectVersion: a.engine.proposalEngine.version() }).ack).status).toBe('noop');
+        await toB.flush();
+        expect(a.engine.paragraphs('body')).toEqual(accepted);
+        expect(b.engine.paragraphs('body')).toEqual(accepted);
+        expect(await proposalsOf(a)).toEqual([]);
+        expect(await proposalsOf(b)).toEqual([]);
+      }
     } finally { toA.off(); toB.off(); a.session.dispose(); b.session.dispose(); }
   }, TIMEOUT);
 }
+
+test('a merge deleting proposed text removes the proposal card on both replicas', async () => {
+  const a = await open(9201);
+  const b = await open(9202, a.engine.encodeState());
+  const remote = await createYrsSession({ clientId: 9203 });
+  const toA = relay(b, a), toB = relay(a, b);
+  try {
+    const second = b.engine.paragraphIdentities().paragraphs[1]!.session!;
+    for (const [replica, paragraph] of [[a, proposalIn(a).paragraph], [b, second]] as const) {
+      expect((await replica.session.submit('propose', { expectVersion: replica.engine.proposalEngine.version(),
+        proposals: [{ ...proposalIn(replica), paragraph }] }).ack).status).toBe('applied');
+    }
+    await toB.flush();
+    await toA.flush();
+    for (const replica of [a, b]) {
+      const [card] = await proposalsOf(replica);
+      expect(card!.revisionIds.length).toBeGreaterThan(0);
+    }
+    remote.loadState(a.engine.encodeState());
+    const first = remote.paragraphs('body')[0]!;
+    const last = remote.paragraphs('body').at(-1)!;
+    remote.deleteRange({ story: 'body', start: { paraId: first.paraId, offset: 0 }, end: { paraId: last.paraId, offset: last.text.length } });
+    for (const replica of [a, b]) {
+      expect((await replica.session.submit('applyRemoteUpdate', { update: remoteUpdate(replica, remote) }, merge).ack).status).toBe('applied');
+      expect(await proposalsOf(replica)).toEqual([]);
+      expect(pendingRevisions(replica)).toEqual([]);
+    }
+    expect(a.engine.paragraphs('body')).toEqual(b.engine.paragraphs('body'));
+  } finally { toA.off(); toB.off(); remote.destroy(); a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
 
 test('two opens that both seed from one source merge by story last-writer-wins like the in-thread route', async () => {
   const a = await open(9201);

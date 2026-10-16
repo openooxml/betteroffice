@@ -94,7 +94,7 @@ export type DocxProposalResult =
   | { ok: true; snapshot: DocxProposalSnapshot }
   | { ok: false; version: string; failure: DocxProposalFailure };
 
-/** Ids that name no proposal are ignored, so a retried withdrawal changes nothing. */
+/** Missing or remotely settled ids withdraw as a no-op, preserving accepted text. */
 export interface DocxProposalWithdrawRequest {
   expectVersion: string;
   ids: readonly string[];
