@@ -15,6 +15,7 @@ import initWasmModule, {
 import type { InitInput } from './generated/xlsx_wasm.js';
 import * as xlsxWasm from './generated/xlsx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
@@ -1308,9 +1309,9 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
     if (
       !Number.isSafeInteger(options.clientId) ||
       options.clientId <= 0 ||
-      options.clientId > Number.MAX_SAFE_INTEGER
+      options.clientId >= OPEN_SYNC_CLIENT
     ) {
-      throw new RangeError('clientId must be a nonzero safe integer');
+      throw new RangeError('clientId must be a nonzero safe integer below Number.MAX_SAFE_INTEGER - 1');
     }
     return options.clientId;
   }
@@ -1324,7 +1325,7 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
   do {
     random.getRandomValues(words);
     value = (words[0] & 0x1fffff) * 0x1_0000_0000 + words[1];
-  } while (value === 0);
+  } while (value === 0 || value >= OPEN_SYNC_CLIENT);
   return value;
 }
 

@@ -3,9 +3,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from '../yrs';
+import { createResidentEngineSession } from '../yrs/residentEngineSession';
 import { createAsyncCollaborationReplica } from './asyncReplica';
 import { CollaborationProvider } from './provider';
-import { CHUNKED_SYNC_CLIENT, decodeMessages, encodeVarUint, stateVectorDominates } from './protocol';
+import { CHUNKED_SYNC_CLIENT, decodeMessages, encodeVarUint, OPEN_SYNC_CLIENT, parseSyncRequest } from './protocol';
 import type { CollaborationError, CollaborationTransport, CollaborationTransportEvent } from './types';
 
 type Kind = 'sync' | 'async';
@@ -49,11 +50,11 @@ async function openPeer(kind: Kind, clientId: number) {
   };
 }
 
-function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
+function relay(size: number) {
   const listeners = Array.from({ length: size }, () => new Set<(event: CollaborationTransportEvent) => void>());
   const online = new Array<boolean>(size).fill(false);
   const sent: { from: number; data: Uint8Array }[] = [];
-  const missing = new Array<number>(size).fill(0);
+  const opens = new Array<number>(size).fill(0);
   let queue: { from: number; to: number; data: Uint8Array }[] = [];
   const setOnline = (index: number, open: boolean) => {
     online[index] = open;
@@ -90,10 +91,7 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
         .flatMap((message) => message.type === 'sync-step-1' ? [message.stateVector] : []);
       const copies = twice && requests.length ? 2 : 1;
       for (let copy = 0; copy < copies; copy += 1) {
-        if (requests.length) {
-          const vector = await vectorOf(frame.to);
-          missing[frame.to] += requests.filter((request) => !stateVectorDominates(vector, request)).length;
-        }
+        opens[frame.to] += requests.filter((request) => parseSyncRequest(request).open).length;
         for (const listener of [...listeners[frame.to]]) listener({ type: 'message', data: frame.data });
       }
     }
@@ -102,11 +100,11 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
     .filter((frame) => frame.from === from)
     .flatMap((frame) => decodeMessages(frame.data))
     .filter((message) => message.type === type).length;
-  const vectors = (from: number, since: number) => sent.slice(since)
+  const requests = (from: number, since: number) => sent.slice(since)
     .filter((frame) => frame.from === from)
     .flatMap((frame) => decodeMessages(frame.data))
-    .flatMap((message) => message.type === 'sync-step-1' ? [clocks(message.stateVector)] : []);
-  return { transports, setOnline, reopen, flush, sent, missing, count, vectors };
+    .flatMap((message) => message.type === 'sync-step-1' ? [message.stateVector] : []);
+  return { transports, setOnline, reopen, flush, sent, opens, count, requests };
 }
 
 function clocks(vector: Uint8Array): Map<bigint, bigint> {
@@ -129,7 +127,7 @@ function phantomClockTo(client: number, from: number, to: number): Uint8Array {
 
 async function network(kind: Kind, size: number) {
   const peers = await Promise.all(Array.from({ length: size }, (_, index) => openPeer(kind, 201 + index)));
-  const net = relay(size, async (index) => peers[index].session.encodeStateVector());
+  const net = relay(size);
   const providers = peers.map((peer, index) => peer.connect(net.transports[index]));
   const errors: CollaborationError[] = [];
   for (const provider of providers) provider.onError((error) => { errors.push(error); });
@@ -237,7 +235,7 @@ for (const kind of ['sync', 'async'] as const) {
       } finally { close(); }
     });
 
-    it('publish an offline deletion at the native clock limit', async () => {
+    it('publish an offline deletion through the reverse request at the native clock limit', async () => {
       const { peers: [left, right], net, errors, close } = await network(kind, 2);
       try {
         const own = left.session.clientId;
@@ -251,7 +249,28 @@ for (const kind of ['sync', 'async'] as const) {
         const mark = net.sent.length;
         net.setOnline(0, true);
         await net.flush();
-        expect(net.vectors(0, mark).map((vector) => vector.get(BigInt(own)))).toEqual([0xffff_ffffn]);
+        const opened = net.requests(0, mark);
+        expect(opened.map((vector) => [clocks(vector).get(BigInt(own)), parseSyncRequest(vector).open]))
+          .toEqual([[0xffff_ffffn, true]]);
+        expect(right.session.encodeStateAsUpdate(opened[0]).byteLength).toBeGreaterThan(0);
+        expect([net.count(0, 'update', mark), net.count(1, 'sync-step-1', mark), net.count(0, 'sync-step-2', mark)])
+          .toEqual([0, 1, 1]);
+        expect(errors).toEqual([]);
+        expect(right.text()).toEqual(left.text());
+        expect(right.text()[0]).toBe('beta');
+      } finally { close(); }
+    });
+
+    it('publish an offline deletion when the history already holds the open request client', async () => {
+      const { peers: [left, right], net, errors, close } = await network(kind, 2);
+      try {
+        for (const peer of [left, right]) peer.session.applyUpdate(phantomClockTo(OPEN_SYNC_CLIENT, 0, 3));
+        await net.flush();
+        expect(clocks(left.session.encodeStateVector()).get(BigInt(OPEN_SYNC_CLIENT))).toBe(3n);
+        net.setOnline(0, false);
+        left.erase(0, 0, 6);
+        net.setOnline(0, true);
+        await net.flush();
         expect(errors).toEqual([]);
         expect(right.text()).toEqual(left.text());
         expect(right.text()[0]).toBe('beta');
@@ -275,7 +294,7 @@ for (const kind of ['sync', 'async'] as const) {
       } finally { close(); }
     });
 
-    it('send at most one reverse request per newer state received, then go quiet', async () => {
+    it('send one reverse request per delivered open request, then go quiet', async () => {
       const { peers, net, close } = await network(kind, 3);
       try {
         net.setOnline(2, false);
@@ -283,15 +302,17 @@ for (const kind of ['sync', 'async'] as const) {
         peers[0].edit(1, 'online ');
         await net.flush();
         const mark = net.sent.length;
-        net.missing.fill(0);
+        net.opens.fill(0);
         net.setOnline(2, true);
         await net.flush({ twice: true });
         expect(peers[1].text()).toEqual(peers[0].text());
         expect(peers[2].text()).toEqual(peers[0].text());
         expect(peers[0].text()).toEqual(['offline alpha beta', 'online second paragraph']);
-        const reverse = [0, 1, 2].map((index) => net.count(index, 'sync-step-1', mark) - (index === 2 ? 1 : 0));
-        expect(reverse.slice(0, 2).every((requests) => requests > 0)).toBe(true);
-        expect(reverse.map((requests, index) => Math.max(0, requests - net.missing[index]))).toEqual([0, 0, 0]);
+        expect(net.opens).toEqual([2, 2, 0]);
+        expect([0, 1, 2].map((index) => net.count(index, 'sync-step-1', mark))).toEqual([2, 2, 1]);
+        expect(net.requests(2, mark).map((vector) => parseSyncRequest(vector).open)).toEqual([true]);
+        expect([0, 1].flatMap((index) => net.requests(index, mark).map((vector) => parseSyncRequest(vector).open)))
+          .toEqual([false, false, false, false]);
         const settled = net.sent.length;
         await net.flush({ twice: true });
         expect(net.sent.length).toBe(settled);
@@ -319,38 +340,37 @@ for (const kind of ['sync', 'async'] as const) {
 describe('a replica holding its initial sync', () => {
   const sorted = (vector: Map<bigint, bigint>) => [...vector].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 
-  it('opens with the chunked sync marker next to the local clock ahead, or the real clock at the native limit', async () => {
+  it('opens with both request markers next to its real clock, also at the native clock limit', async () => {
     const { peers: [left, right], net, errors, close } = await network('sync', 2);
     try {
       const own = BigInt(left.session.clientId);
-      const marker: [bigint, bigint] = [BigInt(CHUNKED_SYNC_CLIENT), 0n];
+      const markers: [bigint, bigint][] = [[BigInt(OPEN_SYNC_CLIENT), 0n], [BigInt(CHUNKED_SYNC_CLIENT), 0n]];
       const reopen = async () => {
         net.setOnline(0, false);
         const before = clocks(left.session.encodeStateVector());
         const mark = net.sent.length;
         net.setOnline(0, true);
         await net.flush();
-        return { before, opened: net.vectors(0, mark)[0], updates: net.count(0, 'update', mark) };
+        return { before, opened: clocks(net.requests(0, mark)[0]), updates: net.count(0, 'update', mark) };
       };
 
-      const ahead = await reopen();
-      expect(sorted(ahead.opened))
-        .toEqual(sorted(new Map([...ahead.before, [own, (ahead.before.get(own) ?? 0n) + 1n], marker])));
-      expect(ahead.updates).toBe(0);
+      const first = await reopen();
+      expect(sorted(first.opened)).toEqual(sorted(new Map([...first.before, ...markers])));
+      expect(first.updates).toBe(0);
 
-      const filler = phantomClockTo(Number(own), Number(ahead.before.get(own) ?? 0n), 0xffff_ffff);
+      const filler = phantomClockTo(Number(own), Number(first.before.get(own) ?? 0n), 0xffff_ffff);
       for (const peer of [left, right]) peer.session.applyUpdate(filler.slice());
       await net.flush();
       const limit = await reopen();
       expect(limit.before.get(own)).toBe(0xffff_ffffn);
-      expect(sorted(limit.opened)).toEqual(sorted(new Map([...limit.before, marker])));
-      expect(limit.updates).toBe(1);
+      expect(sorted(limit.opened)).toEqual(sorted(new Map([...limit.before, ...markers])));
+      expect(limit.updates).toBe(0);
       expect(errors).toEqual([]);
       expect(right.text()).toEqual(left.text());
     } finally { close(); }
   });
 
-  it.todo('first joiner in a two-peer relay leaves the chunked hold (deferred: no peer answers its open, and its request waits for that answer)', async () => {
+  it('first joiner in a two-peer relay leaves the chunked hold', async () => {
     const { peers: [first, second], net, errors, close } = await network('sync', 2);
     try {
       second.edit(0, 'live ');
@@ -358,5 +378,14 @@ describe('a replica holding its initial sync', () => {
       expect(errors).toEqual([]);
       expect(first.text()).toEqual(second.text());
     } finally { close(); }
+  });
+});
+
+describe('reserved request client ids', () => {
+  it('are refused as session client ids', async () => {
+    for (const clientId of [OPEN_SYNC_CLIENT, CHUNKED_SYNC_CLIENT]) {
+      await expect(createYrsSession({ clientId })).rejects.toThrow(RangeError);
+      await expect(createResidentEngineSession(undefined, clientId)).rejects.toThrow(RangeError);
+    }
   });
 });

@@ -276,77 +276,70 @@ export function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
   return payload.subarray(0, tagOffset);
 }
 
-function varUintReader(payload: Uint8Array, label: string): { read(): bigint; done(): boolean } {
-  let offset = 0;
-  return {
-    read() {
-      let value = 0n;
-      for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES; index += 1) {
-        if (offset >= payload.byteLength) throw new ProtocolError(`Truncated ${label.toLowerCase()}`);
-        const byte = payload[offset++];
-        value |= BigInt(byte & 0x7f) << BigInt(7 * index);
-        if (byte < 0x80) return value;
-      }
-      throw new ProtocolError(`${label} varUint exceeds 64 bits`);
-    },
-    done: () => offset === payload.byteLength,
-  };
-}
-
-function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
-  const reader = varUintReader(payload, 'State vector');
-  const clocks = new Map<bigint, bigint>();
-  for (let count = reader.read(); count > 0n; count -= 1n) clocks.set(reader.read(), reader.read());
-  if (!reader.done()) throw new ProtocolError('Trailing state vector bytes');
-  return clocks;
-}
-
-/** Whether `payload` decodes as one v1 state vector, optionally fingerprinted. */
-export function isStateVector(payload: Uint8Array): boolean {
-  try {
-    decodeStateVector(withoutDocumentFingerprint(payload));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Whether `vector` has every client clock of `other`; both are v1 state vectors, optionally fingerprinted. */
-export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boolean {
-  const own = withoutDocumentFingerprint(vector);
-  const remote = withoutDocumentFingerprint(other);
-  if (own.byteLength === remote.byteLength && own.every((byte, index) => byte === remote[index])) {
-    return true;
-  }
-  const clocks = decodeStateVector(own);
-  for (const [client, clock] of decodeStateVector(remote)) {
-    if (clock > (clocks.get(client) ?? 0n)) return false;
-  }
-  return true;
-}
-
+export const OPEN_SYNC_CLIENT = Number.MAX_SAFE_INTEGER - 1;
+const OPEN_SYNC_ENTRY = BigInt(OPEN_SYNC_CLIENT);
 const MAX_STATE_VECTOR_ENTRIES = 65_536;
 
-/** `vector` with `clientId`'s clock one past its own (1 when absent), keeping any document fingerprint; undefined past a native limit. */
-export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array | undefined {
-  if (!Number.isSafeInteger(clientId) || clientId < 0) {
-    throw new ProtocolError('Client id must be a non-negative safe integer');
+interface StateVectorEntry {
+  client: bigint;
+  clock: bigint;
+  start: number;
+  end: number;
+}
+
+function stateVectorEntries(body: Uint8Array): { header: number; entries: StateVectorEntry[] } | undefined {
+  let offset = 0;
+  const read = (): bigint | undefined => {
+    let value = 0n;
+    for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES && offset < body.byteLength; index += 1) {
+      const byte = body[offset++];
+      value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+      if (byte < 0x80) return value;
+    }
+    return undefined;
+  };
+  const count = read();
+  if (count === undefined) return undefined;
+  const header = offset;
+  const entries: StateVectorEntry[] = [];
+  for (let left = count; left > 0n; left -= 1n) {
+    const start = offset;
+    const client = read();
+    const clock = read();
+    if (client === undefined || clock === undefined) return undefined;
+    entries.push({ client, clock, start, end: offset });
   }
+  return offset === body.byteLength ? { header, entries } : undefined;
+}
+
+/** `vector` marked as an open request, keeping any document fingerprint; unchanged when undecodable, undefined when the mark would cross the native entry limit. */
+export function withOpenSyncRequest(vector: Uint8Array): Uint8Array | undefined {
   const body = withoutDocumentFingerprint(vector);
-  const clocks = decodeStateVector(body);
-  const client = BigInt(clientId);
-  clocks.set(client, (clocks.get(client) ?? 0n) + 1n);
-  if (clocks.size > MAX_STATE_VECTOR_ENTRIES) return undefined;
-  const bytes: number[] = [];
-  for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
-    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
-    bytes.push(Number(value));
+  const decoded = stateVectorEntries(body);
+  if (!decoded) return vector;
+  const { header, entries } = decoded;
+  if (entries.length >= MAX_STATE_VECTOR_ENTRIES || entries.some(({ client }) => client === OPEN_SYNC_ENTRY)) {
+    return undefined;
   }
-  const suffix = vector.subarray(body.byteLength);
-  const result = new Uint8Array(bytes.length + suffix.byteLength);
-  result.set(bytes);
-  result.set(suffix, bytes.length);
-  return result;
+  return encodeFrame([
+    encodeVarUint(entries.length + 1), body.subarray(header),
+    encodeVarUint(OPEN_SYNC_CLIENT), encodeVarUint(0), vector.subarray(body.byteLength),
+  ], Number.MAX_SAFE_INTEGER);
+}
+
+/** The state vector of a sync step 1 without its open markers, and whether it carried one. */
+export function parseSyncRequest(vector: Uint8Array): { stateVector: Uint8Array; open: boolean } {
+  const body = withoutDocumentFingerprint(vector);
+  const decoded = stateVectorEntries(body);
+  if (!decoded) return { stateVector: vector, open: false };
+  const kept = decoded.entries.filter(({ client, clock }) => client !== OPEN_SYNC_ENTRY || clock !== 0n);
+  if (kept.length === decoded.entries.length) return { stateVector: vector, open: false };
+  return {
+    stateVector: encodeFrame([
+      encodeVarUint(kept.length), ...kept.map(({ start, end }) => body.subarray(start, end)), vector.subarray(body.byteLength),
+    ], Number.MAX_SAFE_INTEGER),
+    open: true,
+  };
 }
 
 export function decodeMessages(

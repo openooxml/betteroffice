@@ -9,8 +9,8 @@ import {
   encodeUpdate,
   encodeVarUint,
   MAX_FRAME_BYTES,
-  requestsChunkedSync,
-  withChunkedSyncRequest,
+  parseSyncRequest,
+  withSyncRequest,
 } from './protocol';
 import { CollaborationProvider } from './provider';
 import type {
@@ -149,22 +149,23 @@ function sent(transport: Transport) {
   return transport.sent.flatMap((frame) => decodeMessages(frame));
 }
 
-const asking = () => encodeSyncStep1(withChunkedSyncRequest(Uint8Array.of(0)));
+const asking = () => encodeSyncStep1(withSyncRequest(Uint8Array.of(0), { chunked: true }));
+const opening = { open: true, chunked: true };
 const chunked = { syncChunkBytes: MiB };
 
 describe('chunked sync requests in the state vector', () => {
   it('adds one empty marker client to a well-formed vector and nothing otherwise', () => {
     const vector = Uint8Array.of(1, 5, 9);
-    const marked = withChunkedSyncRequest(vector);
-    expect(requestsChunkedSync(vector)).toBe(false);
-    expect(requestsChunkedSync(marked)).toBe(true);
+    const marked = withSyncRequest(vector, { chunked: true });
+    expect(parseSyncRequest(vector).chunked).toBe(false);
+    expect(parseSyncRequest(marked).chunked).toBe(true);
     expect([...marked]).toEqual([2, 5, 9, ...encodeVarUint(CHUNKED_SYNC_CLIENT), 0]);
-    expect(withChunkedSyncRequest(marked)).toBe(marked);
+    expect(withSyncRequest(marked, { chunked: true })).toBe(marked);
     for (const malformed of [Uint8Array.of(4), Uint8Array.of(1, 5), new Uint8Array()]) {
-      expect(withChunkedSyncRequest(malformed)).toBe(malformed);
-      expect(requestsChunkedSync(malformed)).toBe(false);
+      expect(withSyncRequest(malformed, { chunked: true })).toBe(malformed);
+      expect(parseSyncRequest(malformed).chunked).toBe(false);
     }
-    expect(requestsChunkedSync(Uint8Array.of(1, ...encodeVarUint(CHUNKED_SYNC_CLIENT), 3))).toBe(false);
+    expect(parseSyncRequest(Uint8Array.of(1, ...encodeVarUint(CHUNKED_SYNC_CLIENT), 3)).chunked).toBe(false);
   });
 
   it('asks for chunks only when the replica applies them as one change', () => {
@@ -177,8 +178,8 @@ describe('chunked sync requests in the state vector', () => {
       return sent(transport)[0];
     });
     expect(handshakes).toEqual([
-      { type: 'sync-step-1', stateVector: withChunkedSyncRequest(Uint8Array.of(1, 1, 1)) },
-      { type: 'sync-step-1', stateVector: Uint8Array.of(1, 1, 1) },
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), opening) },
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { open: true }) },
     ]);
   });
 });
@@ -256,7 +257,7 @@ describe('CollaborationProvider chunked sync answers', () => {
 
     expect(sent(transport)).toEqual([
       { type: 'update', update: Uint8Array.of(1) },
-      { type: 'sync-step-1', stateVector: withChunkedSyncRequest(Uint8Array.of(1, 1, 1)) },
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), opening) },
     ]);
     expect(errors).toEqual([]);
   });
@@ -368,6 +369,31 @@ describe('CollaborationProvider chunked sync answers by transport', () => {
     expect(provider.synced).toBe(true);
     expect(b.errors).toEqual([]);
   });
+
+  it('asks a holding joiner back once, unmarked, and gets one SyncStep2 although both chunk', () => {
+    const source = answerer();
+    const joiner = new ChunkReplica();
+    const b = syncedPeer(source, chunked);
+    const transport = new Transport();
+    const provider = new CollaborationProvider(joiner, transport, chunked);
+    providers.add(provider);
+    const flush = room(b.transport, transport);
+    provider.connect();
+    transport.emit({ type: 'open' });
+    flush();
+
+    expect(sent(transport)).toEqual([
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), opening) },
+      { type: 'sync-step-2', update: joiner.whole },
+    ]);
+    expect(shape(b.transport)).toEqual([['update', MiB], ['sync-step-2', 4096], ['sync-step-1']]);
+    expect(sent(b.transport)[2]).toEqual({ type: 'sync-step-1', stateVector: Uint8Array.of(0) });
+    expect(joiner.limits).toEqual([]);
+    expect(joiner.syncs.map(sizes)).toEqual([[MiB, 4096]]);
+    expect(source.applied).toEqual([joiner.whole]);
+    expect(provider.synced).toBe(true);
+    expect(b.errors).toEqual([]);
+  });
 });
 
 describe('CollaborationProvider held initial sync', () => {
@@ -462,7 +488,7 @@ describe('CollaborationProvider held initial sync', () => {
   it('sends one SyncStep1 per hold, after the SyncStep2, for the requests answered while holding', () => {
     const replica = new ChunkReplica();
     const { transport, errors } = open(replica, chunked);
-    const ahead = encodeSyncStep1(withChunkedSyncRequest(Uint8Array.of(1, 5, 1)));
+    const ahead = encodeSyncStep1(withSyncRequest(Uint8Array.of(1, 5, 1), opening));
     transport.receive(ahead);
     transport.receive(ahead);
     transport.receive(encodeUpdate(Uint8Array.of(7)));
@@ -473,6 +499,24 @@ describe('CollaborationProvider held initial sync', () => {
     expect(sent(transport).filter((message) => message.type === 'sync-step-1'))
       .toEqual([{ type: 'sync-step-1', stateVector: Uint8Array.of(0) }]);
     expect(replica.syncs).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
+  it('asks back for chunks while holding, and applies a chunk landing after the hold once', () => {
+    const replica = new ChunkReplica();
+    const { transport, errors } = open(replica);
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    expect(sent(transport)).toEqual([
+      { type: 'sync-step-2', update: replica.whole },
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+    ]);
+    transport.receive(encodeUpdate(Uint8Array.of(9)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    transport.receive(encodeUpdate(Uint8Array.of(1)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0, 2)));
+    expect(replica.syncs).toEqual([[Uint8Array.of(9), Uint8Array.of(0)]]);
+    expect(replica.applied).toEqual([Uint8Array.of(1), Uint8Array.of(0, 2)]);
+    expect(sent(transport).filter((message) => message.type === 'sync-step-1')).toHaveLength(1);
     expect(errors).toEqual([]);
   });
 
@@ -537,8 +581,15 @@ class AsyncChunkReplica implements AsyncCollaborationReplica {
   }
 }
 
-async function openAsync(options: CollaborationProviderOptions = {}) {
-  const replica = new AsyncChunkReplica();
+class GatedAnswerReplica extends AsyncChunkReplica {
+  readonly gate = deferred<void>();
+
+  override encodeStateAsUpdate(): Promise<Uint8Array> {
+    return this.gate.promise.then(() => new Uint8Array(64));
+  }
+}
+
+async function openAsync(options: CollaborationProviderOptions = {}, replica = new AsyncChunkReplica()) {
   const value = open(createAsyncCollaborationReplica(replica), options);
   await settle();
   value.transport.sent.length = 0;
@@ -560,6 +611,136 @@ describe('CollaborationProvider chunked sync with async replicas', () => {
     ]);
     expect(errors).toEqual([]);
   });
+
+  it('asks an opening peer back once, unmarked, after the chunks, and answers that unchunked', async () => {
+    const { replica, transport, errors } = await openAsync(chunked);
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    await settle();
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    replica.answers[0].result.resolve([Uint8Array.of(1), Uint8Array.of(0, 2)]);
+    await settle();
+    expect(sent(transport)).toEqual([
+      { type: 'update', update: Uint8Array.of(1) },
+      { type: 'sync-step-2', update: Uint8Array.of(0, 2) },
+      { type: 'sync-step-1', stateVector: Uint8Array.of(0) },
+    ]);
+
+    transport.receive(encodeSyncStep1(Uint8Array.of(0)));
+    await settle();
+    expect(sent(transport).slice(3)).toEqual([{ type: 'sync-step-2', update: new Uint8Array(64) }]);
+    expect(replica.answers).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
+  it('asks an opening peer back once, unmarked, only after its held join merges, and answers that unchunked', async () => {
+    const { replica, transport, errors } = await openAsync(chunked);
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    replica.answers[0].result.resolve([Uint8Array.of(1), Uint8Array.of(0, 2)]);
+    await settle();
+    transport.receive(encodeUpdate(Uint8Array.of(7)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    await settle();
+    expect(sent(transport)).toEqual([
+      { type: 'update', update: Uint8Array.of(1) },
+      { type: 'sync-step-2', update: Uint8Array.of(0, 2) },
+    ]);
+
+    replica.syncs[0].result.resolve(undefined);
+    await settle();
+    expect(sent(transport).slice(2)).toEqual([{ type: 'sync-step-1', stateVector: Uint8Array.of(0) }]);
+    transport.receive(encodeSyncStep1(Uint8Array.of(0)));
+    await settle();
+    expect(sent(transport).slice(3)).toEqual([{ type: 'sync-step-2', update: new Uint8Array(64) }]);
+    expect(replica.answers).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
+  it('asks back for chunks while holding, and merges a chunk landing after the hold once', async () => {
+    const { replica, transport, errors } = await openAsync();
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    expect(sent(transport)).toEqual([
+      { type: 'sync-step-2', update: new Uint8Array(64) },
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+    ]);
+    transport.receive(encodeUpdate(Uint8Array.of(9)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    await settle();
+    replica.syncs[0].result.resolve(undefined);
+    await settle();
+    transport.receive(encodeUpdate(Uint8Array.of(1)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0, 2)));
+    await settle();
+    expect(replica.syncs.map((sync) => sync.updates)).toEqual([[Uint8Array.of(9), Uint8Array.of(0)]]);
+    expect(replica.merges).toEqual([Uint8Array.of(1), Uint8Array.of(0, 2)]);
+    expect(sent(transport).filter((message) => message.type === 'sync-step-1')).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
+  it('asks back for chunks until a join landing mid-answer merges, and unmarked after', async () => {
+    const replica = new GatedAnswerReplica();
+    const { transport, errors } = await openAsync({}, replica);
+    const requests = () => sent(transport).filter((message) => message.type === 'sync-step-1');
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    transport.receive(encodeUpdate(Uint8Array.of(9)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    await settle();
+    expect(replica.syncs).toEqual([]);
+
+    replica.gate.resolve();
+    await settle();
+    expect(requests()).toEqual([
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+    ]);
+    replica.syncs[0].result.resolve(undefined);
+    await settle();
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    expect(requests().slice(1)).toEqual([{ type: 'sync-step-1', stateVector: Uint8Array.of(0) }]);
+    expect(errors).toEqual([]);
+  });
+
+  for (const ending of ['is refused', 'loses its connection'] as const) {
+    it(`asks a reopened connection for chunks only until its own join merges after a pending join ${ending}`, async () => {
+      const replica = new GatedAnswerReplica();
+      const { provider, transport, errors } = await openAsync({}, replica);
+      const requests = () => sent(transport).filter((message) => message.type === 'sync-step-1');
+      transport.receive(encodeUpdate(Uint8Array.of(9)));
+      transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+      await settle();
+      if (ending === 'is refused') {
+        replica.syncs[0].result.reject(new Error('refused'));
+        await settle();
+        expect(errors.map((error) => error.code)).toEqual(['replica']);
+        provider.connect();
+      } else {
+        transport.emit({ type: 'close' });
+      }
+      transport.emit({ type: 'open' });
+      await settle();
+      transport.sent.length = 0;
+
+      transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+      transport.receive(encodeUpdate(Uint8Array.of(8)));
+      transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+      if (ending !== 'is refused') replica.syncs[0].result.resolve(undefined);
+      await settle();
+      replica.gate.resolve();
+      await settle();
+      expect(requests()).toEqual([
+        { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+      ]);
+      replica.syncs[1].result.resolve(undefined);
+      await settle();
+      transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+      await settle();
+      expect(requests().slice(1)).toEqual([{ type: 'sync-step-1', stateVector: Uint8Array.of(0) }]);
+      expect(provider.synced).toBe(true);
+    });
+  }
 
   it('holds updates past the inbound limit and merges them with the SyncStep2 in order', async () => {
     const { replica, provider, transport, errors } = await openAsync({ ...chunked, maxPendingBytes: 24 });
@@ -593,7 +774,7 @@ describe('CollaborationProvider chunked sync with async replicas', () => {
   it('sends one SyncStep1 per hold, after the SyncStep2 merges, for the requests that arrived while holding', async () => {
     const { replica, transport, errors } = await openAsync(chunked);
     const requests = () => sent(transport).filter((message) => message.type === 'sync-step-1');
-    const ahead = encodeSyncStep1(withChunkedSyncRequest(Uint8Array.of(1, 5, 1)));
+    const ahead = encodeSyncStep1(withSyncRequest(Uint8Array.of(1, 5, 1), opening));
     transport.receive(ahead);
     transport.receive(ahead);
     transport.receive(encodeUpdate(Uint8Array.of(7)));
