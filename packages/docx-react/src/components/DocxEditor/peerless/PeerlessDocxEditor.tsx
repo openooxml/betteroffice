@@ -30,7 +30,7 @@ import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
 import { commandPageGeometry } from './commandPageGeometry';
-import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
+import { createDocxPluginHost, type DocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { usePluginReservations } from '../../../plugins/reservations';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
 import { DocxEditorShell } from '../DocxEditorShell';
@@ -40,7 +40,7 @@ import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from '../../D
 import { PluginOverlays } from '../../../plugins/PluginOverlays';
 import { managedSidebarItems, mergeSidebarItems } from '../../../plugins/PluginSidebarItems';
 import { UnifiedSidebar } from '../../UnifiedSidebar';
-import { createWorkerPluginGeometry } from './workerPluginGeometry';
+import { createWorkerPluginGeometry, workerDocumentVersion, workerReadRefusal } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
@@ -224,7 +224,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     (target, focus) => navigation.revealParagraph(target.paraId, target.story, focus), () => sentReservationsRef.current()));
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
   const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
-  const [pluginHost] = useState(() => createDocxPluginHost({
+  const [pluginHost] = useState<DocxPluginHost>(() => createDocxPluginHost({
     pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
     commands: () => controller.commands, layout: () => ({ queries: null, complete: false, failed: false }),
     subscribeLayout: controller.subscribe, geometry: pluginGeometry.geometry, subscribeGeometry: pluginGeometry.subscribe, translate: (key) => controller.environment().translate(key),
@@ -235,8 +235,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       listStories: () => controller.read({ kind: 'listStories' }),
       readStories: (request) => controller.read({ kind: 'readStories', request }),
     },
-    workerEdits: { applyEdits: (request, authorize) => controller.applyEdits(request, authorize) },
+    workerEdits: { applyEdits: (request, authorize, commit) => controller.applyEdits(request, authorize,
+      (view) => commit(() => pluginHost.workerChanged(workerDocumentVersion(view)))) },
     workerNavigation: pluginGeometry.navigation,
+    workerRefusal: (error) => workerReadRefusal(controller, error),
   }));
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
   const reservations = usePluginReservations(pluginHost, activations);
@@ -264,8 +266,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useEffect(() => {
     if (documentReady) {
       pluginHost.modeChanged(shellState.mode, effectiveReadOnly);
-      if (pluginHost.generation() === null) pluginHost.openWorker(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
-      else pluginHost.workerChanged(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
+      if (pluginHost.generation() === null) pluginHost.openWorker(workerDocumentVersion(shellState.view));
+      else pluginHost.workerChanged(workerDocumentVersion(shellState.view));
       const review = controller.reviewSnapshot();
       if (review) pluginHost.workerProposalsChanged(review.proposals);
       const layout = pluginGeometry.layout();

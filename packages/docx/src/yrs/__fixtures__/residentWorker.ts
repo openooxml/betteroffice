@@ -20,7 +20,8 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   readonly fontFaces: Set<FontFace>;
   /** Holds the worker's replies until `release`. */
   hold(): void;
-  release(): void;
+  /** Delivers the held replies `only` accepts and keeps holding, or delivers all and stops holding. */
+  release(only?: (reply: ResidentEngineWorkerResponse) => boolean): void;
 }
 
 const STUBS: Record<string, string> = {
@@ -185,10 +186,10 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
       hold() {
         held ??= [];
       },
-      release() {
+      release(only) {
         const replies = held ?? [];
-        held = null;
-        for (const reply of replies) deliver(reply);
+        held = only ? replies.filter((reply) => !only(reply)) : null;
+        for (const reply of replies) if (!only || only(reply)) deliver(reply);
       },
     };
     start(

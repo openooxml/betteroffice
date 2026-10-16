@@ -2,10 +2,21 @@ import { createDisplayListQueries, effectiveZoom, loadRustDisplayListQueryEngine
 import { createRenderedDomContext, type DisplayListPageProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarget } from '@betteroffice/docx/yrs';
 import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
-import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginSelection } from '../../../plugins/types';
+import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginRefusal, DocxPluginSelection } from '../../../plugins/types';
+import { pluginRefusal } from '../../../plugins/createPluginClients';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
-import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
+import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 import { clientPointToPage } from './pagePoint';
+
+export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefined): string {
+  return view?.editState?.documentVersion ?? view?.geometry?.documentVersion ?? String(view?.version ?? 0);
+}
+
+/** The refusal a plugin read or navigation answers when the worker read rejected with `error`, or null to rethrow it. */
+export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerlessShellController>, 'getSnapshot'>, error: unknown): DocxPluginRefusal | null {
+  if (controller.getSnapshot().status !== 'ready') return pluginRefusal('document-replaced');
+  return error instanceof WorkerReadSupersededError ? pluginRefusal('input-failed', error.message) : null;
+}
 
 /** `reservations` is the set the editor sends, which a frame's boxes answer for only once it was laid out with it. */
 export function createWorkerPluginGeometry(controller: ReturnType<typeof createPeerlessShellController>, pages: () => HTMLElement | null, layer: () => HTMLElement | null, changed: () => void,

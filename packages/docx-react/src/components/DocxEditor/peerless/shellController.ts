@@ -569,6 +569,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   commands.attach(commandBinding);
   const batchResults = new Map<number, DocxEditResult>();
+  const appliedBatches = new Map<{ readonly seq: number | undefined }, { binding: PeerlessEditSessionBinding; applied: (view: PeerlessViewSnapshot) => void }>();
   const commentResults = new Map<number, { id?: number; comments: Comment[] }>();
   let commentTail: Promise<unknown> = Promise.resolve();
   let commentList: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; comments: Comment[] } | null = null;
@@ -658,7 +659,8 @@ export function createPeerlessShellController(initial: Options) {
     if (env.mode === 'suggesting' && stepIndex >= 0) return { ok: false as const, version: request.expectVersion, failure: { code: 'invalid-step' as const, stepIndex, message: 'Suggesting mode requires suggest metadata' } };
     return null;
   };
-  const applyEdits = async (request: DocxEditRequest, authorize: () => unknown = () => null) => {
+  /** `applied` runs with the view that first shows the batch applied, before that view is published. */
+  const applyEdits = async (request: DocxEditRequest, authorize: () => unknown = () => null, applied?: (view: PeerlessViewSnapshot) => void) => {
     const current = await flush();
     const denied = authorize();
     if (denied) return denied as DocxEditResult;
@@ -666,7 +668,8 @@ export function createPeerlessShellController(initial: Options) {
     if (policy) return policy;
     const admitted = current.commands.submit({ kind: 'applyEdits', payload: { request } }, { fence: true });
     if (admitted.status !== 'submitted') return { ok: false as const, version: request.expectVersion, failure: { code: 'read-only' as const, message: 'Worker batch was not admitted' } };
-    const outcome = await admitted.ticket.ack;
+    if (applied) appliedBatches.set(admitted.ticket, { binding: current, applied });
+    const outcome = await admitted.ticket.ack.finally(() => appliedBatches.delete(admitted.ticket));
     if (binding !== current) throw new Error('Document was replaced');
     const receipt = outcome.seq === undefined ? undefined : batchResults.get(outcome.seq);
     if (outcome.seq !== undefined) batchResults.delete(outcome.seq);
@@ -887,6 +890,14 @@ export function createPeerlessShellController(initial: Options) {
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
           preview: ready ? null : snapshot.preview };
         syncBorderPen();
+        const batch = view.editState?.batch;
+        if (batch?.result.ok) {
+          for (const [ticket, own] of appliedBatches) {
+            if (own.binding !== next || ticket.seq !== batch.seq) continue;
+            appliedBatches.delete(ticket);
+            emit(own.applied, view);
+          }
+        }
         publish();
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {
