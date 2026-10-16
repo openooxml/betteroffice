@@ -581,7 +581,7 @@ it('saving while F2 prefill is pending waits for the seed and preserves the unto
   host.cellInputs.mockImplementationOnce(() => prefill.promise);
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
   await waitFor(() => expect(host.cellInputs.mock.calls.length).toBeGreaterThan(requested));
-  expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('');
+  expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
   let saving!: Promise<unknown>;
   await act(async () => {
     saving = ready.mock.calls[0]![0].commands.execute('save', null);
@@ -603,8 +603,114 @@ it('saving while F2 prefill is pending waits for the seed and preserves the unto
   expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
 });
 
-describe('peerless F2 prefill keyboard replay', () => {
+for (const key of ['z', 'y', 'b', 'i']) {
+  it(`routes Mod+${key} to the text input during an uncached pending prefill`, async () => {
+    const host = peerlessHarness();
+    const pending = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    host.cellInputs.mockReturnValue(pending.promise);
+    const view = await host.mount();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    const input = view.getByTestId('xlsx-cell-editor');
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key, ctrlKey: true });
+    expect(host.sent).toEqual([]);
+    expect(view.getByTestId('xlsx-cell-editor')).toBe(input);
+    await act(async () =>
+      pending.resolve({
+        sheet: 0,
+        version: 'v1',
+        cells: [[{ a1: 'A1', input: 'initial', isFormula: false }]],
+      }),
+    );
+  });
+}
+
+for (const reopen of [false, true]) {
+  it(`updates B1 formula input when F2 interrupts its read${reopen ? ' and reopens after Escape' : ''}`, async () => {
+    const host = peerlessHarness();
+    host.cells.set('0:0:1', 'second');
+    const view = await host.mount();
+    const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    expect(formula.value).toBe('initial');
+    const focused = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    host.cellInputs.mockReturnValueOnce(focused.promise);
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+    await waitFor(() => expect(host.cellInputs).toHaveBeenLastCalledWith(0, 'B1'));
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    host.cellInputs.mockReturnValueOnce(prefill.promise);
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    await act(async () =>
+      focused.resolve({
+        sheet: 0,
+        version: 'v1',
+        cells: [[{ a1: 'B1', input: 'second', isFormula: false }]],
+      }),
+    );
+    expect(formula.value).toBe('second');
+    if (reopen) {
+      await act(async () =>
+        fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), {
+          key: 'Escape',
+        }),
+      );
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+      expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('second');
+      expect(formula.value).toBe('second');
+    }
+    await act(async () =>
+      prefill.resolve({
+        sheet: 0,
+        version: 'v1',
+        cells: [[{ a1: 'B1', input: 'second', isFormula: false }]],
+      }),
+    );
+  });
+}
+
+it('updates the focused formula input across a proposal refresh without a paint', async () => {
+  let coordinator!: ReturnType<typeof peerlessInput.createPeerlessWorkerInputCoordinator>;
+  const original = peerlessInput.createPeerlessWorkerInputCoordinator;
+  const creating = spyOn(peerlessInput, 'createPeerlessWorkerInputCoordinator').mockImplementation((hooks) => {
+    coordinator = original(hooks);
+    return coordinator;
+  });
+  restorers.push(() => creating.mockRestore());
+  const host = peerlessHarness();
+  const view = await host.mount();
+  const focused = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+  host.cellInputs.mockReturnValueOnce(focused.promise);
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+  await waitFor(() => expect(host.cellInputs).toHaveBeenLastCalledWith(0, 'B1'));
+  let ticket!: ReturnType<typeof coordinator.command>;
+  act(() => {
+    ticket = coordinator.command(
+      {
+        kind: 'applyOps',
+        payload: { toolbar: { id: 'refreshProposals', args: null } },
+      },
+      { after: null, frame: undefined },
+    );
+  });
+  await act(async () =>
+    focused.resolve({
+      sheet: 0,
+      version: 'v1',
+      cells: [[{ a1: 'B1', input: 'second', isFormula: false }]],
+    }),
+  );
+  expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('second');
+  await act(async () => {
+    for (const command of host.sent) host.ack(command);
+    await ticket.result;
+  });
+});
+
+for (const cached of [true, false]) describe(`peerless F2 prefill keyboard replay (${cached ? 'cached' : 'uncached'})`, () => {
   const value = 'Q3 Sales Dashboard';
+  const preview = cached ? value : '';
   const key = (input: HTMLInputElement, name: string, options: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean } = {}) => {
     const allowed = fireEvent.keyDown(input, { key: name, ...options });
     if (allowed && (options.ctrlKey || options.metaKey) && !options.altKey && name.toLowerCase() === 'a') input.select();
@@ -634,15 +740,22 @@ describe('peerless F2 prefill keyboard replay', () => {
   const setup = async (onSave: (bytes: Uint8Array) => void = () => {}) => {
     const host = peerlessHarness();
     host.cells.set('0:0:0', value);
+    const focused = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
+    const read = host.cellInputs.getMockImplementation()!;
+    if (!cached) host.cellInputs.mockReturnValue(focused.promise);
     const view = await host.mount(onSave);
+    host.cellInputs.mockImplementation(read);
     const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
     const requested = host.cellInputs.mock.calls.length;
     host.cellInputs.mockReturnValueOnce(prefill.promise);
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
     await waitFor(() => expect(host.cellInputs.mock.calls.length).toBeGreaterThan(requested));
     const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
-    const resolve = () => act(async () => prefill.resolve({ sheet: 0, version: 'v1',
-      cells: [[{ a1: 'A1', input: value, isFormula: false }]] }));
+    const resolve = () => act(async () => {
+      const result = { sheet: 0, version: 'v1', cells: [[{ a1: 'A1', input: value, isFormula: false }]] };
+      focused.resolve(result);
+      prefill.resolve(result);
+    });
     return { host, view, input, resolve };
   };
 
@@ -678,14 +791,14 @@ describe('peerless F2 prefill keyboard replay', () => {
     expect(input.selectionStart).toBe(value.length + 1);
   });
 
-  it('selects nothing when the still-empty editor is selected before prefill, so held keys apply at the end', async () => {
+  it('replays native selection against the visible value before prefill', async () => {
     const { input, resolve } = await setup();
     input.select();
     key(input, 'Delete');
     type(input, 'X');
     await resolve();
-    expect(input.value).toBe(`${value}X`);
-    expect(input.selectionStart).toBe(value.length + 1);
+    expect(input.value).toBe(cached ? 'X' : `${value}X`);
+    expect(input.selectionStart).toBe(cached ? 1 : value.length + 1);
   });
 
   it('closes Enter immediately and commits once after replay with the selection moved down', async () => {
@@ -920,12 +1033,12 @@ describe('peerless F2 prefill keyboard replay', () => {
       acknowledge(host);
       type(input, 'X');
       fireEvent.compositionStart(input);
-      fireEvent.change(input, { target: { value: '仮' } });
+      fireEvent.change(input, { target: { value: `${preview}仮` } });
       end(input, '変');
       await act(async () => { await Promise.resolve(); });
       await resolve();
       expect(input.value).toBe(`${value}X変`);
-      fireEvent.change(input, { target: { value: '変' } });
+      fireEvent.change(input, { target: { value: `${preview}変` } });
       expect(input.value).toBe(`${value}X変`);
       type(input, '変');
       expect(input.value).toBe(`${value}X変`);
@@ -959,21 +1072,21 @@ describe('peerless F2 prefill keyboard replay', () => {
       acknowledge(host);
       type(input, 'X');
       fireEvent.compositionStart(input);
-      fireEvent.change(input, { target: { value: '変' } });
+      fireEvent.change(input, { target: { value: `${preview}変` } });
       end(input, '変');
       await act(async () => {});
-      input.setSelectionRange(1, 1);
+      input.setSelectionRange(preview.length + 1, preview.length + 1);
       fireEvent.compositionStart(input);
-      fireEvent.change(input, { target: { value: '変仮' } });
+      fireEvent.change(input, { target: { value: `${preview}変仮` } });
       end(input, '数');
       await act(async () => {});
-      fireEvent.change(input, { target: { value: '変数' } });
-      input.setSelectionRange(2, 2);
+      fireEvent.change(input, { target: { value: `${preview}変数` } });
+      input.setSelectionRange(preview.length + 2, preview.length + 2);
       fireEvent.compositionStart(input);
-      fireEvent.change(input, { target: { value: '変数仮' } });
+      fireEvent.change(input, { target: { value: `${preview}変数仮` } });
       end(input, '');
       await act(async () => {});
-      fireEvent.change(input, { target: { value: '変数' } });
+      fireEvent.change(input, { target: { value: `${preview}変数` } });
       await resolve();
       expect(input.value).toBe(`${value}X変数`);
       fireEvent.keyUp(input, { key: 'Enter' });
@@ -2120,7 +2233,7 @@ describe('peerless workbook worker editor', () => {
     expect(input.value).toBe('AB');
   });
 
-  it('retries discarded formula reads on scroll without content changes', async () => {
+  it('keeps focused formula reads across cancelled cell input and scrolling', async () => {
     const host = peerlessHarness();
     host.cells.set('0:0:1', 'second');
     const view = await host.mount();
@@ -2146,7 +2259,7 @@ describe('peerless workbook worker editor', () => {
     fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Escape' });
     await act(async () => reply.resolve(result));
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
-    expect(input.value).toBe('initial');
+    expect(input.value).toBe('second');
     host.cellInputs.mockResolvedValue(result);
     const reads = host.cellInputs.mock.calls.length;
     const frames = host.frame.mock.calls.length;
