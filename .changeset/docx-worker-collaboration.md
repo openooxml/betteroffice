@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": minor
 ---
 
-Adds opt-in `collaboration` support to the worker-only DOCX editor, including remote cursors, reconnect synchronization, and undo that preserves other participants' edits.
+`collaboration` now runs on the default worker editor, with remote cursors, reconnect synchronization, and undo that preserves other participants' edits. `onChange` is refused as elsewhere.
