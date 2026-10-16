@@ -37,7 +37,7 @@ export function workerRevisions(review: ResidentReviewSnapshot, sidebar: Residen
     if (rect) anchors.set(`revision-${key}`, rect);
   }
   return {
-    ids: new Set(numeric.values()),
+    ids: new Set(review.revisions.map(site => site.revisionId)),
     navigation: [...navigation.values()].sort((first, second) => first.position - second.position),
     entries: (sidebar?.trackedChanges.entries ?? []).filter(entry => numeric.has(entry.revisionId) &&
       (entry.insertionRevisionId == null || numeric.has(entry.insertionRevisionId))),

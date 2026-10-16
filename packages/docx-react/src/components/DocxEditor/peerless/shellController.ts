@@ -315,7 +315,8 @@ export function createPeerlessShellController(initial: Options) {
     const outcome = await result.ticket.ack;
     if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
     if (outcome.status === 'applied' || outcome.status === 'noop') return { ok: true, status: outcome.status === 'applied' ? 'executed' : 'noop' };
-    return { ok: false, failure: { code: outcome.reason === 'read-only' ? 'read-only' : 'command-failed', message: outcome.reason ?? 'Worker command failed.' } };
+    const code = outcome.reason === 'read-only' ? 'read-only' : outcome.reason === 'unknown-revision' ? 'revision-not-found' : 'command-failed';
+    return { ok: false, failure: { code, message: outcome.reason ?? 'Worker command failed.' } };
   };
   const submit = (intent: PeerlessInputIntent): Promise<DocxCommandResult> => {
     const current = ready();

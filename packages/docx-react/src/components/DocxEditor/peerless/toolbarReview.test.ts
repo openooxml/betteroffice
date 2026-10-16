@@ -41,12 +41,12 @@ test('worker review commands target the tracked change the worker reports at the
   await feed();
   const env = controller.environment();
   expect(env.revisions).toEqual([{ revisionId: '7', position: 4 }, { revisionId: '9', position: 20 }]);
-  expect([...env.revisionIds].sort()).toEqual(['7', '9']);
+  expect([...env.revisionIds].sort()).toEqual(['11', '7', '9']);
   expect(env.currentRevisionId).toBe('7');
   parity('reviewAccept');
   parity('reviewReject', { revisionId: '9' });
   expect(controller.commands.store.getState('reviewAccept')).toMatchObject({ enabled: true });
-  expect(controller.commands.store.getState('reviewReject', { revisionId: '11' }))
+  expect(controller.commands.store.getState('reviewReject', { revisionId: '12' }))
     .toMatchObject({ enabled: false, disabledReason: { code: 'revision-not-found' } });
   expect(await controller.commands.store.execute('reviewAccept', null)).toMatchObject({ ok: true });
   expect(submit).toHaveBeenLastCalledWith({ kind: 'acceptRevision', payload: { revisionId: '7' } }, { fence: true });
@@ -69,7 +69,7 @@ test('worker tracked changes skip host proposals and survive until a newer read 
   viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, version: view.version + 1, selection: null });
   controller.revisions(null, null);
   expect(controller.trackedChanges()).toBe(changes);
-  expect([...controller.environment().revisionIds].sort()).toEqual(['7', '9']);
+  expect([...controller.environment().revisionIds].sort()).toEqual(['11', '7', '9']);
   controller.empty();
   expect(controller.trackedChanges()).toBeNull();
   expect(controller.environment().revisions).toEqual([]);
@@ -159,4 +159,14 @@ test('review commands take their admission place between keystrokes and expect t
   expect((await Promise.all(keys)).map(outcome => outcome.status)).toEqual(['applied', 'applied', 'applied']);
   expect(applied).toEqual(['a', 'acceptRevision', 'b', 'rejectRevision', 'c']);
   binding.admission.dispose();
+});
+
+test('host proposal revisions stay addressable by id and a vanished revision answers revision-not-found', async () => {
+  const { controller, submit, feed } = reviewFixture();
+  await feed();
+  expect([...controller.environment().revisionIds].sort()).toEqual(['11', '7', '9']);
+  expect(await controller.commands.store.execute('reviewReject', { revisionId: '11' })).toMatchObject({ ok: true });
+  expect(submit.mock.lastCall![0]).toMatchObject({ kind: 'rejectRevision', payload: { revisionId: '11' } });
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'refused', reason: 'unknown-revision' }) } }) as never);
+  expect(await controller.commands.store.execute('reviewAccept', { revisionId: '7' })).toMatchObject({ ok: false, failure: { code: 'revision-not-found' } });
 });
