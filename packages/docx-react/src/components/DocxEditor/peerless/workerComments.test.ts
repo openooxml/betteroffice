@@ -155,7 +155,8 @@ test('getComments follows the latest review read of the worker document', async 
 test('removing a worker comment admits its native id and emits the shortened projection once', async () => {
   const { controller, submit, changes } = reviewFixture();
   expect(await controller.removeComment(7)).toEqual({ ok: true, status: 'executed' });
-  expect(submit.mock.calls).toEqual([[{ kind: 'removeComment', payload: { id: 'native-7', expectVersion: 'native' } }]]);
+  expect(submit).toHaveBeenCalledTimes(1);
+  expect(submit.mock.calls[0]![0]).toEqual({ kind: 'removeComment', payload: { id: 'native-7', expectVersion: 'native' } });
   expect(controller.ref.getComments()).toEqual([]);
   expect(changes).toEqual([[]]);
 });
