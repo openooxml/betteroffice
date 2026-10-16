@@ -514,6 +514,10 @@ export class EditSession {
     format_text_target_json(target_json: string, delta_json: string): string;
     geometry_position_outline_json(root: string): string;
     /**
+     * Whether a remote update is waiting on one that has not arrived yet.
+     */
+    has_pending_update(): boolean;
+    /**
      * Whether the document has a story with this id.
      */
     has_story(story: string): boolean;
@@ -1774,6 +1778,7 @@ export interface InitOutput {
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_geometry_position_outline_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_has_pending_update: (a: number) => number;
     readonly editsession_has_story: (a: number, b: number, c: number) => number;
     readonly editsession_header_footer_aliases_json: (a: number) => [number, number];
     readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];

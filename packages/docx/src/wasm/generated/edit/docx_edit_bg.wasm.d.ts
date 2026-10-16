@@ -91,6 +91,7 @@ export const editsession_finish_compared_docx_json: (a: number, b: number, c: nu
 export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_geometry_position_outline_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_has_pending_update: (a: number) => number;
 export const editsession_has_story: (a: number, b: number, c: number) => number;
 export const editsession_header_footer_aliases_json: (a: number) => [number, number];
 export const editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
