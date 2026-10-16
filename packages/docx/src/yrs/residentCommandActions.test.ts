@@ -11,6 +11,7 @@ import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand 
 import { createResidentCommandHost } from './residentCommandHost';
 import { resolveCommandSelection } from './residentCommandAnchors';
 import { readResidentProperties } from './residentProperties';
+import { wrapSession } from './yrsSessionFacade';
 import { yrsToDocument } from './yrsToDocument';
 import type {
   DocxCommandEnvelope, DocxCommandIntent, DocxCommandPayload, DocxCommandSelection, DocxEditState,
@@ -450,7 +451,7 @@ test('setObjectProperties updates image wrapType, float/position attrs, and tran
     vertical: { relativeTo: 'paragraph', posOffset: 0 },
   };
   const savedDocumentXml = async () => {
-    const projected = yrsToDocument(arm.engine, arm.engine.propertyDocument());
+    const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
     const saved = await repackDocx(projected);
     return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
   };

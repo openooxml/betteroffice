@@ -74,8 +74,8 @@ test('enables and dispatches imageWrap and imageTransform when an image is selec
     imagePropertiesAvailable: true,
     image: { wrap: 'inline' },
   });
-  expect(controller.commands.store.getState('imageWrap', { wrap: 'squareLeft' })).toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-mode' } });
-  expect(controller.commands.store.getState('imageTransform', { action: 'rotateCW' })).toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-mode' } });
+  expect(controller.commands.store.getState('imageWrap', { wrap: 'squareLeft' })).toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-unsupported' } });
+  expect(controller.commands.store.getState('imageTransform', { action: 'rotateCW' })).toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-unsupported' } });
 
   controller.update({
     read: (async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } })) as never,
