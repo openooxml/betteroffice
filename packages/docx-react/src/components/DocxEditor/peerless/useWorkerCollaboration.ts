@@ -9,7 +9,8 @@ import { PeerlessRemotePresence } from './PeerlessRemotePresence';
 type Connection = { client: ResidentEngineWorkerClient; binding: PeerlessEditSessionBinding;
   replica: ReturnType<typeof createPeerlessCollaborationReplica>; stop: () => void };
 
-const emittedClocks = new Map<number, number>();
+const heldClocks = new Map<number, number>();
+const hold = (clientId: number, clock: number) => heldClocks.set(clientId, Math.max(heldClocks.get(clientId) ?? 0, clock));
 let warnedFreshId = false;
 
 /** @internal Opens, publishes and retires the worker editor's collaboration replica. */
@@ -40,16 +41,18 @@ export function useWorkerCollaboration(options: DocxEditorCollaborationOptions |
     const pinned = openOptions?.clientId;
     const collaboration = openOptions && (pinned === undefined
       ? { clientId: crypto.getRandomValues(new Uint32Array(1))[0]!, initialUpdate: openOptions.initialUpdate }
-      : { clientId: pinned, initialUpdate: openOptions.initialUpdate, clientClock: emittedClocks.get(pinned) });
+      : { clientId: pinned, initialUpdate: openOptions.initialUpdate, clientClock: heldClocks.get(pinned) });
     opening.current = { client, room: reopenKey, clientId: collaboration?.clientId };
     return collaboration;
   }, [openOptions, reopenKey, retire]);
-  const opened = useCallback((client: ResidentEngineWorkerClient, clientId: number | undefined) => {
+  const opened = useCallback((client: ResidentEngineWorkerClient, { clientId, clientClock = 0 }: { clientId?: number; clientClock?: number }) => {
     const open = opening.current;
-    if (open?.client !== client || open.clientId === undefined || clientId === undefined || clientId === open.clientId) return;
+    if (open?.client !== client || open.clientId === undefined || clientId === undefined) return;
+    if (clientId === openOptions?.clientId) hold(clientId, clientClock);
+    if (clientId === open.clientId) return;
     if (open.clientId === openOptions?.clientId && !warnedFreshId) {
       warnedFreshId = true;
-      console.warn(`[DocxEditor] collaboration.clientId ${open.clientId} reopened a state behind its earlier edits; this session uses a fresh client id.`);
+      console.warn(`[DocxEditor] collaboration.clientId ${open.clientId} would reuse clocks this page already used; this session uses a fresh client id.`);
     }
     opening.current = { ...open, clientId };
   }, [openOptions]);
@@ -59,7 +62,7 @@ export function useWorkerCollaboration(options: DocxEditorCollaborationOptions |
       current.current?.binding === binding) return;
     const clientId = open.clientId;
     const stop = clientId === openOptions.clientId ? client.onCollabUpdates(({ clock }) => {
-      if (clock !== undefined) emittedClocks.set(clientId, Math.max(emittedClocks.get(clientId) ?? 0, clock));
+      if (clock !== undefined) hold(clientId, clock);
     }) : () => {};
     const next = { client, binding, replica: createPeerlessCollaborationReplica(client, binding, clientId), stop };
     current.current = next; setConnection(next);

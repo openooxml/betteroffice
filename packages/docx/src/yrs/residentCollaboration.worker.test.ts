@@ -56,7 +56,7 @@ async function parsedDocument(): Promise<Document> {
 
 async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
   const client = new ResidentSourceWorkerClient(worker);
-  await client.openSource({ ...(document ? { document } : { bytes }), collaboration: { clientId, initialUpdate } });
+  const opened = await client.openSource({ ...(document ? { document } : { bytes }), collaboration: { clientId, initialUpdate } });
   const engine = worker.sessions[0]!;
   const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 4 };
   const initial = await client.commandInit({ session: `replica-${clientId}`, incarnation: 1, epoch: 1,
@@ -66,17 +66,17 @@ async function openCommands(clientId: number, initialUpdate?: Uint8Array, docume
       measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, fontChains: { 'liberation sans|0|0': [0] } }, renderEnv: {} }),
     layoutWithRegions: true, layoutRevision: 1, extras: '{}',
   });
-  return { worker, client, engine, initial };
+  return { worker, client, engine, initial, opened };
 }
 
 async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
-  const { client, engine, initial } = await openCommands(clientId, initialUpdate, document, bytes, worker);
+  const { client, engine, initial, opened } = await openCommands(clientId, initialUpdate, document, bytes, worker);
   const session = createDocxWorkerEditSession({ source: bytes,
     connection: await createResidentCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });
-  return { worker, client, engine, initial, session };
+  return { worker, client, engine, initial, session, opened };
 }
 
 const remoteUpdate = (target: { engine: { encodeStateVector(): Uint8Array } }, source: { encodeStateAsUpdate(vector?: Uint8Array): Uint8Array }) =>
@@ -129,6 +129,44 @@ test('a pinned id opens under a fresh id when the opened state lags the clock it
       } finally { client.destroy(); }
     }
   } finally { off(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('a pinned id that seeds again opens under a fresh id and converges with a peer of its first seed', async () => {
+  const seed = async (body: string, clientClock?: number) => {
+    const worker = start();
+    const client = new ResidentSourceWorkerClient(worker);
+    const opened = await client.openSource({ bytes: documentBytes(undefined, body), collaboration: { clientId: 9511, clientClock } });
+    return { client, opened, engine: worker.sessions.at(-1)! };
+  };
+  const first = await seed(SEED_BODY);
+  const peer = await createYrsSession({ clientId: 9512 });
+  const second = await seed(`${SEED_BODY}<w:p><w:r><w:t>A longer replacement seed</w:t></w:r></w:p>`, stateVectorClock(first.opened.stateVector, 9511));
+  try {
+    peer.loadState(first.engine.encodeState());
+    expect(second.opened.clientId).not.toBe(9511);
+    expect(second.engine.clientId).toBe(second.opened.clientId!);
+    peer.applyUpdate(second.engine.encodeStateAsUpdate(peer.encodeStateVector()));
+    second.engine.applyUpdate(peer.encodeStateAsUpdate(second.engine.encodeStateVector()));
+    expect(peer.paragraphs('body')).toEqual(second.engine.paragraphs('body'));
+  } finally { first.client.destroy(); second.client.destroy(); peer.destroy(); }
+}, TIMEOUT);
+
+test('a pinned session reports its own clocks held at open and merged from a peer', async () => {
+  const bytes = documentBytes();
+  const a = await open(9521, undefined, undefined, bytes, start());
+  const checkpoint = a.engine.encodeState();
+  const held = stateVectorClock(a.engine.encodeStateVector(), 9521);
+  expect((await a.session.submit('insertText', { text: ' later' }).ack).status).toBe('applied');
+  const b = await open(9521, checkpoint, undefined, bytes, start());
+  const clocks: number[] = [];
+  const off = b.client.onCollabUpdates(event => { if (event.clock !== undefined) clocks.push(event.clock); });
+  try {
+    expect(held).toBeGreaterThan(0);
+    expect((await b.session.submit('applyRemoteUpdate', { update: remoteUpdate(b, a.engine) }, merge).ack).status).toBe('applied');
+    expect(clocks).toEqual([stateVectorClock(a.engine.encodeStateVector(), 9521)]);
+    expect(clocks[0]).toBeGreaterThan(held);
+    expect(b.opened.clientClock).toBe(held);
+  } finally { off(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
 
 test('two worker command sessions converge with reordered and duplicated updates', async () => {

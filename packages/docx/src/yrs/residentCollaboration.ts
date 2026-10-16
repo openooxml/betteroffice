@@ -26,8 +26,8 @@ export interface ResidentPresenceGeometry {
 export interface ResidentCollaborationUpdates {
   updates: ArrayBuffer[];
   inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>;
-  /** This session's own state-vector clock, set when updates were drained. */
-  clock?: number;
+  /** This session's own state-vector clock after the drained edits and merges. */
+  clock: number;
 }
 
 const inferredAnchors = new WeakMap<ResidentEngineSession, Map<number, { key: string; sticky: { story: string; encoded: Uint8Array } }>>();
@@ -41,14 +41,15 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
   inferredAnchors.set(engine, anchors);
   const updates: ArrayBuffer[] = [];
   const inferences: ResidentCollaborationUpdates['inferences'] = [];
+  let merged = false;
   const unsubscribe = engine.onUpdate((update, origin) => {
     if (!disposed && origin !== 'remote') updates.push(update.slice().buffer);
   });
   return {
     drain(): ResidentCollaborationUpdates | undefined {
-      if (!updates.length && !inferences.length) return undefined;
-      return { ...(updates.length ? { clock: stateVectorClock(engine.encodeStateVector(), engine.clientId) } : {}),
-        updates: updates.splice(0), inferences: inferences.splice(0) };
+      if (!updates.length && !inferences.length && !merged) return undefined;
+      merged = false;
+      return { clock: stateVectorClock(engine.encodeStateVector(), engine.clientId), updates: updates.splice(0), inferences: inferences.splice(0) };
     },
     wrap(hooks: Hooks): Hooks {
       const state = () => ({ selection: hooks.selection(), editState: hooks.editState() });
@@ -63,6 +64,7 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
           try {
             if (command.kind === 'applyRemoteUpdateChunks') engine.applyUpdateChunks(command.payload.updates.map(update => new Uint8Array(update)));
             const insertion = command.kind === 'applyRemoteUpdate' ? engine.applyUpdate(new Uint8Array(command.payload.update)) : null;
+            merged = true;
             if (engine.proposalEngine.version() !== before) engine.markProjectionStories(engine.storiesChangedSince(since).stories);
             if (insertion) {
               inferences.push({ seq: command.seq, insertion });

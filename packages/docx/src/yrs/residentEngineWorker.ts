@@ -1482,10 +1482,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const started = performance.now();
     let opening: ResidentEngineSession | undefined;
     try {
-      opening = await createResidentEngineSession(source.heapLimitBytes, source.collaboration?.clientId);
+      const pinned = source.collaboration;
+      const reseeded = pinned?.clientClock !== undefined && pinned.initialUpdate === undefined;
+      opening = await createResidentEngineSession(source.heapLimitBytes, reseeded ? undefined : pinned?.clientId);
       let opened = adoptResidentSource(opening, source);
-      const clientClock = source.collaboration?.clientClock;
-      if (opened && clientClock !== undefined && stateVectorClock(opening.encodeStateVector(), opening.clientId) < clientClock) {
+      if (opened && !reseeded && pinned?.clientClock !== undefined &&
+        stateVectorClock(opening.encodeStateVector(), opening.clientId) < pinned.clientClock) {
         destroySession(true);
         opening = await createResidentEngineSession(source.heapLimitBytes);
         opened = adoptResidentSource(opening, source);
@@ -1498,12 +1500,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       const { document, hostJson } = opened;
       if (source.collaboration) collaboration = createResidentCollaboration(opening);
       const metadata = residentSourceMetadata(document);
+      const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, clientId: opening.clientId });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, clientId: opening.clientId }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity }, [stateVector]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -3195,7 +3198,7 @@ async function replySourcePreview(
   preview: ResidentSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
@@ -3236,7 +3239,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;

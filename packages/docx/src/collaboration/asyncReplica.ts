@@ -2,9 +2,9 @@ import type { AsyncCollaborationReplica, CollaborationReplica } from './types';
 
 /**
  * @experimental A `CollaborationReplica` whose state lives in a worker. `CollaborationProvider` reads it
- * through `async`. The synchronous `encodeStateVector` and `encodeStateAsUpdate` throw; use
- * `async.encodeStateVector()` and `async.encodeStateAsUpdate()`, or open the editor with `legacySyncApi`
- * for a synchronous replica. `applyUpdate` and `async`'s apply methods copy the caller's updates, which stay usable.
+ * through `async`. The synchronous `encodeStateVector`, `encodeStateAsUpdate` and `encodeStateAsUpdateChunks`
+ * throw; use their `async` counterparts, or open the editor with `legacySyncApi` for a synchronous replica.
+ * `applyUpdate` and `async`'s apply methods copy the caller's updates, which stay usable.
  */
 export interface AsyncReplicaAdapter extends CollaborationReplica {
   readonly async: AsyncCollaborationReplica;
@@ -16,7 +16,7 @@ export function asyncReplicaFor(replica: CollaborationReplica): AsyncCollaborati
   return adapters.get(replica);
 }
 
-function unavailable(method: 'encodeStateVector' | 'encodeStateAsUpdate'): () => never {
+function unavailable(method: 'encodeStateVector' | 'encodeStateAsUpdate' | 'encodeStateAsUpdateChunks'): () => never {
   return () => {
     throw new Error(
       `${method} is not available on a worker-hosted replica; use async.${method}() or open the editor with legacySyncApi for synchronous replica access`
@@ -44,6 +44,7 @@ export function createAsyncCollaborationReplica(replica: AsyncCollaborationRepli
     clientId: replica.clientId, async: hosted,
     encodeStateVector: unavailable('encodeStateVector'),
     encodeStateAsUpdate: unavailable('encodeStateAsUpdate'),
+    ...(hosted.encodeStateAsUpdateChunks && { encodeStateAsUpdateChunks: unavailable('encodeStateAsUpdateChunks') }),
     applyUpdate: hosted.applyUpdate,
     onUpdate: hosted.onUpdate,
   };

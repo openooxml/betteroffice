@@ -19,7 +19,8 @@ export type ResidentSourceOpenRequest = (
   digest?: string;
   /**
    * One replica seeds from bytes; joiners pass `initialUpdate`. Two seeds merge by story last-writer-wins.
-   * `clientClock` is the highest clock this client id has emitted; an opened state behind it opens under a fresh client id.
+   * `clientClock` is the highest clock of `clientId` the caller has held. A seed would write that id's clocks again
+   * and a joined state behind it would reuse later ones, so either opens under a fresh client id.
    */
   collaboration?: { clientId: number; initialUpdate?: Uint8Array; clientClock?: number };
 };

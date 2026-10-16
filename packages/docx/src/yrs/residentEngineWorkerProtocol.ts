@@ -439,6 +439,8 @@ export type ResidentEngineWorkerResponse = (
       sourceDocument?: Document;
       /** An `openSource` reply: the client id the opened replica writes with. */
       clientId?: number;
+      /** An `openSource` reply: the opened state's clock for `clientId`. */
+      clientClock?: number;
       /** An `open` reply: the package cannot open as a preview; nothing was opened. */
       previewRefused?: boolean;
       /** A `fontRequirements` reply. */
