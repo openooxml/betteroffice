@@ -41,7 +41,7 @@ test('worker review commands target the tracked change at the selection', async 
   expect(controller.commands.store.getState('reviewAccept')).toMatchObject({ enabled: true });
   expect(controller.commands.store.getState('reviewReject', { revisionId: '11' }))
     .toMatchObject({ enabled: false, disabledReason: { code: 'revision-not-found' } });
-  expect(await controller.commands.store.execute('reviewAccept')).toMatchObject({ ok: true });
+  expect(await controller.commands.store.execute('reviewAccept', null)).toMatchObject({ ok: true });
   expect(submit).toHaveBeenLastCalledWith({ kind: 'acceptRevision', payload: { revisionId: '7', expectVersion: 'native' } }, { fence: true });
   expect(await controller.commands.store.execute('reviewReject', { revisionId: '9' })).toMatchObject({ ok: true });
   expect(submit).toHaveBeenLastCalledWith({ kind: 'rejectRevision', payload: { revisionId: '9', expectVersion: 'native' } }, { fence: true });
