@@ -18,6 +18,8 @@ import {
   computeAnchorTargetGeometry,
   createYrsSession,
   proposalRevisionPreview,
+  resolveReservations,
+  type DocxReservationsPayload,
   type ProposalGeometryTarget,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -123,12 +125,13 @@ test('plugin selection ranges label the native worker caret with its accepted of
 interface LaidOut { main: YrsSession; engine: ResidentEngineSession; frame: ReturnType<typeof applyFrameDelta>; window: readonly [number, number] }
 
 /** The fixture laid out as the worker frames it, with pages outside `[first, end)` unbuilt. */
-async function laidOut(first = 0, end = 2 ** 32 - 1): Promise<LaidOut> {
+async function laidOut(first = 0, end = 2 ** 32 - 1, reservations?: DocxReservationsPayload): Promise<LaidOut> {
   const main = await createYrsSession();
   const engine = await createResidentEngineSession();
   destroy.push(main, engine);
   const host = main.openDocx(await storyAnchorsDocx(), true);
-  const request = buildResidentRegionLayoutRequest(host.document, PAGE_GAP, { revisionPreview: proposalRevisionPreview(main.getProposals()) });
+  const request = buildResidentRegionLayoutRequest(host.document, PAGE_GAP, { revisionPreview: proposalRevisionPreview(main.getProposals()),
+    ...(reservations ? { reservations: resolveReservations(main, reservations, main.version()) } : {}) });
   const requirements = JSON.parse(main.layoutFontRequirementsJson(JSON.stringify(request))) as { key: string }[];
   main.clearFonts();
   const font = main.registerFont(FONT);
@@ -144,10 +147,14 @@ async function laidOut(first = 0, end = 2 ** 32 - 1): Promise<LaidOut> {
   return { main, engine, frame, window: [first, end] };
 }
 
-interface ShellOptions { zoom?: number; window?: readonly [number, number]; answer?(result: ProposalGeometryTarget): ProposalGeometryTarget }
+interface ShellOptions {
+  zoom?: number; window?: readonly [number, number]; answer?(result: ProposalGeometryTarget): ProposalGeometryTarget;
+  /** The reservation set the frame was laid out with, and the one the editor sends. */
+  laidOutWith?: { version: string; key: string | null }; sent?(): unknown;
+}
 
 /** The peer-less plugin geometry over `laid`'s frame, its targets answered by the worker read. */
-async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, window, answer = (result) => result }: ShellOptions = {}) {
+async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, window, answer = (result) => result, laidOutWith, sent = () => null }: ShellOptions = {}) {
   const shown = window ?? built;
   const container = document.createElement('div');
   const host = document.createElement('div');
@@ -173,7 +180,8 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
   layer.getBoundingClientRect = container.getBoundingClientRect;
   const identity = { session: 's', incarnation: 1, epoch: 1 };
   const view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, editState: undefined,
-    geometry: { identity, coversThroughSeq: 0, frameEpoch: frame.frameEpoch, layoutRevision: 1, pages, caret: null, selectionRects: [] } };
+    geometry: { identity, coversThroughSeq: 0, frameEpoch: frame.frameEpoch, layoutRevision: 1, pages, caret: null, selectionRects: [],
+      ...(laidOutWith ? { reservations: laidOutWith } : {}) } };
   const version = engine.geometryReader.version();
   const review = { version, previewVersion: 0 };
   const reads: unknown[] = [];
@@ -184,7 +192,8 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
       return computeAnchorTargetGeometry(engine.geometryReader, request.targets).map(answer);
     },
     ref: { getZoom: () => zoom, readParagraphs: async () => ({ ok: true, version, paragraphs: [] }) } };
-  const plugin = createWorkerPluginGeometry(controller as never, () => container, () => layer, () => {});
+  const plugin = (createWorkerPluginGeometry as (...args: unknown[]) => ReturnType<typeof createWorkerPluginGeometry>)(
+    controller, () => container, () => layer, () => {}, undefined, sent);
   if (window) plugin.setDisplayWindow(window);
   await plugin.update();
   return {
@@ -401,18 +410,96 @@ test('pages released to unbuilt keep the parts their build paints across a frame
     .toEqual(painted.map((parts, index) => [index < 3, ...parts]));
 });
 
-test('the worker-only layout reports no included reservation set', async () => {
-  const shell = await shellOf(await laidOut());
-  expect(shell.plugin.layout()!.reservationsVersion).toBeNull();
+const at = (paraId: string, offset: number) => ({ paraId, offset });
+const span = (paraId: string, from: number, to: number) =>
+  ({ kind: 'range', version: 'v', range: { story: 'body', start: at(paraId, from), end: at(paraId, to), view: 'accepted' } }) as const;
+const RESERVED: DocxReservationsPayload = { version: 'v', sets: [
+  { owner: 'probe', items: [
+    { id: 'chip', kind: 'inline', width: 40, height: 20, anchor: span('00000004', 7, 7) },
+    { id: 'gap', kind: 'block', side: 'after', height: 60, anchor: span('00000005', 0, 0) },
+    { id: 'gone', kind: 'hide', anchor: span('00000005', 6, 11) },
+    { id: 'late', kind: 'inline', width: 30, height: 10, anchor: span('00000008', 0, 0) },
+  ] },
+  { owner: 'other', items: [{ id: 'chip', kind: 'inline', width: 24, height: 12, anchor: span('00000001', 0, 0) }] },
+] };
+const LAID_OUT = { version: 'v', key: '1' };
+const sentAs = (key: string) => ({ ...RESERVED, key });
+const reservation = (id: string) => ({ kind: 'reservation', id }) as const;
+
+async function reservedShell(first?: number, end?: number) {
+  const laid = await laidOut(first, end, RESERVED);
+  return { laid, shell: await shellOf(laid, { laidOutWith: LAID_OUT, sent: () => sentAs('1') }) };
+}
+
+/** `owner`'s box `id` on the frame pages, which the answer must place in overlay pixels. */
+function expectBox(result: DocxAnchorGeometryResult, { frame }: LaidOut, { bounds }: { bounds: { x: number; y: number }[] }, owner: string, id: string) {
+  const pageIndex = frame.displayList.pages.findIndex((page) => page.reservations?.some((box) => box.owner === owner && box.id === id));
+  const box = frame.displayList.pages[pageIndex]!.reservations!.find((entry) => entry.owner === owner && entry.id === id)!;
+  const expected = { x: HOST.left + bounds[pageIndex]!.x + box.x, y: HOST.top + bounds[pageIndex]!.y + box.y, width: box.width, height: box.height };
+  const answered = ok(result);
+  expect(answered.rects).toHaveLength(1);
+  for (const rect of [answered.rects[0]!, answered.anchor]) {
+    expect(rect.pageIndex).toBe(pageIndex);
+    for (const key of ['x', 'y', 'width', 'height'] as const) expect(rect[key]).toBeCloseTo(expected[key], 6);
+  }
+}
+
+test('the worker-only layout reports the reservation set its frame was laid out with', async () => {
+  expect((await reservedShell()).shell.plugin.layout()!.reservationsVersion).toBe('v');
+  expect((await shellOf(await laidOut())).plugin.layout()!.reservationsVersion).toBeNull();
 });
 
-test('a reservation target answers unsupported on the worker-only editor without a worker read', async () => {
-  const shell = await shellOf(await laidOut());
-  const target = { kind: 'reservation', id: 'box' } as const;
-  const unsupported: DocxAnchorGeometryResult = { ok: false, failure: { code: 'unsupported', message: 'This layout reports no reservations' } };
-  shell.plugin.requestTarget(target);
+test('a plugin reads its own inline and block boxes from the frame pages, batched with other targets, without a worker read', async () => {
+  const { laid, shell } = await reservedShell();
   const geometry = shell.plugin.geometry()!;
-  expect(geometry.getAnchorGeometry(target)).toEqual(unsupported);
-  expect(scopePluginGeometry(geometry, 'plugin').getAnchorGeometry(target)).toEqual(unsupported);
+  const probe = scopePluginGeometry(geometry, 'probe');
+  const [chip, gap] = await probe.readAnchorGeometries([reservation('chip'), reservation('gap')]);
   expect(shell.reads).toHaveLength(0);
+  expectBox(chip!, laid, shell, 'probe', 'chip');
+  expectBox(gap!, laid, shell, 'probe', 'gap');
+  expect(ok(gap!).rects[0]!.height).toBeCloseTo(60, 6);
+  expectBox((await scopePluginGeometry(geometry, 'other').readAnchorGeometries([reservation('chip')]))[0]!, laid, shell, 'other', 'chip');
+  expect(probe.getAnchorGeometry(reservation('chip'))).toEqual(chip!);
+  const [mixed, intro] = await probe.readAnchorGeometries([reservation('chip'), range(laid, shell.version, 'body', '00000001', 'Intro')]);
+  expect(mixed).toEqual(chip!);
+  ok(intro!);
+  expect(geometry.getAnchorGeometry(reservation('chip'))).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+  expect(probe.getPageRect(0)).toEqual(geometry.getPageRect(0));
+  expect(probe.isPageBuilt(0)).toBe(true);
+});
+
+test('a frame laid out with another reservation set than the one the editor sends answers layout-unavailable', async () => {
+  let sent = sentAs('2');
+  const laid = await laidOut(undefined, undefined, RESERVED);
+  const shell = await shellOf(laid, { laidOutWith: LAID_OUT, sent: () => sent });
+  const probe = scopePluginGeometry(shell.plugin.geometry()!, 'probe');
+  const unavailable = { ok: false, failure: { code: 'layout-unavailable' } };
+  expect(probe.getAnchorGeometry(reservation('chip'))).toMatchObject(unavailable);
+  expect(await probe.readAnchorGeometries([reservation('chip'), reservation('gone')])).toMatchObject([unavailable, unavailable]);
+  const unstamped = await shellOf(laid, { sent: () => sentAs('1') });
+  expect(scopePluginGeometry(unstamped.plugin.geometry()!, 'probe').getAnchorGeometry(reservation('chip'))).toMatchObject(unavailable);
+  sent = sentAs('1');
+  expectBox(probe.getAnchorGeometry(reservation('chip')), laid, shell, 'probe', 'chip');
+});
+
+test('a hidden reservation answers the boundary its hidden text leaves, read with the other targets', async () => {
+  const { laid, shell } = await reservedShell();
+  const probe = scopePluginGeometry(shell.plugin.geometry()!, 'probe');
+  const [gone, before] = await probe.readAnchorGeometries([reservation('gone'), range(laid, shell.version, 'body', '00000005', 'After ')]);
+  const hidden = ok(gone!);
+  const visible = ok(before!);
+  expect(shell.reads).toHaveLength(1);
+  expect(hidden.rects).toEqual([]);
+  expect(hidden.anchor).toMatchObject({ pageIndex: visible.anchor.pageIndex, width: 0 });
+  expect(hidden.anchor.x).toBeCloseTo(visible.anchor.x, 6);
+  expect(hidden.anchor.y).toBeCloseTo(visible.anchor.y, 6);
+});
+
+test('a reservation box on an unbuilt page waits for its layout, and an unknown one is missing once laid out', async () => {
+  const unavailable = { ok: false, failure: { code: 'layout-unavailable' } };
+  const early = await reservedShell(0, 3);
+  expect(await scopePluginGeometry(early.shell.plugin.geometry()!, 'probe').readAnchorGeometries([reservation('late')])).toMatchObject([unavailable]);
+  const probe = scopePluginGeometry((await reservedShell()).shell.plugin.geometry()!, 'probe');
+  ok((await probe.readAnchorGeometries([reservation('late')]))[0]!);
+  expect(await probe.readAnchorGeometries([reservation('nope')])).toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
 });

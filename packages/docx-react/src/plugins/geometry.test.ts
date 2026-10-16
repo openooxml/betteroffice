@@ -137,7 +137,7 @@ describe('reservation geometry', () => {
     });
   });
 
-  test('answers a plugin its own box once the painted layout holds its latest set', () => {
+  test('answers a plugin its own box once the painted layout holds its latest set', async () => {
     const pages = document.createElement('div');
     const canvas = document.createElement('canvas');
     canvas.dataset.pageIndex = '0';
@@ -191,6 +191,9 @@ describe('reservation geometry', () => {
     expect(result).toMatchObject({ version: 'v', layoutId: layout.id });
     expect(result.anchor).toEqual({ x: 10, y: 20, width: 30, height: 40, pageIndex: 0 });
     expect(result.rects).toEqual([result.anchor]);
+    expect(await mine.readAnchorGeometries([target, { kind: 'reservation', id: 'other' }])).toEqual([
+      result, mine.getAnchorGeometry({ kind: 'reservation', id: 'other' }),
+    ]);
     expect(scopePluginGeometry(geometry, 'acme.b').getAnchorGeometry(target)).toMatchObject({
       ok: false, failure: { code: 'missing-target' },
     });

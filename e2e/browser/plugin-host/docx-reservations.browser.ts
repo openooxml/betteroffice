@@ -10,7 +10,7 @@ interface Rect {
 interface ReservationProbe {
   editor: { save(): Promise<ArrayBuffer | null> } | null;
   geometry: {
-    getAnchorGeometry(target: unknown): { ok: true; anchor: Rect; rects: Rect[] } | { ok: false; failure: { code: string } };
+    readAnchorGeometries(targets: unknown[]): Promise<({ ok: true; anchor: Rect; rects: Rect[] } | { ok: false; failure: { code: string } })[]>;
   } | null;
   target: { version: string; paraId: string; text: string } | null;
   setPlugins(enabled: boolean): void;
@@ -46,20 +46,16 @@ test('a plugin draws in the space it reserves, read-only too, and saves leave it
   expect(gap.height / chip.height).toBeCloseTo(80 / 24, 1);
   expect(gap.y).toBeGreaterThan(chip.y);
 
-  const [reserved, word] = await page.evaluate(() => {
+  const [reserved, word] = await page.evaluate(async () => {
     const probe = (window as unknown as ProbeWindow).__reservations;
     const target = probe.target!;
     const start = target.text.indexOf(' ') + 1;
     const end = target.text.indexOf(' ', start) < 0 ? target.text.length : target.text.indexOf(' ', start);
     const at = (offset: number) => ({ paraId: target.paraId, offset });
-    return [
-      probe.geometry!.getAnchorGeometry({ kind: 'reservation', id: 'chip' }),
-      probe.geometry!.getAnchorGeometry({
-        kind: 'range',
-        version: target.version,
-        range: { story: 'body', start: at(start), end: at(end), view: 'accepted' },
-      }),
-    ];
+    return probe.geometry!.readAnchorGeometries([
+      { kind: 'reservation', id: 'chip' },
+      { kind: 'range', version: target.version, range: { story: 'body', start: at(start), end: at(end), view: 'accepted' } },
+    ]);
   });
   if (!reserved.ok || !word.ok) throw new Error('reservation or word geometry failed');
   expect(word.rects[0]!.x).toBeGreaterThanOrEqual(reserved.anchor.x + reserved.anchor.width - 1);
