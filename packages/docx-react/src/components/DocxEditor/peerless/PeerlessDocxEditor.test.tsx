@@ -112,7 +112,9 @@ class FakeWorker {
       response = { id: message.id, ok: false, error: 'Worker heap limit exceeded', terminal: true, outOfMemory: true };
     } else if (message.type === 'checkpoint' && this.initial) {
       const { epoch, version, throughSeq } = this.initial;
-      const checkpoint = { state: Uint8Array.of(9, this.checkpoints.length), epoch, version, throughSeq };
+      const checkpoint = { state: new TextEncoder().encode(this.text), epoch, version, throughSeq,
+        recoveryState: { selection: null, storedMarks: null, stickyPositions: [], cellSelection: null,
+          proposals: { previewVersion: 0, entries: [] }, selections: [] } };
       this.checkpoints.push(checkpoint);
       response = { id: message.id, ok: true, checkpoint: { ...checkpoint, state: checkpoint.state.slice() } };
     } else if (message.type === 'openSource' && message.source.cut && refuseCut) {
@@ -120,7 +122,7 @@ class FakeWorker {
     } else if (message.type === 'openSource' && !message.source.cut && failWholeOpen) {
       response = { id: message.id, ok: false, error: 'Whole source failed to open' };
     } else if (message.type === 'openSource') {
-      this.text = '';
+      this.text = message.source.state ? new TextDecoder().decode(message.source.state) : '';
       response = { id: message.id, ok: true, hostJson, sourceDocument: yrs.decodeDocxHostJson(hostJson, source).document, stateVector: new ArrayBuffer(0),
         ...(message.source.preview ? { frame: commandFrame(1).payload.frame, documentPreview: true,
           caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1 } : {}) };
@@ -2221,7 +2223,7 @@ test('an out-of-memory worker reopens in a fresh worker from its checkpoint and 
   if (replayed.status !== 'submitted') throw new Error('edit not submitted');
   expect((await replayed.ticket.ack).status).toBe('applied');
   expect(workers).toHaveLength(2);
-  expect(workers[1]!.text).toBe(' replayed');
+  expect(workers[1]!.text).toBe('kept replayed');
   expect(current.session.state.version).toBe(2);
   const opens = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'openSource' }> =>
     request.type === 'openSource');

@@ -950,6 +950,7 @@ export function createPeerlessShellController(initial: Options) {
           if (commentResults.size > 256) commentResults.delete(commentResults.keys().next().value!);
         }
         const previous = snapshot.view;
+        if (previous && !sameIdentity(previous.identity, view.identity)) fontRevision = 0;
         const ready = view.presentedThroughSeq >= 0;
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
           preview: ready ? null : snapshot.preview };

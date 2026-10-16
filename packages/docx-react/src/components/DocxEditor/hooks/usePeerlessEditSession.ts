@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
+import { SessionFailure } from '../../../../../../shared/office-session/types';
 import { createDocxWorkerEditSession, discardCommandPresentation } from '@betteroffice/docx/peerless';
 import type {
   DocxCommandFrame,
@@ -70,11 +72,25 @@ export function usePeerlessEditSession(
     let recovering = false;
     let crash: Error | undefined;
     let receiveRequestedFrame: ((frame: DocxCommandFrame) => void) | undefined;
-    const connect = (resident: ResidentCommandConnection): ResidentCommandConnection => ({
+    const connect = (resident: ResidentCommandConnection, replayAppliedSeqs: readonly number[] = []): ResidentCommandConnection => ({
       ...resident,
       client: {
         ...resident.client,
         get failure() { return resident.client.failure; },
+        call: {
+          ...resident.client.call,
+          async edit(command) {
+            const ack = await resident.client.call.edit(command);
+            const refused = command.replay && ack.outcomes.find(outcome =>
+              outcome.status === 'refused' || outcome.status === 'cancelled' ||
+              (replayAppliedSeqs.includes(outcome.seq) && outcome.status === 'noop'));
+            if (refused) {
+              discardCommandPresentation(ack.frame);
+              throw new SessionFailure('message', `Cannot restore DOCX command ${command.seq} (${command.kind}): ${refused.reason ?? refused.status}`);
+            }
+            return ack;
+          },
+        },
         onFrame(listener) {
           receiveRequestedFrame = listener;
           const stop = resident.client.onFrame?.(listener);
@@ -184,7 +200,12 @@ export function usePeerlessEditSession(
               if (!recovery) throw new Error('Peerless recovery is unavailable');
               if (respawned) throw crash ?? new Error('Peerless session failed');
               respawned = true;
-              const reopened = await recovery.reopen(input);
+              const reopened = await recovery.reopen(input).catch((error: unknown) => {
+                if (error instanceof ResidentWorkerOutOfMemoryError) {
+                  throw new SessionFailure('out-of-memory', error.message, JSON.stringify(error.memory));
+                }
+                throw error;
+              });
               if (controller.signal.aborted) {
                 discardCommandPresentation(reopened.initial.frame);
                 void reopened.client.dispose().catch(() => {});
@@ -196,7 +217,7 @@ export function usePeerlessEditSession(
                 epoch: reopened.initial.epoch, version: reopened.initial.version, throughSeq: reopened.initial.throughSeq,
                 presentedThroughSeq: -1, selection: reopened.initial.selection, editState: reopened.initial.editState,
               });
-              return connect(reopened);
+              return connect(reopened, input.replayAppliedSeqs);
             },
           },
         });

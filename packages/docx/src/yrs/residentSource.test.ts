@@ -203,7 +203,7 @@ test('a checkpoint reopens a source in a fresh worker that resumes commands at i
     const expected = unzipContainer(new Uint8Array((await first!.save({ comments: [] })).bytes));
 
     await second!.openSource({ bytes, state: checkpoint.state });
-    const resumed = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, ...('recoveryState' in checkpoint ? { recoveryState: checkpoint.recoveryState } : {}) });
+    const resumed = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
     expect(resumed).toMatchObject({ incarnation: 2, version: 1, throughSeq: 1 });
     expect(workers[1]!.sessions[0]!.paragraphs('body').map(paragraph => [paragraph.paraId, paragraph.text]))
       .toEqual([[paraId, 'One Paragraph 1'], expect.anything()]);
@@ -385,11 +385,11 @@ for (const dependent of [false, true]) {
       expect((await first!.edit(edit(1, 0, 'insertText', { text: 'kept' }))).outcomes[0]?.status).toBe('applied');
       expect((await first!.edit(edit(2, 1, 'formatSelection', { delta: { bold: true } }))).outcomes[0]?.status).toBe('noop');
       const checkpoint = await first!.checkpoint();
-      const suffix = { ...edit(3, 1, 'insertText', { text: ' later' }), ...(dependent ? { afterSeq: 2 } : {}) };
+      const suffix = { ...edit(3, 1, 'insertText', { text: ' later' }), ...(dependent ? { afterSeq: 1 } : {}) };
       expect((await first!.edit(suffix)).outcomes[0]?.status).toBe('applied');
       const expected = workers[0]!.sessions[0]!.paragraphSegments('body', [0]);
       await second!.openSource({ bytes, state: checkpoint.state });
-      const reopened = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, ...('recoveryState' in checkpoint ? { recoveryState: checkpoint.recoveryState } : {}), replayAppliedSeqs: [3] });
+      const reopened = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState, replayAppliedSeqs: [3] });
       expect(reopened.selection?.focus.offset).toBe(4);
       expect(reopened.editState.storedMarks).toMatchObject({ delta: { bold: true }, clear: false });
       expect((await second!.edit({ ...suffix, incarnation: 2, replay: true })).outcomes[0]?.status).toBe('applied');
@@ -410,6 +410,9 @@ test('previously applied typing replays after the editor becomes read-only', asy
     expect(ack.outcomes[0]?.status).toBe('applied');
     expect(worker.sessions[0]!.paragraphs('body')[0]!.text).toBe('keptParagraph 1');
     expect(ack.editState?.readOnly).toBe(true);
+    expect((await client.edit({ session: 'source-worker', incarnation: 2, seq: 2, replay: true,
+      basis: { epoch: 1, version: 1 }, kind: 'insertText', payload: { text: 'blocked' } })).outcomes[0])
+      .toMatchObject({ status: 'refused', reason: 'read-only' });
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -434,10 +437,16 @@ test('checkpoint recovery restores proposal records and preview decisions', asyn
     const checkpoint = await clients[0]!.checkpoint();
     const before = (await clients[0]!.documentRead({ kind: 'reviewSnapshot' })).value!;
     await clients[1]!.openSource({ bytes, state: checkpoint.state });
-    await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, ...('recoveryState' in checkpoint ? { recoveryState: checkpoint.recoveryState } : {}) });
+    await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
     const after = (await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!;
     expect(after.proposals.proposals).toEqual(before.proposals.proposals);
     expect(after.proposals.previewVersion).toBe(before.proposals.previewVersion);
     expect(after.revisions).toEqual(before.revisions);
+    const changed = await clients[1]!.edit({ session: 'source-worker', incarnation: 2, seq: 3,
+      basis: { epoch: 1, version: checkpoint.version }, kind: 'setProposalStates', payload: {
+        expectVersion: after.version, expectPreviewVersion: after.proposals.previewVersion,
+        changes: [{ id: 'retained', state: 'rejected' }] } });
+    expect(changed.outcomes[0]?.status).toBe('applied');
+    expect((await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!.proposals.proposals[0]?.state).toBe('rejected');
   } finally { clients.forEach(client => client.destroy()); }
 }, TIMEOUT);

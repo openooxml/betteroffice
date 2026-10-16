@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-The resident worker's `openSource` accepts a Yrs `state` alongside the source bytes and restores it over the unseeded package, and `commandInit` resumes commands at a checkpoint's `version` and `throughSeq`.
+The resident worker restores command checkpoints with caret, stored marks, selection dependencies and proposal preview decisions. `openSource` restores the checkpoint's Yrs `state`; pass its `recoveryState` to `commandInit` alongside `version` and `throughSeq`.

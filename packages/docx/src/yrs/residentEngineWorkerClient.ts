@@ -1,5 +1,5 @@
 import type { LayoutMetaV1 } from './layoutMeta';
-import { isCommandAck, type Checkpoint } from '../../../../shared/office-session/commands/types';
+import { isCommandAck } from '../../../../shared/office-session/commands/types';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
@@ -7,6 +7,7 @@ import type {
   DocxCommandEnvelope,
   DocxCommandFrame,
   ResidentCommandClient,
+  ResidentCommandCheckpoint,
   ResidentCommandInitReply,
   ResidentCommandInitRequest,
   ResidentCommandViewportRequest,
@@ -365,12 +366,12 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return this.commandAck(response);
   }
 
-  async checkpoint(): Promise<Checkpoint> {
+  async checkpoint(): Promise<ResidentCommandCheckpoint> {
     const response = await this.request({ type: 'checkpoint' });
     if (!response.checkpoint || !(response.checkpoint.state instanceof Uint8Array)) {
       throw new SessionFailure('message', 'Resident command checkpoint omitted its state');
     }
-    return response.checkpoint;
+    return response.checkpoint as ResidentCommandCheckpoint;
   }
 
   async requestFullFrame(): Promise<DocxCommandAck> {

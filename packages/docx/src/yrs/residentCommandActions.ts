@@ -468,6 +468,7 @@ export function preflightDocxCommand(
     return { status: 'refused', reason, selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
   };
+  const readOnly = state.readOnly && !context.replayPreviouslyApplied;
   const error = { reason: 'invalid-payload' };
   if (!validCommandIntent(command, error, environment)) return refuse(error.reason);
   if (commandPolicy(command.kind)?.origin === 'remote') {
@@ -482,7 +483,7 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'setContentControlValue' || command.kind === 'addRepeatingItem' || command.kind === 'removeRepeatingItem') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveControlHandle(engine, command.payload.handle);
     if (!target) return refuse('stale-control');
@@ -490,13 +491,13 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'openPart' || command.kind === 'ensurePart' || command.kind === 'removePart') {
-    if (state.readOnly && command.kind !== 'openPart') return refuse('read-only');
+    if (readOnly && command.kind !== 'openPart') return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     if (!resolvePart(engine, command.payload) && (command.kind !== 'ensurePart' || !ensurePartDocument(engine, command.payload))) return refuse('unknown-part');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (propertyCommand(command.kind)) {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
     if (!('expectVersion' in command.payload) || command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const reason = propertyCommandTarget(engine, command);
@@ -504,7 +505,7 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'setSectionMargins' || command.kind === 'setTabStops' || command.kind === 'removeTabStop') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if ('suggesting' in command.payload && command.payload.suggesting !== undefined) return refuse('unsupported-suggesting');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     if (command.kind === 'setSectionMargins') {
@@ -544,18 +545,18 @@ export function preflightDocxCommand(
     }
   }
   if (command.kind === 'applyEdits') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     const validation = engine.proposalEngine.validateEdits(commandBatchRequest(command.payload));
     if (!validation.ok) return refuse(validation.failure.code);
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'replaceMatches') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'resizeObject' || command.kind === 'moveObject') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveResidentObject(engine, command.payload.handle);
@@ -566,12 +567,12 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'undo' || command.kind === 'redo') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (Object.hasOwn(reviewCommandKeys, command.kind)) {
-    if (state.readOnly && !grantedHostProposal(command as ReviewCommand)) return refuse('read-only');
+    if (readOnly && !grantedHostProposal(command as ReviewCommand)) return refuse('read-only');
     const reason = preflightReviewCommand(engine, state, command as ReviewCommand);
     if (reason) return refuse(reason);
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
@@ -586,7 +587,7 @@ export function preflightDocxCommand(
   }
   if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
   if (isTableCommandKind(command.kind)) {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.kind === 'setTableProperties' && command.payload.expectVersion !== undefined &&
       command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const tableResolved = resolveCommandSelection(engine, state, command, context);
@@ -600,7 +601,7 @@ export function preflightDocxCommand(
   const resolved = resolveCommandSelection(engine, state, command, context);
   if (!resolved.ok) return refuse(resolved.reason);
   if (command.kind === 'navigateCell') {
-    const cellNavigation = resolveCellNavigation(engine, resolved.selection, command.payload, state.readOnly);
+    const cellNavigation = resolveCellNavigation(engine, resolved.selection, command.payload, readOnly);
     if (cellNavigation === 'read-only') return refuse('read-only');
     if (!cellNavigation) return refuse('invalid-cell-target');
     return { status: 'ready', prepared: {
@@ -613,7 +614,7 @@ export function preflightDocxCommand(
       cells: cellsForCaret(engine, resolved.selection.focus.story),
     } };
   }
-  if (state.readOnly) return refuse('read-only');
+  if (readOnly) return refuse('read-only');
   if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
@@ -1121,16 +1122,24 @@ function applyPreparedDocxCommand(
 }
 
 export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engine, init, environment) => {
+  const recovery = init.recoveryState;
   const native = engine.selection();
   const first = !native && init.selection === undefined && engine.geometryReader.hasStory('body')
     ? engine.geometryReader.paragraphSpans('body')[0] : undefined;
   const fallback = first ? { story: 'body', paraId: first.paraId, offset: 0 } : null;
   const state: ResidentDocxCommandState = {
     readOnly: init.readOnly,
-    selection: init.selection !== undefined ? init.selection : native
+    selection: recovery ? structuredClone(recovery.selection) : init.selection !== undefined ? init.selection : native
       ? { anchor: native.anchor, focus: native.head } : fallback ? { anchor: fallback, focus: fallback } : null,
-    storedMarks: null, stickyPositions: new Map(), proposals: environment?.proposals ?? createProposalRegistry(engine.proposalEngine),
+    storedMarks: structuredClone(recovery?.storedMarks ?? null),
+    activePart: structuredClone(recovery?.activePart),
+    stickyPositions: new Map(structuredClone(recovery?.stickyPositions ?? [])),
+    proposals: environment?.proposals ?? createProposalRegistry(engine.proposalEngine),
   };
+  if (recovery) {
+    state.proposals!.mirror({ version: engine.proposalEngine.version(), proposals: recovery.proposals });
+    state.proposals!.mirror(null);
+  }
   if (state.selection) {
     const selected = {
       anchor: { story: state.selection.anchor.story, paraId: state.selection.anchor.paraId, offset: state.selection.anchor.offset },
@@ -1140,6 +1149,7 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
     engine.setSelection(selected.anchor, selected.focus);
     state.selection = mintCommandSelection(engine, state, selected);
   }
+  if (recovery?.cellSelection) engine.setCellSelection(recovery.cellSelection);
   registerCommandAnchorState(engine, state);
   let projection: { version: string; selection: DocxCommandSelection | null; editState: ReturnType<typeof projectDocxEditState> } | null = null;
   const remember = (result: DocxCommandApplyResult) => {
@@ -1189,5 +1199,10 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
     },
     selection: () => projected().selection,
     editState: () => projected().editState,
+    recoveryState: () => ({
+      selection: projected().selection, storedMarks: state.storedMarks, activePart: state.activePart,
+      stickyPositions: [...state.stickyPositions], cellSelection: readCellSelection(engine),
+      proposals: state.proposals!.exportState(),
+    }),
   };
 };

@@ -25,7 +25,8 @@ import {
   type ResidentCommandConnection,
   type YrsResidentFontRegistration,
 } from '@betteroffice/docx/yrs';
-import { createResidentCommandConnection, discardCommandPresentation } from '@betteroffice/docx/peerless';
+import { createResidentCommandConnection, discardCommandPresentation, type ResidentCommandCheckpoint } from '@betteroffice/docx/peerless';
+import { SessionFailure } from '../../../../../../shared/office-session/types';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
@@ -353,6 +354,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const openResident = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number,
     resume?: ResidentResume): Promise<ResidentCommandConnection> => {
     signal.throwIfAborted();
+    const checkpoint = resume?.checkpoint as ResidentCommandCheckpoint | undefined;
+    if (checkpoint && !checkpoint.recoveryState) {
+      throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
+    }
     releaseResident.current?.();
     const client = (resume ? null : takePreloadedResidentEngineWorker()) ?? new ResidentEngineWorkerClient();
     const collaboration = workerCollaboration.begin(client);
@@ -518,7 +523,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const initial = await client.commandInit({
         session: resume?.session ?? crypto.randomUUID(), incarnation: resume?.incarnation ?? 1, epoch: resume?.epoch ?? 1,
         ...(resume ? { version: resume.checkpoint?.version ?? 0, throughSeq: resume.checkpoint?.throughSeq ?? 0,
-          refusedSeqs: resume.refusedSeqs, replayAppliedSeqs: resume.replayAppliedSeqs } : {}),
+          refusedSeqs: resume.refusedSeqs, replayAppliedSeqs: resume.replayAppliedSeqs,
+          recoveryState: checkpoint?.recoveryState } : {}),
         readOnly: settings.current.readOnly,
         fonts: fonts.slice(),
         rasterScale: getRasterScale?.() ?? 1,
@@ -768,8 +774,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!context) throw new Error('Editor was closed');
       return await openResident(resume.source, context.signal, context.getRasterScale, resume);
     },
-    onRecovery: (event) => { if (event.phase === 'recovered') updateFontEnvironment(); },
-  }), [source, openResident, updateFontEnvironment]);
+    onRecovery: (event) => { if (event.phase === 'recovered') { updateReadOnly(); updateFontEnvironment(); } },
+  }), [source, openResident, updateReadOnly, updateFontEnvironment]);
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
     source, openConnection, recovery, canvasForPage, prepareGeometry, onError: reportError,
     onRecoverableError: error => { controller.stalled(error); reportRecoverableError(error); },
