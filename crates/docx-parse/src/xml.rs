@@ -352,6 +352,7 @@ pub struct XmlElement {
     /// Word 2010 `paraId` under the namespace bindings in scope; see
     /// [`crate::paragraph_identity::word_para_id_name`].
     pub para_id_attribute: Option<String>,
+    pub bookmark_xml: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1156,6 +1157,7 @@ pub(crate) fn parse_xml_strict(
 
     let mut roots = Vec::new();
     let mut stack: Vec<XmlElement> = Vec::new();
+    let mut starts = Vec::new();
     let mut paragraphs = 0u32;
     let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
         if element.name == "w:p" {
@@ -1176,6 +1178,7 @@ pub(crate) fn parse_xml_strict(
         element
     };
     loop {
+        let offset = reader.buffer_position() as usize;
         let event = reader
             .read_event()
             .map_err(|error| malformed(&reader, part, error))?;
@@ -1191,6 +1194,7 @@ pub(crate) fn parse_xml_strict(
                 let element = decode_element(&reader, start, part, budget)?;
                 let element = number(element, &stack);
                 stack.push(element);
+                starts.push(offset);
             }
             Event::Empty(start) => {
                 if stack.len() + 1 > budget.limits.max_xml_depth {
@@ -1201,6 +1205,7 @@ pub(crate) fn parse_xml_strict(
                 }
                 let element = decode_element(&reader, start, part, budget)?;
                 let mut element = number(element, &stack);
+                retain_bookmark_xml(&mut element, xml, offset, reader.buffer_position() as usize);
                 retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
@@ -1210,6 +1215,8 @@ pub(crate) fn parse_xml_strict(
                     offset: reader.buffer_position(),
                     message: "unexpected closing element".to_owned(),
                 })?;
+                let start = starts.pop().unwrap();
+                retain_bookmark_xml(&mut element, xml, start, reader.buffer_position() as usize);
                 retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
@@ -1382,6 +1389,14 @@ fn retain_drawing_namespace_aliases(
     Ok(())
 }
 
+fn retain_bookmark_xml(element: &mut XmlElement, xml: &[u8], start: usize, end: usize) {
+    if matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd") {
+        element.bookmark_xml = std::str::from_utf8(&xml[start..end])
+            .ok()
+            .map(str::to_owned);
+    }
+}
+
 fn decode_element(
     reader: &Reader<&[u8]>,
     start: BytesStart<'_>,
@@ -1451,6 +1466,7 @@ fn decode_element(
         children: Vec::new(),
         paragraph_ordinal: None,
         para_id_attribute: None,
+        bookmark_xml: None,
     })
 }
 

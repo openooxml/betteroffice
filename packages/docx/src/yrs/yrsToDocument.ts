@@ -2609,11 +2609,73 @@ function paragraphChartRuns(content: readonly ParagraphContent[]): Run[] {
   return runs;
 }
 
-function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[]): BlockContent[] {
+function isBlockBookmark(block: BlockContent): boolean {
+  return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>])/.test(block.xml);
+}
+
+function restoreBlockBookmarks(
+  projected: BlockContent[],
+  base: readonly BlockContent[],
+  storyId: string
+): void {
+  if (!base.some(isBlockBookmark)) return;
+  let paragraph = 0;
+  let table = 0;
+  let sdt = 0;
+  const keys = base.map((block): string | undefined => {
+    const memo = projectedBlocks.get(block);
+    if (block.type === 'paragraph') {
+      const key = memo?.sessionKey ?? ((!block.repeatedParaId && block.paraId) || `${storyId}:p${paragraph}`);
+      paragraph += 1;
+      return `P${key}`;
+    }
+    if (block.type === 'table') {
+      const key = memo?.tableSourcePrefix ?? `${storyId}:t${table}`;
+      table += 1;
+      return `T${key}`;
+    }
+    if (block.type === 'blockSdt') {
+      const key = memo?.key ?? `S${storyId}:sdt${sdt}`;
+      sdt += 1;
+      return key;
+    }
+    return undefined;
+  });
+  const live = new Map<string, BlockContent>();
+  for (const block of projected) {
+    const memo = projectedBlocks.get(block);
+    const key = block.type === 'paragraph' ? `P${memo?.sessionKey}`
+      : block.type === 'table' ? `T${memo?.tableSourcePrefix}` : memo?.key;
+    if (key !== undefined) live.set(key, block);
+  }
+  const after = new Map<BlockContent, number>();
+  for (let index = 0; index < base.length; index += 1) {
+    const block = base[index]!;
+    if (!isBlockBookmark(block)) continue;
+    const next = keys.slice(index + 1).find((key) => key !== undefined);
+    const previous = keys.slice(0, index).reverse().find((key) => key !== undefined);
+    const key = next ?? previous;
+    const anchor = key === undefined ? undefined : live.get(key);
+    if (key !== undefined && anchor === undefined) {
+      throw new Error('Cannot save body bookmark boundaries after their neighboring block was removed');
+    }
+    const position = anchor === undefined ? projected.length
+      : projected.indexOf(anchor) + (next === undefined ? 1 + (after.get(anchor) ?? 0) : 0);
+    projected.splice(position, 0, block);
+    if (anchor !== undefined && next === undefined) after.set(anchor, (after.get(anchor) ?? 0) + 1);
+  }
+  const expected = base.filter(isBlockBookmark);
+  if (projected.filter(isBlockBookmark).some((block, index) => block !== expected[index])) {
+    throw new Error('Cannot save reordered body bookmark boundaries');
+  }
+}
+
+function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[], storyId: string): BlockContent[] {
+  restoreBlockBookmarks(projected, base, storyId);
   let offset = 0;
   for (let index = 0; index < base.length; index += 1) {
     const block = base[index]!;
-    if (!isRawXml(block)) continue;
+    if (!isRawXml(block) || isBlockBookmark(block)) continue;
     const following = base.slice(index + 1).find((candidate) =>
       candidate.type === 'paragraph' && candidate.paraId && projected.some((entry) =>
         entry.type === 'paragraph' && entry.paraId === candidate.paraId));
@@ -3368,7 +3430,7 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
-    const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
+    const projected = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
     this.memo.stories.set(storyId, { commentsKey, blocks: projected });
     this.memo.dirty.delete(storyId);
     this.memo.clean.add(storyId);
