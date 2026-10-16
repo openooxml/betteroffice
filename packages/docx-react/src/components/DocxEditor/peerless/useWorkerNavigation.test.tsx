@@ -177,3 +177,27 @@ test('review navigation builds the start before scrolling a range whose end is t
     expect(scroller.scrollTop).toBe(200 * 2 - 24);
   } finally { dispose(); }
 });
+
+
+for (const phase of ['ack', 'presented'] as const) {
+  test(`review navigation resolves false when replacement disposes ${phase}`, async () => {
+    const { controller, submit, dispose } = reviewNavigation(reviewTargets);
+    const replaced = () => { controller.opening({}); throw Object.assign(new Error('Session was disposed'), { code: 'disposed' }); };
+    try {
+      submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1,
+        ack: phase === 'ack' ? Promise.resolve().then(replaced) : Promise.resolve({ status: 'applied', seq: 1 }),
+        presented: phase === 'presented' ? Promise.resolve().then(replaced) : Promise.resolve('presented') } }));
+      expect(await controller.ref.scrollToComment(7)).toBe(false);
+    } finally { dispose(); }
+  });
+
+  test(`review navigation preserves unrelated ${phase} failures`, async () => {
+    const { controller, submit, dispose } = reviewNavigation(reviewTargets);
+    try {
+      submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1,
+        ack: phase === 'ack' ? Promise.reject(new Error('Worker failed')) : Promise.resolve({ status: 'applied', seq: 1 }),
+        presented: phase === 'presented' ? Promise.reject(new Error('Worker failed')) : Promise.resolve('presented') } }));
+      await expect(controller.ref.scrollToComment(7)).rejects.toThrow('Worker failed');
+    } finally { dispose(); }
+  });
+}
