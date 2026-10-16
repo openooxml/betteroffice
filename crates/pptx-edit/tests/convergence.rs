@@ -855,3 +855,70 @@ fn undo_after_concurrent_deletes_of_one_slide_restores_it_everywhere() {
     assert_eq!(assert_converged(&[&left, &right]), [first, second, third]);
     assert_eq!(right.snapshot().unwrap().slides[0], initial.slides[0]);
 }
+
+fn diff_since(session: &DeckSession, state_vector: &mut Vec<u8>) -> Vec<u8> {
+    let update = session.encode_diff_v1(state_vector).unwrap();
+    *state_vector = session.encode_state_vector_v1();
+    update
+}
+
+fn undo_and_redo_over_merged_concurrent_moves(delete: bool) {
+    let context = EditCtx::local("local");
+    for reverse in [false, true] {
+        let peers = [651, 652, 653].map(|client| DeckSession::open(FIXTURE, client).unwrap());
+        let [left, right, merger] = &peers;
+        let [first, second, third] = slide_ids(left);
+        left.move_slide(&context, &first, 1).unwrap();
+        right.move_slide(&context, &first, 2).unwrap();
+        let moves = [
+            left.encode_state_as_update_v1(),
+            right.encode_state_as_update_v1(),
+        ];
+        sync(left, merger);
+        sync(right, merger);
+        let before = merger.snapshot().unwrap();
+        assert_eq!(
+            merger.slide_ids().unwrap(),
+            [second.clone(), first.clone(), third.clone()]
+        );
+
+        let mut state_vector = merger.encode_state_vector_v1();
+        let expected = if delete {
+            merger.delete_slide(&context, &first).unwrap();
+            vec![second.clone(), third.clone()]
+        } else {
+            merger.move_slide(&context, &first, 0).unwrap();
+            vec![first.clone(), second.clone(), third.clone()]
+        };
+        let after = merger.snapshot().unwrap();
+        assert_eq!(merger.slide_ids().unwrap(), expected);
+        let mut updates = vec![diff_since(merger, &mut state_vector)];
+        assert!(merger.undo());
+        assert_eq!(merger.snapshot().unwrap(), before);
+        updates.push(diff_since(merger, &mut state_vector));
+        assert!(merger.redo());
+        assert_eq!(merger.snapshot().unwrap(), after);
+        updates.push(diff_since(merger, &mut state_vector));
+
+        for (peer, other) in [(left, &moves[1]), (right, &moves[0])] {
+            let mut delivery: Vec<&Vec<u8>> = std::iter::once(other).chain(&updates).collect();
+            if reverse {
+                delivery.reverse();
+            }
+            for update in delivery {
+                peer.apply_update_v1(update).unwrap();
+            }
+        }
+        assert_eq!(assert_converged(&peers.each_ref()), expected);
+    }
+}
+
+#[test]
+fn undo_and_redo_of_a_move_over_merged_concurrent_moves_restore_the_visible_order() {
+    undo_and_redo_over_merged_concurrent_moves(false);
+}
+
+#[test]
+fn undo_and_redo_of_a_delete_over_merged_concurrent_moves_restore_the_visible_order() {
+    undo_and_redo_over_merged_concurrent_moves(true);
+}
