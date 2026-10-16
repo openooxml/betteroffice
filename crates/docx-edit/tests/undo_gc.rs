@@ -27,8 +27,8 @@ unsafe impl GlobalAlloc for QuarantinedBranches {
 #[global_allocator]
 static ALLOCATOR: QuarantinedBranches = QuarantinedBranches;
 
-#[test]
-fn a_peer_deleting_a_story_edited_and_undone_before_typing_elsewhere_leaves_state_readable() {
+/// The seed's `body` and `note` stories on `local`, and a peer holding the same seed.
+fn seeded_peer(local: &EditingDoc) -> EditingDoc {
     let source = EditingDoc::new(101);
     source
         .create_story("body", "Body", "Normal", "left")
@@ -37,22 +37,20 @@ fn a_peer_deleting_a_story_edited_and_undone_before_typing_elsewhere_leaves_stat
         .create_story("note", "Note", "Normal", "left")
         .unwrap();
     let seed = source.encode_state_as_update_v1();
-    let local = EngineSession::new(202);
-    local.doc().apply_update_v1(&seed).unwrap();
+    local.apply_update_v1(&seed).unwrap();
     let peer = EditingDoc::new(303);
     peer.apply_update_v1(&seed).unwrap();
+    peer
+}
 
-    let history = UndoSession::new();
-    history.track(local.doc());
+/// Edits `note` and undoes it, types in `body`, then integrates the peer deleting `note`.
+fn lose_an_undone_story(local: &EditingDoc, peer: &EditingDoc, mut undo: impl FnMut() -> bool) {
     let context = EditCtx::local("local", "2026-10-16T00:00:00Z");
     local
-        .doc()
         .replace_range(&context, StoryRange::new("note", 0, 4), "Memo")
         .unwrap();
-    history.add_undo_barrier();
-    assert!(history.undo());
+    assert!(undo());
     local
-        .doc()
         .insert_text(
             &context,
             Position::new("body", 4),
@@ -68,13 +66,65 @@ fn a_peer_deleting_a_story_edited_and_undone_before_typing_elsewhere_leaves_stat
         .unwrap();
     peer.delete_story("note").unwrap();
     for update in sent.lock().unwrap().iter() {
-        local.doc().apply_update_v1(update).unwrap();
+        local.apply_update_v1(update).unwrap();
     }
+}
 
-    let state = local.doc().encode_state_as_update_v1();
+fn assert_readable(local: &EditingDoc, peer: &EditingDoc) {
+    let state = local.encode_state_as_update_v1();
     peer.apply_update_v1(&state).unwrap();
-    assert_eq!(
-        local.doc().list_stories().stories,
-        peer.list_stories().stories
-    );
+    assert_eq!(local.list_stories().stories, peer.list_stories().stories);
+}
+
+#[test]
+fn a_peer_deleting_a_story_edited_and_undone_before_typing_elsewhere_leaves_state_readable() {
+    let local = EngineSession::new(202);
+    let peer = seeded_peer(local.doc());
+    let history = UndoSession::new();
+    history.track(local.doc());
+    lose_an_undone_story(local.doc(), &peer, || {
+        history.add_undo_barrier();
+        history.undo()
+    });
+    assert_readable(local.doc(), &peer);
+}
+
+#[test]
+fn histories_attached_after_a_peer_deletes_an_undone_story_leave_state_readable() {
+    let local = EngineSession::new(202);
+    let peer = seeded_peer(local.doc());
+    let history = UndoSession::new();
+    history.track(local.doc());
+    lose_an_undone_story(local.doc(), &peer, || {
+        history.add_undo_barrier();
+        history.undo()
+    });
+    let _manager = local.doc().undo_manager();
+    UndoSession::new().track(local.doc());
+    assert_readable(local.doc(), &peer);
+    assert!(history.undo());
+    assert_readable(local.doc(), &peer);
+}
+
+#[test]
+fn every_way_of_attaching_undo_to_a_new_replica_keeps_what_the_history_points_into() {
+    for session in [false, true] {
+        let local = EditingDoc::new(202);
+        let peer = seeded_peer(&local);
+        if session {
+            let history = UndoSession::new();
+            history.track(&local);
+            lose_an_undone_story(&local, &peer, || {
+                history.add_undo_barrier();
+                history.undo()
+            });
+        } else {
+            let mut manager = local.undo_manager();
+            lose_an_undone_story(&local, &peer, || {
+                manager.add_undo_barrier();
+                manager.undo()
+            });
+        }
+        assert_readable(&local, &peer);
+    }
 }
