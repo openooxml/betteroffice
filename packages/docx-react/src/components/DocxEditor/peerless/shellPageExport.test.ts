@@ -49,7 +49,7 @@ async function fixture(readOnly = false) {
   const controller = createPeerlessShellController(settings);
   controller.attach(binding);
   return { controller, binding, resident, relayout, request, settings, viewStore,
-    close: async () => { controller.dispose(); await client.dispose(); } };
+    close: async () => { controller.dispose(); client.destroy(); } };
 }
 
 for (const readOnly of [false, true]) {
