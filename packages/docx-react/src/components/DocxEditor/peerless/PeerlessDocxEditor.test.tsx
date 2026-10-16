@@ -190,6 +190,7 @@ class FakeWorker {
         }],
         editState: { ...state.editState, readOnly },
         ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
+        ...(realSurface ? { frame: { ...commandFrame(command.seq + 1), coversThroughSeq: command.seq } } : {}),
       };
       this.initial = { ...state, ...ack };
       response = { id: message.id, ok: true, commandAck: ack };
