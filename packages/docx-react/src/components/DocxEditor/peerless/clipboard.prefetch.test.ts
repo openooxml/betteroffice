@@ -4,7 +4,7 @@ import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession
 import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection } from '@betteroffice/docx/yrs';
 
 const range: DocxCommandSelection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
-const fragment = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'bcd', rPr: {} }, { kind: 'pilcrow' }] }] }] }] }] } as DocxClipboardFragment;
+const fragment = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'bcd' }, { kind: 'pilcrow' }] }] }] }] }] } as DocxClipboardFragment;
 
 function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }) {
   const listeners = new Set<() => void>();
@@ -41,7 +41,10 @@ test('a settled range fills the copy event synchronously when the async clipboar
   setPending({ ack: Promise.resolve() });
   publish({ workerSelection: range });
   setPending(undefined);
-  expect(await settled(prefetch)).not.toBeNull();
+  const capture = await settled(prefetch);
+  expect(capture).not.toBeNull();
+  expect(capture!.html).toContain('<table');
+  Object.defineProperty(capture!.slice, 'fragment', { get: () => { throw new Error('Fragment accessed during copy'); } });
   expect(readClipboardSlice).toHaveBeenCalledTimes(1);
   const { data, transfer: clipboardData } = transfer();
   const copied = copyWorkerSelection({ binding, readSelection, readClipboardSlice, isCurrent: () => true,
@@ -167,6 +170,24 @@ test('a missed cut with unavailable activation and denied async writes preserves
   f.publish({ workerSelection: range });
   await expect(copyWorkerSelection({ ...f, isCurrent: () => true, cut: true,
     readCapture: () => f.prefetch.read(), writeNative: () => false, write: denied, writeSlice: denied })).rejects.toThrow('Write permission denied.');
+  expect(f.submit).not.toHaveBeenCalled();
+  f.prefetch.dispose();
+});
+
+
+test('an incarnation replaced during a pending cut cannot receive the old operation', async () => {
+  const f = fixture();
+  let finish!: (slice: DocxClipboardSlice) => void;
+  f.readClipboardSlice.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.publish({ workerSelection: range });
+  const write = mock(async (_text: string) => {});
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true, cut: true,
+    readCapture: () => f.prefetch.read(), write });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  f.publish({ identity: { session: 'clipboard', incarnation: 2, epoch: 1 } });
+  finish({ text: 'old', fragment: null });
+  expect(await copied).toBe(false);
+  expect(write).not.toHaveBeenCalled();
   expect(f.submit).not.toHaveBeenCalled();
   f.prefetch.dispose();
 });

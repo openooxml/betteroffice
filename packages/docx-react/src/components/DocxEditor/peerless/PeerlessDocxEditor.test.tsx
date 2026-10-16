@@ -36,6 +36,7 @@ import { createEchoPainter } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
+import * as clipboard from './clipboard';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -141,7 +142,7 @@ class FakeWorker {
         },
         frame: {
           coversThroughSeq: 0, revision: 1,
-          payload: { frame: new ArrayBuffer(0), caret: { frameEpoch: 1, caretRect: null }, layoutRevision },
+          payload: { frame: commandFrame(1).payload.frame, caret: { frameEpoch: 1, caretRect: null }, layoutRevision },
         },
       };
       this.initial = initial;
@@ -169,7 +170,7 @@ class FakeWorker {
             cancelled ? { reason: 'dependency-refused' } : {}),
         }],
         editState: { ...state.editState, readOnly },
-        ...(command.kind === 'select' ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
+        ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
       };
       this.initial = { ...state, ...ack };
       response = { id: message.id, ok: true, commandAck: ack };
@@ -1876,4 +1877,23 @@ test('the real worker editor serves one native copy from its prefetched selectio
   expect(data.getData('text/html')).toBe('');
   await waitFor(() => expect(onCopy).toHaveBeenCalledTimes(1));
   expect(onError).not.toHaveBeenCalled();
+});
+
+
+test('unmount disposes the real worker editor clipboard subscription', async () => {
+  surface.mockRestore();
+  const create = clipboard.createClipboardPrefetch;
+  const disposals: ReturnType<typeof mock>[] = [];
+  const factory = spyOn(clipboard, 'createClipboardPrefetch').mockImplementation(options => {
+    const prefetch = create(options);
+    const dispose = mock(prefetch.dispose);
+    disposals.push(dispose);
+    return { ...prefetch, dispose };
+  });
+  restorers.push(() => factory.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await view.findByRole('textbox', { name: 'Document input' });
+  await waitFor(() => expect(disposals).toHaveLength(1));
+  view.unmount();
+  expect(disposals[0]).toHaveBeenCalledTimes(1);
 });
