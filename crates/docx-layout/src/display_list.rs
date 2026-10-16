@@ -139,6 +139,9 @@ pub struct DisplayPage {
     pub footer: Option<HfRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub note_areas: Vec<NoteRegion>,
+    /// Where host layout reservations landed on this page; never painted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reservations: Vec<DisplayReservation>,
     /// Geometry only: the page's content is built when a host asks for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unbuilt: bool,
@@ -149,6 +152,18 @@ pub struct DisplayPage {
     /// For an unbuilt page, the header and footer parts its build paints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_parts: Option<HfParts>,
+}
+
+/// The page rect a host's layout reservation takes, in page coordinates.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayReservation {
+    pub owner: String,
+    pub id: String,
+    pub x: Number,
+    pub y: Number,
+    pub width: Number,
+    pub height: Number,
 }
 
 /// Relationship ids of the header and footer parts a page paints.
@@ -1597,8 +1612,25 @@ pub(crate) enum BlockIn {
     Shape(Box<ShapeBlockIn>),
     #[serde(rename = "chart")]
     Chart(Box<ChartBlockIn>),
+    #[serde(rename = "reserved")]
+    Reserved(Box<ReservedBlockIn>),
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Deserialize, Clone, Default)]
+struct ReservationRefIn {
+    #[serde(default)]
+    owner: String,
+    #[serde(default)]
+    id: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ReservedBlockIn {
+    pub(crate) id: Value,
+    #[serde(default)]
+    reservation: ReservationRefIn,
 }
 
 #[derive(Deserialize)]
@@ -1658,8 +1690,25 @@ enum RunIn {
     LineBreak(LineBreakRunIn),
     #[serde(rename = "field")]
     Field(FieldRunIn),
+    #[serde(rename = "reserved")]
+    Reserved(ReservedRunIn),
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ReservedRunIn {
+    #[serde(default)]
+    reservation: ReservationRefIn,
+    #[serde(default)]
+    width: f64,
+    #[serde(default)]
+    height: f64,
+    #[serde(default)]
+    pm_start: Option<i64>,
+    #[serde(default)]
+    pm_end: Option<i64>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -3078,8 +3127,24 @@ enum FragmentIn {
     Shape(ShapeFragmentIn),
     #[serde(rename = "chart")]
     Chart(ChartFragmentIn),
+    #[serde(rename = "reserved")]
+    Reserved(ReservedFragmentIn),
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReservedFragmentIn {
+    block_id: Value,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+    #[serde(default)]
+    width: f64,
+    #[serde(default)]
+    height: f64,
 }
 
 #[derive(Deserialize)]
@@ -4075,6 +4140,12 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
                 pm_start: t.pm_start,
                 pm_end: t.pm_end,
             }),
+            RunIn::Reserved(t) => out.push(ResolvedSegment {
+                run,
+                text: String::new(),
+                pm_start: t.pm_start,
+                pm_end: t.pm_end,
+            }),
             RunIn::Unsupported => {}
         }
     }
@@ -4117,6 +4188,11 @@ enum LinePaintItem<'a> {
         pm_start: Option<i64>,
         level: u8,
     },
+    Reserved {
+        run: &'a ReservedRunIn,
+        single: bool,
+        level: u8,
+    },
 }
 
 impl LinePaintItem<'_> {
@@ -4125,7 +4201,8 @@ impl LinePaintItem<'_> {
             LinePaintItem::Text(item) => item.level,
             LinePaintItem::Tab { level, .. }
             | LinePaintItem::Image { level, .. }
-            | LinePaintItem::LineBreak { level, .. } => *level,
+            | LinePaintItem::LineBreak { level, .. }
+            | LinePaintItem::Reserved { level, .. } => *level,
         }
     }
 
@@ -4139,6 +4216,7 @@ impl LinePaintItem<'_> {
                 .and_then(|bounds| bounds.width)
                 .unwrap_or(run.width),
             LinePaintItem::LineBreak { .. } => 0.0,
+            LinePaintItem::Reserved { run, .. } => run.width,
         }
     }
 }
@@ -4314,9 +4392,24 @@ pub(crate) struct RenderCtx<'a> {
     pub(crate) shape: Option<&'a ShapeFonts<'a>>,
     /// Per-page PAGE/NUMPAGES widths for header/footer field lines.
     pub(crate) field_widths: Option<&'a FieldWidthMap>,
+    /// Collects the page's reservation rects; `None` drops them.
+    pub(crate) reservations: Option<&'a std::cell::RefCell<Vec<DisplayReservation>>>,
 }
 
 impl RenderCtx<'_> {
+    fn reserve(&self, reservation: &ReservationRefIn, x: f64, y: f64, width: f64, height: f64) {
+        if let Some(reservations) = self.reservations {
+            reservations.borrow_mut().push(DisplayReservation {
+                owner: reservation.owner.clone(),
+                id: reservation.id.clone(),
+                x: px(x),
+                y: px(y),
+                width: px(width),
+                height: px(height),
+            });
+        }
+    }
+
     /// `(fallback_width, resolved_width_on_this_page)` for a field run, when the
     /// input supplied a per-page width keyed on its document position.
     fn field_width(&self, pm_start: Option<i64>) -> Option<(f64, f64)> {
@@ -4656,6 +4749,16 @@ fn emit_note_item(
                 emit_table_fragment(prims, &fragment, block, measure, ctx);
                 cursor += measure.total_height;
             }
+            (BlockIn::Reserved(block), MeasureIn::Image(measure)) => {
+                ctx.reserve(
+                    &block.reservation,
+                    x,
+                    y + cursor,
+                    measure.width.min(width.max(0.0)).max(0.0),
+                    measure.height,
+                );
+                cursor += measure.height;
+            }
             (BlockIn::Image(block), MeasureIn::Image(measure)) => {
                 let mut attrs = BlockRef::of(&block.id).attrs();
                 attrs.doc_start = block.pm_start;
@@ -4919,6 +5022,7 @@ fn recompose_hf_region(
     total_pages: u64,
     cached_page_totals: bool,
     shape: Option<&ShapeFonts<'_>>,
+    reservations: &std::cell::RefCell<Vec<DisplayReservation>>,
 ) {
     let Some(variant) = hf
         .variants
@@ -4949,6 +5053,7 @@ fn recompose_hf_region(
         cached_page_totals,
         shape,
         field_widths: (!field_widths.is_empty()).then_some(&field_widths),
+        reservations: Some(reservations),
     };
     let content_width = page.size.w - page.margins.left - page.margins.right;
     let height = variant
@@ -5053,6 +5158,16 @@ fn recompose_hf_region(
                     carried_to_next: None,
                 };
                 emit_table_fragment(&mut flow, &fragment, block, measure, &ctx);
+            }
+            (BlockIn::Reserved(block), MeasureIn::Image(measure)) => {
+                let y = origin_y + hf_flow.place(measure.height, 0.0, 0.0);
+                ctx.reserve(
+                    &block.reservation,
+                    page.margins.left,
+                    y,
+                    measure.width.min(content_width.max(0.0)).max(0.0),
+                    measure.height,
+                );
             }
             (BlockIn::Image(block), MeasureIn::Image(measure)) => {
                 let x = page.margins.left;
@@ -5161,6 +5276,7 @@ fn build_display_list_selected(
             BlockIn::TextBox(t) => block_key(&t.id),
             BlockIn::Shape(s) => block_key(&s.id),
             BlockIn::Chart(c) => block_key(&c.id),
+            BlockIn::Reserved(r) => block_key(&r.id),
             BlockIn::Unsupported => continue,
         };
         by_id.entry(key).or_insert(mb);
@@ -5178,6 +5294,7 @@ fn build_display_list_selected(
         if selected_pages.is_some_and(|selected| !selected.contains(&page_index)) {
             continue;
         }
+        let page_reservations = std::cell::RefCell::new(Vec::new());
         let ctx = RenderCtx {
             page_number: page.number.unwrap_or(page_index as u64 + 1),
             page_label: page.page_label.clone(),
@@ -5186,6 +5303,7 @@ fn build_display_list_selected(
             cached_page_totals: input.layout.cached_page_totals,
             shape: shape_fonts.as_ref(),
             field_widths: None,
+            reservations: Some(&page_reservations),
         };
         let mut prims: Vec<Primitive> = Vec::new();
         let mut page_borders: Vec<PageBorderPrimitive> = Vec::new();
@@ -5401,6 +5519,14 @@ fn build_display_list_selected(
                     };
                     emit_chart_fragment(&mut prims, cf, block);
                 }
+                FragmentIn::Reserved(rf) => {
+                    prev_para_borders = None;
+                    if let Some(mb) = by_id.get(block_key(&rf.block_id).as_ref())
+                        && let BlockIn::Reserved(block) = &mb.block
+                    {
+                        ctx.reserve(&block.reservation, rf.x, rf.y, rf.width, rf.height);
+                    }
+                }
                 FragmentIn::Unsupported => {
                     prev_para_borders = None;
                 }
@@ -5444,6 +5570,7 @@ fn build_display_list_selected(
                     total_pages,
                     input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
+                    &page_reservations,
                 );
             }
             if let Some(region) = &mut footer {
@@ -5455,6 +5582,7 @@ fn build_display_list_selected(
                     total_pages,
                     input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
+                    &page_reservations,
                 );
             }
         }
@@ -5479,6 +5607,7 @@ fn build_display_list_selected(
             header,
             footer,
             note_areas,
+            reservations: page_reservations.take(),
             unbuilt: false,
             position_span: None,
             hf_parts: None,
@@ -6113,6 +6242,11 @@ fn authoritative_line_items<'a>(
                 pm_start: line_break.pm_start,
                 level,
             }),
+            RunIn::Reserved(reserved) => out.push(LinePaintItem::Reserved {
+                run: reserved,
+                single: item_count == 1,
+                level,
+            }),
             RunIn::Image(_) | RunIn::Unsupported => {}
         }
     }
@@ -6207,6 +6341,7 @@ fn emit_line(
                         fixed_width += image_layout_width(imr);
                     }
                 }
+                RunIn::Reserved(reserved) => fixed_width += reserved.width,
                 RunIn::Text(text) => {
                     if let Some(rule) = attrs.and_then(|attrs| {
                         attrs
@@ -6489,6 +6624,13 @@ fn emit_line(
                         level: default_bidi_level,
                     });
                 }
+                RunIn::Reserved(reserved) => {
+                    logical_items.push(LinePaintItem::Reserved {
+                        run: reserved,
+                        single: segments.len() == 1,
+                        level: default_bidi_level,
+                    });
+                }
                 RunIn::Unsupported => {}
             }
         }
@@ -6760,6 +6902,20 @@ fn emit_line(
                 if line_break_pos.is_none() {
                     line_break_pos = *pm_start;
                 }
+            }
+            LinePaintItem::Reserved { run, single, .. } => {
+                let y = if *single && line.descent <= 0.0 {
+                    geom.line_top + (line.ascent - run.height).max(0.0)
+                } else if *single {
+                    geom.line_top + ((line.line_height - run.height) / 2.0).max(0.0)
+                } else {
+                    baseline - run.height
+                };
+                ctx.reserve(&run.reservation, pen_x, y, run.width, run.height);
+                if line_break_pos.is_none() {
+                    line_break_pos = run.pm_start;
+                }
+                pen_x += run.width;
             }
         }
     }
@@ -10363,7 +10519,7 @@ fn cell_content_frame<'m>(
                 }
                 prev_after = 0.0;
             }
-            (BlockIn::Image(_), Some(MeasureIn::Image(image))) => {
+            (BlockIn::Image(_) | BlockIn::Reserved(_), Some(MeasureIn::Image(image))) => {
                 stack_cursor += prev_after;
                 block_tops.push(stack_cursor);
                 stack_cursor += image.height;
@@ -10461,6 +10617,9 @@ fn emit_cell_content(
     let rotated = rotation != 0.0;
     let windowed_lines = line_clip.is_some();
     let (cull_top_y, cull_bottom_y) = line_clip.unwrap_or((clip_top_y, clip_bottom_y));
+    let reserved_from = ctx
+        .reservations
+        .map_or(0, |reserved| reserved.borrow().len());
 
     // Behind-document floats paint below cell content.
     emit_cell_floating_images(
@@ -10586,6 +10745,14 @@ fn emit_cell_content(
                 windowed_lines,
                 selectable,
                 None,
+            );
+        } else if let (BlockIn::Reserved(block), MeasureIn::Image(measure)) = (cell_block, m) {
+            ctx.reserve(
+                &block.reservation,
+                content_x,
+                content_top + block_tops[i],
+                measure.width.min(content_width.max(0.0)).max(0.0),
+                measure.height,
             );
         } else if let (BlockIn::Image(image), MeasureIn::Image(image_measure)) = (cell_block, m) {
             let image_x = content_x;
@@ -10735,6 +10902,60 @@ fn emit_cell_content(
     }
     if rotated {
         rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
+    }
+    finish_cell_reservations(
+        ctx,
+        reserved_from,
+        selectable,
+        (cull_top_y, cull_bottom_y),
+        rotated.then_some((physical, rotation)),
+    );
+}
+
+/// Keeps a selectable paint's new reservation rects inside the cull band,
+/// turned with rotated cell content; a repaint adds none.
+fn finish_cell_reservations(
+    ctx: &RenderCtx<'_>,
+    from: usize,
+    selectable: bool,
+    (cull_top, cull_bottom): (f64, f64),
+    rotation: Option<((f64, f64, f64, f64), f64)>,
+) {
+    let Some(reservations) = ctx.reservations else {
+        return;
+    };
+    let mut reservations = reservations.borrow_mut();
+    if !selectable {
+        reservations.truncate(from);
+        return;
+    }
+    let mut index = from;
+    while index < reservations.len() {
+        let top = num_f64(&reservations[index].y);
+        let bottom = top + num_f64(&reservations[index].height);
+        if bottom <= cull_top || top >= cull_bottom {
+            reservations.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    let Some((cell, rotation)) = rotation else {
+        return;
+    };
+    for reservation in &mut reservations[from..] {
+        let width = num_f64(&reservation.width);
+        let height = num_f64(&reservation.height);
+        let x = num_f64(&reservation.x) + width / 2.0;
+        let y = num_f64(&reservation.y) + height / 2.0;
+        let (center_x, center_y) = if rotation < 0.0 {
+            (cell.0 + y, cell.1 + cell.3 - x)
+        } else {
+            (cell.0 + cell.2 - y, cell.1 + x)
+        };
+        reservation.x = px(center_x - height / 2.0);
+        reservation.y = px(center_y - width / 2.0);
+        reservation.width = px(height);
+        reservation.height = px(width);
     }
 }
 
@@ -11668,6 +11889,7 @@ fn unbuilt_page_with_span(
         header: None,
         footer: None,
         note_areas: Vec::new(),
+        reservations: Vec::new(),
         unbuilt: true,
         position_span,
         hf_parts: headers_footers
@@ -11712,6 +11934,7 @@ fn layout_page_position_span(
             Fragment::TextBox(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Shape(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Chart(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Reserved(_) => {}
             Fragment::Table(fragment) => {
                 if let Some(measured) =
                     blocks.get(resident_block_id_key(&fragment.block_id).as_ref())
@@ -12428,6 +12651,7 @@ fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>>
         LayoutBlock::TextBox(value) => Some(resident_block_id_key(&value.id)),
         LayoutBlock::Shape(value) => Some(resident_block_id_key(&value.id)),
         LayoutBlock::Chart(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Reserved(value) => Some(resident_block_id_key(&value.id)),
         LayoutBlock::SectionBreak(_)
         | LayoutBlock::PageBreak(_)
         | LayoutBlock::ColumnBreak(_)
@@ -12445,6 +12669,7 @@ fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str
         Fragment::TextBox(value) => &value.block_id,
         Fragment::Shape(value) => &value.block_id,
         Fragment::Chart(value) => &value.block_id,
+        Fragment::Reserved(value) => &value.block_id,
     };
     resident_block_id_key(id)
 }
@@ -12475,6 +12700,7 @@ fn measured_block_key(measured: &MeasuredBlockIn) -> Option<Cow<'_, str>> {
         BlockIn::TextBox(value) => Some(block_key(&value.id)),
         BlockIn::Shape(value) => Some(block_key(&value.id)),
         BlockIn::Chart(value) => Some(block_key(&value.id)),
+        BlockIn::Reserved(value) => Some(block_key(&value.id)),
         BlockIn::Unsupported => None,
     }
 }
@@ -12488,6 +12714,7 @@ fn fragment_block_key_ref(fragment: &FragmentIn) -> Option<Cow<'_, str>> {
         FragmentIn::TextBox(value) => &value.block_id,
         FragmentIn::Shape(value) => &value.block_id,
         FragmentIn::Chart(value) => &value.block_id,
+        FragmentIn::Reserved(value) => &value.block_id,
         FragmentIn::Unsupported => return None,
     };
     Some(block_key(id))
@@ -12524,18 +12751,13 @@ fn shift_unbuilt_span(
         return DisplayShift::Inert;
     };
     let delta = layout_page
-        .and_then(|layout_page| layout_page.fragments.first())
-        .map(|fragment| {
-            use crate::types::Fragment;
-            resident_block_id_key(match fragment {
-                Fragment::Paragraph(value) => &value.block_id,
-                Fragment::Table(value) => &value.block_id,
-                Fragment::Image(value) => &value.block_id,
-                Fragment::TextBox(value) => &value.block_id,
-                Fragment::Shape(value) => &value.block_id,
-                Fragment::Chart(value) => &value.block_id,
-            })
+        .and_then(|layout_page| {
+            layout_page
+                .fragments
+                .iter()
+                .find(|fragment| !matches!(fragment, crate::types::Fragment::Reserved(_)))
         })
+        .map(resident_fragment_block_key)
         .and_then(|key| deltas.get(key.as_ref()))
         .filter(|&&delta| delta != 0);
     if let Some(&delta) = delta {

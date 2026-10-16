@@ -439,6 +439,150 @@ test('worker host proposal cards alone leave an uncontrolled sidebar closed', as
   h.controller.dispose();
 });
 
+test('worker shell draws unmanaged plugin overlays under the managed overlay layer', async () => {
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} pluginOverlays={<div data-testid="host-overlay" />} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const layer = view.getByTestId('host-overlay').parentElement!;
+  const managed = view.getByTestId('plugin-overlays');
+  expect(layer.parentElement).toBe(managed.parentElement);
+  expect(Number(layer.style.zIndex)).toBeLessThan(Number(managed.style.zIndex));
+});
+
+test('unmanaged plugin sidebar items are placed from worker geometry without plugins', async () => {
+  const h = proposalHost();
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const queries = { pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 600, height: 800 }), anchorRect: () => null,
+    rangeRects: (from: number) => from === 4 ? [{ pageIndex: 0, x: 10, y: 30, width: 5, height: 12 }] : [], dispose() {} } as unknown as frameRender.DisplayListQueries;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(h.readAt as never);
+  const load = spyOn(frameRender, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
+  const create = spyOn(frameRender, 'createDisplayListQueries').mockReturnValue(queries);
+  restorers.push(() => readAt.mockRestore(), () => load.mockRestore(), () => create.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false}
+    pluginSidebarItems={[{ id: 'note', anchorPos: 4, render: () => <div data-testid="host-note" /> }]} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  view.getByTestId('peerless-paged-editor').setAttribute('data-peerless-pages-host', '');
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('30px'));
+  view.unmount();
+  h.controller.dispose();
+});
+
+test('plugin sidebar cards discard placement across source replacement and incarnations', async () => {
+  const hosts = [proposalHost(), proposalHost(), proposalHost()];
+  hosts[2]!.binding.viewStore.getSnapshot().identity.incarnation = 2;
+  hosts[2]!.binding.viewStore.getSnapshot().geometry!.identity.incarnation = 2;
+  for (const h of hosts) h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  let y: number | null = 30;
+  let currentHost = hosts[0]!;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt')
+    .mockImplementation(((...args: Parameters<typeof currentHost.readAt>) => currentHost.readAt(...args)) as never);
+  const load = spyOn(frameRender, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
+  const create = spyOn(frameRender, 'createDisplayListQueries').mockImplementation(() => {
+    const top = y;
+    return { pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 600, height: 800 }),
+      anchorRect: () => null, rangeRects: (from: number) => from === 4 && top !== null
+        ? [{ pageIndex: 0, x: 10, y: top, width: 5, height: 12 }] : [], dispose() {} } as unknown as frameRender.DisplayListQueries;
+  });
+  restorers.push(() => readAt.mockRestore(), () => load.mockRestore(), () => create.mockRestore(),
+    () => hosts.forEach(h => h.controller.dispose()));
+  const items = [{ id: 'note', anchorPos: 4, render: () => <div data-testid="host-note" /> }];
+  const element = (documentBuffer: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false} pluginSidebarItems={items} />;
+  const view = render(element(source));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  view.getByTestId('peerless-paged-editor').setAttribute('data-peerless-pages-host', '');
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[0]!.binding); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('30px'));
+  const isPlaced = () => {
+    const note = view.queryByTestId('host-note');
+    const sidebar = note?.closest<HTMLElement>('.docx-unified-sidebar');
+    return !!sidebar && sidebar.style.opacity !== '0' && note!.parentElement!.style.visibility !== 'hidden';
+  };
+  holdInitial = true;
+  view.rerender(element(Uint8Array.of(4, 5, 6)));
+  expect(isPlaced()).toBe(false);
+  await waitFor(() => expect(workers.at(-1)!.pendingReplies.length).toBeGreaterThan(0));
+  expect(isPlaced()).toBe(false);
+  y = null;
+  currentHost = hosts[1]!;
+  await act(async () => {
+    const worker = workers.at(-1)!;
+    for (const response of worker.pendingReplies.splice(0)) worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[1]!.binding); });
+  await waitFor(() => expect(create.mock.calls.length).toBeGreaterThan(1));
+  expect(isPlaced()).toBe(false);
+  y = 140;
+  const frame = hosts[1]!.binding.viewStore.getSnapshot().geometry!;
+  await act(async () => { hosts[1]!.binding.viewStore.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1 }); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('140px'));
+  const previousQueries = create.mock.calls.length;
+  y = null;
+  currentHost = hosts[2]!;
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[2]!.binding); });
+  await waitFor(() => expect(create.mock.calls.length).toBeGreaterThan(previousQueries));
+  expect(isPlaced()).toBe(false);
+  y = 250;
+  const recoveredFrame = hosts[2]!.binding.viewStore.getSnapshot().geometry!;
+  await act(async () => { hosts[2]!.binding.viewStore.installFrameGeometry({ ...recoveredFrame, frameEpoch: recoveredFrame.frameEpoch + 1 }); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('250px'));
+});
+
+test('unmanaged plugin overlays wait for a ready document and clear on replacement', async () => {
+  holdInitial = true;
+  const element = (documentBuffer: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false}
+    pluginOverlays={<div data-testid="host-overlay" />} />;
+  const view = render(element(source));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  await waitFor(() => expect(workers[0]!.pendingReplies.length).toBeGreaterThan(0));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  await act(async () => {
+    for (const response of workers[0]!.pendingReplies.splice(0)) workers[0]!.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(view.queryByTestId('host-overlay')).not.toBeNull());
+  view.rerender(element(Uint8Array.of(4, 5, 6)));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+});
+
+test('unmanaged plugin overlays stay hidden for placeholder and parse errors', async () => {
+  const element = (documentBuffer?: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false}
+    pluginOverlays={<div data-testid="host-overlay" />} />;
+  const view = render(element());
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  failWholeOpen = true;
+  const onError = mock(() => {});
+  view.rerender(<DocxEditor {...peerlessProps} showToolbar={false} onError={onError}
+    pluginOverlays={<div data-testid="host-overlay" />} />);
+  await waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+});
+
+test('unmanaged plugin sidebar items keyed to a host proposal card are placed at that card', async () => {
+  const h = proposalHost();
+  await h.submit('propose', { proposals: inputs }, {}).ack;
+  h.binding.viewStore.getSnapshot().geometry!.pages = [0, 1].map(pageIndex => ({
+    page: { pageId: String(pageIndex), pageIndex }, bounds: { x: 0, y: pageIndex * 820, width: 600, height: 800 },
+    transform: [1, 0, 0, 1, 0, pageIndex * 820] as const,
+  }));
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(h.readAt as never);
+  restorers.push(() => readAt.mockRestore());
+  const anchorKey = `revision-${frameRender.yrsIdToNumericId('revision-change-1')}`;
+  const view = render(<DocxEditor {...peerlessProps} allowHostProposals commentsSidebarOpen showHostProposalsInSidebar showToolbar={false}
+    pluginSidebarItems={[{ id: 'note', anchorPos: -1, anchorKey, render: () => <div data-testid="host-note" /> }]} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(4));
+  const note = view.getByTestId('host-note').parentElement!;
+  await waitFor(() => expect([note.style.position, note.style.visibility]).toEqual(['absolute', '']));
+  const cards = [...view.container.querySelectorAll('.docx-tracked-change-card')]
+    .map(card => Number.parseFloat(card.closest<HTMLElement>('.docx-unified-sidebar > div > div')!.style.top)).sort((a, b) => a - b);
+  expect(Number.parseFloat(note.style.top)).toBeGreaterThan(cards[0]!);
+  expect(Number.parseFloat(note.style.top)).toBeLessThan(cards[1]!);
+  view.unmount();
+  h.controller.dispose();
+});
+
 test('d8a_peerless_mount_creates_no_main_document', async () => {
   const main = spyOn(yrs, 'createYrsSession').mockImplementation(() => {
     throw new Error('main document created');
@@ -1807,6 +1951,19 @@ test('viewing mode initializes worker read-only and internal mode changes use it
   await waitFor(() => expect(binding!.admission.getSnapshot().readOnly).toBe(false));
 });
 
+test('viewing mode reports read-only to worker plugins', async () => {
+  let context: DocxPluginContext<null> | undefined;
+  const events: { mode: string; readOnly: boolean; snapshot: boolean }[] = [];
+  const plugin = defineDocxPlugin({ id: 'mode-check', createState: () => null, initialize: (value) => { context = value; },
+    onEvent(value, event) {
+      if (event.type === 'mode-change') events.push({ mode: event.mode, readOnly: event.readOnly, snapshot: value.snapshot.readOnly });
+    } });
+  const view = render(<DocxEditor {...peerlessProps} mode="viewing" plugins={[plugin]} />);
+  await waitFor(() => expect(context?.snapshot).toMatchObject({ mode: 'viewing', readOnly: true }));
+  view.rerender(<DocxEditor {...peerlessProps} mode="editing" plugins={[plugin]} />);
+  await waitFor(() => expect(events.at(-1)).toEqual({ mode: 'editing', readOnly: false, snapshot: false }));
+});
+
 test('suggesting shell edits carry the current host author', async () => {
   const view = render(<DocxEditor {...peerlessProps} mode="suggesting" author="Writer" />);
   await waitFor(() => expect(binding).toBeDefined());
@@ -1844,6 +2001,13 @@ test('worker rulers show native section values and the first-line indent control
   await waitFor(() => expect(binding).toBeDefined());
   await waitFor(() => expect(requests.some(request => request.type === 'documentRead' && request.read.kind === 'sectionProperties')).toBe(true));
   expect(view.getByRole('slider', { name: 'First line indent' })).toBeDefined();
+});
+
+test('worker rulers use the host ruler unit', async () => {
+  const view = render(<DocxEditor {...peerlessProps} showRuler rulerUnit="cm" />);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(view.getByRole('slider', { name: 'Horizontal ruler' }).textContent).toContain('21');
+  expect(view.getByRole('slider', { name: 'Vertical ruler' }).textContent).toContain('27');
 });
 
 test('worker-only opens request the font-ready certified initial display window', async () => {

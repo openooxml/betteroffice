@@ -1312,10 +1312,12 @@ fn shiftable(block: &LayoutBlock) -> bool {
                 .attrs
                 .as_ref()
                 .is_none_or(|attrs| attrs.horizontal_rules.is_empty())
-                && paragraph
-                    .runs
-                    .iter()
-                    .all(|run| matches!(run, Run::Text(_) | Run::Tab(_) | Run::LineBreak(_)))
+                && paragraph.runs.iter().all(|run| {
+                    matches!(
+                        run,
+                        Run::Text(_) | Run::Tab(_) | Run::LineBreak(_) | Run::Reserved(_)
+                    )
+                })
         }
         LayoutBlock::Table(table) => table
             .rows
@@ -1323,7 +1325,7 @@ fn shiftable(block: &LayoutBlock) -> bool {
             .flat_map(|row| &row.cells)
             .flat_map(|cell| &cell.blocks)
             .all(shiftable),
-        LayoutBlock::SectionBreak(_) => true,
+        LayoutBlock::SectionBreak(_) | LayoutBlock::Reserved(_) => true,
         LayoutBlock::Image(_)
         | LayoutBlock::Shape(_)
         | LayoutBlock::Chart(_)
@@ -1375,7 +1377,7 @@ pub(crate) fn shift_block(block: &mut LayoutBlock, delta: i64) {
             shift_pair(&mut column_break.pm_start, &mut column_break.pm_end, delta);
             shift_groups(&mut column_break.sdt_groups, delta);
         }
-        LayoutBlock::Unsupported => {}
+        LayoutBlock::Reserved(_) | LayoutBlock::Unsupported => {}
     }
 }
 
@@ -1425,6 +1427,7 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, delta: i64) {
                 }
             }
             Run::Field(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
+            Run::Reserved(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
             Run::Unsupported => {}
         }
     }

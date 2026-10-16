@@ -47,8 +47,8 @@ use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock, ImageExtent,
     ImageFragment, ImageRunPosition, Input, Layout, LayoutBlock, MeasuredBlock, ParagraphBlock,
-    ParagraphExtent, ParagraphFragment, Run, SectionBreakType, ShapeBlock, ShapeExtent,
-    ShapeFragment, Size, TextBoxBlock, TextBoxExtent, TextBoxFragment,
+    ParagraphExtent, ParagraphFragment, ReservedBlock, ReservedFragment, Run, SectionBreakType,
+    ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent, TextBoxFragment,
 };
 
 /// Default page size (US Letter in pixels at 96 DPI).
@@ -1075,6 +1075,15 @@ fn place<F: PartialEq>(
                 layout_text_box(block, measure, paginator);
             }
 
+            LayoutBlock::Reserved(block) => {
+                let BlockExtent::Image(measure) = &mb.measure else {
+                    return Err(LayoutError::Invalid(
+                        "layoutReserved: expected image measure".into(),
+                    ));
+                };
+                layout_reserved(block, measure, paginator);
+            }
+
             LayoutBlock::PageBreak(_) => {
                 paginator.force_authored_page_break(false);
             }
@@ -1217,6 +1226,7 @@ fn fragment_source(fragment: &Fragment) -> (&crate::types::BlockId, bool) {
         Fragment::Shape(fragment) => (&fragment.block_id, false),
         Fragment::Chart(fragment) => (&fragment.block_id, false),
         Fragment::TextBox(fragment) => (&fragment.block_id, false),
+        Fragment::Reserved(fragment) => (&fragment.block_id, false),
     }
 }
 
@@ -1775,6 +1785,25 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
+/// Places reserved space like an inline image block, clipped to the column it
+/// lands in.
+fn layout_reserved(block: &ReservedBlock, measure: &ImageExtent, paginator: &mut Paginator) {
+    let state_idx = paginator.ensure_fits(measure.height);
+    let column_index = paginator.state(state_idx).column_index;
+    let height = measure.height.min(paginator.get_column_capacity()).max(0.0);
+    let fragment = Fragment::Reserved(ReservedFragment {
+        block_id: block.id.clone(),
+        x: paginator.get_column_x(column_index),
+        y: 0.0,
+        width: measure
+            .width
+            .min(paginator.column_width().max(0.0))
+            .max(0.0),
+        height,
+    });
+    paginator.add_fragment(fragment, height, 0.0, 0.0);
+}
+
 /// Places anchored shapes at page coordinates.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
     if block.position.is_some() {
@@ -1915,6 +1944,7 @@ fn layout_anchored_image(block: &ImageBlock, measure: &ImageExtent, paginator: &
                 Fragment::Shape(value) => (value.x, value.y, value.width, value.height),
                 Fragment::Chart(value) => (value.x, value.y, value.width, value.height),
                 Fragment::TextBox(value) => (value.x, value.y, value.width, value.height),
+                Fragment::Reserved(value) => (value.x, value.y, value.width, value.height),
             };
             if x < ex + ew && x + measure.width > ex && y < ey + eh && y + measure.height > ey {
                 y = ey + eh;
