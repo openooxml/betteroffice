@@ -66,7 +66,7 @@ class Canvas {
  * `terminate` stops the worker like a real one: no more messages either way, its timers and
  * channels close and its sessions are freed.
  */
-export async function residentWorkerFactory(): Promise<(clientId?: number) => InProcessResidentWorker> {
+export async function residentWorkerFactory(options: { transferBuffers?: boolean } = {}): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
     target: 'bun',
@@ -157,10 +157,10 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       sessions: [],
       imageBlobs: [],
       fontFaces,
-      postMessage(message) {
+      postMessage(message, transfer = []) {
         worker.requests.push(message.type);
         if (terminated) return;
-        const data = structuredClone(message);
+        const data = structuredClone(message, { transfer: options.transferBuffers ? transfer.filter(value => value instanceof ArrayBuffer) : [] });
         if (data.type === 'attachCanvases') {
           for (const page of data.pages) Object.setPrototypeOf(page.canvas, Canvas.prototype);
         }
