@@ -2985,22 +2985,14 @@ fn apply_run_properties(
             base.attributes.remove("u");
         }
     }
-    let keeps_gradient = properties.color.as_ref().is_some_and(|color| {
-        base.child("gradFill")
-            .and_then(crate::drawing::run_gradient_color)
-            .is_some_and(|authored| {
-                &authored == color
-                    || resolve_color_value_to_hex_with_theme(Some(&authored), theme).is_some_and(
-                        |authored| {
-                            Some(authored)
-                                == resolve_color_value_to_hex_with_theme(Some(color), theme)
-                        },
-                    )
-            })
-    });
+    // An unedited colour keeps its authored fill, theme token and transforms included.
+    let authored = parse_run_properties(Some(base)).color;
+    let keeps_fill = authored == properties.color
+        || resolve_color_value_to_hex_with_theme(authored.as_ref(), theme)
+            == resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme);
     // A colour write replaces the whole fill choice; clearing the colour only
     // drops an explicit solidFill so an unmodeled noFill/gradFill survives.
-    let removed_fills: &[&str] = if keeps_gradient {
+    let removed_fills: &[&str] = if keeps_fill {
         &[]
     } else if properties.color.is_some() {
         &FILL_ELEMENTS
@@ -3016,7 +3008,7 @@ fn apply_run_properties(
     if let Some(color) = properties
         .color
         .as_ref()
-        .filter(|_| !keeps_gradient)
+        .filter(|_| !keeps_fill)
         .and_then(|color| color_element(color, prefixes))
     {
         let position = base
@@ -3903,6 +3895,53 @@ mod tests {
         let xml = rebuilt_paragraph(FONT_PARAGRAPH.as_bytes(), &font_runs("Calibri"));
         let calibri = edited_font_body(r#"<a:latin typeface="Calibri"/>"#);
         assert!(xml.ends_with(&calibri), "{xml}");
+    }
+
+    const FILL_PARAGRAPH: &str = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent6"><a:lumMod val="75000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr><a:t> them</a:t></a:r></a:p>"#;
+
+    /// Each run's colour flattened to hex, as the editor snapshot hands it back.
+    fn hex_runs() -> Vec<(&'static str, RunProperties)> {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let path = "ppt/slides/slide1.xml";
+        let root = parse_xml(FILL_PARAGRAPH.as_bytes(), path, &mut budget).unwrap();
+        root.child_elements()
+            .zip(["among", " then"])
+            .map(|(run, text)| {
+                let color = parse_run_properties(run.child("rPr")).color;
+                let hex = resolve_color_value_to_hex_with_theme(color.as_ref(), None);
+                let color = ColorValue {
+                    rgb: hex.map(|hex| hex[1..].to_owned()),
+                    ..ColorValue::default()
+                };
+                let properties = RunProperties {
+                    color: Some(color),
+                    ..RunProperties::default()
+                };
+                (text, properties)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_text_edit_keeps_theme_colours_and_their_transforms() {
+        let xml = rebuilt_paragraph(FILL_PARAGRAPH.as_bytes(), &hex_runs());
+        let (_, body) = FILL_PARAGRAPH.split_once('>').unwrap();
+        let edited = body.replace("amongst", "among").replace(" them", " then");
+        assert!(xml.ends_with(&edited), "{xml}");
+    }
+
+    #[test]
+    fn an_explicit_colour_edit_replaces_the_theme_fill() {
+        let mut runs = hex_runs();
+        runs[0].1.color = Some(ColorValue {
+            rgb: Some("FF0000".to_owned()),
+            ..ColorValue::default()
+        });
+        let xml = rebuilt_paragraph(FILL_PARAGRAPH.as_bytes(), &runs);
+        let red = r#"<a:rPr lang="en-US"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:rPr><a:t>among</a:t>"#;
+        assert!(xml.contains(red), "{xml}");
+        assert!(xml.contains(r#"<a:schemeClr val="tx1"/>"#), "{xml}");
     }
 
     #[test]
