@@ -34,10 +34,12 @@ pub(crate) fn parse_stylesheet(
 }
 
 /// which top-level pool the cursor is inside; disambiguates elements that recur
-/// across sections (`<xf>` in cellStyleXfs vs cellXfs, `<color>` everywhere).
+/// across sections (`<xf>` in cellStyleXfs vs cellXfs, `<numFmt>` and `<font>`
+/// in dxfs, `<color>` everywhere). only direct `styleSheet` children open one.
 #[derive(PartialEq)]
 enum Section {
     None,
+    NumFmts,
     Fonts,
     Fills,
     Borders,
@@ -91,13 +93,13 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     };
                     ss.indexed_colors.push(rgb);
                 }
-                b"numFmts" => section = Section::None,
-                b"fonts" => section = Section::Fonts,
-                b"fills" => section = Section::Fills,
-                b"borders" => section = Section::Borders,
-                b"cellStyleXfs" => section = Section::CellStyleXfs,
-                b"cellXfs" => section = Section::CellXfs,
-                b"numFmt" => {
+                b"numFmts" if depth == 2 => section = Section::NumFmts,
+                b"fonts" if depth == 2 => section = Section::Fonts,
+                b"fills" if depth == 2 => section = Section::Fills,
+                b"borders" if depth == 2 => section = Section::Borders,
+                b"cellStyleXfs" if depth == 2 => section = Section::CellStyleXfs,
+                b"cellXfs" if depth == 2 => section = Section::CellXfs,
+                b"numFmt" if section == Section::NumFmts && depth == 3 => {
                     if let (Some(id), Some(code)) = (
                         attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
                         attr(&e, b"formatCode")?,
@@ -197,8 +199,11 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                 }
                 _ => {}
             },
+            Event::End(_) if depth == 1 => {
+                section = Section::None;
+                colors_depth = None;
+            }
             Event::End(e) => match e.name().local_name().as_ref() {
-                b"colors" if colors_depth == Some(depth + 1) => colors_depth = None,
                 b"indexedColors" if indexed_colors_depth == Some(depth + 1) => {
                     indexed_colors_depth = None;
                 }

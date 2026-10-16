@@ -3317,6 +3317,52 @@ fn keeps_a_stylesheet_that_models_nothing() {
     assert!(content_types_text(&saved).contains("/xl/styles.xml"));
 }
 
+/// A `dxf` number format belongs to its conditional format; promoting one to
+/// the cell pool would redefine a builtin id for untouched cells.
+#[test]
+fn dxf_number_formats_stay_out_of_the_cell_pool() {
+    let num_fmts = r#"<numFmts count="2"><numFmt numFmtId="3" formatCode="0.0"/><numFmt numFmtId="164" formatCode="0.000"/></numFmts>"#;
+    let dxfs = r#"<dxfs count="2"><dxf><numFmt numFmtId="14" formatCode="0.00%"/></dxf><dxf><font><b/></font><numFmt numFmtId="165" formatCode="@"/></dxf></dxfs>"#;
+    let ext = r#"<extLst><ext uri="{46F421CA-312F-682f-3DD2-61675219B42D}"><dxfs count="1"><dxf><numFmt numFmtId="166" formatCode="0%"/></dxf></dxfs></ext></extLst>"#;
+    let styles = format!(
+        r#"{num_fmts}<fonts count="1"><font><sz val="11"/></font></fonts><cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="14" fontId="0" applyNumberFormat="1"/></cellXfs>{dxfs}{ext}"#
+    );
+    let parts = package_styled(
+        r#"<sheetData><row r="1"><c r="A1" s="1"><v>43678</v></c><c r="B1"><v>1</v></c></row></sheetData>"#,
+        Some(&styles),
+        None,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let pool = vec![(3, "0.0".to_string()), (164, "0.000".to_string())];
+    assert_eq!(parsed.workbook.styles.num_fmts, pool);
+
+    let mut wb = parsed.workbook.clone();
+    let mut format = wb.styles.cell_format(None);
+    format.font.bold = true;
+    wb.sheets[0].cell_mut(CellRef::new(0, 1)).unwrap().style =
+        wb.styles.intern_cell_format(&format).unwrap();
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(num_fmts), "{xml}");
+    assert!(xml.contains(dxfs), "{xml}");
+    assert!(xml.contains(ext), "{xml}");
+
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(reopened.styles.num_fmts, pool);
+    assert_eq!(reopened.styles.format_code_for(1), FormatCode::Builtin(14));
+    let bold = reopened.styles.cell_format(cell_at(&reopened, "B1").style);
+    assert!(bold.font.bold);
+}
+
+/// Pools close with their element, so a `dxf` font is never a cell font.
+#[test]
+fn dxf_fonts_stay_out_of_the_font_pool() {
+    let styles = r#"<fonts count="1"><font><sz val="11"/></font></fonts><dxfs count="1"><dxf><font><b/></font></dxf></dxfs>"#;
+    let parts = package_styled("<sheetData/>", Some(styles), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.styles.fonts.len(), 1);
+}
+
 /// Interning a new format appends one `xf`; every pool entry the model left
 /// alone must keep its source markup.
 #[test]
