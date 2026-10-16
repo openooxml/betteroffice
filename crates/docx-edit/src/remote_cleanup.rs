@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use yrs::encoding::write::Write;
 use yrs::error::UpdateError;
+use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
-use yrs::{IdSet, ReadTxn, TransactionMut, Update};
+use yrs::{IdSet, ReadTxn, StateVector, TransactionMut, Update};
 
 /// Deletions an open remote integration did not make itself: what its updates carried plus the
 /// deletions earlier remote integrations left pending, which integrating may apply. Deletions a
@@ -61,7 +62,27 @@ impl RemoteIntegration<'_, '_> {
     }
 
     pub(crate) fn apply_update(&mut self, update: Update) -> Result<(), UpdateError> {
-        self.txn.apply_update(update)
+        let mut before = self.txn.state_vector();
+        self.txn.apply_update(update)?;
+        while let Some(held) = self.stranded(&before) {
+            before = self.txn.state_vector();
+            self.txn.apply_update(held)?;
+        }
+        Ok(())
+    }
+
+    /// A copy of the structs yrs holds once every dependency they wait on has arrived. yrs
+    /// retries held structs only when a missing client's clock passes the one it recorded, so
+    /// structs that wait on a skipped range stay held after that range fills below the clock.
+    fn stranded(&self, before: &StateVector) -> Option<Update> {
+        let now = self.txn.state_vector();
+        let pending = self.txn.store().pending_update()?;
+        let mut missing = pending.missing.iter();
+        let arrived = missing
+            .clone()
+            .all(|(client, &clock)| clock <= now.get(client))
+            && missing.any(|(client, _)| now.get(client) > before.get(client));
+        arrived.then(|| Update::decode_v1(&pending.update.encode_v1()).ok())?
     }
 }
 
@@ -180,6 +201,30 @@ mod tests {
 
         assert_eq!(text(&peer), "acd");
         assert!(residuals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn structs_held_on_a_skipped_range_integrate_once_it_fills() {
+        let origin = replica(7);
+        let base = edit(&origin, |txn, text| text.insert(txn, 0, "abc"));
+        let late = edit(&origin, |txn, text| text.insert(txn, 3, "d"));
+        let early = edit(&origin, |txn, text| {
+            text.insert(txn, 0, "x");
+            text.insert(txn, 5, "y");
+        });
+        let peer = replica(8);
+        let deletions = RemoteDeletions::default();
+        integrate(&peer, &deletions, &base, None);
+        integrate(&peer, &deletions, &early, None);
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_some());
+        integrate(&peer, &deletions, &late, None);
+
+        assert_eq!(text(&peer), "xabcdy");
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_none());
+        assert_eq!(
+            ReadTxn::state_vector(&peer.transact()),
+            ReadTxn::state_vector(&origin.transact())
+        );
     }
 
     #[test]

@@ -83,6 +83,11 @@ async function open(clientId: number, initialUpdate?: Uint8Array, document?: Doc
 const remoteUpdate = (target: { engine: { encodeStateVector(): Uint8Array } }, source: { encodeStateAsUpdate(vector?: Uint8Array): Uint8Array }) =>
   source.encodeStateAsUpdate(target.engine.encodeStateVector()).slice().buffer;
 const merge = { lane: 'collab', fence: true } as const;
+const clocks = (vector: Uint8Array) => {
+  let at = 0;
+  const read = () => { let value = 0; for (let scale = 1; ; scale *= 128) { const byte = vector[at++]!; value += (byte & 127) * scale; if (byte < 128) return value; } };
+  return Object.fromEntries(Array.from({ length: read() }, () => [read(), read()]));
+};
 
 for (const input of ['bytes', 'document'] as const) {
   test(`a ${input} source joins a room from the shared state without seeding its own stories`, async () => {
@@ -142,7 +147,7 @@ test('a worker replica survives a remote update that arrives before the update i
       for (const step of steps) {
         sent = [];
         const [kind, payload] = step === 'split' ? ['paragraphBreak', caret(0, 3)]
-          : step === 'deleteAcross' ? ['deleteBackward', { selection: { anchor: point(0, 3), focus: point(1, 4) } }]
+          : step === 'deleteAcross' ? ['deleteBackward', { selection: { anchor: point(0, 3), focus: point(1, Math.min(4, a.engine.paragraphs('body')[1]!.text.length)) } }]
             : step === 'section' ? ['insertSectionBreak', { ...caret(1, 2), type: 'continuous' }]
               : step === 'table' ? ['insertTable', { ...caret(1, 0), rows: 2, columns: 2 }] : ['undo', {}];
         const status = (await a.session.submit(kind as 'undo', payload as Record<string, never>).ack).status;
@@ -162,8 +167,8 @@ test('a worker replica survives a remote update that arrives before the update i
         if (update === early.at(-1) && b.engine.hasPendingUpdate()) awaited.push(label);
       }
       if (b.client.hasFailed()) continue;
-      expect(b.engine.hasPendingUpdate()).toBe(false);
       for (const update of back) await a.session.submit('applyRemoteUpdate', { update }, merge).ack;
+      expect(clocks(b.engine.encodeStateVector())).toEqual(clocks(a.engine.encodeStateVector()));
       expect(b.engine.paragraphs('body').map(p => p.text)).toEqual(a.engine.paragraphs('body').map(p => p.text));
       const at = { story: 'body', paraId: b.engine.paragraphs('body')[0]!.paraId, offset: 0 };
       expect((await b.session.submit('insertText', { selection: { anchor: at, focus: at }, text: 'x' }).ack).status).toBe('applied');
