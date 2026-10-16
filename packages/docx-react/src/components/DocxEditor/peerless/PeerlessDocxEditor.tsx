@@ -119,7 +119,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, []);
   const save = useCallback(async () => {
     if (!worker.current) throw new Error('Peer-less worker is not ready');
-    return (await worker.current.save({ comments: [...(props.comments ?? sourceComments.current)] })).bytes;
+    return (await worker.current.save(props.comments ? { comments: [...props.comments], commentsSource: 'host' } : { comments: [...sourceComments.current] })).bytes;
   }, [props.comments]);
   const printCaptures = useRef(new Set<ReturnType<typeof createWorkerPrintCapture>>());
   const print = useCallback(async (preview = false) => {
@@ -154,7 +154,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [props.onPrint, reportRecoverableError]);
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
   const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
-    comments: () => props.comments ?? sourceComments.current,
+    comments: () => props.comments ?? sourceComments.current, hostComments: props.comments,
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
@@ -803,11 +803,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => controller.revisions(commentReview, revisionRead), [controller, commentReview, revisionRead]);
   const trackedChanges = controller.trackedChanges();
   const revisionCallbacks = useMemo(() => workerRevisionCallbacks(controller), [controller]);
-  const comments = review?.uiComments ?? props.comments ?? sourceComments.current;
+  const comments = props.comments ?? review?.uiComments ?? sourceComments.current;
   const commentItems = useCommentSidebarItems({ comments: props.commentsSidebarOpen === false ? [] : comments, trackedChanges: props.commentsSidebarOpen === false ? [] : trackedChanges?.entries ?? [], callbacks: revisionCallbacks });
   const positionedComments = commentItems.map(item => {
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
-    const rect = nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined;
+    const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
+    const rect = (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
+      (review && item.anchorKey?.startsWith('comment-') && firstPage !== undefined ? { pageIndex: firstPage, y: 0 } : undefined);
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
     return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };

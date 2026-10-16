@@ -269,6 +269,8 @@ export type ResidentEngineWorkerRequest =
       id: number;
       type: 'save';
       comments: Comment[];
+      /** `host` when `comments` is the host's list and wins over the worker's own comments. @internal */
+      commentsSource?: 'host';
       host?: Document;
       stateVector?: Uint8Array;
       /** The editor peer's marked stories. @internal */

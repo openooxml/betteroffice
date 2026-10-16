@@ -694,6 +694,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
    */
   async save(request: {
     comments: Comment[];
+    /** @internal */
+    commentsSource?: 'host';
     host?: Document;
     stateVector?: Uint8Array;
     /** @internal */
@@ -702,6 +704,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     const response = await this.request({
       type: 'save',
       comments: request.comments,
+      ...(request.commentsSource === undefined ? {} : { commentsSource: request.commentsSource }),
       ...(request.host === undefined ? {} : { host: request.host }),
       ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
       ...(request.stories === undefined ? {} : { stories: [...request.stories] }),

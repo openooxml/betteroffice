@@ -1690,7 +1690,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     try {
       const projection = commandHost ? session.commentProjection() : null;
       editorSaves.commentIds = projection?.sessionIds;
-      const comments = projection?.comments ?? request.comments;
+      const comments = request.commentsSource === 'host' ? request.comments : projection?.comments ?? request.comments;
       const saved = openedParsed ? await session.saveDocument(request.host, comments, editorSaves) : await session.save(
         new Uint8Array(openedSource!.bytes),
         openedSource!.hostJson,

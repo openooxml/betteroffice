@@ -69,6 +69,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   scrollToParagraph?(paraId: string): Promise<boolean>;
   scrollToReviewTarget?(target: ResidentReviewTarget): Promise<boolean>;
   comments?(): Comment[];
+  hostComments?: Comment[];
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
@@ -567,7 +568,7 @@ export function createPeerlessShellController(initial: Options) {
   const removeComment = (commentId: number) =>
     changeComment(commentId, (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }));
   const getComments = (): Comment[] => snapshot.status !== 'ready' ? [] :
-    structuredClone(snapshot.view && commentsMatch(snapshot.view) ? commentList!.comments : options.comments?.() ?? []);
+    structuredClone(options.hostComments ?? (snapshot.view && commentsMatch(snapshot.view) ? commentList!.comments : options.comments?.() ?? []));
   /** Selects a comment's or revision's first anchored range and scrolls it into view; false when it does not exist. */
   const revealReviewTarget = (target: ResidentReviewTarget): Promise<boolean> =>
     options.scrollToReviewTarget?.(target) ?? Promise.resolve(false);
