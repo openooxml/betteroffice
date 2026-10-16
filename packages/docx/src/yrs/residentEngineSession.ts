@@ -1026,9 +1026,14 @@ export async function createResidentEngineSession(
     },
     applyUpdate: (update) => {
       sectionLayout = null;
-      return JSON.parse(
-        session.apply_update_with_inference(update)
-      ) as CollaborationTextInsertion | null;
+      const before = session.resident_section_revision().split(':')[1];
+      try {
+        return JSON.parse(
+          session.apply_update_with_inference(update)
+        ) as CollaborationTextInsertion | null;
+      } finally {
+        if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
+      }
     },
     onUpdate: (listener) => {
       listeners.add(listener);

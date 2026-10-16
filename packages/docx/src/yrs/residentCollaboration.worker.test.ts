@@ -11,6 +11,7 @@ import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import { MAX_UPDATE_BYTES } from './residentCommandActions';
 import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
+import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import type { Document } from '../types/document';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -23,7 +24,9 @@ afterEach(closeCommandEngines);
 
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
-function documentBytes(header?: string) {
+const SEED_BODY = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>';
+
+function documentBytes(header?: string, body = SEED_BODY, sectPr = '<w:sectPr/>') {
   const parts: PartsMap = new Map();
   const set = (name: string, xml: string) => parts.set(name, toBytes(xml));
   set('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
@@ -33,8 +36,8 @@ function documentBytes(header?: string) {
     set('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/></Relationships>`);
     set('word/header1.xml', `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>${header}</w:t></w:r></w:p></w:hdr>`);
   }
-  set('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"${header === undefined ? '' : ` xmlns:r="${REL}"`}><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>` +
-    (header === undefined ? '<w:sectPr/>' : '<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr>') + '</w:body></w:document>');
+  set('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"${header === undefined ? '' : ` xmlns:r="${REL}"`}><w:body>${body}` +
+    (header === undefined ? sectPr : '<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr>') + '</w:body></w:document>');
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -383,4 +386,83 @@ test('a remote update past the relay frame cap applies and one past the engine c
     expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
     expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed!');
   } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+type Replica = Awaited<ReturnType<typeof open>>;
+
+function relay(from: Replica, to: Replica) {
+  const pending: ArrayBuffer[] = [];
+  const off = from.client.onCollabUpdates(event => pending.push(...event.updates.map(update => update.slice().buffer)));
+  return { off, async flush() { for (const update of pending.splice(0)) await to.session.submit('applyRemoteUpdate', { update }, merge).ack; } };
+}
+
+const pageTexts = (frame: RetainedFrame) => frame.displayList.pages.map(({ primitives }) => primitives
+  .map(primitive => primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : '').join(''));
+
+async function sectionView(replica: Replica) {
+  const frame = applyFrameDeltaOwned(null, decodeFrameDelta((await replica.client.requestFullFrame()).frame!.payload.frame));
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array((await replica.client.save({ comments: [] })).bytes))['word/document.xml']!);
+  return { pages: pageTexts(frame), sections: replica.engine.sectionProperties().sections.map(({ properties }) => properties.sectionStart ?? null),
+    body: xml.slice(xml.indexOf('<w:body>'), xml.indexOf('</w:body>')) };
+}
+
+const projectedSections = (replica: Replica) => replica.engine.partDocument().package.document.sections?.map(section => section.properties);
+
+const SMALL_PAGE = '<w:pgSz w:w="6000" w:h="4000"/><w:pgMar w:top="500" w:right="500" w:bottom="500" w:left="500" w:header="200" w:footer="200" w:gutter="0"/>';
+
+test('a merged section insert lays out and saves like the local edit with a header', async () => {
+  const bytes = documentBytes('HeaderSeed');
+  const a = await open(9201, undefined, undefined, bytes);
+  const b = await open(9202, a.engine.encodeState(), undefined, bytes);
+  const toA = relay(b, a);
+  try {
+    const before = await sectionView(b);
+    const at = { story: 'body', paraId: b.engine.paragraphs('body')[1]!.paraId, offset: 3 };
+    expect((await b.session.submit('insertSectionBreak', { type: 'nextPage', selection: { anchor: at, focus: at } }).ack).status).toBe('applied');
+    await toA.flush();
+    const inserted = await sectionView(b);
+    expect(inserted.sections).toHaveLength(before.sections.length + 1);
+    expect(inserted.pages.length).toBeGreaterThan(before.pages.length);
+    expect(await sectionView(a)).toEqual(inserted);
+    expect(projectedSections(a)).toEqual(projectedSections(b));
+  } finally { toA.off(); a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
+
+test('a merged section delete lays out and saves like the local edit after joining', async () => {
+  const bytes = documentBytes('HeaderSeed');
+  const a = await open(9201, undefined, undefined, bytes);
+  let b: Replica | undefined;
+  try {
+    const at = { story: 'body', paraId: a.engine.paragraphs('body')[1]!.paraId, offset: 3 };
+    expect((await a.session.submit('insertSectionBreak', { type: 'nextPage', selection: { anchor: at, focus: at } }).ack).status).toBe('applied');
+    b = await open(9202, a.engine.encodeState(), undefined, bytes);
+    const before = await sectionView(a);
+    const [seed, closing] = a.engine.paragraphs('body');
+    const selection = { anchor: { story: 'body', paraId: seed!.paraId, offset: 2 }, focus: { story: 'body', paraId: closing!.paraId, offset: 1 } };
+    expect((await a.session.submit('deleteBackward', { selection }).ack).status).toBe('applied');
+    expect((await b.session.submit('applyRemoteUpdate', { update: remoteUpdate(b, a.engine) }, merge).ack).status).toBe('applied');
+    const deleted = await sectionView(a);
+    expect(deleted.sections).toHaveLength(before.sections.length - 1);
+    expect(await sectionView(b)).toEqual(deleted);
+    expect(projectedSections(b)).toEqual(projectedSections(a));
+  } finally { a.session.dispose(); b?.session.dispose(); }
+}, TIMEOUT);
+
+test.todo('a local delete across a seeded section boundary must mark sectionsTouched for save parity with a merge', async () => {
+  const bytes = documentBytes(undefined, `<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:pPr><w:sectPr><w:type w:val="nextPage"/>${SMALL_PAGE}</w:sectPr></w:pPr>` +
+    '<w:r><w:t>Closing</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>');
+  const a = await open(9201, undefined, undefined, bytes);
+  const b = await open(9202, a.engine.encodeState(), undefined, bytes);
+  const toA = relay(b, a);
+  try {
+    const before = await sectionView(b);
+    expect(await sectionView(a)).toEqual(before);
+    const [seed, closing] = b.engine.paragraphs('body');
+    const selection = { anchor: { story: 'body', paraId: seed!.paraId, offset: 2 }, focus: { story: 'body', paraId: closing!.paraId, offset: 2 } };
+    expect((await b.session.submit('deleteBackward', { selection }).ack).status).toBe('applied');
+    await toA.flush();
+    const deleted = await sectionView(b);
+    expect(deleted.sections).toHaveLength(before.sections.length - 1);
+    expect(await sectionView(a)).toEqual(deleted);
+  } finally { toA.off(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
