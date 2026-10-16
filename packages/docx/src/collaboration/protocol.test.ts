@@ -17,6 +17,7 @@ import {
   encodeUpdate,
   encodeVarUint,
   ProtocolError,
+  stateVectorDominates,
 } from './protocol';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -276,5 +277,50 @@ describe('collaboration protocol decoding', () => {
     expect(() => decodeMessages(Uint8Array.of(3), 1024, 0)).toThrow(
       'Message limit must be a positive integer'
     );
+  });
+});
+
+function stateVector(...entries: [bigint, bigint][]): Uint8Array {
+  const bytes: number[] = [];
+  const write = (value: bigint) => {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  };
+  write(BigInt(entries.length));
+  for (const [client, clock] of entries) {
+    write(client);
+    write(clock);
+  }
+  return Uint8Array.from(bytes);
+}
+
+describe('state vector dominance', () => {
+  it('compares clocks per client regardless of encoding order', () => {
+    expect(stateVectorDominates(stateVector(), stateVector())).toBe(true);
+    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector())).toBe(true);
+    expect(stateVectorDominates(stateVector(), stateVector([1n, 5n]))).toBe(false);
+    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([1n, 6n]))).toBe(false);
+    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([2n, 1n]))).toBe(false);
+    expect(stateVectorDominates(
+      stateVector([1n, 5n], [2n, 3n]),
+      stateVector([2n, 3n], [1n, 4n])
+    )).toBe(true);
+  });
+
+  it('keeps 64-bit client ids distinct', () => {
+    const max = (1n << 64n) - 1n;
+    expect(stateVectorDominates(stateVector([1n << 53n, 9n]), stateVector([(1n << 53n) + 1n, 1n]))).toBe(false);
+    expect(stateVectorDominates(stateVector([max, 3n]), stateVector([max, 2n]))).toBe(true);
+    expect(stateVectorDominates(stateVector([max - 1n, 3n]), stateVector([max, 2n]))).toBe(false);
+  });
+
+  it('rejects vectors that do not decode', () => {
+    expect(() => stateVectorDominates(stateVector([1n, 5n]), Uint8Array.of(2, 1, 5))).toThrow(ProtocolError);
+    expect(() => stateVectorDominates(Uint8Array.of(), stateVector([1n, 5n]))).toThrow(ProtocolError);
+    expect(() => stateVectorDominates(
+      stateVector(),
+      Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1)
+    )).toThrow('State vector varUint exceeds 64 bits');
+    expect(() => stateVectorDominates(stateVector(), Uint8Array.of(0, 1))).toThrow('Trailing state vector bytes');
   });
 });
