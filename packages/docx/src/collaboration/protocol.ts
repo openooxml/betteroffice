@@ -430,6 +430,7 @@ export function decodeAwarenessUpdate(
   return entries;
 }
 
+/** Every payload is a copy the caller owns; `frame` is not retained. */
 export function decodeMessages(
   frame: Uint8Array,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,

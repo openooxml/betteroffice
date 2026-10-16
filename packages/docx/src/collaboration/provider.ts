@@ -616,7 +616,7 @@ export class CollaborationProvider {
     const connection = this.openEpoch;
     let messages: ReturnType<typeof decodeMessages>;
     try {
-      messages = decoded ?? decodeMessages(data.slice(), this.maxFrameBytes, this.maxMessagesPerFrame);
+      messages = decoded ?? decodeMessages(data, this.maxFrameBytes, this.maxMessagesPerFrame);
     } catch (cause) {
       this.failConnection(
         token,
@@ -764,8 +764,8 @@ export class CollaborationProvider {
             if (!this.isCurrentOpen(token, connection)) return;
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             const applied = message.type === 'sync-step-2'
-              ? await applySync(this.asyncReplica!, held, message.update.slice())
-              : await this.asyncReplica!.applyUpdate(message.update.slice());
+              ? await applySync(this.asyncReplica!, held, message.update)
+              : await this.asyncReplica!.applyUpdate(message.update);
             if (!this.isCurrentOpen(token, connection)) return;
             if (message.type === 'sync-step-2') {
               this.setStatus('connected', true);
