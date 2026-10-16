@@ -2,6 +2,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -1546,6 +1547,10 @@ def check_real(task, source, revised):
                     patch['style']['fill_rest'] = canonical(ET.fromstring(f'<fill xmlns="{NS["s"]}"><patternFill/></fill>'))
         real_metadata(original)
         real_metadata(actual)
+        calculation = original.root('xl/workbook.xml').find('s:calcPr', NS)
+        saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
+        if calculation is not None and saved_calculation is not None and saved_calculation.get('fullCalcOnLoad') in ('1', 'true'):
+            calculation.set('fullCalcOnLoad', saved_calculation.get('fullCalcOnLoad'))
         renames = spec.get('rename', {})
         if renames and 'docProps/app.xml' in original.parts:
             app = original.root('docProps/app.xml')
@@ -1601,7 +1606,17 @@ def check_real(task, source, revised):
                 record.setdefault('rich_text', None)
                 if 'value' in patch:
                     require(record['rich_text'] is None, 'edited rich text cell requires explicit formatting expectation')
-        compare(wanted, workbook(actual, real=True))
+        found = workbook(actual, real=True)
+        saved_sheets = {sheet['name']: sheet for sheet in found['sheets']}
+        for sheet in wanted['sheets']:
+            saved_cells = saved_sheets.get(sheet['name'], {}).get('cells', {})
+            for address, record in sheet['cells'].items():
+                saved = saved_cells.get(address, {})
+                if (record['formula'] is not None and saved.get('formula') is not None
+                        and isinstance(record['value'], Decimal) and isinstance(saved.get('value'), Decimal)
+                        and math.isclose(record['value'], saved['value'], rel_tol=1e-12, abs_tol=0.0)):
+                    record['value'] = saved['value']
+        compare(wanted, found)
         return
     ids = real_ids(original) if task['format'] == 'docx' else {}
     all_ids = {value for _, value in ids}

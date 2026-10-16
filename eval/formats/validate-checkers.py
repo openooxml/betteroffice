@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import tempfile
 import xml.etree.ElementTree as ET
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -1936,6 +1937,51 @@ def v3_mutants(package, task, original):
     return result
 
 
+def v3_calculation_variants(task):
+    def full_calculation(value='1', **attributes):
+        def edit(package):
+            calculation = package.xml('xl/workbook.xml').find('s:calcPr', NS)
+            calculation.set('fullCalcOnLoad', value)
+            calculation.attrib.update(attributes)
+            package.parts.pop('xl/calcChain.xml', None)
+            package.xml_parts.pop('xl/calcChain.xml', None)
+            links = package.xml('xl/_rels/workbook.xml.rels')
+            for item in list(links):
+                if item.get('Type') == NS['r'] + '/calcChain':
+                    links.remove(item)
+            types = package.xml('[Content_Types].xml')
+            for item in list(types):
+                if item.get('PartName') == '/xl/calcChain.xml':
+                    types.remove(item)
+        return edit
+
+    def numeric_drift(factor, formula):
+        def edit(package):
+            for part in v3_sheet_map(package).values():
+                for cell in package.xml(part).findall('s:sheetData/s:row/s:c', NS):
+                    value = cell.find('s:v', NS)
+                    if (cell.get('t', 'n') == 'n' and (cell.find('s:f', NS) is not None) == formula
+                            and value is not None and value.text):
+                        number = Decimal(value.text)
+                        if number.is_finite() and number != 0:
+                            value.text = str(number * Decimal(factor))
+                            return
+            raise ValueError('no nonzero numeric drift target')
+        return edit
+
+    if task['id'] == 'xlsx-v3-01-spending-label':
+        return [('full-calc-on-load-dropped-chain', full_calculation(), True),
+                ('full-calc-on-load-true-dropped-chain', full_calculation('true'), True),
+                ('full-calc-on-load-changed-calc-mode', full_calculation(calcMode='manual'), False),
+                ('full-calc-on-load-changed-calc-id', full_calculation(calcId='0'), False),
+                ('full-calc-on-load-false', full_calculation('0'), False)]
+    if task['id'] in ('xlsx-v3-10-borough-correction', 'xlsx-v3-26-costing-headers'):
+        return [('formula-cache-roundoff', numeric_drift('1.000000000000001', True), True),
+                ('formula-cache-value-change', numeric_drift('1.01', True), False),
+                ('literal-number-roundoff', numeric_drift('1.000000000000001', False), False)]
+    return []
+
+
 def v3_allowances(task):
     fmt = task['format']
     def saved_metadata(package):
@@ -2220,6 +2266,18 @@ def validate_v3(directory):
             except Exception as error:
                 counts[task['format']]['mutants_rejected'][1] += 1
                 failures.append(f'{task["id"]} mutant construction {name}: {error}')
+                print('FAIL ' + failures[-1], flush=True)
+        for name, mutate, accept in v3_calculation_variants(task):
+            package = Package(output)
+            kind = 'accepted' if accept else 'mutants_rejected'
+            try:
+                mutate(package)
+                path = directory / (name + '-' + task['id'] + '.' + task['format'])
+                v3_save(package, path)
+                score(task, name, path, accept, kind)
+            except Exception as error:
+                counts[task['format']][kind][1] += 1
+                failures.append(f'{task["id"]} calculation variant construction {name}: {error}')
                 print('FAIL ' + failures[-1], flush=True)
         allowances = v3_allowances(task)
         if task['format'] in checked_allowances:
