@@ -473,6 +473,10 @@ impl EditingDoc {
         }
         let story = story_ref(txn, &range.story)?;
         check_range(&story, txn, range.start, len)?;
+        if len == 0 {
+            range.start = past_leading_blocks(&story, txn, range.start);
+            range.end = range.start;
+        }
         let chunks = range_chunks(&story, txn, &mut range);
         let len = range.end - range.start;
         let after = after_struck_text(&story, txn, ctx, &range, len, &chunks);
@@ -573,6 +577,10 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
+        if len == 0 {
+            range.start = past_leading_blocks(&story, &txn, range.start);
+            range.end = range.start;
+        }
         let chunks = range_chunks(&story, &txn, &mut range);
         let len = range.end - range.start;
         let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
