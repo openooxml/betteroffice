@@ -58,7 +58,7 @@ import { DEFAULT_PAGE_WIDTH } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
-import { peerlessPreviewPaint, WorkerDocumentPreview, type WorkerPreviewJob } from './WorkerDocumentPreview';
+import { peerlessPreviewPaint, WorkerDocumentPreview, workerPreviewPages, type WorkerPreviewJob } from './WorkerDocumentPreview';
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
@@ -335,7 +335,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     try {
       await client.prewarm();
       signal.throwIfAborted();
-      const measured = async (metadata: Document) => {
+      const measure = async (metadata: Document) => {
         const theme = settings.current.theme ?? metadata.package.theme;
         const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
         const environment = { themeColors, showHiddenText: settings.current.showHiddenText };
@@ -374,20 +374,39 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         };
         return { environment, layout, requirements, config };
       };
-      const showPreview = async ({ layout, config }: Awaited<ReturnType<typeof measured>>) => {
+      let measuring: Promise<unknown> = Promise.resolve();
+      const measured = (metadata: Document) => {
+        const turn = measuring.then(() => measure(metadata));
+        measuring = turn.catch(() => {});
+        return turn;
+      };
+      let painted = false;
+      const showPreview = async ({ layout, config }: Awaited<ReturnType<typeof measure>>, live: () => boolean) => {
+        if (!live()) return false;
         const preview = await client.previewSource({ fonts: fonts.slice(), fontRegistrationSlots: { fontChains: config.fontChains },
           layoutInput: JSON.stringify({ ...layout, cachedPageTotals: true }), extras: JSON.stringify({ fontChains: config.fontChains }) });
         signal.throwIfAborted();
+        const pages = workerPreviewPages(preview);
+        if (!live() || pages.presented.length === 0) return false;
         controller.preview(preview);
-        await new Promise<void>((resolve, reject) => {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const settle = (operation: () => void) => { clearTimeout(timer); signal.removeEventListener('abort', cancel); operation(); };
+        return await new Promise<boolean>((resolve, reject) => {
+          const settle = (operation: () => void) => { signal.removeEventListener('abort', cancel); operation(); };
           const cancel = () => settle(() => reject(signal.reason));
           signal.addEventListener('abort', cancel, { once: true });
-          timer = setTimeout(() => settle(resolve), peerlessPreviewPaint.timeoutMs);
-          setPreviewJob({ client, frame: preview, signal,
-            resolve: () => settle(resolve), reject: (error) => settle(() => reject(error)) });
+          setPreviewJob({ client, frame: preview, pages, signal,
+            resolve: () => settle(() => { painted = true; resolve(true); }), reject: (error) => settle(() => reject(error)) });
         });
+      };
+      const withinPreviewBudget = async (attempt: (live: () => boolean) => Promise<boolean>): Promise<boolean | null> => {
+        let live = true;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([attempt(() => live),
+            new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), peerlessPreviewPaint.timeoutMs); })]);
+        } finally {
+          live = false;
+          clearTimeout(timer);
+        }
       };
       const previewFailed = (error: unknown) => {
         signal.throwIfAborted();
@@ -396,14 +415,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       let previewed = false;
       if (settings.current.previewFirstPage === true && input instanceof Uint8Array && settings.current.mediaTokens !== true) {
         try {
-          const cut = await client.openSourceCut({ bytes: input, cut: PREVIEW_CUT, heapLimitBytes: settings.current.workerLimitBytes });
-          signal.throwIfAborted();
-          previewed = cut !== null;
-          if (cut) await showPreview(await measured(cut));
+          previewed = await withinPreviewBudget(async (live) => {
+            const cut = await client.openSourceCut({ bytes: input, cut: PREVIEW_CUT, heapLimitBytes: settings.current.workerLimitBytes });
+            signal.throwIfAborted();
+            return cut !== null && live() && await showPreview(await measured(cut), live);
+          }) !== false;
         } catch (error) { previewed = true; previewFailed(error); }
       }
-      const opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
-        heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true });
+      let opened: Awaited<ReturnType<typeof client.openSource>>;
+      try {
+        opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
+          heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true });
+      } catch (error) {
+        if (!painted) throw error;
+        signal.throwIfAborted();
+        const failure = error instanceof Error ? error : new Error(String(error));
+        controller.stalled(failure);
+        errorHandler.current?.(failure);
+        return await new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      }
       signal.throwIfAborted();
       const metadata = opened.document;
       sourceComments.current = metadata.package.document.comments ?? [];
@@ -411,7 +441,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const { environment, layout, requirements, config } = opening;
       renderEnvironment.current = { theme: metadata.package.theme, requested: JSON.stringify(environment) };
       if (settings.current.previewFirstPage === true && !previewed) {
-        try { await showPreview(opening); } catch (error) { previewFailed(error); }
+        try { await withinPreviewBudget((live) => showPreview(opening, live)); } catch (error) { previewFailed(error); }
       }
       const initial = await client.commandInit({
         session: crypto.randomUUID(), incarnation: 1, epoch: 1, readOnly: settings.current.readOnly,

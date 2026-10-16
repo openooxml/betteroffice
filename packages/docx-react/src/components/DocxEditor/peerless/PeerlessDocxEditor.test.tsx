@@ -56,6 +56,11 @@ let holdInitial = false;
 let holdPreviewPaint = false;
 let failPreview = false;
 let refuseCut = false;
+let holdCut = false;
+let failWholeOpen = false;
+/** Per source preview, in order: whether its first page is built or missing. */
+let previewPages: ('built' | 'none')[] = [];
+const PREVIEW_EPOCHS = { built: 90, none: 1 } as const;
 
 function hostMetadata() {
   return {
@@ -99,6 +104,8 @@ class FakeWorker {
     let response: ResidentEngineWorkerResponse;
     if (message.type === 'openSource' && message.source.cut && refuseCut) {
       response = { id: message.id, ok: true, previewRefused: true };
+    } else if (message.type === 'openSource' && !message.source.cut && failWholeOpen) {
+      response = { id: message.id, ok: false, error: 'Whole source failed to open' };
     } else if (message.type === 'openSource') {
       this.text = '';
       response = { id: message.id, ok: true, hostJson, sourceDocument: yrs.decodeDocxHostJson(hostJson, source).document, stateVector: new ArrayBuffer(0),
@@ -106,7 +113,8 @@ class FakeWorker {
           caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1 } : {}) };
     } else if (message.type === 'previewSource') {
       response = failPreview ? { id: message.id, ok: false, error: 'Preview layout failed' } : { id: message.id, ok: true,
-        frame: commandFrame(1).payload.frame, documentPreview: true, caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1 };
+        frame: commandFrame(PREVIEW_EPOCHS[previewPages.shift() ?? 'built']).payload.frame, documentPreview: true,
+        caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1 };
     } else if (message.type === 'fontRequirements') {
       response = { id: message.id, ok: true, requirementsJson: JSON.stringify(fontRequirements) };
     } else if (message.type === 'save') {
@@ -175,6 +183,7 @@ class FakeWorker {
       response = { id: message.id, ok: true };
       if (message.type === 'attachCanvases' && holdPreviewPaint) { this.pendingReplies.push(response); return; }
     }
+    if (message.type === 'openSource' && message.source.cut && holdCut) { this.pendingReplies.push(response); return; }
     queueMicrotask(() => this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>));
   }
 }
@@ -221,6 +230,29 @@ function commandFrame(epoch: number, base = 0): DocxCommandFrame {
     coversThroughSeq: epoch - 1, revision: epoch,
     ...(base ? { baseRevision: base } : {}),
     payload: { frame: bytes.buffer, caret: { frameEpoch: epoch, caretRect: null }, layoutRevision: epoch },
+  };
+}
+
+function previewPage(epoch: number): frameRender.RetainedFramePage | null {
+  if (epoch !== PREVIEW_EPOCHS.built) return null;
+  return { pageIndex: 0, pageId: 1n, fingerprint: 1n, primitiveIds: new BigUint64Array(0),
+    page: { pageIndex: 0, width: 816, height: 1056, primitives: [] } };
+}
+
+function installPreviewPages() {
+  const apply = frameRender.applyFrameDelta;
+  const applied = spyOn(frameRender, 'applyFrameDelta').mockImplementation((previous, delta) => {
+    const frame = apply(previous, delta);
+    const page = previous === null ? previewPage(delta.frameEpoch) : null;
+    return page ? { ...frame, pages: [page] } : frame;
+  });
+  const canvas = window.HTMLCanvasElement.prototype as { transferControlToOffscreen?: () => unknown };
+  const transfer = Object.getOwnPropertyDescriptor(canvas, 'transferControlToOffscreen');
+  Object.defineProperty(canvas, 'transferControlToOffscreen', { configurable: true, value: () => ({}) });
+  return () => {
+    applied.mockRestore();
+    if (transfer) Object.defineProperty(canvas, 'transferControlToOffscreen', transfer);
+    else Reflect.deleteProperty(canvas, 'transferControlToOffscreen');
   };
 }
 
@@ -272,6 +304,10 @@ beforeEach(() => {
   holdPreviewPaint = false;
   failPreview = false;
   refuseCut = false;
+  holdCut = false;
+  failWholeOpen = false;
+  previewPages = [];
+  restorers.push(installPreviewPages());
   setMissingWorkerCapabilitiesForTests([]);
   requests.length = 0;
   workers.length = 0;
@@ -489,11 +525,65 @@ test('the preview releases its worker surfaces once the command session presents
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
   await waitFor(() => expect(requests.filter(request => request.type === 'attachCanvases')).toHaveLength(2));
   const order = requests.map(request => request.type);
-  const released = requests.filter(request => request.type === 'attachCanvases').at(-1);
+  const [painted, released] = requests.filter(request => request.type === 'attachCanvases');
+  if (painted?.type !== 'attachCanvases') throw new Error('The preview attached no surfaces');
+  expect(painted.pages.length).toBeGreaterThan(0);
   expect(order.indexOf('attachCanvases')).toBeLessThan(order.indexOf('commandInit'));
   expect(order.lastIndexOf('attachCanvases')).toBeGreaterThan(order.indexOf('commandInit'));
   expect(released).toMatchObject({ pages: [], activePageIds: [] });
   expect(view.queryByLabelText('Document preview')).toBeNull();
+});
+
+test('a cut preview without a built first page keeps opening and previews the whole source', async () => {
+  holdInitial = true;
+  previewPages = ['none', 'built'];
+  const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  const order = requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type));
+  expect(order).toEqual(['openSource', 'previewSource', 'openSource', 'previewSource', 'attachCanvases', 'commandInit']);
+  expect(view.queryByText('Opening source')).toBeNull();
+  expect(view.getByLabelText('Document preview')).toBeTruthy();
+});
+
+test('the preview budget covers the source cut and its late steps preview nothing', async () => {
+  holdCut = true;
+  const budget = peerlessPreviewPaint.timeoutMs;
+  peerlessPreviewPaint.timeoutMs = 4_321;
+  restorers.push(() => { peerlessPreviewPaint.timeoutMs = budget; });
+  const schedule = globalThis.setTimeout;
+  const expiries: (() => void)[] = [];
+  const timers = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void, delay?: number, ...rest: unknown[]) => {
+    if (delay !== 4_321) return schedule(callback, delay, ...rest);
+    expiries.push(callback);
+    return schedule(() => {}, 0);
+  }) as typeof setTimeout);
+  restorers.push(() => timers.mockRestore());
+  const turns = async (done: () => boolean) => {
+    for (let turn = 0; turn < 200 && !done(); turn += 1) await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+    expect(done()).toBe(true);
+  };
+  const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} />);
+  await turns(() => expiries.length === 1);
+  expect(requests.filter(request => request.type === 'openSource')).toHaveLength(1);
+  act(() => expiries[0]!());
+  await turns(() => view.queryByTestId('peerless-paged-editor')?.dataset.opened === 'true');
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  expect(requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type)))
+    .toEqual(['openSource', 'openSource', 'commandInit']);
+});
+
+test('a whole source that fails after the cut painted keeps the preview and reports the failure', async () => {
+  failWholeOpen = true;
+  const errors: Error[] = [];
+  const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} onError={error => errors.push(error)}
+    loadingIndicator={<span>Opening source</span>} />);
+  await waitFor(() => expect(errors.map(error => error.message)).toEqual(['Whole source failed to open']));
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  expect(view.getByLabelText('Document preview')).toBeTruthy();
+  expect(view.queryByText('Opening source')).toBeNull();
+  expect(workers[0].terminate).not.toHaveBeenCalled();
+  expect(requests.some(request => request.type === 'commandInit')).toBe(false);
 });
 
 for (const failure of ['layout', 'paint'] as const) {
