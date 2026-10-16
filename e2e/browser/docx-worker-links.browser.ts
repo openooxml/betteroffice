@@ -96,6 +96,8 @@ test('worker link under the caret edits and removes from the dialog', async ({ p
   await expect(dialog.getByLabel('URL', { exact: true })).toHaveValue(external);
   await dialog.getByLabel('Display Text', { exact: true }).fill('Changed link');
   await dialog.getByLabel('URL', { exact: true }).fill('https://example.com/changed');
+  await expect(dialog.getByLabel('Display Text', { exact: true })).toHaveValue('Changed link');
+  await expect(dialog.getByLabel('URL', { exact: true })).toHaveValue('https://example.com/changed');
   await dialog.getByRole('button', { name: 'Update', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect((await saved(page, info)).links).toContainEqual({ text: 'Changed link', href: 'https://example.com/changed' });
