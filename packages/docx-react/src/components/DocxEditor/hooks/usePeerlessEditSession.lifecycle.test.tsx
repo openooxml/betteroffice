@@ -159,3 +159,42 @@ test('a crashed worker respawns once with the viewport re-sent and a second cras
   expect(view.result.current.error).toBe(second);
   expect(phases).toEqual(['recovering', 'recovered', 'recovering', 'failed']);
 });
+
+for (const reason of ['stale-version', 'stale-anchor', 'read-only']) {
+  test(`recovery fails loudly when replay refuses acknowledged work with ${reason}`, async () => {
+    const first = resident();
+    first.connection.client.call.edit = async command => ({ ...first.connection.initial, frame: undefined,
+      version: 1, throughSeq: command.seq, outcomes: [{ seq: command.seq, status: 'applied' }] });
+    const next = resident(2);
+    next.connection.client.call.edit = async command => ({ ...next.connection.initial, frame: undefined,
+      throughSeq: command.seq, outcomes: [{ seq: command.seq, status: 'refused', reason }] });
+    const phases: string[] = [];
+    const onError = mock((_error: Error) => {});
+    const view = renderHook(() => usePeerlessEditSession({ ...first.options, onError,
+      recovery: { reopen: async () => next.connection, onRecovery: event => { phases.push(event.phase); } } }));
+    await waitFor(() => expect(view.result.current.status).toBe('ready'));
+    await act(async () => { await view.result.current.binding!.session.submit('insertText', { text: 'kept' }).ack; });
+    act(() => first.crash(new SessionFailure('crash', 'Worker stopped')));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0]![0]).toBeInstanceOf(SessionFailure);
+    expect(onError.mock.calls[0]![0].message).toContain(reason);
+    expect(phases).not.toContain('recovered');
+    expect(view.result.current.status).toBe('failed');
+  });
+}
+
+test('replacement source OOM preserves its classification and memory diagnostics', async () => {
+  const first = resident();
+  const { ResidentWorkerOutOfMemoryError } = await import('@betteroffice/docx/peerless');
+  const memory = [{ module: 'docx-edit', bytes: 2048, limitBytes: 1024 }];
+  const failure = new ResidentWorkerOutOfMemoryError('Replacement source allocation failed', memory as never);
+  const onError = mock((_error: Error) => {});
+  const phases: string[] = [];
+  const view = renderHook(() => usePeerlessEditSession({ ...first.options, onError,
+    recovery: { reopen: async () => { throw failure; }, onRecovery: event => { phases.push(event.phase); } } }));
+  await waitFor(() => expect(view.result.current.status).toBe('ready'));
+  act(() => first.crash(new SessionFailure('crash', 'Worker stopped')));
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'out-of-memory', diagnostics: JSON.stringify(memory) });
+  expect(phases).not.toContain('recovered');
+});

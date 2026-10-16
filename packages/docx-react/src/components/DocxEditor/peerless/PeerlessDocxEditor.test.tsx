@@ -24,6 +24,7 @@ import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession
 import type { PeerlessEchoIntent } from './echoPainter';
 import type { PeerlessFrameGeometry } from './viewStore';
 import * as paged from './PeerlessPagedEditor';
+import * as sessionHook from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
 import { OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
@@ -60,6 +61,7 @@ let refuseCut = false;
 let holdCut = false;
 let failWholeOpen = false;
 let recoverSurface = false;
+let realSurface = false;
 /** Per source preview, in order: whether its first page is built or missing. */
 let previewPages: ('built' | 'none')[] = [];
 const PREVIEW_EPOCHS = { built: 90, none: 1 } as const;
@@ -129,7 +131,7 @@ class FakeWorker {
     } else if (message.type === 'fontRequirements') {
       response = { id: message.id, ok: true, requirementsJson: JSON.stringify(fontRequirements) };
     } else if (message.type === 'save') {
-      response = { id: message.id, ok: true, saved: Uint8Array.of(4, 5).buffer, updates: [], version: 'saved' };
+      response = { id: message.id, ok: true, saved: realSurface ? new TextEncoder().encode(this.text).buffer : Uint8Array.of(4, 5).buffer, updates: [], version: 'saved' };
     } else if (message.type === 'documentRead') {
       response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'clipboardSlice' ? { text: 'Selected text', fragment: null }
         : message.read.kind === 'headings'
@@ -143,6 +145,8 @@ class FakeWorker {
         : message.read.kind === 'listStories' ? { ok: true, version: 'worker-version', stories: [{ story: 'hf:rId3', kind: 'header', root: 'hf:rId3' }] }
         : message.read.kind === 'readStories' ? { ok: true, version: 'worker-version', view: 'accepted', stories: [{ story: 'hf:rId3', ok: true, paragraphs: [] }], truncated: false }
         : { ok: true, view: 'accepted', version: 'worker-version', paragraphs: [] } } };
+    } else if (message.type === 'requestFullFrame' && this.initial) {
+      response = { id: message.id, ok: true, commandAck: { ...this.initial, frame: { ...commandFrame(this.initial.throughSeq + 1), coversThroughSeq: this.initial.throughSeq } } };
     } else if (message.type === 'commandInit') {
       const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision } = message.request;
       const initial: ResidentCommandInitReply = {
@@ -151,7 +155,7 @@ class FakeWorker {
           readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
           canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
         },
-        frame: {
+        frame: realSurface ? { ...commandFrame(throughSeq + 1), coversThroughSeq: throughSeq } : {
           coversThroughSeq: throughSeq, revision: 1,
           payload: { frame: commandFrame(1).payload.frame, caret: { frameEpoch: 1, caretRect: null }, layoutRevision,
             stagedPresentation: { frameEpoch: 1, pages: [] } },
@@ -325,6 +329,7 @@ beforeEach(() => {
   holdCut = false;
   failWholeOpen = false;
   recoverSurface = false;
+  realSurface = false;
   previewPages = [];
   restorers.push(installPreviewPages());
   setMissingWorkerCapabilitiesForTests([]);
@@ -2234,4 +2239,50 @@ test('an out-of-memory worker reopens in a fresh worker from its checkpoint and 
   view.unmount();
   expect(listening.size).toBe(0);
 
+});
+
+
+test('the real paged editor recovers the full checkpoint document and fails on a second crash', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} showToolbar={false} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const first = workers[0]!;
+  const expected = 'kept' + '.'.repeat(127);
+  for (let index = 0; index < 128; index++) {
+    await act(async () => {
+      const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: index === 0 ? 'kept' : '.' } });
+      if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+      expect((await submitted.ticket.ack).status).toBe('applied');
+    });
+  }
+  await waitFor(() => expect(first.checkpoints.length).toBeGreaterThan(0));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  first.outOfMemory = true;
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: ' later' } });
+    if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+    expect((await submitted.ticket.ack).status).toBe('applied');
+  });
+  expect(workers).toHaveLength(2);
+  expect(workers[1]!.text).toBe(expected + ' later');
+  await waitFor(() => expect(binding!.session.state.presentedThroughSeq).toBe(129));
+  expect(new TextDecoder().decode((await ref.current!.save())!)).toBe(expected + ' later');
+  expect(first.terminate).toHaveBeenCalledTimes(1);
+  expect(onError).not.toHaveBeenCalled();
+  workers[1]!.outOfMemory = true;
+  await act(async () => { await binding!.session.submit('insertText', { text: ' second' }).ack.catch(() => {}); });
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'out-of-memory' });
+  expect(workers).toHaveLength(2);
+  expect(view.getByRole('alert')).toBeDefined();
 });

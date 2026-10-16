@@ -369,3 +369,70 @@ test('a whole source that fails after its cut failed leaves the client free for 
     expect(await client.openSourceCut({ bytes: source(400), cut: { blocks: 20 } })).toBeDefined();
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+for (const dependent of [false, true]) {
+  test(`checkpoint recovery restores caret and stored marks${dependent ? ' across the predecessor boundary' : ''}`, async () => {
+    const bytes = source(1);
+    const workers = [startWorker(), startWorker()];
+    const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+    const [first, second] = clients;
+    try {
+      await first!.openSource({ bytes });
+      const initial = await first!.commandInit(init());
+      const edit = (seq: number, version: number, kind: string, payload: object) => ({
+        session: initial.session, incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload,
+      });
+      expect((await first!.edit(edit(1, 0, 'insertText', { text: 'kept' }))).outcomes[0]?.status).toBe('applied');
+      expect((await first!.edit(edit(2, 1, 'formatRange', { delta: { bold: true } }))).outcomes[0]?.status).toBe('noop');
+      const checkpoint = await first!.checkpoint();
+      const suffix = { ...edit(3, 1, 'insertText', { text: ' later' }), ...(dependent ? { afterSeq: 2 } : {}) };
+      expect((await first!.edit(suffix)).outcomes[0]?.status).toBe('applied');
+      const expected = workers[0]!.sessions[0]!.paragraphSegments('body', [0]);
+      await second!.openSource({ bytes, state: checkpoint.state });
+      const reopened = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, replayAppliedSeqs: [3] });
+      expect(reopened.selection?.focus.offset).toBe(4);
+      expect(reopened.editState.storedMarks).toEqual({ delta: { bold: true }, clear: false });
+      expect((await second!.edit({ ...suffix, incarnation: 2, replay: true })).outcomes[0]?.status).toBe('applied');
+      expect(workers[1]!.sessions[0]!.paragraphs('body')[0]!.text).toBe('kept laterParagraph 1');
+      expect(workers[1]!.sessions[0]!.paragraphSegments('body', [0])).toEqual(expected);
+    } finally { clients.forEach(client => client!.destroy()); }
+  }, TIMEOUT);
+}
+
+test('previously applied typing replays after the editor becomes read-only', async () => {
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    await client.openSource({ bytes: source(1) });
+    await client.commandInit({ ...init(), incarnation: 2, readOnly: true, replayAppliedSeqs: [1] });
+    const ack = await client.edit({ session: 'source-worker', incarnation: 2, seq: 1, replay: true,
+      basis: { epoch: 1, version: 0 }, kind: 'insertText', payload: { text: 'kept' } });
+    expect(ack.outcomes[0]?.status).toBe('applied');
+    expect(worker.sessions[0]!.paragraphs('body')[0]!.text).toBe('keptParagraph 1');
+    expect(ack.editState?.readOnly).toBe(true);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('checkpoint recovery restores proposal records and preview decisions', async () => {
+  const bytes = source(1);
+  const workers = [startWorker(), startWorker()];
+  const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+  try {
+    await clients[0]!.openSource({ bytes });
+    await clients[0]!.commandInit(init());
+    const identities = await clients[0]!.documentRead({ kind: 'paragraphIdentities' });
+    const proposed = await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+      basis: { epoch: 1, version: 0 }, kind: 'propose', payload: { expectVersion: identities.version,
+        proposals: [{ id: 'retained', paragraph: identities.value.paragraphs[0]!.session!,
+          op: 'insertText', text: 'Proposal', suggest: { author: 'Writer', date: '2026-01-01' } }] } });
+    expect(proposed.outcomes[0]?.status).toBe('applied');
+    const checkpoint = await clients[0]!.checkpoint();
+    const before = (await clients[0]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+    await clients[1]!.openSource({ bytes, state: checkpoint.state });
+    await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq });
+    const after = (await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+    expect(after.proposals.proposals).toEqual(before.proposals.proposals);
+    expect(after.proposals.previewVersion).toBe(before.proposals.previewVersion);
+    expect(after.revisions).toEqual(before.revisions);
+  } finally { clients.forEach(client => client.destroy()); }
+}, TIMEOUT);
