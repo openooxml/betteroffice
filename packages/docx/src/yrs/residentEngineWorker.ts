@@ -1272,7 +1272,8 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
     kind === 'pasteFragment' ||
-    kind === 'insertPageBreak' || kind === 'insertSectionBreak';
+    kind === 'insertPageBreak' || kind === 'insertSectionBreak' ||
+    kind === 'setTableBorders';
 }
 
 function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {

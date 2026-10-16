@@ -33,6 +33,7 @@ import type {
   YrsSession,
   YrsStickyPosition,
   YrsStoryRange,
+  YrsCellBorders,
   YrsTableRange,
 } from './index';
 import type { DocxClipboardFragment } from './clipboardFragment';
@@ -298,6 +299,7 @@ export interface DocxCommandPayloads {
   mergeTableCells: DocxSelectionIntent;
   splitTableCell: DocxSelectionIntent & { rows: number; columns: number };
   setTableCellShading: DocxSelectionIntent & { color: string | null };
+  setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };

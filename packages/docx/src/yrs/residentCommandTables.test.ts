@@ -297,6 +297,58 @@ test('set_table_cell_shading_shades_clears_and_keeps_selection', async () => {
   expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.backgroundColor).toBeUndefined();
 }, TIMEOUT);
 
+test('table_formatting_targets_live_rect_and_preserves_selection', async () => {
+  const arm = await inCell();
+  const kept = arm.state.selection!.focus;
+  const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+  selectCells(arm, [0, 0], [1, 1]);
+  const applied = execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line } }));
+  expect(applied.status).toBe('applied');
+  expect(applied.selection?.focus).toMatchObject({ story: kept.story, paraId: kept.paraId, offset: kept.offset });
+  for (const row of payload(arm)!.rows) for (const entry of row.cells) {
+    expect(entry.tcPr?.borders).toMatchObject({ top: line, bottom: line, left: line, right: line });
+  }
+  expect(undo(arm).status).toBe('applied');
+  expect(JSON.stringify(payload(arm))).not.toContain('single');
+  expect(redo(arm).status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.borders).toMatchObject({ top: line });
+  const storyA = cellStory(arm, 'A');
+  expect(execute(arm, tableCommand(arm, 'insertText', { text: 'x' })).status).toBe('applied');
+  expect(cellText(arm, storyA)).toBe('xA');
+  selectCells(arm, [1, 1], [0, 0]);
+  const red = { style: 'single', size: 8, color: { rgb: 'FF0000' } };
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: red } })).status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.borders).toMatchObject({ top: red });
+  expect(payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders).toMatchObject({ top: red });
+}, TIMEOUT);
+
+test('table_formatting_refusals_leave_state_unchanged', async () => {
+  const arm = await inCell();
+  const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+  const cases: [Record<string, unknown>, string][] = [
+    [{ borders: { top: { style: '', size: 4, color: { rgb: '000000' } } } }, 'invalid-payload'],
+    [{ borders: { top: { style: 'single', size: -1, color: { rgb: '000000' } } } }, 'invalid-payload'],
+    [{ borders: { top: { style: 'single', size: 4, color: { rgb: 'ZZZZZZ' } } } }, 'invalid-payload'],
+    [{ borders: { middle: line } }, 'invalid-payload'],
+    [{}, 'invalid-payload'],
+  ];
+  for (const [extra, reason] of cases) {
+    const version = arm.engine.proposalEngine.version();
+    const vector = arm.engine.encodeStateVector();
+    const before = JSON.stringify(payload(arm));
+    expect(execute(arm, tableCommand(arm, 'setTableBorders', extra))).toMatchObject({ status: 'refused', reason });
+    expect(arm.engine.proposalEngine.version()).toBe(version);
+    expect(arm.engine.encodeStateVector()).toEqual(vector);
+    expect(JSON.stringify(payload(arm))).toBe(before);
+  }
+  arm.state.readOnly = true;
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line } })))
+    .toMatchObject({ status: 'refused', reason: 'read-only' });
+  arm.state.readOnly = false;
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line }, suggesting: { name: 'W', date: '2026-01-01' } })))
+    .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+}, TIMEOUT);
+
 test('table_commands_refuse_outside_cells_readonly_and_bad_payloads_without_mutation', async () => {
   const arm = await openCommandEngine([], { bodyXml: body });
   const kinds: [string, Record<string, unknown>][] = [
@@ -308,6 +360,7 @@ test('table_commands_refuse_outside_cells_readonly_and_bad_payloads_without_muta
     ['mergeTableCells', {}],
     ['splitTableCell', { rows: 1, columns: 2 }],
     ['setTableCellShading', { color: 'FF0000' }],
+    ['setTableBorders', { borders: { top: { style: 'single', size: 4, color: { rgb: '000000' } } } }],
   ];
   for (const [kind, extra] of kinds) {
     const version = arm.engine.proposalEngine.version();

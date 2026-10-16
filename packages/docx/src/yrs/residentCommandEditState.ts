@@ -87,7 +87,7 @@ function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCom
   const focusedCell = anchors.find((entry) => entry.row <= focused.row && focused.row < entry.row + entry.rowspan &&
     entry.column <= focused.column && focused.column < entry.column + entry.colspan);
   if (!focusedCell) return null;
-  const properties = payload.rows.flatMap((row) => row.cells ?? []).find((entry) => entry.story === cell.story)?.tcPr;
+  const properties = payload.rows.flatMap((row) => row.cells ?? []).find((entry) => entry.story === focusedCell.story)?.tcPr;
   const borders = properties?.borders;
   let cellBorderColor: DocxCommandTableContext['cellBorderColor'];
   if (borders && typeof borders === 'object') {

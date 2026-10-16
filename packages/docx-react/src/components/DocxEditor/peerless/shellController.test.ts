@@ -345,7 +345,8 @@ test('table selection dispatches selectTableCells as fenced selection input', as
   expect(controller.environment().supportedCommands?.has('tableAction')).toBe(true);
   expect(controller.environment().tableActions).toEqual(new Set(['selectTable', 'selectRow', 'selectColumn',
     'addRowAbove', 'addRowBelow', 'addColumnLeft', 'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable',
-    'mergeCells', 'splitCell', 'cellFillColor']));
+    'mergeCells', 'splitCell', 'cellFillColor', 'borderAll', 'borderOutside', 'borderInside', 'borderNone',
+    'borderTop', 'borderBottom', 'borderLeft', 'borderRight', 'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle']));
   expect(await controller.commands.store.execute('tableAction', 'selectTable')).toMatchObject({ ok: true, status: 'noop' });
   expect(await controller.commands.store.execute('tableAction', 'selectRow')).toMatchObject({ ok: true });
   expect(await controller.commands.store.execute('tableAction', 'selectColumn')).toMatchObject({ ok: true });
@@ -375,7 +376,8 @@ test('table structure actions submit the worker table commands without a selecti
   const { controller, submit } = tableFixture();
   expect(controller.environment().tableActions).toEqual(new Set(['selectTable', 'selectRow', 'selectColumn',
     'addRowAbove', 'addRowBelow', 'addColumnLeft', 'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable',
-    'mergeCells', 'splitCell', 'cellFillColor']));
+    'mergeCells', 'splitCell', 'cellFillColor', 'borderAll', 'borderOutside', 'borderInside', 'borderNone',
+    'borderTop', 'borderBottom', 'borderLeft', 'borderRight', 'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle']));
   const cases: Array<[unknown, unknown]> = [
     ['addRowAbove', { kind: 'insertTableRow', payload: { side: 'above' } }],
     ['addRowBelow', { kind: 'insertTableRow', payload: { side: 'below' } }],
@@ -397,17 +399,60 @@ test('table structure actions submit the worker table commands without a selecti
   expect(await controller.commands.store.execute('tableAction', 'deleteRow')).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
 });
 
-test('unsupported table border actions still gate unsupported-command', async () => {
+test('table_border_actions_submit_hybrid_presets_and_pen_state', async () => {
   const { controller, submit } = tableFixture();
-  for (const action of ['borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop'] as const) {
-    expect(controller.commands.store.getState('tableAction', action))
-      .toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
-    expect(await controller.commands.store.execute('tableAction', action)).toMatchObject({ ok: false });
+  const pen = { style: 'single', size: 4, color: { rgb: '000000' } };
+  const all = (border: typeof pen) => ({ top: border, bottom: border, left: border, right: border, insideH: border, insideV: border });
+  const cases: Array<[unknown, unknown]> = [
+    ['borderAll', { kind: 'setTableBorders', payload: { borders: all(pen) } }],
+    ['borderOutside', { kind: 'setTableBorders', payload: { borders: { top: pen, bottom: pen, left: pen, right: pen } } }],
+    ['borderInside', { kind: 'setTableBorders', payload: { borders: { insideH: pen, insideV: pen } } }],
+    ['borderNone', { kind: 'setTableBorders', payload: { borders: all({ style: 'none', size: 0, color: { rgb: '000000' } }) } }],
+    ['borderTop', { kind: 'setTableBorders', payload: { borders: { top: pen } } }],
+    ['borderBottom', { kind: 'setTableBorders', payload: { borders: { bottom: pen } } }],
+    ['borderLeft', { kind: 'setTableBorders', payload: { borders: { left: pen } } }],
+    ['borderRight', { kind: 'setTableBorders', payload: { borders: { right: pen } } }],
+  ];
+  for (const [action] of cases) {
+    expect(await controller.commands.store.execute('tableAction', action as never)).toMatchObject({ ok: true, status: 'executed' });
   }
-  for (const action of [{ type: 'borderColor', color: 'FF0000' }, { type: 'borderWidth', size: 8 },
-    { type: 'cellBorder', side: 'top', style: 'single', size: 4, color: 'FF0000' }] as const) {
+  expect((submit.mock.calls as unknown as Array<[unknown, unknown]>).map(([intent, options]) => ({ intent, options })))
+    .toEqual(cases.map(([, intent]) => ({ intent, options: { fence: true } })));
+  submit.mockClear();
+  const red = { style: 'single', size: 4, color: { rgb: 'FF0000' } };
+  expect(await controller.commands.store.execute('tableAction', { type: 'borderColor', color: '#FF0000' })).toMatchObject({ ok: true });
+  expect((submit.mock.calls.at(-1) as unknown[])[0]).toEqual({ kind: 'setTableBorders', payload: { borders: all(red) } });
+  const wide = { style: 'single', size: 12, color: { rgb: 'FF0000' } };
+  expect(await controller.commands.store.execute('tableAction', { type: 'borderWidth', size: 12 })).toMatchObject({ ok: true });
+  expect((submit.mock.calls.at(-1) as unknown[])[0]).toEqual({ kind: 'setTableBorders', payload: { borders: all(wide) } });
+  expect(await controller.commands.store.execute('tableAction', 'borderTop')).toMatchObject({ ok: true });
+  expect((submit.mock.calls.at(-1) as unknown[])[0]).toEqual({ kind: 'setTableBorders', payload: { borders: { top: wide } } });
+  expect(await controller.commands.store.execute('tableAction', { type: 'cellBorder', side: 'left', style: 'double', size: 6, color: '#00FF00' })).toMatchObject({ ok: true });
+  expect((submit.mock.calls.at(-1) as unknown[])[0]).toEqual({ kind: 'setTableBorders',
+    payload: { borders: { left: { style: 'double', size: 6, color: { rgb: '00FF00' } } } } });
+  expect(await controller.commands.store.execute('tableAction', 'borderTop')).toMatchObject({ ok: true });
+  expect((submit.mock.calls.at(-1) as unknown[])[0]).toEqual({ kind: 'setTableBorders', payload: { borders: { top: wide } } });
+  const grid = { style: 'single', size: 4, color: { rgb: '000000' } };
+  expect(await controller.commands.store.execute('tableAction', { type: 'applyTableStyle', styleId: 'TableGrid' })).toMatchObject({ ok: true });
+  expect((submit.mock.calls.at(-1) as unknown[])[0]).toEqual({ kind: 'setTableBorders', payload: { borders: all(grid) } });
+  submit.mockClear();
+  expect(await controller.commands.store.execute('tableAction', { type: 'applyTableStyle', styleId: 'TableNormal' })).toMatchObject({ ok: true, status: 'noop' });
+  expect(await controller.commands.store.execute('tableAction', { type: 'applyTableStyle', styleId: 'MissingStyle' })).toMatchObject({ ok: true, status: 'noop' });
+  expect(submit).not.toHaveBeenCalled();
+});
+
+test('worker route refuses the eight hybrid-unsupported table actions', async () => {
+  const { controller, submit } = tableFixture();
+  const actions = [
+    { type: 'cellVerticalAlign', align: 'center' }, { type: 'cellMargins', margins: { top: 100 } },
+    { type: 'cellTextDirection', direction: 'btLr' }, { type: 'toggleNoWrap' },
+    { type: 'rowHeight', height: 400, rule: 'exact' }, { type: 'toggleHeaderRow' },
+    { type: 'distributeColumns' }, { type: 'autoFitContents' },
+  ] as const;
+  for (const action of actions) {
     expect(controller.commands.store.getState('tableAction', action as never))
       .toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
+    expect(await controller.commands.store.execute('tableAction', action as never)).toMatchObject({ ok: false });
   }
   expect(submit).not.toHaveBeenCalled();
 });

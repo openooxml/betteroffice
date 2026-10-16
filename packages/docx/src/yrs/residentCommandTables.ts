@@ -11,7 +11,7 @@ import { readCellSelection, resolveLiveCell, rootOf } from './residentCommandTab
 export type TableCommandKind =
   | 'insertTableRow' | 'insertTableColumn'
   | 'deleteTableRow' | 'deleteTableColumn' | 'deleteTable'
-  | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading';
+  | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading' | 'setTableBorders';
 
 export type TableCommandIntent = Extract<DocxCommandIntent, { kind: TableCommandKind }>;
 
@@ -24,7 +24,7 @@ export interface DocxTableCommandTarget {
 
 const TABLE_COMMANDS = {
   insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
-  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true,
+  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true,
 } satisfies Record<TableCommandKind, true>;
 
 export function isTableCommandKind(kind: string): kind is TableCommandKind {
@@ -256,6 +256,9 @@ export function applyTableCommand(
     }
     case 'setTableCellShading':
       engine.setCellShading(target.range, command.payload.color);
+      break;
+    case 'setTableBorders':
+      engine.setCellBorders(target.range, command.payload.borders);
       break;
   }
   if (engine.proposalEngine.version() !== version) state.storedMarks = null;

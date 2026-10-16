@@ -100,6 +100,22 @@ function validDelta(value: unknown): value is YrsInlineFormatDelta {
   });
 }
 
+function validBorders(value: unknown): boolean {
+  if (!object(value)) return false;
+  const sides = ['top', 'bottom', 'left', 'right', 'insideH', 'insideV'];
+  return Object.entries(value).every(([key, entry]) => {
+    if (!sides.includes(key)) return false;
+    if (entry === null) return true;
+    if (!object(entry)) return false;
+    return fields(entry, {
+      style: string,
+      size: (size) => number(size) && (size as number) >= 0,
+      color: (color) => object(color) && fields(color, { rgb: string }) &&
+        typeof (color as { rgb?: unknown }).rgb === 'string' && /^#?[0-9a-fA-F]{6}$/.test((color as { rgb: string }).rgb),
+    }) && string((entry as { style?: unknown }).style) && (entry as { style: string }).style.trim().length > 0;
+  });
+}
+
 function validMark(value: unknown): value is YrsRunMark {
   if (!object(value)) return false;
   if (['bold', 'italic', 'underline', 'superscript', 'subscript'].includes(String(value.type))) {
@@ -157,7 +173,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     insertImage: ['image'], insertTable: ['rows', 'columns'], pasteFragment: ['fragment'], insertPageBreak: [], insertSectionBreak: ['type'],
     insertTableRow: ['side'], insertTableColumn: ['side'],
     deleteTableRow: [], deleteTableColumn: [], deleteTable: [],
-    mergeTableCells: [], splitTableCell: ['rows', 'columns'], setTableCellShading: ['color'],
+    mergeTableCells: [], splitTableCell: ['rows', 'columns'], setTableCellShading: ['color'], setTableBorders: ['borders'],
     resizeObject: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'expectVersion'],
     moveObject: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'],
     undo: [], redo: [], replaceMatches: ['targets', 'text', 'expectVersion', 'suggesting'],
@@ -294,6 +310,9 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
       break;
     case 'setTableCellShading':
       if (payload.color !== null && (typeof payload.color !== 'string' || !/^[0-9a-fA-F]{6}$/.test(payload.color))) return refuse('invalid-payload');
+      break;
+    case 'setTableBorders':
+      if (!validBorders(payload.borders)) return refuse('invalid-payload');
       break;
     case 'insertImage':
       if (!object(payload.image) || !json(payload.image) || Object.hasOwn(payload.image, '_kind') || ['widthEmu', 'heightEmu'].some(key => payload.image && object(payload.image) && payload.image[key] !== undefined && !positive(payload.image[key]))) return refuse('invalid-image');
@@ -997,7 +1016,7 @@ function applyPreparedDocxCommand(
       break;
     }
     case 'insertTableRow': case 'insertTableColumn': case 'deleteTableRow': case 'deleteTableColumn':
-    case 'deleteTable': case 'mergeTableCells': case 'splitTableCell': case 'setTableCellShading': {
+    case 'deleteTable': case 'mergeTableCells': case 'splitTableCell': case 'setTableCellShading': case 'setTableBorders': {
       if (!prepared.table) throw new Error('Prepared command lacks table target');
       const focus = selection.focus;
       applyTableCommand(engine, state, prepared.command as TableCommandIntent, prepared.table,

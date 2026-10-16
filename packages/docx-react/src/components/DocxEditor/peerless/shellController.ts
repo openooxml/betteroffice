@@ -1,7 +1,9 @@
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
 import { WASM32_MEMORY_LIMIT_BYTES, type DocxEditRequest, type DocxEditResult, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
   type ResidentFontEnvironment, type ResidentFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
-import { computeSplitDialogDefaults } from '@betteroffice/docx/utils';
+import { computeSplitDialogDefaults, resolveColorToHex } from '@betteroffice/docx/utils';
+import type { YrsCellBorders } from '@betteroffice/docx/yrs';
+import { getBuiltinTableStyle } from '../../ui/TableStyleGallery';
 import { normalizeFontFamilies } from '@betteroffice/docx/utils/fontOptions';
 import { DEFAULT_FONTS } from '../../ui/FontPicker';
 import { DEFAULT_STYLES } from '../../ui/StylePicker';
@@ -98,6 +100,7 @@ export function createPeerlessShellController(initial: Options) {
   let proposalTail: Promise<unknown> = Promise.resolve();
   let documentKey: unknown;
   let generation = 0;
+  let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
   const waiting = new Set<(error: Error) => void>();
   const reviewReads = new WeakMap<PeerlessEditSessionBinding, Promise<ResidentReviewSnapshot>>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
@@ -149,11 +152,14 @@ export function createPeerlessShellController(initial: Options) {
       supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
         ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
-        'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor']),
+        'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
+        'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
+        'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle']),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
-      table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext } : null,
+      table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext,
+        table: { attrs: { justification: view.editState.tableContext.justification } } } : null,
       image: options.imagePropertiesAvailable ? { wrap: null } : null, revisions: [], revisionIds: new Set(), currentRevisionId: null,
       styles: workerStyleOptions(metadata && metadata.binding === binding && metadata.version === view?.version ? metadata.value.styles : [], translate), fonts: [
         ...choices.map(font => ({ args: { family: getPrimaryFontFamily(font.fontFamily) || font.name }, label: font.name,
@@ -388,6 +394,43 @@ export function createPeerlessShellController(initial: Options) {
             const color = (args as { color?: string | null }).color;
             const normalized = color === null || color === undefined || color === '' ? null : color.replace(/^#/, '');
             return submit({ kind: 'setTableCellShading', payload: { color: normalized } });
+          }
+          case 'borderAll': case 'borderOutside': case 'borderInside': case 'borderNone':
+          case 'borderTop': case 'borderBottom': case 'borderLeft': case 'borderRight': {
+            const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
+            const resolved = cellColor ? resolveColorToHex(cellColor, options.theme ?? undefined) : undefined;
+            if (resolved) borderPen = { ...borderPen, color: { rgb: resolved } };
+            const pen = borderPen;
+            const all = (border: typeof pen): YrsCellBorders => ({ top: border, bottom: border, left: border, right: border, insideH: border, insideV: border });
+            const borders: YrsCellBorders = key === 'borderAll' ? all(pen)
+              : key === 'borderOutside' ? { top: pen, bottom: pen, left: pen, right: pen }
+              : key === 'borderInside' ? { insideH: pen, insideV: pen }
+              : key === 'borderNone' ? all({ style: 'none', size: 0, color: { rgb: '000000' } })
+              : { [key.slice('border'.length).toLowerCase()]: pen } as YrsCellBorders;
+            return submit({ kind: 'setTableBorders', payload: { borders } });
+          }
+          case 'borderColor': {
+            borderPen = { ...borderPen, color: { rgb: (args as { color: string }).color.replace(/^#/, '') } };
+            const pen = borderPen;
+            return submit({ kind: 'setTableBorders', payload: { borders: { top: pen, bottom: pen, left: pen, right: pen, insideH: pen, insideV: pen } } });
+          }
+          case 'borderWidth': {
+            borderPen = { ...borderPen, size: (args as { size: number }).size };
+            const pen = borderPen;
+            return submit({ kind: 'setTableBorders', payload: { borders: { top: pen, bottom: pen, left: pen, right: pen, insideH: pen, insideV: pen } } });
+          }
+          case 'cellBorder': {
+            const action = args as { side: string; style: string; size: number; color: string };
+            const border = { style: action.style, size: action.size, color: { rgb: action.color.replace(/^#/, '') } };
+            const borders: YrsCellBorders = action.side === 'all'
+              ? { top: border, bottom: border, left: border, right: border, insideH: border, insideV: border }
+              : { [action.side]: border } as YrsCellBorders;
+            return submit({ kind: 'setTableBorders', payload: { borders } });
+          }
+          case 'applyTableStyle': {
+            const preset = getBuiltinTableStyle((args as { styleId: string }).styleId);
+            if (!preset?.tableBorders) return { ok: true, status: 'noop' };
+            return submit({ kind: 'setTableBorders', payload: { borders: preset.tableBorders } });
           }
           case 'splitCell': {
             if (!options.openSplitCell) break;
