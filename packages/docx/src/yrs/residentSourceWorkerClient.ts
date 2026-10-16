@@ -1,4 +1,4 @@
-import { ResidentEngineWorkerClient, ResidentWorkerFailureError, takePreloadedResidentEngineWorker,
+import { ResidentEngineWorkerClient, ResidentWorkerCutKeptError, ResidentWorkerFailureError, takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerPort, type ResidentEngineWorkerFrame } from './residentEngineWorkerClient';
 import { isCommandAck } from '../../../../shared/office-session/commands/types';
 import { validateResidentSource, type ResidentSourceOpenRequest, type ResidentSourcePreviewOptions } from './residentSource';
@@ -110,7 +110,6 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
     }
     const cut = this.cutReservation;
-    this.cutReservation = null;
     const reservation = { bytes: source.heapLimitBytes };
     this.openedHeapLimit = reservation;
     try {
@@ -120,6 +119,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
       if (!response.sourceDocument || !response.stateVector) {
         throw new ResidentWorkerFailureError('Resident engine worker omitted the opened source');
       }
+      if (this.cutReservation === cut) this.cutReservation = null;
       if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
       return {
         document: response.sourceDocument, hostJson: response.hostJson,
@@ -127,10 +127,9 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
         ...(response.frame ? { preview: sourcePreviewFrame(response) } : {}),
       };
     } catch (error) {
-      if (this.openedHeapLimit === reservation) {
-        this.openedHeapLimit = cut;
-        this.cutReservation = cut;
-      }
+      const kept = error instanceof ResidentWorkerCutKeptError && this.cutReservation === cut ? cut : null;
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = kept;
+      if (this.cutReservation === cut) this.cutReservation = kept;
       throw error;
     }
   }
