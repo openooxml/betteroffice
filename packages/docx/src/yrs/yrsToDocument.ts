@@ -3005,10 +3005,8 @@ class SaveContext {
 
   private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
     const cell = this.cellParagraphs.has(storyId);
-    if (
-      (NESTED_STORY_ID.test(storyId) && !cell) ||
-      (this.syntheticDefaults && !cell)
-    ) {
+    const nested = !cell && NESTED_STORY_ID.test(storyId);
+    if (this.syntheticDefaults && !cell && !nested) {
       return undefined;
     }
     const numbered = properties.numPr != null;
@@ -3016,14 +3014,14 @@ class SaveContext {
     const tableFormatting = this.cellParagraphs.get(storyId);
     const key = cell
       ? JSON.stringify([style, tableFormatting, numbered])
-      : JSON.stringify([style, numbered]);
+      : JSON.stringify([style, numbered, nested]);
     if (!this.inherited.has(key)) {
       const resolved = cell
         ? this.inheritance().paragraphFormatting(style || null, tableFormatting)
         : this.styles.resolveParagraphStyle(style || null).paragraphFormatting;
       if (resolved === undefined || (!numbered && resolved.numPr != null)) {
         this.inherited.set(key, undefined);
-      } else if (numbered) {
+      } else if (numbered || nested) {
         const formatting: ParagraphFormatting = {};
         if (resolved.autoSpaceDE !== undefined) formatting.autoSpaceDE = resolved.autoSpaceDE;
         if (resolved.autoSpaceDN !== undefined) formatting.autoSpaceDN = resolved.autoSpaceDN;

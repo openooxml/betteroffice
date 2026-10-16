@@ -203,11 +203,11 @@ pub fn serialize_paragraph_formatting(
         );
         on_off(&mut body, "w:autoSpaceDE", formatting.auto_space_de);
         on_off(&mut body, "w:autoSpaceDN", formatting.auto_space_dn);
-        write_spacing(&mut body, formatting);
-        write_indentation(&mut body, formatting);
         on_off(&mut body, "w:bidi", formatting.bidi);
         on_off(&mut body, "w:adjustRightInd", formatting.adjust_right_ind);
         on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
+        write_spacing(&mut body, formatting);
+        write_indentation(&mut body, formatting);
         if let Some(value) = nonempty(formatting.alignment.as_deref()) {
             empty_attr(&mut body, "w:jc", "w:val", value);
         }
