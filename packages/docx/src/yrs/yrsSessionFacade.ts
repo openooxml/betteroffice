@@ -779,6 +779,12 @@ export function wrapSession(
       remoteStateVector === undefined
         ? session.encode_state()
         : session.encode_diff(remoteStateVector.slice()),
+    encodeStateAsUpdateChunks: (remoteStateVector, maxChunkBytes) => {
+      if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1 || maxChunkBytes > 0xffffffff) {
+        throw new RangeError('maxChunkBytes must be a positive 32-bit integer');
+      }
+      return session.encode_diff_chunks(remoteStateVector.slice(), maxChunkBytes) as Uint8Array[];
+    },
     applyUpdate: (update) => {
       markDirty('all');
       return mutate(
@@ -787,6 +793,10 @@ export function wrapSession(
             session.apply_update_with_inference(update)
           ) as CollaborationTextInsertion | null
       );
+    },
+    applyUpdateChunks: (updates) => {
+      markDirty('all');
+      mutate(() => session.apply_update_chunks([...updates]));
     },
     applyLocalUpdate: (update) => {
       ensureUndo();

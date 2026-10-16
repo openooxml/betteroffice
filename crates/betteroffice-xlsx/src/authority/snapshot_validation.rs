@@ -35,6 +35,9 @@ pub(crate) struct SnapshotValidation {
     format_keys: BTreeSet<String>,
     number_formats: BTreeMap<u16, usize>,
     unit_bytes: usize,
+    merge_edits: BTreeMap<usize, MergeEdits>,
+    merge_projection: Option<MergeProjection>,
+    merge_projected: usize,
 }
 
 fn invalid() -> SnapshotError {
@@ -808,18 +811,9 @@ impl SnapshotValidation {
                                 let values =
                                     any_values(&value, "merges").map_err(SnapshotError::new)?;
                                 allowance(512, budget, &mut self.unit_bytes)?;
-                                if values.len() != sheet.merges.len() {
-                                    return Err(invalid());
-                                }
                                 if let Some(merge) = values.get(self.metadata_child) {
                                     let single = Any::Array(vec![merge.clone()].into());
-                                    if merges_from_any(&single)
-                                        .map_err(SnapshotError::new)?
-                                        .first()
-                                        != sheet.merges.get(self.metadata_child)
-                                    {
-                                        return Err(invalid());
-                                    }
+                                    merges_from_any(&single).map_err(SnapshotError::new)?;
                                     self.metadata_child += 1;
                                     return Ok(false);
                                 }
@@ -1268,7 +1262,15 @@ impl SnapshotValidation {
                                 let sheet = &model.sheets[sheet_index];
                                 match field {
                                     "sheet" => {
-                                        if !sheet_schema_keys(self.version).contains(&key.as_ref())
+                                        if key.starts_with(MERGE_PREFIX) {
+                                            insert_merge_edit(
+                                                self.merge_edits.entry(sheet_index).or_default(),
+                                                key,
+                                                &value,
+                                            )
+                                            .map_err(SnapshotError::new)?;
+                                        } else if !sheet_schema_keys(self.version)
+                                            .contains(&key.as_ref())
                                             && !sheet_schema_optional_keys(self.version)
                                                 .contains(&key.as_ref())
                                         {
@@ -1344,8 +1346,52 @@ impl SnapshotValidation {
                 keys.pop_first();
                 return Ok(false);
             }
+            self.phase = 11;
+            self.sheet = 0;
+            self.metadata_child = 0;
+        }
+        if self.phase == 11 {
+            allowance(512, budget, &mut self.unit_bytes)?;
+            if let Some(sheet) = model.sheets.get(self.sheet) {
+                let projection = self.merge_projection.get_or_insert_with(|| {
+                    MergeProjection::new(self.merge_edits.remove(&self.sheet).unwrap_or_default())
+                });
+                let key = self.sheet_keys.get(&self.sheet).ok_or_else(invalid)?;
+                let map = sheets
+                    .get(&txn, key.as_ref())
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .ok_or_else(invalid)?;
+                let baseline = atomic(&map, &txn, MERGES)?;
+                let baseline = any_values(&baseline, "merges").map_err(SnapshotError::new)?;
+                let next = if let Some(value) = baseline.get(self.metadata_child) {
+                    let single = Any::Array(vec![value.clone()].into());
+                    let range = merges_from_any(&single).map_err(SnapshotError::new)?[0];
+                    self.metadata_child += 1;
+                    Some(projection.baseline(range).map_err(SnapshotError::new)?)
+                } else {
+                    projection.next_edit()
+                };
+                if let Some(range) = next {
+                    if let Some(range) = range {
+                        if sheet.merges.get(self.merge_projected) != Some(&range) {
+                            return Err(invalid());
+                        }
+                        self.merge_projected += 1;
+                    }
+                    return Ok(false);
+                }
+                if self.merge_projected != sheet.merges.len() {
+                    return Err(invalid());
+                }
+                self.merge_projection = None;
+                self.merge_projected = 0;
+                self.metadata_child = 0;
+                self.sheet += 1;
+                return Ok(false);
+            }
             self.phase = 3;
             self.sheet = 0;
+            return Ok(false);
         }
         if self.phase == 3 {
             if let Some(sheet) = model.sheets.get(self.sheet) {
@@ -1987,4 +2033,35 @@ mod tests {
             assert!(windows > 1);
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn validate_for_test(
+    authority: &WorkbookAuthority,
+    mut model: WorkbookModel,
+) -> SnapshotResult<()> {
+    fn collect<T: ReadTxn>(map: MapRef, txn: &T, keys: &mut SnapshotKeys) {
+        for (key, value) in map.iter(txn) {
+            keys.insert((parent(&map), Arc::from(key)));
+            if let Out::YMap(child) = value {
+                collect(child, txn, keys);
+            }
+        }
+    }
+    let mut keys = SnapshotKeys::new();
+    {
+        let txn = authority.doc.transact();
+        for name in [META, SHEETS, CELL_FORMATS] {
+            let map = txn.get_map(name).ok_or_else(invalid)?;
+            collect(map, &txn, &mut keys);
+        }
+    }
+    let mut validation = SnapshotValidation::default();
+    let budget = SnapshotBudget::new(1, 4096)?;
+    for _ in 0..1_000_000 {
+        if validation.advance(authority, &mut model, &mut keys, budget)? {
+            return Ok(());
+        }
+    }
+    panic!("snapshot merge validation did not finish");
 }

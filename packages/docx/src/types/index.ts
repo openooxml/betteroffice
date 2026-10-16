@@ -23,6 +23,7 @@ export type {
   TabStop,
   LineSpacingRule,
   ParagraphAlignment,
+  ParagraphCnfStyle,
   ParagraphFormatting,
 
   // Table Formatting

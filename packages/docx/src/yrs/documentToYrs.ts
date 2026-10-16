@@ -1141,6 +1141,7 @@ function paragraphAttrs(
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
     listStartOverride: paragraph.listRendering?.startOverride ?? null,
     _originalFormatting: formatting ?? null,
+    ...(formatting?.cnfStyle ? { cnfStyle: formatting.cnfStyle } : {}),
   };
 
   if (styleResolver) {
@@ -1184,6 +1185,7 @@ function paragraphAttrs(
     attrs.snapToGrid = formatting?.snapToGrid ?? stylePpr?.snapToGrid ?? null;
     attrs.autoSpaceDE = formatting?.autoSpaceDE ?? stylePpr?.autoSpaceDE ?? null;
     attrs.autoSpaceDN = formatting?.autoSpaceDN ?? stylePpr?.autoSpaceDN ?? null;
+    attrs.adjustRightInd = formatting?.adjustRightInd ?? stylePpr?.adjustRightInd ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
 
@@ -1227,6 +1229,7 @@ function paragraphAttrs(
     attrs.snapToGrid = formatting?.snapToGrid ?? null;
     attrs.autoSpaceDE = formatting?.autoSpaceDE ?? null;
     attrs.autoSpaceDN = formatting?.autoSpaceDN ?? null;
+    attrs.adjustRightInd = formatting?.adjustRightInd ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;

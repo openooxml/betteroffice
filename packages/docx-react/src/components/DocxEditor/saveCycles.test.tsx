@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -124,7 +125,7 @@ for (const typing of [false, true]) {
       for (let cycle = 0; cycle < 3; cycle += 1) {
         const opens = workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length;
         const ref = createRef<DocxEditorRef>();
-        const view = render(<DocxEditor ref={ref} showToolbar={false} documentBuffer={buffer} />);
+        const view = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} showToolbar={false} documentBuffer={buffer} />);
         let saved: ArrayBuffer | null = null;
         try {
           await until(() => ref.current?.commands.getState('save').enabled === true);

@@ -1,6 +1,6 @@
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
 import { createProposalRegistry } from './proposals';
-import { applyReviewCommand, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
+import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
 import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange } from './index';
 import {
@@ -178,6 +178,7 @@ function validCommandIntent(command: DocxCommandEnvelope, error: { reason: strin
     (command.kind === 'setReadOnly' || semanticSelection || !['selection', 'suggesting'].includes(key)))) return refuse('invalid-payload');
   if (payload.suggesting !== undefined && (!fields(payload.suggesting, { name: string, date: string }) ||
     !object(payload.suggesting) || !string(payload.suggesting.name) || !string(payload.suggesting.date))) return refuse('invalid-author');
+  if (payload.hostProposal !== undefined && !boolean(payload.hostProposal)) return refuse('invalid-payload');
   switch (command.kind) {
     case 'applyEdits':
       if (!object(payload.request) || !string(payload.request.expectVersion) || !Array.isArray(payload.request.steps) || !json(payload.request)) return refuse('invalid-payload');
@@ -473,7 +474,7 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (Object.hasOwn(reviewCommandKeys, command.kind)) {
-    if (state.readOnly) return refuse('read-only');
+    if (state.readOnly && !grantedHostProposal(command as ReviewCommand)) return refuse('read-only');
     const reason = preflightReviewCommand(engine, state, command as ReviewCommand);
     if (reason) return refuse(reason);
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };

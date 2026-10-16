@@ -131,6 +131,7 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <DocxEditor
+        legacySyncApi
         ref={(editor) => { probe.editor = editor; }}
         documentBuffer={buffer}
         experimentalWorkerOpen={worker}

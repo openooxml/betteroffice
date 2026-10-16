@@ -25,6 +25,8 @@ import '@betteroffice/docx-react/styles.css';
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
 
+`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` currently uses the hybrid runtime until worker-only collaboration is available.
+
 ## Edit a document
 
 ```tsx
@@ -56,11 +58,10 @@ export function App() {
 
 Without `onSave`, File > Save downloads the edited bytes.
 
-Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onChange`,
+Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onDocumentChange`,
 `author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`, `toolbar`,
 `showRuler`, `showZoomControl`, `showHiddenText`, `i18n`, `measurementFontProvider`. The `ref`
-exposes the full editor API (selection, formatting, find/replace, comments,
-revisions) and the editor's command store, `commands`.
+exposes async reads and edits, plus the editor's command store, `commands`.
 
 Vanished (hidden) text stays out of the layout by default; pass
 `showHiddenText` to reveal it with normal wrapping.
@@ -478,9 +479,9 @@ const review = defineDocxPlugin<State>({
   stories, or listed kinds and story ids in their order without repeats, in one
   call. An entry naming a kind is a kind, matching each story's own kind unless
   `byRoot` matches its root's: `['header']` with `byRoot` includes header table
-  cells, and `['body']` with `byRoot` selects everything under the body. Worker viewers, the
-  default for read-only editors without `collaboration`, answer each with one
-  worker read. A story that cannot be read reports its own failure, the read
+  cells, and `['body']` with `byRoot` selects everything under the body. The default worker-only
+  editor and read-only `legacySyncApi` editors without `collaboration` answer
+  each with one worker read. A story that cannot be read reports its own failure, the read
   limits stop the read with `truncated`, a story larger than the limits on its
   own reports `limit-exceeded` (page it with `readParagraphs` and `paraIds`),
   and `expectVersion` refuses a changed
@@ -556,6 +557,13 @@ const review = defineDocxPlugin<State>({
   are deprecated in favour of this API.
 
 ## Page-referenced export
+
+Opt in to `legacySyncApi` for this export because the default async editor does
+not expose page-referenced export:
+
+```tsx
+<DocxEditor ref={editorRef} legacySyncApi />
+```
 
 `DocxEditorRef.exportStructuredWithPages(options)` flushes pending input and exports
 structured content with the page map of the editor's authoritative layout of that

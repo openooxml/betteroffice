@@ -39,6 +39,9 @@ const ROW_STYLE: u8 = 24;
 /// A sheet record that also counts its row defaults; a sheet without any keeps
 /// the `SHEET` layout.
 const STYLED_SHEET: u8 = 25;
+const HIDDEN_COL_WIDTH: u8 = 26;
+const HIDDEN_ROW_HEIGHT: u8 = 27;
+const HIDDEN_SHEET: u8 = 28;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -46,7 +49,7 @@ const BORDER_V2: u8 = 23;
 
 fn run_tag(tag: u8) -> u8 {
     match tag {
-        STYLED_SHEET => SHEET,
+        STYLED_SHEET | HIDDEN_SHEET => SHEET,
         XF_V2 => XF,
         FILL_V2 => FILL,
         BORDER_V2 => BORDER,
@@ -180,7 +183,7 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
     ]
 }
 
-fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 9]> {
+fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 11]> {
     Ok([
         sheet.hyperlinks.len(),
         sheet.merges.len(),
@@ -191,6 +194,8 @@ fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 9]> {
         exact_len(sheet.array_formulas())?,
         exact_len(sheet.iter_cells())?,
         sheet.row_styles.len(),
+        sheet.hidden_col_widths.len(),
+        sheet.hidden_row_heights.len(),
     ])
 }
 
@@ -224,7 +229,9 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         for count in &counts[..7] {
             add_count(&mut records, *count)?;
         }
-        add_count(&mut records, counts[8])?;
+        for count in &counts[8..] {
+            add_count(&mut records, *count)?;
+        }
         add_count(&mut cells, counts[7])?;
         for chart in &sheet.charts {
             add_count(&mut records, chart.refs.len())?;
@@ -359,6 +366,8 @@ impl MetadataCursor {
                 MERGE => sheet.merges.len(),
                 COL_WIDTH => sheet.col_widths.len(),
                 ROW_HEIGHT => sheet.row_heights.len(),
+                HIDDEN_COL_WIDTH => sheet.hidden_col_widths.len(),
+                HIDDEN_ROW_HEIGHT => sheet.hidden_row_heights.len(),
                 COL_STYLE => sheet.col_styles.len(),
                 CHART => sheet.charts.len(),
                 ARRAY => exact_len(sheet.array_formulas())?,
@@ -369,6 +378,7 @@ impl MetadataCursor {
                 self.sheet_phase = match self.sheet_phase {
                     CHART => ARRAY,
                     ARRAY => ROW_STYLE,
+                    ROW_STYLE => HIDDEN_COL_WIDTH,
                     phase => phase + 1,
                 };
                 self.index = 0;
@@ -378,6 +388,10 @@ impl MetadataCursor {
             }
             w.u8(if self.sheet_phase == CHART && self.child != 0 {
                 CHART_REF
+            } else if self.sheet_phase == SHEET
+                && (!sheet.hidden_col_widths.is_empty() || !sheet.hidden_row_heights.is_empty())
+            {
+                HIDDEN_SHEET
             } else if self.sheet_phase == SHEET && !sheet.row_styles.is_empty() {
                 STYLED_SHEET
             } else {
@@ -389,18 +403,27 @@ impl MetadataCursor {
                     w.option(sheet.freeze_pane.as_ref(), write_pane);
                     write_format(w, &sheet.format);
                     let counts = sheet_counts(sheet)?;
-                    let count = if sheet.row_styles.is_empty() { 8 } else { 9 };
+                    let count = if !sheet.hidden_col_widths.is_empty()
+                        || !sheet.hidden_row_heights.is_empty()
+                    {
+                        11
+                    } else if sheet.row_styles.is_empty() {
+                        8
+                    } else {
+                        9
+                    };
                     for value in &counts[..count] {
                         w.var_usize(*value);
                     }
                 }
                 HYPERLINK => write_hyperlink(w, &sheet.hyperlinks[self.index]),
                 MERGE => write_range(w, &sheet.merges[self.index]),
-                COL_WIDTH | ROW_HEIGHT => {
-                    let map = if self.sheet_phase == COL_WIDTH {
-                        &sheet.col_widths
-                    } else {
-                        &sheet.row_heights
+                COL_WIDTH | ROW_HEIGHT | HIDDEN_COL_WIDTH | HIDDEN_ROW_HEIGHT => {
+                    let map = match self.sheet_phase {
+                        COL_WIDTH => &sheet.col_widths,
+                        ROW_HEIGHT => &sheet.row_heights,
+                        HIDDEN_COL_WIDTH => &sheet.hidden_col_widths,
+                        _ => &sheet.hidden_row_heights,
                     };
                     let lower = self.map_key.map_or(Unbounded, Excluded);
                     let (&key, &value) = map
@@ -862,7 +885,7 @@ impl ModelSnapshotBuilder {
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
             TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
             TABLE_COLUMN => g.ensure(m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget),
-            SHEET | STYLED_SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
+            SHEET | STYLED_SHEET | HIDDEN_SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
             HYPERLINK => g.ensure(
                 m,
                 |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks),
@@ -1042,7 +1065,7 @@ impl ModelSnapshotBuilder {
                 .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
                 .columns
                 .push(r.str()?.to_owned()),
-            SHEET | STYLED_SHEET => self.read_sheet(r, raw == STYLED_SHEET)?,
+            SHEET | STYLED_SHEET | HIDDEN_SHEET => self.read_sheet(r, raw)?,
             _ => self.read_sheet_record(tag, r)?,
         }
         self.validate_counts()?;
@@ -1061,12 +1084,17 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_sheet(&mut self, r: &mut Reader<'_>, styled: bool) -> SnapshotResult<()> {
+    fn read_sheet(&mut self, r: &mut Reader<'_>, tag: u8) -> SnapshotResult<()> {
         let mut sheet = Sheet::new(r.str()?);
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
-        let mut counts = [0; 9];
-        for count in &mut counts[..if styled { 9 } else { 8 }] {
+        let mut counts = [0; 11];
+        let count = match tag {
+            HIDDEN_SHEET => 11,
+            STYLED_SHEET => 9,
+            _ => 8,
+        };
+        for count in &mut counts[..count] {
             *count = r.var_usize()?;
         }
         add_count(&mut self.declared_cells, counts[7])?;
@@ -1082,6 +1110,8 @@ impl ModelSnapshotBuilder {
         self.model.sheets.push(sheet);
         self.array_key = None;
         for (tag, count) in [
+            (HIDDEN_ROW_HEIGHT, counts[10]),
+            (HIDDEN_COL_WIDTH, counts[9]),
             (ROW_STYLE, counts[8]),
             (ARRAY, counts[6]),
             (CHART, counts[5]),
@@ -1107,13 +1137,14 @@ impl ModelSnapshotBuilder {
         match tag {
             HYPERLINK => sheet.hyperlinks.push(read_hyperlink(r)?),
             MERGE => sheet.merges.push(read_range(r)?),
-            COL_WIDTH | ROW_HEIGHT => {
+            COL_WIDTH | ROW_HEIGHT | HIDDEN_COL_WIDTH | HIDDEN_ROW_HEIGHT => {
                 let key = r.var_u32()?;
                 let value = r.f64()?;
-                let map = if tag == COL_WIDTH {
-                    &mut sheet.col_widths
-                } else {
-                    &mut sheet.row_heights
+                let map = match tag {
+                    COL_WIDTH => &mut sheet.col_widths,
+                    ROW_HEIGHT => &mut sheet.row_heights,
+                    HIDDEN_COL_WIDTH => &mut sheet.hidden_col_widths,
+                    _ => &mut sheet.hidden_row_heights,
                 };
                 if map
                     .last_key_value()
@@ -2207,6 +2238,24 @@ mod tests {
                 .to_string(),
             error
         );
+    }
+
+    #[test]
+    fn hidden_sizes_roundtrip_with_bounded_snapshot_decoding() {
+        let mut sheet = Sheet::new("Hidden");
+        sheet.col_widths.insert(1, 0.0);
+        sheet.row_heights.insert(2, 0.0);
+        sheet.hidden_col_widths.insert(1, 20.0);
+        sheet.hidden_row_heights.insert(2, 30.0);
+        sheet.row_styles.insert(3, 0);
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Default::default()
+        };
+        let budget = SnapshotBudget::new(1, 1024).unwrap();
+        let chunks = encode(&model, budget);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(advance_all(&chunks, budget).unwrap(), model);
     }
 
     #[test]

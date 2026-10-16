@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   DocxEditor,
   defineDocxPlugin,
@@ -27,6 +27,7 @@ interface ViewState {
   selection: ReturnType<YrsSession['selection']>;
 }
 const options = new URLSearchParams(window.location.search);
+const hybrid = options.get('arm') === 'hybrid';
 const readOnly = options.get('readOnly') !== 'false';
 const revisions = options.get('revisions') === '1';
 const keepSidebarClosed = options.get('sidebar') === 'closed';
@@ -186,22 +187,23 @@ const overlay = defineDocxPlugin<OverlayState>({
     }
     probe.events[event.type] += 1;
     probe.eventSerial += 1;
-    if (event.type === 'load') {
-      if (probe.events.load === 1) {
-        void probe.editor!.whenLayoutComplete().then(
-          () => { probe.layoutComplete = performance.now(); },
-          (error: Error) => probe.errors.push(error.message)
-        );
-      }
-      const version = await context.read.version();
-      if (!version.ok) throw new Error(version.failure.message);
-      probe.load = {
-        version: version.version,
-        sessionVersion: probe.session!.version(),
-        snapshotVersion: context.snapshot.version,
-      };
+    if (event.type === 'load' && probe.events.load === 1) {
+      void probe.editor!.whenLayoutComplete().then(
+        () => { probe.layoutComplete = performance.now(); },
+        (error: Error) => probe.errors.push(error.message)
+      );
     }
-    const snapshot = proposalSnapshot(probe.session!);
+    if (probe.load === null) {
+      const version = await context.read.version();
+      if (version.ok) {
+        probe.load = {
+          version: version.version,
+          sessionVersion: hybrid ? probe.session!.version() : version.version,
+          snapshotVersion: context.snapshot.version,
+        };
+      } else if (version.failure.code !== 'aborted') throw new Error(version.failure.message);
+    }
+    const snapshot = hybrid ? proposalSnapshot(probe.session!) : await probe.editor!.getProposals();
     if (snapshot) context.setState({ snapshot, eventSerial: probe.eventSerial }, snapshot.version);
   },
   overlay: ProposalOverlay,
@@ -212,25 +214,24 @@ const fonts = {
   resolve: () => async () => (await fetch(fontUrl)).arrayBuffer(),
 };
 const faces = [{ family: 'Liberation Sans', src: fontUrl }];
+const attachEditor = (editor: DocxEditorRef | null) => { probe.editor = editor; };
 
 function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const editor = useRef<DocxEditorRef>(null);
   useEffect(() => {
     void pagedDocx(6, 12, { trackedInsertion: revisions }).then(setBuffer);
   }, []);
   useEffect(() => {
-    probe.editor = editor.current;
     probe.sidebarOpen = sidebarOpen;
   });
   if (!buffer) return null;
   return (
     <div style={{ height: '100%' }}>
       <DocxEditor
-        ref={editor}
+        {...(hybrid ? { legacySyncApi: true as const, experimentalWorkerOpen: true } : {})}
+        ref={attachEditor}
         documentBuffer={buffer}
-        experimentalWorkerOpen
         readOnly={readOnly}
         allowHostProposals
         commentsSidebarOpen={keepSidebarClosed ? false : sidebarOpen}
@@ -250,7 +251,7 @@ function Harness() {
         measurementFontProvider={fonts}
         onRenderedDomContextReady={() => { probe.renderedDomContextCalls += 1; }}
         onChange={
-          reportChanges ? (document) => {
+          reportChanges && hybrid ? (document) => {
             probe.contentChanges.push({
               bodyContainsProposedText:
                 JSON.stringify(document.package.document).includes('Reviewed 1'),

@@ -151,6 +151,13 @@ export class EditSession {
      */
     apply_update(update: Uint8Array): void;
     /**
+     * Applies the ordered updates of one sync in a single remote transaction,
+     * so the result matches [`EditSession::apply_update`] on the whole diff.
+     * Errors on a non-`Uint8Array` entry or a malformed or oversized update,
+     * before applying any.
+     */
+    apply_update_chunks(updates: Array<any>): void;
+    /**
      * [`EditSession::apply_update`] plus an inference about where the peer
      * that authored it is typing, for caret presence. Returns
      * `{"clientId","story","paraId","endOffset"}` for the end of that peer's
@@ -385,6 +392,15 @@ export class EditSession {
      * state vector.
      */
     encode_diff(remote_state_vector: Uint8Array): Uint8Array;
+    /**
+     * [`EditSession::encode_diff`] as ordered updates for a sync that must
+     * travel in bounded frames: the whole diff when it fits
+     * `max_chunk_bytes`, otherwise causally ordered struct updates followed
+     * by the delete set alone. Each fits the limit except one that carries a
+     * single larger struct. Errors on a malformed state vector or a zero
+     * limit.
+     */
+    encode_diff_chunks(remote_state_vector: Uint8Array, max_chunk_bytes: number): Array<any>;
     encode_peer_metadata(): Uint8Array;
     /**
      * The full document state as one yrs v1 update. Hand it to
@@ -1179,8 +1195,10 @@ export class EditSession {
      * committed transaction. `update` is v1-encoded — feed it straight to
      * [`EditSession::apply_update`] on a peer — and is copied out of wasm
      * memory, so JS may hold it across later edits. The second argument is
-     * `1` when the transaction had no local origin. One observer per session;
-     * a second call replaces the first, and a throwing callback is ignored.
+     * `1` when the transaction had no local origin; a remote update's own
+     * formatting cleanup follows it as a `0` update to forward. One observer
+     * per session; a second call replaces the first, and a throwing callback
+     * is ignored.
      */
     set_update_observer(callback: Function): void;
     /**
@@ -1696,6 +1714,7 @@ export interface InitOutput {
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_apply_update_chunks: (a: number, b: any) => [number, number];
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1737,6 +1756,7 @@ export interface InitOutput {
     readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
     readonly editsession_encode_state_vector: (a: number) => [number, number];

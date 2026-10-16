@@ -35,7 +35,7 @@ pub(super) fn splice_comments(
     }
     let source = std::str::from_utf8(source).map_err(|error| error_xml(error.to_string()))?;
     let original = source_comments(parts, seed)?;
-    let spans = comment_spans(source)?;
+    let (spans, close) = comment_spans(source)?;
     let source_ids: HashSet<_> = spans.iter().map(|(id, _)| id.as_str()).collect();
     let model_ids: HashSet<_> = comments
         .iter()
@@ -51,13 +51,17 @@ pub(super) fn splice_comments(
     {
         return Err(error_xml("duplicate comment ids"));
     }
-    if comments.len() != original.len()
+    if comments.len() < original.len()
         || comments
             .iter()
             .zip(&original)
             .any(|(comment, original)| js_number(comment.id) != js_number(original.id))
     {
         return Err(error_xml("comment ids or order changed"));
+    }
+    let (kept, added) = comments.split_at(original.len());
+    if added.iter().any(|comment| comment.parent_id.is_some()) {
+        return Err(error_xml("added reply"));
     }
     let parent_ids: HashSet<_> = comments
         .iter()
@@ -67,7 +71,7 @@ pub(super) fn splice_comments(
         .iter()
         .map(|(id, span)| (id.as_str(), &source[span.clone()]))
         .collect();
-    for (comment, original) in comments.iter().zip(&original) {
+    for (comment, original) in kept.iter().zip(&original) {
         let id = js_number(comment.id);
         let fragment = fragments
             .get(id.as_str())
@@ -85,20 +89,24 @@ pub(super) fn splice_comments(
             return Err(error_xml("comment changed"));
         }
     }
-    let (source_xml, source_infos) = serialize_comments_with_info(&original, &mut source_context);
-    if source_xml != serialized || source_infos != *infos {
+    let (source_xml, source_infos) =
+        serialize_comments_with_info(&original, &mut source_context.clone());
+    let (kept_xml, kept_infos) = serialize_comments_with_info(kept, &mut source_context);
+    if source_xml != kept_xml || source_infos != kept_infos {
         return Err(error_xml("comment serialization changed"));
     }
     let original_para_ids: HashMap<_, _> = original
         .iter()
         .map(|comment| (js_number(comment.id), comment.para_id.as_ref()))
         .collect();
+    let added_ids: HashSet<_> = added.iter().map(|comment| js_number(comment.id)).collect();
     infos.retain_mut(|info| {
-        if let Some(Some(para_id)) = original_para_ids.get(&js_number(info.comment_id)) {
+        let id = js_number(info.comment_id);
+        if let Some(Some(para_id)) = original_para_ids.get(&id) {
             info.last_para_id.clone_from(para_id);
             true
         } else {
-            false
+            added_ids.contains(&id)
         }
     });
     if infos.is_empty()
@@ -112,7 +120,23 @@ pub(super) fn splice_comments(
     {
         return Err(error_xml("empty comment companions"));
     }
-    Ok(source.to_owned())
+    if added.is_empty() {
+        return Ok(source.to_owned());
+    }
+    let close = close.ok_or_else(|| error_xml("self-closing comments root"))?;
+    let written: HashMap<_, _> = comment_spans(serialized)?.0.into_iter().collect();
+    let mut spliced = source[..close].to_owned();
+    for comment in added {
+        let span = written
+            .get(&js_number(comment.id))
+            .ok_or_else(|| error_xml("missing written comment"))?;
+        spliced.push_str(&serialized[span.clone()]);
+    }
+    spliced.push_str(&source[close..]);
+    if !crate::xml::reads_as_written(spliced.as_bytes()) {
+        return Err(error_xml("added comments require whole-part writing"));
+    }
+    Ok(spliced)
 }
 
 fn source_metadata_changed(source: &Comment, written: &Comment) -> bool {
@@ -371,9 +395,10 @@ fn source_comments(parts: &[(String, Vec<u8>)], seed: &str) -> Result<Vec<Commen
     )
 }
 
-fn comment_spans(xml: &str) -> Result<Vec<(String, Range<usize>)>, ParseError> {
+/// Each comment's span and where the root's end tag starts (`None` for a self-closing root).
+fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, Option<usize>), ParseError> {
     if xml.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let limits = ParseLimits::default();
     let document = parse_xml(
@@ -411,7 +436,7 @@ fn comment_spans(xml: &str) -> Result<Vec<(String, Range<usize>)>, ParseError> {
                     spans.push((id, start..tag.range.end));
                 }
             } else if depth == 0 {
-                end = Some(tag.range.start);
+                end = Some(Some(tag.range.start));
             }
         } else {
             if depth == 1 {
@@ -428,12 +453,12 @@ fn comment_spans(xml: &str) -> Result<Vec<(String, Range<usize>)>, ParseError> {
             }
             depth += usize::from(!tag.empty);
             if depth == 0 && tag.empty {
-                end = Some(tag.range.end);
+                end = Some(None);
             }
         }
     }
-    end.ok_or_else(|| error_xml("missing comments end"))?;
-    Ok(spans)
+    let close = end.ok_or_else(|| error_xml("missing comments end"))?;
+    Ok((spans, close))
 }
 
 fn error_xml(message: impl Into<String>) -> ParseError {

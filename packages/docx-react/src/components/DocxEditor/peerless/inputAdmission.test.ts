@@ -209,6 +209,27 @@ test('a held failure after a read-only held entry releases each count once', asy
   } finally { submit.mockRestore(); admission.dispose(); }
 });
 
+test('read-only admission forwards the host proposal grant and refuses proposals and edits without it', () => {
+  const { admission, submitted } = lane();
+  admission.setReadOnly(true);
+  const propose: PeerlessInputIntent = { kind: 'propose', payload: { expectVersion: 'v1', proposals: [], hostProposal: true } };
+  const decide: PeerlessInputIntent = { kind: 'setProposalStates', payload: { expectVersion: 'v1', expectPreviewVersion: 0, changes: [] } };
+  const withdraw: PeerlessInputIntent = { kind: 'withdrawProposals', payload: { expectVersion: 'v1', ids: [] } };
+  for (const intent of [propose, decide, withdraw]) expect(admitIntent(admission, intent)).toEqual({ status: 'ignored', reason: 'read-only' });
+  expect(admitIntent(admission, { kind: 'insertText', payload: { text: 'x' } }, { hostProposal: true })).toEqual({ status: 'ignored', reason: 'read-only' });
+  expect(submitted.map(entry => entry.kind)).toEqual(['setReadOnly']);
+  for (const intent of [propose, decide, withdraw]) expect(admitIntent(admission, intent, { fence: true, hostProposal: true }).status).toBe('submitted');
+  expect(submitted.slice(1).map(({ kind, payload }) => ({ kind, payload }))).toEqual([
+    { kind: 'propose', payload: { expectVersion: 'v1', proposals: [], hostProposal: true } },
+    { kind: 'setProposalStates', payload: { expectVersion: 'v1', expectPreviewVersion: 0, changes: [], hostProposal: true } },
+    { kind: 'withdrawProposals', payload: { expectVersion: 'v1', ids: [], hostProposal: true } },
+  ]);
+  admission.setReadOnly(false);
+  expect(admitIntent(admission, propose).status).toBe('submitted');
+  expect(submitted.at(-1)!.payload).toEqual({ expectVersion: 'v1', proposals: [] });
+  admission.dispose();
+});
+
 function lane() {
   let selectionThroughSeq = 0;
   let selection: DocxCommandSelection = {

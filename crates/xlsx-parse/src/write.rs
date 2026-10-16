@@ -21,10 +21,10 @@ use xlsx_model::{
 use crate::ParseError;
 use crate::axis::SheetAxes;
 use crate::package::{
-    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
-    XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
-    parse_relationships, relationship_part_path, relationships_by_id, remove_attribute,
-    set_attribute,
+    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship,
+    SourceSheetKind, XmlAttribute, XmlTemplate, attributes_from_fragment, effective_content_type,
+    normalized_part_name, parse_relationships, relationship_part_path, relationships_by_id,
+    remove_attribute, set_attribute,
 };
 use crate::patch::{
     SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
@@ -2091,7 +2091,7 @@ fn workbook_xml_with_template(
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
-    let calc_pr = if edited {
+    let calc_pr = if edited && holds_formulas(wb, package, sheets) {
         let mut attributes = package.calc_pr_attributes.clone().unwrap_or_default();
         set_attribute(
             &mut attributes,
@@ -2132,6 +2132,23 @@ fn workbook_xml_with_template(
         }
     }
     template.render(replacements, workbook_child_rank)
+}
+
+/// Whether the saved workbook holds a formula. Only worksheet cells are
+/// modeled, and an `mc:AlternateContent` branch can hide one from the model,
+/// so a macrosheet, an unknown sheet kind or such a source sheet counts too.
+fn holds_formulas(wb: &Workbook, package: &PreservedPackage, sheets: &[PlannedSheet]) -> bool {
+    sheets.iter().filter_map(|plan| plan.origin).any(|origin| {
+        matches!(
+            package.source_sheet_kind(origin),
+            Some(SourceSheetKind::Macrosheet | SourceSheetKind::Other)
+        ) || package
+            .source_cell_facts(origin)
+            .is_some_and(|facts| facts.alternate_formulas)
+    }) || wb
+        .sheets
+        .iter()
+        .any(|sheet| sheet.iter_cells().any(|(_, cell)| cell.formula.is_some()))
 }
 
 /// Patches retained `definedName` elements from the model, which the sheet ops
@@ -2961,6 +2978,7 @@ pub(crate) struct ColRun {
     pub(crate) first: ColId,
     last: ColId,
     width: Option<f64>,
+    hidden_width: Option<f64>,
     style: Option<u32>,
 }
 
@@ -3019,6 +3037,7 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
                 first,
                 last,
                 width,
+                hidden_width: sheet.hidden_col_widths.get(&first).copied(),
                 style,
             }),
         }
@@ -3029,7 +3048,14 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
 pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io::Result<()> {
     let first = (u64::from(run.first) + 1).to_string();
     let last = (u64::from(run.last) + 1).to_string();
-    let width = run.width.map(fmt_num);
+    let hidden = run.width == Some(0.0);
+    let width = run.width.map(|width| {
+        fmt_num(if hidden {
+            run.hidden_width.unwrap_or(width)
+        } else {
+            width
+        })
+    });
     let style = run.style.map(|style| style.to_string());
     let mut element = BytesStart::new("col");
     element.push_attribute(("min", first.as_str()));
@@ -3041,7 +3067,7 @@ pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io
     if let Some(style) = &style {
         element.push_attribute(("style", style.as_str()));
     }
-    if width.as_deref() == Some("0") {
+    if hidden {
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Empty(element))?;
@@ -3071,11 +3097,18 @@ where
         start.push_attribute(("s", style.as_str()));
         start.push_attribute(("customFormat", "1"));
     }
-    let ht = sheet.row_heights.get(&row).map(|h| fmt_num(*h));
+    let hidden = sheet.row_heights.get(&row) == Some(&0.0);
+    let ht = sheet.row_heights.get(&row).map(|h| {
+        fmt_num(if hidden {
+            sheet.hidden_row_heights.get(&row).copied().unwrap_or(*h)
+        } else {
+            *h
+        })
+    });
     if let Some(h) = &ht {
         start.push_attribute(("ht", h.as_str()));
         start.push_attribute(("customHeight", "1"));
-        if h == "0" {
+        if hidden {
             start.push_attribute(("hidden", "1"));
         }
     }
@@ -3274,13 +3307,20 @@ fn patched_pool<T>(
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
     overrides: Option<&HashMap<usize, Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
+    template.require_unwrapped_child(pool_name)?;
+    let pool = template
+        .child(pool_name)
+        .map(|child| XmlTemplate::capture(&child.bytes))
+        .transpose()?;
+    if let Some(pool) = &pool {
+        pool.require_unwrapped_child(item_name)?;
+    }
     if values.is_empty() {
         return Ok(None);
     }
-    let Some(child) = template.child(pool_name) else {
+    let Some(pool) = pool else {
         return write_pool().map(Some);
     };
-    let pool = XmlTemplate::capture(&child.bytes)?;
     let sources = pool.children_named(item_name).collect::<Vec<_>>();
     let mut items = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {

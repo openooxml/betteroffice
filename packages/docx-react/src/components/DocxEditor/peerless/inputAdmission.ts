@@ -6,7 +6,7 @@ import type {
 } from '@betteroffice/docx/peerless';
 import type { YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
-import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessTextIntent } from './inputEvents';
+import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessTextIntent } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 
 /** @internal */
@@ -225,11 +225,15 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   ): PeerlessAdmissionResult => {
     if (disposed) throw new Error('Input admission is disposed');
     const environment = intent.kind === 'setRenderEnvironment' || intent.kind === 'setFontEnvironment';
-    const proposal = intent.kind === 'propose' || intent.kind === 'setProposalStates' || intent.kind === 'withdrawProposals';
     const { source, onSubmitted, hostProposal, ...metadata } = options;
-    if (readOnly() && !environment && (!isSelection(intent) || deletionExtension) && !(proposal && hostProposal)) {
+    const granted = isProposal(intent) && hostProposal === true;
+    if (readOnly() && !environment && (!isSelection(intent) || deletionExtension) && !granted) {
       if (counted) releaseCount();
       return { status: 'ignored', reason: 'read-only' };
+    }
+    if (isProposal(intent)) {
+      const { hostProposal: _grant, ...payload } = intent.payload;
+      intent = { ...intent, payload: granted ? { ...payload, hostProposal: true } : payload } as AdmissionIntent;
     }
     const authored = SUGGESTED[intent.kind] && (intent.kind !== 'navigateCell' || intent.payload.createLastRow === true);
     if (authored && !stamped.has(intent)) {
@@ -470,6 +474,10 @@ function isCollapsed(selection: DocxCommandSelection | null | undefined): boolea
 function requireSelection(selection: DocxCommandSelection | null | undefined): DocxCommandSelection {
   if (!selection) throw new Error('Worker selection is unavailable');
   return selection;
+}
+
+function isProposal(intent: AdmissionIntent): intent is PeerlessProposalIntent {
+  return intent.kind === 'propose' || intent.kind === 'setProposalStates' || intent.kind === 'withdrawProposals';
 }
 
 function isSelection(intent: AdmissionIntent): boolean {
