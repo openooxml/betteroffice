@@ -189,10 +189,10 @@ test('getComments invalidates an old version and accepts a lower version in a ne
   const { controller, viewStore, host } = reviewFixture();
   await controller.setCommentDone(7, true);
   const previous = viewStore.getSnapshot();
-  viewStore.acceptWorkerState(previous.identity, { epoch: 1, version: 10, throughSeq: 2, selection: null, editState });
+  viewStore.acceptWorkerState(previous.identity, { epoch: 1, version: 10, throughSeq: 2, presentedThroughSeq: 0, selection: null, editState });
   expect(controller.ref.getComments()).toEqual(host);
   const identity = { ...previous.identity, incarnation: 2, epoch: 2 };
-  viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, selection: null, editState });
+  viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, presentedThroughSeq: 0, selection: null, editState });
   viewStore.installFrameGeometry({ identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
   expect(controller.ref.getComments()).toEqual(host);
   await controller.query({ kind: 'reviewSnapshot' });
@@ -215,7 +215,7 @@ test('a review refresh from the previous incarnation cannot overwrite getComment
   const pending = controller.query({ kind: 'reviewSnapshot' });
   await started;
   const identity = { session: 's', incarnation: 2, epoch: 2 };
-  viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, selection: null, editState });
+  viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, presentedThroughSeq: 0, selection: null, editState });
   viewStore.installFrameGeometry({ identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
   release();
   await expect(pending).rejects.toThrow('Worker read was superseded');
