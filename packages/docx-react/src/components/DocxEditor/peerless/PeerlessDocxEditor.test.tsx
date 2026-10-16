@@ -440,7 +440,7 @@ test('worker host proposal cards alone leave an uncontrolled sidebar closed', as
 });
 
 test('worker tracked change cards accept and reject through worker review commands', async () => {
-  const h = proposalHost();
+  const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
     bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
   const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
