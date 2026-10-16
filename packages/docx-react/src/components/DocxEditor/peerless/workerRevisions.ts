@@ -55,6 +55,12 @@ export function currentWorkerRevision(state: WorkerRevisionState, selection: Doc
     : (head.paraId === start.paraId && start.offset <= head.offset) || (head.paraId === end.paraId && head.offset <= end.offset)))?.revisionId ?? null;
 }
 
+export function adjacentWorkerRevision(navigation: readonly DocxRevisionEnvironment[], current: string | null, step: 1 | -1): string | null {
+  if (!navigation.length) return null;
+  const index = navigation.findIndex(revision => revision.revisionId === current);
+  return navigation[index < 0 ? step > 0 ? 0 : navigation.length - 1 : (index + step + navigation.length) % navigation.length]!.revisionId;
+}
+
 export function workerRevisionCallbacks(controller: {
   trackedChanges(): WorkerRevisionState | null;
   commands: { store: { execute(id: 'reviewAccept' | 'reviewReject', args: { revisionId: string }): unknown } };

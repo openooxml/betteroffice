@@ -20,12 +20,13 @@ function reviewFixture() {
   const view = fixture.viewStore.getSnapshot();
   fixture.viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: fixture.selection,
     editState: { ...view.editState!, documentVersion: 'native' } });
-  fixture.controller.update({ read: fixture.read as never, readAt: readAt as never, focus() {}, zoom: 1 });
+  const reveal = mock(async (_target: { kind: 'revision'; revisionId: string } | { kind: 'comment'; id: number }) => true);
+  fixture.controller.update({ read: fixture.read as never, readAt: readAt as never, focus() {}, zoom: 1, scrollToReviewTarget: reveal });
   const feed = async () => {
     const reviewRead = await fixture.controller.query({ kind: 'reviewSnapshot' });
     fixture.controller.revisions(reviewRead, await fixture.controller.query({ kind: 'sidebar', commentIds: [], expectVersion: reviewRead.version }));
   };
-  return { ...fixture, feed };
+  return { ...fixture, feed, reveal };
 }
 
 test('worker review commands target the tracked change at the selection', async () => {
@@ -66,4 +67,25 @@ test('worker tracked changes skip host proposals and survive until a newer read 
   controller.empty();
   expect(controller.trackedChanges()).toBeNull();
   expect(controller.environment().revisions).toEqual([]);
+});
+
+test('worker next and previous change reveal the adjacent tracked change with wrap-around', async () => {
+  const { controller, viewStore, parity, reveal, feed } = reviewFixture();
+  expect(controller.commands.store.getState('reviewNext')).toMatchObject({ enabled: false, disabledReason: { code: 'no-revisions' } });
+  await feed();
+  parity('reviewNext');
+  parity('reviewPrevious');
+  const step = async (id: 'reviewNext' | 'reviewPrevious') => {
+    expect(await controller.commands.store.execute(id, null)).toMatchObject({ ok: true, status: 'executed' });
+    return reveal.mock.calls.at(-1)![0];
+  };
+  expect(await step('reviewNext')).toEqual({ kind: 'revision', revisionId: '9' });
+  expect(await step('reviewPrevious')).toEqual({ kind: 'revision', revisionId: '9' });
+  const view = viewStore.getSnapshot();
+  const outside = { anchor: { story: 'body', paraId: 'p9', offset: 0 }, focus: { story: 'body', paraId: 'p9', offset: 0 } };
+  viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: outside });
+  expect(await step('reviewNext')).toEqual({ kind: 'revision', revisionId: '7' });
+  expect(await step('reviewPrevious')).toEqual({ kind: 'revision', revisionId: '9' });
+  reveal.mockImplementationOnce(async () => false);
+  expect(await controller.commands.store.execute('reviewNext', null)).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
 });

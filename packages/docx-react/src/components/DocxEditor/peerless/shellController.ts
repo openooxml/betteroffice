@@ -22,7 +22,7 @@ import type { DocxHostSearch } from '../hooks/useHostSearch';
 import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
-import { currentWorkerRevision, workerRevisions, type WorkerRevisionState } from './workerRevisions';
+import { adjacentWorkerRevision, currentWorkerRevision, workerRevisions, type WorkerRevisionState } from './workerRevisions';
 import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 
 import { PeerlessSyncApiError } from './contracts';
@@ -151,7 +151,7 @@ export function createPeerlessShellController(initial: Options) {
       sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
       supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
-        'reviewAccept', 'reviewReject', ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
+        'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor']),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
@@ -385,6 +385,11 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'reviewAccept' || id === 'reviewReject') {
         const revisionId = (args as DocxCommandArgs['reviewAccept'])?.revisionId ?? env.currentRevisionId;
         return revisionId ? review(id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', revisionId) : { ok: true, status: 'noop' };
+      }
+      if (id === 'reviewNext' || id === 'reviewPrevious') {
+        const revisionId = adjacentWorkerRevision(env.revisions, env.currentRevisionId, id === 'reviewNext' ? 1 : -1);
+        return revisionId && await revealReviewTarget({ kind: 'revision', revisionId }) ? { ok: true, status: 'executed' }
+          : { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } };
       }
       if (id === 'strikethrough') return format({ kind: 'toggleStrike', payload: {} });
       if (id === 'superscript' || id === 'subscript') return format({ kind: 'toggleMark', payload: { mark: { type: id } } });
