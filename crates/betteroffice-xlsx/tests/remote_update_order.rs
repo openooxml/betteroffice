@@ -40,7 +40,10 @@ fn edit(source: &mut Workbook, edits: &[(&str, &str)]) -> Vec<Vec<u8>> {
 }
 
 fn deliver(target: Workbook, updates: &[&Vec<u8>]) -> Workbook {
-    let updates = updates.iter().map(|update| update.to_vec()).collect::<Vec<_>>();
+    let updates = updates
+        .iter()
+        .map(|update| update.to_vec())
+        .collect::<Vec<_>>();
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut target = target;
@@ -67,12 +70,7 @@ fn an_overwrite_that_overtakes_a_cleared_edit_settles_and_converges() {
     let mut other = open(822);
     let updates = edit(
         &mut source,
-        &[
-            ("D1", "one"),
-            ("H20", "two"),
-            ("H20", ""),
-            ("D1", "three"),
-        ],
+        &[("D1", "one"), ("H20", "two"), ("H20", ""), ("D1", "three")],
     );
     let unrelated = edit(&mut other, &[("B30", "other")]);
     source

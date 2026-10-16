@@ -26,8 +26,8 @@ use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encoder, EncoderV1};
 use yrs::{
-    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Options, Origin, Out, ReadTxn,
-    StateVector, Transact, TransactionMut, Update, WriteTxn,
+    Any, Array, ArrayRef, BranchID, Doc, ID, IdSet, Map, MapPrelim, MapRef, Options, Origin, Out,
+    ReadTxn, StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
 #[cfg(test)]
@@ -1410,18 +1410,27 @@ impl WorkbookAuthority {
                 &owned
             }
         };
+        let inserted = incoming.insertions(true);
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, before).map_err(AuthorityError::InvalidState)?;
-        staged_doc
-            .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
-            .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
+        apply_remote(&staged_doc, incoming)?;
+        let held_back = !covers(&staged_doc.transact().state_vector(), &inserted);
+        // Yrs integrates a block whose own predecessors are missing behind a
+        // skip that no state vector reaches, so no diff can commit it: stage
+        // only what the commit carries and keep the update pending.
+        let staged_doc = if held_back {
+            let diff = staged_doc.transact().encode_diff_v1(&before_vector);
+            let carried = decode_local_update_v1(&diff).map_err(AuthorityError::InvalidUpdate)?;
+            let committed = Doc::with_client_id(self.client_id());
+            hydrate_local_doc(&committed, before).map_err(AuthorityError::InvalidState)?;
+            apply_remote(&committed, carried)?;
+            committed
+        } else {
+            staged_doc
+        };
 
         let staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
-        let pending = {
-            let txn = staged.doc.transact();
-            txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
-        };
+        let pending = held_back || has_pending(&staged.doc);
         if let Err(error) = staged.upgrade_schema_from(Some(&self.doc))
             && !pending
         {
@@ -2508,6 +2517,17 @@ fn hydrate_local_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) fn hydrate_snapshot_part(doc: &Doc, update: &[u8]) -> Result<(), String> {
     hydrate_local_doc(doc, update)
+}
+
+fn apply_remote(doc: &Doc, update: Update) -> Result<(), AuthorityError> {
+    doc.transact_mut_with(REMOTE_ORIGIN)
+        .apply_update(update)
+        .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
+}
+
+fn covers(vector: &StateVector, ids: &IdSet) -> bool {
+    ids.iter()
+        .all(|(client, ranges)| ranges.iter().all(|range| range.end <= vector.get(client)))
 }
 
 fn has_pending(doc: &Doc) -> bool {
