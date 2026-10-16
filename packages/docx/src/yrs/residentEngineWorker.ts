@@ -1398,6 +1398,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       throw new Error('Resident commands require a whole opened document');
     }
     if (commandHost) throw new Error('Resident commands are already initialized');
+    session.initializeComments();
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
     const init = { ...request.request };
     if (init.provisionalPages !== undefined &&
