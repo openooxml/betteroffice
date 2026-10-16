@@ -345,6 +345,21 @@ test('add_comment keeps existing comments byte-identical and anchors in body and
   expect(await part(bytes, 'word/styles.xml')).toBe(await part(source, 'word/styles.xml'));
 });
 
+test('add_comment anchors inside a body content control', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>Obsolete remark.</w:t></w:r></w:p>',
+    '<w:sdt><w:sdtPr><w:id w:val="5"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Obsolete remark.</w:t></w:r></w:p></w:sdtContent></w:sdt>'));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const match = hit(doc, 'remark');
+  expect(match.story).not.toBe('body');
+  const { receipt, xml: saved, bytes } = await edited(doc, [{ op: 'add_comment', match: match.match, author: 'Ada', text: 'Inside a control' }]);
+  expect(receipt.results[0]).toMatchObject({ op: 'add_comment', ref: match.ref });
+  const [comment] = comments((await part(bytes, 'word/comments.xml'))!);
+  expect(anchored(saved, comment.id)).toBe('remark');
+  expect(saved.slice(saved.indexOf('<w:sdtContent>'), saved.indexOf('</w:sdtContent>'))).toContain(`<w:commentReference w:id="${comment.id}"/>`);
+});
+
 test('add_comment refusals are atomic: invalid input, stale version, stale match, non-body story', async () => {
   const doc = await open();
   const heading = hit(doc, 'Quarterly report');
@@ -361,6 +376,8 @@ test('add_comment refusals are atomic: invalid input, stale version, stale match
   await refused(version, [comment({ text: 'Tab\there' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ text: 'Line\r\nbreak' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ author: 'Two\nlines' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ text: 'Note\uffff' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ author: 'Ada\ufffe' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ text: '' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ date: '1 October 2026' })], 'INVALID_ARGUMENT');
   await refused(version, [comment({ match: 'm999' })], 'UNKNOWN_MATCH');
