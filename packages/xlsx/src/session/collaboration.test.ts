@@ -1,10 +1,13 @@
 import { beforeAll, expect, test } from 'bun:test';
-import { isHostMessage } from '../../../../shared/office-session/protocol';
+import { isHostMessage, isTransferResult } from '../../../../shared/office-session/protocol';
+import { openWorkbook } from '../wasm/loader';
 import { CollaborationProvider } from '../collaboration/provider';
 import { decodeMessages } from '../collaboration/protocol';
 import type { CollaborationTransport, CollaborationTransportEvent, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { WorkbookSession } from './client';
-import type { WorkbookAck } from './commandProtocol';
+import type { WorkbookAck, WorkbookCommand } from './commandProtocol';
+import { createWorkbookCommandState } from './commandHandlers';
+import { createWorkbookCommandHost } from './commandHost';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
 
 let bytes: Uint8Array;
@@ -275,5 +278,53 @@ test('collaborative worker replicas sync cell merges and undo', async () => {
     for (const provider of providers) provider.destroy();
     await left.dispose();
     await right.dispose();
+  }
+});
+
+test('hyperlink edit limits have the same refusal on the main thread and worker', async () => {
+  const main = openWorkbook(bytes, { collaborative: true, clientId: 501 });
+  const worker = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 502 });
+  const identity = { session: 'hyperlink-limits', incarnation: 'main' };
+  const selected = { sheetId: main.sheetInfo().sheetIds[0], range: { kind: 'a1' as const, a1: 'A1' } };
+  const state = createWorkbookCommandState(identity, { epoch: 1, version: main.version() },
+    selected, main.sheetInfo().sheetIds);
+  const host = createWorkbookCommandHost({ handle: main, state,
+    frame: () => { throw new Error('Unexpected frame'); } });
+  const op = (row: number) => ({
+    type: 'setHyperlink', sheet: 0,
+    hyperlink: { range: { start: { row, col: 25 }, end: { row, col: 25 } }, location: 'Data!A1' },
+  });
+  const sendMain = async (seq: number, ops: unknown[]) => {
+    const reply = await host.command({ ...identity, seq, basis: { epoch: 1, version: main.version() },
+      kind: 'applyOps', payload: { args: [ops] } } as WorkbookCommand);
+    return (isTransferResult(reply) ? reply.value : reply).statuses[0];
+  };
+  const sendWorker = (ops: unknown[]) => worker.editSession!.submit('applyOps', {
+    payload: { args: [ops] },
+  }).ack;
+  try {
+    const fill = Array.from({ length: 4096 }, (_, row) => op(row));
+    expect(await sendMain(1, fill)).toMatchObject({ status: 'applied' });
+    expect(await sendWorker(fill)).toMatchObject({ status: 'applied' });
+    const beforeMain = main.encodeStateAsUpdate();
+    const beforeWorker = await worker.replica!.async.encodeStateAsUpdate();
+    expect(await sendMain(2, [op(4096)]))
+      .toMatchObject({ status: 'refused', reason: 'limit-exceeded', committed: false });
+    expect(await sendWorker([op(4096)]))
+      .toMatchObject({ status: 'refused', reason: 'limit-exceeded', committed: false });
+    expect(main.encodeStateAsUpdate()).toEqual(beforeMain);
+    expect(await worker.replica!.async.encodeStateAsUpdate()).toEqual(beforeWorker);
+    expect(worker.failure).toBeUndefined();
+    expect(await sendMain(3, [{
+      type: 'removeHyperlink', sheet: 0, range: op(0).hyperlink.range,
+    }])).toMatchObject({ status: 'applied' });
+    expect(await sendWorker([{
+      type: 'removeHyperlink', sheet: 0, range: op(0).hyperlink.range,
+    }])).toMatchObject({ status: 'applied' });
+    expect(await sendMain(4, [op(4096)])).toMatchObject({ status: 'applied' });
+    expect(await sendWorker([op(4096)])).toMatchObject({ status: 'applied' });
+  } finally {
+    main.dispose();
+    await worker.dispose();
   }
 });

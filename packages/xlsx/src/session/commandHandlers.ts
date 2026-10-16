@@ -375,7 +375,10 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   }
   if (['applyOps', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'propose', 'acceptProposal'].includes(method ?? '') &&
     error.message === 'number format table is full') return new WorkbookCommandRefusal('limit-exceeded');
-  if (method === 'applyOps' && error.message === 'invalid collaborative workbook state: too many sheet merge edits') {
+  if (method === 'applyOps' && (
+    error.message === 'invalid collaborative workbook state: too many sheet merge edits' ||
+    error.message === 'invalid collaborative workbook state: too many sheet hyperlink edits'
+  )) {
     return new WorkbookCommandRefusal('limit-exceeded');
   }
   if (method === 'applyOps' && (

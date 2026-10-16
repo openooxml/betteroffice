@@ -69,6 +69,8 @@ impl Workbook {
                 Op::RestoreColStyles { .. } => {}
                 Op::SetFreezePane { .. }
                 | Op::SetHyperlinks { .. }
+                | Op::SetHyperlink { .. }
+                | Op::RemoveHyperlink { .. }
                 | Op::SetCharts { .. }
                 | Op::SetChartAnchor { .. }
                 | Op::SetDefinedNames { .. } => {}

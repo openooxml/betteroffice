@@ -9,8 +9,8 @@ use yrs::error::UpdateError;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{IdSet, ReadTxn, TransactionMut, Update};
 
-/// Deletions an open remote integration did not make itself: what its updates carried plus the
-/// deletions yrs held pending before it, which integrating may apply. Set only while it is open.
+/// Deletions carried by peers, caused by integrating their structs, or held pending when
+/// the integration opened.
 #[derive(Clone, Default)]
 pub(crate) struct RemoteDeletions(Arc<Mutex<Option<IdSet>>>);
 
@@ -64,6 +64,16 @@ impl Drop for RemoteIntegration<'_, '_> {
     }
 }
 
+pub(crate) fn apply_staged_update(
+    txn: &mut TransactionMut,
+    update: Update,
+) -> Result<IdSet, UpdateError> {
+    let mut carried = update.delete_set().clone();
+    txn.apply_update(update)?;
+    carried.merge_with(txn.delete_set().clone());
+    Ok(carried)
+}
+
 fn delete_only_update_v1(deletions: &IdSet) -> Vec<u8> {
     let mut encoder = EncoderV1::new();
     encoder.write_var(0_u32);
@@ -74,8 +84,9 @@ fn delete_only_update_v1(deletions: &IdSet) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yrs::types::Attrs;
     use yrs::updates::decoder::Decode;
-    use yrs::{ClientID, Doc, GetString, ID, Options, StateVector, Subscription, Text, Transact};
+    use yrs::{Any, ClientID, Doc, GetString, Options, StateVector, Subscription, Text, Transact};
 
     fn replica(client: u64) -> Doc {
         Doc::with_options(Options::with_client_id(ClientID::new(client)))
@@ -105,10 +116,10 @@ mod tests {
         (subscription, sink)
     }
 
-    fn integrate(doc: &Doc, deletions: &RemoteDeletions, update: &[u8], carried: Option<&IdSet>) {
+    fn integrate(doc: &Doc, deletions: &RemoteDeletions, update: &[u8]) {
         let update = Update::decode_v1(update).unwrap();
         let mut integration = deletions.integrate(doc.transact_mut());
-        integration.carry(carried.unwrap_or(update.delete_set()));
+        integration.carry(update.delete_set());
         integration.apply_update(update).unwrap();
     }
 
@@ -117,35 +128,91 @@ mod tests {
     }
 
     #[test]
-    fn residual_update_deletes_exactly_the_residual() {
+    fn residual_update_deletes_exactly_the_formatting_cleanup() {
         let origin = replica(7);
         edit(&origin, |txn, text| text.insert(txn, 0, "abcd"));
         let state = origin
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        let removal = edit(&origin, |txn, text| text.remove_range(txn, 0, 2));
         let (peer, behind) = (replica(8), replica(9));
         for doc in [&peer, &behind] {
             let state = Update::decode_v1(&state).unwrap();
             doc.transact_mut().apply_update(state).unwrap();
         }
+        let bold = || Attrs::from([(Arc::from("b"), Any::Bool(true))]);
+        let theirs = edit(&origin, |txn, text| text.format(txn, 0, 2, bold()));
+        let ours = edit(&peer, |txn, text| text.format(txn, 0, 2, bold()));
 
         let deletions = RemoteDeletions::default();
         let (_subscription, residuals) = published(&peer, &deletions);
-        let mut carried = IdSet::new();
-        carried.insert(ID::new(ClientID::new(7), 0), 1);
-        integrate(&peer, &deletions, &removal, Some(&carried));
+        let expected = Arc::new(Mutex::new(IdSet::new()));
+        let deleted = Arc::clone(&expected);
+        let _observer = peer
+            .observe_update_v1(move |txn, _| {
+                deleted.lock().unwrap().merge_with(txn.delete_set().clone());
+            })
+            .unwrap();
+        assert!(Update::decode_v1(&theirs).unwrap().delete_set().is_empty());
+        integrate(&peer, &deletions, &theirs);
         assert!(deletions.residual_update_v1(&peer.transact_mut()).is_none());
 
         let residuals = residuals.lock().unwrap().clone();
         assert_eq!(residuals.len(), 1);
         assert_eq!(residuals[0][0], 0, "a residual update carries no structs");
         let residual = Update::decode_v1(&residuals[0]).unwrap();
-        let mut expected = IdSet::new();
-        expected.insert(ID::new(ClientID::new(7), 1), 1);
-        assert!(residual.delete_set() == &expected);
-        behind.transact_mut().apply_update(residual).unwrap();
-        assert_eq!(text(&behind), "acd");
+        assert!(residual.delete_set() == &*expected.lock().unwrap());
+        for update in [&ours, &theirs, &residuals[0]] {
+            let update = Update::decode_v1(update).unwrap();
+            behind.transact_mut().apply_update(update).unwrap();
+        }
+        let encoded = |doc: &Doc| {
+            doc.transact()
+                .encode_state_as_update_v1(&StateVector::default())
+        };
+        assert_eq!(encoded(&behind), encoded(&peer));
+    }
+
+    #[test]
+    fn staged_formatting_cleanup_is_republished() {
+        let origin = replica(7);
+        let state = edit(&origin, |txn, text| text.insert(txn, 0, "abcd"));
+        let peer = replica(8);
+        peer.transact_mut()
+            .apply_update(Update::decode_v1(&state).unwrap())
+            .unwrap();
+        let bold = || Attrs::from([(Arc::from("b"), Any::Bool(true))]);
+        let theirs = edit(&origin, |txn, text| text.format(txn, 0, 2, bold()));
+        edit(&peer, |txn, text| text.format(txn, 0, 2, bold()));
+        let staged = replica(9);
+        let state = peer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        staged
+            .transact_mut()
+            .apply_update(Update::decode_v1(&state).unwrap())
+            .unwrap();
+        let carried = apply_staged_update(
+            &mut staged.transact_mut(),
+            Update::decode_v1(&theirs).unwrap(),
+        )
+        .unwrap();
+        assert!(carried.is_empty());
+        let diff = staged
+            .transact()
+            .encode_state_as_update_v1(&peer.transact().state_vector());
+        let diff = Update::decode_v1(&diff).unwrap();
+        let expected = diff.delete_set().clone();
+        assert!(!expected.is_empty());
+        let deletions = RemoteDeletions::default();
+        let (_subscription, residuals) = published(&peer, &deletions);
+        let mut integration = deletions.integrate(peer.transact_mut());
+        integration.carry(&carried);
+        integration.apply_update(diff).unwrap();
+        drop(integration);
+        let residuals = residuals.lock().unwrap();
+        assert_eq!(residuals.len(), 1);
+        assert_eq!(residuals[0][0], 0);
+        assert!(Update::decode_v1(&residuals[0]).unwrap().delete_set() == &expected);
     }
 
     #[test]
@@ -157,9 +224,9 @@ mod tests {
         let deletions = RemoteDeletions::default();
         let (_subscription, residuals) = published(&peer, &deletions);
 
-        integrate(&peer, &deletions, &delete, None);
+        integrate(&peer, &deletions, &delete);
         assert!(ReadTxn::store(&peer.transact()).pending_ds().is_some());
-        integrate(&peer, &deletions, &insert, None);
+        integrate(&peer, &deletions, &insert);
 
         assert_eq!(text(&peer), "acd");
         assert!(residuals.lock().unwrap().is_empty());
@@ -177,9 +244,9 @@ mod tests {
         let deletions = RemoteDeletions::default();
         let (_subscription, residuals) = published(&peer, &deletions);
 
-        integrate(&peer, &deletions, &second, None);
+        integrate(&peer, &deletions, &second);
         assert!(ReadTxn::store(&peer.transact()).pending_update().is_some());
-        integrate(&peer, &deletions, &first, None);
+        integrate(&peer, &deletions, &first);
 
         assert_eq!(text(&peer), "abd");
         assert!(residuals.lock().unwrap().is_empty());

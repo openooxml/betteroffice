@@ -52,10 +52,12 @@
 #[cfg(test)]
 extern crate self as docx_edit;
 
+use std::cell::RefCell;
 #[cfg(feature = "wasm")]
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -617,6 +619,28 @@ struct TableMembership {
     cells: std::collections::HashSet<String>,
 }
 
+type CommitHookFn = Box<dyn Fn(&yrs::TransactionMut)>;
+
+#[derive(Default)]
+struct CommitHooks {
+    next_id: u64,
+    hooks: Vec<(u64, CommitHookFn)>,
+}
+
+/// Unregisters its commit hook when dropped.
+pub(crate) struct CommitHook {
+    hooks: Weak<RefCell<CommitHooks>>,
+    id: u64,
+}
+
+impl Drop for CommitHook {
+    fn drop(&mut self) {
+        if let Some(hooks) = self.hooks.upgrade() {
+            hooks.borrow_mut().hooks.retain(|(id, _)| *id != self.id);
+        }
+    }
+}
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -650,6 +674,8 @@ pub struct EditingDoc {
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
     remote_deletions: remote_cleanup::RemoteDeletions,
+    keeps_deleted: Arc<AtomicBool>,
+    commit_hooks: Rc<RefCell<CommitHooks>>,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
     _seen_subs: Vec<Subscription>,
@@ -658,8 +684,14 @@ pub struct EditingDoc {
 impl EditingDoc {
     /// Creates a browser-compatible replica. All public positions use UTF-16 offsets.
     pub fn new(client_id: u64) -> Self {
+        Self::build(client_id, false)
+    }
+
+    fn build(client_id: u64, keeps_deleted: bool) -> Self {
         let mut options = Options::with_client_id(ClientID::new(client_id));
         options.offset_kind = OffsetKind::Utf16;
+        // yrs fixes GC at construction; the observer below collects until `keep_deleted`.
+        options.skip_gc = true;
         let doc = Doc::with_options(options);
         // Root shared types are schema declarations; their contents are still changed only in the
         // explicit transactions below.
@@ -673,11 +705,24 @@ impl EditingDoc {
         doc.get_or_insert_map(identity::SESSION);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
-        // after_transaction: bumps on any store-changing commit without encoding an update.
+        let keeps_deleted = Arc::new(AtomicBool::new(keeps_deleted));
+        let keeping = Arc::clone(&keeps_deleted);
+        let commit_hooks = Rc::new(RefCell::new(CommitHooks::default()));
+        let hooks = Rc::clone(&commit_hooks);
+        // The doc's only after_transaction observer, since yrs runs those in no fixed order: bumps
+        // on any store-changing commit without encoding an update, runs the commit hooks in
+        // registration order, then collects last, where yrs would.
         let update_sub = doc
             .observe_after_transaction(move |txn| {
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
                     observed.fetch_add(1, Ordering::Relaxed);
+                }
+                for (_, hook) in &hooks.borrow().hooks {
+                    hook(txn);
+                }
+                if !keeping.load(Ordering::Relaxed) && !txn.delete_set().is_empty() {
+                    let deleted = txn.delete_set().clone();
+                    txn.gc(Some(&deleted));
                 }
             })
             .expect("a fresh doc accepts an update observer");
@@ -715,10 +760,43 @@ impl EditingDoc {
             scan_cache: identity::ScanCache::default(),
             story_revisions,
             remote_deletions: remote_cleanup::RemoteDeletions::default(),
+            keeps_deleted,
+            commit_hooks,
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
             _seen_subs: seen_subs,
         }
+    }
+
+    /// Runs `hook` after every commit, in registration order and before the commit's deleted
+    /// content is collected, until the returned handle drops.
+    pub(crate) fn observe_commit(
+        &self,
+        hook: impl Fn(&yrs::TransactionMut) + 'static,
+    ) -> CommitHook {
+        let mut hooks = self.commit_hooks.borrow_mut();
+        let id = hooks.next_id;
+        hooks.next_id += 1;
+        hooks.hooks.push((id, Box::new(hook)));
+        CommitHook {
+            hooks: Rc::downgrade(&self.commit_hooks),
+            id,
+        }
+    }
+
+    /// Whether this replica keeps deleted content instead of collecting it.
+    pub(crate) fn keeps_deleted(&self) -> bool {
+        self.keeps_deleted.load(Ordering::Relaxed)
+    }
+
+    /// Stops collecting deleted content for the rest of this replica's life. Clearing an undo
+    /// manager's redo stack unkeeps the parents of deleted items its undo stack still keeps, so
+    /// collecting such a parent would free what those items point to. Collection runs in an
+    /// `after_transaction` callback that yrs orders arbitrarily against callbacks added through
+    /// [`Self::yrs_doc`], so a raw yrs `UndoManager` or `after_transaction` observer may see a
+    /// transaction's deletions already collected unless this is called before it attaches.
+    pub fn keep_deleted(&self) {
+        self.keeps_deleted.store(true, Ordering::Relaxed);
     }
 
     #[doc(hidden)]
@@ -1193,7 +1271,9 @@ impl EditingDoc {
         index
     }
 
-    /// Low-level access for the transport, awareness, and undo bridges.
+    /// Low-level access for the transport, awareness, and undo bridges. Attach undo through
+    /// [`Self::undo_manager`] or [`crate::UndoSession::track`], or call [`Self::keep_deleted`]
+    /// before attaching a raw yrs `UndoManager` or `after_transaction` observer here.
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
     }
@@ -1772,10 +1852,11 @@ impl EditingDoc {
 
     /// A private replica of `state`, this document's committed state, that allocates identities
     /// as this document would: the same client id and key counter, the retained source index,
-    /// and every key and Word paragraph ID this replica has seen, deleted ones included. What
-    /// the fork allocates stays its own until its update is adopted.
+    /// and every key and Word paragraph ID this replica has seen, deleted ones included. It keeps
+    /// deleted content when this replica does. What the fork allocates stays its own until its
+    /// update is adopted.
     pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
-        let fork = Self::new(self.client_id);
+        let fork = Self::build(self.client_id, self.keeps_deleted());
         fork.apply_verbatim_v1(state)?;
         fork.id_counter
             .store(self.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -2040,6 +2121,79 @@ mod tests {
     use yrs::types::ToJson;
 
     const DATE: &str = "2026-07-13T12:00:00Z";
+
+    #[test]
+    fn replicas_without_undo_collect_what_yrs_gc_collects() {
+        use yrs::WriteTxn;
+
+        let replica = EditingDoc::new(7);
+        let mut options = Options::with_client_id(ClientID::new(7));
+        options.offset_kind = OffsetKind::Utf16;
+        let collected = Doc::with_options(options);
+        let state = |doc: &Doc| {
+            doc.transact()
+                .encode_state_as_update_v1(&StateVector::default())
+        };
+        let streams = [replica.yrs_doc(), &collected].map(|doc| {
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&sent);
+            let sub = doc
+                .observe_update_v1(move |_, event| sink.lock().unwrap().push(event.update.clone()))
+                .unwrap();
+            (sent, sub)
+        });
+        let each = |edit: &dyn Fn(&mut yrs::TransactionMut)| {
+            for doc in [replica.yrs_doc(), &collected] {
+                edit(&mut doc.transact_mut());
+            }
+            assert_eq!(state(replica.yrs_doc()), state(&collected));
+            let [sent, expected] = &streams;
+            assert_eq!(*sent.0.lock().unwrap(), *expected.0.lock().unwrap());
+        };
+        let text = |txn: &yrs::TransactionMut, key: &str| -> TextRef {
+            txn.get_map("gc")
+                .unwrap()
+                .get(txn, key)
+                .unwrap()
+                .cast()
+                .unwrap()
+        };
+        each(&|txn| {
+            let root = txn.get_or_insert_map("gc");
+            root.insert(txn, "a", TextPrelim::new("Alpha beta gamma"));
+            root.insert(txn, "b", TextPrelim::new("Delta"));
+        });
+        each(&|txn| text(txn, "a").remove_range(txn, 0, 6));
+        each(&|txn| {
+            let italic = HashMap::from([("italic".into(), Any::Bool(true))]);
+            text(txn, "a").format(txn, 0, 4, italic);
+        });
+        each(&|txn| {
+            let a = text(txn, "a");
+            a.insert(txn, 0, "Zeta ");
+            a.remove_range(txn, 1, 3);
+            let root = txn.get_map("gc").unwrap();
+            root.insert(txn, "c", TextPrelim::new("Eta"));
+            root.remove(txn, "c");
+        });
+        each(&|txn| {
+            txn.get_map("gc").unwrap().remove(txn, "b");
+        });
+        let peer = Doc::with_client_id(8);
+        peer.transact_mut()
+            .apply_update(Update::decode_v1(&state(&collected)).unwrap())
+            .unwrap();
+        let known = collected.transact().state_vector();
+        {
+            let mut txn = peer.transact_mut();
+            text(&txn, "a").remove_range(&mut txn, 2, 3);
+        }
+        let diff = peer.transact().encode_state_as_update_v1(&known);
+        each(&|txn| {
+            txn.apply_update(Update::decode_v1(&diff).unwrap()).unwrap();
+        });
+        assert_eq!(streams[0].0.lock().unwrap().len(), 6);
+    }
 
     fn local(author: &str) -> EditCtx {
         EditCtx::local(author, DATE)

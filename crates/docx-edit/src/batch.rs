@@ -2787,7 +2787,7 @@ impl EditingDoc {
         {
             let direct_len =
                 if matches!(capture, Capture::Direct) && direct_admissible(self, &txn, &steps) {
-                    deterministic::fork_state_len_v1(&txn)
+                    deterministic::fork_state_len_v1(&txn, self.keeps_deleted())
                 } else {
                     None
                 };
@@ -3247,8 +3247,9 @@ fn validate_stage(
     Ok(())
 }
 
-/// Integrates the staged update into an untouched copy of the base and checks it reproduces the
-/// staged stories; adoption then cannot meet a failure the rehearsal did not.
+/// Integrates the staged update into an untouched copy of the base, in the stage's GC mode, and
+/// checks it reproduces the staged stories; adoption then cannot meet a failure the rehearsal did
+/// not.
 fn rehearse(
     client_id: u64,
     base: &[u8],
@@ -3256,7 +3257,7 @@ fn rehearse(
     stage: &EditingDoc,
     changed_stories: &[String],
 ) -> EditResult<()> {
-    let rehearsal = EditingDoc::new(client_id);
+    let rehearsal = EditingDoc::build(client_id, stage.keeps_deleted());
     rehearsal.apply_verbatim_v1(base)?;
     rehearsal.apply_verbatim_v1(update)?;
     let pending = {
@@ -3540,7 +3541,7 @@ mod direct_tests {
         assert_eq!(base, replica.encode_state_as_update_v1());
         let n = base.len();
         assert_eq!(
-            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false),
             Some(n)
         );
         direct.set_direct_batches(true);
@@ -4093,7 +4094,7 @@ mod direct_tests {
             );
         });
         assert_eq!(
-            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false),
             None
         );
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
@@ -4111,7 +4112,7 @@ mod direct_tests {
                 ],
             );
         });
-        assert!(deterministic::fork_state_len_v1(&direct.yrs_doc().transact()).is_some());
+        assert!(deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false).is_some());
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
         assert_replica_fallback_docs(
             direct,
@@ -4136,7 +4137,7 @@ mod direct_tests {
     }
 
     #[test]
-    fn retained_deleted_text_uses_replica_path() {
+    fn retained_deleted_text_takes_the_direct_path() {
         let [direct, replica] = seeded_pair(&["ABX", "C"], |_| {});
         let histories = [&direct, &replica].map(|doc| {
             let history = doc.undo_manager();
@@ -4151,17 +4152,115 @@ mod direct_tests {
         });
         assert_eq!(histories[0].undo_depth(), 1);
         assert_eq!(
-            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false),
             None
         );
+        assert!(deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), true).is_some());
+        direct.set_direct_batches(true);
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
-        assert_replica_fallback_docs(
-            direct,
-            replica,
-            vec![EditStep::new(EditOperation::DeleteText {
-                target: TextTarget::Range(text_range("body", &paragraph, 1, &paragraph, 2)),
-            })],
+        let step = delete_in(&paragraph, 1, 2);
+        let steps = [BatchStep::Edit(&step)];
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        assert!(a.applied);
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(direct.direct_batches_applied(), 1);
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
         );
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
+    }
+
+    #[test]
+    fn kept_deleted_content_takes_the_direct_path() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Track {
+            BeforeLoad,
+            AfterRemote,
+            Never,
+        }
+        let ctx = EditCtx::local("User", DATE);
+        let seed = EditingDoc::new(9002);
+        let _seed_history = seed.undo_manager();
+        let paragraphs =
+            ["Alpha beta", "Gamma delta", "Epsilon zeta"].map(|text| crate::SeedParagraph {
+                text: text.to_owned(),
+                p_style: "Normal".to_owned(),
+                alignment: "left".to_owned(),
+            });
+        seed.seed_story("body", &paragraphs).unwrap();
+        seed.delete_range(&ctx, StoryRange::new("body", 0, 6))
+            .unwrap();
+        let state = seed.encode_state_as_update_v1();
+        let peer = EditingDoc::new(9003);
+        peer.apply_update_v1(&state).unwrap();
+        peer.delete_range(&ctx, StoryRange::new("body", 5, 11))
+            .unwrap();
+        let remote = peer.encode_diff_v1(&seed.encode_state_vector_v1()).unwrap();
+        let arm = |track: Track| {
+            let doc = EditingDoc::new(9001);
+            let history = UndoSession::new();
+            if track == Track::BeforeLoad {
+                history.track(&doc);
+            }
+            doc.apply_update_v1(&state).unwrap();
+            doc.apply_update_v1(&remote).unwrap();
+            if track == Track::AfterRemote {
+                history.track(&doc);
+            }
+            doc.delete_range(&ctx, StoryRange::new("body", 11, 19))
+                .unwrap();
+            (doc, history)
+        };
+        for track in [Track::BeforeLoad, Track::AfterRemote, Track::Never] {
+            for (paragraph, start, end, text) in
+                [(0, 0, 4, "BETA"), (1, 0, 0, "new "), (2, 0, 4, "")]
+            {
+                let [(direct, direct_history), (replica, replica_history)] = [track; 2].map(&arm);
+                let id = direct.paragraphs("body").unwrap()[paragraph]
+                    .para_id
+                    .clone();
+                let target = TextTarget::Range(text_range("body", &id, start, &id, end));
+                let text = text.to_owned();
+                let step = EditStep::new(if start == end {
+                    EditOperation::InsertText {
+                        target,
+                        at: TargetEdge::Start,
+                        text,
+                    }
+                } else if text.is_empty() {
+                    EditOperation::DeleteText { target }
+                } else {
+                    EditOperation::ReplaceText { target, text }
+                });
+                direct.set_direct_batches(true);
+                let steps = [BatchStep::Edit(&step)];
+                let a =
+                    apply_text_steps(&direct, &steps, &direct_history, MAX_STAGING_BYTES).unwrap();
+                let b = apply_text_steps(&replica, &steps, &replica_history, MAX_STAGING_BYTES)
+                    .unwrap();
+                assert!(a.applied);
+                assert_eq!(
+                    direct.direct_batches_applied(),
+                    1,
+                    "paragraph {paragraph}, {track:?}"
+                );
+                assert_eq!(normalized(&a), normalized(&b));
+                assert_eq!(
+                    direct.encode_state_vector_v1(),
+                    replica.encode_state_vector_v1()
+                );
+                assert_eq!(
+                    direct.encode_state_as_update_v1(),
+                    replica.encode_state_as_update_v1()
+                );
+                assert_eq!(raw_export(&direct), raw_export(&replica));
+            }
+        }
     }
 
     #[test]

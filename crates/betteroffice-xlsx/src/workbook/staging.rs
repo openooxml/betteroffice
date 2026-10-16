@@ -114,7 +114,9 @@ impl Workbook {
             .map_err(authority_error)?;
         self.install_model_with_ops(model, &ops)?;
         if let Some(structure) = new_structure {
-            self.mode = WorkbookMode::Collaborative { structure };
+            self.mode = WorkbookMode::Collaborative {
+                structure: Box::new(structure),
+            };
         }
         self.update_sheet_info_cache(&ops, &prior_styles);
         if !collaborative && recorded {

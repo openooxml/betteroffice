@@ -184,6 +184,7 @@ export type {
   HistoryState,
   HorizontalAlignment,
   MergedRange,
+  WorkbookHyperlink,
   NumberFormat,
   NumberFormatMutation,
   Proposal,

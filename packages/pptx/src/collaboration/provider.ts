@@ -8,9 +8,8 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
-  isStateVector,
-  stateVectorDominates,
-  withClientClockAhead,
+  parseSyncRequest,
+  withOpenSyncRequest,
   withoutDocumentFingerprint,
 } from './protocol';
 import {
@@ -461,12 +460,10 @@ export class CollaborationProvider {
     this.replicaResult(token, attempt, () => this.replica.encodeStateVector(), (value) => {
       try {
         const stateVector = requireBytes(value, 'encodeStateVector');
-        const ahead = isStateVector(stateVector)
-          ? withClientClockAhead(stateVector, this.localClientId)
-          : stateVector;
-        this.sendFrame(encodeSyncStep1(ahead ?? stateVector, this.maxFrameBytes));
+        const marked = withOpenSyncRequest(stateVector);
+        this.sendFrame(encodeSyncStep1(marked ?? stateVector, this.maxFrameBytes));
         if (!this.isCurrent(token) || !this.isOpen) return;
-        if (!ahead) this.sendFullUpdate(token, attempt);
+        if (!marked) this.sendFullUpdate(token, attempt);
         if (!this.isCurrent(token) || !this.isOpen) return;
         this.startPresenceTimers();
         this.broadcastLocalPresence(false);
@@ -549,35 +546,22 @@ export class CollaborationProvider {
   }
 
   private answerSyncStep1(token: number, attempt: number, remoteStateVector: Uint8Array): void | Promise<void> {
+    const request = parseSyncRequest(remoteStateVector);
     const answered = this.replicaResult(token, attempt,
-      () => this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
+      () => this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(request.stateVector).slice()),
       (value) => {
         try { this.sendFrame(encodeSyncStep2(requireBytes(value, 'encodeStateAsUpdate'), this.maxFrameBytes)); }
         catch (cause) { this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause)); }
       });
-    const request = () => {
+    if (!request.open) return answered;
+    const reverse = () => {
       if (!this.isCurrent(token) || !this.isOpen || this.connectAttempt !== attempt) return;
       return this.replicaResult(token, attempt, () => this.replica.encodeStateVector(), (value) => {
-        try {
-          const stateVector = requireBytes(value, 'encodeStateVector');
-          if (this.missesRemoteState(stateVector, remoteStateVector)) {
-            this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
-          }
-        } catch (cause) {
-          this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause));
-        }
+        try { this.sendFrame(encodeSyncStep1(requireBytes(value, 'encodeStateVector'), this.maxFrameBytes)); }
+        catch (cause) { this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause)); }
       });
     };
-    return answered instanceof Promise ? answered.then(request) : request();
-  }
-
-  private missesRemoteState(stateVector: Uint8Array, remoteStateVector: Uint8Array): boolean {
-    try {
-      return !stateVectorDominates(stateVector, remoteStateVector);
-    } catch (cause) {
-      this.report(normalizeError('protocol', 'Invalid state vector', cause));
-      return false;
-    }
+    return answered instanceof Promise ? answered.then(reverse) : reverse();
   }
 
   private enqueueMessage(token: number, data: Uint8Array): void {
