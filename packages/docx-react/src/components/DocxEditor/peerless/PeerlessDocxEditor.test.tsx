@@ -1863,14 +1863,15 @@ test('viewing mode initializes worker read-only and internal mode changes use it
 
 test('viewing mode reports read-only to worker plugins', async () => {
   let context: DocxPluginContext<null> | undefined;
-  const events: { mode: string; readOnly: boolean }[] = [];
+  const events: { mode: string; readOnly: boolean; snapshot: boolean }[] = [];
   const plugin = defineDocxPlugin({ id: 'mode-check', createState: () => null, initialize: (value) => { context = value; },
-    onEvent(_context, event) { if (event.type === 'mode-change') events.push({ mode: event.mode, readOnly: event.readOnly }); } });
+    onEvent(value, event) {
+      if (event.type === 'mode-change') events.push({ mode: event.mode, readOnly: event.readOnly, snapshot: value.snapshot.readOnly });
+    } });
   const view = render(<DocxEditor {...peerlessProps} mode="viewing" plugins={[plugin]} />);
   await waitFor(() => expect(context?.snapshot).toMatchObject({ mode: 'viewing', readOnly: true }));
   view.rerender(<DocxEditor {...peerlessProps} mode="editing" plugins={[plugin]} />);
-  await waitFor(() => expect(events.at(-1)).toEqual({ mode: 'editing', readOnly: false }));
-  expect(context!.snapshot.readOnly).toBe(false);
+  await waitFor(() => expect(events.at(-1)).toEqual({ mode: 'editing', readOnly: false, snapshot: false }));
 });
 
 test('suggesting shell edits carry the current host author', async () => {
