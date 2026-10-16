@@ -21,10 +21,10 @@ use xlsx_model::{
 use crate::ParseError;
 use crate::axis::SheetAxes;
 use crate::package::{
-    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
-    XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
-    parse_relationships, relationship_part_path, relationships_by_id, remove_attribute,
-    set_attribute,
+    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship,
+    SourceSheetKind, XmlAttribute, XmlTemplate, attributes_from_fragment, effective_content_type,
+    normalized_part_name, parse_relationships, relationship_part_path, relationships_by_id,
+    remove_attribute, set_attribute,
 };
 use crate::patch::{
     SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
@@ -2091,7 +2091,7 @@ fn workbook_xml_with_template(
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
-    let calc_pr = if edited {
+    let calc_pr = if edited && holds_formulas(wb, package, sheets) {
         let mut attributes = package.calc_pr_attributes.clone().unwrap_or_default();
         set_attribute(
             &mut attributes,
@@ -2132,6 +2132,20 @@ fn workbook_xml_with_template(
         }
     }
     template.render(replacements, workbook_child_rank)
+}
+
+/// Whether the saved workbook holds a formula. Only worksheet cells are
+/// modeled, so a macrosheet or an unknown sheet kind counts as holding one.
+fn holds_formulas(wb: &Workbook, package: &PreservedPackage, sheets: &[PlannedSheet]) -> bool {
+    sheets.iter().filter_map(|plan| plan.origin).any(|origin| {
+        matches!(
+            package.source_sheet_kind(origin),
+            Some(SourceSheetKind::Macrosheet | SourceSheetKind::Other)
+        )
+    }) || wb
+        .sheets
+        .iter()
+        .any(|sheet| sheet.iter_cells().any(|(_, cell)| cell.formula.is_some()))
 }
 
 /// Patches retained `definedName` elements from the model, which the sheet ops
