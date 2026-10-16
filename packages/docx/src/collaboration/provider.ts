@@ -46,7 +46,6 @@ import {
 import { asyncReplicaFor } from './asyncReplica';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
-const DEFAULT_SYNC_CHUNK_BYTES = 1024 * 1024;
 const DEFAULT_MAX_SYNC_BYTES = 64 * 1024 * 1024;
 /** Upper bound for `maxPendingBytes` and `maxSyncBytes`. */
 const MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
@@ -195,7 +194,7 @@ export class CollaborationProvider {
   private readonly maxFrameBytes: number;
   private readonly maxMessagesPerFrame: number;
   private readonly maxPendingBytes: number;
-  private readonly syncChunkBytes: number;
+  private readonly syncChunkBytes: number | undefined;
   private readonly maxSyncBytes: number;
   private syncHeld: Uint8Array[] | null = null;
   private syncHeldBytes = 0;
@@ -256,12 +255,9 @@ export class CollaborationProvider {
       true,
       MAX_BUFFERED_BYTES
     );
-    this.syncChunkBytes = validateLimit(
-      'syncChunkBytes',
-      options.syncChunkBytes ?? Math.min(DEFAULT_SYNC_CHUNK_BYTES, this.maxFrameBytes),
-      false,
-      this.maxFrameBytes
-    );
+    this.syncChunkBytes = options.syncChunkBytes === undefined
+      ? undefined
+      : validateLimit('syncChunkBytes', options.syncChunkBytes, false, this.maxFrameBytes);
     this.maxSyncBytes = validateLimit(
       'maxSyncBytes',
       options.maxSyncBytes ?? DEFAULT_MAX_SYNC_BYTES,
@@ -833,19 +829,24 @@ export class CollaborationProvider {
   }
 
   /**
-   * Chunks only for a peer whose SyncStep1 asks for it: that peer holds the chunks and applies them as one change. A
-   * peer applying them one at a time would run its repairs on partial states.
+   * Chunks only when `syncChunkBytes` is set and the SyncStep1 asks for it: that peer holds the chunks and applies them
+   * as one change. A peer applying them one at a time, such as another peer in a room, would run its repairs on
+   * partial states.
    */
   private chunksAnswer(
     remoteStateVector: Uint8Array,
     replica: Pick<CollaborationReplica | AsyncCollaborationReplica, 'encodeStateAsUpdateChunks'>
   ): boolean {
-    return typeof replica.encodeStateAsUpdateChunks === 'function' && requestsChunkedSync(remoteStateVector);
+    return (
+      this.syncChunkBytes !== undefined &&
+      typeof replica.encodeStateAsUpdateChunks === 'function' &&
+      requestsChunkedSync(remoteStateVector)
+    );
   }
 
   /** Largest update a chunked sync answer may carry: `syncChunkBytes`, within one frame. */
   private syncChunkLimit(): number {
-    return Math.max(1, Math.min(this.syncChunkBytes, maxSyncPayloadBytes(this.maxFrameBytes)));
+    return Math.max(1, Math.min(this.syncChunkBytes!, maxSyncPayloadBytes(this.maxFrameBytes)));
   }
 
   /**

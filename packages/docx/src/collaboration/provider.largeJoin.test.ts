@@ -70,7 +70,10 @@ function replicaOf(session: YrsSession, atomic = true): { replica: Collaboration
   return { replica, applied };
 }
 
-/** Opens the source first, so only the joiner's SyncStep1 is answered: the joiner receives the source's state. */
+/**
+ * Opens the source first, so only the joiner's SyncStep1 is answered: the joiner receives the source's state. The pair
+ * is point-to-point, so the source chunks its answer at 1 MiB.
+ */
 function join(
   source: CollaborationReplica,
   joiner: CollaborationReplica,
@@ -80,7 +83,7 @@ function join(
   const joinerTransport = new LoopbackTransport();
   sourceTransport.peer = joinerTransport;
   joinerTransport.peer = sourceTransport;
-  const sourceProvider = new CollaborationProvider(source, sourceTransport);
+  const sourceProvider = new CollaborationProvider(source, sourceTransport, { syncChunkBytes: MiB });
   const joinerProvider = new CollaborationProvider(joiner, joinerTransport, options);
   const errors: CollaborationError[] = [];
   sourceProvider.onError((error) => errors.push(error));
