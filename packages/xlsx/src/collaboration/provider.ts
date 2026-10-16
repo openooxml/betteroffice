@@ -108,7 +108,6 @@ export class CollaborationProvider {
   private replicaTail: Promise<void> = Promise.resolve();
   private replicaBytes = 0;
   private openEpoch = 0;
-  private requestedStateVectors: Uint8Array[] = [];
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
   private readonly maxMessagesPerFrame: number;
@@ -493,7 +492,6 @@ export class CollaborationProvider {
     const connection = ++this.openEpoch;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
-    this.requestedStateVectors = [];
     this.isOpen = true;
     this.hasPublishedAwarenessForOpen = false;
     this.clearPending();
@@ -662,7 +660,6 @@ export class CollaborationProvider {
     this.openEpoch += 1;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
-    this.requestedStateVectors = [];
   }
 
   private publishDeleteSet(token: number, connection: number, stateVector: Uint8Array): void {
@@ -776,10 +773,7 @@ export class CollaborationProvider {
   ): void {
     let missing: boolean;
     try {
-      this.requestedStateVectors = this.requestedStateVectors
-        .filter((target) => !stateVectorDominates(stateVector, target));
-      missing = !stateVectorDominates(stateVector, remoteStateVector) &&
-        !this.requestedStateVectors.some((target) => stateVectorDominates(target, remoteStateVector));
+      missing = !stateVectorDominates(stateVector, remoteStateVector);
     } catch (cause) {
       this.report(normalizeError('protocol', 'Invalid state vector', cause));
       return;
@@ -792,9 +786,7 @@ export class CollaborationProvider {
         token,
         normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
       );
-      return;
     }
-    this.requestedStateVectors.push(remoteStateVector.slice());
   }
 
   private applyRemoteUpdate(token: number, update: Uint8Array): boolean {

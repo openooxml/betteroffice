@@ -137,7 +137,6 @@ export class CollaborationProvider {
   private incomingBusy = false;
   private asyncReplica = false;
   private incomingGeneration = 0;
-  private requestedStateVectors: Uint8Array[] = [];
   private isFlushing = false;
   private localClock = 0;
   private reportedClockExhaustion = false;
@@ -429,7 +428,6 @@ export class CollaborationProvider {
       case 'close':
         this.isOpen = false;
         this.connectAttempt += 1;
-        this.requestedStateVectors = [];
         this.stopPresenceTimers();
         this.clearPending();
         this.clearRemotePresence();
@@ -455,7 +453,6 @@ export class CollaborationProvider {
   private handleOpen(token: number): void {
     if (this.isOpen) return;
     this.isOpen = true;
-    this.requestedStateVectors = [];
     this.clearPending();
     this.setStatus('connected', false);
     if (!this.isCurrent(token) || !this.isOpen) return;
@@ -569,7 +566,6 @@ export class CollaborationProvider {
           const stateVector = requireBytes(value, 'encodeStateVector');
           if (this.missesRemoteState(stateVector, remoteStateVector)) {
             this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
-            this.requestedStateVectors.push(remoteStateVector.slice());
           }
         } catch (cause) {
           this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause));
@@ -581,10 +577,7 @@ export class CollaborationProvider {
 
   private missesRemoteState(stateVector: Uint8Array, remoteStateVector: Uint8Array): boolean {
     try {
-      this.requestedStateVectors = this.requestedStateVectors
-        .filter((target) => !stateVectorDominates(stateVector, target));
-      return !stateVectorDominates(stateVector, remoteStateVector) &&
-        !this.requestedStateVectors.some((target) => stateVectorDominates(target, remoteStateVector));
+      return !stateVectorDominates(stateVector, remoteStateVector);
     } catch (cause) {
       this.report(normalizeError('protocol', 'Invalid state vector', cause));
       return false;
