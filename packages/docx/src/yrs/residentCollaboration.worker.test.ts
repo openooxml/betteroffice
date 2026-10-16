@@ -352,6 +352,26 @@ test('ordinary typing behind an unacknowledged merge resolves through sticky pos
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
 
+test('ordinary typing behind a merge that deletes its selection story is refused', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const table = remote.insertTable({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 0 }, 1, 1);
+    await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack;
+    const story = table.createdStoryIds[0]!;
+    const at = { story, paraId: a.engine.paragraphs(story)[0]!.paraId, offset: 0 };
+    await a.session.submit('select', { selection: { anchor: at, focus: at } }).ack;
+    remote.deleteTable(table.table);
+    const merged = a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge);
+    const typing = a.session.submit('insertText', { text: 'misplaced' });
+    expect((await merged.ack).status).toBe('applied');
+    expect(await typing.ack).toMatchObject({ status: 'refused', reason: 'stale-anchor' });
+    expect(a.engine.paragraphs('body').map(p => p.text)).toEqual(['Seed', 'Second']);
+    expect((await a.session.submit('insertText', { text: 'fresh' }).ack).status).toBe('applied');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
 test('input behind an unacknowledged local edit or expecting its version is still refused across a merge', async () => {
   const a = await open(9201);
   const remote = await createYrsSession({ clientId: 9203 });

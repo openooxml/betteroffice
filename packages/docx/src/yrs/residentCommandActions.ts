@@ -1122,11 +1122,16 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
     afterRemoteMerge: (context) => {
       state.proposals?.reconcile();
       const run = state.remoteMerges;
-      state.remoteMerges = { from: run?.to === context.currentVersion ? run.from : context.currentVersion, to: context.currentVersion + 1 };
       const storedMarks = state.storedMarks;
-      const live = state.selection !== null && readCommandSelection(engine, state).ok;
+      const resolved = state.selection ? readCommandSelection(engine, state) : null;
       repairCommandSelection(engine, state);
-      if (live) state.storedMarks = storedMarks;
+      const survived = resolved?.ok && sameSelection(state.selection, resolved.selection);
+      state.remoteMerges = survived
+        ? { from: run?.to === context.currentVersion ? run.from : context.currentVersion, to: context.currentVersion + 1 }
+        : undefined;
+      state.storedMarks = survived && storedMarks && state.selection && sameSelection({ anchor: state.selection.anchor, focus: state.selection.anchor }, state.selection)
+        ? { ...storedMarks, story: state.selection.focus.story, paraId: state.selection.focus.paraId }
+        : null;
     },
     selection: () => projected().selection,
     editState: () => projected().editState,
