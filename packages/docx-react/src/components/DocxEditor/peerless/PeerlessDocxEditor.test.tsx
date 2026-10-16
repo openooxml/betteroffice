@@ -251,7 +251,8 @@ function commandFrame(epoch: number, base = 0): DocxCommandFrame {
   return {
     coversThroughSeq: epoch - 1, revision: epoch,
     ...(base ? { baseRevision: base } : {}),
-    payload: { frame: bytes.buffer, caret: { frameEpoch: epoch, caretRect: null }, layoutRevision: epoch },
+    payload: { frame: bytes.buffer, caret: { frameEpoch: epoch, caretRect: null }, layoutRevision: epoch,
+      stagedPresentation: { frameEpoch: epoch, pages: [] } },
   };
 }
 

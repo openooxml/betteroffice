@@ -458,7 +458,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return { frame, layoutRevision };
     },
   });
-  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
+  const changes: NonNullable<typeof commandFrameChanges> = {
+    pages: new Set<number>(), updates: [], layoutPreviewVersion, layoutStale: init.recoveryState !== undefined,
+  };
   const hooks = collaboration?.wrap(baseHooks) ?? baseHooks;
   commandFrameChanges = changes;
   const prefixNavigation = {
