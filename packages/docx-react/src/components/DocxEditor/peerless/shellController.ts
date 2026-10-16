@@ -711,7 +711,7 @@ export function createPeerlessShellController(initial: Options) {
       const request = options.layoutRequest?.() ?? null;
       if (request === null) return { ok: false, version: current.viewStore.getSnapshot().editState?.documentVersion ?? '',
         failure: { code: 'layout-unavailable', target: null, message: 'The fonts this document uses are not loaded yet.' } };
-      const value = await read({ kind: 'exportStructuredWithPages', options: config, currentRequest: request });
+      const value = await read({ kind: 'exportStructuredWithPages', options: config, currentRequest: request, workerFonts: true });
       assertCurrent();
       return JSON.parse(value) as WorkerPageExportResult;
     };

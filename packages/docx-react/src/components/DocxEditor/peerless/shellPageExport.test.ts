@@ -27,14 +27,15 @@ function documentBytes() {
   ])));
 }
 
-async function fixture(readOnly = false) {
+async function fixture(readOnly = false, commandFonts = false) {
   const port = startWorker();
   const client = new ResidentEngineWorkerClient(port);
   const bytes = documentBytes();
   const opened = await client.open(bytes);
   const resident = port.sessions[0]!;
   const document = decodeDocxHostJson(opened.hostJson, bytes).document;
-  const font = resident.registerFont(new Uint8Array(readFileSync(resolve(ROOT, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'))));
+  const fontBytes = new Uint8Array(readFileSync(resolve(ROOT, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')));
+  const font = resident.registerFont(fontBytes);
   const layout = buildResidentRegionLayoutRequest(document, 24, {});
   const requirements = JSON.parse(resident.layoutFontRequirementsJson(JSON.stringify(layout))) as { key: string }[];
   layout.measurement = { fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [font]])),
@@ -42,13 +43,21 @@ async function fixture(readOnly = false) {
   const request = JSON.stringify(layout);
   const relayout = () => resident.layoutDocumentWithRegionsRetainedJson(request);
   relayout();
+  if (commandFonts) await client.commandInit({
+    session: 'page-export', incarnation: 1, epoch: 1, readOnly,
+    fonts: [fontBytes, { substituteOf: 0, family: 'Times New Roman' }],
+    fontRegistrationSlots: { fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [1]])) },
+    layoutInput: request, layoutWithRegions: true, layoutRevision: 1, extras: '{}', provisionalPages: 3, displayWindow: [0, 3],
+  });
   const viewStore = createPeerlessViewStore({ identity: { session: 'worker', incarnation: 1, epoch: 1 },
     version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, geometry: null, editState: undefined });
+  if (commandFonts) viewStore.installFrameGeometry({ identity: viewStore.getSnapshot().identity, coversThroughSeq: 0,
+    frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
   const binding = { viewStore, admission: {}, session: { flush: async () => {} } } as unknown as PeerlessEditSessionBinding;
   const settings = { read: client.documentRead.bind(client), layoutRequest: () => request, zoom: 1, readOnly, focus() {} };
   const controller = createPeerlessShellController(settings);
   controller.attach(binding);
-  return { controller, binding, resident, relayout, request, settings, viewStore,
+  return { controller, binding, resident, relayout, request, settings, viewStore, client,
     close: async () => { controller.dispose(); client.destroy(); } };
 }
 
@@ -109,5 +118,23 @@ test('paged worker export waits for the layout already in progress', async () =>
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.failure.message);
     expect(result.content.layout.pages).toHaveLength(2);
+  } finally { await h.close(); }
+});
+
+test('paged worker export uses worker font registrations while still checking the render environment', async () => {
+  const h = await fixture(true, true);
+  const options = { revisionView: 'markup' as const, stories: ['body' as const] };
+  try {
+    const strict = JSON.parse((await h.client.documentRead({ kind: 'exportStructuredWithPages', options, currentRequest: h.request })).value);
+    expect(strict).toMatchObject({ ok: false, failure: { code: 'stale-layout' } });
+    const result = await h.controller.ref.exportStructuredWithPages(options);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.failure.message);
+    expect(result.content.layout.pages).toHaveLength(2);
+    const input = JSON.parse(h.request);
+    input.renderEnv = { ...input.renderEnv, showHiddenText: true };
+    h.controller.update({ ...h.settings, layoutRequest: () => JSON.stringify(input) });
+    expect(await h.controller.ref.exportStructuredWithPages({ ...options, expectLayoutVersion: result.content.layout.layoutVersion }))
+      .toMatchObject({ ok: false, failure: { code: 'stale-layout' } });
   } finally { await h.close(); }
 });

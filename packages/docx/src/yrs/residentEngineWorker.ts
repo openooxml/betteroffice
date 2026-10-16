@@ -1966,13 +1966,25 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'sectionProperties':
         value = session.sectionProperties();
         break;
-      case 'exportStructuredWithPages':
+      case 'exportStructuredWithPages': {
         if (commandLayout?.complete()) postCommandFrame(0);
+        let currentRequest = request.read.currentRequest;
+        if (request.read.workerFonts === true && commandInit?.layoutWithRegions) {
+          try {
+            const input = JSON.parse(currentRequest);
+            const owned = JSON.parse(commandInit.layoutInput);
+            if (input?.measurement && typeof input.measurement === 'object' && !Array.isArray(input.measurement) && owned.measurement?.fontChains) {
+              input.measurement = { ...input.measurement, fontChains: owned.measurement.fontChains };
+              currentRequest = JSON.stringify(input);
+            }
+          } catch {}
+        }
         value = session.exportStructuredWithPagesJson(
           request.read.options,
-          resolveLayoutReservationInput(session, request.read.currentRequest)
+          resolveLayoutReservationInput(session, currentRequest)
         );
         break;
+      }
       case 'listContentControls':
         value = session.listContentControls(request.read.options);
         break;
