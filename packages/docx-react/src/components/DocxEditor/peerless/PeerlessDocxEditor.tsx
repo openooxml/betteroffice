@@ -271,7 +271,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     requestedRenderEnvironment: string;
     barrier?: Ticket;
   } | null>(null);
-  const [loaded, setLoaded] = useState<{ input: DocxInput; source: Uint8Array } | null>(null);
+  const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
+  const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
   const reportError = useCallback((error: Error) => { controller.fail(error); errorHandler.current?.(error); }, [controller]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
@@ -282,19 +283,19 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (parsedDocument) return { ...parsedDocument };
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
-    return loaded && loaded.input === documentBuffer ? new Uint8Array(loaded.source) : null;
-  }, [documentBuffer, parsedDocument, loaded, replaced ? replacement : null]);
+    return loaded?.generation === sourceGeneration ? loaded.source : null;
+  }, [documentBuffer, parsedDocument, sourceGeneration, loaded]);
 
   useEffect(() => {
     if (!documentBuffer || documentBuffer instanceof Uint8Array || documentBuffer instanceof ArrayBuffer) return;
     let current = true;
     void toArrayBuffer(documentBuffer).then((buffer) => {
-      if (current) setLoaded({ input: documentBuffer, source: new Uint8Array(buffer) });
+      if (current) setLoaded({ generation: sourceGeneration, source: new Uint8Array(buffer) });
     }, (error: unknown) => {
       if (current) reportError(error instanceof Error ? error : new Error(String(error)));
     });
     return () => { current = false; };
-  }, [documentBuffer, reportError]);
+  }, [documentBuffer, sourceGeneration, reportError]);
 
   const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection> => {
     signal.throwIfAborted();
@@ -721,8 +722,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => {
     active.current = null;
     setPreviewJob(null);
-    if (hasSource) controller.opening(source ?? (replaced ? replacement : documentBuffer ?? parsedDocument)); else controller.empty();
-  }, [controller, source, documentBuffer, parsedDocument, hasSource]);
+    if (hasSource) controller.opening(sourceGeneration); else controller.empty();
+  }, [controller, sourceGeneration, source, hasSource]);
   useEffect(() => {
     const request = loadRequest.current;
     if (!request) return;

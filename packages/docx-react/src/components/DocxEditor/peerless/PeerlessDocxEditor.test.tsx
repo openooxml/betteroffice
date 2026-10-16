@@ -1883,3 +1883,32 @@ test('loading the same parsed prop document reopens exactly once for every load'
   }
   view.unmount();
 });
+
+
+test('each file load waits for its own bytes and opens one worker when revisiting a source', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const file = new Blob([source]);
+  const view = render(<DocxEditor documentBuffer={file} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  let pending!: Promise<void>;
+  act(() => { pending = ref.current!.loadDocumentBuffer(Uint8Array.of(8, 9)); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await pending;
+  let finish!: (bytes: ArrayBuffer) => void;
+  const read = spyOn(file, 'arrayBuffer').mockImplementationOnce(() => new Promise<ArrayBuffer>(resolve => { finish = resolve; }));
+  restorers.push(() => read.mockRestore());
+  act(() => { pending = ref.current!.loadDocumentBuffer(file); });
+  void pending.catch(() => {});
+  try {
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    expect(workers).toHaveLength(2);
+    act(() => { finish(new Uint8Array(source).buffer); });
+    await waitFor(() => expect(workers).toHaveLength(3));
+    await pending;
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(3);
+    act(() => { pending = ref.current!.loadDocumentBuffer(file); });
+    await waitFor(() => expect(workers).toHaveLength(4));
+    await pending;
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(4);
+  } finally { finish?.(new Uint8Array(source).buffer); view.unmount(); }
+});
