@@ -191,3 +191,21 @@ test('an incarnation replaced during a pending cut cannot receive the old operat
   expect(f.submit).not.toHaveBeenCalled();
   f.prefetch.dispose();
 });
+
+
+test('a pending cut cannot adopt a selection changed while its read is in flight', async () => {
+  const f = fixture();
+  let finish!: (slice: DocxClipboardSlice) => void;
+  f.readClipboardSlice.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.publish({ workerSelection: range });
+  const writeNative = mock(() => true);
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true, cut: true,
+    readCapture: () => f.prefetch.read(), writeNative, write: denied, writeSlice: denied });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  f.publish({ workerSelection: { ...range, focus: { ...range.focus, offset: 5 } } });
+  finish({ text: 'bcd', fragment: null });
+  await expect(copied).rejects.toThrow('Selection read was superseded');
+  expect(writeNative).not.toHaveBeenCalled();
+  expect(f.submit).not.toHaveBeenCalled();
+  f.prefetch.dispose();
+});
