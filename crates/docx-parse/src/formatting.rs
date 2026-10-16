@@ -1556,6 +1556,14 @@ mod tests {
             "<w:pPr><w:bidi/><w:adjustRightInd w:val=\"0\"/><w:snapToGrid/></w:pPr>"
         );
         assert_eq!(save(&off), off);
+        let spaced = save(
+            r#"<w:pPr><w:autoSpaceDE w:val="0"/><w:autoSpaceDN/><w:bidi/><w:adjustRightInd w:val="0"/><w:snapToGrid w:val="0"/><w:spacing w:after="200"/><w:ind w:left="720"/></w:pPr>"#,
+        );
+        assert_eq!(
+            spaced,
+            "<w:pPr><w:autoSpaceDE w:val=\"0\"/><w:autoSpaceDN/><w:bidi/><w:adjustRightInd w:val=\"0\"/><w:snapToGrid w:val=\"0\"/><w:spacing w:after=\"200\"/><w:ind w:left=\"720\"/></w:pPr>"
+        );
+        assert_eq!(save(&spaced), spaced);
         let bare = save(r#"<w:pPr><w:adjustRightInd/></w:pPr>"#);
         assert_eq!(bare, "<w:pPr><w:adjustRightInd/></w:pPr>");
         let absent = save(r#"<w:pPr><w:bidi/></w:pPr>"#);
