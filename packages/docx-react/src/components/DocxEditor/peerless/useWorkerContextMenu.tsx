@@ -3,7 +3,7 @@ import { IMAGE_LAYOUT_OPTIONS, type ImageLayoutTarget } from '@betteroffice/docx
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { TextContextMenu, type TextContextAction, type TextContextMenuItem } from '../../TextContextMenu';
-import type { DocxCommandEnvironment } from '../../../commands/evaluate';
+import { evaluateDocxCommand, type DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandStore } from '../../../commands/types';
 import { normalizeInputEvent } from './inputEvents';
 import { admitInputIntents } from './inputAdmission';
@@ -13,6 +13,21 @@ import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+
+const IMAGE_WRAP_TARGETS: ReadonlySet<string> = new Set<ImageLayoutTarget>([
+  ...IMAGE_LAYOUT_OPTIONS.map(option => option.choice),
+  'square',
+  'tight',
+  'through',
+]);
+
+function isImageWrapTarget(value: string): value is ImageLayoutTarget {
+  return IMAGE_WRAP_TARGETS.has(value);
+}
+
+function isBodyStory(story: string | undefined): boolean {
+  return story === undefined || story === 'body' || story.startsWith('body:');
+}
 
 async function readClipboardFragment(): Promise<DocxClipboardFragment | null> {
   if (typeof navigator === 'undefined' || !navigator.clipboard || !('read' in navigator.clipboard)) return null;
@@ -48,7 +63,7 @@ export function useWorkerContextMenu(options: {
   const [menu, setMenu] = useState<{
     binding: PeerlessEditSessionBinding; snapshot: ReturnType<PeerlessEditSessionBinding['viewStore']['getSnapshot']>;
     position: { x: number; y: number };
-    object?: { kind: 'image' | 'cell'; handle: string; version: string; x: number; y: number; width: number; height: number };
+    object?: { kind: 'image' | 'cell'; handle: string; version: string; story?: string; x: number; y: number; width: number; height: number };
   } | null>(null);
   const [dialog, setDialog] = useState<{ menu: NonNullable<typeof menu>; action: 'resizeImage' | 'moveImage' | 'resizeColumn' } | null>(null);
   const close = useCallback(() => setMenu(null), []);
@@ -71,7 +86,7 @@ export function useWorkerContextMenu(options: {
         const found = objects.objects.find(target => target.kind === kind && target.rects.some(rect => rect.pageIndex === page.page.pageIndex &&
           x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height));
         const rect = found?.rects.find(rect => rect.pageIndex === page.page.pageIndex && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height);
-        if (found && rect) { object = { kind, handle: found.handle, version: objects.version, x: rect.x, y: rect.y, width: rect.width, height: rect.height }; break; }
+        if (found && rect) { object = { kind, handle: found.handle, version: objects.version, story: found.story, x: rect.x, y: rect.y, width: rect.width, height: rect.height }; break; }
       }
     }
     setMenu({ binding, snapshot, object, position: { x: event.clientX, y: event.clientY } });
@@ -81,6 +96,17 @@ export function useWorkerContextMenu(options: {
     selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset);
   const readOnly = options.environment().readOnly || options.environment().mode === 'viewing';
   const t = options.environment().translate;
+  const evaluateWrap = (wrap: ImageLayoutTarget, target = menu?.object) => {
+    const env = options.environment();
+    const currentSelection = options.binding()?.viewStore.getSnapshot().workerSelection ?? selection;
+    const bodyStory =
+      env.bodyStory !== false &&
+      isBodyStory(target?.story) &&
+      isBodyStory(selection?.focus.story) &&
+      isBodyStory(currentSelection?.focus.story);
+    const image = env.image ?? (target?.kind === 'image' ? { wrap: null } : null);
+    return evaluateDocxCommand('imageWrap', { wrap }, { ...env, bodyStory, image });
+  };
   const items: TextContextMenuItem[] = [
     { action: 'copy', label: t('contextMenu.copy'), disabled: !hasSelection },
     ...readOnly ? [] : [
@@ -96,6 +122,7 @@ export function useWorkerContextMenu(options: {
         ...IMAGE_LAYOUT_OPTIONS.map(option => ({
           action: `wrap:${option.choice}` as const,
           label: t(`imageWrap.menu.${option.i18nLabelKey}` as TranslationKey),
+          disabled: !evaluateWrap(option.choice).enabled,
         })),
         { action: 'resizeImage', label: 'Resize image' },
         { action: 'moveImage', label: 'Move image', dividerAfter: true },
@@ -113,14 +140,16 @@ export function useWorkerContextMenu(options: {
     if (!menu) return;
     if (action.startsWith('wrap:') && menu.object?.kind === 'image') {
       const handle = menu.object.handle;
-      const wrap = action.slice(5) as ImageLayoutTarget;
+      const wrap = action.slice(5);
       close();
+      if (!isImageWrapTarget(wrap)) return;
       try {
         const current = options.binding();
         const latest = current?.viewStore.getSnapshot();
         if (current !== menu.binding || latest?.version !== menu.snapshot.version ||
           JSON.stringify(latest.identity) !== JSON.stringify(menu.snapshot.identity)) throw new Error('Context menu target changed');
-        if (options.environment().readOnly || options.environment().mode !== 'editing') throw new Error('Document is not editable');
+        const state = evaluateWrap(wrap, menu.object);
+        if (!state.enabled) throw new Error(state.disabledReason.message);
         await options.onWrapImage?.(handle, wrap);
       } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); }
       return;

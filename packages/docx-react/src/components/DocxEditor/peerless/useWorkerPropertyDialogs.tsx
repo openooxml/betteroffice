@@ -30,10 +30,10 @@ export function buildImageWrapPatch(currentAttrs: Readonly<Record<string, unknow
     cssFloat: next.cssFloat ?? null,
     wrapText: next.wrapText ?? null,
     position: next.position ?? null,
-    distTop: next.distTop ?? null,
-    distBottom: next.distBottom ?? null,
-    distLeft: next.distLeft ?? null,
-    distRight: next.distRight ?? null,
+    ...('distTop' in next ? { distTop: next.distTop ?? null } : {}),
+    ...('distBottom' in next ? { distBottom: next.distBottom ?? null } : {}),
+    ...('distLeft' in next ? { distLeft: next.distLeft ?? null } : {}),
+    ...('distRight' in next ? { distRight: next.distRight ?? null } : {}),
   };
 }
 
