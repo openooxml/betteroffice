@@ -684,7 +684,7 @@ export class CollaborationProvider {
           }
           frame.remaining += 1;
           const held = message.type === 'sync-step-2' ? this.takeSyncHeld() : [];
-          const owed = message.type === 'sync-step-1' && this.syncHeld !== null &&
+          const owed = message.type === 'sync-step-1' && this.defersSyncRequest() &&
             parseSyncRequest(message.stateVector).open;
           if (owed) this.syncRequestOwed = true;
           this.enqueueReplicaMessages(token, frame, [message], held, owed);
@@ -878,8 +878,17 @@ export class CollaborationProvider {
     }
     this.sendSyncAnswer(token, updates, () => this.isCurrentOpen(token, connection));
     if (!request.open || !this.isCurrentOpen(token, connection)) return;
-    if (this.syncHeld) this.syncRequestOwed = true;
+    if (this.defersSyncRequest()) this.syncRequestOwed = true;
     else this.sendSyncRequest(token);
+  }
+
+  /**
+   * Whether the SyncStep1 owed to an opening peer waits for the held join to merge. Only a provider that chunks its
+   * answers waits; one that does not asks at once with its current state vector, so a first joiner whose open nobody
+   * answered still gets the SyncStep2 that ends its hold.
+   */
+  private defersSyncRequest(): boolean {
+    return this.syncHeld !== null && this.syncChunkBytes !== undefined;
   }
 
   /**
@@ -894,7 +903,14 @@ export class CollaborationProvider {
 
   private async sendWorkerSyncRequest(token: number, connection: number): Promise<void> {
     const vector = requireBytes(await this.asyncReplica!.encodeStateVector(), 'encodeStateVector');
-    if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep1(vector, this.maxFrameBytes));
+    if (this.isCurrentOpen(token, connection)) {
+      this.sendFrame(encodeSyncStep1(this.syncRequestVector(vector), this.maxFrameBytes));
+    }
+  }
+
+  /** A SyncStep1 sent while holding asks for chunks: the held join takes them with its SyncStep2 as one change. */
+  private syncRequestVector(stateVector: Uint8Array): Uint8Array {
+    return this.syncHeld ? withSyncRequest(stateVector, { chunked: true }) : stateVector;
   }
 
   private sendSyncRequest(token: number): void {
@@ -909,7 +925,7 @@ export class CollaborationProvider {
       return;
     }
     try {
-      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+      this.sendFrame(encodeSyncStep1(this.syncRequestVector(stateVector), this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(
         token,

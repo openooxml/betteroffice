@@ -119,6 +119,8 @@ async function peer(kind: 'sync' | 'async', clientId: number, paragraphs = 0) {
 }
 
 const bodyText = (session: YrsSession) => session.paragraphs('body').map((paragraph) => paragraph.text).join('\n');
+const requests = (frames: Uint8Array[]) =>
+  frames.flatMap((frame) => decodeMessages(frame)).filter((message) => message.type === 'sync-step-1').length;
 
 for (const kind of ['sync', 'async'] as const) {
   describe(`${kind} replicas opening a point-to-point link at once`, () => {
@@ -139,6 +141,7 @@ for (const kind of ['sync', 'async'] as const) {
         net.open();
         await settle();
         await net.deliver(1);
+        expect(requests(net.sent)).toBe(2);
         await net.deliver(0);
         expect(errors).toEqual([]);
 
@@ -151,8 +154,39 @@ for (const kind of ['sync', 'async'] as const) {
         await net.deliver(1, undefined, 1);
         expect(joiner.applied.syncs).toEqual([held + 1]);
         expect(await net.drain()).toBe(0);
+        expect(requests(net.sent)).toBe(4);
         expect(errors).toEqual([]);
         expect(net.sent.map((frame) => frame.byteLength).filter((bytes) => bytes > options.maxFrameBytes)).toEqual([]);
+        expect(providers.map((provider) => provider.synced)).toEqual([true, true]);
+        expect([...joiner.session.encodeStateVector()]).toEqual([...source.session.encodeStateVector()]);
+        expect(bodyText(joiner.session) === bodyText(source.session)).toBe(true);
+      } finally {
+        for (const provider of providers) provider.destroy();
+        source.session.destroy();
+        joiner.session.destroy();
+      }
+    });
+
+    it('join a large replica in chunks when only the answerer chunks, every frame within the limit', async () => {
+      const source = await peer(kind, 401, 1024);
+      const joiner = await peer(kind, 402);
+      const net = link();
+      const providers = [
+        new CollaborationProvider(source.replica, net.transports[0], options),
+        new CollaborationProvider(joiner.replica, net.transports[1], { maxFrameBytes: options.maxFrameBytes }),
+      ];
+      const errors: string[] = [];
+      for (const provider of providers) {
+        provider.onError((error) => { errors.push(error.message); });
+        provider.connect();
+      }
+      try {
+        net.open();
+        await settle();
+        expect(await net.drain()).toBe(0);
+        expect(errors).toEqual([]);
+        expect(net.sent.map((frame) => frame.byteLength).filter((bytes) => bytes > options.maxFrameBytes)).toEqual([]);
+        expect(joiner.applied.syncs).toHaveLength(1);
         expect(providers.map((provider) => provider.synced)).toEqual([true, true]);
         expect([...joiner.session.encodeStateVector()]).toEqual([...source.session.encodeStateVector()]);
         expect(bodyText(joiner.session) === bodyText(source.session)).toBe(true);

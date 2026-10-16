@@ -502,6 +502,24 @@ describe('CollaborationProvider held initial sync', () => {
     expect(errors).toEqual([]);
   });
 
+  it('asks back for chunks while holding, and applies a chunk landing after the hold once', () => {
+    const replica = new ChunkReplica();
+    const { transport, errors } = open(replica);
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    expect(sent(transport)).toEqual([
+      { type: 'sync-step-2', update: replica.whole },
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+    ]);
+    transport.receive(encodeUpdate(Uint8Array.of(9)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    transport.receive(encodeUpdate(Uint8Array.of(1)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0, 2)));
+    expect(replica.syncs).toEqual([[Uint8Array.of(9), Uint8Array.of(0)]]);
+    expect(replica.applied).toEqual([Uint8Array.of(1), Uint8Array.of(0, 2)]);
+    expect(sent(transport).filter((message) => message.type === 'sync-step-1')).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
   it('applies updates on arrival for a replica without applyUpdateChunks', () => {
     const replica = new ChunkReplica();
     const { provider, transport } = open(plainReplica(replica));
@@ -629,6 +647,28 @@ describe('CollaborationProvider chunked sync with async replicas', () => {
     await settle();
     expect(sent(transport).slice(3)).toEqual([{ type: 'sync-step-2', update: new Uint8Array(64) }]);
     expect(replica.answers).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+
+  it('asks back for chunks while holding, and merges a chunk landing after the hold once', async () => {
+    const { replica, transport, errors } = await openAsync();
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    expect(sent(transport)).toEqual([
+      { type: 'sync-step-2', update: new Uint8Array(64) },
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+    ]);
+    transport.receive(encodeUpdate(Uint8Array.of(9)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    await settle();
+    replica.syncs[0].result.resolve(undefined);
+    await settle();
+    transport.receive(encodeUpdate(Uint8Array.of(1)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0, 2)));
+    await settle();
+    expect(replica.syncs.map((sync) => sync.updates)).toEqual([[Uint8Array.of(9), Uint8Array.of(0)]]);
+    expect(replica.merges).toEqual([Uint8Array.of(1), Uint8Array.of(0, 2)]);
+    expect(sent(transport).filter((message) => message.type === 'sync-step-1')).toHaveLength(1);
     expect(errors).toEqual([]);
   });
 
