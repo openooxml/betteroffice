@@ -147,9 +147,9 @@ test('worker borders preserve sides and saved shared edges', async ({ page }, in
   const input = await open(page);
   await borderPreset(page, 'No borders');
   let saved = await savedTable(page, info, 'single-none');
-  expect(saved.cells[0]).toEqual({ top: 'none/0/000000', bottom: 'none/0/000000', left: 'none/0/000000', right: 'none/0/000000' });
-  expect(saved.cells[1]).toEqual({ left: 'none/0/000000' });
-  expect(saved.cells[2]).toEqual({ top: 'none/0/000000' });
+  expect(saved.cells[0]).toEqual({ top: 'none/null/null', bottom: 'none/null/null', left: 'none/null/null', right: 'none/null/null' });
+  expect(saved.cells[1]).toEqual({ left: 'none/null/null' });
+  expect(saved.cells[2]).toEqual({ top: 'none/null/null' });
   expect(saved.cells[3]).toEqual({});
   expect(saved.tblBorders).toBe(6);
   expect(saved.tblStyle).toBe('TableGrid');
@@ -158,10 +158,10 @@ test('worker borders preserve sides and saved shared edges', async ({ page }, in
   await borderPreset(page, 'No borders');
   saved = await savedTable(page, info, 'none');
   for (const cell of saved.cells) {
-    expect(cell.top).toBe('none/0/000000');
-    expect(cell.bottom).toBe('none/0/000000');
-    expect(cell.left).toBe('none/0/000000');
-    expect(cell.right).toBe('none/0/000000');
+    expect(cell.top).toBe('none/null/null');
+    expect(cell.bottom).toBe('none/null/null');
+    expect(cell.left).toBe('none/null/null');
+    expect(cell.right).toBe('none/null/null');
   }
   expect(saved.tblBorders).toBe(6);
   expect(saved.tblStyle).toBe('TableGrid');
