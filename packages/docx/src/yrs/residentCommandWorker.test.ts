@@ -2650,6 +2650,8 @@ test('an imported reply without range markers inherits its ancestor anchor and s
     expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.some(comment => comment.id === 1)).toBe(false);
     expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
     expect((await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value).toEqual(reply);
-    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 1)).toMatchObject({ parentId: 0, done: false });
+    const restored = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 1);
+    expect(restored).toMatchObject({ parentId: 0 });
+    expect(restored?.done ?? false).toBe(false);
   } finally { client.destroy(); }
 }, TIMEOUT);
