@@ -39,7 +39,8 @@ export function projectResidentComments(engine: ResidentEngineSession, aliases: 
     const parentId = parentOf(comment);
     return [{ ...original, ...(comment.author ? { author: comment.author } : {}), ...(comment.date ? { date: comment.date } : {}),
       ...(comment.body == null ? {} : { content: commentContent(comment.body, original.content) }),
-      ...(comment.done && !original.done ? { done: true, ...(original.status === undefined ? {} : { status: 'resolved' as const }) } : {}),
+      ...(comment.done === (original.done ?? false) ? {} : { done: comment.done,
+        ...(original.status === undefined ? {} : { status: comment.done ? 'resolved' as const : 'active' as const }) }),
       ...(parentId === undefined ? {} : { parentId }) }];
   });
   const sourceIds = new Set(source.map(comment => comment.id));

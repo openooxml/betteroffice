@@ -203,10 +203,10 @@ export function createPeerlessShellController(initial: Options) {
   };
   const read = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<ResidentDocumentReadValues[K]> => {
     const current = await flush();
-    const version = current.viewStore.getSnapshot().version;
+    const view = current.viewStore.getSnapshot();
     const result = await options.read<K>(request);
     if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
-    if (version !== current.viewStore.getSnapshot().version) throw new WorkerReadSupersededError('Worker read was superseded');
+    if (view.version !== current.viewStore.getSnapshot().version || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity)) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const readAt = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }, token: string): Promise<ResidentDocumentReadValues[K]> => {
@@ -236,7 +236,7 @@ export function createPeerlessShellController(initial: Options) {
         if (binding !== current) throw new Error('Document was replaced');
         if (!reviewMatches(current.viewStore.getSnapshot(), value)) continue;
         reviewBinding = current; reviewIdentity = { ...current.viewStore.getSnapshot().identity }; reviewValue = value;
-        rememberComments(current, current.viewStore.getSnapshot().version, value.uiComments); publish();
+        rememberComments(current, current.viewStore.getSnapshot(), value.uiComments); publish();
         if (reviewMatches(current.viewStore.getSnapshot(), value)) return value;
       }
       throw new Error('Review snapshot timed out');
@@ -328,7 +328,7 @@ export function createPeerlessShellController(initial: Options) {
     if (current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
     const value = await readAt<K>(request, native.version);
     if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
-    if (request.kind === 'reviewSnapshot') rememberComments(current, view.version, (value as ResidentDocumentReadValues['reviewSnapshot'])?.uiComments);
+    if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as ResidentDocumentReadValues['reviewSnapshot'])?.uiComments);
     const result = { version: native.version, value, selection: structuredClone(view.workerSelection) };
     queryOrigins.set(result, { binding: current, identity: view.identity, version: view.version });
     return result;
@@ -476,10 +476,20 @@ export function createPeerlessShellController(initial: Options) {
   const batchResults = new Map<number, DocxEditResult>();
   const commentResults = new Map<number, { id?: number; comments: Comment[] }>();
   let commentTail: Promise<unknown> = Promise.resolve();
-  let commentList: { binding: PeerlessEditSessionBinding; version: number; comments: Comment[] } | null = null;
-  const rememberComments = (current: PeerlessEditSessionBinding, version: number, comments: Comment[] | undefined) => {
-    if (!comments || current !== binding || (commentList?.binding === current && commentList.version > version)) return;
-    commentList = { binding: current, version, comments };
+  let commentList: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; comments: Comment[] } | null = null;
+  const commentsMatch = (view: PeerlessViewSnapshot) => commentList?.binding === binding &&
+    sameIdentity(commentList.identity, view.identity) && commentList.version === view.version;
+  const rememberComments = (current: PeerlessEditSessionBinding, view: PeerlessViewSnapshot, comments: Comment[] | undefined) => {
+    const latest = current.viewStore.getSnapshot();
+    if (!comments || current !== binding || !sameIdentity(view.identity, latest.identity) || view.version !== latest.version) return;
+    if (commentList?.binding === current && sameIdentity(commentList.identity, view.identity) && commentList.version > view.version) return;
+    commentList = { binding: current, identity: { ...view.identity }, version: view.version, comments };
+  };
+  const flushComments = async () => {
+    const current = ready();
+    await commentTail;
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    return flush();
   };
   const commentRound = <T>(refused: () => T, operation: (current: PeerlessEditSessionBinding) => Promise<T>, failed: (error: Error) => T = refused): Promise<T> => {
     const origin = binding;
@@ -542,7 +552,7 @@ export function createPeerlessShellController(initial: Options) {
   const removeComment = (commentId: number) =>
     changeComment(commentId, (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }));
   const getComments = (): Comment[] => snapshot.status !== 'ready' ? [] :
-    structuredClone(commentList?.binding === binding ? commentList.comments : options.comments?.() ?? []);
+    structuredClone(snapshot.view && commentsMatch(snapshot.view) ? commentList!.comments : options.comments?.() ?? []);
   /** Selects a comment's or revision's first anchored range and scrolls it into view; false when it does not exist. */
   const revealReviewTarget = (target: ResidentReviewTarget): Promise<boolean> =>
     options.scrollToReviewTarget?.(target) ?? Promise.resolve(false);
@@ -610,7 +620,7 @@ export function createPeerlessShellController(initial: Options) {
       waits.add(check);
       check();
     }),
-    flushPendingInput: async () => { await flush(); },
+    flushPendingInput: async () => { await flushComments(); },
     readParagraphs: (request) => read({ kind: 'readParagraphs', request }),
     getParagraphIdentities: () => read({ kind: 'paragraphIdentities' }),
     resolveParagraphAnchors: async (anchors) => {
@@ -636,7 +646,7 @@ export function createPeerlessShellController(initial: Options) {
     findParagraphs: (query, config) => read({ kind: 'findParagraphs', query, ...config }),
     listContentControls: (config) => read({ kind: 'listContentControls', options: config ?? {} }),
     findContentControls: (query, config) => read({ kind: 'findContentControls', query, options: config ?? {} }),
-    save: async () => { const current = await flush(); const result = await options.save?.();
+    save: async () => { const current = await flushComments(); const result = await options.save?.();
       if (current !== binding) throw new Error('Document was replaced'); if (result) options.onSave?.(result); return result ?? null; },
     loadDocumentBuffer: (buffer) => options.loadBuffer?.(buffer) ?? Promise.reject(new Error('Worker loading is unavailable')),
     loadDocument: (document) => { void options.loadDocument?.(document).catch(() => {}); },
@@ -715,13 +725,14 @@ export function createPeerlessShellController(initial: Options) {
       const accept = () => {
         if (binding !== next) return;
         const view = next.viewStore.getSnapshot();
+        if (!commentsMatch(view)) commentList = null;
         if (view.editState?.batch) {
           batchResults.set(view.editState.batch.seq, view.editState.batch.result);
           if (batchResults.size > 256) batchResults.delete(batchResults.keys().next().value!);
         }
         for (const comment of [view.editState?.comment, view.editState?.commentChange]) {
           if (!comment || comment === snapshot.view?.editState?.comment || comment === snapshot.view?.editState?.commentChange) continue;
-          rememberComments(next, view.version, comment.comments);
+          rememberComments(next, view, comment.comments);
           commentResults.set(comment.seq, comment);
           if (commentResults.size > 256) commentResults.delete(commentResults.keys().next().value!);
         }

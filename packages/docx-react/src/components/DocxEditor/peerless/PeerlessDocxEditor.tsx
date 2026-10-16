@@ -199,13 +199,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const legacyRef = useRef<PagedEditorRef | null>(null);
   useKeyboardShortcuts({ commands: controller.commands, pagedEditorRef: legacyRef, containerRef: container,
     disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false });
-  useEffect(() => {
-    const request = loadRequest.current;
-    if (!request) return;
-    if (request.input !== (documentBuffer ?? parsedDocument)) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
-    else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
-    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
-  }, [shellState, documentBuffer, parsedDocument, controller]);
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);
@@ -313,11 +306,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (applyFrameDelta(null, decodeFrameDelta(frame.frame)).pages.some(({ page }) => !page.unbuilt)) controller.painted();
   }, [controller]);
   const source = useMemo(() => {
-    if (parsedDocument) return parsedDocument;
+    if (parsedDocument) return { ...parsedDocument };
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
-    return loaded && loaded.input === documentBuffer ? loaded.source : null;
-  }, [documentBuffer, parsedDocument, loaded]);
+    return loaded && loaded.input === documentBuffer ? new Uint8Array(loaded.source) : null;
+  }, [documentBuffer, parsedDocument, loaded, replaced ? replacement : null]);
 
   useEffect(() => {
     if (!documentBuffer || documentBuffer instanceof Uint8Array || documentBuffer instanceof ArrayBuffer) return;
@@ -767,8 +760,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     linkGesture.current += 1;
     openedSource.current = sourceKey;
     pluginGeometry.clear();
-    if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
+    if (hasSource) controller.opening(source ?? (replaced ? replacement : documentBuffer ?? parsedDocument)); else controller.empty();
   }, [controller, source, sourceKey, documentBuffer, parsedDocument, hasSource, pluginGeometry]);
+  useEffect(() => {
+    const request = loadRequest.current;
+    if (!request) return;
+    if (request.input !== (documentBuffer ?? parsedDocument)) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
+    else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
+    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
+  }, [shellState, documentBuffer, parsedDocument, controller]);
   useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
