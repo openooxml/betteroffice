@@ -32,7 +32,13 @@ export function DataBindingPanel({ table, shape, onImport, onBind, t, className 
   useEffect(() => { setStatus(null); }, [table, shape?.id]);
 
   const bind = (rowIndex: number) => {
-    const outcome = onBind(rowIndex);
+    let outcome: BindOutcome | void;
+    try { outcome = onBind(rowIndex); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      setStatus({ text: t('dataBinding.refused', { rows: reason }), refused: true });
+      return;
+    }
     if (!outcome) return;
     if (outcome.refusals.length > 0) {
       const rows = outcome.refusals.map((receipt) => receipt.rowName ?? String(receipt.rowIndex ?? '')).join(', ');
