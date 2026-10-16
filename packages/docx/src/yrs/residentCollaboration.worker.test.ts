@@ -23,7 +23,7 @@ let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
 beforeAll(async () => {
   await openCommandEngine();
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(process.cwd(), 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm'))));
-  start = await residentWorkerFactory();
+  start = await residentWorkerFactory({ transferBuffers: true });
 });
 afterEach(closeCommandEngines);
 
