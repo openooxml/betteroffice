@@ -996,8 +996,8 @@ impl EditingDoc {
         self.advance_table_membership(before, after);
     }
 
-    /// Where text asked for at `index` went: past the block embeds leading a paragraph there.
-    fn text_insert_index(&self, story_id: &str, epoch: u64, index: u32) -> u32 {
+    /// Where inline text inserted at `index` lands: past the block embeds leading its paragraph.
+    pub(crate) fn text_insert_index(&self, story_id: &str, epoch: u64, index: u32) -> u32 {
         let cached = self.paragraph_indexes.lock().unwrap().get(story_id, epoch);
         if let Some(paragraphs) = cached {
             return paragraphs
