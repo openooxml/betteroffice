@@ -18,7 +18,6 @@ import {
 
 interface Paragraph extends ParagraphRef {
   paraId: string;
-  root: string;
   text: string;
   style: string | null;
   headingLevel: number | null;
@@ -389,7 +388,7 @@ export class DocxAgentDocument {
           const p: Paragraph = {
             ref: previous?.ref ?? `p${this.nextRef++}`,
             revision: previous ? previous.revision + Number(previous.fingerprint !== fingerprint) : 1,
-            story, root: positions.get(story)!.root, paraId: segment.paraId, paragraph: ++ordinal, text, runs, fingerprint,
+            story, paraId: segment.paraId, paragraph: ++ordinal, text, runs, fingerprint,
             style: typeof segment.properties.pStyle === 'string' ? segment.properties.pStyle : null,
             headingLevel: headings.get(segment.paraId) ?? null,
           };
@@ -505,7 +504,7 @@ export class DocxAgentDocument {
       const end = start + held.oldText.length;
       const range = { story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } };
       if (edit.op === 'add_comment') {
-        if (p.root !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comments anchor in the document body and its tables, not in headers, footers, notes or text boxes.');
+        if (this.session.listStories().stories.find(story => story.story === p.story)?.root !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comments anchor in the document body, its tables and content controls, not in headers, footers, notes or text boxes.');
         const body = commentBody(edit.author, edit.text);
         const date = edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z');
         return draft => {

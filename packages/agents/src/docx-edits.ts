@@ -73,8 +73,8 @@ export function lineText(text: string) {
 export function commentBody(author: string, text: string) {
   plainText(author);
   plainText(text);
-  if (/[\t\r\n\u000b\u000c\ufffc]/.test(author) || /[\t\r\u000b\u000c\ufffc]/.test(text)) {
-    throw new DocumentToolError('INVALID_ARGUMENT', 'Comment author is one line and comment text is plain text, one paragraph per line: no tabs, carriage returns or object placeholders.');
+  if (/[\t\r\n\u000b\u000c\ufffc\ufffe\uffff]/.test(author) || /[\t\r\u000b\u000c\ufffc\ufffe\uffff]/.test(text)) {
+    throw new DocumentToolError('INVALID_ARGUMENT', 'Comment author is one line and comment text is plain text, one paragraph per line: no tabs, carriage returns, object placeholders or noncharacters.');
   }
   return text.split('\n').map(line => ({ type: 'paragraph', formatting: {}, content: line ? [{ type: 'run', formatting: {}, content: [{ type: 'text', text: line }] }] : [] }));
 }
