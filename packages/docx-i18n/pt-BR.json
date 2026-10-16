@@ -661,6 +661,7 @@
     "borderColor": "Cor da borda",
     "borderWidth": "Largura da borda",
     "unknownAction": "Ação desconhecida",
+    "viewGridlines": "Exibir linhas de grade",
     "borders": {
       "all": "Todas as bordas",
       "outside": "Bordas externas",

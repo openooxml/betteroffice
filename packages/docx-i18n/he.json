@@ -661,6 +661,7 @@
     "borderColor": "צבע מסגרת",
     "borderWidth": "עובי מסגרת",
     "unknownAction": "פעולה לא ידועה",
+    "viewGridlines": "הצג קווי רשת",
     "borders": {
       "all": "כל המסגרות",
       "outside": "מסגרות חיצוניות",

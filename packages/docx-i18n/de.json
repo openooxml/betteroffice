@@ -661,6 +661,7 @@
     "borderColor": "Rahmenfarbe",
     "borderWidth": "Rahmenbreite",
     "unknownAction": "Unbekannte Aktion",
+    "viewGridlines": "Gitternetzlinien anzeigen",
     "borders": {
       "all": "Alle Rahmenlinien",
       "outside": "Äußere Rahmenlinien",
