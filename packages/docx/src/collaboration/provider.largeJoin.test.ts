@@ -74,14 +74,13 @@ function replicaOf(session: YrsSession, atomic = true): { replica: Collaboration
 function join(
   source: CollaborationReplica,
   joiner: CollaborationReplica,
-  options: CollaborationProviderOptions = {},
-  sourceOptions: CollaborationProviderOptions = {}
+  options: CollaborationProviderOptions = {}
 ) {
   const sourceTransport = new LoopbackTransport();
   const joinerTransport = new LoopbackTransport();
   sourceTransport.peer = joinerTransport;
   joinerTransport.peer = sourceTransport;
-  const sourceProvider = new CollaborationProvider(source, sourceTransport, sourceOptions);
+  const sourceProvider = new CollaborationProvider(source, sourceTransport);
   const joinerProvider = new CollaborationProvider(joiner, joinerTransport, options);
   const errors: CollaborationError[] = [];
   sourceProvider.onError((error) => errors.push(error));
@@ -145,10 +144,10 @@ describe('chunked initial sync between yrs replicas', () => {
     joiner.destroy();
   }, HEAVY);
 
-  it('streams an answer over one frame as bounded Update frames closed by a delete-set SyncStep2', async () => {
+  it('streams the answer as bounded Update frames closed by a delete-set SyncStep2', async () => {
     const source = await sessionWithState(1003, 6 * MiB, 512);
     const joiner = await createYrsSession({ clientId: 1004 });
-    const room = join(replicaOf(source).replica, replicaOf(joiner).replica, {}, { maxFrameBytes: 2 * MiB });
+    const room = join(replicaOf(source).replica, replicaOf(joiner).replica);
 
     expect(room.errors).toEqual([]);
     expect(room.synced).toBe(true);
@@ -165,18 +164,25 @@ describe('chunked initial sync between yrs replicas', () => {
     joiner.destroy();
   }, HEAVY);
 
-  it('converges on a receiver that applies each update as it arrives', async () => {
-    const source = await sessionWithState(1009, 20 * MiB, 64 * 1024);
+  it('answers a receiver without applyUpdateChunks with one SyncStep2, as before', async () => {
+    const source = await sessionWithState(1009, 6 * MiB, 64 * 1024);
     const joiner = await createYrsSession({ clientId: 1005 });
     const { replica, applied } = replicaOf(joiner, false);
     const room = join(replicaOf(source).replica, replica);
 
     expect(room.errors).toEqual([]);
     expect(room.synced).toBe(true);
-    expect(applied).toEqual({ updates: room.answer.length, syncs: [] });
-    expect(room.answer.length).toBeGreaterThan(2);
+    expect(room.answer.map((message) => message.type)).toEqual(['sync-step-2']);
+    expect(applied).toEqual({ updates: 1, syncs: [] });
     expectSameDocument(joiner, source);
     source.destroy();
+
+    const large = await largeSource();
+    const old = replicaOf(joiner, false);
+    const refused = join(replicaOf(large).replica, old.replica);
+    expect(refused.errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(refused.synced).toBe(false);
+    expect(old.applied).toEqual({ updates: 0, syncs: [] });
     joiner.destroy();
   }, HEAVY);
 

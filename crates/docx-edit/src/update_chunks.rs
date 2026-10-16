@@ -43,13 +43,24 @@ struct Section {
     end: usize,
 }
 
-/// Splits `diff` into updates of at most `max_bytes` each, except that a struct larger than the
-/// limit travels alone. The last update carries only the delete set (possibly empty) and every
-/// earlier one only structs.
+/// Splits `diff` into updates of at most `max_bytes` each; only an update holding a single struct,
+/// or a single delete range, larger than the limit exceeds it. Struct updates come first and the
+/// trailing updates carry only the delete set (one, possibly empty, when it fits).
 pub(crate) fn split_diff_v1(diff: &[u8], max_bytes: usize) -> Result<Vec<Vec<u8>>, SplitError> {
     if max_bytes == 0 {
         return Err(SplitError::Malformed);
     }
+    let (sections, delete_set) = parse(diff)?;
+    let mut packer = Packer::new(diff, max_bytes);
+    schedule(diff, &sections, |section, index| {
+        packer.push(&sections[section], index)
+    })?;
+    let mut parts = packer.finish()?;
+    parts.extend(delete_set.encode(max_bytes));
+    Ok(parts)
+}
+
+fn parse(diff: &[u8]) -> Result<(Vec<Section>, DeleteSet), SplitError> {
     let mut scanner = Scanner::new(diff);
     let mut sections = Vec::new();
     for _ in 0..scanner.count()? {
@@ -76,14 +87,7 @@ pub(crate) fn split_diff_v1(diff: &[u8], max_bytes: usize) -> Result<Vec<Vec<u8>
     if scanner.pos != diff.len() {
         return Err(SplitError::Malformed);
     }
-
-    let mut packer = Packer::new(diff, max_bytes);
-    schedule(diff, &sections, |section, index| {
-        packer.push(&sections[section], index)
-    })?;
-    let mut parts = packer.finish()?;
-    parts.extend(delete_set.encode(max_bytes));
-    Ok(parts)
+    Ok((sections, delete_set))
 }
 
 /// Emits every struct once, in an order where each struct's origins and parent are either
@@ -941,6 +945,157 @@ mod tests {
         assert_eq!(split_diff_v1(&[0, 0, 0], 1), Err(SplitError::Malformed));
         assert_eq!(split_diff_v1(&[0, 0], 0), Err(SplitError::Malformed));
         assert_eq!(split_diff_v1(&[0, 0], 1), Ok(vec![vec![0, 0]]));
+    }
+
+    #[test]
+    fn truncated_or_mutated_diffs_never_panic_or_hang() {
+        let source = document(1);
+        write_paragraphs(&source, "A", 6);
+        bold(&source, "A", 1, 12);
+        source
+            .delete_range(&ctx("A"), StoryRange::new("body", 2, 9))
+            .unwrap();
+        let diff = source
+            .encode_diff_v1(&EditingDoc::new(2).encode_state_vector_v1())
+            .unwrap();
+        assert!(split_diff_v1(&diff, 64).unwrap().len() > 2);
+        for end in 0..diff.len() {
+            assert!(split_diff_v1(&diff[..end], 64).is_err(), "prefix {end}");
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..5_000 {
+            let mut mutated = diff.clone();
+            for _ in 0..1 + next() % 4 {
+                let index = (next() % mutated.len() as u64) as usize;
+                mutated[index] = next() as u8;
+            }
+            if let Ok((sections, _)) = parse(&mutated) {
+                let _ = schedule(&mutated, &sections, |_, _| Ok(()));
+            }
+        }
+    }
+
+    #[test]
+    fn every_yrs_content_kind_splits_into_complete_parts() {
+        use std::sync::Arc;
+        use yrs::types::Attrs;
+        use yrs::{
+            Array, ClientID, Doc, MapPrelim, OffsetKind, Options, Text, WriteTxn, Xml,
+            XmlElementPrelim, XmlFragment, XmlTextPrelim,
+        };
+
+        let replica = |client_id: u64| {
+            let mut options = Options::with_client_id(ClientID::new(client_id));
+            options.offset_kind = OffsetKind::Utf16;
+            Doc::with_options(options)
+        };
+        let source = replica(7);
+        {
+            let mut txn = source.transact_mut();
+            let map = txn.get_or_insert_map("map");
+            map.insert(&mut txn, "float", 1.5);
+            map.insert(&mut txn, "big", Any::BigInt(1 << 40));
+            map.insert(&mut txn, "buffer", Any::Buffer(Arc::from([1, 2, 3])));
+            map.insert(
+                &mut txn,
+                "nested",
+                Any::Map(Arc::new(std::collections::HashMap::from([(
+                    "a".to_owned(),
+                    Any::Array(Arc::from([Any::from(2.5), Any::Null, Any::Bool(true)])),
+                )]))),
+            );
+            map.insert(&mut txn, "sub", Doc::new());
+            let inner = map.insert(&mut txn, "inner", MapPrelim::default());
+            inner.insert(&mut txn, "x", "y");
+            let array = txn.get_or_insert_array("array");
+            array.insert_range(
+                &mut txn,
+                0,
+                (0..200).map(|n| Any::from(f64::from(n) + 0.25)),
+            );
+            let text = txn.get_or_insert_text("text");
+            text.insert(&mut txn, 0, "hello world 😀 and more text");
+            text.format(
+                &mut txn,
+                0,
+                5,
+                Attrs::from([("bold".into(), Any::Bool(true))]),
+            );
+            text.insert_embed(&mut txn, 3, Any::from("embed"));
+            let xml = txn.get_or_insert_xml_fragment("xml");
+            let element = xml.insert(&mut txn, 0, XmlElementPrelim::empty("p"));
+            element.insert_attribute(&mut txn, "class", "c");
+            element.insert(&mut txn, 0, XmlTextPrelim::new("xml text"));
+        }
+        let other = replica(8);
+        other
+            .transact_mut()
+            .apply_update(
+                Update::decode_v1(
+                    &source
+                        .transact()
+                        .encode_state_as_update_v1(&StateVector::default()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        {
+            let mut txn = other.transact_mut();
+            txn.get_or_insert_text("text")
+                .insert(&mut txn, 6, "concurrent ");
+            txn.get_or_insert_array("array")
+                .remove_range(&mut txn, 10, 50);
+        }
+        {
+            let mut txn = source.transact_mut();
+            txn.get_or_insert_map("map").remove(&mut txn, "inner");
+            txn.get_or_insert_text("text").remove_range(&mut txn, 6, 3);
+        }
+        let from_other = other
+            .transact()
+            .encode_diff_v1(&source.transact().state_vector());
+        source
+            .transact_mut()
+            .apply_update(Update::decode_v1(&from_other).unwrap())
+            .unwrap();
+        let diff = source.transact().encode_diff_v1(&StateVector::default());
+        let whole = replica(9);
+        whole
+            .transact_mut()
+            .apply_update(Update::decode_v1(&diff).unwrap())
+            .unwrap();
+        let expected = crate::deterministic::encode_state_as_update_v1(
+            &whole.transact(),
+            &StateVector::default(),
+        );
+        for limit in [1, 64, 512, 4096] {
+            let parts = split_diff_v1(&diff, limit).unwrap();
+            assert!(parts.len() > 2 || limit == 4096, "limit {limit}");
+            let stepwise = replica(9);
+            for part in &parts {
+                stepwise
+                    .transact_mut()
+                    .apply_update(Update::decode_v1(part).unwrap())
+                    .unwrap();
+                let txn = stepwise.transact();
+                assert!(txn.store().pending_update().is_none(), "limit {limit}");
+                assert!(txn.store().pending_ds().is_none(), "limit {limit}");
+            }
+            assert_eq!(
+                crate::deterministic::encode_state_as_update_v1(
+                    &stepwise.transact(),
+                    &StateVector::default(),
+                ),
+                expected,
+                "limit {limit}"
+            );
+        }
     }
 
     #[test]

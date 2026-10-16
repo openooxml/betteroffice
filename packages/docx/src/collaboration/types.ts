@@ -85,17 +85,18 @@ export interface CollaborationProviderOptions {
    */
   maxPendingBytes?: number;
   /**
-   * Largest update in a chunked answer to SyncStep1. When the state a peer lacks does not fit one frame and the replica
-   * implements `encodeStateAsUpdateChunks`, the answer travels as Update messages and a final SyncStep2, which every
-   * peer applies as it would ordinary updates. Default 1 MiB or `maxFrameBytes` if smaller; at most `maxFrameBytes`.
-   * A struct larger than a frame, such as an inline image, still fails to encode.
+   * Largest update in a chunked answer to SyncStep1. A provider whose replica implements `applyUpdateChunks` asks for
+   * chunks in its SyncStep1; a peer whose replica implements `encodeStateAsUpdateChunks` then answers with Update
+   * messages and a closing SyncStep2 once the missing state exceeds this size. Other peers get one SyncStep2 as before.
+   * Default 1 MiB or `maxFrameBytes` if smaller; at most `maxFrameBytes`. A struct larger than a frame, such as an
+   * inline image, still fails to encode.
    */
   syncChunkBytes?: number;
   /**
    * Updates held before the first SyncStep2 when the replica implements `applyUpdateChunks`, which then applies them
-   * with the SyncStep2 as one change. Default 64 MiB, at most 256 MiB; more fails the connection with `backpressure`.
-   * Relays that retain every update bound a room by their own capacity, so large documents there join through
-   * `initialUpdate` instead.
+   * with the SyncStep2 as one change; each held update also counts 64 bytes. Default 64 MiB, at most 256 MiB; more
+   * fails the connection with `backpressure`. Relays that retain every update bound a room by their own capacity, so
+   * large documents there join through `initialUpdate` instead.
    */
   maxSyncBytes?: number;
   user?: CollaborationUser;
