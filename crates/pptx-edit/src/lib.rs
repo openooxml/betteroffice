@@ -357,9 +357,11 @@ impl DeckSession {
             .transact()
             .encode_state_as_update_v1(&self.doc.transact().state_vector());
         let diff = decode_update_v1(&diff).map_err(EditError::InvalidUpdate)?;
-        let _carried = self.remote_deletions.carry(&carried);
-        self.doc
-            .transact_mut_with(REMOTE_ORIGIN)
+        let mut integration = self
+            .remote_deletions
+            .integrate(self.doc.transact_mut_with(REMOTE_ORIGIN));
+        integration.carry(&carried);
+        integration
             .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         Ok(snapshot)
