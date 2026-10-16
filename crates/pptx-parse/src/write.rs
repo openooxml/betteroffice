@@ -3031,13 +3031,24 @@ fn apply_run_properties(
             XmlNode::Element(XmlElement::new(prefixes.drawing("solidFill")).with_child(color)),
         );
     }
-    base.children.retain(|child| {
-        !matches!(
-            child,
-            XmlNode::Element(element) if element.local_name() == "latin"
-        )
-    });
-    if let Some(family) = &properties.font_family {
+    let Some(family) = &properties.font_family else {
+        base.children.retain(|child| {
+            !matches!(
+                child,
+                XmlNode::Element(element) if element.local_name() == "latin"
+            )
+        });
+        return;
+    };
+    if let Some(latin) = base.child_mut("latin") {
+        if latin.attribute("typeface") != Some(family.as_str()) {
+            // panose, pitchFamily and charset describe the old face.
+            latin
+                .attributes
+                .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
+            latin.set_attribute("typeface", family.clone());
+        }
+    } else {
         let position = base
             .children
             .iter()
@@ -3847,6 +3858,51 @@ mod tests {
             ),
             "{xml}"
         );
+    }
+
+    const FONT_PARAGRAPH: &str = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:pPr algn="ctr"/><a:r><a:rPr lang="en-US"><a:highlight><a:srgbClr val="FFFF00"/></a:highlight><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial" vendorHint="1"/><a:cs charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/></a:rPr><a:t>38.8%</a:t></a:r><a:r><a:rPr b="1" lang="en-US"><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/></a:rPr><a:t> of cases</a:t></a:r></a:p>"#;
+    const ARIAL_LATIN: &str = r#"<a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial" vendorHint="1"/>"#;
+
+    fn font_runs(family: &str) -> [(&'static str, RunProperties); 2] {
+        let arial = RunProperties {
+            font_family: Some("Arial".to_owned()),
+            ..RunProperties::default()
+        };
+        [
+            (
+                "39.8%",
+                RunProperties {
+                    font_family: Some(family.to_owned()),
+                    ..RunProperties::default()
+                },
+            ),
+            (
+                " of cases",
+                RunProperties {
+                    bold: Some(true),
+                    ..arial
+                },
+            ),
+        ]
+    }
+
+    fn edited_font_body(latin: &str) -> String {
+        let (_, body) = FONT_PARAGRAPH.split_once('>').unwrap();
+        let edited = body.replace("38.8%", "39.8%");
+        edited.replacen(ARIAL_LATIN, latin, 1)
+    }
+
+    #[test]
+    fn a_text_edit_keeps_the_latin_font_element_whole() {
+        let xml = rebuilt_paragraph(FONT_PARAGRAPH.as_bytes(), &font_runs("Arial"));
+        assert!(xml.ends_with(&edited_font_body(ARIAL_LATIN)), "{xml}");
+    }
+
+    #[test]
+    fn a_new_font_family_drops_the_old_face_metrics_in_place() {
+        let xml = rebuilt_paragraph(FONT_PARAGRAPH.as_bytes(), &font_runs("Calibri"));
+        let calibri = edited_font_body(r#"<a:latin typeface="Calibri"/>"#);
+        assert!(xml.ends_with(&calibri), "{xml}");
     }
 
     #[test]
