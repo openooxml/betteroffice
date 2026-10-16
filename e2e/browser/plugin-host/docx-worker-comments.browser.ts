@@ -14,6 +14,7 @@ interface WorkerCommentsProbe {
   } | null;
   errors: string[];
   load(bytes: number[]): void;
+  setComments(comments: unknown[] | undefined): void;
   pageInView(index: number): boolean;
   scrollToTop(): void;
   saved(): Promise<number[]>;
@@ -50,8 +51,9 @@ async function reviewDocx(spanning = false, reply = false) {
   return [...await zip.generateAsync({ type: 'uint8array' })];
 }
 
-async function open(page: Page, spanning = false, reply = false) {
+async function open(page: Page, spanning = false, reply = false, hosted?: unknown[]) {
   await page.goto('/docx-worker-comments.html');
+  if (hosted) await pinnedEvaluate(page, (comments) => window.__workerComments.setComments(comments), hosted);
   await pinnedEvaluate(page, (bytes) => window.__workerComments.load(bytes), await reviewDocx(spanning, reply));
   await expect.poll(() => page.evaluate(() => !!window.__workerComments.editor), { timeout: 60_000 }).toBe(true);
   expect(await pinnedEvaluate(page, () => window.__workerComments.editor!.whenLayoutComplete({ timeoutMs: 60_000 }))).toBe(spanning ? 7 : 3);
@@ -113,5 +115,36 @@ test('worker editor navigates and replies to an imported reply and immediately s
   const zip = await JSZip.loadAsync(Uint8Array.from(bytes));
   expect(await zip.file('word/comments.xml')!.async('string')).toContain('Nested reply');
   expect(await zip.file('word/commentsExtended.xml')!.async('string')).toMatch(/w15:paraId="0000000B"[^>]*w15:done="1"/);
+  expect(await page.evaluate(() => window.__workerComments.errors)).toEqual([]);
+});
+
+const note = (id: number, text: string) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
+  content: [{ type: 'paragraph', formatting: {}, content: [{ type: 'run', formatting: {}, content: [{ type: 'text', text }] }] }] });
+
+async function savedParts(page: Page) {
+  const zip = await JSZip.loadAsync(Uint8Array.from(await pinnedEvaluate(page, () => window.__workerComments.saved())));
+  return { comments: await zip.file('word/comments.xml')!.async('string'), document: await zip.file('word/document.xml')!.async('string') };
+}
+
+test('host comments given only through the controlled prop show in the sidebar, follow prop updates and survive save', async ({ page }) => {
+  test.setTimeout(180_000);
+  await open(page, false, false, [note(3, 'Host note'), note(8, 'Host only')]);
+  const cards = page.locator('.docx-comment-card');
+  await expect(cards.filter({ hasText: 'Host note' })).toBeVisible();
+  await expect(cards.filter({ hasText: 'Host only' })).toBeVisible();
+  await expect(cards.filter({ hasText: 'Parent note' })).toHaveCount(0);
+  let saved = await savedParts(page);
+  expect(saved.comments).toContain('Host note');
+  expect(saved.comments).toContain('Host only');
+  expect(saved.comments).not.toContain('Parent note');
+  const anchored = saved.comments.match(/<w:comment [^>]*w:id="(\d+)"(?:(?!<\/w:comment>)[\s\S])*Host note/)?.[1];
+  expect(anchored).toBeDefined();
+  expect(saved.document).toContain(`<w:commentRangeStart w:id="${anchored}"`);
+  await pinnedEvaluate(page, (comments) => window.__workerComments.setComments(comments), [note(3, 'Edited note')]);
+  await expect(cards.filter({ hasText: 'Edited note' })).toBeVisible();
+  await expect(cards.filter({ hasText: 'Host only' })).toHaveCount(0);
+  saved = await savedParts(page);
+  expect(saved.comments).toContain('Edited note');
+  expect(saved.comments).not.toContain('Host only');
   expect(await page.evaluate(() => window.__workerComments.errors)).toEqual([]);
 });

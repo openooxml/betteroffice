@@ -468,6 +468,38 @@ test('worker tracked change cards accept and reject through worker review comman
   h.controller.dispose();
 });
 
+const noteComment = (id: number, text: string, extra: object = {}) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
+  content: [{ type: 'paragraph' as const, formatting: {}, content: [{ type: 'run' as const, formatting: {}, content: [{ type: 'text' as const, text }] }] }], ...extra });
+
+test('controlled comments replace the worker comment projection in the sidebar and follow prop updates', async () => {
+  const h = proposalHost({ automatic: false });
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
+  const review = { ...base.value, uiComments: [noteComment(3, 'Worker note')], commentIds: { native: 3 },
+    commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
+    ({ status: 'ok', version, value: request.kind === 'reviewSnapshot' ? review : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
+  restorers.push(() => readAt.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const hosted = [noteComment(3, 'Host note'), noteComment(8, 'Host only')];
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} comments={hosted} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  const cards = () => [...view.container.querySelectorAll<HTMLElement>('.docx-comment-card')].map(card => card.textContent ?? '');
+  await waitFor(() => expect(cards()).toHaveLength(2));
+  expect(cards().join()).toContain('Host note');
+  expect(cards().join()).toContain('Host only');
+  expect(cards().join()).not.toContain('Worker note');
+  expect(ref.current!.getComments().map(comment => comment.id)).toEqual([3, 8]);
+  view.rerender(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} comments={[noteComment(3, 'Edited note')]} />);
+  await waitFor(() => expect(cards()).toEqual([expect.stringContaining('Edited note')]));
+  view.rerender(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} comments={[]} />);
+  await waitFor(() => expect(cards()).toEqual([]));
+  view.unmount();
+  h.controller.dispose();
+});
+
 test('d8a_peerless_mount_creates_no_main_document', async () => {
   const main = spyOn(yrs, 'createYrsSession').mockImplementation(() => {
     throw new Error('main document created');
@@ -909,9 +941,10 @@ test('worker saves retain source comments unless the host controls them', async 
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
   await act(async () => { await ref.current!.save(); });
   expect(requests.filter((request) => request.type === 'save').at(-1)).toMatchObject({ comments });
+  expect(requests.filter((request) => request.type === 'save').at(-1)).not.toHaveProperty('commentsSource');
   view.rerender(<DocxEditor {...peerlessProps} ref={ref} downloadOnSave={false} comments={[]} />);
   await act(async () => { await ref.current!.save(); });
-  expect(requests.filter((request) => request.type === 'save').at(-1)).toMatchObject({ comments: [] });
+  expect(requests.filter((request) => request.type === 'save').at(-1)).toMatchObject({ comments: [], commentsSource: 'host' });
   expect(coreSession).not.toHaveBeenCalled();
 });
 

@@ -2655,3 +2655,24 @@ test('an imported reply without range markers inherits its ancestor anchor and s
     expect(restored?.done ?? false).toBe(false);
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+test('a host comment list wins over the worker comment projection on save and keeps native anchors', async () => {
+  const note = (id: number, text: string) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
+    content: [{ type: 'paragraph' as const, formatting: {}, content: [{ type: 'run' as const, formatting: {}, content: [{ type: 'text' as const, text }] }] }] });
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [source] = engine.listComments();
+    const id = engine.commentProjection()!.ids[source!.id]!;
+    const part = async (request: Parameters<typeof client.save>[0], name: string) =>
+      new TextDecoder().decode(unzipContainer(new Uint8Array((await client.save(request)).bytes))[name] ?? new Uint8Array());
+    const hosted = { comments: [note(id, 'Host note'), note(id + 40, 'Host only')], commentsSource: 'host' as const };
+    const comments = await part(hosted, 'word/comments.xml');
+    expect(comments).toContain('Host note');
+    expect(comments).toContain('Host only');
+    expect(comments).not.toContain('Parent');
+    const anchored = comments.match(/<w:comment [^>]*w:id="(\d+)"(?:(?!<\/w:comment>)[\s\S])*Host note/)?.[1];
+    expect(await part(hosted, 'word/document.xml')).toContain(`<w:commentRangeStart w:id="${anchored}"`);
+    expect(await part({ comments: [], commentsSource: 'host' }, 'word/comments.xml')).not.toContain('Parent');
+    expect(await part({ comments: [note(id, 'Ignored')] }, 'word/comments.xml')).toContain('Parent');
+  } finally { client.destroy(); }
+}, TIMEOUT);
