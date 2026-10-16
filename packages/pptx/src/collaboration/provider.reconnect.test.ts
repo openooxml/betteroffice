@@ -63,6 +63,10 @@ function relay(size: number) {
     if (!open) queue = queue.filter((frame) => frame.from !== index && frame.to !== index);
     for (const listener of [...listeners[index]]) listener({ type: open ? 'open' : 'close' });
   };
+  const reopen = (...indices: number[]) => {
+    for (const index of indices) online[index] = true;
+    for (const index of indices) for (const listener of [...listeners[index]]) listener({ type: 'open' });
+  };
   const transports = listeners.map((set, from): CollaborationTransport => ({
     connect: () => setOnline(from, true),
     disconnect: () => setOnline(from, false),
@@ -91,7 +95,7 @@ function relay(size: number) {
     .filter((frame) => frame.from === from)
     .flatMap((frame) => decodeMessages(frame.data))
     .filter((message) => message.type === type).length;
-  return { transports, setOnline, flush, sent, count };
+  return { transports, setOnline, reopen, flush, sent, count };
 }
 
 async function network(kind: Kind, size: number) {
@@ -180,6 +184,28 @@ for (const kind of ['sync', 'async'] as const) {
         mark = net.sent.length;
         await net.flush();
         expect(net.sent.length).toBe(mark);
+      } finally { close(); }
+    });
+
+    it('spend one extra exchange per side when both reopen diverged, then go quiet', async () => {
+      const { peers: [left, right], net, close } = await network(kind, 2);
+      try {
+        net.setOnline(0, false);
+        net.setOnline(1, false);
+        left.edit('left ');
+        right.edit('right ');
+        await net.flush();
+        const mark = net.sent.length;
+        net.reopen(0, 1);
+        await net.flush();
+        expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+        expect(left.text()).toContain('left ');
+        expect(left.text()).toContain('right ');
+        expect([0, 1].map((index) => [net.count(index, 'sync-step-1', mark), net.count(index, 'sync-step-2', mark)]))
+          .toEqual([[2, 2], [2, 2]]);
+        const settled = net.sent.length;
+        await net.flush();
+        expect(net.sent.length).toBe(settled);
       } finally { close(); }
     });
   });
