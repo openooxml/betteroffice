@@ -148,8 +148,9 @@ test('worker borders preserve sides and saved shared edges', async ({ page }, in
   await borderPreset(page, 'No borders');
   let saved = await savedTable(page, info, 'single-none');
   expect(saved.cells[0]).toEqual({ top: 'none/null/null', bottom: 'none/null/null', left: 'none/null/null', right: 'none/null/null' });
-  expect(saved.cells[1]).toEqual({ left: 'none/null/null' });
-  expect(saved.cells[2]).toEqual({ top: 'none/null/null' });
+  const line = 'single/4/000000';
+  expect(saved.cells[1]).toEqual({ top: line, bottom: line, left: 'none/null/null', right: line });
+  expect(saved.cells[2]).toEqual({ top: 'none/null/null', bottom: line, left: line, right: line });
   expect(saved.cells[3]).toEqual({});
   expect(saved.tblBorders).toBe(6);
   expect(saved.tblStyle).toBe('TableGrid');
