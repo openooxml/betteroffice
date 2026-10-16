@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { createRef } from 'react';
 import JSZip from 'jszip';
 import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
-import { CollaborationProvider, type AsyncReplicaAdapter, type CollaborationReplica, type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
+import { CollaborationProvider, createAsyncCollaborationReplica, type AsyncReplicaAdapter, type CollaborationReplica, type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import type { DocxPeerlessCollaborationProbe } from './docx-peerless-collab-probe';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
@@ -58,13 +58,23 @@ const slots = [0, 1].map(index => ({ ref: createRef<DocxEditorRef>(), file, clie
   provider: undefined as CollaborationProvider | undefined, generation: 0 }));
 const root = createRoot(document.getElementById('root')!);
 let count = 1;
+const mergeHooks: Array<(() => void) | undefined> = [];
+// The provider merges through this replica, so a hook sees each worker merge right after it is dispatched.
+const observed = (index: number, replica: CollaborationReplica) => {
+  const hosted = (replica as Partial<AsyncReplicaAdapter>).async;
+  return hosted ? createAsyncCollaborationReplica({ ...hosted, applyUpdate(update) {
+    const merging = hosted.applyUpdate(update);
+    const hook = mergeHooks[index]; mergeHooks[index] = undefined; hook?.();
+    return merging;
+  } }) : replica;
+};
 
 const onReplica = slots.map((slot, index) => (replica: CollaborationReplica | null) => {
   slot.provider?.destroy(); slot.provider = undefined;
   slot.replica = replica;
   if (replica) {
     slot.generation++;
-    slot.provider = new CollaborationProvider(replica, transport(index), { user: { name: index ? 'Writer B' : 'Writer A' } });
+    slot.provider = new CollaborationProvider(observed(index, replica), transport(index), { user: { name: index ? 'Writer B' : 'Writer A' } });
     slot.provider.onError(error => errors.push(error.message));
     slot.provider.connect();
   }
@@ -141,6 +151,11 @@ export const probe: DocxPeerlessCollaborationProbe = {
   drop(index: number) { endpoints[index]!.queued.length = 0; },
   heldUpdates(index: number) { return endpoints[index]!.queued.filter(data => data[0] === 0 && data[1] === 2).length; },
   disconnect(index: number) { slots[index]!.provider!.disconnect(); },
+  dropMidMerge(index: number) {
+    const dropped = new Promise<void>(resolve => { mergeHooks[index] = () => { slots[index]!.provider!.disconnect(); resolve(); }; });
+    probe.release(index);
+    return dropped;
+  },
   reconnect(index: number) { slots[index]!.provider!.connect(); },
   restart() {
     const open = [0, 1].filter(index => endpoints[index]!.connected);

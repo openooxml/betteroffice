@@ -69,7 +69,7 @@ test('a relay peer that drops mid-merge catches up from the persistent peer', as
   await open(page); await page.evaluate(() => window.__docxPeerlessCollab.hold(1));
   await type(await select(page, 0), 'A');
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessCollab.heldUpdates(1))).toBeGreaterThan(0);
-  await page.evaluate(() => { window.__docxPeerlessCollab.release(1); window.__docxPeerlessCollab.disconnect(1); });
+  await page.evaluate(() => window.__docxPeerlessCollab.dropMidMerge(1));
   await type(await select(page, 0), 'C'); await expect.poll(() => text(page, 0)).toBe('SeedAC');
   await page.evaluate(() => window.__docxPeerlessCollab.reconnect(1));
   await converged(page, 'SeedAC');

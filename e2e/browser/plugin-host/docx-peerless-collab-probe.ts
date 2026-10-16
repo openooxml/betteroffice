@@ -12,6 +12,8 @@ export interface DocxPeerlessCollaborationProbe {
   drop(index: number): void;
   heldUpdates(index: number): number;
   disconnect(index: number): void;
+  /** Releases held frames and disconnects as soon as one of their worker merges is dispatched. */
+  dropMidMerge(index: number): Promise<void>;
   reconnect(index: number): void;
   restart(): void;
   checkpoint(index: number): Promise<void>;
