@@ -692,9 +692,8 @@ test(`${arm}: a worker viewer reads content controls and refuses revision comman
   });
   expect(reads.list).toMatchObject({ ok: true, content: { controls: [] } });
   expect(reads.find).toMatchObject({ ok: true, content: { controls: [] } });
-  const refusal = arm === 'hybrid' ? 'read-only' : 'unsupported-command';
-  expect(reads.accept).toMatchObject({ ok: false, failure: { code: refusal } });
-  expect(reads.reject).toMatchObject({ ok: false, failure: { code: refusal } });
+  expect(reads.accept).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(reads.reject).toMatchObject({ ok: false, failure: { code: 'read-only' } });
   const prepared = await prepare(page, arm, true);
   const proposed = snapshotOf(await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
