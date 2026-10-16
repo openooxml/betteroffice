@@ -10,7 +10,11 @@ export interface CollaborationReplica {
   ): () => void;
 }
 
-/** @experimental A replica whose state lives in a worker; reads and merges are asynchronous. */
+/**
+ * @experimental A replica whose state lives in a worker; reads and merges are asynchronous. Wrap it with
+ * `createAsyncCollaborationReplica` before passing it to `CollaborationProvider`. The wrapper's synchronous
+ * `encodeStateVector` and `encodeStateAsUpdate` throw; call these methods through `wrapper.async` instead.
+ */
 export interface AsyncCollaborationReplica {
   readonly clientId: number;
   encodeStateVector(): Promise<Uint8Array>;

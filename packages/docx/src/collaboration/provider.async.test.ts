@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { createAsyncCollaborationReplica } from './asyncReplica';
+import { MAX_AWARENESS_TRACKED_PEERS } from './awareness';
 import { CollaborationProvider } from './provider';
 import {
   decodeAwarenessUpdate,
@@ -689,6 +690,48 @@ describe('CollaborationProvider async replicas', () => {
     });
   }
 
+  it('bounds awareness generations across expiry cycles while a typing merge stays pending', async () => {
+    const time = spyOn(performance, 'now').mockReturnValue(0);
+    const intervals = spyOn(globalThis, 'setInterval');
+    try {
+      const value = setup({ user: { name: 'Calm Otter' } });
+      await open(value);
+      const generations = (value.provider as unknown as { awarenessGenerations: ReadonlyMap<number, number> })
+        .awarenessGenerations;
+      announcePeer(value.transport);
+      value.transport.receive(encodeUpdate(Uint8Array.of(9)));
+      await settle();
+      const sweep = intervals.mock.calls.find(([, delay]) => delay === 5_000)?.[0];
+      if (typeof sweep !== 'function') throw new Error('expected presence expiry timer');
+      let largest = 0;
+      for (let cycle = 1; cycle <= 32; cycle++) {
+        for (let index = 0; index < 64; index++) {
+          value.transport.receive(peerAwareness(1, 1, cycle * 100 + index));
+        }
+        largest = Math.max(largest, generations.size);
+        time.mockReturnValue(cycle * 45_001);
+        announcePeer(value.transport);
+        sweep();
+        expect(value.provider.peers.map((peer) => peer.clientId)).toEqual([8]);
+        largest = Math.max(largest, generations.size);
+      }
+      expect(largest).toBeLessThanOrEqual(MAX_AWARENESS_TRACKED_PEERS);
+      value.transport.receive(encodeUpdate(Uint8Array.of(10)));
+
+      value.replica.merges[0].result.resolve(inference);
+      await settle();
+      expect(value.provider.peers[0]).toMatchObject({ clientId: 8, inferredCursor: null });
+      value.replica.merges[1].result.resolve({ ...inference, endOffset: 9 });
+      await settle();
+      expect(value.provider.peers[0].inferredCursor).toEqual({ ...inference, endOffset: 9 });
+      expect(generations.size).toBe(0);
+      expect(value.errors).toEqual([]);
+    } finally {
+      intervals.mockRestore();
+      time.mockRestore();
+    }
+  });
+
   it('queues replica messages at their positions before re-entrant frames', async () => {
     const nested = encodeUpdate(Uint8Array.of(2));
     const frame = concat(encodeUpdate(Uint8Array.of(1)), peerAwareness(), encodeUpdate(Uint8Array.of(3)));
@@ -753,8 +796,12 @@ describe('CollaborationProvider async replicas', () => {
 
   it('keeps synchronous encoding unavailable and never calls it', async () => {
     const value = setup();
-    expect(() => value.adapter.encodeStateVector()).toThrow('requires the async adapter');
-    expect(() => value.adapter.encodeStateAsUpdate()).toThrow('requires the async adapter');
+    expect(() => value.adapter.encodeStateVector()).toThrow(
+      /use async\.encodeStateVector\(\) or open the editor with legacySyncApi/
+    );
+    expect(() => value.adapter.encodeStateAsUpdate()).toThrow(
+      /use async\.encodeStateAsUpdate\(\) or open the editor with legacySyncApi/
+    );
     value.syncCalls.length = 0;
     await open(value);
     value.transport.receive(encodeSyncStep1(Uint8Array.of(2)));
