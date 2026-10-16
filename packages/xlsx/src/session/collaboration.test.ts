@@ -103,7 +103,7 @@ test('collaborative worker replicas paint initial state and serialize edits, mer
     for (const provider of providers) provider.connect();
     await synced;
     await Promise.all([left.call.version(), right.call.version()]);
-    await quiet(() => wire.frames[0].length + wire.frames[1].length + left.throughSeq + right.throughSeq);
+    await quiet(() => wire.frames[0].length + wire.frames[1].length + left.throughSeq + right!.throughSeq);
     expect(providers.every((provider) => provider.synced)).toBe(true);
     const remoteUpdates = () => wire.frames[1].flatMap((frame) => decodeMessages(frame))
       .filter((message) => message.type === 'update').length;
