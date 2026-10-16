@@ -103,7 +103,7 @@ export function createPeerlessShellController(initial: Options) {
   let documentKey: unknown;
   let generation = 0;
   const waiting = new Set<(error: Error) => void>();
-  const reviewReads = new WeakMap<PeerlessEditSessionBinding, Promise<ResidentReviewSnapshot>>();
+  const reviewReads = new WeakMap<PeerlessEditSessionBinding, { identity: PeerlessViewSnapshot['identity']; pending: Promise<ResidentReviewSnapshot> }>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
     worker: workerMemory?.map(sample => ({ ...sample })) ?? null });
   const mode = () => options.mode ?? internalMode;
@@ -226,22 +226,23 @@ export function createPeerlessShellController(initial: Options) {
   /** The last review read while it still describes the presented document and preview, whichever frame shows them. */
   const describedReview = () => currentReview(reviewDescribes);
   const readReview = (current: PeerlessEditSessionBinding, timeoutMs = options.reviewTimeoutMs ?? 30000): Promise<ResidentReviewSnapshot> => {
+    const identity = { ...current.viewStore.getSnapshot().identity };
     const pending = reviewReads.get(current);
-    if (pending) return pending;
+    if (pending && sameIdentity(pending.identity, identity)) return pending.pending;
     const deadline = Date.now() + timeoutMs;
     const request = (async () => {
       while (Date.now() < deadline) {
         const value = await readPresentedReview({ binding: current, current: () => binding, subscribe,
           read: options.read, readAt: options.readAt, timeoutMs: Math.max(0, deadline - Date.now()) });
-        if (binding !== current) throw new Error('Document was replaced');
+        if (binding !== current || !sameIdentity(identity, current.viewStore.getSnapshot().identity)) throw new Error('Document was replaced');
         if (!reviewMatches(current.viewStore.getSnapshot(), value)) continue;
         reviewBinding = current; reviewIdentity = { ...current.viewStore.getSnapshot().identity }; reviewValue = value;
         rememberComments(current, current.viewStore.getSnapshot(), value.uiComments); publish();
         if (reviewMatches(current.viewStore.getSnapshot(), value)) return value;
       }
       throw new Error('Review snapshot timed out');
-    })().finally(() => { reviewReads.delete(current); });
-    reviewReads.set(current, request);
+    })().finally(() => { if (reviewReads.get(current)?.pending === request) reviewReads.delete(current); });
+    reviewReads.set(current, { identity, pending: request });
     return request;
   };
   const presentedProposals = (current: PeerlessEditSessionBinding): Promise<DocxProposalSnapshot> => {
