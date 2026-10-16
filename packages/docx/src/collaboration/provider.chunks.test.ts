@@ -581,8 +581,15 @@ class AsyncChunkReplica implements AsyncCollaborationReplica {
   }
 }
 
-async function openAsync(options: CollaborationProviderOptions = {}) {
-  const replica = new AsyncChunkReplica();
+class GatedAnswerReplica extends AsyncChunkReplica {
+  readonly gate = deferred<void>();
+
+  override encodeStateAsUpdate(): Promise<Uint8Array> {
+    return this.gate.promise.then(() => new Uint8Array(64));
+  }
+}
+
+async function openAsync(options: CollaborationProviderOptions = {}, replica = new AsyncChunkReplica()) {
   const value = open(createAsyncCollaborationReplica(replica), options);
   await settle();
   value.transport.sent.length = 0;
@@ -671,6 +678,69 @@ describe('CollaborationProvider chunked sync with async replicas', () => {
     expect(sent(transport).filter((message) => message.type === 'sync-step-1')).toHaveLength(1);
     expect(errors).toEqual([]);
   });
+
+  it('asks back for chunks until a join landing mid-answer merges, and unmarked after', async () => {
+    const replica = new GatedAnswerReplica();
+    const { transport, errors } = await openAsync({}, replica);
+    const requests = () => sent(transport).filter((message) => message.type === 'sync-step-1');
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    transport.receive(encodeUpdate(Uint8Array.of(9)));
+    transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+    await settle();
+    expect(replica.syncs).toEqual([]);
+
+    replica.gate.resolve();
+    await settle();
+    expect(requests()).toEqual([
+      { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+    ]);
+    replica.syncs[0].result.resolve(undefined);
+    await settle();
+    transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+    await settle();
+    expect(requests().slice(1)).toEqual([{ type: 'sync-step-1', stateVector: Uint8Array.of(0) }]);
+    expect(errors).toEqual([]);
+  });
+
+  for (const ending of ['is refused', 'loses its connection'] as const) {
+    it(`asks a reopened connection for chunks only until its own join merges after a pending join ${ending}`, async () => {
+      const replica = new GatedAnswerReplica();
+      const { provider, transport, errors } = await openAsync({}, replica);
+      const requests = () => sent(transport).filter((message) => message.type === 'sync-step-1');
+      transport.receive(encodeUpdate(Uint8Array.of(9)));
+      transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+      await settle();
+      if (ending === 'is refused') {
+        replica.syncs[0].result.reject(new Error('refused'));
+        await settle();
+        expect(errors.map((error) => error.code)).toEqual(['replica']);
+        provider.connect();
+      } else {
+        transport.emit({ type: 'close' });
+      }
+      transport.emit({ type: 'open' });
+      await settle();
+      transport.sent.length = 0;
+
+      transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+      transport.receive(encodeUpdate(Uint8Array.of(8)));
+      transport.receive(encodeSyncStep2(Uint8Array.of(0)));
+      if (ending !== 'is refused') replica.syncs[0].result.resolve(undefined);
+      await settle();
+      replica.gate.resolve();
+      await settle();
+      expect(requests()).toEqual([
+        { type: 'sync-step-1', stateVector: withSyncRequest(Uint8Array.of(0), { chunked: true }) },
+      ]);
+      replica.syncs[1].result.resolve(undefined);
+      await settle();
+      transport.receive(encodeSyncStep1(withSyncRequest(Uint8Array.of(0), opening)));
+      await settle();
+      expect(requests().slice(1)).toEqual([{ type: 'sync-step-1', stateVector: Uint8Array.of(0) }]);
+      expect(provider.synced).toBe(true);
+    });
+  }
 
   it('holds updates past the inbound limit and merges them with the SyncStep2 in order', async () => {
     const { replica, provider, transport, errors } = await openAsync({ ...chunked, maxPendingBytes: 24 });
