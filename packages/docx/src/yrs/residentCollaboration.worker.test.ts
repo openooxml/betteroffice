@@ -512,3 +512,30 @@ for (const settle of ['all', 'some', 'withdraw'] as const) {
     } finally { toA.off(); toB.off(); a.session.dispose(); b.session.dispose(); }
   }, TIMEOUT);
 }
+
+test('two opens that both seed from one source merge by story last-writer-wins like the in-thread route', async () => {
+  const a = await open(9201);
+  const b = await open(9202);
+  const left = await createYrsSession({ clientId: 9201 });
+  const right = await createYrsSession({ clientId: 9202 });
+  const texts = (session: { paragraphs(story: string): readonly { text: string }[] }) => session.paragraphs('body').map(paragraph => paragraph.text);
+  try {
+    left.openDocx(documentBytes(), true);
+    right.openDocx(documentBytes(), true);
+    left.insertText({ story: 'body', paraId: left.paragraphs('body')[0]!.paraId, offset: 4 }, 'A');
+    right.insertText({ story: 'body', paraId: right.paragraphs('body')[0]!.paraId, offset: 4 }, 'B');
+    const [toLeft, toRight] = [right.encodeStateAsUpdate(left.encodeStateVector()), left.encodeStateAsUpdate(right.encodeStateVector())];
+    left.applyUpdate(toLeft);
+    right.applyUpdate(toRight);
+    expect(texts(left)).toEqual(texts(right));
+    expect([['SeedA', 'Second'], ['SeedB', 'Second']]).toContainEqual(texts(left));
+
+    expect((await a.session.submit('insertText', { text: 'A' }).ack).status).toBe('applied');
+    expect((await b.session.submit('insertText', { text: 'B' }).ack).status).toBe('applied');
+    const [toA, toB] = [remoteUpdate(a, b.engine), remoteUpdate(b, a.engine)];
+    await a.session.submit('applyRemoteUpdate', { update: toA }, merge).ack;
+    await b.session.submit('applyRemoteUpdate', { update: toB }, merge).ack;
+    expect(texts(a.engine)).toEqual(texts(b.engine));
+    expect(texts(a.engine)).toEqual(texts(left));
+  } finally { left.destroy(); right.destroy(); a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
