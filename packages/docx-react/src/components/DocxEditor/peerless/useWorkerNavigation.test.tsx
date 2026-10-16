@@ -4,6 +4,8 @@ import { useRef } from 'react';
 import { createPeerlessShellController, WorkerReadSupersededError } from './shellController';
 import { createPeerlessViewStore } from './viewStore';
 import { useWorkerNavigation } from './useWorkerNavigation';
+import { createInputAdmission } from './inputAdmission';
+import { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -199,5 +201,41 @@ for (const phase of ['ack', 'presented'] as const) {
         presented: phase === 'presented' ? Promise.reject(new Error('Worker failed')) : Promise.resolve('presented') } }));
       await expect(controller.ref.scrollToComment(7)).rejects.toThrow('Worker failed');
     } finally { dispose(); }
+  });
+}
+
+
+test('review navigation resolves false when replacement disposes the composition read barrier', async () => {
+  const { controller, binding, viewStore, read, dispose } = reviewNavigation(reviewTargets);
+  const admission = createInputAdmission({ session: binding.session, viewStore, echoPainter: { disable() {} } as never });
+  binding.admission = admission;
+  admission.reserveComposition();
+  try {
+    const pending = controller.ref.scrollToComment(7);
+    controller.opening({});
+    admission.dispose();
+    expect(await pending).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+  } finally { admission.dispose(); dispose(); }
+});
+
+for (const destroyed of [true, false]) {
+  test(`review navigation ${destroyed ? 'resolves false for teardown' : 'preserves a worker failure'} during a replacement read`, async () => {
+    const { controller, read, dispose } = reviewNavigation(reviewTargets);
+    const port: NonNullable<ConstructorParameters<typeof ResidentEngineWorkerClient>[0]> = {
+      onmessage: null, onmessageerror: null, onerror: null, postMessage() {}, terminate() {},
+    };
+    const client = new ResidentEngineWorkerClient(port);
+    read.mockImplementationOnce(async () => {
+      const pending = client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 7 } });
+      controller.opening({});
+      if (destroyed) client.destroy();
+      else port.onerror?.({ message: 'Worker failed' } as ErrorEvent);
+      return pending as never;
+    });
+    try {
+      if (destroyed) expect(await controller.ref.scrollToComment(7)).toBe(false);
+      else await expect(controller.ref.scrollToComment(7)).rejects.toThrow('Resident engine worker failed: Worker failed');
+    } finally { client.destroy(); dispose(); }
   });
 }
