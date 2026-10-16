@@ -1859,7 +1859,7 @@ test('worker-only opens request the font-ready certified initial display window'
 });
 
 
-test('the real worker editor serves one native copy from its prefetched selection without the async API', async () => {
+test('the real worker editor serves one copy event from its prefetched selection without the async API', async () => {
   surface.mockRestore();
   const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
@@ -1871,7 +1871,9 @@ test('the real worker editor serves one native copy from its prefetched selectio
   await act(async () => { fireEvent.keyDown(input, { key: 'a', ctrlKey: true }); });
   await waitFor(() => expect(requests.filter(r => r.type === 'documentRead' && r.read.kind === 'clipboardSlice')).toHaveLength(1));
   await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
-  const data = new DataTransfer();
+  const written = new Map<string, string>();
+  const data = { setData: (type: string, text: string) => { written.set(type, text); },
+    getData: (type: string) => written.get(type) ?? '' } as unknown as DataTransfer;
   fireEvent.copy(input, { clipboardData: data });
   expect(data.getData('text/plain')).toBe('Selected text');
   expect(data.getData('text/html')).toBe('');

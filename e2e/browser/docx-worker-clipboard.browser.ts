@@ -4,19 +4,21 @@ import { readFile } from 'node:fs/promises';
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 
-async function documentBytes(): Promise<Buffer> {
+async function documentBytes(plain = false): Promise<Buffer> {
   const cell = (text: string, bold = false) => `<w:tc><w:p><w:r>${bold ? '<w:rPr><w:b/></w:rPr>' : ''}<w:t>${text}</w:t></w:r></w:p></w:tc>`;
   const table = `<w:tbl><w:tblPr><w:tblW w:w="4680" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid>` +
     `<w:tr>${cell('RIGHT', true)}${cell('INDEX')}</w:tr></w:tbl>`;
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/document.xml', `<w:document ${W}><w:body><w:p><w:r><w:t>Before</w:t></w:r></w:p>${table}<w:p/>` +
+  const body = plain ? '<w:p><w:r><w:t>Immediate clipboard text</w:t></w:r></w:p>'
+    : `<w:p><w:r><w:t>Before</w:t></w:r></w:p>${table}<w:p/>`;
+  zip.file('word/document.xml', `<w:document ${W}><w:body>${body}` +
     '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>');
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-async function open(page: Page, deny = true): Promise<Locator> {
+async function open(page: Page, deny = true, plain = false): Promise<Locator> {
   if (deny) await page.addInitScript(() => {
     const denied = () => Promise.reject(new DOMException('Write permission denied.', 'NotAllowedError'));
     Object.defineProperty(Navigator.prototype, 'clipboard', { configurable: true,
@@ -32,7 +34,7 @@ async function open(page: Page, deny = true): Promise<Locator> {
   });
   await page.goto('/?format=docx&peerless=1');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'worker-clipboard.docx',
-    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await documentBytes() });
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await documentBytes(plain) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60_000 });
   await page.evaluate(() => {
     const sink = document.createElement('div');
@@ -114,15 +116,15 @@ for (const cut of [false, true]) test(`immediate native ${cut ? 'cut' : 'copy'} 
     document.addEventListener('copy', release, { capture: true, once: true });
     document.addEventListener('cut', release, { capture: true, once: true });
   });
-  const input = await open(page);
+  const input = await open(page, true, true);
   await page.evaluate(() => { const sink = document.createElement('textarea'); sink.id = 'plain-sink'; document.body.append(sink); });
   await input.press('ControlOrMeta+a');
   await input.press(cut ? 'ControlOrMeta+x' : 'ControlOrMeta+c');
-  await expect.poll(() => page.evaluate(() => (window as unknown as { nativeClipboardText?: string }).nativeClipboardText)).toContain('RIGHT');
-  await expect.poll(async () => (await savedXml(page, info, 'immediate')).includes('RIGHT')).toBe(!cut);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { nativeClipboardText?: string }).nativeClipboardText)).toBe('Immediate clipboard text');
+  await expect.poll(async () => (await savedXml(page, info, 'immediate')).includes('Immediate clipboard text')).toBe(!cut);
   await page.locator('#plain-sink').focus();
   await page.keyboard.press('ControlOrMeta+v');
-  await expect(page.locator('#plain-sink')).toHaveValue('Before\nRIGHT\tINDEX\n');
+  await expect(page.locator('#plain-sink')).toHaveValue('Immediate clipboard text');
 });
 
 test('native copy retains table HTML with the async Clipboard API granted', async ({ page, context }) => {
