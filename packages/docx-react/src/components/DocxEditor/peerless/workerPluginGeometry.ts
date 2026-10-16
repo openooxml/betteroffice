@@ -1,16 +1,17 @@
 import { createDisplayListQueries, effectiveZoom, loadRustDisplayListQueryEngine, type DisplayListQueries, type DisplayListRect } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext, type DisplayListPageProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import { anchorFailure, type ProposalGeometryTarget } from '@betteroffice/docx/yrs';
-import { overlayProjector, pageBuilt, pageRectOf, placeRepeated, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
+import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarget } from '@betteroffice/docx/yrs';
+import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
 import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginSelection } from '../../../plugins/types';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
 import { clientPointToPage } from './pagePoint';
 
+/** `reservations` is the set the editor sends, which a frame's boxes answer for only once it was laid out with it. */
 export function createWorkerPluginGeometry(controller: ReturnType<typeof createPeerlessShellController>, pages: () => HTMLElement | null, layer: () => HTMLElement | null, changed: () => void,
-  navigate?: (target: { story: string; paraId: string }, focus: boolean) => Promise<boolean>) {
+  navigate?: (target: { story: string; paraId: string }, focus: boolean) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null) {
   type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' }>;
-  type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean) => Promise<DocxAnchorGeometryResult[]>;
+  type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string) => Promise<DocxAnchorGeometryResult[]>;
   let current: { frame: PeerlessFrameGeometry; version: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries; readAll: ReadAll } | null = null;
   let displaySelection: DocxPluginSelection['displayRange'] = null;
   let displayWindow: readonly [number, number] | null = null;
@@ -84,7 +85,8 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const review = await controller.review();
     if (request !== generation || controller.getSnapshot().view?.geometry !== frame) return;
     const queries = createDisplayListQueries({ pages: frame.pages.map(page => page.displayPage!).filter(Boolean) }, native);
-    const layout: DocxPluginLayout = { id: `${view.identity.session}:${view.version}:${frame.frameEpoch}`, version: review.version, previewVersion: review.previewVersion, reservationsVersion: null, zoom, pageCount: frame.pages.length };
+    const layout: DocxPluginLayout = { id: `${view.identity.session}:${view.version}:${frame.frameEpoch}`, version: review.version, previewVersion: review.previewVersion,
+      reservationsVersion: frame.reservations?.version ?? null, zoom, pageCount: frame.pages.length };
     /** Projections over the pages host and overlay layer, each measured at most once. */
     const measure = () => {
       let host: { x: number; y: number } | null | undefined;
@@ -124,8 +126,21 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
           pageRect: toLayer(bounds), ...(unbuiltPages.length ? { unbuiltPages } : {}) };
       },
     });
-    const answer = (target: DocxGeometryTarget, request: boolean, measured = measure()): DocxAnchorGeometryResult => {
-      if (target.kind === 'reservation') return anchorFailure('unsupported', 'This layout reports no reservations');
+    /** `owner`'s reservation `id` as this frame lays it out: its boxes, or the anchor a `hide` leaves a boundary at. */
+    const reserved = (owner: string, id: string, measured: ReturnType<typeof measure>): { result: DocxAnchorGeometryResult } | { hide: Read } => {
+      if (!shown()) return { result: unavailable() };
+      const sent = reservations();
+      if (sent ? sent.key === undefined || frame.reservations?.key !== sent.key : frame.reservations !== undefined) return { result: unavailable() };
+      const item = sent?.sets.find(set => set.owner === owner)?.items.find(entry => entry.id === id);
+      if (!item) return { result: anchorFailure('missing-target', 'The reservation did not resolve') };
+      return item.kind === 'hide' ? { hide: item.anchor } : { result: placeReservation(repeatedOf(measured), owner, id) };
+    };
+    const answer = (target: DocxGeometryTarget, request: boolean, measured = measure(), owner?: string, hide = false): DocxAnchorGeometryResult => {
+      if (target.kind === 'reservation') {
+        if (owner === undefined) return anchorFailure('unsupported', 'Reservations are read through a plugin context');
+        const item = reserved(owner, target.id, measured);
+        return 'hide' in item ? answer(item.hide, request, measured, undefined, true) : item.result;
+      }
       if (!shown()) return unavailable();
       if ((pinnedVersion(target) ?? layout.version) !== layout.version) return { ok: false, failure: { code: 'stale-version', message: 'The document changed after that version' } };
       if (request) requestTarget(target);
@@ -137,6 +152,13 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       if (resolved.root) {
         return resolved.rIds ? placeRepeated(repeatedOf(measured), resolved.rIds, [...resolved.ranges], resolved.hidden ?? [], resolved.paragraph)
           : { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
+      }
+      if (hide) {
+        const placement = repeatedOf(measured);
+        const end = hiddenBoundary(queries, resolved.ranges, resolved.ranges, resolved.paragraph);
+        const fallback = end || resolved.paragraph === null ? null : queries.anchorRect(resolved.paragraph);
+        const at = end ?? (fallback && { ...fallback, width: 0 });
+        return at && placement.pending(at.pageIndex) ? unavailable() : placement.respond([], at, unbuiltPagesOf(queries, resolved.ranges));
       }
       const raw = target.kind === 'proposal' ? review.proposalHighlights[target.id] ?? [] : resolved.ranges.flatMap(range => queries.rangeRects(range.from, range.to));
       const rects = raw.map(measured.project).filter(value => value !== null);
@@ -177,15 +199,23 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       isPageBuilt: pageIndex => shown() && pageBuilt(queries, pageIndex),
     };
     /** Answers `targets` once their reads land, on the layout then current, until the document is replaced. */
-    const readAll: ReadAll = async (targets, retry) => {
+    const readAll: ReadAll = async (targets, retry, owner) => {
       const sameDocument = () => !!current && sameView(current.frame.identity, frame.identity);
       if (!sameDocument()) return targets.map(unavailable);
-      await Promise.all(targets.map(target => requestTarget(target, retry)));
+      const asked = measure();
+      await Promise.all(targets.map(target => {
+        const item = target.kind === 'reservation' && owner !== undefined ? reserved(owner, target.id, asked) : null;
+        return item && 'hide' in item ? requestTarget(item.hide, retry) : requestTarget(target, retry);
+      }));
       if (!sameDocument()) return targets.map(unavailable);
-      if (current!.geometry !== geometry) return current!.readAll(targets, false);
+      if (current!.geometry !== geometry) return current!.readAll(targets, false, owner);
       const measured = measure();
-      return targets.map(target => answer(target, false, measured));
+      return targets.map(target => answer(target, false, measured, owner));
     };
+    registerReservationReader(geometry, {
+      get: (owner, id) => answer({ kind: 'reservation', id }, true, measure(), owner),
+      read: (owner, targets) => readAll(targets, true, owner),
+    });
     current?.queries.dispose();
     current = { frame, version: view.version, layout, geometry, queries, readAll }; displaySelection = null; publish();
     const selection = view.workerSelection;

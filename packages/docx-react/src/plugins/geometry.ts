@@ -97,10 +97,19 @@ export function pluginLayout(
   };
 }
 
-const reservationReaders = new WeakMap<
-  DocxPluginGeometry,
-  (owner: string, id: string) => DocxAnchorGeometryResult
->();
+/** @internal Answers a plugin's `reservation` targets on one geometry. */
+export interface ReservationReader {
+  get(owner: string, id: string): DocxAnchorGeometryResult;
+  /** Answers `targets` in order once their reads land, `reservation` ones as `owner`'s. */
+  read?(owner: string, targets: readonly DocxGeometryTarget[]): Promise<DocxAnchorGeometryResult[]>;
+}
+
+const reservationReaders = new WeakMap<DocxPluginGeometry, ReservationReader>();
+
+/** @internal Lets plugin-scoped views of `geometry` answer their `reservation` targets with `reader`. */
+export function registerReservationReader(geometry: DocxPluginGeometry, reader: ReservationReader): void {
+  reservationReaders.set(geometry, reader);
+}
 const scopedGeometries = new WeakMap<DocxPluginGeometry, Map<string, DocxPluginGeometry>>();
 
 /** `geometry` as plugin `pluginId` reads it: its `reservation` targets name its own reservations. */
@@ -115,6 +124,13 @@ export function scopePluginGeometry(
   }
   let scoped = byPlugin.get(pluginId);
   if (!scoped) {
+    const reservation = (target: DocxGeometryTarget) => {
+      if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
+      const reader = reservationReaders.get(geometry);
+      return reader
+        ? reader.get(pluginId, target.id)
+        : anchorFailure('unsupported', 'This layout reports no reservations');
+    };
     scoped = {
       get layout() {
         return geometry.layout;
@@ -125,16 +141,14 @@ export function scopePluginGeometry(
       toOverlayRect: (rect) => geometry.toOverlayRect(rect),
       getPositionAtPoint: (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
       readPositionAtPoint: (clientX, clientY) => geometry.readPositionAtPoint(clientX, clientY),
-      readAnchorGeometries: (targets) => geometry.readAnchorGeometries(targets),
+      readAnchorGeometries: async (targets) => {
+        if (!targets.some((target) => target.kind === 'reservation')) return geometry.readAnchorGeometries(targets);
+        const reader = reservationReaders.get(geometry);
+        return reader?.read ? reader.read(pluginId, targets) : targets.map(reservation);
+      },
       getPageRect: (pageIndex) => geometry.getPageRect(pageIndex),
       isPageBuilt: (pageIndex) => geometry.isPageBuilt(pageIndex),
-      getAnchorGeometry: (target: DocxGeometryTarget) => {
-        if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
-        const read = reservationReaders.get(geometry);
-        return read
-          ? read(pluginId, target.id)
-          : anchorFailure('unsupported', 'This layout reports no reservations');
-      },
+      getAnchorGeometry: reservation,
     };
     byPlugin.set(pluginId, scoped);
   }
@@ -314,6 +328,85 @@ export interface RepeatedPlacement {
   unavailable(): DocxAnchorGeometryResult;
 }
 
+/** The last unit drawn at `from`, which has width. */
+const unitAt = (queries: DisplayListQueries, from: number): DisplayListRect | null =>
+  queries
+    .rangeRects(from, from + 1)
+    .filter((rect) => rect.width > 0)
+    .at(-1) ?? null;
+
+/** The text caret stop nearest `x` on `unit`'s line; null over an image or shape atom. */
+function stopAt(queries: DisplayListQueries, unit: DisplayListRect, x: number): number | null {
+  const hit = queries.hitTestRegions(unit.pageIndex, x, unit.y + unit.height / 2);
+  return hit?.region === 'body' && hit.target !== 'image' ? hit.pos : null;
+}
+
+/**
+ * The collapsed caret at `pos`, on the edge of a neighbouring unit whose caret stop is nearest
+ * `pos`: the unit before it first when `before`, else the unit after it first. An atom, which
+ * has no text stops, keeps the caret on its near side.
+ */
+function caretAt(queries: DisplayListQueries, pos: number, before = false): DisplayListRect | null {
+  for (const from of before ? [pos - 1, pos] : [pos, pos - 1]) {
+    const unit = unitAt(queries, from);
+    if (!unit) continue;
+    const inset = Math.min(1, unit.width / 4);
+    const left = stopAt(queries, unit, unit.x + inset);
+    const right = stopAt(queries, unit, unit.x + unit.width - inset);
+    const atLeft =
+      left === null || right === null
+        ? from === pos
+        : Math.abs(left - pos) <= Math.abs(right - pos);
+    return { ...unit, x: atLeft ? unit.x : unit.x + unit.width, width: 0 };
+  }
+  return null;
+}
+
+/**
+ * @internal The caret `ranges` leave when none of them draws: before the hidden text around the
+ * last one, else after it, else at `paragraph`.
+ */
+export function hiddenBoundary(
+  queries: DisplayListQueries,
+  ranges: readonly Interval[],
+  hidden: readonly Interval[],
+  paragraph: number | null
+): DisplayListRect | null {
+  const last = ranges.at(-1);
+  const gap = last && widen(last, hidden);
+  return (
+    (gap && (caretAt(queries, gap.from, true) ?? caretAt(queries, gap.to))) ??
+    (paragraph === null ? null : caretAt(queries, paragraph))
+  );
+}
+
+/** @internal `owner`'s reservation boxes `id` on the built pages; unbuilt pages wait. */
+export function placeReservation(
+  { queries, complete, pending, respond, unavailable }: RepeatedPlacement,
+  owner: string,
+  id: string
+): DocxAnchorGeometryResult {
+  const pages = queries.displayList?.pages ?? [];
+  const rects: DisplayListRect[] = [];
+  let unbuilt = false;
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    const page = pages[pageIndex]!;
+    const found = page.reservations?.filter((box) => box.owner === owner && box.id === id) ?? [];
+    if (found.length && pending(pageIndex)) return unavailable();
+    if (page.unbuilt) {
+      unbuilt = true;
+      continue;
+    }
+    for (const box of found) {
+      rects.push({ pageIndex, x: box.x, y: box.y, width: box.width, height: box.height });
+    }
+  }
+  if (rects.length) return respond(rects, rects[0]!);
+  return unbuilt || !complete()
+    ? unavailable()
+    : anchorFailure('missing-target', 'No page shows the reservation');
+}
+
 /**
  * @internal Places a target in a header or footer story, which repeats on every page whose band
  * shows it under one of `routed` relationship ids. Unbuilt pages outside the display window are
@@ -429,39 +522,9 @@ export function createPluginGeometry(
     }
     return low + 1;
   };
-  const unitAt = (from: number): DisplayListRect | null =>
-    queries
-      .rangeRects(from, from + 1)
-      .filter((rect) => rect.width > 0)
-      .at(-1) ?? null;
-  /** The text caret stop nearest `x` on `unit`'s line; null over an image or shape atom. */
-  const stopAt = (unit: DisplayListRect, x: number): number | null => {
-    const hit = queries.hitTestRegions(unit.pageIndex, x, unit.y + unit.height / 2);
-    return hit?.region === 'body' && hit.target !== 'image' ? hit.pos : null;
-  };
-  /**
-   * The collapsed caret at `pos`, on the edge of a neighbouring unit whose caret stop is nearest
-   * `pos`: the unit before it first when `before`, else the unit after it first. An atom, which
-   * has no text stops, keeps the caret on its near side.
-   */
-  const caretAt = (pos: number, before = false): DisplayListRect | null => {
-    for (const from of before ? [pos - 1, pos] : [pos, pos - 1]) {
-      const unit = unitAt(from);
-      if (!unit) continue;
-      const inset = Math.min(1, unit.width / 4);
-      const left = stopAt(unit, unit.x + inset);
-      const right = stopAt(unit, unit.x + unit.width - inset);
-      const atLeft =
-        left === null || right === null
-          ? from === pos
-          : Math.abs(left - pos) <= Math.abs(right - pos);
-      return { ...unit, x: atLeft ? unit.x : unit.x + unit.width, width: 0 };
-    }
-    return null;
-  };
   const endOf = ({ from, to }: Interval): DisplayListRect | null => {
     const end = lastUnitEnd(from, to);
-    return end === null ? null : caretAt(end, true);
+    return end === null ? null : caretAt(queries, end, true);
   };
   const pendingPage = (pageIndex: number): boolean => {
     const window = displayWindowOf(queries)?.read();
@@ -598,8 +661,6 @@ export function createPluginGeometry(
       }
       if (visible.length > 0) tail = { from, to };
     }
-    const last = ranges.at(-1);
-    const gap = last && widen(last, hidden);
     const paragraph = mirrored?.ok
       ? mirrored.paragraph
       : resolved?.ok
@@ -608,8 +669,7 @@ export function createPluginGeometry(
     const end =
       tail !== null
         ? (endOf(tail) ?? lastInReadingOrder(drawn))
-        : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
-          (paragraph === null ? null : caretAt(paragraph)));
+        : hiddenBoundary(queries, ranges, hidden, paragraph);
     const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
     if ((end && pendingPage(end.pageIndex)) || (fallback && pendingPage(fallback.pageIndex))) {
       return unavailable();
@@ -643,25 +703,7 @@ export function createPluginGeometry(
         paragraph: at(0),
       }, false, true);
     }
-    const pages = queries.displayList?.pages ?? [];
-    const rects: DisplayListRect[] = [];
-    let pending = false;
-    for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
-      const page = pages[pageIndex]!;
-      const found = page.reservations?.filter((box) => box.owner === owner && box.id === id) ?? [];
-      if (found.length && pendingPage(pageIndex)) return unavailable();
-      if (page.unbuilt) {
-        pending = true;
-        continue;
-      }
-      for (const box of found) {
-        rects.push({ pageIndex, x: box.x, y: box.y, width: box.width, height: box.height });
-      }
-    }
-    if (rects.length) return respond(rects, rects[0]!);
-    return pending || !complete()
-      ? unavailable()
-      : anchorFailure('missing-target', 'No page shows the reservation');
+    return placeReservation({ queries, complete, pending: pendingPage, respond, unavailable }, owner, id);
   };
   const drawable = () => shown() || (dom.zoom === layout.zoom && held());
   const created: DocxPluginGeometry = {
@@ -695,6 +737,6 @@ export function createPluginGeometry(
         ? anchorFailure('unsupported', 'Reservations are read through a plugin context')
         : anchorGeometry(target),
   };
-  reservationReaders.set(created, reservation);
+  registerReservationReader(created, { get: reservation });
   return created;
 }

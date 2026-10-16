@@ -150,7 +150,7 @@ async function laidOut(first = 0, end = 2 ** 32 - 1, reservations?: DocxReservat
 interface ShellOptions {
   zoom?: number; window?: readonly [number, number]; answer?(result: ProposalGeometryTarget): ProposalGeometryTarget;
   /** The reservation set the frame was laid out with, and the one the editor sends. */
-  laidOutWith?: { version: string; key: string | null }; sent?(): unknown;
+  laidOutWith?: { version: string; key: string | null }; sent?(): DocxReservationsPayload | null;
 }
 
 /** The peer-less plugin geometry over `laid`'s frame, its targets answered by the worker read. */
@@ -192,8 +192,7 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
       return computeAnchorTargetGeometry(engine.geometryReader, request.targets).map(answer);
     },
     ref: { getZoom: () => zoom, readParagraphs: async () => ({ ok: true, version, paragraphs: [] }) } };
-  const plugin = (createWorkerPluginGeometry as (...args: unknown[]) => ReturnType<typeof createWorkerPluginGeometry>)(
-    controller, () => container, () => layer, () => {}, undefined, sent);
+  const plugin = createWorkerPluginGeometry(controller as never, () => container, () => layer, () => {}, undefined, sent);
   if (window) plugin.setDisplayWindow(window);
   await plugin.update();
   return {
@@ -411,24 +410,28 @@ test('pages released to unbuilt keep the parts their build paints across a frame
 });
 
 const at = (paraId: string, offset: number) => ({ paraId, offset });
-const span = (paraId: string, from: number, to: number) =>
-  ({ kind: 'range', version: 'v', range: { story: 'body', start: at(paraId, from), end: at(paraId, to), view: 'accepted' } }) as const;
-const RESERVED: DocxReservationsPayload = { version: 'v', sets: [
-  { owner: 'probe', items: [
-    { id: 'chip', kind: 'inline', width: 40, height: 20, anchor: span('00000004', 7, 7) },
-    { id: 'gap', kind: 'block', side: 'after', height: 60, anchor: span('00000005', 0, 0) },
-    { id: 'gone', kind: 'hide', anchor: span('00000005', 6, 11) },
-    { id: 'late', kind: 'inline', width: 30, height: 10, anchor: span('00000008', 0, 0) },
-  ] },
-  { owner: 'other', items: [{ id: 'chip', kind: 'inline', width: 24, height: 12, anchor: span('00000001', 0, 0) }] },
-] };
+/** The probe sets with their anchors read at `version`. */
+function reservedAt(version: string): DocxReservationsPayload {
+  const span = (paraId: string, from: number, to: number) =>
+    ({ kind: 'range', version, range: { story: 'body', start: at(paraId, from), end: at(paraId, to), view: 'accepted' } }) as const;
+  return { version, sets: [
+    { owner: 'probe', items: [
+      { id: 'chip', kind: 'inline', width: 40, height: 20, anchor: span('00000004', 7, 7) },
+      { id: 'gap', kind: 'block', side: 'after', height: 60, anchor: span('00000005', 0, 0) },
+      { id: 'gone', kind: 'hide', anchor: span('00000005', 6, 11) },
+      { id: 'late', kind: 'inline', width: 30, height: 10, anchor: span('00000008', 0, 0) },
+    ] },
+    { owner: 'other', items: [{ id: 'chip', kind: 'inline', width: 24, height: 12, anchor: span('00000001', 0, 0) }] },
+  ] };
+}
 const LAID_OUT = { version: 'v', key: '1' };
-const sentAs = (key: string) => ({ ...RESERVED, key });
+const sentAs = (key: string, version = 'v') => ({ ...reservedAt(version), key });
 const reservation = (id: string) => ({ kind: 'reservation', id }) as const;
 
 async function reservedShell(first?: number, end?: number) {
-  const laid = await laidOut(first, end, RESERVED);
-  return { laid, shell: await shellOf(laid, { laidOutWith: LAID_OUT, sent: () => sentAs('1') }) };
+  const laid = await laidOut(first, end, reservedAt('v'));
+  const version = laid.engine.geometryReader.version();
+  return { laid, shell: await shellOf(laid, { laidOutWith: LAID_OUT, sent: () => sentAs('1', version) }) };
 }
 
 /** `owner`'s box `id` on the frame pages, which the answer must place in overlay pixels. */
@@ -470,7 +473,7 @@ test('a plugin reads its own inline and block boxes from the frame pages, batche
 
 test('a frame laid out with another reservation set than the one the editor sends answers layout-unavailable', async () => {
   let sent = sentAs('2');
-  const laid = await laidOut(undefined, undefined, RESERVED);
+  const laid = await laidOut(undefined, undefined, reservedAt('v'));
   const shell = await shellOf(laid, { laidOutWith: LAID_OUT, sent: () => sent });
   const probe = scopePluginGeometry(shell.plugin.geometry()!, 'probe');
   const unavailable = { ok: false, failure: { code: 'layout-unavailable' } };
