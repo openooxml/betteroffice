@@ -20,7 +20,7 @@ const SEPARATOR: char = '\u{2029}';
 /// the common prefix and suffix as one edit.
 const EDIT_LIMIT: usize = 256;
 
-fn has_markers(xml: &str) -> bool {
+pub(crate) fn has_markers(xml: &str) -> bool {
     MARKERS.iter().any(|marker| xml.contains(marker))
 }
 
@@ -32,12 +32,15 @@ enum Slot {
     Inserted(usize),
 }
 
+/// The comment a part whose source holds permission markers is serialized with right before
+/// the paragraph recorded at `position` in writing order (see [`keep`]).
+pub(crate) fn token(position: usize) -> String {
+    format!("<!--bo-paragraph {position}-->")
+}
+
 /// Carries the permission markers of the paragraphs of `source` into those `recorded` holds
-/// for `part`, and into `serialized`, which holds them in writing order. Each paragraph written
-/// from a source paragraph takes, as one text, that paragraph and the removed ones whose nearest
-/// written paragraph it is (the one before them, else after), and places their markers in
-/// itself and the paragraphs written without a source paragraph that follow it, before the
-/// next one written from one. Paragraphs of groups without markers are not read.
+/// for `part` (see [`placements`]), and into `serialized`, which holds each right after its
+/// [`token`] when `source` holds a marker, and drops the tokens.
 pub(crate) fn keep(
     source: &str,
     part: &S13SplicedPart,
@@ -47,9 +50,60 @@ pub(crate) fn keep(
     if !has_markers(source) {
         return;
     }
-    let Some(occurrences) = paragraph_occurrences(source) else {
-        return;
-    };
+    let replacements = placements(source, part, recorded).unwrap_or_default();
+    let mut output = String::with_capacity(serialized.len() + 256);
+    let mut cursor = 0;
+    let mut inserted = 0;
+    let mut updates = Vec::new();
+    for (position, entry) in recorded.order.iter().enumerate() {
+        let (slot, old) = match *entry {
+            Some(ordinal) => (Slot::Written(ordinal), recorded.written.get(&ordinal)),
+            None => {
+                inserted += 1;
+                (
+                    Slot::Inserted(inserted - 1),
+                    recorded.inserted.get(inserted - 1),
+                )
+            }
+        };
+        let token = token(position);
+        let Some(found) = serialized[cursor..].find(&token) else {
+            continue;
+        };
+        output.push_str(&serialized[cursor..cursor + found]);
+        cursor += found + token.len();
+        if let Some(new) = replacements.get(&position) {
+            if let Some(old) = old.filter(|old| serialized[cursor..].starts_with(old.as_str())) {
+                output.push_str(new);
+                cursor += old.len();
+            }
+            updates.push((slot, new.clone()));
+        }
+    }
+    output.push_str(&serialized[cursor..]);
+    *serialized = output;
+    for (slot, new) in updates {
+        match slot {
+            Slot::Written(ordinal) => {
+                recorded.written.insert(ordinal, new);
+            }
+            Slot::Inserted(index) => recorded.inserted[index] = new,
+        }
+    }
+}
+
+/// The XML with permission markers of each paragraph `recorded` holds for `part` that takes
+/// one, by its position in writing order; `None` when none does. Each paragraph written from a
+/// source paragraph takes, as one text, that paragraph and the removed ones whose nearest
+/// written paragraph it is (the one before them, else after), and places their markers in
+/// itself and the paragraphs written without a source paragraph that follow it, before the
+/// next one written from one. Paragraphs of groups without markers are not read.
+fn placements(
+    source: &str,
+    part: &S13SplicedPart,
+    recorded: &RecordedParagraphs,
+) -> Option<BTreeMap<usize, String>> {
+    let occurrences = paragraph_occurrences(source)?;
     let xml = |ordinal: u32| {
         occurrences
             .get(ordinal as usize)
@@ -79,7 +133,7 @@ pub(crate) fn keep(
         }
     }
     if sources.is_empty() {
-        return;
+        return None;
     }
     let mut slots = Vec::with_capacity(recorded.order.len());
     let mut groups: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
@@ -132,38 +186,7 @@ pub(crate) fn keep(
             }
         }
     }
-    let Some(&last) = replacements.keys().next_back() else {
-        return;
-    };
-    let mut output = String::with_capacity(serialized.len() + 256);
-    let mut cursor = 0;
-    for (position, slot) in slots.iter().enumerate().take(last + 1) {
-        let Some(old) = text(*slot) else {
-            break;
-        };
-        let Some(found) = serialized[cursor..].find(old) else {
-            break;
-        };
-        let start = cursor + found;
-        match replacements.get(&position) {
-            Some(new) => {
-                output.push_str(&serialized[cursor..start]);
-                output.push_str(new);
-            }
-            None => output.push_str(&serialized[cursor..start + old.len()]),
-        }
-        cursor = start + old.len();
-    }
-    output.push_str(&serialized[cursor..]);
-    *serialized = output;
-    for (position, new) in replacements {
-        match slots[position] {
-            Slot::Written(ordinal) => {
-                recorded.written.insert(ordinal, new);
-            }
-            Slot::Inserted(index) => recorded.inserted[index] = new,
-        }
-    }
+    Some(replacements)
 }
 
 /// A permission marker: the offset in its paragraph's text it sits at, how many empty siblings

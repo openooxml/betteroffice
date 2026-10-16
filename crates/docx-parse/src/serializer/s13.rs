@@ -938,13 +938,14 @@ impl StoryParts<'_> {
         let Some(part) = self.spliced.get(path) else {
             return serialize(context);
         };
-        context.begin_splice(part.paragraphs.iter().copied());
-        let serialized = serialize(context);
-        let written = context.end_splice();
-        let mut serialized = serialized?;
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let tokens = source.is_some_and(super::permissions::has_markers);
+        context.begin_splice(part.paragraphs.iter().copied(), tokens);
+        let serialized = serialize(context);
+        let written = context.end_splice();
+        let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
             return Ok(serialized);
         };

@@ -343,3 +343,27 @@ fn merging_three_paragraphs_keeps_a_range_on_its_own_text() {
     .unwrap();
     assert!(saved.contains(&format!("{}{}{START}{}{END}", run("A"), run("B"), run("C"))));
 }
+
+#[test]
+fn a_paragraph_kept_as_raw_markup_does_not_take_the_markers_of_an_identical_one() {
+    let block = format!(
+        r#"<x:block xmlns:x="urn:example:block"><w:p>{}</w:p></x:block>"#,
+        run("One")
+    );
+    let saved = save_paragraphs(
+        &format!(
+            "{block}<w:p>{START}{}</w:p><w:p>{}{END}</w:p>",
+            run("One"),
+            run("Two")
+        ),
+        &format!("{block}<w:p>{}</w:p><w:p>{}</w:p>", run("One"), run("Deux")),
+        &[Some(0), Some(1), Some(2)],
+        &[2],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(saved.matches(START).count(), 1);
+    assert!(saved.find("</x:block>") < saved.find(START));
+    assert!(saved.contains(&format!("{START}{}</w:p>", run("One"))));
+    assert!(saved.contains(&format!("{}{END}</w:p>", run("Deux"))));
+}

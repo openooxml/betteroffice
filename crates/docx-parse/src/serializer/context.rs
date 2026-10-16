@@ -31,6 +31,7 @@ struct SpliceRecorder {
     expected: HashSet<u32>,
     recorded: RecordedParagraphs,
     conflict: bool,
+    tokens: bool,
 }
 
 /// The paragraphs written for a spliced part, outside any other paragraph.
@@ -129,10 +130,12 @@ impl SerializerContext {
     }
 
     /// Records the XML written for the model paragraphs whose `sourceOrdinal` is in `expected`
-    /// until [`Self::end_splice`].
-    pub(crate) fn begin_splice(&mut self, expected: impl IntoIterator<Item = u32>) {
+    /// until [`Self::end_splice`], each written after its [`super::permissions::token`] when
+    /// `tokens`.
+    pub(crate) fn begin_splice(&mut self, expected: impl IntoIterator<Item = u32>, tokens: bool) {
         self.splice = Some(SpliceRecorder {
             expected: expected.into_iter().collect(),
+            tokens,
             ..SpliceRecorder::default()
         });
     }
@@ -146,30 +149,32 @@ impl SerializerContext {
     }
 
     /// Records a paragraph written outside any other paragraph: by its `sourceOrdinal`, which
-    /// must be one the part addresses, or as a paragraph the source lacks.
-    pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) {
+    /// must be one the part addresses, or as a paragraph the source lacks. The token to write
+    /// before it, if any.
+    pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) -> Option<String> {
         if !self.rendered_page_breaks.is_empty() {
-            return;
+            return None;
         }
-        let Some(recorder) = self.splice.as_mut() else {
-            return;
-        };
+        let recorder = self.splice.as_mut()?;
         let recorded = &mut recorder.recorded;
         match ordinal {
             None => recorded.inserted.push(xml.to_owned()),
             Some(ordinal) if recorder.expected.contains(&ordinal) => {
                 if let Some(previous) = recorded.written.get(&ordinal) {
                     recorder.conflict |= previous != xml;
-                    return;
+                    return None;
                 }
                 recorded.written.insert(ordinal, xml.to_owned());
             }
             Some(_) => {
                 recorder.conflict = true;
-                return;
+                return None;
             }
         }
         recorded.order.push(ordinal);
+        recorder
+            .tokens
+            .then(|| super::permissions::token(recorded.order.len() - 1))
     }
 
     pub(crate) fn enter_paragraph(&mut self, rendered_page_break_before: bool) {
