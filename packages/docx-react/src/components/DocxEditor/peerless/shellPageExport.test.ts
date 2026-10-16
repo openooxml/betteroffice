@@ -153,7 +153,7 @@ function presentLayout(h: Awaited<ReturnType<typeof fixture>>) {
 
 for (const revisionView of ['accepted', 'original'] as const) {
   test(`paged worker export waits for markup layout when exporting ${revisionView} revisions`, async () => {
-    const h = await fixture(true, false, true);
+    const h = await fixture(true);
     const preview = JSON.parse(h.request);
     preview.renderEnv = { ...preview.renderEnv, revisionPreview: { '1': 'accepted' } };
     h.resident.layoutDocumentWithRegionsRetainedJson(JSON.stringify(preview));
@@ -169,7 +169,27 @@ for (const revisionView of ['accepted', 'original'] as const) {
       const result = await h.controller.ref.exportStructuredWithPages({ revisionView });
       expect(result.ok).toBe(true);
       if (!result.ok) throw new Error(result.failure.message);
-      expect(JSON.stringify(result.content.structured).includes('Revised text')).toBe(revisionView === 'accepted');
+    } finally { await h.close(); }
+  });
+}
+
+for (const previewView of ['accepted', 'rejected'] as const) {
+  test(`paged worker export restores markup after a revised document's ${previewView} preview`, async () => {
+    const h = await fixture(true, false, true);
+    const preview = JSON.parse(h.request);
+    preview.renderEnv = { ...preview.renderEnv, revisionPreview: { '1': previewView } };
+    h.resident.layoutDocumentWithRegionsRetainedJson(JSON.stringify(preview));
+    const subscribe = h.viewStore.subscribe;
+    h.viewStore.subscribe = listener => {
+      const stop = subscribe(listener);
+      queueMicrotask(() => { h.relayout(); presentLayout(h); });
+      return stop;
+    };
+    try {
+      const result = await h.controller.ref.exportStructuredWithPages({ revisionView: 'markup' });
+      if (!result.ok) throw new Error(result.failure.message);
+      expect(JSON.stringify(result.content.structured)).toContain('Revised text');
+      expect(result.content.layout.revisionView).toBe('markup');
     } finally { await h.close(); }
   });
 }
