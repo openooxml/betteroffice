@@ -3,7 +3,13 @@ import { openWorkbook } from '../wasm/loader';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from '../session/testHelpers';
 import { asyncReplicaFor } from './asyncReplica';
 import { CollaborationProvider } from './provider';
-import { decodeMessages, stateVectorDominates } from './protocol';
+import {
+  decodeMessages,
+  encodeSyncStep1,
+  encodeSyncStep2,
+  stateVectorDominates,
+  withoutDocumentFingerprint,
+} from './protocol';
 import type { CollaborationReplica, CollaborationTransport, CollaborationTransportEvent } from './types';
 
 type Kind = 'sync' | 'async';
@@ -105,14 +111,40 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
   return { transports, setOnline, reopen, flush, sent, missing, count };
 }
 
-async function network(kind: Kind, size: number) {
+function connectLegacyPeer(replica: CollaborationReplica, transport: CollaborationTransport, errors: string[]) {
+  const target = asyncReplicaFor(replica) ?? replica;
+  let tail = Promise.resolve();
+  transport.onEvent((event) => {
+    tail = tail.then(async () => {
+      if (event.type === 'open') transport.send(encodeSyncStep1(await target.encodeStateVector()));
+      if (event.type !== 'message') return;
+      for (const message of decodeMessages(event.data)) {
+        if (message.type === 'sync-step-1') {
+          const vector = withoutDocumentFingerprint(message.stateVector).slice();
+          transport.send(encodeSyncStep2(await target.encodeStateAsUpdate(vector)));
+        } else if (message.type === 'sync-step-2' || message.type === 'update') {
+          await target.applyUpdate(withoutDocumentFingerprint(message.update).slice());
+        }
+      }
+    }).catch((cause) => { errors.push(`legacy: ${String(cause)}`); });
+  });
+  transport.connect();
+}
+
+async function network(kind: Kind, size: number, legacy?: number) {
   const peers = await Promise.all(Array.from({ length: size }, (_, index) => openPeer(kind, 101 + index)));
   const net = relay(size, (index) => peers[index].vector());
-  const providers = peers.map((peer, index) => new CollaborationProvider(peer.replica, net.transports[index]));
-  for (const provider of providers) provider.connect();
+  const errors: string[] = [];
+  const providers = peers.flatMap((peer, index) => index === legacy
+    ? [] : [new CollaborationProvider(peer.replica, net.transports[index])]);
+  for (const provider of providers) {
+    provider.onError((error) => errors.push(`${error.code}: ${error.message}`));
+    provider.connect();
+  }
+  if (legacy !== undefined) connectLegacyPeer(peers[legacy].replica, net.transports[legacy], errors);
   await net.flush();
   return {
-    peers, net,
+    peers, net, providers, errors,
     async close() {
       for (const provider of providers) provider.destroy();
       await Promise.all(peers.map((peer) => peer.dispose()));
@@ -277,6 +309,68 @@ for (const kind of ['sync', 'async'] as const) {
         const settled = net.sent.length;
         await net.flush({ twice: true });
         expect(net.sent.length).toBe(settled);
+      } finally { await close(); }
+    });
+
+    it('converge after an offline overwrite of existing cells without dropping the link', async () => {
+      const { peers: [left, right], net, providers, errors, close } = await network(kind, 2);
+      try {
+        await left.edit(0, 'before');
+        await right.edit(1, 'theirs');
+        await net.flush();
+        net.setOnline(0, false);
+        await left.edit(0, 'after');
+        await left.edit(1, 'mine');
+        net.setOnline(0, true);
+        await net.flush();
+        expect(errors).toEqual([]);
+        expect(providers.map((provider) => [provider.status, provider.synced]))
+          .toEqual([['connected', true], ['connected', true]]);
+        expect(await right.read()).toEqual(['after', 'mine']);
+        expect(await left.read()).toEqual(['after', 'mine']);
+      } finally { await close(); }
+    });
+
+    it('spend exactly one extra exchange per open, then go quiet', async () => {
+      const { peers: [left, right], net, close } = await network(kind, 2);
+      try {
+        await left.edit(4, 'cleared');
+        await net.flush();
+        const opens: number[][] = [];
+        for (const change of [async () => {}, () => left.edit(4, ''), () => left.edit(0, 'offline')]) {
+          const mark = net.sent.length;
+          net.setOnline(0, false);
+          await change();
+          net.setOnline(0, true);
+          await net.flush();
+          opens.push([0, 1].flatMap((index) => ['sync-step-1', 'sync-step-2'].map((type) => net.count(index, type, mark))));
+          const settled = net.sent.length;
+          await net.flush();
+          expect(net.sent.length).toBe(settled);
+        }
+        expect(opens).toEqual([[1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1]]);
+        expect(await right.read(4)).toEqual(await left.read(4));
+        expect(await right.read()).toEqual(await left.read());
+      } finally { await close(); }
+    });
+
+    it('stay valid with a peer that answers without requesting state back', async () => {
+      const { peers: [left, right], net, providers: [provider], errors, close } = await network(kind, 2, 1);
+      try {
+        net.setOnline(0, false);
+        net.setOnline(1, false);
+        await left.edit(0, 'ours offline');
+        await right.edit(1, 'theirs offline');
+        const mark = net.sent.length;
+        net.reopen(0, 1);
+        await net.flush();
+        expect(errors).toEqual([]);
+        expect([provider.status, provider.synced]).toEqual(['connected', true]);
+        expect(net.count(1, 'sync-step-1', mark)).toBe(1);
+        expect(net.count(0, 'sync-step-2', mark)).toBeGreaterThan(0);
+        const cells = await Promise.all([left.read(), right.read()]);
+        expect(cells[1]).toEqual(cells[0]);
+        expect(cells[0]).toEqual(['ours offline', 'theirs offline']);
       } finally { await close(); }
     });
 

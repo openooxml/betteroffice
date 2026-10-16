@@ -4,7 +4,13 @@ import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { initWasm, openPresentation, type PresentationHandle } from '../wasm/loader';
 import { CollaborationProvider } from './provider';
-import { decodeMessages, stateVectorDominates } from './protocol';
+import {
+  decodeMessages,
+  encodeSyncStep1,
+  encodeSyncStep2,
+  stateVectorDominates,
+  withoutDocumentFingerprint,
+} from './protocol';
 import type { AsyncCollaborationReplica, CollaborationTransport, CollaborationTransportEvent } from './types';
 
 type Kind = 'sync' | 'async';
@@ -110,14 +116,39 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
   return { transports, setOnline, reopen, flush, sent, missing, count };
 }
 
-async function network(kind: Kind, size: number) {
+function connectLegacyPeer(deck: PresentationHandle, transport: CollaborationTransport, errors: string[]) {
+  let tail = Promise.resolve();
+  transport.onEvent((event) => {
+    tail = tail.then(async () => {
+      if (event.type === 'open') transport.send(encodeSyncStep1(await later(() => deck.encodeStateVector())));
+      if (event.type !== 'message') return;
+      for (const message of decodeMessages(event.data)) {
+        if (message.type === 'sync-step-1') {
+          const vector = withoutDocumentFingerprint(message.stateVector).slice();
+          transport.send(encodeSyncStep2(await later(() => deck.encodeStateAsUpdate(vector))));
+        } else if (message.type === 'sync-step-2' || message.type === 'update') {
+          const update = withoutDocumentFingerprint(message.update).slice();
+          await later(() => deck.applyUpdate(update));
+        }
+      }
+    }).catch((cause) => { errors.push(`legacy: ${String(cause)}`); });
+  });
+  transport.connect();
+}
+
+async function network(kind: Kind, size: number, legacy?: number) {
   const peers = Array.from({ length: size }, (_, index) => openPeer(kind, 201 + index));
   const net = relay(size, async (index) => peers[index].deck.encodeStateVector());
-  const providers = peers.map((peer, index) => peer.connect(net.transports[index]));
-  for (const provider of providers) provider.connect();
+  const errors: string[] = [];
+  const providers = peers.flatMap((peer, index) => index === legacy ? [] : [peer.connect(net.transports[index])]);
+  for (const provider of providers) {
+    provider.onError((error) => errors.push(`${error.code}: ${error.message}`));
+    provider.connect();
+  }
+  if (legacy !== undefined) connectLegacyPeer(peers[legacy].deck, net.transports[legacy], errors);
   await net.flush();
   return {
-    peers, net,
+    peers, net, providers, errors,
     close() {
       for (const provider of providers) provider.destroy();
       for (const peer of peers) peer.deck.dispose();
@@ -270,6 +301,70 @@ for (const kind of ['sync', 'async'] as const) {
         const settled = net.sent.length;
         await net.flush({ twice: true });
         expect(net.sent.length).toBe(settled);
+      } finally { close(); }
+    });
+
+    for (const change of ['move', 'resize'] as const) {
+      it(`converge after an offline shape ${change} without dropping the link`, async () => {
+        const { peers: [left, right], net, providers, errors, close } = await network(kind, 2);
+        try {
+          const slide = left.deck.snapshot().slides[0];
+          const shape = slide.shapes[0];
+          net.setOnline(0, false);
+          const { after } = change === 'move'
+            ? left.deck.moveShape(slide.id, shape.id, shape.x + 250000, shape.y + 125000)
+            : left.deck.resizeShape(slide.id, shape.id, shape.width - 1000000, shape.height + 300000);
+          net.setOnline(0, true);
+          await net.flush();
+          expect(errors).toEqual([]);
+          expect(providers.map((provider) => [provider.status, provider.synced]))
+            .toEqual([['connected', true], ['connected', true]]);
+          expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+          const { x, y, width, height } = right.deck.snapshot().slides[0].shapes[0];
+          expect({ x, y, width, height }).toEqual(after);
+          expect(after).not.toEqual({ x: shape.x, y: shape.y, width: shape.width, height: shape.height });
+        } finally { close(); }
+      });
+    }
+
+    it('spend exactly one extra exchange per open, then go quiet', async () => {
+      const { peers: [left, right], net, close } = await network(kind, 2);
+      try {
+        const opens: number[][] = [];
+        for (const change of [() => {}, () => left.erase(0, 1), () => left.edit('offline ')]) {
+          const mark = net.sent.length;
+          net.setOnline(0, false);
+          change();
+          net.setOnline(0, true);
+          await net.flush();
+          opens.push([0, 1].flatMap((index) => ['sync-step-1', 'sync-step-2'].map((type) => net.count(index, type, mark))));
+          const settled = net.sent.length;
+          await net.flush();
+          expect(net.sent.length).toBe(settled);
+        }
+        expect(opens).toEqual([[1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1]]);
+        expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+        expect(right.text()).toBe('offline lpha');
+      } finally { close(); }
+    });
+
+    it('stay valid with a peer that answers without requesting state back', async () => {
+      const { peers: [left, right], net, providers: [provider], errors, close } = await network(kind, 2, 1);
+      try {
+        net.setOnline(0, false);
+        net.setOnline(1, false);
+        left.edit('ours ');
+        right.edit('theirs ');
+        const mark = net.sent.length;
+        net.reopen(0, 1);
+        await net.flush();
+        expect(errors).toEqual([]);
+        expect([provider.status, provider.synced]).toEqual(['connected', true]);
+        expect(net.count(1, 'sync-step-1', mark)).toBe(1);
+        expect(net.count(0, 'sync-step-2', mark)).toBeGreaterThan(0);
+        expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+        expect(left.text()).toContain('ours ');
+        expect(left.text()).toContain('theirs ');
       } finally { close(); }
     });
 
