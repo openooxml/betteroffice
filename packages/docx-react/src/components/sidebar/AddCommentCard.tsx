@@ -36,6 +36,7 @@ export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCar
       <textarea
         ref={(el) => el?.focus({ preventScroll: true })}
         value={text}
+        readOnly={pending}
         onChange={(e) => setText(e.target.value)}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
