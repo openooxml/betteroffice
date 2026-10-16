@@ -2569,11 +2569,17 @@ fn span_elements(
             let range = &ranges[range_index];
             let source = &source_runs[range.source];
             if segment.line_break {
+                let template = if source.local_name() == "br"
+                    || source
+                        .child("rPr")
+                        .is_some_and(|properties| properties.child("gradFill").is_some())
+                {
+                    source.child("rPr")
+                } else {
+                    None
+                };
                 output.push(XmlNode::Element(segment_element(
-                    segment,
-                    source.child("rPr"),
-                    theme,
-                    prefixes,
+                    segment, template, theme, prefixes,
                 )));
                 offset += 1;
                 break;
@@ -2870,7 +2876,7 @@ fn segment_properties(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> Option<XmlElement> {
-    match template.filter(|template| !segment.line_break || template.child("gradFill").is_some()) {
+    match template {
         Some(template) => {
             let mut base = template.clone();
             apply_run_properties(&mut base, segment.properties, theme, prefixes);
@@ -2933,6 +2939,31 @@ const POST_LATIN_ELEMENTS: [&str; 7] = [
     "extLst",
 ];
 
+fn is_flattened_colour_snapshot(
+    authored: Option<&ColorValue>,
+    requested: Option<&ColorValue>,
+    theme: Option<&Theme>,
+) -> bool {
+    let (Some(authored), Some(requested)) = (authored, requested) else {
+        return false;
+    };
+    if requested.theme_color.is_some()
+        || requested.theme_tint.is_some()
+        || requested.theme_shade.is_some()
+        || requested.auto.is_some()
+        || requested.luminance_modulation.is_some()
+        || requested.luminance_offset.is_some()
+        || requested.saturation_modulation.is_some()
+    {
+        return false;
+    }
+    if requested.alpha.is_some() && requested.alpha != authored.alpha {
+        return false;
+    }
+    resolve_color_value_to_hex_with_theme(Some(authored), theme)
+        .is_some_and(|hex| requested.rgb.as_deref() == Some(&hex[1..]))
+}
+
 /// Updates modeled styling while preserving unmodeled XML.
 fn apply_run_properties(
     base: &mut XmlElement,
@@ -2985,11 +3016,9 @@ fn apply_run_properties(
             base.attributes.remove("u");
         }
     }
-    // An unedited colour keeps its authored fill, theme token and transforms included.
     let authored = parse_run_properties(Some(base)).color;
     let keeps_fill = authored == properties.color
-        || resolve_color_value_to_hex_with_theme(authored.as_ref(), theme)
-            == resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme);
+        || is_flattened_colour_snapshot(authored.as_ref(), properties.color.as_ref(), theme);
     // A colour write replaces the whole fill choice; clearing the colour only
     // drops an explicit solidFill so an unmodeled noFill/gradFill survives.
     let removed_fills: &[&str] = if keeps_fill {
