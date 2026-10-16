@@ -367,7 +367,7 @@ impl DeckSession {
             .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         drop(integration);
-        if self.undo.borrow().diagnostics() == (0, 0) {
+        if !self.undo.borrow().ever_kept() {
             collect_garbage(&self.doc, Some(&carried));
         }
         Ok(snapshot)
@@ -464,7 +464,7 @@ pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
 
 /// A doc an undo manager attaches to. Clearing the redo stack unkeeps the parents of deleted
 /// items the undo stack still keeps, so collecting such a parent would free what they point to;
-/// these docs collect only while opening and while their undo manager holds no stack items.
+/// these docs collect only while opening and until their undo manager first pushes a stack item.
 pub(crate) fn session_doc(client_id: u64) -> Doc {
     let mut options = doc_options(client_id);
     options.skip_gc = true;
