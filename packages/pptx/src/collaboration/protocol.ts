@@ -325,8 +325,10 @@ export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boo
   return true;
 }
 
-/** `vector` with `clientId`'s clock one past its own (1 when absent), keeping any document fingerprint. */
-export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array {
+const MAX_STATE_VECTOR_ENTRIES = 65_536;
+
+/** `vector` with `clientId`'s clock one past its own (1 when absent), keeping any document fingerprint; undefined past a native limit. */
+export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array | undefined {
   if (!Number.isSafeInteger(clientId) || clientId < 0) {
     throw new ProtocolError('Client id must be a non-negative safe integer');
   }
@@ -334,6 +336,7 @@ export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint
   const clocks = decodeStateVector(body);
   const client = BigInt(clientId);
   clocks.set(client, (clocks.get(client) ?? 0n) + 1n);
+  if (clocks.size > MAX_STATE_VECTOR_ENTRIES) return undefined;
   const bytes: number[] = [];
   for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
     for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);

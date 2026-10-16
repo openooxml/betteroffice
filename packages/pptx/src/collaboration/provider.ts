@@ -461,10 +461,12 @@ export class CollaborationProvider {
     this.replicaResult(token, attempt, () => this.replica.encodeStateVector(), (value) => {
       try {
         const stateVector = requireBytes(value, 'encodeStateVector');
-        const advertised = isStateVector(stateVector)
+        const ahead = isStateVector(stateVector)
           ? withClientClockAhead(stateVector, this.localClientId)
           : stateVector;
-        this.sendFrame(encodeSyncStep1(advertised, this.maxFrameBytes));
+        this.sendFrame(encodeSyncStep1(ahead ?? stateVector, this.maxFrameBytes));
+        if (!this.isCurrent(token) || !this.isOpen) return;
+        if (!ahead) this.sendFullUpdate(token, attempt);
         if (!this.isCurrent(token) || !this.isOpen) return;
         this.startPresenceTimers();
         this.broadcastLocalPresence(false);
@@ -473,6 +475,13 @@ export class CollaborationProvider {
       } catch (cause) {
         this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause));
       }
+    });
+  }
+
+  private sendFullUpdate(token: number, attempt: number): void {
+    void this.replicaResult(token, attempt, () => this.replica.encodeStateAsUpdate(), (value) => {
+      try { this.sendFrame(encodeUpdate(requireBytes(value, 'encodeStateAsUpdate'), this.maxFrameBytes)); }
+      catch (cause) { this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause)); }
     });
   }
 
