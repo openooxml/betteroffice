@@ -900,6 +900,20 @@ test('worker ref buffer loads replace the worker and resolve on readiness', asyn
   expect(coreSession).not.toHaveBeenCalled();
 });
 
+test('worker ref document loads open the parsed document in a new worker', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  act(() => { expect(ref.current!.loadDocument(parsed)).toBeUndefined(); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await waitFor(() => expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(2));
+  expect(requests.filter(request => request.type === 'openSource').at(-1)).toMatchObject({ source: { document: parsed } });
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  await waitFor(() => expect(workers[0]!.terminate).toHaveBeenCalled());
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
 test('worker file picker delegates to the host and save can be intercepted', async () => {
   const ref = createRef<DocxEditorRef>();
   const onOpen = mock(async (_file: File) => {});

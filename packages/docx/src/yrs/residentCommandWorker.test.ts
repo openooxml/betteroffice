@@ -2561,3 +2561,31 @@ test('review target reads resolve a comment by its public id and a revision by i
     expect(await read({ kind: 'revision', revisionId: 'missing' })).toBeNull();
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+test('a reply comment links its parent in one undo step and comment commands report every comment', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const reply = (seq: number, version: number, parent: string) => client.edit(intent(seq, version, 'addComment', {
+      ranges, author: 'B', date: '2026-01-02', body: 'Reply', parentId: parent, expectVersion: engine.proposalEngine.version() }));
+    const unknown = await reply(1, 0, 'missing');
+    expect(unknown.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unknown-comment' });
+    const replied = await reply(2, unknown.version, parent.id);
+    expect(replied.outcomes[0]?.status).toBe('applied');
+    const added = engine.listComments().find(comment => comment.id !== parent.id)!;
+    expect(added.parentId).toBe(parent.id);
+    const replyId = replied.editState!.comment!.id!;
+    expect(replied.editState!.comment!.comments.find(comment => comment.id === replyId)).toMatchObject({ parentId, author: 'B' });
+    const done = await client.edit(intent(3, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.editState!.comment).toMatchObject({ seq: 3, comments: expect.arrayContaining([expect.objectContaining({ id: parentId, done: true })]) });
+    expect(done.editState!.comment!.id).toBeUndefined();
+    const undone = await client.edit(intent(4, done.version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    const undoneReply = await client.edit(intent(5, undone.version, 'undo', {}));
+    expect(undoneReply.outcomes[0]?.status).toBe('applied');
+    expect(engine.listComments().map(comment => comment.id)).toEqual([parent.id]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
