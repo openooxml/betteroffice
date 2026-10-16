@@ -49,7 +49,7 @@ export interface PeerlessWorkerQuery<K extends ResidentDocumentRead['kind'] = Re
   selection: DocxCommandSelection | null | undefined;
 }
 
-export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; ranges: YrsStoryRange[]; expectVersion: string }
+export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; selection: DocxCommandSelection }
 export type WorkerCommentAction = { kind: 'add'; draft: WorkerCommentDraft; text: string } | { kind: 'reply'; id: number; text: string } |
   { kind: 'resolve' | 'reopen' | 'delete'; id: number };
 
@@ -555,16 +555,16 @@ export function createPeerlessShellController(initial: Options) {
   };
   const hostOnly = (commentId: number) => !!options.hostComments?.some(comment => comment.id === commentId);
   const addComment = async (current: PeerlessEditSessionBinding, payload: Extract<PeerlessInputIntent, { kind: 'addComment' }>['payload']) => {
-    const { comment } = await commentTicket(current, { kind: 'addComment', payload });
+    const { result, comment } = await commentTicket(current, { kind: 'addComment', payload });
     const added = comment?.comments.find(entry => entry.id === comment.id);
     if (added) commentsChanged(current, comment, comments => [...comments, added]);
-    return added ?? null;
+    return { result, added: added ?? null };
   };
   const insertComment = (request: DocxCommentInsertion): Promise<number | null> => commentRound(() => null, async current => {
     const target = await query({ kind: 'commentInsertionRange', paraId: request.paraId,
       ...(request.search === undefined ? {} : { search: request.search }) });
     if (!target.value || 'status' in target.value || current !== binding) return null;
-    return (await addComment(current, { ranges: [target.value], author: request.author, date: new Date().toISOString(), body: request.text, expectVersion: target.version }))?.id ?? null;
+    return (await addComment(current, { ranges: [target.value], author: request.author, date: new Date().toISOString(), body: request.text, expectVersion: target.version })).added?.id ?? null;
   });
   const reply = (commentId: number, text: string, author: string): Promise<Comment | null> => commentRound(() => null, async current => {
     const target = await query({ kind: 'reviewTarget', target: { kind: 'comment', id: commentId } });
@@ -577,8 +577,8 @@ export function createPeerlessShellController(initial: Options) {
       commentsChanged(current, undefined, comments => [...comments, added]);
       return added;
     }
-    return addComment(current, { ranges: target.value.ranges, author, date: new Date().toISOString(), body: text,
-      parentId: target.value.id, expectVersion: target.version });
+    return (await addComment(current, { ranges: target.value.ranges, author, date: new Date().toISOString(), body: text,
+      parentId: target.value.id, expectVersion: target.version })).added;
   });
   /** Adds a reply anchored where its parent is; null when the parent does not exist or the editor is read-only. */
   const replyToComment = async (commentId: number, text: string, author: string): Promise<number | null> => (await reply(commentId, text, author))?.id ?? null;
@@ -626,29 +626,34 @@ export function createPeerlessShellController(initial: Options) {
     [...knownComments().filter(comment => comment.parentId === commentId).map(comment => comment.id), commentId],
     (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }),
     (comments, removed) => comments.filter(comment => !removed.includes(comment.id) && !(removed.includes(commentId) && comment.parentId === commentId)));
-  /** Reads the current body selection as the range a new comment anchors; null when nothing commentable is selected. */
+  const commentable = (range: YrsStoryRange | null): range is YrsStoryRange => !!range && (range.story === 'body' || range.story.startsWith('body:')) &&
+    (range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset);
+  const editable = () => { const env = environment(); return !env.readOnly && env.mode !== 'viewing'; };
+  /** Captures the current body selection a new comment anchors; null when nothing commentable is selected. */
   const beginComment = async (): Promise<WorkerCommentDraft | null> => {
-    const env = environment();
-    if (!binding || snapshot.status !== 'ready' || env.readOnly || env.mode === 'viewing') return null;
+    if (!binding || snapshot.status !== 'ready' || !editable()) return null;
     const current = await flush();
     const selection = current.viewStore.getSnapshot().workerSelection;
     if (!selection) return null;
     const target = await query({ kind: 'commentSelectionRange', selection });
-    const range = target.value;
-    if (!range || current !== binding || JSON.stringify(target.selection) !== JSON.stringify(selection) ||
-      (range.story !== 'body' && !range.story.startsWith('body:')) ||
-      (range.start.paraId === range.end.paraId && range.start.offset === range.end.offset)) return null;
-    return { binding: current, ranges: [range], expectVersion: target.version };
+    if (!commentable(target.value) || current !== binding || !editable() || JSON.stringify(target.selection) !== JSON.stringify(selection)) return null;
+    return { binding: current, selection: structuredClone(selection) };
   };
+  const invalidRange: DocxCommandResult = { ok: false, failure: { code: 'command-failed', message: 'invalid-range' } };
   const failedComment: DocxCommandResult = { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } };
   /** Runs a comment sidebar action and reports it to the host callbacks the way the hybrid editor does. */
   const comment = async (action: WorkerCommentAction): Promise<DocxCommandResult> => {
     const author = options.author ?? 'User';
     const target = action.kind === 'add' ? undefined : knownComments().find(entry => entry.id === action.id);
     if (action.kind === 'add') {
-      const added = await commentRound(() => null, async current => current !== action.draft.binding ? null : addComment(current, {
-        ranges: action.draft.ranges, author, date: new Date().toISOString(), body: action.text, expectVersion: action.draft.expectVersion }));
-      if (!added) return failedComment;
+      const { result, added } = await commentRound<{ result: DocxCommandResult; added: Comment | null }>(() => ({ result: refusedComment(), added: null }), async current => {
+        if (current !== action.draft.binding) return { result: replacedComment, added: null };
+        const target = await query({ kind: 'commentSelectionRange', selection: action.draft.selection });
+        if (current !== binding) return { result: replacedComment, added: null };
+        if (!commentable(target.value)) return { result: invalidRange, added: null };
+        return addComment(current, { ranges: [target.value], author, date: new Date().toISOString(), body: action.text, expectVersion: target.version });
+      }, error => ({ result: { ok: false, failure: { code: 'command-failed', message: error.message } }, added: null }));
+      if (!added) return result.ok ? failedComment : result;
       emit(options.onCommentAdd, added);
       return { ok: true, status: 'executed' };
     }

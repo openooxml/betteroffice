@@ -13,7 +13,7 @@ import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './reside
 import { createResidentCommandHost } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { releaseResidentSelectionReads } from './residentCommandSelection';
-import { commandSelectionRange, readCommandStickyPosition } from './residentCommandAnchors';
+import { currentSelectionRange, readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
@@ -1890,7 +1890,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
         break;
       case 'commentSelectionRange':
-        value = commandSelectionRange(session, request.read.selection);
+        value = currentSelectionRange(session, request.read.selection);
         break;
       case 'collabStateVector':
         value = session.encodeStateVector();

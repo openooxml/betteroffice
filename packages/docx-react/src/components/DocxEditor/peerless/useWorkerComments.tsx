@@ -7,13 +7,14 @@ import type { createPeerlessShellController, WorkerCommentAction, WorkerCommentD
 export function useWorkerComments(options: {
   controller: ReturnType<typeof createPeerlessShellController>;
   documentKey: string | undefined;
+  readOnly: boolean;
   setOpen: Dispatch<SetStateAction<boolean>>;
   setExpanded: Dispatch<SetStateAction<string | null>>;
   selectionAnchor(): { y: number; right: number } | null;
   focus(): void;
   onError(error: Error): void;
 }) {
-  const { controller, documentKey, setOpen, setExpanded, selectionAnchor, focus, onError } = options;
+  const { controller, documentKey, readOnly, setOpen, setExpanded, selectionAnchor, focus, onError } = options;
   const [draft, setDraft] = useState<{ draft: WorkerCommentDraft; y: number } | null>(null);
   useLayoutEffect(() => setDraft(null), [documentKey]);
   const beginAddComment = useCallback(async () => {
@@ -26,17 +27,27 @@ export function useWorkerComments(options: {
     } catch (error) { onError(error instanceof Error ? error : new Error(String(error))); }
   }, [controller, onError, selectionAnchor, setOpen]);
   const callbacks = useMemo<CommentCallbacks>(() => {
-    const run = (action: WorkerCommentAction) => { void controller.comment(action); };
+    const run = async (action: WorkerCommentAction) => {
+      try {
+        const result = await controller.comment(action);
+        if (!result.ok) onError(new Error(result.failure.message));
+        return result.ok;
+      } catch (error) { onError(error instanceof Error ? error : new Error(String(error))); return false; }
+    };
     return {
-      onCommentReply: (id, text) => run({ kind: 'reply', id, text }),
-      onCommentResolve: (id) => { run({ kind: 'resolve', id }); setExpanded(item => item === `comment-${id}` ? null : item); },
-      onCommentUnresolve: (id) => run({ kind: 'reopen', id }),
-      onCommentDelete: (id) => run({ kind: 'delete', id }),
-      onAddComment: (text) => { if (draft) run({ kind: 'add', draft: draft.draft, text }); setDraft(null); },
+      onCommentReply: (id, text) => { void run({ kind: 'reply', id, text }); },
+      onCommentResolve: (id) => { void run({ kind: 'resolve', id }); setExpanded(item => item === `comment-${id}` ? null : item); },
+      onCommentUnresolve: (id) => { void run({ kind: 'reopen', id }); },
+      onCommentDelete: (id) => { void run({ kind: 'delete', id }); },
+      onAddComment: async (text) => {
+        if (!draft || !await run({ kind: 'add', draft: draft.draft, text })) return false;
+        setDraft(current => current === draft ? null : current);
+        return true;
+      },
       onCancelAddComment: () => { setDraft(null); focus(); },
     };
-  }, [controller, draft, focus, setExpanded]);
-  return { callbacks, beginAddComment, adding: draft !== null, addCommentY: draft?.y ?? null };
+  }, [controller, draft, focus, onError, setExpanded]);
+  return { callbacks, beginAddComment, adding: draft !== null, composerHidden: draft !== null && readOnly, addCommentY: draft?.y ?? null };
 }
 
 export function WorkerCommentButton({ top, left, onAdd }: { top: number; left: number; onAdd(): void }) {

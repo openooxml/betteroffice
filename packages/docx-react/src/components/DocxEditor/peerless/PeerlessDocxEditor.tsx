@@ -765,7 +765,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const bounds = pluginGeometry.geometry()?.dom.getPageBounds(page.page.pageIndex);
     return { y: (bounds?.y ?? page.bounds.y + 48 / zoom) + rect.y - page.bounds.y, right: bounds ? bounds.x + bounds.width : page.bounds.x + page.bounds.width };
   }, [controller, pluginGeometry, zoom]);
-  const workerComments = useWorkerComments({ controller, documentKey: shellState.view?.identity.session, setOpen: setCommentsOpen,
+  const workerComments = useWorkerComments({ controller, documentKey: shellState.view?.identity.session, readOnly: effectiveReadOnly, setOpen: setCommentsOpen,
     setExpanded: setExpandedSidebarItem, selectionAnchor, focus, onError: reportRecoverableError });
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
@@ -893,7 +893,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const commentItems = useCommentSidebarItems({ comments: commentsOpen ? comments : [], trackedChanges: commentsOpen ? trackedChanges?.entries ?? [] : [],
     callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
   const positionedComments = commentItems.map(item => {
-    if (item.isTemporary) return item;
+    if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
     const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
     const rect = !documentReady ? undefined : (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??

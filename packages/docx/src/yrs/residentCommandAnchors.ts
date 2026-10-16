@@ -96,6 +96,14 @@ export function readCommandSelection(
   return range ? { ok: true, selection, range } : { ok: false, reason: 'invalid-selection' };
 }
 
+/** The range a selection covers in the current document; positions carrying an issued sticky follow later edits. */
+export function currentSelectionRange(engine: ResidentDocxCommandEngine, selected: DocxCommandSelection): YrsStoryRange | null {
+  const state = commandStates.get(engine);
+  if (!state) return commandSelectionRange(engine, selected);
+  const read = readCommandSelection(engine, state, selected);
+  return read.ok ? read.range : null;
+}
+
 export function mintCommandSelection(
   engine: ResidentDocxCommandEngine,
   state: ResidentDocxCommandState,
