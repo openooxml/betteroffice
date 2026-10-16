@@ -623,6 +623,7 @@ fn compose_region(
         cached_page_totals,
         shape,
         field_widths: field_widths.as_ref(),
+        reservations: None,
     };
     let ctx = &ctx;
     let content_width = page.size.w - page.margins.left - page.margins.right;
@@ -713,6 +714,7 @@ fn compose_region(
                     cursor += measure.total_height;
                 }
             }
+            (BlockIn::Reserved(_), MeasureIn::Image(measure)) => cursor += measure.height,
             (BlockIn::Image(block), MeasureIn::Image(measure)) => {
                 let rot = rotation_degrees(block.transform.as_deref());
                 let mut attrs = BlockRef::of(&block.id).attrs();

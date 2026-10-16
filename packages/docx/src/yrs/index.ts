@@ -46,6 +46,7 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import type { DocxListStoriesResult } from './stories';
+import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
 import type { DocxTableFragment } from './clipboardFragment';
 import {
   type DocxProposalRegistryState,
@@ -81,6 +82,7 @@ export type {
   DocxCommandEchoContext,
   DocxCommandKind,
   DocxCommandFrame,
+  DocxFrameReservations,
   DocxCommandPageIdentity,
   DocxCommandPayloads,
   DocxCommandSelection,
@@ -209,6 +211,7 @@ export {
 export { editorSaveKeys } from './editorSaveKeys';
 export * from './yrsPositionProjection';
 export * from './proposalGeometry';
+export * from './reservations';
 
 export interface YrsDocxHost {
   document: Document;
@@ -625,6 +628,10 @@ export interface YrsRenderEnv {
   showHiddenText?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
+  /** View-only layout reservations; saves and paged exports leave them out. @internal */
+  reservations?: Readonly<DocxResolvedReservations>;
+  /** Unresolved viewer reservations for resident layout requests. @internal */
+  reservationSets?: DocxReservationsPayload;
   /**
    * Lay the opened package's images out as `media:{n}` tokens, which a
    * resolver given the session's `mediaSource` reads. @internal

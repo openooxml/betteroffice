@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { resolveReservations, validReservationsPayload } from './reservations';
 import * as queryModule from '../layout/render/displayListQueries';
 import type { DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries, type DisplayListRect } from '../layout/render/displayListQueries';
@@ -81,10 +82,13 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     };
   const sticky = new Map<number, YrsLoc>();
   const source = readFileSync(new URL('./residentEngineWorker.ts', import.meta.url), 'utf8');
+  const reservationStart = source.indexOf('const appliedLayoutReservations =');
+  const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const parseFailures = source.indexOf('let queryParseFailures = 0;');
   const binding = source.slice(parseFailures < 0 ? source.indexOf('function bindResidentCommands(') : parseFailures,
     source.indexOf('function replacementCommandInit('));
   const dependencies = {
+    resolveReservations, validReservationsPayload,
     sessionFonts: null, ResidentSessionFonts, scope: {}, proposals: null, resetResidentObjectHandles() {},
     createProposalRegistry: () => ({ snapshot: () => ({ previewVersion: 0, proposals: [] }) }),
     session: {
@@ -179,7 +183,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),
   };
   const worker = new Function(...Object.keys(dependencies),
-    new Bun.Transpiler({ loader: 'ts' }).transformSync(binding) +
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
     '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
   )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; rebind(): void; release(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
   releasesAfterTest.push(worker.release);

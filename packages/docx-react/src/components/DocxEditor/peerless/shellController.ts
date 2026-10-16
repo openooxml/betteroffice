@@ -39,7 +39,7 @@ const PROPOSAL_FAILURES = {
   'limit-exceeded': true, 'stale-preview': true, 'unknown-proposal': true, 'proposal-id-conflict': true,
 } satisfies Record<Extract<DocxProposalResult, { ok: false }>['failure']['code'], true>;
 
-const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor',
+const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor', 'highlightColor',
   'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'setLtr', 'setRtl',
   'bulletList', 'numberedList', 'indent', 'outdent', 'paragraphStyle']);
 
@@ -157,7 +157,7 @@ export function createPeerlessShellController(initial: Options) {
       sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
       supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
-        ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
+        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
         'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
@@ -495,6 +495,14 @@ export function createPeerlessShellController(initial: Options) {
         const delta = id === 'fontFamily' ? { fontFamily: { ascii: (args as { family: string }).family, hAnsi: (args as { family: string }).family } } :
           { fontSize: (args as { points: number }).points };
         return settleCommand(current, current.commands.format({ kind: 'formatRange', payload: { delta } }, { fence: true }));
+      }
+      if (id === 'highlightColor') {
+        const color = (args as DocxCommandArgs['highlightColor']).color;
+        return format({ kind: 'formatRange', payload: { delta: { highlight: color && color !== 'none' ? color : null } } });
+      }
+      if (id === 'insertPageBreak') return submit({ kind: 'insertPageBreak', payload: {} });
+      if (id === 'insertSectionBreakNextPage' || id === 'insertSectionBreakContinuous') {
+        return submit({ kind: 'insertSectionBreak', payload: { type: id === 'insertSectionBreakNextPage' ? 'nextPage' : 'continuous' } });
       }
       if (id === 'textColor') {
         const current = ready();

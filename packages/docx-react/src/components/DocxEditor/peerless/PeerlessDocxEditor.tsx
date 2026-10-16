@@ -10,11 +10,14 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import {
   applyFrameDelta,
   decodeFrameDelta,
+  findDisplayListHyperlinkAtPoint,
   type RetainedFrame,
 } from '@betteroffice/docx/layout/render';
 import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
 import { createRustMeasureSource, type ResidentFontRequirement } from '@betteroffice/docx/layout';
-import { extractEmbeddedFontFaces, toArrayBuffer, type DocxInput } from '@betteroffice/docx/utils';
+import { extractEmbeddedFontFaces, sanitizeHref, toArrayBuffer, type DocxInput } from '@betteroffice/docx/utils';
+import { HyperlinkPopup, type HyperlinkPopupData } from '../../ui/HyperlinkPopup';
+import { toast } from 'sonner';
 import {
   residentCaretSnapshotForFrame,
   type DocxCommandFrame,
@@ -28,6 +31,7 @@ import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
 import { commandPageGeometry } from './commandPageGeometry';
 import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
+import { usePluginReservations } from '../../../plugins/reservations';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
 import { DocxEditorShell } from '../DocxEditorShell';
 import { DocxEditorToolbar } from '../DocxEditorToolbar';
@@ -42,7 +46,7 @@ import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
 import { admitInputIntents } from './inputAdmission';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
@@ -107,6 +111,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const worker = useRef<ResidentEngineWorkerClient | null>(null);
   const sourceComments = useRef<NonNullable<DocxEditorProps['comments']>>([]);
   const [zoom, setZoom] = useState(initialZoom);
+  const [hyperlinkPopup, setHyperlinkPopup] = useState<HyperlinkPopupData | null>(null);
+  const linkGesture = useRef(0);
   const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__peerless-input')?.focus({ preventScroll: true }), []);
   const read = useCallback<ResidentEngineWorkerClient['documentRead']>((request) => {
     if (!worker.current) return Promise.reject(new Error('Peer-less worker is not ready'));
@@ -201,8 +207,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);
+  const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
-    (target, focus) => navigation.revealParagraph(target.paraId, target.story, focus)));
+    (target, focus) => navigation.revealParagraph(target.paraId, target.story, focus), () => sentReservationsRef.current()));
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
   const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
   const [pluginHost] = useState(() => createDocxPluginHost({
@@ -220,6 +227,22 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     workerNavigation: pluginGeometry.navigation,
   }));
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
+  const reservations = usePluginReservations(pluginHost, activations);
+  const reservationsRef = useRef<{ payload: DocxReservationsPayload | null; sent: boolean; source: DocxReservationsPayload | string | null;
+    keyed: DocxReservationsPayload | null; serial: number }>({ payload: reservations, sent: false, source: null, keyed: null, serial: 0 });
+  reservationsRef.current.payload = reservations;
+  /** The set the editor sends, keyed so a frame names the set it was laid out with; once sent, none is an empty set. */
+  const sentReservations = useCallback((): DocxReservationsPayload | null => {
+    const reserved = reservationsRef.current;
+    const source = reserved.payload ?? (reserved.sent ? pluginHost.version() : null);
+    if (source === null) return null;
+    if (reserved.source !== source) {
+      reserved.source = source;
+      reserved.keyed = { ...(typeof source === 'string' ? { version: source, sets: [] } : source), key: String(++reserved.serial) };
+    }
+    return reserved.keyed;
+  }, [pluginHost]);
+  sentReservationsRef.current = sentReservations;
   useEffect(() => {
     pluginHost.setReporter(props.onPluginError);
     pluginHost.setGrants(props.pluginGrants);
@@ -523,7 +546,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (!current) return;
     const theme = settings.current.theme ?? renderEnvironment.current.theme;
     const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-    const payload = { themeColors, showHiddenText: settings.current.showHiddenText };
+    const reserved = reservationsRef.current;
+    const reservations = sentReservations();
+    const payload = {
+      themeColors, showHiddenText: settings.current.showHiddenText, ...(reservations ? { reservations } : {}),
+    };
     const requested = JSON.stringify(payload);
     if (current.requestedRenderEnvironment === requested) return;
     const result = current.binding.commands.submit({ kind: 'setRenderEnvironment', payload }, { fence: true, onSubmitted: (ticket) => {
@@ -539,8 +566,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
       });
     } });
-    if (result.status !== 'ignored') current.requestedRenderEnvironment = requested;
-  }, [reportRecoverableError]);
+    if (result.status !== 'ignored') {
+      current.requestedRenderEnvironment = requested;
+      reserved.sent = reserved.payload !== null;
+    }
+  }, [sentReservations, reportRecoverableError]);
   const updateFontEnvironment = useCallback(() => {
     const current = active.current;
     const client = worker.current;
@@ -628,7 +658,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     updateFontEnvironment();
   }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller]);
   useLayoutEffect(updateReadOnly, [effectiveReadOnly, updateReadOnly]);
-  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, updateRenderEnvironment]);
+  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, reservations, updateRenderEnvironment]);
   useLayoutEffect(updateFontEnvironment, [props.fonts, measurementFontProvider, props.onFontsLoaded, updateFontEnvironment]);
   useLayoutEffect(() => () => { active.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }, []);
 
@@ -666,6 +696,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         objects: frame.payload.geometry,
         documentWidth: frame.payload.documentWidth,
         layoutProvisional: frame.payload.layoutProvisional,
+        ...(frame.payload.reservations ? { reservations: frame.payload.reservations } : {}),
         pages,
         caret: caret.caretRect ? { ...caret.caretRect,
           x: caret.caretRect.x + (pages[caret.caretRect.pageIndex]?.bounds.x ?? 0), y: caret.caretRect.y + (pages[caret.caretRect.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
@@ -730,6 +761,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => {
     active.current = null;
     setPreviewJob(null);
+    setHyperlinkPopup(null);
+    linkGesture.current += 1;
     openedSource.current = sourceKey;
     pluginGeometry.clear();
     if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
@@ -737,6 +770,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
+    const gesture = ++linkGesture.current;
+    setHyperlinkPopup(null);
     const geometry = controller.getSnapshot().view?.geometry;
     const section = 'final';
     const targets = geometry?.parts?.filter(part => part.pageId === page.page.pageId &&
@@ -750,14 +785,35 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       (y < body.y ? 'header' : y > body.y + body.height ? 'footer' : null));
     if (band === 'header' || band === 'footer') {
       const activePart = controller.getSnapshot().view?.editState?.activePart;
-      if (activePart?.kind === band && activePart.page === page.page.pageIndex) return false;
-      if (clickCount === 2) {
-        const target = { kind: band, section, page: page.page.pageIndex };
-        void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
+      if (activePart?.kind !== band || activePart.page !== page.page.pageIndex) {
+        if (clickCount === 2) {
+          const target = { kind: band, section, page: page.page.pageIndex };
+          void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
+        }
+        return true;
       }
-      return true;
     }
-    return false;
+    const region = band === 'header' || band === 'footer' ? { kind: band } : { kind: 'body' as const };
+    const hit = clickCount === 1 && page.displayPage ? findDisplayListHyperlinkAtPoint({ pages: [page.displayPage] }, 0, x, y, region) : null;
+    const href = sanitizeHref(hit?.href ?? '');
+    const bounds = host.current?.querySelector('[data-peerless-pages-host]')?.getBoundingClientRect();
+    const hostBounds = host.current?.getBoundingClientRect();
+    if (!hit || !href || !bounds || !hostBounds) return false;
+    const data = { href, displayText: hit.displayText, tooltip: hit.tooltip, position: {
+      left: bounds.left - hostBounds.left + (page.bounds.x + hit.rect.x) * zoom,
+      top: bounds.top - hostBounds.top + (page.bounds.y + hit.rect.y + hit.rect.h) * zoom + 4,
+    } };
+    void controller.submit({ kind: 'selectPoint', payload: intent }).then(async result => {
+      if (!result.ok || gesture !== linkGesture.current) return;
+      const selection = controller.getSnapshot().view?.workerSelection;
+      if (!selection || selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset) return;
+      focus();
+      if (href.startsWith('#')) {
+        const story = region.kind === 'body' ? 'body' : selection.focus.story;
+        await navigation.scrollToBookmark(href.slice(1), story);
+      } else setHyperlinkPopup(data);
+    }).catch(error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
+    return true;
   };
   const activeBox = shellState.view?.geometry && parts.activePart && shellState.view.geometry.coversThroughSeq === shellState.view.throughSeq ?
     shellState.view.geometry.parts?.find(part => part.story === parts.activePart?.story && part.pageIndex === parts.activePart.page) : undefined;
@@ -874,6 +930,17 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}
       {previewJob && shellState.preview === previewJob.frame &&
         <WorkerDocumentPreview job={previewJob} zoom={zoom} onPresented={onPreviewPresented} />}
+      <HyperlinkPopup data={hyperlinkPopup} readOnly={effectiveReadOnly} onClose={() => setHyperlinkPopup(null)}
+        onNavigate={href => { window.open(href, '_blank', 'noopener,noreferrer'); }}
+        onCopy={async href => {
+          try { await navigator.clipboard.writeText(href); } catch {
+            const textarea = document.createElement('textarea');
+            textarea.value = href; textarea.style.position = 'fixed'; textarea.style.opacity = '0';
+            document.body.appendChild(textarea); textarea.select(); document.execCommand('copy'); textarea.remove();
+          }
+        }}
+        onEdit={(displayText, href) => { void propertyDialogs.applyPopupLink(displayText, href, hyperlinkPopup?.tooltip).then(applied => { if (applied) setHyperlinkPopup(null); }); }}
+        onRemove={() => { void propertyDialogs.removeLinkAtCaret().then(applied => { if (applied) { setHyperlinkPopup(null); toast('Link removed'); } }); }} />
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}

@@ -59,8 +59,11 @@ use crate::seed::synthesized_cell_width;
 pub(crate) mod group_pictures;
 pub(crate) mod local;
 pub(crate) mod preview;
+pub mod reservations;
 pub use group_pictures::GroupPictureSources;
 mod shapes;
+
+pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
 const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 
@@ -116,6 +119,9 @@ pub struct RenderEnv {
     /// document's when empty.
     #[serde(skip)]
     pub media: crate::media::MediaSources,
+    /// View-only layout space and hidden ranges, by host key. Never saved.
+    #[serde(skip_serializing_if = "Reservations::is_empty")]
+    pub reservations: Reservations,
     #[serde(skip)]
     pub group_pictures: GroupPictureSources,
 }
@@ -677,6 +683,8 @@ fn walk_story_chunks<T: ReadTxn>(
             }
             Out::YMap(pilcrow) if is_pilcrow(pilcrow, txn) => {
                 let values = pilcrow_values(pilcrow, txn);
+                let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                let reserved = env.reservations.paragraph(story_id, &para_id);
                 local.observe_pilcrow(
                     &mut plain,
                     pilcrow,
@@ -691,10 +699,17 @@ fn walk_story_chunks<T: ReadTxn>(
                     ),
                     story_index + 1 == story.len(txn),
                     local_safe
+                        && reserved.is_empty()
                         && !value_string(values.get("paraId"))
                             .is_some_and(|id| hidden_field_blocks.contains(&id)),
                 );
-                let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                let placed = reservations::place(
+                    reserved,
+                    &mut paragraph_runs,
+                    &mut paragraph_drawings,
+                    paragraph_start,
+                    story_index,
+                );
                 let code_join = pending_code_join.take();
                 let sectioned =
                     values.contains_key("sectPr") || values.contains_key("sectionBreakType");
@@ -838,6 +853,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     opaque_sequences,
                     revealable,
                     segments,
+                    placed.hides_mark,
                 );
                 suppress_cell_edge_spacing(
                     &mut paragraph_blocks,
@@ -847,6 +863,12 @@ fn walk_story_chunks<T: ReadTxn>(
                         after: cell_edges.after && story_index + 1 == story.len(txn),
                     },
                 );
+                let paragraph_blocks: Vec<LayoutBlock> = placed
+                    .before
+                    .into_iter()
+                    .chain(paragraph_blocks)
+                    .chain(placed.after)
+                    .collect();
                 if !shared_map_string(pilcrow, txn, "paraId")
                     .is_some_and(|id| hidden_field_blocks.contains(&id))
                 {
@@ -1652,6 +1674,7 @@ impl FieldJoin {
             opaque_sequences,
             revealable,
             self.segments,
+            false,
         );
         suppress_cell_edge_spacing(
             &mut blocks,
@@ -2514,7 +2537,7 @@ fn stamp_sdt_group(blocks: &mut [LayoutBlock], group: SdtGroup) {
             LayoutBlock::SectionBreak(block) => &mut block.sdt_groups,
             LayoutBlock::PageBreak(block) => &mut block.sdt_groups,
             LayoutBlock::ColumnBreak(block) => &mut block.sdt_groups,
-            LayoutBlock::Unsupported => continue,
+            LayoutBlock::Reserved(_) | LayoutBlock::Unsupported => continue,
         };
         groups.get_or_insert_with(Vec::new).insert(0, group.clone());
     }
@@ -2996,6 +3019,7 @@ enum RawRunKind {
         locked: bool,
         nested_sequences: Vec<String>,
     },
+    Reserved(docx_layout::types::ReservedRun),
 }
 
 /// One run before coalescing and before its position is made absolute.
@@ -3296,6 +3320,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
     opaque_sequences: &mut BTreeSet<String>,
     revealable: &mut Option<Vec<LayoutBlock>>,
     mut carried: Vec<(u32, Vec<RawRun>)>,
+    hides_mark: bool,
 ) -> Vec<LayoutBlock> {
     let source = map.paragraph_count();
     map.paragraphs.push((
@@ -3350,14 +3375,15 @@ fn flush_paragraph_parts<T: ReadTxn>(
             (map, source),
             carried,
         );
-        if !env.show_hidden_text
-            && paragraph.runs.is_empty()
-            && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
-                shared_any(pilcrow, txn, "defaultTextFormatting")
-                    .as_ref()
-                    .and_then(any_map)
-                    .and_then(|defaults| map_bool(defaults, "hidden"))
-            }) == Some(true)
+        if paragraph.runs.is_empty()
+            && (hides_mark
+                || (!env.show_hidden_text
+                    && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
+                        shared_any(pilcrow, txn, "defaultTextFormatting")
+                            .as_ref()
+                            .and_then(any_map)
+                            .and_then(|defaults| map_bool(defaults, "hidden"))
+                    }) == Some(true)))
         {
             return blocks;
         }
@@ -3484,6 +3510,7 @@ fn flush_paragraph<T: ReadTxn>(
         .iter()
         .flat_map(|(source, runs)| runs.iter().map(|raw| (raw, *source)))
         .chain(raw_runs.iter().map(|raw| (raw, source)))
+        .filter(|(raw, _)| !matches!(raw.kind, RawRunKind::Reserved(_)))
     {
         map.spans.push(SourceSpan {
             pm_start: paragraph_pm_start + 1 + u64::from(raw.pm_start),
@@ -3769,6 +3796,11 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             image.pm_end = pm_end;
             Run::Image(image)
         }
+        RawRunKind::Reserved(mut reserved) => {
+            reserved.pm_start = pm_start;
+            reserved.pm_end = pm_end;
+            Run::Reserved(reserved)
+        }
         RawRunKind::Field {
             field_type,
             raw_type,
@@ -3802,7 +3834,7 @@ fn stamp_logical_order(runs: &mut [Run]) {
             Run::Text(run) => run.fmt.logical_order = Some(index as u64),
             Run::Tab(run) => run.fmt.logical_order = Some(index as u64),
             Run::Field(run) => run.fmt.logical_order = Some(index as u64),
-            Run::Image(_) | Run::LineBreak(_) | Run::Unsupported => {}
+            Run::Image(_) | Run::LineBreak(_) | Run::Reserved(_) | Run::Unsupported => {}
         }
     }
 }

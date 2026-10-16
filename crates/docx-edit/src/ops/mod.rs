@@ -7,7 +7,8 @@ pub mod resolve;
 pub mod table;
 pub mod text;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -35,6 +36,10 @@ pub(crate) enum ChunkKind {
 impl Chunk {
     pub fn end(&self) -> u32 {
         self.start + self.len
+    }
+
+    pub fn is_map_embed(&self) -> bool {
+        matches!(self.kind, ChunkKind::Pilcrow(_) | ChunkKind::Embed(Some(_)))
     }
 
     pub fn attr_active(&self, key: &str) -> bool {
@@ -211,11 +216,32 @@ pub(crate) fn snapshot<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Chunk> {
 
 /// `snapshot` over the chunks overlapping `[lo, hi)`.
 pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: u32) -> Vec<Chunk> {
+    snapshot_window(story, txn, lo, hi, false)
+}
+
+/// `snapshot_range`, continued past `hi` through any map embeds and the unit after them: what
+/// [`remove_units`] needs to keep their formatting without reading the story again.
+pub(crate) fn snapshot_range_through_embeds<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    lo: u32,
+    hi: u32,
+) -> Vec<Chunk> {
+    snapshot_window(story, txn, lo, hi, true)
+}
+
+fn snapshot_window<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    lo: u32,
+    hi: u32,
+    through_embeds: bool,
+) -> Vec<Chunk> {
     let mut offset = 0;
-    let mut chunks = Vec::new();
+    let mut chunks: Vec<Chunk> = Vec::new();
     for diff in story.diff(txn, YChange::identity) {
         let len = out_len(&diff.insert);
-        if offset >= hi {
+        if offset >= hi && !(through_embeds && chunks.last().is_some_and(Chunk::is_map_embed)) {
             break;
         }
         if offset + len > lo {
@@ -229,6 +255,129 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
         offset += len;
     }
     chunks
+}
+
+/// Whether the chunks a removal gets still hold the units after it.
+#[derive(Clone, Copy)]
+pub(crate) enum After {
+    /// Unchanged since the chunks were taken.
+    Known,
+    /// Possibly changed since, so they are read from the story.
+    Changed,
+}
+
+/// The formatting a removal of `[index, end)` can disturb: the keys set on the unit before it,
+/// on its units and on the unit after the map embeds that follow it, and those embeds' formatting.
+#[derive(Default)]
+struct Surroundings {
+    keys: HashSet<Arc<str>>,
+    embeds: Vec<Attrs>,
+}
+
+impl Surroundings {
+    /// Takes the chunk ending at `chunk_end`; false once it is the unit after the embeds.
+    fn take(&mut self, chunk_end: u32, end: u32, map_embed: bool, attrs: Attrs) -> bool {
+        if chunk_end > end && map_embed {
+            self.embeds.push(attrs);
+            return true;
+        }
+        self.keys.extend(attrs.into_keys());
+        chunk_end <= end
+    }
+
+    /// Reads them from the story.
+    fn read<T: ReadTxn>(story: &TextRef, txn: &T, index: u32, end: u32) -> Self {
+        let mut around = Self::default();
+        let mut offset = 0;
+        for diff in story.diff(txn, YChange::identity) {
+            offset += out_len(&diff.insert);
+            if offset < index {
+                continue;
+            }
+            let map_embed = !matches!(diff.insert, Out::Any(_));
+            let attrs = diff.attributes.map(|attrs| *attrs).unwrap_or_default();
+            if !around.take(offset, end, map_embed, attrs) {
+                break;
+            }
+        }
+        around
+    }
+
+    /// `read` from `chunks`, when they cover every unit it reads.
+    fn known(chunks: &[Chunk], index: u32, end: u32, story_len: u32) -> Option<Self> {
+        let mut around = Self::default();
+        let before = index.checked_sub(1)?;
+        let mut next = before;
+        for chunk in chunks.iter().skip_while(|chunk| chunk.end() <= before) {
+            let unknown_embed = matches!(chunk.kind, ChunkKind::Embed(None));
+            if chunk.start > next || (chunk.end() > end && unknown_embed) {
+                return None;
+            }
+            next = chunk.end();
+            let attrs = chunk
+                .attrs
+                .iter()
+                .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+                .collect();
+            if !around.take(next, end, chunk.is_map_embed(), attrs) {
+                return Some(around);
+            }
+        }
+        (next == story_len).then_some(around)
+    }
+}
+
+/// Removes `len` units at `index`, keeping the formatting of the paragraph marks and other map
+/// embeds after them. yrs tidies the format markers a removal leaves behind up to the next text,
+/// past any map embed, so formatting that closed before them could merge with the same formatting
+/// reopening after them. Each such embed gets back its own value for every key set around the
+/// removal, which inserts nothing where the value held. `chunks` hold the units on either side of
+/// the range when known; with [`After::Known`] the embeds after it come from them too where they
+/// reach (see `snapshot_range_through_embeds`).
+pub(crate) fn remove_units(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    index: u32,
+    len: u32,
+    chunks: &[Chunk],
+    after: After,
+) {
+    let unit = |at: u32| {
+        chunks
+            .iter()
+            .find(|chunk| chunk.start <= at && at < chunk.end())
+    };
+    let formatted_before = index.checked_sub(1).is_some_and(|before| {
+        unit(before).is_none_or(|chunk| chunk.attrs.values().any(|value| *value != Any::Null))
+    });
+    let text_after =
+        unit(index + len).is_some_and(|chunk| matches!(chunk.kind, ChunkKind::Text(_)));
+    if !formatted_before || text_after {
+        story.remove_range(txn, index, len);
+        return;
+    }
+    let end = index + len;
+    let Surroundings { mut keys, embeds } = match after {
+        After::Known => Surroundings::known(chunks, index, end, story.len(txn)),
+        After::Changed => None,
+    }
+    .unwrap_or_else(|| Surroundings::read(story, txn, index, end));
+    story.remove_range(txn, index, len);
+    keys.extend(embeds.iter().flat_map(|attrs| attrs.keys().cloned()));
+    let mut restores: Vec<(u32, u32, Attrs)> = Vec::new();
+    for (at, was) in (index..).zip(&embeds) {
+        let restore: Attrs = keys
+            .iter()
+            .map(|key| (key.clone(), was.get(key).cloned().unwrap_or(Any::Null)))
+            .collect();
+        match restores.last_mut() {
+            Some((_, len, attrs)) if *attrs == restore => *len += 1,
+            _ => restores.push((at, 1, restore)),
+        }
+    }
+    for (start, len, attrs) in restores {
+        story.format(txn, start, len, attrs);
+    }
 }
 
 pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
@@ -403,7 +552,7 @@ pub(crate) fn range_chunks_observed<T: ReadTxn>(
     range: &mut StoryRange,
 ) -> (Vec<Chunk>, bool) {
     let take = |range: &StoryRange| {
-        snapshot_range(
+        snapshot_range_through_embeds(
             story,
             txn,
             range.start.saturating_sub(1),
