@@ -42,7 +42,7 @@ export interface ResidentReviewSnapshot {
 }
 
 function rangeHighlightGeometry(
-  engine: ResidentEngineSession, queries: DisplayListQueries, ranges: readonly YrsStoryRange[]
+  engine: ResidentEngineSession, queries: DisplayListQueries, ranges: readonly YrsStoryRange[], anchorCollapsed = false
 ): DisplayListRect[][] {
   const index = new DisplayPositionIndex({ ...engine.geometryReader, selectionText: engine.selectionText });
   return ranges.map(range => {
@@ -50,9 +50,15 @@ function rangeHighlightGeometry(
       : range.story.split(':').slice(0, 2).join(':');
     const from = index.positionOf({ story: range.story, ...range.start }, root);
     const to = index.positionOf({ story: range.story, ...range.end }, root);
-    if (from === null || to === null || from >= to) return [];
-    if (root === 'body') return queries.rangeRects(from, to);
+    if (from === null || to === null || from > to || (from === to && !anchorCollapsed)) return [];
     const [kind, id] = root.split(':');
+    if (from === to) {
+      if (root === 'body') return [queries.anchorRect(from)].filter((rect): rect is DisplayListRect => !!rect);
+      if (kind === 'hf') return [...queries.hfAnchorRects('header', id!, from), ...queries.hfAnchorRects('footer', id!, from)];
+      if (kind === 'fn' || kind === 'en') return queries.noteCaretRects(kind === 'fn' ? 'footnote' : 'endnote', Number(id), from);
+      return [];
+    }
+    if (root === 'body') return queries.rangeRects(from, to);
     if (kind === 'hf') return [...queries.hfRangeRects('header', id!, from, to), ...queries.hfRangeRects('footer', id!, from, to)];
     if (kind === 'fn' || kind === 'en') return queries.noteRangeRects(kind === 'fn' ? 'footnote' : 'endnote', Number(id), from, to);
     return [];
@@ -108,7 +114,7 @@ export async function readResidentReviewSnapshot(
     }));
     const revisionGeometry: Record<string, DisplayListRect[]> = {};
     for (const revision of revisions) {
-      (revisionGeometry[revision.revisionId] ??= []).push(...rangeHighlightGeometry(engine, queries, [revision.range]).flat());
+      (revisionGeometry[revision.revisionId] ??= []).push(...rangeHighlightGeometry(engine, queries, [revision.range], true).flat());
     }
     const proposalGeometry = computeProposalGeometryMirror(engine.geometryReader, proposals);
     const proposalHighlights = Object.fromEntries(Object.entries(proposalGeometry.targets).map(([id, target]) => [

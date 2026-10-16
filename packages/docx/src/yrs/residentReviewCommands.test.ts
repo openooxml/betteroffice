@@ -80,6 +80,17 @@ test('a read-only state applies granted host proposals and refuses ungranted pro
   expect(arm.state.readOnly).toBe(true);
 }, TIMEOUT);
 
+test('a paragraph-properties change on the last paragraph anchors its review card', async () => {
+  const bodyXml = '<w:p w14:paraId="00000001"><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="5" w:author="Ada" w:date="2026-01-01T00:00:00Z"><w:pPr/></w:pPrChange></w:pPr>' +
+    '<w:r><w:t>Centered</w:t></w:r></w:p>';
+  const arm = await openCommandEngine([], { bodyXml, preview: 1 });
+  const frame = applyFrameDelta(null, decodeFrameDelta(arm.engine.buildDisplayListFrame('{}', 0)));
+  const review = await readResidentReviewSnapshot(arm.resident, createProposalRegistry(arm.engine.proposalEngine), frame, 0);
+  const revision = review.revisions.find(candidate => candidate.kind === 'pPrChange')!;
+  expect(revision.range.start).toEqual(revision.range.end);
+  expect(review.revisionGeometry[revision.revisionId]!.length).toBeGreaterThan(0);
+}, TIMEOUT);
+
 test('the current change holds every paragraph of a multi-paragraph suggestion, host proposals aside', async () => {
   const arm = await openCommandEngine(['Alpha', 'Beta', 'Gamma', 'Delta']);
   const [first, middle, last, outside] = arm.engine.paragraphs('body').map(({ paraId }) => paraId);
