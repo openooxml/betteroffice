@@ -128,3 +128,36 @@ fn every_way_of_attaching_undo_to_a_new_replica_keeps_what_the_history_points_in
         assert_readable(&local, &peer);
     }
 }
+
+fn raw_undo_restores_a_deletion(keep_deleted: bool) -> bool {
+    let doc = EditingDoc::new(404);
+    doc.create_story("body", "Body", "Normal", "left").unwrap();
+    let context = EditCtx::local("local", "2026-10-16T00:00:00Z");
+    doc.insert_text(
+        &context,
+        Position::new("body", 0),
+        "Hello world",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let before = doc.story_len("body").unwrap();
+    if keep_deleted {
+        doc.keep_deleted();
+    }
+    let mut options = yrs::undo::Options::default();
+    options
+        .tracked_origins
+        .insert(yrs::Origin::from(doc.client_id()));
+    let mut undo = yrs::undo::UndoManager::<()>::with_options(options);
+    let stories = doc.yrs_doc().get_or_insert_map("stories");
+    undo.expand_scope(doc.yrs_doc(), &stories);
+    doc.delete_range(&context, StoryRange::new("body", 0, 5))
+        .unwrap();
+    undo.undo_blocking();
+    doc.story_len("body").unwrap() == before
+}
+
+#[test]
+fn raw_undo_managers_restore_deletions_once_the_replica_keeps_deleted_content() {
+    assert!((0..32).all(|_| raw_undo_restores_a_deletion(true)));
+}

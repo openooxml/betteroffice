@@ -791,8 +791,11 @@ impl EditingDoc {
 
     /// Stops collecting deleted content for the rest of this replica's life. Clearing an undo
     /// manager's redo stack unkeeps the parents of deleted items its undo stack still keeps, so
-    /// collecting such a parent would free what those items point to.
-    pub(crate) fn keep_deleted(&self) {
+    /// collecting such a parent would free what those items point to. Collection runs in an
+    /// `after_transaction` callback that yrs orders arbitrarily against callbacks added through
+    /// [`Self::yrs_doc`], so a raw yrs `UndoManager` or `after_transaction` observer may see a
+    /// transaction's deletions already collected unless this is called before it attaches.
+    pub fn keep_deleted(&self) {
         self.keeps_deleted.store(true, Ordering::Relaxed);
     }
 
@@ -1268,7 +1271,9 @@ impl EditingDoc {
         index
     }
 
-    /// Low-level access for the transport, awareness, and undo bridges.
+    /// Low-level access for the transport, awareness, and undo bridges. Attach undo through
+    /// [`Self::undo_manager`] or [`crate::UndoSession::track`], or call [`Self::keep_deleted`]
+    /// before attaching a raw yrs `UndoManager` or `after_transaction` observer here.
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
     }
