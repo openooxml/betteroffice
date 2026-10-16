@@ -2718,11 +2718,53 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// [`EditSession::encode_diff`] as ordered updates for a sync that must
+    /// travel in bounded frames: the whole diff when it fits
+    /// `max_chunk_bytes`, otherwise causally ordered struct updates followed
+    /// by the delete set alone. Each fits the limit except one that carries a
+    /// single larger struct. Errors on a malformed state vector or a zero
+    /// limit.
+    pub fn encode_diff_chunks(
+        &self,
+        remote_state_vector: &[u8],
+        max_chunk_bytes: u32,
+    ) -> Result<js_sys::Array, JsValue> {
+        let chunks = self
+            .engine
+            .doc()
+            .encode_diff_chunks_v1(remote_state_vector, max_chunk_bytes as usize)
+            .map_err(js_err)?;
+        Ok(chunks
+            .iter()
+            .map(|chunk| Uint8Array::from(chunk.as_slice()))
+            .collect())
+    }
+
     /// Applies a remote or incremental yrs v1 update. It commits without a
     /// local origin, so this replica's undo manager never claims it. Errors on
     /// a malformed update.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
+    }
+
+    /// Applies the ordered updates of one sync in a single remote transaction,
+    /// so the result matches [`EditSession::apply_update`] on the whole diff.
+    /// Errors on a non-`Uint8Array` entry or a malformed or oversized update,
+    /// before applying any.
+    pub fn apply_update_chunks(&self, updates: js_sys::Array) -> Result<(), JsValue> {
+        let chunks = updates
+            .iter()
+            .map(|update| {
+                update
+                    .dyn_into::<Uint8Array>()
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|_| js_err("sync updates must be Uint8Arrays"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.engine
+            .doc()
+            .apply_update_chunks_v1(&chunks)
+            .map_err(js_err)
     }
 
     /// [`EditSession::apply_update`] plus an inference about where the peer

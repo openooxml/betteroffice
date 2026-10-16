@@ -132,13 +132,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
-    if styles.cell_xfs.is_empty()
-        && sheets.iter().any(|sheet| {
-            sheet.row_styles.values().any(|&style| style == 0)
-                || sheet.col_styles.iter().any(|run| run.xf == 0)
-                || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
-        })
-    {
+    if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
     Ok(IndexedWorkbook {
@@ -157,6 +151,29 @@ pub(crate) fn parse_workbook_indexed(
         legacy_styles,
         declined_parts,
         rich_shared_strings,
+    })
+}
+
+pub(crate) fn legacy_style_readings(
+    parts: &[(String, Vec<u8>)],
+    model: &Workbook,
+    legacy: Option<&Stylesheet>,
+) -> Result<Vec<Stylesheet>, ParseError> {
+    let rels = find_part(parts, "xl/_rels/workbook.xml.rels");
+    let styles = typed_part(parts, rels, "styles", "xl/styles.xml")?;
+    crate::styles::legacy_style_readings(
+        styles,
+        &model.styles,
+        legacy,
+        references_zero_style(&model.sheets),
+    )
+}
+
+fn references_zero_style(sheets: &[Sheet]) -> bool {
+    sheets.iter().any(|sheet| {
+        sheet.row_styles.values().any(|&style| style == 0)
+            || sheet.col_styles.iter().any(|run| run.xf == 0)
+            || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
     })
 }
 
@@ -539,6 +556,9 @@ pub struct SourceCellFacts {
     pub uncached_formulas: BTreeSet<(u32, u32)>,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
+    /// Whether a formula cell sits inside `mc:AlternateContent`, where another
+    /// branch's cell can stand in for it in the model.
+    pub alternate_formulas: bool,
 }
 
 /// in-progress cell state accumulated between a `<c>` start and its end.
@@ -576,6 +596,7 @@ fn parse_worksheet(
     let mut row_style_count: usize = 0;
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
+    let mut alternate_depth: usize = 0;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -605,6 +626,9 @@ fn parse_worksheet(
                     }
                     if attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value)) {
                         sheet.row_heights.insert(row, 0.0);
+                        if let Some(height) = height.filter(|height| *height > 0.0) {
+                            sheet.hidden_row_heights.insert(row, height);
+                        }
                     } else if let Some(height) = height {
                         sheet.row_heights.insert(row, height);
                     }
@@ -645,8 +669,10 @@ fn parse_worksheet(
                             }
                         }
                         c.formula = Some(text);
+                        facts.alternate_formulas |= alternate_depth > 0;
                     }
                 }
+                b"AlternateContent" => alternate_depth += 1,
                 b"is" => {
                     let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
                     if let Some(c) = cur.as_mut() {
@@ -706,6 +732,7 @@ fn parse_worksheet(
                         col_cursor += 1;
                     }
                     b"row" => cur_row = None,
+                    b"AlternateContent" => alternate_depth = alternate_depth.saturating_sub(1),
                     _ => {}
                 }
             }
@@ -868,6 +895,13 @@ fn parse_col(
     };
     for col in min..=max {
         sheet.col_widths.insert(col - 1, width);
+        if hidden && let Some(authored) = authored.filter(|authored| *authored > 0.0) {
+            sheet
+                .hidden_col_widths
+                .insert(col - 1, authored.min(MAX_COL_WIDTH_CHARS));
+        } else {
+            sheet.hidden_col_widths.remove(&(col - 1));
+        }
         if let Some(authored) = authored {
             legacy.col_widths.insert(col - 1, authored);
         }

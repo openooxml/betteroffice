@@ -1481,6 +1481,111 @@ fn saving_rejects_invalid_palette_colors_from_model_json() {
 }
 
 #[test]
+fn dxf_plain_open_save_and_current_state_skip_legacy_style_reading() {
+    let source = dxf_count_source(1);
+    let before = xlsx_parse::legacy_style_reads();
+    let plain = Workbook::open(&source).unwrap();
+    let saved = plain.save().unwrap();
+    Workbook::open_for_read(&saved).unwrap();
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+    let peer = Workbook::open_collaborative(&source, 903).unwrap();
+    replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+}
+
+fn dxf_count_source(count: usize) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let dxfs = r#"<dxf><numFmt numFmtId="14" formatCode="0%"/></dxf>"#.repeat(count);
+    let styles = format!("<styleSheet><dxfs>{dxfs}</dxfs></styleSheet>");
+    set_test_part(&mut parts, "xl/styles.xml", styles.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn dxf_entries_over_legacy_style_cap_still_open() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    Workbook::open(&source).unwrap();
+    Workbook::open_collaborative(&source, 902).unwrap();
+}
+
+#[test]
+fn dxf_legacy_style_cap_preserves_fingerprint_mismatch() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    let mut other = WorkbookModel::default();
+    other.sheets.push(Sheet::new("Different"));
+    let peer = Workbook::from_model_collaborative(other, 903).unwrap();
+    let before = replica.model().clone();
+    let reads = xlsx_parse::legacy_style_reads();
+    let error = replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("base fingerprint"), "{error}");
+    assert_eq!(xlsx_parse::legacy_style_reads(), reads + 1);
+    assert_eq!(replica.model(), &before);
+}
+
+#[test]
+fn persisted_dxf_base_fingerprints_keep_pre_filter_pool_readings() {
+    for flags in [
+        "",
+        r#"applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1""#,
+    ] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.styles.cell_xfs.push(xlsx_model::Xf::default());
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let prefix = r#"<numFmts><numFmt numFmtId="164" formatCode="0.000"/></numFmts>"#;
+        let fonts = "<font/><font><b/></font>";
+        let fills = r#"<fill/><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>"#;
+        let borders = r#"<border/><border><left style="thin"/></border>"#;
+        let xf = format!(r#"<xf numFmtId="164" fontId="0" fillId="0" borderId="0" {flags}/>"#);
+        let extension_xf = format!(r#"<xf numFmtId="164" fontId="0" {flags}/>"#);
+        let legacy_projection = format!(
+            r#"<styleSheet><numFmts><numFmt numFmtId="164" formatCode="0.000"/><numFmt numFmtId="14" formatCode="0%"/><numFmt numFmtId="165" formatCode="@"/></numFmts><fonts>{fonts}</fonts><fills>{fills}</fills><borders>{borders}</borders><cellXfs>{xf}{extension_xf}</cellXfs></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", legacy_projection.into_bytes());
+        let pre_fix = xlsx_parse::parse_workbook(&parts).unwrap();
+        let legacy = Workbook::from_model_collaborative(pre_fix, 901).unwrap();
+        let state = legacy.encode_state_as_update_v1();
+        let source_xml = format!(
+            r#"<styleSheet>{prefix}<fonts><font/></fonts><dxfs><dxf><font><b/></font></dxf></dxfs><fills><fill/></fills><extLst><ext><fills><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills></ext></extLst><borders><border/></borders><dxfs><dxf><border><left style="thin"/></border></dxf></dxfs><cellXfs>{xf}</cellXfs><dxfs><dxf><numFmt numFmtId="14" formatCode="0%"/></dxf></dxfs><extLst><ext><numFmt numFmtId="165" formatCode="@"/><cellXfs>{extension_xf}</cellXfs></ext></extLst></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", source_xml.into_bytes());
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut restored = Workbook::open_collaborative(&source, 902).unwrap();
+        restored
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap();
+        assert_eq!(restored.model().styles.num_fmts, [(164, "0.000".into())]);
+        assert_eq!(restored.model().styles.fonts.len(), 1);
+        assert_eq!(restored.model().styles.fills.len(), 1);
+        assert_eq!(restored.model().styles.borders.len(), 1);
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", br#"<worksheet><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#.to_vec());
+        let different = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut different = Workbook::open_collaborative(&different, 903).unwrap();
+        let before = different.model().clone();
+        let error = different
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("base fingerprint"), "{error}");
+        assert_eq!(different.model(), &before);
+    }
+}
+
+#[test]
 fn restored_legacy_snapshots_publish_the_current_palette_identity() {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Data"));
@@ -4996,13 +5101,16 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
     let _remote_subscription = target
         .observe_update_v1(move |event| observed.lock().unwrap().push(event))
         .unwrap();
+    let state_vector = target.encode_state_vector_v1();
     assert!(
         target
             .apply_update_v1(&updates[1], CalculationOptions::default())
             .unwrap()
             .applied
     );
-    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "9");
+    assert_eq!(target.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "");
+    assert_eq!(target.encode_state_vector_v1(), state_vector);
     assert_eq!(remote_events.lock().unwrap().len(), 1);
     assert!(
         target
@@ -5011,7 +5119,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .applied
     );
     assert_eq!(target.model(), source.model());
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
     assert_eq!(
         remote_events.lock().unwrap()[0].origin,
         UpdateOrigin::Remote
@@ -5028,7 +5136,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .unwrap()
             .applied
     );
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -5749,6 +5857,217 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
 }
 
 #[test]
+fn collaborative_freeze_panes_converge_undo_and_reopen_without_unfreezing_axes() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1002).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1003).unwrap();
+    let pane = Some(FreezePane::new(1, 0, cell("A2")));
+    assert!(
+        left.apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane
+            }],
+            options
+        )
+        .unwrap()
+        .applied
+    );
+    assert_eq!(left.model().sheets[0].freeze_pane, pane);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, pane);
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .freeze_pane,
+        pane
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    assert_eq!(left.model().sheets[0].freeze_pane, None);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, None);
+    assert!(left.redo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, pane);
+
+    let state = right.encode_state_as_update_v1();
+    let mut shifted = Workbook::open(&bytes).unwrap();
+    shifted
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
+    assert!(matches!(
+        right.apply_update_v1(
+            &shifted
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options
+        ),
+        Err(Error::CollaborativeStructureChanged)
+    ));
+    assert_eq!(right.encode_state_as_update_v1(), state);
+}
+
+#[test]
+fn concurrent_collaborative_freeze_panes_converge() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1004).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1005).unwrap();
+    left.apply_ops(
+        vec![Op::SetFreezePane {
+            sheet: SheetId(0),
+            pane: Some(FreezePane::new(1, 0, cell("A2"))),
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane: Some(FreezePane::new(2, 0, cell("A3"))),
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        left.encode_state_as_update_v1(),
+        right.encode_state_as_update_v1()
+    );
+    assert_eq!(
+        Workbook::open(&left.save().unwrap()).unwrap().model(),
+        left.model()
+    );
+}
+
+#[test]
+fn concurrent_freeze_and_cell_edit_do_not_overwrite_each_other() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut pane_author = Workbook::open_collaborative(&bytes, 1006).unwrap();
+    let mut cell_author = Workbook::open_collaborative(&bytes, 1007).unwrap();
+    let pane = Some(FreezePane::new(1, 1, cell("B2")));
+    pane_author
+        .apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane,
+            }],
+            options,
+        )
+        .unwrap();
+    cell_author
+        .edit_cell(SheetId(0), cell("A1"), "41", options)
+        .unwrap();
+    let pane_update = pane_author
+        .encode_diff_v1(&cell_author.encode_state_vector_v1())
+        .unwrap();
+    let cell_update = cell_author
+        .encode_diff_v1(&pane_author.encode_state_vector_v1())
+        .unwrap();
+    pane_author.apply_update_v1(&cell_update, options).unwrap();
+    cell_author.apply_update_v1(&pane_update, options).unwrap();
+    for workbook in [&pane_author, &cell_author] {
+        assert_eq!(workbook.model().sheets[0].freeze_pane, pane);
+        assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "41");
+    }
+    assert_eq!(pane_author.model(), cell_author.model());
+}
+
+#[test]
+fn freeze_pane_updates_recover_from_reversed_delivery_and_full_snapshot() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut source = Workbook::open_collaborative(&bytes, 1008).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 1009).unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&updates);
+    let _subscription = source
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    for rows in [1, 2] {
+        source
+            .apply_ops(
+                vec![Op::SetFreezePane {
+                    sheet: SheetId(0),
+                    pane: Some(FreezePane::new(rows, 0, CellRef::new(rows, 0))),
+                }],
+                options,
+            )
+            .unwrap();
+    }
+    let updates = updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), 2);
+    assert!(
+        !target
+            .apply_update_v1(&updates[1], options)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        target
+            .apply_update_v1(&updates[0], options)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        target.model().sheets[0].freeze_pane,
+        source.model().sheets[0].freeze_pane
+    );
+
+    let mut recovered = Workbook::open_collaborative(&bytes, 1010).unwrap();
+    recovered
+        .apply_update_v1(&source.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(recovered.model(), source.model());
+    assert_eq!(
+        Workbook::open(&recovered.save().unwrap()).unwrap().model(),
+        source.model()
+    );
+}
+
+#[test]
 fn collaboration_decoding_validates_malformed_and_oversized_payloads() {
     let bytes = sample_xlsx();
     let mut workbook = Workbook::open_collaborative(&bytes, 1101).unwrap();
@@ -5839,7 +6158,7 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
     let workbook_xml = String::from_utf8(after["xl/workbook.xml"].clone()).unwrap();
     assert!(workbook_xml.contains(r#"<definedName name="NamedCell">Data!$A$1</definedName>"#));
     assert!(!after.contains_key("xl/calcChain.xml"));
-    assert!(workbook_xml.contains(r#"fullCalcOnLoad="1""#));
+    assert!(workbook_xml.contains(r#"<calcPr calcId="191029"/>"#));
     assert_eq!(
         after["xl/sharedStrings.xml"],
         before["xl/sharedStrings.xml"]
@@ -6760,7 +7079,7 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     assert!(workbook_xml.contains(&format!(r#"<sheets xmlns:r="{strict_rel}" {strict_main}"#)));
     assert!(workbook_xml.contains(r#"<sheet name="Data" sheetId="1" rel:id="rId1"/>"#));
     assert!(workbook_xml.contains(r#"r:id="rId2""#));
-    assert!(workbook_xml.contains("<calcPr"));
+    assert!(!workbook_xml.contains("calcPr"));
     assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
     let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
     assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
@@ -9493,4 +9812,326 @@ fn oversized_column_width_opens_at_excel_limit_and_survives_save() {
         "{sheet}"
     );
     assert!(sheet.contains("<v>3</v>"), "{sheet}");
+}
+
+#[test]
+fn zero_size_ops_preserve_authored_dimensions_in_saved_xml() {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 20.0);
+    sheet.row_heights.insert(0, 30.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    workbook
+        .apply_ops(
+            vec![
+                Op::SetColWidth {
+                    sheet: SheetId(0),
+                    col: 0,
+                    width: Some(0.0),
+                },
+                Op::SetRowHeight {
+                    sheet: SheetId(0),
+                    row: 0,
+                    height: Some(0.0),
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = package_map(&saved);
+    let xml = std::str::from_utf8(&parts["xl/worksheets/sheet1.xml"]).unwrap();
+    assert!(xml.contains(r#"width="20""#), "{xml}");
+    assert!(xml.contains(r#"ht="30""#), "{xml}");
+    assert_eq!(xml.matches(r#"hidden="1""#).count(), 2, "{xml}");
+    let mut reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(reopened.model().sheets[0].col_widths.get(&0), Some(&0.0));
+    assert_eq!(reopened.model().sheets[0].row_heights.get(&0), Some(&0.0));
+
+    assert_eq!(
+        reopened.model().sheets[0].hidden_col_widths.get(&0),
+        Some(&20.0)
+    );
+    assert_eq!(
+        reopened.model().sheets[0].hidden_row_heights.get(&0),
+        Some(&30.0)
+    );
+    reopened
+        .apply_ops(
+            vec![
+                Op::SetColVisibility {
+                    sheet: SheetId(0),
+                    col: 0,
+                    hidden: false,
+                },
+                Op::SetRowVisibility {
+                    sheet: SheetId(0),
+                    row: 0,
+                    hidden: false,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(reopened.model().sheets[0].col_widths.get(&0), Some(&20.0));
+    assert_eq!(reopened.model().sheets[0].row_heights.get(&0), Some(&30.0));
+    reopened.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].hidden_col_widths.get(&0),
+        Some(&20.0)
+    );
+    assert_eq!(
+        reopened.model().sheets[0].hidden_row_heights.get(&0),
+        Some(&30.0)
+    );
+    reopened.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(reopened.model().sheets[0].col_widths.get(&0), Some(&20.0));
+    assert_eq!(reopened.model().sheets[0].row_heights.get(&0), Some(&30.0));
+}
+
+#[test]
+fn hidden_custom_sizes_survive_bounded_workbook_snapshots() {
+    use betteroffice_xlsx::{SnapshotBudget, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder};
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 20.0);
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_row_heights.insert(0, 30.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let workbook = Workbook::open(&source).unwrap();
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (mut restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(restored.model(), workbook.model());
+    restored
+        .apply_ops(
+            vec![
+                Op::SetColVisibility {
+                    sheet: SheetId(0),
+                    col: 0,
+                    hidden: false,
+                },
+                Op::SetRowVisibility {
+                    sheet: SheetId(0),
+                    row: 0,
+                    hidden: false,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(restored.model().sheets[0].col_widths.get(&0), Some(&20.0));
+    assert_eq!(restored.model().sheets[0].row_heights.get(&0), Some(&30.0));
+}
+
+fn hidden_custom_sizes_source() -> Vec<u8> {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 24.0);
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_row_heights.insert(0, 30.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
+}
+
+fn shared_json(workbook: &Workbook) -> yrs::Any {
+    use yrs::Transact;
+    use yrs::types::ToJson;
+    let doc = yrs::Doc::new();
+    doc.transact_mut()
+        .apply_update(YrsUpdate::decode_v1(&workbook.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    doc.get_or_insert_map("xlsx");
+    doc.get_or_insert_map("xlsx:sheets");
+    doc.get_or_insert_map("xlsx:cell-formats");
+    doc.get_or_insert_array("xlsx:sheet-order");
+    let txn = doc.transact();
+    doc.to_json(&txn)
+}
+
+fn assert_no_shared_hidden_sizes(workbook: &Workbook) {
+    let json = shared_json(workbook).to_string();
+    assert!(!json.contains("hiddenColWidths"), "{json}");
+    assert!(!json.contains("hiddenRowHeights"), "{json}");
+    assert!(workbook.model().sheets[0].hidden_col_widths.is_empty());
+    assert!(workbook.model().sheets[0].hidden_row_heights.is_empty());
+}
+
+#[test]
+fn collaborative_hidden_sizes_keep_main_schema_six_identity() {
+    let source = hidden_custom_sizes_source();
+    let mut stripped = Workbook::open(&source).unwrap().model().clone();
+    for sheet in &mut stripped.sheets {
+        sheet.hidden_col_widths.clear();
+        sheet.hidden_row_heights.clear();
+    }
+    let expected = Workbook::from_model_collaborative(stripped, 886).unwrap();
+    let actual = Workbook::open_collaborative(&source, 886).unwrap();
+    assert_eq!(
+        actual.encode_state_vector_v1(),
+        expected.encode_state_vector_v1()
+    );
+    assert_eq!(
+        actual.encode_state_as_update_v1(),
+        expected.encode_state_as_update_v1()
+    );
+    assert_no_shared_hidden_sizes(&actual);
+}
+
+#[test]
+fn collaborative_hidden_sizes_never_write_shared_keys() {
+    let source = hidden_custom_sizes_source();
+    let mut stripped = Workbook::open(&source).unwrap().model().clone();
+    stripped.sheets[0].hidden_col_widths.clear();
+    stripped.sheets[0].hidden_row_heights.clear();
+    let mut expected = Workbook::from_model_collaborative(stripped, 887).unwrap();
+    let mut workbook = Workbook::open_collaborative(&source, 887).unwrap();
+    assert_no_shared_hidden_sizes(&workbook);
+    for ops in [
+        vec![
+            Op::SetColWidth {
+                sheet: SheetId(0),
+                col: 0,
+                width: Some(25.0),
+            },
+            Op::SetRowHeight {
+                sheet: SheetId(0),
+                row: 0,
+                height: Some(35.0),
+            },
+        ],
+        vec![
+            Op::SetColVisibility {
+                sheet: SheetId(0),
+                col: 0,
+                hidden: true,
+            },
+            Op::SetRowVisibility {
+                sheet: SheetId(0),
+                row: 0,
+                hidden: true,
+            },
+        ],
+        vec![
+            Op::SetColVisibility {
+                sheet: SheetId(0),
+                col: 0,
+                hidden: false,
+            },
+            Op::SetRowVisibility {
+                sheet: SheetId(0),
+                row: 0,
+                hidden: false,
+            },
+        ],
+    ] {
+        expected
+            .apply_ops(ops.clone(), CalculationOptions::default())
+            .unwrap();
+        workbook
+            .apply_ops(ops, CalculationOptions::default())
+            .unwrap();
+        assert_no_shared_hidden_sizes(&workbook);
+        assert_eq!(
+            workbook.encode_state_vector_v1(),
+            expected.encode_state_vector_v1()
+        );
+        assert_eq!(
+            workbook.encode_state_as_update_v1(),
+            expected.encode_state_as_update_v1()
+        );
+    }
+    expected.undo(CalculationOptions::default()).unwrap();
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_no_shared_hidden_sizes(&workbook);
+    assert_eq!(
+        workbook.encode_state_vector_v1(),
+        expected.encode_state_vector_v1()
+    );
+    // yrs redoes restored items in HashSet order, so post-undo clocks are not byte-stable
+    assert_eq!(shared_json(&workbook), shared_json(&expected));
+}
+
+#[test]
+fn collaborative_hidden_sizes_concurrent_first_hides_use_main_maps() {
+    let mut sheet = Sheet::new("Sized");
+    for index in 0..2 {
+        sheet.col_widths.insert(index, 24.0 + f64::from(index));
+        sheet.row_heights.insert(index, 30.0 + f64::from(index));
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut left = Workbook::open_collaborative(&source, 888).unwrap();
+    let mut right = Workbook::open_collaborative(&source, 889).unwrap();
+    for (workbook, index) in [(&mut left, 0), (&mut right, 1)] {
+        workbook
+            .apply_ops(
+                vec![
+                    Op::SetColVisibility {
+                        sheet: SheetId(0),
+                        col: index,
+                        hidden: true,
+                    },
+                    Op::SetRowVisibility {
+                        sheet: SheetId(0),
+                        row: index,
+                        hidden: true,
+                    },
+                ],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&to_left, CalculationOptions::default())
+        .unwrap();
+    right
+        .apply_update_v1(&to_right, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(left.model(), right.model());
+    for workbook in [&left, &right] {
+        assert_no_shared_hidden_sizes(workbook);
+        for index in 0..2 {
+            assert_eq!(
+                workbook.model().sheets[0].col_widths.get(&index),
+                Some(&0.0)
+            );
+            assert_eq!(
+                workbook.model().sheets[0].row_heights.get(&index),
+                Some(&0.0)
+            );
+        }
+    }
 }

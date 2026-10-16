@@ -599,3 +599,28 @@ describe('source run formatting after disjoint paragraph edits', () => {
     });
   });
 });
+
+describe('source run language after a paragraph edit', () => {
+  describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
+    it('keeps each source run’s w:lang on the text that maps back to it', async () => {
+      const languages = ['<w:lang w:val="fr-FR"/>', '<w:lang w:val="de-DE" w:eastAsia="ja-JP"/>', ''];
+      const runs = ['aaaa', 'bbbb', 'cccc'];
+      const paragraph = '<w:p>' + runs.map((value, index) =>
+        `<w:r>${languages[index] ? `<w:rPr>${languages[index]}</w:rPr>` : ''}<w:t>${value}</w:t></w:r>`
+      ).join('') + '</w:p>';
+      const xml = await saveTableEdit(path, runFixture('', paragraph), (engine) => {
+        const { paraId } = bodyParagraph(engine, runs[0]!);
+        for (const [index, offset] of [0, 11].entries()) {
+          engine.replaceRange({
+            story: 'body', start: { paraId, offset }, end: { paraId, offset: offset + 1 },
+          }, 'AC'[index]!);
+        }
+        return ['body'];
+      });
+      expect(text(xml)).toBe('AaaabbbbcccC');
+      const saved = Array.from(xml.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g) ?? []).flatMap((run) =>
+        Array.from(text(run), () => run.match(/<w:lang\b[^>]*\/>/)?.[0] ?? ''));
+      expect(saved).toEqual(languages.flatMap((language) => Array<string>(4).fill(language)));
+    });
+  });
+});

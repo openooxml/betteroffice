@@ -758,6 +758,105 @@ fn package_save_borrows_unchanged_parts() {
     assert!(borrowed > 0, "unchanged parts must stay borrowed");
 }
 
+const CALC_PR: &str = r#"<calcPr calcId="191029"/>"#;
+const FULL_CALC_PR: &str = r#"<calcPr calcId="191029" fullCalcOnLoad="1"/>"#;
+const PLAIN_BODY: &str = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>label</t></is></c><c r="B1"><v>2</v></c></row></sheetData>"#;
+
+fn calc_package(body: &str, calc_pr: &str) -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(body, &[], false);
+    parts[0].1 = format!(
+        r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>{calc_pr}</workbook>"#
+    )
+    .into_bytes();
+    parts
+}
+
+fn workbook_xml_after_edit(parts: &[(String, Vec<u8>)], at: &str, cell: Cell) -> String {
+    let parsed = parse_workbook_with_package(parts).unwrap();
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(CellRef::parse_a1(at).unwrap(), cell);
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    String::from_utf8(part_bytes(&saved, "xl/workbook.xml")).unwrap()
+}
+
+fn text_cell(value: &str) -> Cell {
+    Cell {
+        value: CellValue::Text {
+            value: value.to_owned(),
+        },
+        ..Cell::default()
+    }
+}
+
+#[test]
+fn an_edit_without_formulas_keeps_the_source_calc_pr() {
+    let xml = workbook_xml_after_edit(
+        &calc_package(PLAIN_BODY, CALC_PR),
+        "A1",
+        text_cell("edited"),
+    );
+    assert!(xml.contains(CALC_PR), "{xml}");
+    let xml = workbook_xml_after_edit(&calc_package(PLAIN_BODY, ""), "A1", text_cell("edited"));
+    assert!(!xml.contains("calcPr"), "{xml}");
+}
+
+#[test]
+fn an_edit_beside_a_formula_still_requests_a_full_calc_on_load() {
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>A1*2</f><v>2</v></c></row></sheetData>"#;
+    let xml = workbook_xml_after_edit(&calc_package(body, CALC_PR), "C1", text_cell("edited"));
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
+#[test]
+fn an_edit_that_adds_a_formula_requests_a_full_calc_on_load() {
+    let formula = Cell {
+        value: CellValue::Number { value: 4.0 },
+        formula: Some("B1*2".to_owned()),
+        ..Cell::default()
+    };
+    let xml = workbook_xml_after_edit(&calc_package(PLAIN_BODY, CALC_PR), "C1", formula);
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
+/// The model reads no cells from a macrosheet, so its formulas go unseen.
+#[test]
+fn an_edit_beside_a_macrosheet_requests_a_full_calc_on_load() {
+    let mut parts = calc_package(PLAIN_BODY, CALC_PR);
+    parts[0].1 = String::from_utf8(parts[0].1.clone())
+        .unwrap()
+        .replace(
+            "</sheets>",
+            r#"<sheet name="Macro1" sheetId="2" r:id="rId2"/></sheets>"#,
+        )
+        .into_bytes();
+    parts[1].1 = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet" Target="macrosheets/sheet1.xml"/></Relationships>"#.to_vec();
+    parts.push((
+        "xl/macrosheets/sheet1.xml".to_owned(),
+        br#"<xm:macrosheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><f>Sheet1!B1*2</f><v>4</v></c></row></sheetData></xm:macrosheet>"#.to_vec(),
+    ));
+    let xml = workbook_xml_after_edit(&parts, "A1", text_cell("edited"));
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
+/// The model keeps the Fallback's literal, so the Choice's formula goes unseen.
+#[test]
+fn an_edit_beside_an_alternate_content_formula_requests_a_full_calc_on_load() {
+    let mut parts = two_sheet_package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        r#"<sheetData><row r="1"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x14"><c r="A1"><f>Sheet1!A1*2</f><v>2</v></c></mc:Choice><mc:Fallback><c r="A1"><v>2</v></c></mc:Fallback></mc:AlternateContent></row></sheetData>"#,
+    );
+    parts[0].1 = String::from_utf8(parts[0].1.clone())
+        .unwrap()
+        .replace("</workbook>", &format!("{CALC_PR}</workbook>"))
+        .into_bytes();
+    let precedent = Cell {
+        value: CellValue::Number { value: 5.0 },
+        ..Cell::default()
+    };
+    let xml = workbook_xml_after_edit(&parts, "A1", precedent);
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
 #[test]
 fn shared_formulas_resolve_late_masters_and_leave_unshared_cells_alone() {
     let body = r#"<sheetData>
@@ -872,6 +971,36 @@ fn hidden_rows_and_columns_have_zero_render_extent() {
     assert_eq!(sheet.col_widths.get(&3), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&1), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&2), Some(&0.0));
+    assert_eq!(sheet.hidden_col_widths.get(&1), Some(&12.5));
+    assert_eq!(sheet.hidden_col_widths.get(&2), Some(&12.5));
+    assert_eq!(sheet.hidden_col_widths.get(&3), None);
+    assert_eq!(sheet.hidden_row_heights.get(&1), Some(&30.0));
+    assert_eq!(sheet.hidden_row_heights.get(&2), None);
+}
+
+#[test]
+fn hiding_resized_axes_writes_visibility_without_erasing_authored_sizes() {
+    let body = r#"<cols><col min="1" max="1" width="24" customWidth="1"/></cols><sheetData><row r="1" ht="30" customHeight="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let mut workbook = parsed.workbook;
+    let sheet = &mut workbook.sheets[0];
+    sheet.col_widths.insert(0, 0.0);
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 24.0);
+    sheet.hidden_row_heights.insert(0, 30.0);
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    assert!(
+        xml.contains(r#"width="24" customWidth="1" hidden="1""#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"ht="30" customHeight="1" hidden="1""#),
+        "{xml}"
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(reopened.sheets[0].hidden_col_widths.get(&0), Some(&24.0));
+    assert_eq!(reopened.sheets[0].hidden_row_heights.get(&0), Some(&30.0));
 }
 
 /// a negative `<col>` width is unrenderable, so the model narrows it to zero
@@ -3285,6 +3414,170 @@ fn keeps_a_stylesheet_that_models_nothing() {
         part_bytes(&parts, "xl/styles.xml")
     );
     assert!(content_types_text(&saved).contains("/xl/styles.xml"));
+}
+
+/// A `dxf` number format belongs to its conditional format; promoting one to
+/// the cell pool would redefine a builtin id for untouched cells.
+#[test]
+fn dxf_number_formats_stay_out_of_the_cell_pool() {
+    let num_fmts = r#"<numFmts count="2"><numFmt numFmtId="3" formatCode="0.0"/><numFmt numFmtId="164" formatCode="0.000"/></numFmts>"#;
+    let dxfs = r#"<dxfs count="2"><dxf><numFmt numFmtId="14" formatCode="0.00%"/></dxf><dxf><font><b/></font><numFmt numFmtId="165" formatCode="@"/></dxf></dxfs>"#;
+    let ext = r#"<extLst><ext uri="{46F421CA-312F-682f-3DD2-61675219B42D}"><dxfs count="1"><dxf><numFmt numFmtId="166" formatCode="0%"/></dxf></dxfs></ext></extLst>"#;
+    let styles = format!(
+        r#"{num_fmts}<fonts count="1"><font><sz val="11"/></font></fonts><cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="14" fontId="0" applyNumberFormat="1"/></cellXfs>{dxfs}{ext}"#
+    );
+    let parts = package_styled(
+        r#"<sheetData><row r="1"><c r="A1" s="1"><v>43678</v></c><c r="B1"><v>1</v></c></row></sheetData>"#,
+        Some(&styles),
+        None,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let pool = vec![(3, "0.0".to_string()), (164, "0.000".to_string())];
+    assert_eq!(parsed.workbook.styles.num_fmts, pool);
+
+    let mut wb = parsed.workbook.clone();
+    let mut format = wb.styles.cell_format(None);
+    format.font.bold = true;
+    wb.sheets[0].cell_mut(CellRef::new(0, 1)).unwrap().style =
+        wb.styles.intern_cell_format(&format).unwrap();
+    let saved = serialize_workbook_with_package(&wb, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(num_fmts), "{xml}");
+    assert!(xml.contains(dxfs), "{xml}");
+    assert!(xml.contains(ext), "{xml}");
+
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(reopened.styles.num_fmts, pool);
+    assert_eq!(reopened.styles.format_code_for(1), FormatCode::Builtin(14));
+    let bold = reopened.styles.cell_format(cell_at(&reopened, "B1").style);
+    assert!(bold.font.bold);
+}
+
+/// Pools close with their element, so a `dxf` font is never a cell font.
+#[test]
+fn dxf_fonts_stay_out_of_the_font_pool() {
+    let styles = r#"<fonts count="1"><font><sz val="11"/></font></fonts><dxfs count="1"><dxf><font><b/></font></dxf></dxfs>"#;
+    let parts = package_styled("<sheetData/>", Some(styles), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.styles.fonts.len(), 1);
+}
+
+fn style_branch(content: &str, branch: &str) -> String {
+    format!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:{branch}>{content}</mc:{branch}></mc:AlternateContent>"#
+    )
+}
+
+#[test]
+fn wrapped_number_format_entries_read_fallback() {
+    let entry = style_branch(r#"<numFmt numFmtId="164" formatCode="0.000"/>"#, "Fallback");
+    let styles = format!(r#"<numFmts count="1">{entry}</numFmts>"#);
+    let workbook = parse_workbook(&package_styled("<sheetData/>", Some(&styles), None)).unwrap();
+    assert_eq!(workbook.styles.num_fmts, [(164, "0.000".into())]);
+}
+
+#[test]
+fn wrapped_number_format_pools_read_one_choice() {
+    let styles = r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x14"><numFmts><numFmt numFmtId="164" formatCode="0.000"/></numFmts></mc:Choice><mc:Choice Requires="x15"><numFmts><numFmt numFmtId="165" formatCode="0%"/></numFmts></mc:Choice><mc:Fallback><numFmts><numFmt numFmtId="166" formatCode="@"/></numFmts></mc:Fallback></mc:AlternateContent>"#;
+    let workbook = parse_workbook(&package_styled("<sheetData/>", Some(styles), None)).unwrap();
+    assert_eq!(workbook.styles.num_fmts, [(164, "0.000".into())]);
+}
+
+#[test]
+fn wrapped_style_pools_and_entries_keep_indices_and_exclude_dxfs() {
+    let font = style_branch(r#"<font><b/></font>"#, "Choice");
+    let fonts = style_branch(&format!("<fonts><font/>{font}</fonts>"), "Fallback");
+    let xf = style_branch(r#"<xf fontId="1" fillId="1" borderId="1"/>"#, "Fallback");
+    let xfs = style_branch(&format!("<cellXfs><xf/>{xf}</cellXfs>"), "Choice");
+    let fills = style_branch(
+        r#"<fills><fill/><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills>"#,
+        "Fallback",
+    );
+    let border = style_branch(r#"<border><left style="thin"/></border>"#, "Choice");
+    let styles = format!(
+        r#"{fonts}{fills}<borders><border/>{border}</borders>{xfs}<dxfs><dxf><font><i/></font><fill/><border/><numFmt numFmtId="14" formatCode="@"/></dxf></dxfs><extLst><ext><fonts><font><i/></font></fonts><numFmts><numFmt numFmtId="165" formatCode="0%"/></numFmts></ext></extLst>"#
+    );
+    let workbook = parse_workbook(&package_styled("<sheetData/>", Some(&styles), None)).unwrap();
+    assert_eq!(workbook.styles.fonts.len(), 2);
+    assert_eq!(workbook.styles.fills.len(), 2);
+    assert_eq!(workbook.styles.borders.len(), 2);
+    assert_eq!(workbook.styles.cell_xfs.len(), 2);
+    assert!(workbook.styles.num_fmts.is_empty());
+    let format = workbook.styles.cell_format(Some(1));
+    assert!(format.font.bold);
+    assert_eq!(format.fill, Fill::Solid(Color::Rgb("#ff0000".into())));
+    assert_eq!(format.border.left.unwrap().style, BorderStyle::Thin);
+}
+
+#[test]
+fn style_edits_refuse_wrapped_pools_without_reusing_number_format_ids() {
+    for branch in ["Fallback", "Choice"] {
+        for wrapped_pool in [false, true] {
+            let entry = r#"<numFmt numFmtId="164" formatCode="0.000"/>"#;
+            let pool = if wrapped_pool {
+                style_branch(
+                    &style_branch(&format!("<numFmts>{entry}</numFmts>"), branch),
+                    branch,
+                )
+            } else {
+                format!("<numFmts>{}</numFmts>", style_branch(entry, branch))
+            };
+            let styles = format!(r#"{pool}<cellXfs><xf numFmtId="164"/></cellXfs>"#);
+            let parts = package_styled(
+                r#"<sheetData><row r="1"><c r="A1" s="0"><v>1</v></c><c r="B1"><v>2</v></c></row></sheetData>"#,
+                Some(&styles),
+                None,
+            );
+            let parsed = parse_workbook_with_package(&parts).unwrap();
+            let unchanged =
+                serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+            assert_eq!(
+                part_bytes(&unchanged, "xl/styles.xml"),
+                part_bytes(&parts, "xl/styles.xml")
+            );
+            let mut workbook = parsed.workbook.clone();
+            let format = xlsx_model::CellFormat {
+                number_format: xlsx_model::NumberFormat::Custom {
+                    pattern: "0.0000".into(),
+                },
+                ..Default::default()
+            };
+            let style = workbook
+                .styles
+                .intern_cell_format(&format)
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                workbook.styles.cell_xfs[style as usize].num_fmt_id,
+                Some(164)
+            );
+            assert_eq!(workbook.styles.num_fmts[0], (164, "0.000".into()));
+            assert_eq!(
+                workbook.styles.format_code_for(0),
+                FormatCode::Custom("0.000")
+            );
+            workbook.sheets[0]
+                .cell_mut(CellRef::new(0, 1))
+                .unwrap()
+                .style = Some(style);
+            let error = serialize_workbook_with_package(&workbook, &parsed.package).unwrap_err();
+            assert!(matches!(error, ParseError::UnsupportedEdit(_)), "{error:?}");
+        }
+    }
+}
+
+#[test]
+fn style_edits_refuse_wrapped_font_entries() {
+    let font = style_branch("<font><b/></font>", "Fallback");
+    let styles = format!("<fonts>{font}</fonts><cellXfs><xf fontId=\"0\"/></cellXfs>");
+    let parts = package_styled("<sheetData/>", Some(&styles), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    let mut format = workbook.styles.cell_format(Some(0));
+    format.font.italic = true;
+    workbook.styles.intern_cell_format(&format).unwrap();
+    let error = serialize_workbook_with_package(&workbook, &parsed.package).unwrap_err();
+    assert!(matches!(error, ParseError::UnsupportedEdit(_)), "{error:?}");
 }
 
 /// Interning a new format appends one `xf`; every pool entry the model left

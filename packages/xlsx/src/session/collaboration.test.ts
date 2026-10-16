@@ -41,6 +41,15 @@ function whenAcknowledged(session: WorkbookSession, throughSeq = session.through
   });
 }
 
+async function quiet(progress: () => number) {
+  for (let idle = 0, seen = -1; idle < 64;) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const moved = progress();
+    idle = moved === seen ? idle + 1 : 0;
+    seen = moved;
+  }
+}
+
 async function edit(session: WorkbookSession, input: string) {
   const ticket = session.editSession!.submit('editCell', {
     payload: { args: [0, 2, 1, input] },
@@ -94,6 +103,7 @@ test('collaborative worker replicas paint initial state and serialize edits, mer
     for (const provider of providers) provider.connect();
     await synced;
     await Promise.all([left.call.version(), right.call.version()]);
+    await quiet(() => wire.frames[0].length + wire.frames[1].length + left.throughSeq + right!.throughSeq);
     expect(providers.every((provider) => provider.synced)).toBe(true);
     const remoteUpdates = () => wire.frames[1].flatMap((frame) => decodeMessages(frame))
       .filter((message) => message.type === 'update').length;
@@ -157,5 +167,52 @@ test('collaborative worker replicas paint initial state and serialize edits, mer
     for (const provider of providers) provider.destroy();
     await left.dispose();
     await right?.dispose();
+  }
+});
+
+test('collaborative worker replicas sync freeze panes and undo', async () => {
+  const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 301 });
+  const right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 302 });
+  const wire = transports();
+  const providers = [
+    new CollaborationProvider(left.replica!, wire.pair[0]),
+    new CollaborationProvider(right.replica!, wire.pair[1]),
+  ];
+  try {
+    const synced = Promise.all(providers.map(whenSynced));
+    for (const provider of providers) provider.connect();
+    await synced;
+    expect(await left.call.sheetView(0)).toMatchObject({ frozenRows: 0, frozenCols: 0, frozenHeight: 0 });
+    expect(await right.call.sheetView(0)).toMatchObject({ frozenRows: 0, frozenCols: 0, frozenHeight: 0 });
+
+    let merged = whenAcknowledged(right);
+    const freeze = left.editSession!.submit('applyOps', {
+      payload: {
+        args: [[{ type: 'setFreezePane', sheet: 0, pane: { rows: 1, cols: 0, top_left: { row: 1, col: 0 } } }]],
+      },
+    });
+    expect((await freeze.ack).status).toBe('applied');
+    await merged;
+    const leftFrozen = await left.call.sheetView(0);
+    const rightFrozen = await right.call.sheetView(0);
+    expect(leftFrozen).toMatchObject({ frozenRows: 1, frozenCols: 0 });
+    expect(leftFrozen.frozenHeight).toBeGreaterThan(0);
+    expect(rightFrozen).toMatchObject({
+      frozenRows: leftFrozen.frozenRows,
+      frozenCols: leftFrozen.frozenCols,
+      frozenWidth: leftFrozen.frozenWidth,
+      frozenHeight: leftFrozen.frozenHeight,
+    });
+
+    merged = whenAcknowledged(right);
+    const undo = left.editSession!.submit('undo', { payload: { args: [] } });
+    expect((await undo.ack).status).toBe('applied');
+    await merged;
+    expect(await left.call.sheetView(0)).toMatchObject({ frozenRows: 0, frozenCols: 0, frozenHeight: 0 });
+    expect(await right.call.sheetView(0)).toMatchObject({ frozenRows: 0, frozenCols: 0, frozenHeight: 0 });
+  } finally {
+    for (const provider of providers) provider.destroy();
+    await left.dispose();
+    await right.dispose();
   }
 });

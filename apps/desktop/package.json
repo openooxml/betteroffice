@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "bun test src"
+    "test": "bun test --isolate src"
   },
   "dependencies": {
     "@betteroffice/docx": "workspace:*",

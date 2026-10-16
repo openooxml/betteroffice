@@ -437,7 +437,7 @@ const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
 
-const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs'] as const;
+const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language'] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
@@ -461,7 +461,8 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting): TextF
     const value = source?.[key];
     if (value === undefined) continue;
     const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
-    if (sameJson(value, live) ||
+    // Runs hold no live language, so text keeps the language of the source run it maps to.
+    if (key === 'language' || sameJson(value, live) ||
       ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
     }

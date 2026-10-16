@@ -2147,6 +2147,7 @@ fn snapshot_current_state_identity() {
                 None,
                 &[],
                 None,
+                &[],
             )
             .unwrap()
             .0;

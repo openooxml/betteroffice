@@ -301,6 +301,56 @@ fn adding_a_comment_saves_the_new_comment() {
     assert_comment_text(&saved, 0.0, " colorful");
     assert_comment_text(&saved, 1.0, "Plain");
     assert_comment_text(&saved, 2.0, "Added comment");
+    assert_rich_comment(&saved);
+    let original = String::from_utf8(part(&source, "word/comments.xml")).unwrap();
+    let written = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    let close = original.rfind("</w:comments>").unwrap();
+    assert!(written.starts_with(&original[..close]));
+    assert!(written.ends_with(&original[close..]));
+    assert!(written[close..].starts_with("<w:comment w:id=\"2\""));
+}
+
+#[test]
+fn adding_a_comment_where_its_prefixes_are_unbound_writes_the_part_whole() {
+    let plain = "<w:comment w:id=\"1\" w:author=\"Plain reviewer\"><w:p><w:r><w:t>Plain</w:t></w:r></w:p></w:comment>";
+    let mut parts = ooxml_opc::unzip_parts(&fixture_with_comment_parts(plain, &[])).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace(
+            " xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"",
+            "",
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let unchanged = write_docx_s13(save_request(&source), &source).unwrap();
+    assert_eq!(
+        part(&unchanged, "word/comments.xml"),
+        part(&source, "word/comments.xml")
+    );
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().push(
+        serde_json::from_value(json!({
+            "id": 2, "author": "New reviewer", "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "run", "content": [{ "type": "text", "text": "Added comment" }]
+                }]
+            }]
+        }))
+        .unwrap(),
+    );
+    let expected = serialize_comments_part(
+        request.document.comments.as_ref().unwrap(),
+        &mut SerializerContext::new(&request.determinism).unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
+    assert_comment_companion_ids(&saved);
+    assert_comment_text(&saved, 1.0, "Plain");
+    assert_comment_text(&saved, 2.0, "Added comment");
 }
 
 fn without_rich_paragraph_ids(xml: &str) -> String {
