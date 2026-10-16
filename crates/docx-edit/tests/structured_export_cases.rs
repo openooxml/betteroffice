@@ -2098,9 +2098,7 @@ fn removing_a_materialized_unanchored_source_comment_removes_its_export() {
     .unwrap();
     doc.apply_raw_ops(
         "body",
-        vec![RawOp::RemoveComment {
-            id: "1".to_owned(),
-        }],
+        vec![RawOp::RemoveComment { id: "1".to_owned() }],
         &EditCtx::local("", ""),
     )
     .unwrap();

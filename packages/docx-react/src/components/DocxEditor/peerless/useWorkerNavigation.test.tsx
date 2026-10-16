@@ -129,7 +129,7 @@ for (const member of ['scrollToComment', 'scrollToChange'] as const) {
     const { controller, read, viewStore, dispose } = reviewNavigation(reviewTargets);
     const id = member === 'scrollToComment' ? 7 : 12;
     try {
-      read.mockImplementationOnce(async () => { const view = viewStore.getSnapshot(); viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version + 1, throughSeq: 0, selection: null }); return { status: 'ok', version: 'native', value: reviewTargets[JSON.stringify({ kind: 'comment', id: 7 })] }; });
+      read.mockImplementationOnce(async () => { const view = viewStore.getSnapshot(); viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version + 1, throughSeq: 0, presentedThroughSeq: 0, selection: null, editState: view.editState }); return { status: 'ok', version: 'native', value: reviewTargets[JSON.stringify({ kind: 'comment', id: 7 })] }; });
       expect(await controller.ref[member](id)).toBe(false);
       read.mockImplementationOnce(async () => { controller.opening({}); return { status: 'ok', version: 'native', value: null }; });
       expect(await controller.ref[member](id)).toBe(false);
