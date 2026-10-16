@@ -115,7 +115,13 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     try {
       const owned: ResidentSourceOpenRequest = source.bytes
         ? { ...source, bytes: source.bytes.slice() } : source;
-      const response = await this.request({ type: 'openSource', source: owned }, owned.bytes ? [owned.bytes.buffer] : []);
+      const initialUpdate = source.collaboration?.initialUpdate === undefined
+        ? undefined : new Uint8Array(source.collaboration.initialUpdate);
+      const requestSource = initialUpdate
+        ? { ...owned, collaboration: { ...owned.collaboration!, initialUpdate } } : owned;
+      const transfer: Transferable[] = owned.bytes ? [owned.bytes.buffer] : [];
+      if (initialUpdate) transfer.push(initialUpdate.buffer);
+      const response = await this.request({ type: 'openSource', source: requestSource }, transfer);
       if (!response.sourceDocument || !response.stateVector) {
         throw new ResidentWorkerFailureError('Resident engine worker omitted the opened source');
       }
