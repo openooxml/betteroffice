@@ -2,6 +2,8 @@ import { afterEach, expect, test } from 'bun:test';
 import { closeCommandEngines, command, execute, openCommandEngine, snapshot, TIMEOUT } from './residentCommandTestSupport';
 import { createProposalRegistry } from './proposals';
 import { readResidentReviewSnapshot } from './residentReview';
+import { projectDocxEditState } from './residentCommandEditState';
+import { readAdjacentRevision } from './sidebarReads';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 
 afterEach(closeCommandEngines);
@@ -76,4 +78,45 @@ test('a read-only state applies granted host proposals and refuses ungranted pro
   expect(execute(arm, command(arm, 'withdrawProposals', { expectVersion: version(), ids: ['one'], hostProposal: true }))).toMatchObject({ status: 'applied' });
   expect(arm.state.proposals.snapshot().proposals).toEqual([]);
   expect(arm.state.readOnly).toBe(true);
+}, TIMEOUT);
+
+test('the current change holds every paragraph of a multi-paragraph suggestion, host proposals aside', async () => {
+  const arm = await openCommandEngine(['Alpha', 'Beta', 'Gamma', 'Delta']);
+  const [first, middle, last, outside] = arm.engine.paragraphs('body').map(({ paraId }) => paraId);
+  const at = (paraId: string, offset: number) => ({ story: 'body', paraId, offset });
+  expect(execute(arm, command(arm, 'select', { selection: { anchor: at(first!, 2), focus: at(last!, 2) } })).status).toBe('noop');
+  expect(execute(arm, command(arm, 'deleteBackward', { suggesting: { name: 'Ada', date: '2026-01-01' } })).status).toBe('applied');
+  const deletion = arm.engine.geometryReader.listRevisions().find(({ kind }) => kind === 'deletion')!.revisionId;
+  const current = (paraId: string, offset: number) => {
+    execute(arm, command(arm, 'select', { selection: { anchor: at(paraId, offset), focus: at(paraId, offset) } }));
+    return projectDocxEditState(arm.engine, arm.state).currentRevisionId;
+  };
+  expect(current(middle!, 1)).toBe(deletion);
+  expect(current(first!, 2)).toBe(deletion);
+  expect(current(last!, 2)).toBe(deletion);
+  expect(current(first!, 1)).toBeUndefined();
+  expect(current(outside!, 1)).toBeUndefined();
+  arm.state.proposals = { snapshot: () => ({ proposals: [{ revisionIds: [deletion] }] }) } as never;
+  expect(current(middle!, 1)).toBeUndefined();
+}, TIMEOUT);
+
+test('review navigation steps from the selection in document order and wraps like the hybrid editor', async () => {
+  const insertion = (id: number, author: string, text: string) =>
+    `<w:ins w:id="${id}" w:author="${author}" w:date="2026-01-0${id}T00:00:00Z"><w:r><w:t>${text}</w:t></w:r></w:ins>`;
+  const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Alpha </w:t></w:r>' + insertion(1, 'Ada', 'one') +
+    '<w:r><w:t xml:space="preserve"> between </w:t></w:r>' + insertion(2, 'Bob', 'two') + '<w:r><w:t xml:space="preserve"> tail</w:t></w:r></w:p>';
+  const arm = await openCommandEngine([], { bodyXml });
+  const reader = arm.resident.geometryReader;
+  const [one, two] = reader.listRevisions().sort((a, b) => a.range.start.offset - b.range.start.offset).map(({ revisionId }) => revisionId);
+  const paraId = arm.engine.paragraphs('body')[0]!.paraId;
+  const caret = (offset: number) => ({ anchor: { story: 'body', paraId, offset }, focus: { story: 'body', paraId, offset } });
+  const step = (selection: ReturnType<typeof caret> | null, direction: 'next' | 'previous', excluded: string[] = []) =>
+    readAdjacentRevision(reader, selection, direction, new Set(excluded))?.revisionId;
+  expect([step(caret(12), 'next'), step(caret(12), 'previous')]).toEqual([two, one]);
+  expect([step(caret(7), 'next'), step(caret(7), 'previous')]).toEqual([two, one]);
+  expect([step(caret(26), 'next'), step(caret(2), 'previous')]).toEqual([one, two]);
+  expect([step(null, 'next'), step(null, 'previous')]).toEqual([one, two]);
+  expect(step({ anchor: caret(6).anchor, focus: caret(9).focus }, 'next')).toBe(two);
+  expect(step(caret(12), 'next', [two!])).toBe(one);
+  expect(step(caret(12), 'next', [one!, two!])).toBeUndefined();
 }, TIMEOUT);

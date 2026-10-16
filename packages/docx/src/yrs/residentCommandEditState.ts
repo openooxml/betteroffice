@@ -1,4 +1,4 @@
-import type { YrsHyperlinkAttrs, YrsSelectionContext } from './index';
+import type { YrsHyperlinkAttrs, YrsLoc, YrsSelectionContext } from './index';
 import { readCommandSelection } from './residentCommandAnchors';
 import { readCellSelection, resolveLiveCell } from './residentCommandTableSelection';
 import { tableAnchors, type TablePayload } from './storyPlainText';
@@ -54,6 +54,23 @@ function hyperlinkAt(engine: ResidentDocxCommandEngine, story: string, paraId: s
     start = end;
   }
   return boundary;
+}
+
+function revisionAt(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, head: YrsLoc): string | undefined {
+  const reader = engine.geometryReader;
+  const at = (paraId: string, offset: number) => reader.locateParagraph(head.story, paraId).start + offset;
+  const position = at(head.paraId, head.offset);
+  const holding = reader.listRevisions().filter(({ range }) => {
+    if (range.story !== head.story) return false;
+    try {
+      return at(range.start.paraId, range.start.offset) <= position && position <= at(range.end.paraId, range.end.offset);
+    } catch {
+      return false;
+    }
+  });
+  if (!holding.length) return undefined;
+  const proposed = new Set(state.proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds));
+  return holding.find(({ revisionId }) => !proposed.has(revisionId))?.revisionId;
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -146,5 +163,7 @@ export function projectDocxEditState(
   };
   result.hyperlink = hyperlinkAt(engine, selection.focus.story, selection.focus.paraId, selection.focus.offset);
   result.tableContext = tableContext(engine, selection.focus.story);
+  const revision = revisionAt(engine, state, selection.focus);
+  if (revision !== undefined) result.currentRevisionId = revision;
   return result;
 }

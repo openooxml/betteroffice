@@ -22,7 +22,7 @@ import type { DocxHostSearch } from '../hooks/useHostSearch';
 import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
-import { adjacentWorkerRevision, currentWorkerRevision, workerRevisions, type WorkerRevisionState } from './workerRevisions';
+import { workerRevisions, type WorkerRevisionState } from './workerRevisions';
 import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 
 import { PeerlessSyncApiError } from './contracts';
@@ -168,7 +168,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const revisionEnvironment = (view: PeerlessViewSnapshot | null | undefined) => {
     const state = revisions?.binding === binding ? revisions?.value : null;
-    return { revisions: state?.navigation ?? [], revisionIds: state?.ids ?? new Set<string>(), currentRevisionId: state ? currentWorkerRevision(state, view?.workerSelection) : null };
+    return { revisions: state?.navigation ?? [], revisionIds: state?.ids ?? new Set<string>(), currentRevisionId: view?.editState?.currentRevisionId ?? null };
   };
   const queryOrigins = new WeakMap<object, { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number }>();
   const capture = () => binding;
@@ -374,8 +374,8 @@ export function createPeerlessShellController(initial: Options) {
         return revisionId ? submit({ kind: id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', payload: { revisionId } }) : { ok: true, status: 'noop' };
       }
       if (id === 'reviewNext' || id === 'reviewPrevious') {
-        const revisionId = adjacentWorkerRevision(env.revisions, env.currentRevisionId, id === 'reviewNext' ? 1 : -1);
-        return revisionId && await revealReviewTarget({ kind: 'revision', revisionId }) ? { ok: true, status: 'executed' }
+        const target = await query({ kind: 'adjacentRevision', selection: ready().viewStore.getSnapshot().workerSelection, direction: id === 'reviewNext' ? 'next' : 'previous' });
+        return target.value && await revealReviewTarget({ kind: 'revision', revisionId: target.value.revisionId }) ? { ok: true, status: 'executed' }
           : { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } };
       }
       if (id === 'strikethrough') return format({ kind: 'toggleStrike', payload: {} });
@@ -661,7 +661,7 @@ export function createPeerlessShellController(initial: Options) {
       if (!review?.value || !currentQuery(review) || (sidebar && (!currentQuery(sidebar) || sidebar.version !== review.version))) return;
       const value = workerRevisions(review.value, sidebar?.value ?? null);
       if (!value) return;
-      const key = JSON.stringify([value.sites, value.navigation, value.entries, [...value.anchors]]);
+      const key = JSON.stringify([[...value.ids], value.navigation, value.entries, [...value.anchors]]);
       if (revisions?.binding === binding && revisions.key === key) return;
       revisions = { binding: binding!, key, value };
       publish();

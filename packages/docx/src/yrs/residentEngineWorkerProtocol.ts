@@ -153,7 +153,8 @@ export type ResidentDocumentRead =
   | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
   | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
-  | { kind: 'headings'; expectVersion: string };
+  | { kind: 'headings'; expectVersion: string }
+  | { kind: 'adjacentRevision'; selection: DocxCommandSelection | null; direction: 'next' | 'previous' };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -194,6 +195,7 @@ export interface ResidentDocumentReadValues {
   bookmarkPosition: number | null;
   sidebar: DocxSidebarRead | null;
   headings: DocxOutlineHeading[] | null;
+  adjacentRevision: { revisionId: string } | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */

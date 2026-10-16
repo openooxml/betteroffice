@@ -1,11 +1,10 @@
 import { yrsIdToNumericId, type DisplayListRect } from '@betteroffice/docx/layout/render';
-import type { DocxCommandSelection, ResidentDocumentRead, ResidentDocumentReadValues, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import type { ResidentDocumentRead, ResidentDocumentReadValues, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
 import type { DocxRevisionEnvironment } from '../../../commands/evaluate';
 import type { CommentCallbacks } from '../../../hooks/useCommentSidebarItems';
 import type { TrackedChangeEntry } from '../../sidebar/cardUtils';
 
 export interface WorkerRevisionState {
-  sites: ResidentReviewSnapshot['revisions'];
   ids: ReadonlySet<string>;
   navigation: readonly DocxRevisionEnvironment[];
   entries: TrackedChangeEntry[];
@@ -38,27 +37,12 @@ export function workerRevisions(review: ResidentReviewSnapshot, sidebar: Residen
     if (rect) anchors.set(`revision-${key}`, rect);
   }
   return {
-    sites: indexed.map(({ site }) => site),
     ids: new Set(numeric.values()),
     navigation: [...navigation.values()].sort((first, second) => first.position - second.position),
     entries: (sidebar?.trackedChanges.entries ?? []).filter(entry => numeric.has(entry.revisionId) &&
       (entry.insertionRevisionId == null || numeric.has(entry.insertionRevisionId))),
     anchors,
   };
-}
-
-export function currentWorkerRevision(state: WorkerRevisionState, selection: DocxCommandSelection | null | undefined): string | null {
-  const head = selection?.focus;
-  if (!head) return null;
-  return state.sites.find(({ range: { story, start, end } }) => story === head.story && (start.paraId === end.paraId
-    ? head.paraId === start.paraId && start.offset <= head.offset && head.offset <= end.offset
-    : (head.paraId === start.paraId && start.offset <= head.offset) || (head.paraId === end.paraId && head.offset <= end.offset)))?.revisionId ?? null;
-}
-
-export function adjacentWorkerRevision(navigation: readonly DocxRevisionEnvironment[], current: string | null, step: 1 | -1): string | null {
-  if (!navigation.length) return null;
-  const index = navigation.findIndex(revision => revision.revisionId === current);
-  return navigation[index < 0 ? step > 0 ? 0 : navigation.length - 1 : (index + step + navigation.length) % navigation.length]!.revisionId;
 }
 
 export function workerRevisionCallbacks(controller: {

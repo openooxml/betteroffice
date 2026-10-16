@@ -21,22 +21,23 @@ function reviewFixture() {
   const sidebar = { comments: [], revisions: [{ key: 'revision-9', start: { story: 'body', position: 20 } },
     { key: 'revision-7', start: { story: 'body', position: 4 } }, { key: 'revision-11', start: { story: 'body', position: 30 } }],
   trackedChanges: { entries: [entry(9, 20), entry(7, 4), entry(11, 30)], commentToRevision: [] } };
-  const readAt = mock(async (request: { kind: string }) => ({ status: 'ok', version: 'native', value: request.kind === 'sidebar' ? sidebar : review }));
+  const adjacent: { value: { revisionId: string } | null } = { value: null };
+  const readAt = mock(async (request: { kind: string }) => ({ status: 'ok', version: 'native',
+    value: request.kind === 'sidebar' ? sidebar : request.kind === 'adjacentRevision' ? adjacent.value : review }));
   const view = fixture.viewStore.getSnapshot();
   fixture.viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: fixture.selection,
-    editState: { ...view.editState!, documentVersion: 'native' } });
+    editState: { ...view.editState!, documentVersion: 'native', currentRevisionId: '7' } });
   const reveal = mock(async (_target: { kind: 'revision'; revisionId: string } | { kind: 'comment'; id: number }) => true);
   fixture.controller.update({ read: fixture.read as never, readAt: readAt as never, focus() {}, zoom: 1, scrollToReviewTarget: reveal });
   const feed = async () => {
     const reviewRead = await fixture.controller.query({ kind: 'reviewSnapshot' });
     fixture.controller.revisions(reviewRead, await fixture.controller.query({ kind: 'sidebar', commentIds: [], expectVersion: reviewRead.version }));
   };
-  return { ...fixture, feed, reveal };
+  return { ...fixture, feed, reveal, readAt, adjacent };
 }
 
-test('worker review commands target the tracked change at the selection', async () => {
+test('worker review commands target the tracked change the worker reports at the selection', async () => {
   const { controller, submit, parity, viewStore, feed } = reviewFixture();
-  expect(controller.commands.store.getState('reviewAccept')).toMatchObject({ enabled: false, disabledReason: { code: 'revision-required' } });
   await feed();
   const env = controller.environment();
   expect(env.revisions).toEqual([{ revisionId: '7', position: 4 }, { revisionId: '9', position: 20 }]);
@@ -53,7 +54,7 @@ test('worker review commands target the tracked change at the selection', async 
   expect(submit).toHaveBeenLastCalledWith({ kind: 'rejectRevision', payload: { revisionId: '9' } }, { fence: true });
   const view = viewStore.getSnapshot();
   const outside = { anchor: { story: 'body', paraId: 'p1', offset: 7 }, focus: { story: 'body', paraId: 'p1', offset: 7 } };
-  viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: outside });
+  viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: outside, editState: { ...view.editState!, currentRevisionId: undefined } });
   expect(controller.environment().currentRevisionId).toBeNull();
   expect(controller.commands.store.getState('reviewAccept')).toMatchObject({ enabled: false, disabledReason: { code: 'revision-required' } });
 });
@@ -74,23 +75,28 @@ test('worker tracked changes skip host proposals and survive until a newer read 
   expect(controller.environment().revisions).toEqual([]);
 });
 
-test('worker next and previous change reveal the adjacent tracked change with wrap-around', async () => {
-  const { controller, viewStore, parity, reveal, feed } = reviewFixture();
+test('worker next and previous reveal the change the worker finds from the selection', async () => {
+  const { controller, viewStore, parity, reveal, feed, readAt, adjacent, selection } = reviewFixture();
   expect(controller.commands.store.getState('reviewNext')).toMatchObject({ enabled: false, disabledReason: { code: 'no-revisions' } });
   await feed();
   parity('reviewNext');
   parity('reviewPrevious');
-  const step = async (id: 'reviewNext' | 'reviewPrevious') => {
+  const step = async (id: 'reviewNext' | 'reviewPrevious', revisionId: string) => {
+    adjacent.value = { revisionId };
     expect(await controller.commands.store.execute(id, null)).toMatchObject({ ok: true, status: 'executed' });
-    return reveal.mock.calls.at(-1)![0];
+    expect(reveal.mock.calls.at(-1)![0]).toEqual({ kind: 'revision', revisionId });
+    return readAt.mock.calls.at(-1)![0];
   };
-  expect(await step('reviewNext')).toEqual({ kind: 'revision', revisionId: '9' });
-  expect(await step('reviewPrevious')).toEqual({ kind: 'revision', revisionId: '9' });
+  expect(await step('reviewNext', '9')).toEqual({ kind: 'adjacentRevision', selection, direction: 'next' });
   const view = viewStore.getSnapshot();
   const outside = { anchor: { story: 'body', paraId: 'p9', offset: 0 }, focus: { story: 'body', paraId: 'p9', offset: 0 } };
   viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: outside });
-  expect(await step('reviewNext')).toEqual({ kind: 'revision', revisionId: '7' });
-  expect(await step('reviewPrevious')).toEqual({ kind: 'revision', revisionId: '9' });
+  expect(await step('reviewPrevious', '7')).toEqual({ kind: 'adjacentRevision', selection: outside, direction: 'previous' });
+  adjacent.value = null;
+  const reveals = reveal.mock.calls.length;
+  expect(await controller.commands.store.execute('reviewNext', null)).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
+  expect(reveal.mock.calls.length).toBe(reveals);
+  adjacent.value = { revisionId: '9' };
   reveal.mockImplementationOnce(async () => false);
   expect(await controller.commands.store.execute('reviewNext', null)).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
 });

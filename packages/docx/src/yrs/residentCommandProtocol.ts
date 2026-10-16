@@ -106,6 +106,8 @@ export interface DocxEditState {
   canRedo: boolean;
   hyperlink: YrsHyperlinkAttrs | null;
   tableContext: DocxCommandTableContext | null;
+  /** The tracked change whose range holds the selection head, host proposals aside. */
+  currentRevisionId?: string;
 }
 
 /** Set by a host allowed to propose on a read-only document (`allowHostProposals`). */
