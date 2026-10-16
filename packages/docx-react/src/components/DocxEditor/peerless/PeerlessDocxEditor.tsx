@@ -160,7 +160,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const fileIO = useWorkerFileIO(recoverableProps, controller.ref, loadBuffer, () => active.current?.binding ?? null);
   const getBinding = useCallback(() => active.current?.binding ?? null, []);
   const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, recoverableProps);
-  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, perform: async (id) => {
+  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, perform: async (id) => {
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
     if (id === 'watermark') return propertyDialogs.openWatermark();
     if (id === 'insertLink') return propertyDialogs.openLink();
@@ -719,7 +719,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [controller, props.onPaste]);
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
-    submit: controller.submit, onPaste: props.onPaste, onError: reportRecoverableError });
+    submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
+    onPaste: props.onPaste, onError: reportRecoverableError });
   useLayoutEffect(() => {
     active.current = null;
     setPreviewJob(null);

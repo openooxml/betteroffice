@@ -39,7 +39,8 @@ export type TextContextAction =
   | 'addComment'
   | 'resizeImage'
   | 'moveImage'
-  | 'resizeColumn';
+  | 'resizeColumn'
+  | `wrap:${string}`;
 
 /**
  * Menu item configuration

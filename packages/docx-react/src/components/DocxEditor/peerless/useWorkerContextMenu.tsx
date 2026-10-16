@@ -1,4 +1,6 @@
 import { useCallback, useState, type MouseEvent } from 'react';
+import { IMAGE_LAYOUT_OPTIONS, type ImageLayoutTarget } from '@betteroffice/docx/docx';
+import type { TranslationKey } from '@betteroffice/docx-i18n';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { TextContextMenu, type TextContextAction, type TextContextMenuItem } from '../../TextContextMenu';
 import type { DocxCommandEnvironment } from '../../../commands/evaluate';
@@ -39,6 +41,7 @@ export function useWorkerContextMenu(options: {
   commands: DocxCommandStore;
   clipboard(cut: boolean): Promise<void>;
   submit?(intent: PeerlessPropertyIntent): Promise<DocxCommandResult>;
+  onWrapImage?: (handle: string, wrap: ImageLayoutTarget) => void | Promise<boolean>;
   onPaste?: () => void;
   onError?: (error: Error) => void;
 }) {
@@ -88,8 +91,16 @@ export function useWorkerContextMenu(options: {
     { action: 'selectAll', label: t('contextMenu.selectAll') },
   ];
   if (menu?.object && !readOnly && options.submit) {
-    if (menu.object.kind === 'image') items.unshift({ action: 'resizeImage', label: 'Resize image' }, { action: 'moveImage', label: 'Move image', dividerAfter: true });
-    else items.unshift({ action: 'resizeColumn', label: 'Column width', dividerAfter: true });
+    if (menu.object.kind === 'image') {
+      items.unshift(
+        ...IMAGE_LAYOUT_OPTIONS.map(option => ({
+          action: `wrap:${option.choice}` as const,
+          label: t(`imageWrap.menu.${option.i18nLabelKey}` as TranslationKey),
+        })),
+        { action: 'resizeImage', label: 'Resize image' },
+        { action: 'moveImage', label: 'Move image', dividerAfter: true },
+      );
+    } else items.unshift({ action: 'resizeColumn', label: 'Column width', dividerAfter: true });
   }
   if (menu?.snapshot.editState?.tableContext && !readOnly) {
     for (const [action, key] of [['addRowAbove', 'insertRowAbove'], ['addRowBelow', 'insertRowBelow'], ['deleteRow', 'deleteRow'],
@@ -100,6 +111,20 @@ export function useWorkerContextMenu(options: {
   }
   const action = async (action: TextContextAction) => {
     if (!menu) return;
+    if (action.startsWith('wrap:') && menu.object?.kind === 'image') {
+      const handle = menu.object.handle;
+      const wrap = action.slice(5) as ImageLayoutTarget;
+      close();
+      try {
+        const current = options.binding();
+        const latest = current?.viewStore.getSnapshot();
+        if (current !== menu.binding || latest?.version !== menu.snapshot.version ||
+          JSON.stringify(latest.identity) !== JSON.stringify(menu.snapshot.identity)) throw new Error('Context menu target changed');
+        if (options.environment().readOnly || options.environment().mode !== 'editing') throw new Error('Document is not editable');
+        await options.onWrapImage?.(handle, wrap);
+      } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); }
+      return;
+    }
     if (action === 'resizeImage' || action === 'moveImage' || action === 'resizeColumn') {
       setDialog({ menu, action }); close(); return;
     }
