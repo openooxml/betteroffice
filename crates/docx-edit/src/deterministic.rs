@@ -172,8 +172,8 @@ impl Encoder for CountingEncoderV1 {
 }
 
 /// Returns None for pending data, unstable JSON values, root sequence content, or deleted content
-/// a fork would collect; a fork that `keeps_deleted`, as one of a replica that skips GC does,
-/// collects none.
+/// a fork would collect; a fork that `keeps_deleted`, as one of a replica with an undo history
+/// does, collects none.
 pub(crate) fn fork_state_len_v1<T: ReadTxn>(txn: &T, keeps_deleted: bool) -> Option<usize> {
     let store = txn.store();
     if store.pending_update().is_some() || store.pending_ds().is_some() {
