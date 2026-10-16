@@ -91,20 +91,21 @@ function relay(size: number) {
       for (const listener of [...listeners[frame.to]]) listener({ type: 'message', data: frame.data });
     }
   };
-  return { transports, setOnline, flush, pending: () => queue.length };
+  const pending = (from?: number) => queue.filter((frame) => from === undefined || frame.from === from).length;
+  return { transports, setOnline, flush, pending };
 }
 
 type Link = ReturnType<typeof relay>;
 
 async function opened(...links: Link[]) {
-  for (let tick = 0; tick < 64 && links.some((link) => !link.pending()); tick += 1) {
+  for (let tick = 0; tick < 64 && links.some((link) => !link.pending(0)); tick += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
-  expect(links.map((link) => link.pending() > 0)).toEqual(links.map(() => true));
+  expect(links.map((link) => link.pending(0) > 0)).toEqual(links.map(() => true));
 }
 
 async function settle(links: Link[]) {
-  for (let round = 0; round < 16 && links.some((link) => link.pending()); round += 1) {
+  for (let round = 0; round < 16 && (round === 0 || links.some((link) => link.pending())); round += 1) {
     for (const link of links) await link.flush();
   }
   expect(links.map((link) => link.pending())).toEqual(links.map(() => 0));
@@ -168,8 +169,9 @@ for (const kind of ['sync', 'async'] as const) {
           expect(a.session.encodeStateVector()).toEqual(vector);
           const release = a.hold();
           link.setOnline(0, true);
-          a.edit(0, 'online ');
           await new Promise((done) => setTimeout(done, 0));
+          a.edit(0, 'online ');
+          expect(link.pending(0)).toBe(1);
           release();
           await link.flush();
           expect(errors).toEqual([]);
