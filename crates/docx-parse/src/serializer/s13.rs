@@ -756,7 +756,7 @@ impl<'a> Package<'a> {
     }
 }
 
-pub(super) fn save_error(message: impl Into<String>) -> ParseError {
+fn save_error(message: impl Into<String>) -> ParseError {
     ParseError::Canonical(format!("S13 package save: {}", message.into()))
 }
 
@@ -943,7 +943,7 @@ impl StoryParts<'_> {
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
         context.begin_splice(part.paragraphs.iter().copied());
         if let Some(source) = source {
-            context.keep_permissions(path, super::permissions::sources(source, part));
+            context.keep_permissions(super::permissions::sources(source, part));
         }
         let serialized = serialize(context);
         let written = context.end_splice();

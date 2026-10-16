@@ -41,7 +41,7 @@ pub fn serialize_paragraph(
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let result = serialize_paragraph_inner(paragraph, context);
     context.leave_paragraph();
-    let result = result.and_then(|xml| context.with_permissions(paragraph.source_ordinal, xml));
+    let result = result.map(|xml| context.with_permissions(paragraph.source_ordinal, xml));
     if let Ok(xml) = &result {
         context.record_paragraph(paragraph.source_ordinal, xml);
     }

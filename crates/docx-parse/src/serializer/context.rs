@@ -6,7 +6,6 @@ use crate::paragraph::HexIdAllocator;
 use crate::paragraph_identity::{allocate_paragraph_id, format_paragraph_id};
 use crate::xml::ParseError;
 
-use super::permissions::Source;
 use super::s10::SerializerDeterminism;
 
 /// Per-serialization state. Generated identities are taken only from the
@@ -32,8 +31,7 @@ struct SpliceRecorder {
     expected: HashSet<u32>,
     recorded: RecordedParagraphs,
     conflict: bool,
-    part: String,
-    permissions: BTreeMap<u32, Source>,
+    permissions: BTreeMap<u32, Vec<String>>,
 }
 
 /// The paragraphs written for a spliced part, outside any other paragraph.
@@ -146,41 +144,26 @@ impl SerializerContext {
             .map(|recorder| recorder.recorded)
     }
 
-    /// Carries the permission markers of `sources`, by `sourceOrdinal`, into the paragraphs
-    /// written for them until [`Self::end_splice`]. A changed paragraph whose markers cannot be
-    /// placed fails the save, naming `part`.
-    pub(crate) fn keep_permissions(&mut self, part: &str, sources: BTreeMap<u32, Source>) {
+    /// Carries the permission markers of `sources` into the paragraph written first for each
+    /// `sourceOrdinal` it holds until [`Self::end_splice`] (see [`super::permissions::sources`]).
+    pub(crate) fn keep_permissions(&mut self, sources: BTreeMap<u32, Vec<String>>) {
         if let Some(splice) = self.splice.as_mut() {
-            splice.part = part.to_owned();
             splice.permissions = sources;
         }
     }
 
     /// `xml`, written for the paragraph with `ordinal` as its `sourceOrdinal`, with the
-    /// permission markers of its source when it sits outside any other paragraph.
-    pub(crate) fn with_permissions(
-        &self,
-        ordinal: Option<u32>,
-        xml: String,
-    ) -> Result<String, ParseError> {
-        let Some((ordinal, splice)) = ordinal.zip(self.splice.as_ref()) else {
-            return Ok(xml);
-        };
-        let Some(source) = splice.permissions.get(&ordinal) else {
-            return Ok(xml);
-        };
+    /// permission markers it takes when it sits outside any other paragraph.
+    pub(crate) fn with_permissions(&mut self, ordinal: Option<u32>, xml: String) -> String {
         if !self.rendered_page_breaks.is_empty() {
-            return Ok(xml);
+            return xml;
         }
-        match super::permissions::carry(&source.xml, &xml) {
-            Some(carried) => Ok(carried),
-            None if !source.changed => Ok(xml),
-            None => {
-                let part = &splice.part;
-                Err(super::s13::save_error(format!(
-                    "cannot keep the permission markers of edited paragraph {ordinal} in {part}"
-                )))
-            }
+        let sources = ordinal
+            .zip(self.splice.as_mut())
+            .and_then(|(ordinal, splice)| splice.permissions.remove(&ordinal));
+        match sources {
+            Some(sources) => super::permissions::carry(&sources, &xml),
+            None => xml,
         }
     }
 

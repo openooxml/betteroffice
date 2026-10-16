@@ -33,8 +33,9 @@ fn run(text: &str) -> String {
     format!("<w:r><w:t>{text}</w:t></w:r>")
 }
 
-/// Saves the body `source` with its paragraphs as the body `edited` reads, `changed` among them.
-fn save(source: &str, edited: &str, changed: &[u32]) -> Result<String, String> {
+/// Saves the body `source` with its paragraphs as the body `edited` reads, in order, but for
+/// those `removed`; `changed` among them.
+fn save(source: &str, edited: &str, changed: &[u32], removed: &[u32]) -> Result<String, String> {
     let source = document(source);
     let original = package(&source);
     let parsed = parse_docx_s9_wire(&package(&document(edited)), S9ParseOptions::default())
@@ -43,10 +44,13 @@ fn save(source: &str, edited: &str, changed: &[u32]) -> Result<String, String> {
         .package;
     let mut content = serde_json::to_value(&parsed.document.content).unwrap();
     let paragraphs = content.as_array_mut().unwrap();
-    for (ordinal, paragraph) in paragraphs.iter_mut().enumerate() {
+    let ordinals: Vec<u32> = (0..)
+        .filter(|ordinal| !removed.contains(ordinal))
+        .take(paragraphs.len())
+        .collect();
+    for (paragraph, ordinal) in paragraphs.iter_mut().zip(&ordinals) {
         paragraph["sourceOrdinal"] = json!(ordinal);
     }
-    let ordinals: Vec<usize> = (0..paragraphs.len()).collect();
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": {"content": content},
@@ -57,7 +61,7 @@ fn save(source: &str, edited: &str, changed: &[u32]) -> Result<String, String> {
             "paragraphs": ordinals,
             "changed": changed,
             "inserted": [],
-            "removed": [],
+            "removed": removed,
         }]},
     }))
     .unwrap();
@@ -77,12 +81,14 @@ fn an_edit_beside_a_permission_range_keeps_its_markers_in_place() {
         &format!("<w:p>{}{START}{}{END}</w:p>", run("Draft"), run("Signed")),
         &edited,
         &[0],
+        &[],
     )
     .unwrap();
     let plain = save(
         &format!("<w:p>{}{}</w:p>", run("Draft"), run("Signed")),
         &edited,
         &[0],
+        &[],
     )
     .unwrap();
     assert!(saved.contains(&format!(
@@ -113,6 +119,7 @@ fn edits_at_both_ends_of_a_permission_range_across_paragraphs_keep_both_markers(
             run("Four")
         ),
         &[0, 1],
+        &[],
     )
     .unwrap();
     assert!(saved.contains(&format!("{}{START}{}</w:p>", run("Uno"), run("Two"))));
@@ -120,17 +127,6 @@ fn edits_at_both_ends_of_a_permission_range_across_paragraphs_keep_both_markers(
     assert!(saved.contains(&format!("{}{END}{}</w:p>", run("Three"), run("Four"))));
     assert_eq!(saved.matches(START).count(), 1);
     assert_eq!(saved.matches(END).count(), 1);
-}
-
-#[test]
-fn refuses_an_edit_across_a_permission_marker_instead_of_dropping_it() {
-    let error = save(
-        &format!("<w:p>{}{START}{}{END}</w:p>", run("Before"), run("After")),
-        &format!("<w:p>{}</w:p>", run("Something else")),
-        &[0],
-    )
-    .unwrap_err();
-    assert!(error.contains("word/document.xml"), "{error}");
 }
 
 #[test]
@@ -142,5 +138,125 @@ fn a_save_without_edits_keeps_permission_ranges_byte_for_byte() {
         run("Three"),
         run("Four")
     );
-    assert_eq!(save(&body, &body, &[]).unwrap(), document(&body));
+    assert_eq!(save(&body, &body, &[], &[]).unwrap(), document(&body));
+}
+
+#[test]
+fn replacing_text_across_a_permission_marker_keeps_the_range_around_the_new_text() {
+    let saved = save(
+        &format!("<w:p>{}{START}{}{END}</w:p>", run("Before"), run("After")),
+        &format!("<w:p>{}</w:p>", run("Something else")),
+        &[0],
+        &[],
+    )
+    .unwrap();
+    assert!(saved.contains(&format!("<w:p>{START}{}{END}</w:p>", run("Something else"))));
+}
+
+#[test]
+fn text_typed_into_an_empty_permission_range_lands_inside_it() {
+    let saved = save(
+        &format!("<w:p>{}{START}{END}{}</w:p>", run("A"), run("B")),
+        &format!("<w:p>{}{}{}</w:p>", run("A"), run("new"), run("B")),
+        &[0],
+        &[],
+    )
+    .unwrap();
+    assert!(saved.contains(&format!(
+        "{}{START}{}{END}{}",
+        run("A"),
+        run("new"),
+        run("B")
+    )));
+}
+
+#[test]
+fn deleting_the_text_of_a_range_between_bookmarks_keeps_its_start_before_its_end() {
+    let start = r#"<w:bookmarkStart w:id="0" w:name="b"/>"#;
+    let end = r#"<w:bookmarkEnd w:id="0"/>"#;
+    let saved = save(
+        &format!(
+            "<w:p>{}{start}{START}{}{END}{end}</w:p>",
+            run("Keep"),
+            run("A")
+        ),
+        &format!("<w:p>{}{start}{end}</w:p>", run("Keep")),
+        &[0],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(saved.matches(START).count(), 1);
+    assert_eq!(saved.matches(END).count(), 1);
+    assert!(saved.find(START) < saved.find(END));
+}
+
+#[test]
+fn a_permission_range_in_a_hyperlink_moves_beside_it_when_the_paragraph_is_edited() {
+    let saved = save(
+        &format!(
+            r#"<w:p><w:hyperlink w:anchor="t">{START}{}{END}</w:hyperlink>{}</w:p>"#,
+            run("Link"),
+            run("Tail")
+        ),
+        &format!(
+            r#"<w:p><w:hyperlink w:anchor="t">{}</w:hyperlink>{}</w:p>"#,
+            run("Link"),
+            run("End")
+        ),
+        &[0],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(saved.matches(START).count(), 1);
+    assert_eq!(saved.matches(END).count(), 1);
+    assert!(saved.find(START) < saved.find("<w:hyperlink"));
+    assert!(saved.find("</w:hyperlink>") < saved.find(END));
+    assert!(saved.find(END) < saved.find("End"));
+}
+
+#[test]
+fn deleting_a_paragraph_moves_its_permission_marker_to_the_paragraph_before() {
+    let saved = save(
+        &format!(
+            "<w:p>{}</w:p><w:p>{START}{}</w:p><w:p>{}{END}</w:p>",
+            run("Keep"),
+            run("Gone"),
+            run("Rest")
+        ),
+        &format!("<w:p>{}</w:p><w:p>{}</w:p>", run("Keep"), run("Rest")),
+        &[],
+        &[1],
+    )
+    .unwrap();
+    assert!(!saved.contains("Gone"));
+    assert!(saved.contains(&format!("{}{START}</w:p>", run("Keep"))));
+    assert!(saved.contains(&format!("{}{END}</w:p>", run("Rest"))));
+    assert_eq!(saved.matches(START).count(), 1);
+    assert_eq!(saved.matches(END).count(), 1);
+}
+
+#[test]
+fn merging_a_paragraph_keeps_its_permission_marker_where_its_text_went() {
+    let saved = save(
+        &format!(
+            "<w:p>{}</w:p><w:p>{}{START}{}</w:p><w:p>{}{END}</w:p>",
+            run("One"),
+            run("Two"),
+            run("Three"),
+            run("Four")
+        ),
+        &format!(
+            "<w:p>{}{}{}</w:p><w:p>{}</w:p>",
+            run("One"),
+            run("Two"),
+            run("Three"),
+            run("Four")
+        ),
+        &[0],
+        &[1],
+    )
+    .unwrap();
+    assert!(saved.contains(&format!("{}{START}{}</w:p>", run("Two"), run("Three"))));
+    assert!(saved.contains(&format!("{}{END}</w:p>", run("Four"))));
+    assert_eq!(saved.matches(START).count(), 1);
 }

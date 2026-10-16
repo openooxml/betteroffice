@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-Saving an edited paragraph keeps its editing permission ranges in place. When an edit replaces the text a permission marker sits in, the save now fails with an error naming the part instead of dropping the marker.
+Saves that splice edits into the source part keep editing permission ranges: a marker in replaced text moves to the edit, and markers of deleted or merged paragraphs move to a neighbouring paragraph. Parts written whole without a splice plan still drop them.
