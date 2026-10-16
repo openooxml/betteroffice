@@ -630,7 +630,7 @@ test('a buffer load whose whole source fails after the cut painted rejects, and 
   await pending;
 });
 
-test('a preview that paints after its budget expired presents nothing', async () => {
+async function paintPreviewAfterBudget(onFirstPagePainted?: () => void) {
   holdInitial = true;
   holdPreviewPaint = true;
   const budget = peerlessPreviewPaint.timeoutMs;
@@ -640,16 +640,32 @@ test('a preview that paints after its budget expired presents nothing', async ()
   globalThis.setTimeout = ((callback: () => void, delay?: number, ...rest: unknown[]) =>
     delay === 4_321 ? (expiries.push(callback), schedule(() => {}, 0)) : schedule(callback, delay, ...rest)) as typeof setTimeout;
   restorers.push(() => { peerlessPreviewPaint.timeoutMs = budget; globalThis.setTimeout = schedule; });
-  const painted = mock(() => {});
-  const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} onFirstPagePainted={painted}
+  const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} onFirstPagePainted={onFirstPagePainted}
     loadingIndicator={<span>Opening source</span>} />);
   await waitFor(() => expect(requests.some(request => request.type === 'attachCanvases')).toBe(true));
   act(() => expiries[0]!());
   await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
   await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  return view;
+}
+
+test('a preview that paints after its budget expired presents nothing', async () => {
+  const painted = mock(() => {});
+  const view = await paintPreviewAfterBudget(painted);
   expect(painted).not.toHaveBeenCalled();
   expect(view.getByText('Opening source')).toBeTruthy();
+});
+
+test('a preview that paints after its budget expired settles and releases its surfaces before the document opens', async () => {
+  const settled = spyOn(AbortSignal.prototype, 'removeEventListener');
+  restorers.push(() => settled.mockRestore());
+  const view = await paintPreviewAfterBudget();
+  expect(settled).toHaveBeenCalledWith('abort', expect.any(Function));
+  for (const reply of workers[0].pendingReplies.splice(0)) await act(async () => workers[0].onmessage?.({ data: reply } as MessageEvent<ResidentEngineWorkerResponse>));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(requests.filter(request => request.type === 'attachCanvases'))
+    .toMatchObject([{ pages: [expect.anything()] }, { pages: [], activePageIds: [] }]);
 });
 
 for (const failure of ['layout', 'paint'] as const) {

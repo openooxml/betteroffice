@@ -26,12 +26,14 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
     if (!run?.current || run.failure || !selection || selectedChart) return;
     const identity = `${run.generation}:${run.session.confirmedBasis.epoch}`;
     const at = navigation.current;
-    const draftIdentity = controller.prefillIdentity;
+    const draftIdentity = controller.focusedCellIdentity;
     let cancelled = false;
     void run.session.call.cellInputs(active, cellAddress(selection.focus)).then((result) => {
       if (!cancelled && run.current && !run.failure && identity === `${run.generation}:${run.session.confirmedBasis.epoch}` &&
-        navigation.current === at && controller.prefillIdentity === draftIdentity) {
-        setFocusedInput(result.cells[0]?.[0]?.input ?? '');
+        navigation.current === at && controller.focusedCellIdentity === draftIdentity) {
+        const value = result.cells[0]?.[0]?.input ?? '';
+        controller.focusedCellInput = { identity: draftIdentity, value };
+        setFocusedInput(value);
         controller.presented(inputRevision);
       }
     }).catch((failure) => { if (!cancelled && run.current) run.fail(failure); });
@@ -93,8 +95,13 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     const beforeInput = (event: InputEvent) => {
       if (controller.holdCellBeforeInput(event)) event.preventDefault();
     };
+    const select = () => controller.captureCellSelection();
     input.addEventListener('beforeinput', beforeInput);
-    return () => input.removeEventListener('beforeinput', beforeInput);
+    input.addEventListener('select', select);
+    return () => {
+      input.removeEventListener('beforeinput', beforeInput);
+      input.removeEventListener('select', select);
+    };
   }, [controller, draft !== null, bounds !== null]);
   useLayoutEffect(() => {
     const input = controller.cellInput;

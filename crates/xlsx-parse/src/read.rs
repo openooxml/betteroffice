@@ -539,6 +539,9 @@ pub struct SourceCellFacts {
     pub uncached_formulas: BTreeSet<(u32, u32)>,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
+    /// Whether a formula cell sits inside `mc:AlternateContent`, where another
+    /// branch's cell can stand in for it in the model.
+    pub alternate_formulas: bool,
 }
 
 /// in-progress cell state accumulated between a `<c>` start and its end.
@@ -576,6 +579,7 @@ fn parse_worksheet(
     let mut row_style_count: usize = 0;
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
+    let mut alternate_depth: usize = 0;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -605,6 +609,9 @@ fn parse_worksheet(
                     }
                     if attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value)) {
                         sheet.row_heights.insert(row, 0.0);
+                        if let Some(height) = height.filter(|height| *height > 0.0) {
+                            sheet.hidden_row_heights.insert(row, height);
+                        }
                     } else if let Some(height) = height {
                         sheet.row_heights.insert(row, height);
                     }
@@ -645,8 +652,10 @@ fn parse_worksheet(
                             }
                         }
                         c.formula = Some(text);
+                        facts.alternate_formulas |= alternate_depth > 0;
                     }
                 }
+                b"AlternateContent" => alternate_depth += 1,
                 b"is" => {
                     let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
                     if let Some(c) = cur.as_mut() {
@@ -706,6 +715,7 @@ fn parse_worksheet(
                         col_cursor += 1;
                     }
                     b"row" => cur_row = None,
+                    b"AlternateContent" => alternate_depth = alternate_depth.saturating_sub(1),
                     _ => {}
                 }
             }
@@ -868,6 +878,13 @@ fn parse_col(
     };
     for col in min..=max {
         sheet.col_widths.insert(col - 1, width);
+        if hidden && let Some(authored) = authored.filter(|authored| *authored > 0.0) {
+            sheet
+                .hidden_col_widths
+                .insert(col - 1, authored.min(MAX_COL_WIDTH_CHARS));
+        } else {
+            sheet.hidden_col_widths.remove(&(col - 1));
+        }
         if let Some(authored) = authored {
             legacy.col_widths.insert(col - 1, authored);
         }

@@ -32,6 +32,10 @@ export function workerPreviewPages(frame: ResidentEngineWorkerFrame): WorkerPrev
   return { pages, presented };
 }
 
+export function releaseWorkerPreview(client: ResidentEngineWorkerClient): void {
+  void client.attachCanvases([], [], globalThis.devicePixelRatio || 1, 1, { color: '#000', width: 2 }).catch(() => {});
+}
+
 export function WorkerDocumentPreview({ job, zoom, onPresented }: {
   job: WorkerPreviewJob;
   zoom: number;

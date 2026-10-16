@@ -375,6 +375,8 @@ pub struct ImageRun {
     pub hyperlink: Option<HyperlinkInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_shape: Option<Box<ShapeBlock>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_chart: Option<Box<ChartBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_insertion: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -744,6 +746,12 @@ pub struct CellBorderSpec {
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
+    #[serde(
+        rename = "ooxmlStyle",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ooxml_style: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1364,6 +1372,7 @@ impl PartialEq for ImageRun {
             decorative: _,
             hyperlink: _,
             inline_shape: _,
+            inline_chart: _,
             is_insertion: _,
             is_deletion: _,
             change_author: _,
@@ -1405,6 +1414,7 @@ impl PartialEq for ImageRun {
             && self.decorative == other.decorative
             && self.hyperlink == other.hyperlink
             && self.inline_shape == other.inline_shape
+            && self.inline_chart == other.inline_chart
             && self.is_insertion == other.is_insertion
             && self.is_deletion == other.is_deletion
             && self.change_author == other.change_author
@@ -2831,6 +2841,37 @@ pub struct DisplayCommentAuthorContract {
 mod contract_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn optional_inline_chart_round_trips_and_changes_measurement_identity() {
+        let legacy: ImageRun = serde_json::from_value(json!({
+            "src": "", "width": 192.0, "height": 96.0
+        }))
+        .unwrap();
+        assert!(legacy.inline_chart.is_none());
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("inlineChart")
+                .is_none()
+        );
+        let chart = json!({
+            "id": "chart:inline", "width": 192.0, "height": 96.0,
+            "chart": {
+                "chartType": "column",
+                "series": [{"name": "Sales", "categories": ["Q1"], "values": [2.0]}]
+            }
+        });
+        let mut inline = legacy.clone();
+        inline.inline_chart = Some(Box::new(serde_json::from_value(chart.clone()).unwrap()));
+        assert_ne!(legacy, inline);
+        let value = serde_json::to_value(&inline).unwrap();
+        assert_eq!(value["inlineChart"], chart);
+        assert_eq!(serde_json::from_value::<ImageRun>(value).unwrap(), inline);
+        let mut edited = inline.clone();
+        edited.inline_chart.as_mut().unwrap().chart["series"][0]["values"][0] = json!(4.0);
+        assert_ne!(inline, edited);
+    }
 
     #[test]
     fn optional_table_layout_round_trips_and_changes_measurement_identity() {

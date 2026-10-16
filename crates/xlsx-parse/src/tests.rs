@@ -758,6 +758,105 @@ fn package_save_borrows_unchanged_parts() {
     assert!(borrowed > 0, "unchanged parts must stay borrowed");
 }
 
+const CALC_PR: &str = r#"<calcPr calcId="191029"/>"#;
+const FULL_CALC_PR: &str = r#"<calcPr calcId="191029" fullCalcOnLoad="1"/>"#;
+const PLAIN_BODY: &str = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>label</t></is></c><c r="B1"><v>2</v></c></row></sheetData>"#;
+
+fn calc_package(body: &str, calc_pr: &str) -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(body, &[], false);
+    parts[0].1 = format!(
+        r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>{calc_pr}</workbook>"#
+    )
+    .into_bytes();
+    parts
+}
+
+fn workbook_xml_after_edit(parts: &[(String, Vec<u8>)], at: &str, cell: Cell) -> String {
+    let parsed = parse_workbook_with_package(parts).unwrap();
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(CellRef::parse_a1(at).unwrap(), cell);
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    String::from_utf8(part_bytes(&saved, "xl/workbook.xml")).unwrap()
+}
+
+fn text_cell(value: &str) -> Cell {
+    Cell {
+        value: CellValue::Text {
+            value: value.to_owned(),
+        },
+        ..Cell::default()
+    }
+}
+
+#[test]
+fn an_edit_without_formulas_keeps_the_source_calc_pr() {
+    let xml = workbook_xml_after_edit(
+        &calc_package(PLAIN_BODY, CALC_PR),
+        "A1",
+        text_cell("edited"),
+    );
+    assert!(xml.contains(CALC_PR), "{xml}");
+    let xml = workbook_xml_after_edit(&calc_package(PLAIN_BODY, ""), "A1", text_cell("edited"));
+    assert!(!xml.contains("calcPr"), "{xml}");
+}
+
+#[test]
+fn an_edit_beside_a_formula_still_requests_a_full_calc_on_load() {
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>A1*2</f><v>2</v></c></row></sheetData>"#;
+    let xml = workbook_xml_after_edit(&calc_package(body, CALC_PR), "C1", text_cell("edited"));
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
+#[test]
+fn an_edit_that_adds_a_formula_requests_a_full_calc_on_load() {
+    let formula = Cell {
+        value: CellValue::Number { value: 4.0 },
+        formula: Some("B1*2".to_owned()),
+        ..Cell::default()
+    };
+    let xml = workbook_xml_after_edit(&calc_package(PLAIN_BODY, CALC_PR), "C1", formula);
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
+/// The model reads no cells from a macrosheet, so its formulas go unseen.
+#[test]
+fn an_edit_beside_a_macrosheet_requests_a_full_calc_on_load() {
+    let mut parts = calc_package(PLAIN_BODY, CALC_PR);
+    parts[0].1 = String::from_utf8(parts[0].1.clone())
+        .unwrap()
+        .replace(
+            "</sheets>",
+            r#"<sheet name="Macro1" sheetId="2" r:id="rId2"/></sheets>"#,
+        )
+        .into_bytes();
+    parts[1].1 = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet" Target="macrosheets/sheet1.xml"/></Relationships>"#.to_vec();
+    parts.push((
+        "xl/macrosheets/sheet1.xml".to_owned(),
+        br#"<xm:macrosheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><f>Sheet1!B1*2</f><v>4</v></c></row></sheetData></xm:macrosheet>"#.to_vec(),
+    ));
+    let xml = workbook_xml_after_edit(&parts, "A1", text_cell("edited"));
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
+/// The model keeps the Fallback's literal, so the Choice's formula goes unseen.
+#[test]
+fn an_edit_beside_an_alternate_content_formula_requests_a_full_calc_on_load() {
+    let mut parts = two_sheet_package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        r#"<sheetData><row r="1"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x14"><c r="A1"><f>Sheet1!A1*2</f><v>2</v></c></mc:Choice><mc:Fallback><c r="A1"><v>2</v></c></mc:Fallback></mc:AlternateContent></row></sheetData>"#,
+    );
+    parts[0].1 = String::from_utf8(parts[0].1.clone())
+        .unwrap()
+        .replace("</workbook>", &format!("{CALC_PR}</workbook>"))
+        .into_bytes();
+    let precedent = Cell {
+        value: CellValue::Number { value: 5.0 },
+        ..Cell::default()
+    };
+    let xml = workbook_xml_after_edit(&parts, "A1", precedent);
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
 #[test]
 fn shared_formulas_resolve_late_masters_and_leave_unshared_cells_alone() {
     let body = r#"<sheetData>
@@ -872,6 +971,36 @@ fn hidden_rows_and_columns_have_zero_render_extent() {
     assert_eq!(sheet.col_widths.get(&3), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&1), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&2), Some(&0.0));
+    assert_eq!(sheet.hidden_col_widths.get(&1), Some(&12.5));
+    assert_eq!(sheet.hidden_col_widths.get(&2), Some(&12.5));
+    assert_eq!(sheet.hidden_col_widths.get(&3), None);
+    assert_eq!(sheet.hidden_row_heights.get(&1), Some(&30.0));
+    assert_eq!(sheet.hidden_row_heights.get(&2), None);
+}
+
+#[test]
+fn hiding_resized_axes_writes_visibility_without_erasing_authored_sizes() {
+    let body = r#"<cols><col min="1" max="1" width="24" customWidth="1"/></cols><sheetData><row r="1" ht="30" customHeight="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let mut workbook = parsed.workbook;
+    let sheet = &mut workbook.sheets[0];
+    sheet.col_widths.insert(0, 0.0);
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 24.0);
+    sheet.hidden_row_heights.insert(0, 30.0);
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    assert!(
+        xml.contains(r#"width="24" customWidth="1" hidden="1""#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"ht="30" customHeight="1" hidden="1""#),
+        "{xml}"
+    );
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(reopened.sheets[0].hidden_col_widths.get(&0), Some(&24.0));
+    assert_eq!(reopened.sheets[0].hidden_row_heights.get(&0), Some(&30.0));
 }
 
 /// a negative `<col>` width is unrenderable, so the model narrows it to zero

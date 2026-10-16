@@ -1417,6 +1417,12 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, delta: i64) {
                 if let Some(shape) = &mut run.inline_shape {
                     shift_shape(shape, delta);
                 }
+                if let Some(chart) = &mut run.inline_chart {
+                    shift_pair(&mut chart.pm_start, &mut chart.pm_end, delta);
+                    shift_pair(&mut chart.doc_start, &mut chart.doc_end, delta);
+                    shift_drawing_id(&mut chart.id, delta);
+                    shift_groups(&mut chart.sdt_groups, delta);
+                }
             }
             Run::Field(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
             Run::Unsupported => {}
