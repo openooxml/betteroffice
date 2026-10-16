@@ -2786,7 +2786,7 @@ impl EditingDoc {
         if matches!(data.tbl_pr.get("widthType"), Some(Any::String(kind)) if &**kind == "auto") {
             data.tbl_pr.remove("width");
         }
-        write_table(&mut txn, &table, &data);
+        table.insert(&mut txn, "tblPr", to_any_map(data.tbl_pr.clone()));
         receipt(locator.clone(), Some(&data), Vec::new(), Vec::new(), Vec::new())
     }
 }
@@ -3384,6 +3384,35 @@ mod tests {
         assert!(doc.set_table_properties(&direct(), &at, &HashMap::from([
             ("tableLayout".to_owned(), Any::from("fixed")),
         ])).is_err());
+    }
+
+    #[test]
+    fn set_table_properties_does_not_rewrite_rows_or_grid() {
+        let baseline = seed_table();
+        let state = baseline.encode_state_as_update_v1();
+        let rows_peer = EditingDoc::new(72);
+        rows_peer.apply_update_v1(&state).unwrap();
+        let props_peer = EditingDoc::new(99);
+        props_peer.apply_update_v1(&state).unwrap();
+        rows_peer.set_cell_borders(
+            &direct(),
+            &TableRange::cell(cell(0, 0)),
+            &HashMap::from([("top".to_owned(), line("FF0000"))]),
+        ).unwrap();
+        rows_peer.set_column_width(&direct(), &cell(0, 0), 2400.0).unwrap();
+        props_peer.set_table_properties(&direct(), &TableLocator::new("body", 0), &HashMap::from([
+            ("justification".to_owned(), Any::from("center")),
+        ])).unwrap();
+        let from_rows = rows_peer.encode_state_as_update_v1();
+        let from_props = props_peer.encode_state_as_update_v1();
+        rows_peer.apply_update_v1(&from_props).unwrap();
+        props_peer.apply_update_v1(&from_rows).unwrap();
+        for doc in [&rows_peer, &props_peer] {
+            let (tbl_pr, grid, rows) = table_value(doc);
+            assert_eq!(tbl_pr["justification"], "center");
+            assert_eq!(grid[0], 2400);
+            assert_eq!(rows[0]["cells"][0]["tcPr"]["borders"]["top"]["color"]["rgb"], "FF0000");
+        }
     }
 
     #[test]
