@@ -8,6 +8,7 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  stateVectorDominates,
 } from './protocol';
 import {
   awarenessPeers,
@@ -606,7 +607,7 @@ export class CollaborationProvider {
 
       switch (message.type) {
         case 'sync-step-1':
-          this.respondToSyncStep1(token, message.stateVector);
+          this.respondToSyncStep1(token, connection, message.stateVector);
           break;
         case 'sync-step-2':
           if (this.applyRemoteUpdate(token, message.update, false) && this.isCurrent(token)) {
@@ -704,6 +705,8 @@ export class CollaborationProvider {
               this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause));
               return;
             }
+            if (!this.isCurrentOpen(token, connection)) return;
+            this.requestMissingStateFromWorker(token, connection, message.stateVector);
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             const applied = await this.asyncReplica!.applyUpdate(message.update.slice());
             if (!this.isCurrentOpen(token, connection)) return;
@@ -748,7 +751,7 @@ export class CollaborationProvider {
     this.replicaTail = operation.catch(() => {});
   }
 
-  private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
+  private respondToSyncStep1(token: number, connection: number, remoteStateVector: Uint8Array): void {
     let update: Uint8Array;
     try {
       update = requireBytes(
@@ -767,6 +770,62 @@ export class CollaborationProvider {
       this.sendFrame(encodeSyncStep2(update, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause));
+      return;
+    }
+    if (!this.isCurrentOpen(token, connection)) return;
+
+    let stateVector: Uint8Array;
+    try {
+      stateVector = requireBytes(this.replica.encodeStateVector(), 'encodeStateVector');
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('replica', 'Failed to encode replica state vector', cause)
+      );
+      return;
+    }
+    this.requestMissingState(token, stateVector, remoteStateVector);
+  }
+
+  private requestMissingStateFromWorker(
+    token: number,
+    connection: number,
+    remoteStateVector: Uint8Array
+  ): void {
+    void this.asyncReplica!.encodeStateVector().then((vector) => {
+      if (this.isCurrentOpen(token, connection)) {
+        this.requestMissingState(token, requireBytes(vector, 'encodeStateVector'), remoteStateVector);
+      }
+    }).catch((cause) => {
+      if (this.isCurrentOpen(token, connection)) {
+        this.failConnection(
+          token,
+          normalizeError('replica', 'Failed to encode replica state vector', cause)
+        );
+      }
+    });
+  }
+
+  private requestMissingState(
+    token: number,
+    stateVector: Uint8Array,
+    remoteStateVector: Uint8Array
+  ): void {
+    let missing: boolean;
+    try {
+      missing = !stateVectorDominates(stateVector, remoteStateVector);
+    } catch (cause) {
+      this.report(normalizeError('protocol', 'Invalid state vector', cause));
+      return;
+    }
+    if (!missing) return;
+    try {
+      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
+      );
     }
   }
 
