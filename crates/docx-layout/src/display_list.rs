@@ -9795,12 +9795,14 @@ pub(crate) fn emit_table_fragment(
             cell_clip_bottom
         };
         if let Some((frame, cell_measure)) = content_frame {
+            let content_cuts = frame.content_cuts(frag, g);
             emit_cell_content(
                 prims,
                 cell,
                 cell_measure,
                 frame,
                 windowed_lines.then_some((line_clip_top, line_clip_bottom)),
+                content_cuts.0 || content_cuts.1,
                 ctx,
                 p.selectable,
                 &cell_ref,
@@ -9945,6 +9947,47 @@ struct CellContentFrame {
     clip_bottom_y: f64,
     /// Index-aligned with the cell's blocks.
     block_tops: Vec<f64>,
+}
+
+impl CellContentFrame {
+    fn content_cuts(&self, frag: &TableFragmentIn, g: &GridCell) -> (bool, bool) {
+        let starts_before = g.row_index < frag.row_start
+            || (g.row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) > 0.0);
+        let ends_after = g.row_index + g.row_span > frag.row_end
+            || (g.row_index + g.row_span == frag.row_end && frag.clip_bottom.is_some());
+        (
+            starts_before && self.content_top < self.clip_top_y - 1e-6,
+            ends_after && self.content_end > self.clip_bottom_y + 1e-6,
+        )
+    }
+
+    fn shows_anchor(
+        &self,
+        cell: &TableCellIn,
+        measure: &TableCellExtentIn,
+        index: usize,
+        split_row: bool,
+    ) -> bool {
+        if !split_row {
+            return true;
+        }
+        let anchor = (index..cell.blocks.len())
+            .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
+            .or_else(|| {
+                (0..index)
+                    .rev()
+                    .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
+            })
+            .unwrap_or(index);
+        let y = self.content_top + self.block_tops[anchor];
+        match measure.blocks.get(anchor) {
+            Some(MeasureIn::Paragraph(paragraph)) => {
+                shown_line_window(paragraph, y, self.clip_top_y, self.clip_bottom_y)
+                    .is_some_and(|(lines, _)| lines.start == 0)
+            }
+            _ => y >= self.clip_top_y && y < self.clip_bottom_y,
+        }
+    }
 }
 
 /// Stacks a cell's paragraphs and nested tables with Word's spacing collapse.
@@ -10120,6 +10163,7 @@ fn emit_cell_content(
     cell_measure: &TableCellExtentIn,
     frame: CellContentFrame,
     line_clip: Option<(f64, f64)>,
+    split_row: bool,
     ctx: &RenderCtx<'_>,
     selectable: bool,
     cell_ref: &TableCellRef,
@@ -10134,7 +10178,7 @@ fn emit_cell_content(
         content_width,
         clip_top_y,
         clip_bottom_y,
-        block_tops,
+        ref block_tops,
         ..
     } = frame;
     let rotated = rotation != 0.0;
@@ -10147,11 +10191,8 @@ fn emit_cell_content(
         cell,
         cell_measure,
         block_ref,
-        content_x,
-        content_top,
-        content_width,
-        clip_top_y,
-        clip_bottom_y,
+        &frame,
+        split_row,
         cell_ref,
         selectable,
         true,
@@ -10161,6 +10202,15 @@ fn emit_cell_content(
         let Some(m) = cell_measure.blocks.get(i) else {
             continue;
         };
+        if let BlockIn::Shape(shape) = cell_block
+            && crate::cell_layout::cell_overlay_drawing(
+                shape.position.is_some(),
+                shape.wrap_type.as_deref(),
+            )
+            && !frame.shows_anchor(cell, cell_measure, i, split_row)
+        {
+            continue;
+        }
         if windowed_lines && !matches!(cell_block, BlockIn::Paragraph(_)) {
             let height = match m {
                 MeasureIn::Table(table) => table.total_height,
@@ -10389,11 +10439,8 @@ fn emit_cell_content(
         cell,
         cell_measure,
         block_ref,
-        content_x,
-        content_top,
-        content_width,
-        clip_top_y,
-        clip_bottom_y,
+        &frame,
+        split_row,
         cell_ref,
         selectable,
         false,
@@ -10613,9 +10660,8 @@ fn resolve_cell_float_position(
 /// Emits a cell's floating image runs, `want_behind` choosing the layer painted
 /// under the cell content or the one over it.
 ///
-/// The anchoring `paragraph_y` accumulates the cell's measured block heights
-/// with no spacing collapse. Each image clips to the fragment window, carries
-/// the cell's grid reference, and keeps its document positions only on a
+/// Each image clips to the fragment window, carries the cell's grid reference,
+/// and keeps its document positions only on a
 /// selectable slice — a vertical-merge continuation is a re-paint and carries
 /// none.
 #[allow(clippy::too_many_arguments)]
@@ -10624,11 +10670,8 @@ fn emit_cell_floating_images(
     cell: &TableCellIn,
     cell_measure: &TableCellExtentIn,
     block_ref: &BlockRef,
-    content_x: f64,
-    content_top: f64,
-    content_width: f64,
-    clip_top_y: f64,
-    clip_bottom_y: f64,
+    frame: &CellContentFrame,
+    split_row: bool,
     cell_ref: &TableCellRef,
     selectable: bool,
     want_behind: bool,
@@ -10646,16 +10689,28 @@ fn emit_cell_floating_images(
         };
         for run in &pb.runs {
             let RunIn::Image(imr) = run else { continue };
-            if !is_floating_image_run(imr) {
+            let split_anchor = split_row
+                && crate::cell_layout::cell_overlay_drawing(
+                    imr.position.is_some(),
+                    imr.wrap_type.as_deref(),
+                );
+            if !is_floating_image_run(imr)
+                || !frame.shows_anchor(cell, cell_measure, i, split_anchor)
+            {
                 continue;
             }
             let is_behind = imr.wrap_type.as_deref() == Some("behind");
             if is_behind != want_behind {
                 continue;
             }
-            let (x, y) = resolve_cell_float_position(imr, paragraph_y, content_width);
-            let page_x = content_x + x;
-            let page_y = content_top + y;
+            let anchor_y = if split_anchor {
+                frame.block_tops[i]
+            } else {
+                paragraph_y
+            };
+            let (x, y) = resolve_cell_float_position(imr, anchor_y, frame.content_width);
+            let page_x = frame.content_x + x;
+            let page_y = frame.content_top + y;
             let rot = imr
                 .rotation_deg
                 .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
@@ -10685,7 +10740,7 @@ fn emit_cell_floating_images(
             });
             // Clip to the fragment window.
             let (top, bottom) = primitive_v_extent(&prim);
-            if bottom < clip_top_y || top > clip_bottom_y {
+            if bottom < frame.clip_top_y || top > frame.clip_bottom_y {
                 continue;
             }
             prims.push(prim);
