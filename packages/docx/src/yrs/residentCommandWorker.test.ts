@@ -1518,7 +1518,7 @@ test('worker safety repairs selection after rejecting a suggested table before o
   } finally { client.destroy(); }
 }, TIMEOUT);
 
-test('worker safety refuses unknown withdrawal targets before settling any proposal', async () => {
+test('worker withdrawal ignores missing targets and retries after settlement as a no-op', async () => {
   const { client, engine } = await openWorker();
   try {
     const identities = await client.documentRead({ kind: 'paragraphIdentities' });
@@ -1527,13 +1527,14 @@ test('worker safety refuses unknown withdrawal targets before settling any propo
       text: '!', suggest: { author: 'Ada', date: '2026-01-01' },
     }] }));
     const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
-    const refused = await client.edit(intent(2, 1, 'withdrawProposals', { ids: ['one', 'missing'], expectVersion: before.version }));
-    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unknown-proposal' });
-    expect(engine.proposalEngine.version()).toBe(before.version);
+    const withdrawn = await client.edit(intent(2, 1, 'withdrawProposals', { ids: ['one', 'missing'], expectVersion: before.version }));
+    expect(withdrawn.outcomes[0]).toMatchObject({ status: 'applied' });
     const after = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
-    expect(after.proposals).toEqual(before.proposals);
-    expect(after.revisions).toEqual(before.revisions);
-    expect((await client.edit(intent(3, 1, 'withdrawProposals', { ids: ['one'], expectVersion: before.version }))).outcomes[0]?.status).toBe('applied');
+    expect(after.proposals.proposals).toEqual([]);
+    expect(after.revisions).toEqual([]);
+    const settled = engine.encodeState();
+    expect((await client.edit(intent(3, 2, 'withdrawProposals', { ids: ['one'], expectVersion: after.version }))).outcomes[0]?.status).toBe('noop');
+    expect(engine.encodeState()).toEqual(settled);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
