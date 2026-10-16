@@ -58,9 +58,9 @@ let failPreview = false;
 let refuseCut = false;
 let holdCut = false;
 let failWholeOpen = false;
-/** Per source preview, in order: whether its first page is built, built showing the page total, or missing. */
-let previewPages: ('built' | 'pageTotal' | 'none')[] = [];
-const PREVIEW_EPOCHS = { built: 90, pageTotal: 91, none: 1 } as const;
+/** Per source preview, in order: whether its first page is built or missing. */
+let previewPages: ('built' | 'none')[] = [];
+const PREVIEW_EPOCHS = { built: 90, none: 1 } as const;
 
 function hostMetadata() {
   return {
@@ -234,13 +234,9 @@ function commandFrame(epoch: number, base = 0): DocxCommandFrame {
 }
 
 function previewPage(epoch: number): frameRender.RetainedFramePage | null {
-  if (epoch !== PREVIEW_EPOCHS.built && epoch !== PREVIEW_EPOCHS.pageTotal) return null;
-  const footer: frameRender.HfRegion = { rId: 'rIdFooter', kind: 'footer', y: 1000, height: 20, primitives: [] };
-  if (epoch === PREVIEW_EPOCHS.pageTotal) {
-    footer.primitives.push({ kind: 'text', x: 10, baselineY: 1010, width: 6, text: '7', font: '11px sans-serif', color: '#000', field: { category: 'NUMPAGES' } });
-  }
+  if (epoch !== PREVIEW_EPOCHS.built) return null;
   return { pageIndex: 0, pageId: 1n, fingerprint: 1n, primitiveIds: new BigUint64Array(0),
-    page: { pageIndex: 0, width: 816, height: 1056, primitives: [], footer } };
+    page: { pageIndex: 0, width: 816, height: 1056, primitives: [] } };
 }
 
 function installPreviewPages() {
@@ -538,28 +534,15 @@ test('the preview releases its worker surfaces once the command session presents
   expect(view.queryByLabelText('Document preview')).toBeNull();
 });
 
-for (const kind of ['none', 'pageTotal'] as const) {
-  test(`a cut preview ${kind === 'none' ? 'without a built first page' : 'whose first page shows the page total'} keeps opening and previews the whole source`, async () => {
-    holdInitial = true;
-    previewPages = [kind, 'built'];
-    const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
-    await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
-    const order = requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type));
-    expect(order).toEqual(['openSource', 'previewSource', 'openSource', 'previewSource', 'attachCanvases', 'commandInit']);
-    expect(view.queryByText('Opening source')).toBeNull();
-    expect(view.getByLabelText('Document preview')).toBeTruthy();
-  });
-}
-
-test('a whole-source preview whose first page shows the page total is not presented', async () => {
+test('a cut preview without a built first page keeps opening and previews the whole source', async () => {
   holdInitial = true;
-  refuseCut = true;
-  previewPages = ['pageTotal'];
+  previewPages = ['none', 'built'];
   const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
   await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
-  expect(requests.some(request => request.type === 'attachCanvases')).toBe(false);
-  expect(view.getByText('Opening source')).toBeTruthy();
-  expect(view.queryByLabelText('Document preview')).toBeNull();
+  const order = requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type));
+  expect(order).toEqual(['openSource', 'previewSource', 'openSource', 'previewSource', 'attachCanvases', 'commandInit']);
+  expect(view.queryByText('Opening source')).toBeNull();
+  expect(view.getByLabelText('Document preview')).toBeTruthy();
 });
 
 test('the preview budget covers the source cut and its late steps preview nothing', async () => {
