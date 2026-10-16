@@ -626,6 +626,17 @@ test('copy and cut use the worker clipboard adapter instead of the empty input v
   expect(input.submitted).toEqual([]);
 });
 
+test('copy and cut hand the event clipboardData to the adapter while the event is dispatching', () => {
+  const seen: Array<DataTransfer | null | undefined> = [];
+  const input = mount(false, { onClipboard: async (_cut, data) => { seen.push(data); } });
+  const clipboardData = { setData() {}, getData: () => '' } as unknown as DataTransfer;
+  for (const type of ['copy', 'cut']) {
+    const event = Object.assign(new Event(type, { bubbles: true, cancelable: true }), { clipboardData });
+    act(() => { input.textarea.dispatchEvent(event); });
+  }
+  expect(seen).toEqual([clipboardData, clipboardData]);
+});
+
 test('worker input enables spelling and follows acknowledged caret geometry', () => {
   const input = mount();
   expect(input.textarea.getAttribute('spellcheck')).toBe('true');

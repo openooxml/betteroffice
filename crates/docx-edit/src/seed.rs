@@ -248,6 +248,7 @@ struct LoweringContext {
 #[serde(deny_unknown_fields)]
 enum SourceBlock {
     Raw,
+    Bookmark,
     /// A paragraph with a source id, which a raw block can be restored in front of.
     Anchor(String),
     /// A table, control or id-less paragraph, which that search skips over.
@@ -5150,9 +5151,18 @@ fn visit_story(
     for (block_index, block) in blocks.iter().enumerate() {
         let position = cursor;
         let Some(block_id) = cursor.take(&story_id, block) else {
-            block_order.push(SourceBlock::Raw);
-            source_order.push(None);
             let xml = string(field(Some(block), "xml")).unwrap_or_default();
+            block_order.push(
+                if matches!(
+                    crate::structured::source::element_name(xml).as_str(),
+                    "w:bookmarkStart" | "w:bookmarkEnd"
+                ) {
+                    SourceBlock::Bookmark
+                } else {
+                    SourceBlock::Raw
+                },
+            );
+            source_order.push(None);
             let raws = context
                 .provenance
                 .raw_blocks
@@ -5463,7 +5473,7 @@ fn visit_story(
     }
     if block_order
         .iter()
-        .any(|block| matches!(block, SourceBlock::Raw))
+        .any(|block| matches!(block, SourceBlock::Raw | SourceBlock::Bookmark))
     {
         context.source.blocks.insert(story_id.clone(), block_order);
         context

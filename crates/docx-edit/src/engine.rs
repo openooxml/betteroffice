@@ -36,7 +36,7 @@ use docx_layout::types::{
 };
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::Serialize;
-use yrs::{StickyIndex, Subscription, Transact};
+use yrs::{StickyIndex, Transact};
 
 mod retain;
 
@@ -1847,7 +1847,7 @@ pub struct EngineSession {
     region_retention_valid: Rc<Cell<bool>>,
     // Kept alive for the lifetime of the document. Dropping it unregisters the
     // observer before the Rc epoch source is released.
-    _doc_epoch_observer: Subscription,
+    _doc_epoch_observer: crate::CommitHook,
     render: RefCell<RenderState>,
     note_separators: RefCell<Option<LoweredNoteSeparators>>,
     preview_font_requirements: RefCell<Option<PreviewFontRequirements>>,
@@ -4088,26 +4088,23 @@ impl EngineSession {
         let observer_retention = Rc::clone(&region_retention_valid);
         let observer_measurement_patch = Rc::clone(&measurement_patch_invalidated);
         let host_edit_depth = Arc::clone(&doc.host_edit_depth);
-        let observer = doc
-            .yrs_doc()
-            .observe_after_transaction(move |txn| {
-                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
-                    observer_measurement_patch.set(true);
-                    observer_epoch.set(observer_epoch.get().wrapping_add(1));
-                    let bulk = host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
-                        || txn.origin() == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN));
-                    if !bulk {
-                        observer_trigger.set(RelayoutTrigger::Interactive);
-                        observer_interactive.set(true);
-                        observer_retention.set(false);
-                    } else if !observer_interactive.get()
-                        && observer_trigger.get() != RelayoutTrigger::Open
-                    {
-                        observer_trigger.set(RelayoutTrigger::Bulk);
-                    }
+        let observer = doc.observe_commit(move |txn| {
+            if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                observer_measurement_patch.set(true);
+                observer_epoch.set(observer_epoch.get().wrapping_add(1));
+                let bulk = host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
+                    || txn.origin() == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN));
+                if !bulk {
+                    observer_trigger.set(RelayoutTrigger::Interactive);
+                    observer_interactive.set(true);
+                    observer_retention.set(false);
+                } else if !observer_interactive.get()
+                    && observer_trigger.get() != RelayoutTrigger::Open
+                {
+                    observer_trigger.set(RelayoutTrigger::Bulk);
                 }
-            })
-            .expect("EngineSession document transaction observer registers");
+            }
+        });
         Self {
             doc,
             doc_epoch,
@@ -14414,14 +14411,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             engine.consume_relayout_trigger();
             let origins = Rc::new(RefCell::new(Vec::new()));
             let observed = Rc::clone(&origins);
-            let _subscription = doc
-                .yrs_doc()
-                .observe_after_transaction(move |txn| {
-                    if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
-                        observed.borrow_mut().push(txn.origin().cloned());
-                    }
-                })
-                .unwrap();
+            let _subscription = doc.observe_commit(move |txn| {
+                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observed.borrow_mut().push(txn.origin().cloned());
+                }
+            });
             let update = peer.encode_state_as_update_v1();
             if host {
                 doc.apply_host_update_v1(&update).unwrap();
@@ -14458,6 +14452,44 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 0
             );
         }
+    }
+
+    #[test]
+    fn relayout_runs_before_a_deleted_table_is_collected() {
+        use yrs::{ReadTxn, StateVector};
+
+        let engine = EngineSession::new(9390);
+        let doc = engine.doc();
+        let ctx = crate::EditCtx::local("", "");
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        let table = doc
+            .insert_table(&ctx, crate::Position::new("body", 0), 1, 1)
+            .unwrap();
+        let marker = "text only the deleted table holds";
+        doc.insert_text(
+            &ctx,
+            crate::Position::new(&table.created_story_ids[0], 0),
+            marker,
+            crate::FormatPolicy::Inherit,
+        )
+        .unwrap();
+        let epoch = Rc::clone(&engine.doc_epoch);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let probe = Rc::clone(&seen);
+        let _probe = doc.observe_commit(move |txn| {
+            if !txn.delete_set().is_empty() {
+                let state = txn.encode_state_as_update_v1(&StateVector::default());
+                probe.borrow_mut().push((epoch.get(), state));
+            }
+        });
+        let before = engine.doc_epoch.get();
+        doc.delete_table(&ctx, &table.table).unwrap();
+        let holds = |state: &[u8]| state.windows(marker.len()).any(|w| w == marker.as_bytes());
+        let seen = seen.take();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, before + 1);
+        assert!(holds(&seen[0].1));
+        assert!(!holds(&doc.encode_state_as_update_v1()));
     }
 
     #[test]

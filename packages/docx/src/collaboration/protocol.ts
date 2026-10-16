@@ -27,6 +27,8 @@ const SYNC_UPDATE = 2;
 
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
+const MAX_STATE_VECTOR_VAR_UINT_BYTES = 10;
+const MAX_NATIVE_CLOCK = 0xffff_ffffn;
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -426,6 +428,71 @@ export function decodeAwarenessUpdate(
     throw new ProtocolError('Trailing awareness data');
   }
   return entries;
+}
+
+function varUintReader(payload: Uint8Array, label: string): { read(): bigint; done(): boolean } {
+  let offset = 0;
+  return {
+    read() {
+      let value = 0n;
+      for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES; index += 1) {
+        if (offset >= payload.byteLength) throw new ProtocolError(`Truncated ${label.toLowerCase()}`);
+        const byte = payload[offset++];
+        value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+        if (byte < 0x80) return value;
+      }
+      throw new ProtocolError(`${label} varUint exceeds 64 bits`);
+    },
+    done: () => offset === payload.byteLength,
+  };
+}
+
+function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
+  const reader = varUintReader(payload, 'State vector');
+  const clocks = new Map<bigint, bigint>();
+  for (let count = reader.read(); count > 0n; count -= 1n) clocks.set(reader.read(), reader.read());
+  if (!reader.done()) throw new ProtocolError('Trailing state vector bytes');
+  return clocks;
+}
+
+/** Whether `payload` decodes as one v1 state vector. */
+export function isStateVector(payload: Uint8Array): boolean {
+  try {
+    decodeStateVector(payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `vector` has every client clock of `other`; both are v1 state vectors. */
+export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boolean {
+  if (vector.byteLength === other.byteLength && vector.every((byte, index) => byte === other[index])) {
+    return true;
+  }
+  const clocks = decodeStateVector(vector);
+  for (const [client, clock] of decodeStateVector(other)) {
+    if (clock > (clocks.get(client) ?? 0n)) return false;
+  }
+  return true;
+}
+
+/** `vector` with `clientId`'s clock one past its own (1 when absent); undefined past the native clock limit. */
+export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array | undefined {
+  if (!Number.isSafeInteger(clientId) || clientId < 0) {
+    throw new ProtocolError('Client id must be a non-negative safe integer');
+  }
+  const clocks = decodeStateVector(vector);
+  const client = BigInt(clientId);
+  const clock = (clocks.get(client) ?? 0n) + 1n;
+  if (clock > MAX_NATIVE_CLOCK) return undefined;
+  clocks.set(client, clock);
+  const bytes: number[] = [];
+  for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  }
+  return Uint8Array.from(bytes);
 }
 
 export function decodeMessages(
