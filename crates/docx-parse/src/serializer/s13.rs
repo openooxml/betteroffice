@@ -756,7 +756,7 @@ impl<'a> Package<'a> {
     }
 }
 
-fn save_error(message: impl Into<String>) -> ParseError {
+pub(super) fn save_error(message: impl Into<String>) -> ParseError {
     ParseError::Canonical(format!("S13 package save: {}", message.into()))
 }
 
@@ -938,13 +938,16 @@ impl StoryParts<'_> {
         let Some(part) = self.spliced.get(path) else {
             return serialize(context);
         };
-        context.begin_splice(part.paragraphs.iter().copied());
-        let serialized = serialize(context);
-        let written = context.end_splice();
-        let serialized = serialized?;
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        context.begin_splice(part.paragraphs.iter().copied());
+        if let Some(source) = source {
+            context.keep_permissions(path, super::permissions::sources(source, part));
+        }
+        let serialized = serialize(context);
+        let written = context.end_splice();
+        let serialized = serialized?;
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
         Ok(source

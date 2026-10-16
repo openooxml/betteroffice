@@ -36,7 +36,7 @@ impl Marks {
 }
 
 /// Run content that takes a position in the text, besides `w:t` and `w:delText` characters.
-const POSITIONED: [&str; 19] = [
+pub(crate) const POSITIONED: [&str; 19] = [
     "w:tab",
     "w:ptab",
     "w:br",
@@ -570,7 +570,7 @@ fn with_insertions(source: &str, added: &[(usize, &str)]) -> String {
     output
 }
 
-fn paragraph_span(xml: &str, occurrence: &ParagraphOccurrence) -> Option<Range<usize>> {
+pub(crate) fn paragraph_span(xml: &str, occurrence: &ParagraphOccurrence) -> Option<Range<usize>> {
     let start = occurrence.tag.start;
     let relative = element_span(&xml[start..], &[])?;
     Some(start + relative.start..start + relative.end)
