@@ -213,6 +213,37 @@ fn a_replica_whose_undo_history_emptied_keeps_what_it_kept_after_a_peer_removes_
 }
 
 #[test]
+fn a_replica_holding_only_redo_history_keeps_what_a_peer_removes() {
+    let seed = Seed::new();
+    let local = seed.open(202);
+    let peer = seed.open(303);
+    let other = peer
+        .add_text_box(&EditCtx::local("peer"), &seed.slide_id, &draft("Other"))
+        .unwrap()
+        .shape_id;
+    sync(&peer, &local);
+    let context = EditCtx::local("local");
+    local
+        .move_shape(&context, &seed.slide_id, &seed.shape_id, 400_000, 300_000)
+        .unwrap();
+    local.add_undo_barrier();
+    assert!(local.undo());
+    let before = local.encode_state_as_update_v1().len();
+
+    peer.remove_shape(&EditCtx::local("peer"), &seed.slide_id, &other)
+        .unwrap();
+    sync(&peer, &local);
+
+    let after = local.encode_state_as_update_v1().len();
+    assert!(
+        after >= before,
+        "state shrank from {before} to {after} bytes"
+    );
+    assert!(local.redo());
+    assert_converged(&[&local, &peer]);
+}
+
+#[test]
 fn a_joiner_synced_from_a_collected_replica_converges_when_the_removal_is_undone() {
     let seed = Seed::new();
     let peer = seed.open(202);
