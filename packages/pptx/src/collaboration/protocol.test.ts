@@ -193,6 +193,10 @@ describe('collaboration protocol decoding', () => {
 });
 
 function stateVector(...entries: [bigint, bigint][]): Uint8Array {
+  return stateVectorOf(entries);
+}
+
+function stateVectorOf(entries: readonly [bigint, bigint][]): Uint8Array {
   const bytes: number[] = [];
   const write = (value: bigint) => {
     for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
@@ -276,7 +280,7 @@ describe('state vector with the local clock ahead', () => {
   it('is never dominated by the vector it came from, and dominates it', () => {
     const vector = stateVector([1n, 5n], [2n, 3n]);
     for (const client of [1, 2, 9]) {
-      const ahead = withClientClockAhead(vector, client);
+      const ahead = withClientClockAhead(vector, client)!;
       expect(stateVectorDominates(vector, ahead)).toBe(false);
       expect(stateVectorDominates(ahead, vector)).toBe(true);
     }
@@ -285,6 +289,14 @@ describe('state vector with the local clock ahead', () => {
   it('keeps a document fingerprint suffix', () => {
     expect(withClientClockAhead(fingerprinted(stateVector([7n, 4n])), 7))
       .toEqual(fingerprinted(stateVector([7n, 5n])));
+  });
+
+  it('crosses no native entry limit', () => {
+    const others = Array.from({ length: 65_535 }, (_, index): [bigint, bigint] => [BigInt(index + 1), 1n]);
+    const full = stateVectorOf([...others, [70_000n, 4n]]);
+    expect(withClientClockAhead(full, 80_000)).toBeUndefined();
+    expect(withClientClockAhead(full, 70_000)).toEqual(stateVectorOf([...others, [70_000n, 5n]]));
+    expect(withClientClockAhead(stateVectorOf(others), 80_000)).toEqual(stateVectorOf([...others, [80_000n, 1n]]));
   });
 
   it('rejects vectors that do not decode and invalid client ids', () => {

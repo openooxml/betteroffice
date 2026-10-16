@@ -8,6 +8,7 @@ import {
   decodeMessages,
   encodeSyncStep1,
   encodeSyncStep2,
+  encodeVarUint,
   stateVectorDominates,
   withoutDocumentFingerprint,
 } from './protocol';
@@ -134,6 +135,28 @@ function connectLegacyPeer(deck: PresentationHandle, transport: CollaborationTra
     }).catch((cause) => { errors.push(`legacy: ${String(cause)}`); });
   });
   transport.connect();
+}
+
+function clients(vector: Uint8Array): bigint[] {
+  const values: bigint[] = [];
+  const bytes = withoutDocumentFingerprint(vector);
+  for (let index = 0; index < bytes.length;) {
+    let value = 0n;
+    for (let shift = 0n; ; shift += 7n) {
+      const byte = bytes[index++];
+      value |= BigInt(byte & 0x7f) << shift;
+      if (byte < 0x80) break;
+    }
+    values.push(value);
+  }
+  return values.filter((_, index) => index % 2 === 1);
+}
+
+function phantomClients(count: number): Uint8Array {
+  const bytes = [...encodeVarUint(count)];
+  for (let client = 1; client <= count; client += 1) bytes.push(1, ...encodeVarUint(1_000_000 + client), 0, 0, 1);
+  bytes.push(0);
+  return Uint8Array.from(bytes);
 }
 
 async function network(kind: Kind, size: number, legacy?: number) {
@@ -277,6 +300,25 @@ for (const kind of ['sync', 'async'] as const) {
         expect(peers[1].deck.snapshot()).toEqual(peers[0].deck.snapshot());
         expect(peers[2].deck.snapshot()).toEqual(peers[0].deck.snapshot());
         expect(peers[0].text()).toBe('pha');
+      } finally { close(); }
+    });
+
+    it('publish an offline deletion at the native state vector entry limit', async () => {
+      const { peers: [left, right], net, errors, close } = await network(kind, 2);
+      try {
+        const filler = phantomClients(65_536 - clients(left.deck.encodeStateVector()).length);
+        for (const peer of [left, right]) peer.deck.applyUpdate(filler.slice());
+        const vector = left.deck.encodeStateVector();
+        expect(clients(vector)).toHaveLength(65_536);
+        expect(clients(vector)).not.toContain(201n);
+        net.setOnline(0, false);
+        left.erase(0, 2);
+        expect(left.deck.encodeStateVector()).toEqual(vector);
+        net.setOnline(0, true);
+        await net.flush();
+        expect(errors).toEqual([]);
+        expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+        expect(right.text()).toBe('pha');
       } finally { close(); }
     });
 
