@@ -1210,9 +1210,23 @@ fn parse_alternate_content(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
-    mut drawing: Option<&mut DrawingContext<'_>>,
+    drawing: Option<&mut DrawingContext<'_>>,
     in_header_footer: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
+    Ok(
+        parse_alternate_content_branch(element, relationships, budget, drawing, in_header_footer)?
+            .map(|(_, parsed)| parsed)
+            .unwrap_or_default(),
+    )
+}
+
+pub fn parse_alternate_content_branch<'a>(
+    element: &'a XmlElement,
+    relationships: Option<&RelationshipMap>,
+    budget: &mut ParseBudget<'_>,
+    mut drawing: Option<&mut DrawingContext<'_>>,
+    in_header_footer: bool,
+) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
     let mut saw_text_box = false;
     for branch_name in ["Choice", "Fallback"] {
         for branch in element
@@ -1245,12 +1259,12 @@ fn parse_alternate_content(
                         )
                     });
                 }
-                return Ok(parsed);
+                return Ok(Some((branch, parsed)));
             }
             saw_text_box |= branch_text_box;
         }
     }
-    Ok(Vec::new())
+    Ok(None)
 }
 
 fn contains_drawing_owned_content(element: &XmlElement) -> bool {
@@ -1287,7 +1301,7 @@ fn alternate_content_has_text_box(element: &XmlElement) -> bool {
     })
 }
 
-fn apply_shape_metadata(shape: &mut Shape, drawing: &XmlElement) {
+pub fn apply_shape_metadata(shape: &mut Shape, drawing: &XmlElement) {
     let doc_properties = find_descendant_by_name(drawing, "wp:docPr", 0);
     let non_visual = find_descendant_by_name(drawing, "a:cNvPr", 0);
     let title = doc_properties

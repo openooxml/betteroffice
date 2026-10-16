@@ -1773,3 +1773,54 @@ fn single_path_consumers_do_not_receive_partial_layered_presets() {
         );
     }
 }
+
+fn assert_inside_frame(shape: &str, path: &[GeometryPathCommand], label: &str) {
+    let hull = if HULL_OUTSIDE_FRAME.contains(&shape) {
+        Vec::new()
+    } else {
+        coordinates(path)
+    };
+    for (x, y) in sample(path).into_iter().chain(hull) {
+        assert!(
+            (-TOLERANCE..=1.0 + TOLERANCE).contains(&x)
+                && (-TOLERANCE..=1.0 + TOLERANCE).contains(&y),
+            "{shape} {label} left its frame at ({x}, {y})"
+        );
+    }
+}
+
+#[test]
+fn a_can_with_a_flat_top_stays_inside_its_frame() {
+    for adj in [
+        9.343293760265696e-15,
+        5.484785289152219e-13,
+        1.4054251999661466e-12,
+    ] {
+        let path = draw("can", &named(&[("adj", adj)]), 1.0);
+        assert_inside_frame("can", &path, &format!("adj {adj}"));
+    }
+}
+
+#[test]
+fn a_near_zero_adjust_stays_inside_its_frame() {
+    let pinned = PRESETS
+        .iter()
+        .filter(|shape| {
+            !UNPINNED_CONNECTORS
+                .iter()
+                .any(|prefix| shape.starts_with(prefix))
+        })
+        .filter(|shape| !FRAME_SCALED_STARS.contains(shape))
+        .filter(|shape| !CALLOUTS.contains(shape))
+        .filter(|shape| !SPEC_OVERRUNS_FRAME.contains(shape));
+    for shape in pinned {
+        for adjust in ["adj", "adj1", "adj2", "adj3", "adj4", "vf"] {
+            for value in [1e-16, 1e-15, 1e-14, 1e-12, 1e-9, 1e-6] {
+                for aspect in [1.0 / 64.0, 1.0, 64.0] {
+                    let path = draw(shape, &named(&[(adjust, value)]), aspect);
+                    assert_inside_frame(shape, &path, &format!("{adjust} {value} aspect {aspect}"));
+                }
+            }
+        }
+    }
+}
