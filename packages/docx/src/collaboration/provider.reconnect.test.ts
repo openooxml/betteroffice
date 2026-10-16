@@ -261,6 +261,22 @@ for (const kind of ['sync', 'async'] as const) {
       } finally { close(); }
     });
 
+    it('publish an offline deletion when the history already holds the open request client', async () => {
+      const { peers: [left, right], net, errors, close } = await network(kind, 2);
+      try {
+        for (const peer of [left, right]) peer.session.applyUpdate(phantomClockTo(OPEN_SYNC_CLIENT, 0, 3));
+        await net.flush();
+        expect(clocks(left.session.encodeStateVector()).get(BigInt(OPEN_SYNC_CLIENT))).toBe(3n);
+        net.setOnline(0, false);
+        left.erase(0, 0, 6);
+        net.setOnline(0, true);
+        await net.flush();
+        expect(errors).toEqual([]);
+        expect(right.text()).toEqual(left.text());
+        expect(right.text()[0]).toBe('beta');
+      } finally { close(); }
+    });
+
     it('publish offline deletions to every replica on a relay', async () => {
       const { peers, net, close } = await network(kind, 3);
       try {

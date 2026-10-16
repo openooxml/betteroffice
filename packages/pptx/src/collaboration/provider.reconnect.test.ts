@@ -9,6 +9,7 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeVarUint,
+  OPEN_SYNC_CLIENT,
   parseSyncRequest,
   withoutDocumentFingerprint,
 } from './protocol';
@@ -311,6 +312,22 @@ for (const kind of ['sync', 'async'] as const) {
         net.setOnline(0, false);
         left.erase(0, 2);
         expect(left.deck.encodeStateVector()).toEqual(vector);
+        net.setOnline(0, true);
+        await net.flush();
+        expect(errors).toEqual([]);
+        expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+        expect(right.text()).toBe('pha');
+      } finally { close(); }
+    });
+
+    it('publish an offline deletion when the history already holds the open request client', async () => {
+      const { peers: [left, right], net, errors, close } = await network(kind, 2);
+      try {
+        const history = Uint8Array.from([1, 1, ...encodeVarUint(OPEN_SYNC_CLIENT), 0, 0, 3, 0]);
+        for (const peer of [left, right]) peer.deck.applyUpdate(history.slice());
+        expect(clients(left.deck.encodeStateVector())).toContain(BigInt(OPEN_SYNC_CLIENT));
+        net.setOnline(0, false);
+        left.erase(0, 2);
         net.setOnline(0, true);
         await net.flush();
         expect(errors).toEqual([]);
