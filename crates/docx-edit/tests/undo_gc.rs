@@ -28,7 +28,7 @@ unsafe impl GlobalAlloc for QuarantinedBranches {
 static ALLOCATOR: QuarantinedBranches = QuarantinedBranches;
 
 #[test]
-fn a_peer_deleting_a_story_this_replica_edited_and_undid_before_typing_elsewhere_leaves_its_state_readable() {
+fn a_peer_deleting_a_story_edited_and_undone_before_typing_elsewhere_leaves_state_readable() {
     let source = EditingDoc::new(101);
     source
         .create_story("body", "Body", "Normal", "left")
