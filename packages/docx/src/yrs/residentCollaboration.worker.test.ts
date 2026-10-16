@@ -15,6 +15,9 @@ import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../l
 import type { Document } from '../types/document';
 import type { DocxProposalInput } from './proposals';
 import * as wasm from './wasm/index';
+import { CollaborationProvider } from '../collaboration/provider';
+import { createAsyncCollaborationReplica } from '../collaboration/asyncReplica';
+import type { CollaborationError, CollaborationTransport, CollaborationTransportEvent } from '../collaboration/types';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
 beforeAll(async () => {
@@ -408,6 +411,38 @@ test('a remote update past the relay frame cap applies and one past the engine c
     expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
     expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed!');
   } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('provider decode rejects an oversized inbound frame and local editing still applies', async () => {
+  const a = await open(9201);
+  const errors: CollaborationError[] = [];
+  let receive: ((event: CollaborationTransportEvent) => void) | undefined;
+  const transport: CollaborationTransport = {
+    connect() {}, disconnect() {}, send() { return true; },
+    onEvent(listener) { receive = listener; return () => { receive = undefined; }; },
+  };
+  const provider = new CollaborationProvider(createAsyncCollaborationReplica({
+    clientId: 9201,
+    encodeStateVector: async () => a.engine.encodeStateVector(),
+    encodeStateAsUpdate: async vector => a.engine.encodeStateAsUpdate(vector),
+    applyUpdate: update => a.session.submit('applyRemoteUpdate', { update: update.slice().buffer }, merge).ack,
+    onUpdate: listener => a.client.onCollabUpdates(event => event.updates.forEach(update => listener(update, 'local'))),
+  }), transport);
+  provider.onError(error => errors.push(error));
+  try {
+    provider.connect();
+    receive!({ type: 'open' });
+    const before = a.engine.encodeState();
+    const edits = a.worker.requests.filter(kind => kind === 'edit').length;
+    receive!({ type: 'message', data: new Uint8Array(MAX_COLLABORATION_FRAME_BYTES + 1) });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: 'protocol' });
+    expect(errors[0]!.message).toContain('Frame exceeds');
+    expect(a.worker.requests.filter(kind => kind === 'edit')).toHaveLength(edits);
+    expect(a.engine.encodeState()).toEqual(before);
+    expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed!');
+  } finally { provider.destroy(); a.session.dispose(); }
 }, TIMEOUT);
 
 type Replica = Awaited<ReturnType<typeof open>>;
