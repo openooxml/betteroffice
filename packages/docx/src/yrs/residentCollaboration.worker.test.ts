@@ -10,7 +10,7 @@ import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import { MAX_UPDATE_BYTES } from './residentCommandActions';
-import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
+import { encodeUpdate, MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import type { Document } from '../types/document';
 import type { DocxProposalInput } from './proposals';
@@ -83,6 +83,11 @@ async function open(clientId: number, initialUpdate?: Uint8Array, document?: Doc
 const remoteUpdate = (target: { engine: { encodeStateVector(): Uint8Array } }, source: { encodeStateAsUpdate(vector?: Uint8Array): Uint8Array }) =>
   source.encodeStateAsUpdate(target.engine.encodeStateVector()).slice().buffer;
 const merge = { lane: 'collab', fence: true } as const;
+const clocks = (vector: Uint8Array) => {
+  let at = 0;
+  const read = () => { let value = 0; for (let scale = 1; ; scale *= 128) { const byte = vector[at++]!; value += (byte & 127) * scale; if (byte < 128) return value; } };
+  return Object.fromEntries(Array.from({ length: read() }, () => [read(), read()]));
+};
 
 for (const input of ['bytes', 'document'] as const) {
   test(`a ${input} source joins a room from the shared state without seeding its own stories`, async () => {
@@ -119,6 +124,97 @@ test('two worker command sessions converge with reordered and duplicated updates
   } finally { offA(); offB(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
 
+const ROOM_BODY = ['ALPHA BETA', 'GAMMA DELTA', 'EPSILON ZETA', 'ETA THETA']
+  .map(text => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`).join('');
+
+test('a worker replica survives a remote update that arrives before the update it depends on and converges once it does', async () => {
+  const failures: string[] = [];
+  const awaited: string[] = [];
+  for (const steps of [['split', 'undo'], ['deleteAcross', 'split', 'undo'], ['section', 'split', 'undo'],
+    ['section', 'deleteAcross', 'split', 'undo'], ['table', 'deleteAcross', 'split', 'undo']]) {
+    const bytes = documentBytes(undefined, ROOM_BODY);
+    const a = await open(9201, undefined, undefined, bytes);
+    const b = await open(9202, a.engine.encodeState(), undefined, bytes);
+    let sent: ArrayBuffer[] = [];
+    const back: ArrayBuffer[] = [];
+    const offA = a.client.onCollabUpdates(event => sent.push(...event.updates.map(u => u.slice().buffer)));
+    const offB = b.client.onCollabUpdates(event => back.push(...event.updates.map(u => u.slice().buffer)));
+    const point = (index: number, offset: number) => ({ story: 'body', paraId: a.engine.paragraphs('body')[index]!.paraId, offset });
+    const caret = (index: number, offset: number) => ({ selection: { anchor: point(index, offset), focus: point(index, offset) } });
+    const label = steps.join('+');
+    try {
+      const groups: ArrayBuffer[][] = [];
+      for (const step of steps) {
+        sent = [];
+        const [kind, payload] = step === 'split' ? ['paragraphBreak', caret(0, 3)]
+          : step === 'deleteAcross' ? ['deleteBackward', { selection: { anchor: point(0, 3), focus: point(1, Math.min(4, a.engine.paragraphs('body')[1]!.text.length)) } }]
+            : step === 'section' ? ['insertSectionBreak', { ...caret(1, 2), type: 'continuous' }]
+              : step === 'table' ? ['insertTable', { ...caret(1, 0), rows: 2, columns: 2 }] : ['undo', {}];
+        const status = (await a.session.submit(kind as 'undo', payload as Record<string, never>).ack).status;
+        if (status !== 'applied') failures.push(`${label}: ${step} ${status}`);
+        groups.push(sent);
+      }
+      const late = groups.at(-2)!, early = groups.at(-1)!;
+      for (const update of groups.slice(0, -2).flat()) await b.session.submit('applyRemoteUpdate', { update }, merge).ack;
+      const vector = b.engine.encodeStateVector().slice();
+      for (const update of [...early, ...late]) {
+        const outcome = await b.session.submit('applyRemoteUpdate', { update }, merge).ack.then(ack => ack.status, (error: unknown) => String(error));
+        if (outcome !== 'applied' && outcome !== 'noop') {
+          const held = early.includes(update) && Buffer.compare(vector, b.engine.encodeStateVector()) === 0;
+          failures.push(`${label}: ${outcome} (structs held after the early update: ${held}, failed: ${b.client.hasFailed()})`);
+          break;
+        }
+        if (update === early.at(-1) && b.engine.hasPendingUpdate()) awaited.push(label);
+      }
+      if (b.client.hasFailed()) continue;
+      for (const update of back) await a.session.submit('applyRemoteUpdate', { update }, merge).ack;
+      expect(clocks(b.engine.encodeStateVector())).toEqual(clocks(a.engine.encodeStateVector()));
+      expect(b.engine.paragraphs('body').map(p => p.text)).toEqual(a.engine.paragraphs('body').map(p => p.text));
+      expect(b.engine.hasPendingUpdate()).toBe(false);
+      const at = { story: 'body', paraId: b.engine.paragraphs('body')[0]!.paraId, offset: 0 };
+      expect((await b.session.submit('insertText', { selection: { anchor: at, focus: at }, text: 'x' }).ack).status).toBe('applied');
+    } finally { offA(); offB(); a.session.dispose(); b.session.dispose(); }
+  }
+  expect(failures).toEqual([]);
+  expect(awaited.length).toBeGreaterThan(0);
+}, TIMEOUT * 3);
+
+test('a worker replica whose projection fails with no update pending fails loudly', async () => {
+  const a = await open(9201);
+  const b = await open(9202, a.engine.encodeState());
+  const errors: CollaborationError[] = [];
+  let receive: ((event: CollaborationTransportEvent) => void) | undefined;
+  let applying: Promise<unknown> | undefined;
+  const transport: CollaborationTransport = {
+    connect() {}, disconnect() {}, send() { return true; },
+    onEvent(listener) { receive = listener; return () => { receive = undefined; }; },
+  };
+  const provider = new CollaborationProvider(createAsyncCollaborationReplica({
+    clientId: 9202,
+    encodeStateVector: async () => b.engine.encodeStateVector(),
+    encodeStateAsUpdate: async vector => b.engine.encodeStateAsUpdate(vector),
+    applyUpdate: update => (applying = b.session.submit('applyRemoteUpdate', { update: update.slice().buffer }, merge).ack),
+    onUpdate: listener => b.client.onCollabUpdates(event => event.updates.forEach(update => listener(update, 'local'))),
+  }), transport);
+  provider.onError(error => errors.push(error));
+  const pending: boolean[] = [];
+  spyOn(b.engine, 'layoutDocumentWithRegionsAfterEdit').mockImplementation(() => {
+    pending.push(b.engine.hasPendingUpdate());
+    throw new Error('story "body" contains an unsupported embed at 3');
+  });
+  try {
+    provider.connect();
+    receive!({ type: 'open' });
+    expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
+    receive!({ type: 'message', data: encodeUpdate(new Uint8Array(remoteUpdate(b, a.engine))) });
+    await applying?.catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(pending.length).toBeGreaterThan(0);
+    expect(pending).not.toContain(true);
+    expect(errors[0]?.message).toContain('unsupported embed at 3');
+    expect(b.client.hasFailed()).toBe(true);
+  } finally { provider.destroy(); a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
 test('update push precedes command ack and queued typing survives a merge', async () => {
   const a = await open(9201);
   const b = await open(9202, a.engine.encodeState());

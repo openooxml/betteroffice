@@ -1,10 +1,19 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { createCommandHost } from '../../../../shared/office-session/commands/host';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult } from '../../../../shared/office-session/protocol';
+import { resolveImageLayoutAttrs, type ImageLayoutCurrentAttrs, type ImageLayoutTarget } from '../docx/imageLayout';
+import { repackDocx } from '../docx/rezip';
+import { unzipContainer } from '../docx/wasm';
+import { preloadParseWasm } from '../wasm/parse';
 import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
 import { createResidentCommandHost } from './residentCommandHost';
 import { resolveCommandSelection } from './residentCommandAnchors';
+import { readResidentProperties } from './residentProperties';
+import { wrapSession } from './yrsSessionFacade';
+import { yrsToDocument } from './yrsToDocument';
 import type {
   DocxCommandEnvelope, DocxCommandIntent, DocxCommandPayload, DocxCommandSelection, DocxEditState,
 } from './residentCommandProtocol';
@@ -423,3 +432,159 @@ test.todo('d1a_live_continuation_matches_restored_replay: DX14 needs native allo
   expect(right.version).toBe(4);
   expect(left.version).toBe(4);
 }, TIMEOUT);
+
+test('setObjectProperties updates image wrapType, float/position attrs, and transform and round-trips to OOXML', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const bodyXml = '<w:p w14:paraId="00000001" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    '<w:r><w:drawing><wp:inline><wp:extent cx="952500" cy="476250"/><wp:docPr id="7" name="Picture" descr="First"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="7" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdLink"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="476250"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>' +
+    '<w:r><w:t>Seed</w:t></w:r></w:p>';
+  const arm = await openCommandEngine(undefined, { bodyXml });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const initial = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
+  expect(initial).toMatchObject({ kind: 'object', properties: { wrapType: 'inline', displayMode: 'inline' } });
+  if (initial?.kind !== 'object') throw new Error('Expected image object properties');
+  const { handle } = initial;
+
+  const anchorPosition = {
+    horizontal: { relativeTo: 'column', posOffset: 0 },
+    vertical: { relativeTo: 'paragraph', posOffset: 0 },
+  };
+  const savedDocumentXml = async () => {
+    const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
+    const saved = await repackDocx(projected);
+    return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  };
+
+  for (const wrap of ['square', 'tight', 'through', 'topAndBottom', 'inFront', 'behind'] as const) {
+    const displayMode = wrap === 'topAndBottom' ? 'block' : 'float';
+    const cssFloat = wrap === 'square' || wrap === 'tight' || wrap === 'through' ? 'left' : 'none';
+    const wrapText = cssFloat === 'left' ? 'right' : 'bothSides';
+    const applied = execute(arm, command(arm, 'setObjectProperties', {
+      handle,
+      expectVersion: arm.engine.proposalEngine.version(),
+      patch: {
+        wrap,
+        wrapType: wrap,
+        displayMode,
+        cssFloat,
+        wrapText,
+        position: anchorPosition,
+        transform: 'rotate(90deg) scaleX(-1) scaleY(-1)',
+      },
+    }));
+    expect(applied.status).toBe('applied');
+    const current = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
+    expect(current).toMatchObject({
+      kind: 'object',
+      handle,
+      properties: {
+        wrapType: wrap,
+        displayMode,
+        cssFloat,
+        wrapText,
+        transform: 'rotate(90deg) scaleX(-1) scaleY(-1)',
+      },
+    });
+    if (wrap === 'square') {
+      const xml = await savedDocumentXml();
+      expect(xml).toContain('<wp:anchor');
+      expect(xml).toContain('<wp:wrapSquare');
+      expect(xml).toContain('rot="5400000"');
+      expect(xml).toContain('flipH="1"');
+      expect(xml).toContain('flipV="1"');
+    }
+    if (wrap === 'behind') {
+      const xml = await savedDocumentXml();
+      expect(xml).toContain('<wp:anchor');
+      expect(xml).toContain('behindDoc="1"');
+      expect(xml).toContain('<wp:wrapNone/>');
+      expect(xml).toContain('rot="5400000"');
+      expect(xml).toContain('flipH="1"');
+      expect(xml).toContain('flipV="1"');
+    }
+  }
+
+  const reverted = execute(arm, command(arm, 'setObjectProperties', {
+    handle,
+    expectVersion: arm.engine.proposalEngine.version(),
+    patch: {
+      wrap: 'inline',
+      wrapType: 'inline',
+      displayMode: 'inline',
+      cssFloat: 'none',
+      wrapText: null,
+      position: null,
+      distTop: null,
+      distBottom: null,
+      distLeft: null,
+      distRight: null,
+      transform: null,
+    },
+  }));
+  expect(reverted.status).toBe('applied');
+  const finalProps = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
+  expect(finalProps).toMatchObject({
+    kind: 'object',
+    handle,
+    properties: { wrapType: 'inline', displayMode: 'inline', cssFloat: 'none' },
+  });
+  if (finalProps?.kind === 'object') {
+    expect(finalProps.properties.transform).toBeUndefined();
+    expect(finalProps.properties.position).toBeUndefined();
+  }
+  const inlineXml = await savedDocumentXml();
+  expect(inlineXml).toContain('<wp:inline');
+}, TIMEOUT);
+
+test('setObjectProperties preserves image wrap distances across non-inline worker wrap patches', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const bodyXml = '<w:p w14:paraId="00000001" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    '<w:r><w:drawing><wp:inline distT="114300" distB="228600" distL="342900" distR="457200"><wp:extent cx="952500" cy="476250"/><wp:docPr id="7" name="Picture" descr="First"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="7" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdLink"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="476250"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>' +
+    '<w:r><w:t>Seed</w:t></w:r></w:p>';
+  const arm = await openCommandEngine(undefined, { bodyXml });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const initial = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
+  if (initial?.kind !== 'object') throw new Error('Expected image object properties');
+  const { handle } = initial;
+  const buildWorkerWrapPatch = (currentAttrs: Readonly<Record<string, unknown>>, target: ImageLayoutTarget): Record<string, unknown> => {
+    const next = resolveImageLayoutAttrs(target, currentAttrs as ImageLayoutCurrentAttrs);
+    return {
+      wrap: next.wrapType,
+      wrapType: next.wrapType,
+      displayMode: next.displayMode ?? null,
+      cssFloat: next.cssFloat ?? null,
+      wrapText: next.wrapText ?? null,
+      position: next.position ?? null,
+      ...('distTop' in next ? { distTop: next.distTop ?? null } : {}),
+      ...('distBottom' in next ? { distBottom: next.distBottom ?? null } : {}),
+      ...('distLeft' in next ? { distLeft: next.distLeft ?? null } : {}),
+      ...('distRight' in next ? { distRight: next.distRight ?? null } : {}),
+    };
+  };
+  const savedDocumentXml = async () => {
+    const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
+    const saved = await repackDocx(projected);
+    return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  };
+  for (const target of ['squareLeft', 'behind'] as const) {
+    const snapshot = readResidentProperties(arm.engine, { kind: 'objectSelection', selection: selection(id, 0, 1) });
+    if (snapshot?.kind !== 'object') throw new Error('Expected image object properties');
+    const applied = execute(arm, command(arm, 'setObjectProperties', {
+      handle,
+      expectVersion: arm.engine.proposalEngine.version(),
+      patch: buildWorkerWrapPatch(snapshot.properties, target),
+    }));
+    expect(applied.status).toBe('applied');
+    const xml = await savedDocumentXml();
+    expect(xml).toContain('<wp:anchor');
+    expect(xml).toContain('distT="114300"');
+    expect(xml).toContain('distB="228600"');
+    expect(xml).toContain('distL="342900"');
+    expect(xml).toContain('distR="457200"');
+  }
+}, TIMEOUT);
+

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use yrs::encoding::write::Write;
 use yrs::error::UpdateError;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
-use yrs::{IdSet, ReadTxn, TransactionMut, Update};
+use yrs::{IdSet, ReadTxn, StateVector, TransactionMut, Update, WriteTxn};
 
 /// Deletions an open remote integration must not republish: what its updates carried, the
 /// deletions earlier remote integrations left pending, and what applying its updates deleted,
@@ -70,10 +70,27 @@ impl RemoteIntegration<'_, '_> {
     /// Leaves only the formatting cleanup yrs runs at commit and the local deletions applying
     /// released to be republished.
     pub(crate) fn apply_update(&mut self, update: Update) -> Result<(), UpdateError> {
-        self.txn.apply_update(update)?;
-        let deleted = self.txn.delete_set().diff(&self.local);
-        self.carry(&deleted);
+        let mut next = Some(update);
+        while let Some(update) = next {
+            let before = self.txn.state_vector();
+            self.txn.apply_update(update)?;
+            let deleted = self.txn.delete_set().diff(&self.local);
+            self.carry(&deleted);
+            next = self.stranded(&before);
+        }
         Ok(())
+    }
+
+    /// Takes back what yrs holds once a client it waits on reaches the clock yrs recorded. yrs
+    /// retries held structs only when a missing client's clock passes that one, so structs that
+    /// wait on a skipped range stay held after that range fills below it.
+    fn stranded(&mut self, before: &StateVector) -> Option<Update> {
+        let now = self.txn.state_vector();
+        let pending = self.txn.store().pending_update()?;
+        let arrived = pending.missing.iter().any(|(client, &clock)| {
+            clock <= now.get(client) && now.get(client) > before.get(client)
+        });
+        arrived.then(|| self.txn.prune_pending())?
     }
 }
 
@@ -202,6 +219,58 @@ mod tests {
 
         assert_eq!(text(&peer), "acd");
         assert!(residuals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn structs_held_on_a_skipped_range_integrate_once_it_fills() {
+        let origin = replica(7);
+        let base = edit(&origin, |txn, text| text.insert(txn, 0, "abc"));
+        let late = edit(&origin, |txn, text| text.insert(txn, 3, "d"));
+        let early = edit(&origin, |txn, text| {
+            text.insert(txn, 0, "x");
+            text.insert(txn, 5, "y");
+        });
+        let peer = replica(8);
+        let deletions = RemoteDeletions::default();
+        integrate(&peer, &deletions, &base);
+        integrate(&peer, &deletions, &early);
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_some());
+        integrate(&peer, &deletions, &late);
+
+        assert_eq!(text(&peer), "xabcdy");
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_none());
+        assert_eq!(
+            ReadTxn::state_vector(&peer.transact()),
+            ReadTxn::state_vector(&origin.transact())
+        );
+    }
+
+    #[test]
+    fn another_clients_structs_held_on_a_skipped_range_leave_nothing_pending_once_it_fills() {
+        let origin = replica(7);
+        let base = edit(&origin, |txn, text| text.insert(txn, 0, "abc"));
+        let late = edit(&origin, |txn, text| text.insert(txn, 3, "d"));
+        let early = edit(&origin, |txn, text| text.insert(txn, 0, "x"));
+        let author = replica(9);
+        for update in [&base, &late, &early] {
+            let update = Update::decode_v1(update).unwrap();
+            author.transact_mut().apply_update(update).unwrap();
+        }
+        let held = edit(&author, |txn, text| text.insert(txn, 5, "z"));
+        let peer = replica(8);
+        let deletions = RemoteDeletions::default();
+        for update in [&base, &early, &held] {
+            integrate(&peer, &deletions, update);
+        }
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_some());
+        integrate(&peer, &deletions, &late);
+
+        assert_eq!(text(&peer), "xabcdz");
+        assert!(ReadTxn::store(&peer.transact()).pending_update().is_none());
+        assert_eq!(
+            ReadTxn::state_vector(&peer.transact()),
+            ReadTxn::state_vector(&author.transact())
+        );
     }
 
     #[test]

@@ -2708,6 +2708,11 @@ impl EditSession {
         self.engine.doc().encode_state_vector_v1()
     }
 
+    /// Whether a remote update is waiting on one that has not arrived yet.
+    pub fn has_pending_update(&self) -> bool {
+        self.engine.doc().holds_pending_update()
+    }
+
     /// The yrs v1 update carrying everything this replica has that the peer
     /// described by `remote_state_vector` does not. Errors on a malformed
     /// state vector.

@@ -221,6 +221,8 @@ export type ResidentEngineSession = Pick<
   directBatchesApplied(): number;
   /** @internal */
   markProjectionStories(stories: readonly string[]): void;
+  /** Whether a remote update is held until the one it depends on arrives. */
+  hasPendingUpdate(): boolean;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string, seedStories?: boolean): string;
   /** With `initialUpdate`, the shared state replaces the package's stories. */
@@ -953,6 +955,7 @@ export async function createResidentEngineSession(
       session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),
     encodeStateVector: () => session.encode_state_vector(),
+    hasPendingUpdate: () => session.has_pending_update(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(partLayoutInput(input)),
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),

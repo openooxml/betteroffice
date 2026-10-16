@@ -607,7 +607,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           forgetRequirementsCache();
         }
         const result = await hooks.apply(command, context);
-        if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) relayout();
+        if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) {
+          try { relayout(); } catch (error) {
+            if (error instanceof WebAssembly.RuntimeError) throw error;
+            throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         return result;
       },
       async frame({ coversThroughSeq, full }) {
@@ -1142,6 +1147,7 @@ let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
 let trap: WebAssembly.RuntimeError | null = null;
+let projectionFailure: SessionFailure | null = null;
 // A bootstrap laid out only the body's first pages: the request to finish
 // it, then the finished layout until `completeLayout` hands it over.
 interface LayoutRequest {
@@ -1303,7 +1309,7 @@ function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {
 
 async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
   try {
-    if (trap) throw trap;
+    if (trap || projectionFailure) throw trap ?? projectionFailure;
     handlingId = request.id;
     if ((commandHost || openedViaSource) && isLegacyMutation(request)) {
       throw new Error('Legacy mutations are unavailable in a resident command session');
@@ -1327,6 +1333,10 @@ function replyDropped(response: ResidentEngineWorkerResponse & { ok: true }): vo
 function replyFailure(id: number, error: unknown): void {
   // Once trapped, every failure is the trap's, answered once per request.
   const failure = trap ?? error;
+  if (!trap && projectionFailure) {
+    reply({ id, ok: false, terminal: true, error: projectionFailure.message, failureCode: projectionFailure.code });
+    return;
+  }
   if (isCommandOutcomeUnknownError(failure) || failure instanceof SessionFailure) {
     const message = collaboration && isCommandOutcomeUnknownError(failure)
       ? `Command ${failure.refusal.seq} has an unknown outcome` : failure.message;
