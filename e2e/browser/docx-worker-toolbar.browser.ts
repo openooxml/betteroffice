@@ -6,6 +6,60 @@ import JSZip from 'jszip';
 const root = resolve(import.meta.dirname, '../..');
 const text = 'Toolbar sample';
 
+async function openWorker(page: Page) {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Toolbar sample</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>');
+  await page.setViewportSize({ width: 2560, height: 1200 });
+  await page.goto('/?format=docx');
+  await page.locator('input[type=file]').last().setInputFiles({ name: 'toolbar.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
+  await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60000 });
+  const input = page.locator('.paged-editor__peerless-input');
+  await input.focus();
+  await input.press('ControlOrMeta+Home');
+  return input;
+}
+
+async function savedXml(page: Page, info: TestInfo, name: string) {
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save', exact: true }).first().click();
+  const file = info.outputPath(`${name}.docx`);
+  await (await downloading).saveAs(file);
+  const zip = await JSZip.loadAsync(await readFile(file));
+  return zip.file('word/document.xml')!.async('string');
+}
+
+test('worker highlight saves w:highlight and clearing removes it', async ({ page }, info) => {
+  const input = await openWorker(page);
+  await input.press('Shift+End');
+  const highlight = page.getByTestId('formatting-bar').getByRole('button', { name: 'Text Highlight Color', exact: true });
+  await expect(highlight.first()).not.toHaveAttribute('aria-disabled', 'true');
+  await highlight.first().click();
+  expect(await savedXml(page, info, 'highlight')).toContain('<w:highlight w:val="yellow"');
+  await highlight.last().click();
+  await page.getByRole('button', { name: 'No Color', exact: true }).click();
+  expect(await savedXml(page, info, 'cleared')).not.toContain('<w:highlight');
+});
+
+test('worker page and section breaks save their breaks', async ({ page }, info) => {
+  const input = await openWorker(page);
+  await input.press('ArrowRight');
+  await input.press('ArrowRight');
+  for (const name of ['Page break', 'Section break (next page)', 'Section break (continuous)']) {
+    await page.getByRole('menubar').getByRole('menuitem', { name: 'Insert', exact: true }).click();
+    await page.getByRole('menu', { name: 'Insert', exact: true }).getByRole('menuitem', { name: 'Break', exact: true }).hover();
+    const command = page.getByRole('menuitem', { name, exact: true });
+    await expect(command).not.toHaveAttribute('aria-disabled', 'true');
+    await command.click();
+  }
+  const xml = await savedXml(page, info, 'breaks');
+  expect(xml).toContain('<w:br w:type="page"');
+  expect(xml.match(/<w:sectPr\b/g)).toHaveLength(3);
+  expect(xml).toContain('<w:type w:val="nextPage"');
+  expect(xml).toContain('<w:type w:val="continuous"');
+});
+
 async function savedProperties(page: Page, info: TestInfo, arm: string) {
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save', exact: true }).first().click();

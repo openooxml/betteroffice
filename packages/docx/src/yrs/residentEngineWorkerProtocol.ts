@@ -142,6 +142,7 @@ export type ResidentDocumentRead =
   | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'bookmarkTarget'; story: string; name: string }
   | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] }
   | { kind: 'reviewTarget'; target: ResidentReviewTarget }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string; nativePoint?: DocxSelectionPointIntent }
@@ -190,6 +191,7 @@ export interface ResidentDocumentReadValues {
   findText: DocxFindTextResult;
   findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+  bookmarkTarget: { loc: YrsLoc; position: number } | null;
   anchorTargets: ProposalGeometryTarget[];
   reviewTarget: ResidentReviewTargetRanges | null;
   searchText: ResidentSearchResult;

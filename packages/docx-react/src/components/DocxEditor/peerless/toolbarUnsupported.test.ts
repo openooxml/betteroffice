@@ -3,9 +3,7 @@ import { toolbarFixture } from './toolbarCommands.testing';
 
 test('worker toolbar preserves unsupported command reasons', () => {
   const { controller } = toolbarFixture();
-  for (const id of ['highlightColor', 'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous',
-    'insertTOC', 'imageWrap', 'imageTransform',
-    'reportIssue'] as const) {
+  for (const id of ['insertTOC', 'imageWrap', 'imageTransform', 'reportIssue'] as const) {
     expect(controller.commands.store.getState(id)).toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
   }
 });
@@ -24,6 +22,14 @@ test('worker comments sidebar toggles through its host binding and refuses a fix
   }
   controller.update({ read: (async () => null) as never, focus() {}, zoom: 1, commentsSidebar: { open: true, control: 'fixed', toggle() {} } });
   expect(controller.commands.store.getState('commentsSidebar')).toMatchObject({ enabled: false, active: true, disabledReason: { code: 'controlled-sidebar' } });
+});
+
+test('worker highlight and break toolbar commands match hybrid enablement', () => {
+  const { controller, parity } = toolbarFixture();
+  for (const id of ['highlightColor', 'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous'] as const) {
+    parity(id);
+    expect(controller.commands.store.getState(id).enabled).toBe(true);
+  }
 });
 
 test('worker table selection follows the shell table allowlist', () => {

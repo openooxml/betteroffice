@@ -3,7 +3,7 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import { workerPageAtViewport } from './pageNavigation';
-import type { DocxCommandSelection, DocxOutlineHeading, ResidentReviewTarget } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, DocxOutlineHeading, ResidentDocumentRead, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
@@ -96,11 +96,13 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     scroller.current.scrollTop += host.current.getBoundingClientRect().top - scroller.current.getBoundingClientRect().top + shown.y * latest.current.zoom - 24;
     return true;
   }, [binding, host, scroller]);
-  const scrollToParagraph = useCallback((paraId: string, story = 'body') => navigate(async current => {
-    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
-    if (typeof target === 'string' || current !== binding()) return false;
+  const scrollToTarget = useCallback((request: Extract<ResidentDocumentRead, { kind: 'navigationTarget' | 'bookmarkTarget' }>) => navigate(async current => {
+    const target = await controller.read(request);
+    if (!target || typeof target === 'string' || current !== binding()) return false;
     return revealSelection(current, { anchor: target.loc, focus: target.loc });
   }), [binding, controller, navigate, revealSelection]);
+  const scrollToParagraph = useCallback((paraId: string, story = 'body') => scrollToTarget({ kind: 'navigationTarget', story, paraId }), [scrollToTarget]);
+  const scrollToBookmark = useCallback((name: string, story = 'body') => scrollToTarget({ kind: 'bookmarkTarget', story, name }), [scrollToTarget]);
   /** Selects the first range a comment or revision anchors and scrolls its start into view; false when it does not exist. */
   const scrollToReviewTarget = useCallback((target: ResidentReviewTarget) => navigate(async current => {
     const range = (await controller.read({ kind: 'reviewTarget', target }))?.ranges[0];
@@ -146,5 +148,5 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     }
     return false;
   }, [binding, controller, host, scroller, scrollToPage, scrollToParagraph]);
-  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, scrollToReviewTarget, revealParagraph };
+  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, scrollToBookmark, scrollToReviewTarget, revealParagraph };
 }
