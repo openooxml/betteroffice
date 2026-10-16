@@ -35,6 +35,8 @@ export interface ParagraphSaveAttrs extends Record<string, unknown> {
   widowControl?: boolean | null;
   autoSpaceDE?: boolean | null;
   autoSpaceDN?: boolean | null;
+  adjustRightInd?: boolean | null;
+  cnfStyle?: ParagraphFormatting['cnfStyle'];
   bidi?: boolean;
   _originalFormatting?: ParagraphFormatting;
   _originalRunBoundaries?: unknown[];
@@ -145,6 +147,15 @@ export function paragraphAttrsToFormatting(
     if (!inherits('autoSpaceDN') && attrs.autoSpaceDN !== (orig.autoSpaceDN ?? undefined)) {
       result.autoSpaceDN = attrs.autoSpaceDN ?? undefined;
     }
+    if (
+      !inherits('adjustRightInd') &&
+      attrs.adjustRightInd !== (orig.adjustRightInd ?? undefined)
+    ) {
+      result.adjustRightInd = attrs.adjustRightInd ?? undefined;
+    }
+    if (attrs.cnfStyle != null && !sameValue(attrs.cnfStyle, orig.cnfStyle)) {
+      result.cnfStyle = attrs.cnfStyle;
+    }
     if (!inherits('bidi') && attrs.bidi !== (orig.bidi || undefined)) {
       result.bidi = attrs.bidi || undefined;
     }
@@ -174,6 +185,8 @@ export function paragraphAttrsToFormatting(
     attrs.widowControl != null ||
     attrs.autoSpaceDE != null ||
     attrs.autoSpaceDN != null ||
+    attrs.adjustRightInd != null ||
+    attrs.cnfStyle ||
     attrs.bidi;
   if (!hasFormatting) return undefined;
 
@@ -202,6 +215,8 @@ export function paragraphAttrsToFormatting(
     widowControl: attrs.widowControl ?? undefined,
     autoSpaceDE: attrs.autoSpaceDE ?? undefined,
     autoSpaceDN: attrs.autoSpaceDN ?? undefined,
+    adjustRightInd: attrs.adjustRightInd ?? undefined,
+    cnfStyle: attrs.cnfStyle || undefined,
     bidi: attrs.bidi || undefined,
   };
   return inherited ? withoutInherited(formatting, inherited) : formatting;

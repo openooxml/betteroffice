@@ -2569,11 +2569,17 @@ fn span_elements(
             let range = &ranges[range_index];
             let source = &source_runs[range.source];
             if segment.line_break {
+                let template = if source.local_name() == "br"
+                    || source
+                        .child("rPr")
+                        .is_some_and(|properties| properties.child("gradFill").is_some())
+                {
+                    source.child("rPr")
+                } else {
+                    None
+                };
                 output.push(XmlNode::Element(segment_element(
-                    segment,
-                    source.child("rPr"),
-                    theme,
-                    prefixes,
+                    segment, template, theme, prefixes,
                 )));
                 offset += 1;
                 break;
@@ -2870,7 +2876,7 @@ fn segment_properties(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> Option<XmlElement> {
-    match template.filter(|template| !segment.line_break || template.child("gradFill").is_some()) {
+    match template {
         Some(template) => {
             let mut base = template.clone();
             apply_run_properties(&mut base, segment.properties, theme, prefixes);
@@ -2933,6 +2939,32 @@ const POST_LATIN_ELEMENTS: [&str; 7] = [
     "extLst",
 ];
 
+fn is_flattened_colour_snapshot(
+    authored: Option<&ColorValue>,
+    requested: Option<&ColorValue>,
+    theme: Option<&Theme>,
+) -> bool {
+    let (Some(authored), Some(requested)) = (authored, requested) else {
+        return false;
+    };
+    if requested.theme_color.is_some()
+        || requested.theme_tint.is_some()
+        || requested.theme_shade.is_some()
+        || requested.auto.is_some()
+        || requested.luminance_modulation.is_some()
+        || requested.luminance_offset.is_some()
+        || requested.saturation_modulation.is_some()
+    {
+        return false;
+    }
+    if requested.alpha.is_some() && requested.alpha != authored.alpha {
+        return false;
+    }
+    resolve_color_value_to_hex_with_theme(Some(authored), theme)
+        .zip(requested.rgb.as_deref())
+        .is_some_and(|(hex, rgb)| rgb.eq_ignore_ascii_case(&hex[1..]))
+}
+
 /// Updates modeled styling while preserving unmodeled XML.
 fn apply_run_properties(
     base: &mut XmlElement,
@@ -2985,22 +3017,12 @@ fn apply_run_properties(
             base.attributes.remove("u");
         }
     }
-    let keeps_gradient = properties.color.as_ref().is_some_and(|color| {
-        base.child("gradFill")
-            .and_then(crate::drawing::run_gradient_color)
-            .is_some_and(|authored| {
-                &authored == color
-                    || resolve_color_value_to_hex_with_theme(Some(&authored), theme).is_some_and(
-                        |authored| {
-                            Some(authored)
-                                == resolve_color_value_to_hex_with_theme(Some(color), theme)
-                        },
-                    )
-            })
-    });
+    let authored = parse_run_properties(Some(base)).color;
+    let keeps_fill = authored == properties.color
+        || is_flattened_colour_snapshot(authored.as_ref(), properties.color.as_ref(), theme);
     // A colour write replaces the whole fill choice; clearing the colour only
     // drops an explicit solidFill so an unmodeled noFill/gradFill survives.
-    let removed_fills: &[&str] = if keeps_gradient {
+    let removed_fills: &[&str] = if keeps_fill {
         &[]
     } else if properties.color.is_some() {
         &FILL_ELEMENTS
@@ -3016,7 +3038,7 @@ fn apply_run_properties(
     if let Some(color) = properties
         .color
         .as_ref()
-        .filter(|_| !keeps_gradient)
+        .filter(|_| !keeps_fill)
         .and_then(|color| color_element(color, prefixes))
     {
         let position = base
@@ -3031,13 +3053,24 @@ fn apply_run_properties(
             XmlNode::Element(XmlElement::new(prefixes.drawing("solidFill")).with_child(color)),
         );
     }
-    base.children.retain(|child| {
-        !matches!(
-            child,
-            XmlNode::Element(element) if element.local_name() == "latin"
-        )
-    });
-    if let Some(family) = &properties.font_family {
+    let Some(family) = &properties.font_family else {
+        base.children.retain(|child| {
+            !matches!(
+                child,
+                XmlNode::Element(element) if element.local_name() == "latin"
+            )
+        });
+        return;
+    };
+    if let Some(latin) = base.child_mut("latin") {
+        if latin.attribute("typeface") != Some(family.as_str()) {
+            // panose, pitchFamily and charset describe the old face.
+            latin
+                .attributes
+                .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
+            latin.set_attribute("typeface", family.clone());
+        }
+    } else {
         let position = base
             .children
             .iter()
@@ -3745,6 +3778,20 @@ mod tests {
     }
 
     #[test]
+    fn a_lowercase_flattened_colour_keeps_the_gradient() {
+        let (mut element, prefixes, mut properties) = run_properties(
+            br#"<a:rPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" lang="en"><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst></a:gradFill></a:rPr>"#,
+        );
+        properties.color = Some(ColorValue {
+            rgb: Some("ff0000".to_owned()),
+            ..ColorValue::default()
+        });
+        let gradient = element.child("gradFill").unwrap().clone();
+        apply_run_properties(&mut element, &properties, None, &prefixes);
+        assert_eq!(element.child("gradFill"), Some(&gradient));
+    }
+
+    #[test]
     fn an_edited_colour_replaces_the_gradient() {
         let (mut element, prefixes, mut properties) = run_properties(
             br#"<a:rPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" lang="en"><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst></a:gradFill></a:rPr>"#,
@@ -3847,6 +3894,197 @@ mod tests {
             ),
             "{xml}"
         );
+    }
+
+    const FONT_PARAGRAPH: &str = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:pPr algn="ctr"/><a:r><a:rPr lang="en-US"><a:highlight><a:srgbClr val="FFFF00"/></a:highlight><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial" vendorHint="1"/><a:cs charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/></a:rPr><a:t>38.8%</a:t></a:r><a:r><a:rPr b="1" lang="en-US"><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/></a:rPr><a:t> of cases</a:t></a:r></a:p>"#;
+    const ARIAL_LATIN: &str = r#"<a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial" vendorHint="1"/>"#;
+
+    fn font_runs(family: &str) -> [(&'static str, RunProperties); 2] {
+        let arial = RunProperties {
+            font_family: Some("Arial".to_owned()),
+            ..RunProperties::default()
+        };
+        [
+            (
+                "39.8%",
+                RunProperties {
+                    font_family: Some(family.to_owned()),
+                    ..RunProperties::default()
+                },
+            ),
+            (
+                " of cases",
+                RunProperties {
+                    bold: Some(true),
+                    ..arial
+                },
+            ),
+        ]
+    }
+
+    fn edited_font_body(latin: &str) -> String {
+        let (_, body) = FONT_PARAGRAPH.split_once('>').unwrap();
+        let edited = body.replace("38.8%", "39.8%");
+        edited.replacen(ARIAL_LATIN, latin, 1)
+    }
+
+    #[test]
+    fn a_text_edit_keeps_the_latin_font_element_whole() {
+        let xml = rebuilt_paragraph(FONT_PARAGRAPH.as_bytes(), &font_runs("Arial"));
+        assert!(xml.ends_with(&edited_font_body(ARIAL_LATIN)), "{xml}");
+    }
+
+    #[test]
+    fn a_new_font_family_drops_the_old_face_metrics_in_place() {
+        let xml = rebuilt_paragraph(FONT_PARAGRAPH.as_bytes(), &font_runs("Calibri"));
+        let calibri = edited_font_body(r#"<a:latin typeface="Calibri"/>"#);
+        assert!(xml.ends_with(&calibri), "{xml}");
+    }
+
+    const FILL_PARAGRAPH: &str = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent6"><a:lumMod val="75000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr><a:t> them</a:t></a:r></a:p>"#;
+
+    /// Each run's colour flattened to hex, as the editor snapshot hands it back.
+    fn hex_runs() -> Vec<(&'static str, RunProperties)> {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let path = "ppt/slides/slide1.xml";
+        let root = parse_xml(FILL_PARAGRAPH.as_bytes(), path, &mut budget).unwrap();
+        root.child_elements()
+            .zip(["among", " then"])
+            .map(|(run, text)| {
+                let color = parse_run_properties(run.child("rPr")).color;
+                let hex = resolve_color_value_to_hex_with_theme(color.as_ref(), None);
+                let color = ColorValue {
+                    rgb: hex.map(|hex| hex[1..].to_owned()),
+                    ..ColorValue::default()
+                };
+                let properties = RunProperties {
+                    color: Some(color),
+                    ..RunProperties::default()
+                };
+                (text, properties)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_text_edit_keeps_theme_colours_and_their_transforms() {
+        let xml = rebuilt_paragraph(FILL_PARAGRAPH.as_bytes(), &hex_runs());
+        let (_, body) = FILL_PARAGRAPH.split_once('>').unwrap();
+        let edited = body.replace("amongst", "among").replace(" them", " then");
+        assert!(xml.ends_with(&edited), "{xml}");
+    }
+
+    #[test]
+    fn an_explicit_colour_edit_replaces_the_theme_fill() {
+        let mut runs = hex_runs();
+        runs[0].1.color = Some(ColorValue {
+            rgb: Some("FF0000".to_owned()),
+            ..ColorValue::default()
+        });
+        let xml = rebuilt_paragraph(FILL_PARAGRAPH.as_bytes(), &runs);
+        let red = r#"<a:rPr lang="en-US"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:rPr><a:t>among</a:t>"#;
+        assert!(xml.contains(red), "{xml}");
+        assert!(xml.contains(r#"<a:schemeClr val="tx1"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn an_alpha_change_on_an_unchanged_theme_colour_is_written() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"><a:alpha val="50000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        theme_color: Some("text1".to_owned()),
+                        alpha: Some(1.0),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(r#"<a:schemeClr val="tx1"><a:alpha val="100000"/></a:schemeClr>"#),
+            "{xml}"
+        );
+        assert!(!xml.contains(r#"val="50000""#), "{xml}");
+    }
+
+    #[test]
+    fn switching_theme_slots_with_the_same_rgb_writes_the_new_slot() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        theme_color: Some("dk1".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(xml.contains(r#"<a:schemeClr val="dk1"/>"#), "{xml}");
+        assert!(!xml.contains(r#"<a:schemeClr val="tx1"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn an_unchanged_transformed_theme_colour_survives_byte_identical() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        rgb: Some("8FAADC".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill>"#
+            ),
+            "{xml}"
+        );
+        assert!(!xml.contains("8FAADC"), "{xml}");
+    }
+
+    #[test]
+    fn an_edit_spanning_a_styled_line_break_keeps_the_break_properties() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"/><a:t>First line</a:t></a:r><a:br><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/><a:ea typeface="MS Gothic"/><a:cs typeface="Arial"/></a:rPr></a:br><a:r><a:rPr lang="en-US"/><a:t>Second line</a:t></a:r></a:p>"#,
+            &[(
+                "First line changed\nSecond line changed",
+                RunProperties {
+                    color: Some(ColorValue {
+                        rgb: Some("8FAADC".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    font_family: Some("Arial".to_owned()),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:br><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/><a:ea typeface="MS Gothic"/><a:cs typeface="Arial"/></a:rPr></a:br>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn an_inserted_line_break_does_not_inherit_a_neighbouring_run_properties() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:r><a:rPr lang="en-US" strike="sngStrike"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:hlinkClick r:id="rId2"/></a:rPr><a:t>HelloWorld</a:t></a:r></a:p>"#,
+            &[("Hello\nWorld", RunProperties::default())],
+        );
+        assert!(xml.contains("<a:br/>"), "{xml}");
     }
 
     #[test]

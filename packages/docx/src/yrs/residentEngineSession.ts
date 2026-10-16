@@ -221,9 +221,10 @@ export type ResidentEngineSession = Pick<
   markProjectionStories(stories: readonly string[]): void;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string, seedStories?: boolean): string;
-  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean }): string;
+  /** With `initialUpdate`, the shared state replaces the package's stories. */
+  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): string;
   decodeFont(bytes: Uint8Array): Uint8Array;
-  openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean }): void;
+  openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
@@ -828,7 +829,13 @@ export async function createResidentEngineSession(
     decodeFont: bytes => session.decode_font(bytes),
     openSourceDocx: (bytes, options) => {
       session.set_media_tokens(options.mediaTokens === true);
-      return resident.openDocx(bytes, options.digest, options.generation);
+      const json = resident.openDocx(bytes, options.digest, options.generation, !options.initialUpdate);
+      if (options.initialUpdate) {
+        resident.loadState(options.initialUpdate);
+        partBase = keySections(partBase!);
+        markProjectionStories(session.story_ids());
+      }
+      return json;
     },
     openDocument: (document, options) => {
       commentAliases.clear();
@@ -839,9 +846,14 @@ export async function createResidentEngineSession(
       parsedFacade = wrapSession(session, clientId);
       const nativeMediaDataUrl = parsedFacade.mediaDataUrl;
       parsedFacade.mediaDataUrl = token => parsedMedia.get(token) ?? nativeMediaDataUrl(token);
-      documentToYrs(parsedFacade, options.mediaTokens ? tokenizeResidentDocument(document, parsedMedia) : document, options);
-      partBase = keySections(document);
-      session.set_part_metadata(JSON.stringify(partMetadata(partBase)), '[]');
+      if (options.initialUpdate) {
+        resident.loadState(options.initialUpdate);
+        partBase = keySections(document);
+      } else {
+        documentToYrs(parsedFacade, options.mediaTokens ? tokenizeResidentDocument(document, parsedMedia) : document, options);
+        partBase = keySections(document);
+        session.set_part_metadata(JSON.stringify(partMetadata(partBase)), '[]');
+      }
       partsTouched = false;
       marginsTouched = false;
       sectionsTouched = false;
@@ -1014,9 +1026,10 @@ export async function createResidentEngineSession(
     },
     applyUpdate: (update) => {
       sectionLayout = null;
-      return JSON.parse(
-        session.apply_update_with_inference(update)
-      ) as CollaborationTextInsertion | null;
+      const before = session.resident_section_revision().split(':')[1];
+      const raw = session.apply_update_with_inference(update);
+      if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
+      return JSON.parse(raw) as CollaborationTextInsertion | null;
     },
     onUpdate: (listener) => {
       listeners.add(listener);

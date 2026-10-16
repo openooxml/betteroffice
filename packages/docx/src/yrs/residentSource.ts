@@ -17,6 +17,8 @@ export type ResidentSourceOpenRequest = (
   heapLimitBytes?: number;
   generation?: string;
   digest?: string;
+  /** One replica seeds from bytes; joiners pass `initialUpdate`. Two seeds merge by story last-writer-wins. */
+  collaboration?: { clientId: number; initialUpdate?: Uint8Array };
 };
 
 export function validateResidentSource(source: ResidentSourceOpenRequest): void {
@@ -37,6 +39,11 @@ export function validateResidentSource(source: ResidentSourceOpenRequest): void 
     if (!source.preview || typeof source.preview !== 'object') throw new TypeError('Invalid DOCX preview options');
     const pages = source.preview?.pages ?? 1;
     if (!Number.isSafeInteger(pages) || pages < 1) throw new TypeError('Invalid DOCX preview pages');
+  }
+  const collaboration = source.collaboration;
+  if (collaboration !== undefined && (!collaboration || !Number.isSafeInteger(collaboration.clientId) || collaboration.clientId < 0 ||
+    (collaboration.initialUpdate !== undefined && !(collaboration.initialUpdate instanceof Uint8Array)))) {
+    throw new TypeError('Invalid DOCX collaboration options');
   }
 }
 

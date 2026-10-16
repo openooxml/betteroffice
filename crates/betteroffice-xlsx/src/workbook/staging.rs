@@ -48,16 +48,21 @@ impl Workbook {
         baseline: Option<&[u8]>,
     ) -> Result<PreparedCommit> {
         let styles = &staged.model.styles;
-        let mut authority = match baseline {
-            Some(baseline) => self
-                .authority
-                .stage_local_ops_from_v1(&ops, origin, styles, baseline),
-            None => self.authority.stage_local_ops_v1(&ops, origin, styles),
+        let mut authority = if !self.is_collaborative() {
+            self.authority
+                .stage_standalone_ops_v1(&ops, origin, styles, baseline)
+        } else {
+            match baseline {
+                Some(baseline) => self
+                    .authority
+                    .stage_local_ops_from_v1(&ops, origin, styles, baseline),
+                None => self.authority.stage_local_ops_v1(&ops, origin, styles),
+            }
         }
         .map_err(authority_error)?;
         let model = match &self.mode {
             WorkbookMode::Collaborative { structure } => {
-                if !authority.structure.same_except_freeze_panes(structure) {
+                if !authority.structure.same_except_local_layout(structure) {
                     return Err(crate::Error::CollaborativeStructureChanged);
                 }
                 validate_collaboration_size(&authority.update)?;

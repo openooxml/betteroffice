@@ -1,4 +1,5 @@
 import { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
+export { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
 import {
   MAX_AWARENESS_CURSOR_BYTES,
   MAX_AWARENESS_ENTRIES_PER_UPDATE,
@@ -10,6 +11,10 @@ import {
 
 export const DEFAULT_MAX_FRAME_BYTES = MAX_COLLABORATION_FRAME_BYTES;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
+/** Largest update a replica accepts (docx-edit `MAX_UPDATE_BYTES`), the per-update bound. */
+export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
+/** Largest configurable frame: one update at the per-update bound and its sync header. */
+export const MAX_FRAME_BYTES = MAX_UPDATE_BYTES + 6;
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
@@ -175,6 +180,52 @@ function encodeSyncMessage(
     ],
     maxFrameBytes
   );
+}
+
+/** Largest sync payload that fits a frame of `maxFrameBytes`. */
+export function maxSyncPayloadBytes(maxFrameBytes: number): number {
+  return maxFrameBytes - 2 - encodeVarUint(maxFrameBytes).byteLength;
+}
+
+/** Bytes of a frame holding one sync message with a payload of `payloadBytes`. */
+export function syncFrameBytes(payloadBytes: number): number {
+  return 2 + encodeVarUint(payloadBytes).byteLength + payloadBytes;
+}
+
+/**
+ * A state-vector entry (this client id at clock 0) by which a peer asks for a chunked answer to its SyncStep1. Peers
+ * that do not know it read an empty client, which changes no diff.
+ */
+export const CHUNKED_SYNC_CLIENT = Number.MAX_SAFE_INTEGER;
+
+function stateVectorEntries(stateVector: Uint8Array): Array<[number, number]> | null {
+  try {
+    const decoder = new Decoder(stateVector);
+    const count = decoder.readVarUint();
+    const entries: Array<[number, number]> = [];
+    for (let index = 0; index < count; index++) entries.push([decoder.readVarUint(), decoder.readVarUint()]);
+    return decoder.done ? entries : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `stateVector` with the chunked-sync entry, or unchanged when it is malformed or already has that client. */
+export function withChunkedSyncRequest(stateVector: Uint8Array): Uint8Array {
+  const entries = stateVectorEntries(stateVector);
+  if (!entries || entries.some(([client]) => client === CHUNKED_SYNC_CLIENT)) return stateVector;
+  const body = stateVector.subarray(encodeVarUint(entries.length).byteLength);
+  return encodeFrame(
+    [encodeVarUint(entries.length + 1), body, encodeVarUint(CHUNKED_SYNC_CLIENT), encodeVarUint(0)],
+    Number.MAX_SAFE_INTEGER
+  );
+}
+
+/** Whether a SyncStep1 state vector asks for a chunked answer. */
+export function requestsChunkedSync(stateVector: Uint8Array): boolean {
+  return stateVectorEntries(stateVector)?.some(
+    ([client, clock]) => client === CHUNKED_SYNC_CLIENT && clock === 0
+  ) ?? false;
 }
 
 export function encodeSyncStep1(

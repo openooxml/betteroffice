@@ -367,6 +367,8 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   maxRecoveryAttempts?: number;
   checkpointPolicy?(stats: { applied: number; bytes: number }): boolean;
   commandBytes?(envelope: CommandEnvelope<P>): number;
+  /** @internal May share caller data only with a transport that copies before returning. */
+  copyCommandForDispatch?(envelope: CommandEnvelope<P>): CommandEnvelope<P>;
   now?(): number;
   enqueue?(callback: () => void): void;
   onEchoOverrun?(sample: EchoOverrunSample): void;
