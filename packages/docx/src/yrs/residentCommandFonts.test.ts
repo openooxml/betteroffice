@@ -14,9 +14,14 @@ async function initializeFonts(
   const end = source.indexOf('  for (const { story, env } of snapshot.renderInputs)', start);
   const initStart = source.indexOf("  if (request.type === 'commandInit') {");
   const initEnd = source.indexOf("  if (request.type === 'edit') {", initStart);
+  const reservationStart = source.indexOf('const appliedLayoutReservations =');
+  const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
+  const reservationImport = source.match(/^import .* from '\.\/reservations';$/m)?.[0] ?? '';
   const fontImport = source.match(/^import .* from '\.\/residentCommandFonts';$/m)?.[0] ?? '';
   const hydrateSignature = source.slice(source.indexOf('function hydrate('), source.indexOf('): { layoutJson:', source.indexOf('function hydrate(')));
   const contents = `${fontImport}
+    ${reservationImport}
+    ${reservations}
     export async function initialize(session, request, bindResidentCommands) {
       let fontsRevision = -1;
       let glyphCache;

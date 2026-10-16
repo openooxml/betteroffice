@@ -67,9 +67,11 @@ import {
   isSupersededLayout,
   presentedWorkerFrame,
   readSessionVersion,
+  reservationsKeyOf,
   revisionPreviewKey,
   revisionPreviewKeyOf,
   sourceVersionOf,
+  stampReservationsKey,
   stampRevisionPreviewKey,
   stampSourceVersion,
   stampWorkerFrameVersion,
@@ -1360,6 +1362,7 @@ export function useRustDisplayList(
           UNKNOWN_REVISION_PREVIEW_KEY,
           sourceLine(hostEngine)
         );
+        carryReservationsKey(nextSnapshot.queries, previous.queries);
         generationRef.current += 1;
         mainFrameRef.current = null;
         snapshotRef.current = nextSnapshot;
@@ -2497,6 +2500,7 @@ export function useRustDisplayList(
                         : (result.documentAsOpened ?? false))
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
+              if (!worker) carryReservationsKey(nextSnapshot.queries, previous.queries);
               if (worker) {
                 const deferred = deferredPageBuildsRef.current.get(worker.engine);
                 const deferredPages = deferred?.client === worker.client &&
@@ -3672,6 +3676,7 @@ export function useRustDisplayList(
           result.workerPreview ?? false,
           result.workerAsOpened ?? false
         );
+        carryReservationsKey(nextSnapshot.queries, layout);
         snapshotRef.current = nextSnapshot;
         provisionalPageFrameRef.current = result.provisional === true;
         frameLayoutPassRef.current = layoutPass;
@@ -3953,6 +3958,12 @@ function rememberWorkerPreview(
     if (keys.size <= 8) break;
     keys.delete(revision);
   }
+}
+
+/** Stamps `queries` with the reservations key `source` was rendered with, when known. */
+function carryReservationsKey(queries: object | null, source: object | null): void {
+  const key = reservationsKeyOf(source);
+  if (queries && key !== null) stampReservationsKey(queries, key);
 }
 
 /**

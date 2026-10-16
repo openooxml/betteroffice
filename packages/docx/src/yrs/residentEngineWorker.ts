@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
 import { readResidentReviewSnapshot } from './residentReview';
@@ -28,6 +29,7 @@ import type {
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
   DocxCommandSelection,
+  DocxFrameReservations,
   DocxNavigationIntent,
   DocxSelectionPointIntent,
   ResidentCommandHooksFactory,
@@ -38,7 +40,7 @@ import type {
   ResidentDocxCommandEngine,
 } from './residentCommandProtocol';
 import type { CollaborationCursor } from '../collaboration/types';
-import type { YrsLoc, YrsRegionLayoutProgress, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
+import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import {
   createResidentEngineSession,
@@ -75,6 +77,7 @@ import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResiden
 import { readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
+  resolveBookmarkTarget,
   resolveCommentTarget,
   resolveParagraphTarget,
   resolveRevisionTarget,
@@ -177,6 +180,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   releaseCommandHost = null;
   const engine = session;
   if (init.rasterScale !== undefined) setCommandRasterScale(init.rasterScale);
+  init.layoutInput = resolveLayoutReservationInput(engine, init.layoutInput, true);
   const input = JSON.parse(init.layoutInput || '{}');
   let layoutInput = init.layoutWithRegions ? init.layoutInput : JSON.stringify({
     ...input, measured: [], retainOnly: true,
@@ -185,6 +189,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   });
   if (!init.layoutWithRegions) engine.layoutDocumentJson(layoutInput);
   let layoutDirty = !init.layoutWithRegions;
+  let appliedReservations: DocxFrameReservations | undefined;
+  let laidOutReservations: DocxFrameReservations | undefined;
   sessionFonts?.dispose();
   const fonts = new ResidentSessionFonts(engine, scope.fonts);
   sessionFonts = fonts;
@@ -200,14 +206,15 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     selectionLayout = undefined;
   };
   const layoutWithPreview = () => {
+    laidOutReservations = appliedReservations;
     const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
+    const owner = init.layoutWithRegions ? input : input.workerOwned;
     const snapshot = registry.snapshot();
     const preview = proposalRevisionPreview(snapshot);
-    if (preview !== undefined || input.renderEnv?.revisionPreview !== undefined) {
-      input.renderEnv = { ...input.renderEnv };
-      if (preview) input.renderEnv.revisionPreview = preview;
-      else delete input.renderEnv.revisionPreview;
-      if (!init.layoutWithRegions) input.workerOwned = { ...input.workerOwned, renderEnv: input.renderEnv };
+    if (preview !== undefined || owner.renderEnv?.revisionPreview !== undefined) {
+      owner.renderEnv = { ...owner.renderEnv };
+      if (preview) owner.renderEnv.revisionPreview = preview;
+      else delete owner.renderEnv.revisionPreview;
     }
     if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
     else engine.layoutDocumentJson(JSON.stringify(input));
@@ -219,6 +226,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   };
   const relayout = (step?: 'initial' | 'complete' | 'begin' | 'resume', blocks = ALL_BLOCKS) => {
     if (step === 'begin' || step === 'resume') {
+      if (step === 'begin') laidOutReservations = appliedReservations;
       const progress = step === 'begin'
         ? engine.beginRegionLayout(init.layoutInput) : engine.resumeRegionLayout(blocks);
       if (progress.layoutJson !== undefined) {
@@ -229,6 +237,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return progress;
     }
     if (step === 'initial') {
+      laidOutReservations = appliedReservations;
       const laid = engine.layoutDocumentWithRegionsExactPrefixRetained(init.layoutInput,
         Math.max(init.provisionalPages ?? 0, init.displayWindow?.[1] ?? 0));
       if (laid.provisional) {
@@ -243,6 +252,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     }
     if (prefix) supersedeSlicedCompletion();
     if (step === 'complete') {
+      laidOutReservations = appliedReservations;
       if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(init.layoutInput);
       else engine.layoutDocumentJson(layoutInput);
       certify = true;
@@ -328,7 +338,11 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   };
   resetResidentObjectHandles(engine);
   const baseHooks = commandHooksFactory(engine, init, {
-    setRenderEnvironment(environment) {
+    getLayoutReservations() {
+      return (JSON.parse(init.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.reservations ?? null;
+    },
+    setRenderEnvironment(environment, set) {
+      if (set !== undefined) appliedReservations = set ?? (appliedReservations && { version: appliedReservations.version, key: null });
       const input = JSON.parse(init.layoutInput);
       input.renderEnv = { ...input.renderEnv, ...environment };
       init.layoutInput = JSON.stringify(input);
@@ -906,6 +920,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
           ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
+          ...(laidOutReservations ? { reservations: laidOutReservations } : {}),
         });
         echoGlyphs.sent(echoGlyphSets);
         revision = built.value.revision;
@@ -1941,7 +1956,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       case 'exportStructuredWithPages':
         if (commandLayout?.complete()) postCommandFrame(0);
-        value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
+        value = session.exportStructuredWithPagesJson(
+          request.read.options,
+          resolveLayoutReservationInput(session, request.read.currentRequest)
+        );
         break;
       case 'listContentControls':
         value = session.listContentControls(request.read.options);
@@ -2055,6 +2073,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.head,
           request.read.expectVersion
         );
+        break;
+      case 'bookmarkTarget':
+        value = resolveBookmarkTarget(displayPositionIndex(session), request.read.story, request.read.name, engine.version());
         break;
       case 'bookmarkPosition':
         value = resolveBookmarkPosition(
@@ -2429,6 +2450,42 @@ function validateFontsBaseRevision(snapshot: YrsResidentWorkerSnapshot): void {
   }
 }
 
+const appliedLayoutReservations = new WeakMap<ResidentEngineSession, {
+  version: string;
+  key: string;
+  reservations: DocxResolvedReservations;
+}>();
+
+function resolveLayoutReservationInput(
+  engine: ResidentEngineSession,
+  layoutInput: string,
+  apply = false
+): string {
+  if (!layoutInput.includes('"reservationSets"')) {
+    if (apply) appliedLayoutReservations.delete(engine);
+    return layoutInput;
+  }
+  const input = JSON.parse(layoutInput) as { renderEnv?: YrsRenderEnv };
+  const payload = input.renderEnv?.reservationSets;
+  if (payload === undefined) {
+    if (apply) appliedLayoutReservations.delete(engine);
+    return layoutInput;
+  }
+  const version = engine.proposalEngine.version();
+  const previous = appliedLayoutReservations.get(engine);
+  const key = JSON.stringify(payload);
+  let reservations = previous?.reservations ?? {};
+  if (validReservationsPayload(payload) && payload.version === version) {
+    reservations = previous?.version === version && previous.key === key
+      ? previous.reservations
+      : resolveReservations(engine.geometryReader, payload, version, previous?.reservations ?? null);
+    if (apply) appliedLayoutReservations.set(engine, { version, key, reservations });
+  }
+  delete input.renderEnv!.reservationSets;
+  input.renderEnv!.reservations = reservations;
+  return JSON.stringify(input);
+}
+
 /**
  * Loads a snapshot and runs its layout, over the first `provisionalPages`
  * pages only when given; returns the region layout reply, which a full pass
@@ -2488,6 +2545,7 @@ function hydrate(
     }
     fontsRevision = snapshot.fontsRevision;
   }
+  snapshot.layoutInput = resolveLayoutReservationInput(session, snapshot.layoutInput, true);
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   if (!layout) {
@@ -2590,7 +2648,7 @@ function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: stri
   }
   const cached = requirementsCache.byInput.get(layoutInput);
   if (cached !== undefined) return cached;
-  const requirementsJson = engine.layoutFontRequirementsJson(layoutInput);
+  const requirementsJson = engine.layoutFontRequirementsJson(resolveLayoutReservationInput(engine, layoutInput));
   if (requirementsCache.byInput.size >= REQUIREMENTS_CACHE_INPUTS) {
     requirementsCache.byInput.delete(requirementsCache.byInput.keys().next().value as string);
   }

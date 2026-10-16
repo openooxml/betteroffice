@@ -107,7 +107,7 @@ test('worker hyperlink dialog edits the captured text range and preserves its di
   }
   const dialog = page.getByRole('dialog', { name: 'Insert Hyperlink', exact: true });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByLabel('Display Text', { exact: true })).toHaveAttribute('readonly');
+  await expect(dialog.getByLabel('Display Text', { exact: true })).toBeEditable();
   await dialog.getByLabel('URL', { exact: true }).fill('https://example.com/link');
   await dialog.getByRole('button', { name: 'Insert', exact: true }).click();
   const downloading = page.waitForEvent('download');

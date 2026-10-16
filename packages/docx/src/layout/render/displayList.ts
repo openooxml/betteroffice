@@ -43,12 +43,20 @@ export interface DisplayPage {
   footer?: HfRegion;
   /** Footnote/endnote regions in page coordinates. Undefined = none. */
   noteAreas?: NoteRegion[];
+  /** Page-local rects of host layout reservations; nothing paints them. Undefined = none. */
+  reservations?: DisplayReservation[];
   /** Geometry only: the page's content is built when the host asks for it. */
   unbuilt?: boolean;
   /** For an unbuilt page, the lowest and highest body position its layout places. */
   positionSpan?: [number, number];
   /** For an unbuilt page, the relationship ids of the header and footer parts its build paints. */
   hfParts?: { header?: string; footer?: string };
+}
+
+/** Where a host's layout reservation landed, in page-local px. */
+export interface DisplayReservation extends DisplayBounds {
+  owner: string;
+  id: string;
 }
 
 /** A page-local rectangle emitted as display-list metadata. */

@@ -18,7 +18,7 @@ export async function applyWorkerProperty(controller: WorkerShellController, que
   onError?: (error: Error) => void): Promise<boolean> {
   try {
     const env = controller.environment();
-    if (env.readOnly || env.mode !== 'editing') throw new Error('Document is not editable');
+    if (env.readOnly || (env.mode !== 'editing' && !(env.mode === 'suggesting' && intent.kind === 'setHyperlink'))) throw new Error('Document is not editable');
     const result = await controller.applyQuery(query, omitUndefined(intent));
     if (!result.ok) throw new Error(result.failure.message);
     controller.ref.focus();
