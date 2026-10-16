@@ -345,8 +345,12 @@ test('restoring earlier bytes for the same font face registers them again', asyn
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
-  const first = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')) };
-  const second = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSerif-Regular.ttf')) };
+  const [firstBytes, secondBytes] = await Promise.all([
+    readFile(resolve(root, 'packages/fonts/assets/NotoSansHebrew-Regular.ttf')),
+    readFile(resolve(root, 'packages/fonts/assets/NotoSansHebrew-Bold.ttf')),
+  ]);
+  const first = { family: 'Arial', bytes: firstBytes };
+  const second = { family: 'Arial', bytes: secondBytes };
   const registered: vsdx.VsdxFontFace[] = [];
   let ready: DiagramHandle | undefined;
   const onReady = (api: { handle: DiagramHandle }) => {
@@ -354,14 +358,15 @@ test('restoring earlier bytes for the same font face registers them again', asyn
     const register = ready.registerFont;
     ready.registerFont = (face) => { registered.push(face); return register(face); };
   };
-  const view = render(<VsdxEditor file={foundation} fonts={[first]} onReady={onReady} />);
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(<VsdxEditor file={foundation} fonts={[first]} onReady={onReady} />); });
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const original = ready!;
-    view.rerender(<VsdxEditor file={foundation} fonts={[second]} onReady={onReady} />);
+    await act(async () => { view.rerender(<VsdxEditor file={foundation} fonts={[second]} onReady={onReady} />); });
     await waitFor(() => expect(registered).toHaveLength(1));
     expect(registered[0].bytes).toEqual(second.bytes);
-    view.rerender(<VsdxEditor file={foundation} fonts={[first]} onReady={onReady} />);
+    await act(async () => { view.rerender(<VsdxEditor file={foundation} fonts={[first]} onReady={onReady} />); });
     await waitFor(() => expect(registered).toHaveLength(2));
     expect(registered[1].bytes).toEqual(first.bytes);
     expect(ready).toBe(original);
@@ -383,8 +388,8 @@ test('a superseded font load cannot replace the browser font after the newer fac
   }
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: DeferredFontFace });
   Object.defineProperty(document, 'fonts', { configurable: true, value: { add: (face: FontFace) => { installed.push(face); }, delete: (face: FontFace) => { removed.push(face); } } });
-  const first = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')) };
-  const second = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSerif-Regular.ttf')) };
+  const first = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/NotoSansHebrew-Regular.ttf')) };
+  const second = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/NotoSansHebrew-Bold.ttf')) };
   let ready: DiagramHandle | undefined;
   const onReady = (api: { handle: DiagramHandle }) => { ready = api.handle; };
   const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} />);

@@ -1920,4 +1920,145 @@ mod tests {
         block.children[0].width = f64::NAN;
         assert!(!inline_native_shape(&block));
     }
+
+    fn parse_group_drawing_value(
+        xml: &str,
+        mut resolve: impl FnMut(&str) -> Option<docx_parse::image::Image>,
+    ) -> Value {
+        let limits = docx_parse::xml::ParseLimits::default();
+        let doc = docx_parse::xml::parse_xml(
+            xml.as_bytes(),
+            "drawing.xml",
+            &mut docx_parse::xml::ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        let mut shape = docx_parse::shape::shape_for_rendering(root).unwrap();
+        fn resolve_pictures(
+            shape: &mut docx_parse::shape::Shape,
+            resolve: &mut impl FnMut(&str) -> Option<docx_parse::image::Image>,
+        ) {
+            if let Some(picture) = shape
+                .fill_paint
+                .as_mut()
+                .and_then(|paint| paint.picture.as_mut())
+                && let Some(resolved) = resolve(&picture.relationship_id)
+            {
+                picture.src = resolved.src;
+            }
+            if let Some(children) = &mut shape.children {
+                for child in children {
+                    resolve_pictures(child, resolve);
+                }
+            }
+        }
+        resolve_pictures(&mut shape, &mut resolve);
+        serde_json::to_value(shape).unwrap()
+    }
+
+    fn resolved_test_image(r_id: &str, src: &str) -> docx_parse::image::Image {
+        let mut image = docx_parse::image::placeholder_image(r_id);
+        image.src = Some(src.into());
+        image
+    }
+
+    #[test]
+    fn lowers_group_with_picture_and_shape_preserving_composed_geometry_and_media() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="1905000" cy="952500"/><wp:docPr id="1" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1905000" cy="952500"/><a:chOff x="95250" y="190500"/><a:chExt cx="952500" cy="476250"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="2" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdPic"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="190500" y="238125"/><a:ext cx="285750" cy="142875"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="3" name="RectShape"/><wps:spPr><a:xfrm><a:off x="571500" y="285750"/><a:ext cx="190500" cy="95250"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="336699"/></a:solidFill></wps:spPr></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |rel_id| (rel_id == "rIdPic").then(|| resolved_test_image(rel_id, "media:0")),
+        );
+
+        let block = lower_shape_json(&shape, 700, &RenderEnv::default()).unwrap();
+        assert!(inline_native_shape(&block));
+        assert!((block.width - 200.0).abs() < 1e-6);
+        assert!((block.height - 100.0).abs() < 1e-6);
+        assert_eq!(block.children.len(), 2);
+
+        let pic_child = &block.children[0];
+        assert!((pic_child.x.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic_child.y.unwrap_or(-1.0) - 10.0).abs() < 1e-6);
+        assert!((pic_child.width - 60.0).abs() < 1e-6);
+        assert!((pic_child.height - 30.0).abs() < 1e-6);
+        let fill = pic_child.fill.as_ref().expect("picture fill");
+        assert_eq!(fill["type"], "picture");
+        assert_eq!(fill["pictureSrc"], "media:0");
+        assert_eq!(fill["pictureRelId"], "rIdPic");
+        assert_eq!(fill["pictureFillMode"], "stretch");
+
+        let shape_child = &block.children[1];
+        assert!((shape_child.x.unwrap_or(-1.0) - 100.0).abs() < 1e-6);
+        assert!((shape_child.y.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((shape_child.width - 40.0).abs() < 1e-6);
+        assert!((shape_child.height - 20.0).abs() < 1e-6);
+        assert_eq!(shape_child.fill.as_ref().unwrap()["color"], "#336699");
+    }
+
+    #[test]
+    fn lowers_nested_group_picture_with_composed_transforms() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="3810000" cy="1905000"/><wp:docPr id="10" name="Outer"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3810000" cy="1905000"/><a:chOff x="0" y="0"/><a:chExt cx="1905000" cy="952500"/></a:xfrm></wpg:grpSpPr><wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x="190500" y="95250"/><a:ext cx="952500" cy="476250"/><a:chOff x="95250" y="47625"/><a:chExt cx="476250" cy="238125"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="11" name="NestedPic"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdNested"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="142875" y="95250"/><a:ext cx="95250" cy="47625"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="12" name="NestedShape"/><wps:spPr><a:xfrm><a:off x="285750" y="142875"/><a:ext cx="47625" cy="23812.5"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp></wpg:grpSp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |rel_id| (rel_id == "rIdNested").then(|| resolved_test_image(rel_id, "media:1")),
+        );
+
+        let block = lower_shape_json(&shape, 701, &RenderEnv::default()).unwrap();
+        assert_eq!(block.children.len(), 1);
+        let inner = &block.children[0];
+        assert!((inner.x.unwrap_or(-1.0) - 40.0).abs() < 1e-6);
+        assert!((inner.y.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert_eq!(inner.children.len(), 2);
+
+        let pic = &inner.children[0];
+        assert!((pic.x.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic.y.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic.width - 40.0).abs() < 1e-6);
+        assert!((pic.height - 20.0).abs() < 1e-6);
+        assert_eq!(pic.fill.as_ref().unwrap()["pictureSrc"], "media:1");
+    }
+
+    #[test]
+    fn lowers_cropped_and_rotated_group_picture_preserving_src_rect_and_transform() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="1905000" cy="952500"/><wp:docPr id="20" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1905000" cy="952500"/><a:chOff x="0" y="0"/><a:chExt cx="952500" cy="476250"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="21" name="CroppedRot"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdCrop"/><a:srcRect l="10000" t="20000" r="15000" b="25000"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm rot="5400000" flipH="1" flipV="1"><a:off x="95250" y="47625"/><a:ext cx="381000" cy="190500"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |rel_id| (rel_id == "rIdCrop").then(|| resolved_test_image(rel_id, "media:2")),
+        );
+
+        let block = lower_shape_json(&shape, 702, &RenderEnv::default()).unwrap();
+        let pic = &block.children[0];
+        assert!((pic.x.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic.y.unwrap_or(-1.0) - 10.0).abs() < 1e-6);
+        assert!((pic.width - 80.0).abs() < 1e-6);
+        assert!((pic.height - 40.0).abs() < 1e-6);
+
+        let fill = pic.fill.as_ref().expect("fill");
+        assert_eq!(fill["type"], "picture");
+        assert_eq!(fill["pictureSrc"], "media:2");
+        assert_eq!(
+            fill["pictureSrcRect"],
+            json!({"left": 0.1, "top": 0.2, "right": 0.15, "bottom": 0.25})
+        );
+        let transform = pic.transform.as_ref().unwrap();
+        assert!((transform["rotation"].as_f64().unwrap() + 90.0).abs() < 1e-6);
+        assert!(transform.get("flipH").is_none());
+        assert!(transform.get("flipV").is_none());
+    }
+
+    #[test]
+    fn lowers_group_picture_with_missing_media_without_dropping_siblings() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="952500" cy="476250"/><wp:docPr id="30" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="476250"/><a:chOff x="0" y="0"/><a:chExt cx="952500" cy="476250"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="31" name="MissingMedia"/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdMissing"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="95250" y="95250"/><a:ext cx="190500" cy="95250"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="32" name="SiblingShape"/><wps:spPr><a:xfrm><a:off x="381000" y="95250"/><a:ext cx="190500" cy="95250"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="AA0000"/></a:solidFill></wps:spPr></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |_| None,
+        );
+
+        let block = lower_shape_json(&shape, 703, &RenderEnv::default()).unwrap();
+        assert_eq!(block.children.len(), 2);
+        let missing_pic = &block.children[0];
+        let fill = missing_pic.fill.as_ref().expect("fill");
+        assert_eq!(fill["type"], "picture");
+        assert_eq!(fill["pictureRelId"], "rIdMissing");
+        assert!(fill.get("pictureSrc").is_none());
+
+        let sibling = &block.children[1];
+        assert_eq!(sibling.fill.as_ref().unwrap()["color"], "#AA0000");
+    }
 }

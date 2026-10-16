@@ -15241,4 +15241,303 @@ mod tests {
             [("intro", Some(0))]
         );
     }
+
+    #[test]
+    fn group_pictures_emit_composed_shape_primitives() {
+        let rect_path = serde_json::json!([
+            {"type": "move", "x": 0.0, "y": 0.0},
+            {"type": "line", "x": 1.0, "y": 0.0},
+            {"type": "line", "x": 1.0, "y": 1.0},
+            {"type": "line", "x": 0.0, "y": 1.0},
+            {"type": "close"}
+        ]);
+        let input = serde_json::json!({
+            "measured": [
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-flat",
+                        "shapeType": "rect",
+                        "width": 200.0,
+                        "height": 100.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-flat:child:0",
+                                "shapeType": "rect",
+                                "x": 20.0,
+                                "y": 10.0,
+                                "width": 60.0,
+                                "height": 30.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "picture",
+                                    "pictureSrc": "media:0",
+                                    "pictureRelId": "rIdPic",
+                                    "pictureFillMode": "stretch"
+                                }
+                            },
+                            {
+                                "id": "group-flat:child:1",
+                                "shapeType": "rect",
+                                "x": 100.0,
+                                "y": 20.0,
+                                "width": 40.0,
+                                "height": 20.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "solid",
+                                    "color": "#336699"
+                                }
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 200.0, "height": 100.0}
+                },
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-nested",
+                        "shapeType": "rect",
+                        "width": 400.0,
+                        "height": 200.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-nested:child:0",
+                                "shapeType": "rect",
+                                "x": 40.0,
+                                "y": 20.0,
+                                "width": 200.0,
+                                "height": 100.0,
+                                "geometryPath": rect_path,
+                                "children": [
+                                    {
+                                        "id": "group-nested:child:0:child:0",
+                                        "shapeType": "rect",
+                                        "x": 20.0,
+                                        "y": 20.0,
+                                        "width": 40.0,
+                                        "height": 20.0,
+                                        "geometryPath": rect_path,
+                                        "fill": {
+                                            "type": "picture",
+                                            "pictureSrc": "media:1",
+                                            "pictureRelId": "rIdNested"
+                                        }
+                                    },
+                                    {
+                                        "id": "group-nested:child:0:child:1",
+                                        "shapeType": "rect",
+                                        "x": 80.0,
+                                        "y": 40.0,
+                                        "width": 20.0,
+                                        "height": 10.0,
+                                        "geometryPath": rect_path,
+                                        "fill": {
+                                            "type": "solid",
+                                            "color": "#112233"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 400.0, "height": 200.0}
+                },
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-crop-rot",
+                        "shapeType": "rect",
+                        "width": 200.0,
+                        "height": 100.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-crop-rot:child:0",
+                                "shapeType": "rect",
+                                "x": 20.0,
+                                "y": 10.0,
+                                "width": 80.0,
+                                "height": 40.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "picture",
+                                    "pictureSrc": "media:2",
+                                    "pictureRelId": "rIdCrop",
+                                    "pictureSrcRect": {
+                                        "left": 0.1,
+                                        "top": 0.2,
+                                        "right": 0.15,
+                                        "bottom": 0.25
+                                    }
+                                },
+                                "transform": {
+                                    "rotation": 90.0,
+                                    "flipH": true,
+                                    "flipV": true
+                                }
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 200.0, "height": 100.0}
+                },
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-missing-media",
+                        "shapeType": "rect",
+                        "width": 100.0,
+                        "height": 50.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-missing-media:child:0",
+                                "shapeType": "rect",
+                                "x": 10.0,
+                                "y": 10.0,
+                                "width": 20.0,
+                                "height": 10.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "picture",
+                                    "pictureRelId": "rIdMissing"
+                                }
+                            },
+                            {
+                                "id": "group-missing-media:child:1",
+                                "shapeType": "rect",
+                                "x": 40.0,
+                                "y": 10.0,
+                                "width": 20.0,
+                                "height": 10.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "solid",
+                                    "color": "#aa0000"
+                                }
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 100.0, "height": 50.0}
+                }
+            ],
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "size": {"w": 800, "h": 1000},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                    "fragments": [
+                        {"kind": "shape", "blockId": "group-flat", "x": 96.0, "y": 96.0, "width": 200.0, "height": 100.0},
+                        {"kind": "shape", "blockId": "group-nested", "x": 96.0, "y": 220.0, "width": 400.0, "height": 200.0},
+                        {"kind": "shape", "blockId": "group-crop-rot", "x": 96.0, "y": 450.0, "width": 200.0, "height": 100.0},
+                        {"kind": "shape", "blockId": "group-missing-media", "x": 96.0, "y": 580.0, "width": 100.0, "height": 50.0}
+                    ]
+                }]
+            }
+        });
+
+        let list = build_display_list_value_with_fonts(
+            &input.to_string(),
+            &ooxml_text::FontStore::default(),
+        )
+        .expect("display list builds");
+        let page = serde_json::to_value(&list.pages[0]).unwrap();
+        let primitives = page["primitives"].as_array().expect("primitives");
+        let by_id = |id: &str| -> &Value {
+            primitives
+                .iter()
+                .find(|prim| prim["kind"] == "shape" && prim["blockKey"] == id)
+                .unwrap_or_else(|| panic!("missing shape primitive {id}"))
+        };
+
+        let flat_pic = by_id("group-flat:child:0");
+        assert_eq!(flat_pic["x"], serde_json::json!(116));
+        assert_eq!(flat_pic["y"], serde_json::json!(106));
+        assert_eq!(flat_pic["w"], serde_json::json!(60));
+        assert_eq!(flat_pic["h"], serde_json::json!(30));
+        assert_eq!(flat_pic["fillPaint"]["kind"], "picture");
+        assert_eq!(flat_pic["fillPaint"]["pictureSrc"], "media:0");
+        assert_eq!(flat_pic["fillPaint"]["pictureRelId"], "rIdPic");
+        assert_eq!(flat_pic["fillPaint"]["pictureFillMode"], "stretch");
+
+        let flat_shape = by_id("group-flat:child:1");
+        assert_eq!(flat_shape["x"], serde_json::json!(196));
+        assert_eq!(flat_shape["y"], serde_json::json!(116));
+        assert_eq!(flat_shape["w"], serde_json::json!(40));
+        assert_eq!(flat_shape["h"], serde_json::json!(20));
+        assert_eq!(flat_shape["fill"], "#336699");
+
+        let nested_pic = by_id("group-nested:child:0:child:0");
+        assert_eq!(nested_pic["x"], serde_json::json!(156));
+        assert_eq!(nested_pic["y"], serde_json::json!(260));
+        assert_eq!(nested_pic["w"], serde_json::json!(40));
+        assert_eq!(nested_pic["h"], serde_json::json!(20));
+        assert_eq!(nested_pic["fillPaint"]["pictureSrc"], "media:1");
+
+        let nested_shape = by_id("group-nested:child:0:child:1");
+        assert_eq!(nested_shape["x"], serde_json::json!(216));
+        assert_eq!(nested_shape["y"], serde_json::json!(280));
+        assert_eq!(nested_shape["w"], serde_json::json!(20));
+        assert_eq!(nested_shape["h"], serde_json::json!(10));
+
+        let crop_rot = by_id("group-crop-rot:child:0");
+        assert_eq!(crop_rot["x"], serde_json::json!(116));
+        assert_eq!(crop_rot["y"], serde_json::json!(460));
+        assert_eq!(crop_rot["w"], serde_json::json!(80));
+        assert_eq!(crop_rot["h"], serde_json::json!(40));
+        assert_eq!(crop_rot["fillPaint"]["pictureSrc"], "media:2");
+        assert_eq!(
+            crop_rot["fillPaint"]["pictureSrcRect"],
+            serde_json::json!({"left": 0.1, "top": 0.2, "right": 0.15, "bottom": 0.25})
+        );
+        assert_eq!(
+            crop_rot["transform"],
+            serde_json::json!({"rotation": 90, "flipH": true, "flipV": true})
+        );
+
+        let missing_pic = by_id("group-missing-media:child:0");
+        assert_eq!(missing_pic["x"], serde_json::json!(106));
+        assert_eq!(missing_pic["y"], serde_json::json!(590));
+        assert_eq!(missing_pic["fillPaint"]["kind"], "picture");
+        assert_eq!(missing_pic["fillPaint"]["pictureRelId"], "rIdMissing");
+        assert!(missing_pic["fillPaint"].get("pictureSrc").is_none());
+
+        let surviving_sibling = by_id("group-missing-media:child:1");
+        assert_eq!(surviving_sibling["x"], serde_json::json!(136));
+        assert_eq!(surviving_sibling["y"], serde_json::json!(590));
+        assert_eq!(surviving_sibling["fill"], "#aa0000");
+    }
+    #[test]
+    fn nested_shape_offsets_remain_parent_relative() {
+        let input = serde_json::json!({
+            "measured": [{"block": {"kind": "shape", "id": "root", "shapeType": "rect",
+                "width": 100, "height": 100, "children": [{"id": "child", "shapeType": "rect",
+                    "x": 40, "y": 20, "width": 40, "height": 40,
+                    "children": [{"id": "grandchild", "shapeType": "rect", "x": 5, "y": 5,
+                        "width": 10, "height": 10}]}]},
+                "measure": {"kind": "shape", "width": 100, "height": 100}}],
+            "options": {}, "layout": {"pages": [{"size": {"w": 800, "h": 1000},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "fragments": [{"kind": "shape", "blockId": "root", "x": 100, "y": 100,
+                    "width": 100, "height": 100}]}]}
+        });
+        let list = build_display_list_value_with_fonts(
+            &input.to_string(),
+            &ooxml_text::FontStore::default(),
+        )
+        .unwrap();
+        let page = serde_json::to_value(&list.pages[0]).unwrap();
+        let child = page["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["blockKey"] == "grandchild")
+            .unwrap();
+        assert_eq!(
+            (child["x"].as_i64(), child["y"].as_i64()),
+            (Some(145), Some(125))
+        );
+    }
 }

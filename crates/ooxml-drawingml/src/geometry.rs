@@ -547,6 +547,9 @@ fn polar_radius(wr: f64, hr: f64, angle: f64) -> f64 {
 }
 
 /// The ellipse parameter that lands on a polar angle, kept continuous across whole turns.
+///
+/// On a nonzero axis the parameter is the angle: `atan2` would scale the rounding in `sin(PI)`
+/// by `wr / hr`. Near 0, `sin` is exact, so a tiny angle there is real.
 fn elliptical_parameter(angle: f64, wr: f64, hr: f64, frame: Frame) -> f64 {
     let radius_tolerance = frame.radius_tolerance(wr, hr);
     if wr < 0.0 || hr < 0.0 || (wr <= radius_tolerance && hr <= radius_tolerance) {
@@ -554,8 +557,8 @@ fn elliptical_parameter(angle: f64, wr: f64, hr: f64, frame: Frame) -> f64 {
     }
     let (sin, cos) = angle.sin_cos();
     let tolerance = f64::EPSILON * angle.abs().max(1.0);
-    if (hr <= radius_tolerance && sin.abs() <= tolerance)
-        || (wr <= radius_tolerance && cos.abs() <= tolerance)
+    if cos.abs() <= tolerance
+        || (sin.abs() <= tolerance && (angle.abs() > FRAC_PI_2 || hr <= radius_tolerance))
     {
         return angle;
     }
@@ -1596,6 +1599,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn flat_ellipse_keeps_its_axes_and_its_tiny_angles() {
+        let frame = Frame {
+            w: 100000.0,
+            h: 100000.0,
+        };
+        let (wr, hr) = (50000.0, 2.7e-8);
+        for axis in [FRAC_PI_2, PI, 3.0 * FRAC_PI_2, TAU, -PI] {
+            assert_eq!(elliptical_parameter(axis, wr, hr, frame), axis);
+        }
+        let tiny = 1.45e-16;
+        let expected = (wr * tiny).atan2(hr);
+        assert!(expected > 1e-4);
+        assert!((elliptical_parameter(tiny, wr, hr, frame) - expected).abs() < 1e-12);
     }
 
     #[test]
