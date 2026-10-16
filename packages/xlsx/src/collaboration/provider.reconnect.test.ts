@@ -22,8 +22,8 @@ async function openPeer(kind: Kind, clientId: number): Promise<Peer> {
     const handle = openWorkbook(fixture, { collaborative: true, clientId });
     return {
       replica: handle,
-      edit: async (col, input) => { handle.editCell(0, 0, col, input); },
-      read: async () => [0, 1, 2].map((col) => handle.cell(0, 0, col).input),
+      edit: async (col, input) => { expect(handle.editCell(0, 2, col + 1, input).applied).toBe(true); },
+      read: async () => [1, 2].map((col) => handle.cell(0, 2, col).input),
       dispose: () => handle.dispose(),
     };
   }
@@ -31,10 +31,10 @@ async function openPeer(kind: Kind, clientId: number): Promise<Peer> {
   return {
     replica: session.replica!,
     edit: async (col, input) => {
-      const ack = await session.editSession!.submit('editCell', { payload: { args: [0, 0, col, input] } }).ack;
+      const ack = await session.editSession!.submit('editCell', { payload: { args: [0, 2, col + 1, input] } }).ack;
       expect(ack.status).toBe('applied');
     },
-    read: async () => (await session.call.cellInputs(0, 'A1:C1')).cells[0].map((cell) => cell.input),
+    read: async () => (await session.call.cellInputs(0, 'B3:C3')).cells[0].map((cell) => cell.input),
     dispose: () => session.dispose(),
   };
 }
