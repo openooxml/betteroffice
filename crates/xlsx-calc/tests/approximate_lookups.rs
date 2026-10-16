@@ -222,6 +222,125 @@ fn binary_xlookup_skips_blanks_and_other_types() {
 }
 
 #[test]
+fn blank_target_table_lookups_match_zero() {
+    check(
+        &[CellValue::Empty, n(-3.0), n(0.0), CellValue::Empty, n(2.0)],
+        &[
+            ("VLOOKUP(Z99,A1:B42,2)", n(103.0)),
+            ("HLOOKUP(Z99,C1:AR1,1)", n(0.0)),
+        ],
+    );
+}
+
+#[test]
+fn blank_target_match_ascending_keys_below_zero() {
+    check(
+        &[n(-3.0), CellValue::Empty, n(-1.0), n(2.0)],
+        &[
+            ("MATCH(Z99,A1:A42,1)", n(3.0)),
+            ("MATCH(Z99,VSTACK(A1:A42),1)", n(3.0)),
+        ],
+    );
+}
+
+#[test]
+fn blank_target_match_ascending_keys_above_zero_is_na() {
+    check(
+        &[
+            CellValue::Empty,
+            n(2.0),
+            n(8.7),
+            t(""),
+            CellValue::Bool { value: false },
+        ],
+        &[
+            ("MATCH(Z99,A1:A42,1)", na()),
+            ("MATCH(Z99,VSTACK(A1:A42),1)", na()),
+        ],
+    );
+}
+
+#[test]
+fn blank_target_match_descending_keys() {
+    check(
+        &[n(2.0), CellValue::Empty, n(1.0), n(-3.0)],
+        &[
+            ("MATCH(Z99,A1:A42,-1)", n(3.0)),
+            ("MATCH(Z99,VSTACK(A1:A42),-1)", n(3.0)),
+        ],
+    );
+}
+
+#[test]
+fn blank_target_lookup_matches_zero() {
+    check(
+        &[
+            CellValue::Empty,
+            n(-3.0),
+            n(0.0),
+            CellValue::Empty,
+            t(""),
+            CellValue::Bool { value: false },
+        ],
+        &[
+            ("LOOKUP(Z99,A1:A42,B1:B42)", n(103.0)),
+            ("LOOKUP(Z99,A1:B42)", n(103.0)),
+        ],
+    );
+}
+
+#[test]
+fn blank_target_approximate_xmatch_finds_explicit_zero() {
+    check(
+        &[CellValue::Empty, n(-3.0), n(0.0), CellValue::Empty, n(2.0)],
+        &[
+            ("XMATCH(Z99,A1:A42,-1)", n(3.0)),
+            ("XMATCH(Z99,A1:A42,1)", n(3.0)),
+            ("XMATCH(Z99,A1:A42,-1,2)", n(3.0)),
+        ],
+    );
+    check(
+        &[n(2.0), CellValue::Empty, n(0.0), n(-3.0)],
+        &[("XMATCH(Z99,A1:A42,1,-2)", n(3.0))],
+    );
+}
+
+#[test]
+fn blank_target_approximate_array_xlookup_finds_explicit_zero() {
+    let workbook = grid(&[CellValue::Empty, n(-3.0), n(0.0), CellValue::Empty, n(2.0)]);
+    for formula in [
+        "XLOOKUP(Z99,A1:A42,B1:B42,,-1)",
+        "XLOOKUP(Z99,A1:A42,B1:B42,,1)",
+        "XLOOKUP(Z99,A1:A42,B1:B42,,-1,2)",
+    ] {
+        assert_eq!(
+            evaluate_array(
+                &parse_formula(formula).unwrap(),
+                &EvalContext::new(&workbook, SheetId(0))
+            )
+            .into_scalar(),
+            n(103.0),
+            "{formula}"
+        );
+    }
+}
+
+#[test]
+fn blank_target_exact_lookup_is_unchanged() {
+    check(
+        &[CellValue::Empty, n(0.0), n(2.0)],
+        &[
+            ("VLOOKUP(Z99,A1:B3,2,FALSE)", n(101.0)),
+            ("HLOOKUP(Z99,C1:E1,1,FALSE)", CellValue::Empty),
+            ("MATCH(Z99,A1:A3,0)", n(1.0)),
+            ("MATCH(Z99,VSTACK(A1:A3),0)", n(1.0)),
+            ("XMATCH(Z99,A1:A3,0)", n(1.0)),
+            ("XLOOKUP(Z99,A1:A3,B1:B3)", n(101.0)),
+        ],
+    );
+}
+
+#[test]
 fn exact_lookup_blank_coercion_is_unchanged() {
     check(
         &[CellValue::Empty, n(2.0)],

@@ -517,8 +517,10 @@ fn flatten_vector(block: &crate::array::Array) -> Vec<CellValue> {
 pub(crate) fn comparable(value: &CellValue, target: &CellValue) -> bool {
     matches!(
         (value, target),
-        (CellValue::Number { .. }, CellValue::Number { .. })
-            | (CellValue::Text { .. }, CellValue::Text { .. })
+        (
+            CellValue::Number { .. },
+            CellValue::Number { .. } | CellValue::Empty
+        ) | (CellValue::Text { .. }, CellValue::Text { .. })
             | (CellValue::Bool { .. }, CellValue::Bool { .. })
     )
 }
