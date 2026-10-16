@@ -239,7 +239,7 @@ test('paged worker export polls for font readiness after layout completion', asy
       h.relayout();
       const state = h.viewStore.getSnapshot();
       h.viewStore.acceptWorkerState(state.identity, { epoch: 1, version: state.version + 1, throughSeq: 0,
-        presentedThroughSeq: 0, selection: null });
+        presentedThroughSeq: 0, selection: null, editState: state.editState });
       fontsReady = true;
     });
     return fontsReady ? h.request : null;
