@@ -183,12 +183,12 @@ export function createPeerlessShellController(initial: Options) {
       const fail = (error: Error) => settle(error);
       const check = () => {
         if (closed) settle(new Error('Editor was closed'));
-        else if (snapshot.status === 'failed') settle(snapshot.error ?? new Error('Document failed to open'));
+        else if (snapshot.error) settle(snapshot.error);
         else if (generation !== awaited) settle(new Error('Document was replaced'));
         else if (binding && snapshot.status === 'ready') settle(null);
       };
       const timer = setTimeout(() => settle(new Error('The document did not open in time')), options.openTimeoutMs ?? OPEN_WAIT_MS);
-      waits.add(check); waiting.add(fail);
+      waits.add(check); waiting.add(fail); check();
     });
   };
   const flush = async () => {
@@ -525,7 +525,7 @@ export function createPeerlessShellController(initial: Options) {
       };
       const check = () => {
         if (closed) return settle(new Error('Editor was closed'));
-        if (snapshot.status === 'failed') return settle(snapshot.error ?? new Error('Document failed to open'));
+        if (snapshot.error) return settle(snapshot.error);
         if (current) {
           if (binding !== current) return settle(new Error('Document was replaced'));
           const view = current.viewStore.getSnapshot();
@@ -618,6 +618,9 @@ export function createPeerlessShellController(initial: Options) {
     painted,
     stalled(error: Error) {
       if (snapshot.status === 'opening') for (const fail of [...waiting]) fail(error);
+    },
+    failOpening(error: Error) {
+      if (snapshot.status === 'opening') { snapshot = { ...snapshot, error }; publish(); }
     },
     toolbarMetadata(result: PeerlessWorkerQuery<'toolbarMetadata'> | null) {
       const origin = result && queryOrigins.get(result);

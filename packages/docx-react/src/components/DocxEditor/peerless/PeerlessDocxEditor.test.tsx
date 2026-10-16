@@ -286,7 +286,7 @@ function installSurface() {
           onReady?.(binding);
           setOpened(true);
         }
-      }, sessionOptions.onError);
+      }, (error: Error) => { if (!controller.signal.aborted) sessionOptions.onError?.(error); });
       return () => {
         void session?.dispose();
         controller.abort();
@@ -584,6 +584,21 @@ test('a whole source that fails after the cut painted keeps the preview and repo
   expect(view.queryByText('Opening source')).toBeNull();
   expect(workers[0].terminate).not.toHaveBeenCalled();
   expect(requests.some(request => request.type === 'commandInit')).toBe(false);
+});
+
+test('a buffer load whose whole source fails after the cut painted rejects, and a later load opens', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} previewFirstPage showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  failWholeOpen = true;
+  let outcome = 'pending';
+  act(() => { ref.current!.loadDocumentBuffer(Uint8Array.of(8, 9)).catch((error: Error) => { outcome = error.message; }); });
+  await waitFor(() => expect(outcome).toBe('Whole source failed to open'));
+  await expect(ref.current!.whenLayoutComplete()).rejects.toThrow('Whole source failed to open');
+  failWholeOpen = false;
+  let pending!: Promise<void>;
+  act(() => { pending = ref.current!.loadDocumentBuffer(Uint8Array.of(10, 11)); });
+  await pending;
 });
 
 for (const failure of ['layout', 'paint'] as const) {
