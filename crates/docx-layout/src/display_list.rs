@@ -1894,6 +1894,8 @@ struct ImageRunIn {
     #[serde(default)]
     inline_shape: Option<Value>,
     #[serde(default)]
+    inline_chart: Option<Value>,
+    #[serde(default)]
     is_insertion: Option<bool>,
     #[serde(default)]
     is_deletion: Option<bool>,
@@ -2090,12 +2092,14 @@ pub(crate) struct ParaBordersIn {
     bar: Option<BorderEdgeIn>,
 }
 
-#[derive(Deserialize, Default, Clone, PartialEq)]
+#[derive(Deserialize, Default, Clone, PartialEq, Debug)]
 struct BorderEdgeIn {
     #[serde(default)]
     color: Option<String>,
     #[serde(default)]
     style: Option<String>,
+    #[serde(rename = "ooxmlStyle", default)]
+    ooxml_style: Option<String>,
     #[serde(default)]
     width: Option<f64>,
     #[serde(default)]
@@ -3891,19 +3895,15 @@ fn stamp_hyperlink_attrs(
     }
 }
 
-fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64) {
+fn stamp_image_run_metadata(
+    attrs: &mut DocAttrs,
+    run: &ImageRunIn,
+    logical_order: Option<u64>,
+    bidi_level: Option<u8>,
+) {
     stamp_hyperlink_attrs(attrs, run.hyperlink.as_ref(), run.hlink_href.as_deref());
-    attrs.image_flip_h = (run.flip_h == Some(true)
-        || transform_has_flip(run.transform.as_deref(), 'x'))
-    .then_some(true);
-    attrs.image_flip_v = (run.flip_v == Some(true)
-        || transform_has_flip(run.transform.as_deref(), 'y'))
-    .then_some(true);
-    attrs.content_frame =
-        content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref()).map(Box::new);
-    attrs.image_shape_type = run.shape_type.clone();
-    attrs.effects = run.effects.clone();
-    attrs.border = run.outline.clone().map(Box::new);
+    attrs.logical_order = attrs.logical_order.or(logical_order);
+    attrs.bidi_level = attrs.bidi_level.or(bidi_level);
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
         attrs.revision = Some(Box::new(Revision {
             author: run.change_author.clone().unwrap_or_default(),
@@ -3919,6 +3919,21 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
             },
         }));
     }
+}
+
+fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64) {
+    stamp_image_run_metadata(attrs, run, None, None);
+    attrs.image_flip_h = (run.flip_h == Some(true)
+        || transform_has_flip(run.transform.as_deref(), 'x'))
+    .then_some(true);
+    attrs.image_flip_v = (run.flip_v == Some(true)
+        || transform_has_flip(run.transform.as_deref(), 'y'))
+    .then_some(true);
+    attrs.content_frame =
+        content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref()).map(Box::new);
+    attrs.image_shape_type = run.shape_type.clone();
+    attrs.effects = run.effects.clone();
+    attrs.border = run.outline.clone().map(Box::new);
 }
 
 fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y: f64) {
@@ -6662,29 +6677,47 @@ fn emit_line(
                     for primitive in &mut prims[stamp_from..] {
                         if let Some(attrs) = doc_attrs_mut(primitive) {
                             attrs.inline_shape_atom = Some(true);
-                            stamp_hyperlink_attrs(
+                            stamp_image_run_metadata(
                                 attrs,
-                                imr.hyperlink.as_ref(),
-                                imr.hlink_href.as_deref(),
+                                imr,
+                                *logical_order,
+                                logical_order.map(|_| *level),
                             );
-                            attrs.logical_order = attrs.logical_order.or(*logical_order);
-                            attrs.bidi_level =
-                                attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
-                            if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
-                                attrs.revision = Some(Box::new(Revision {
-                                    author: imr.change_author.clone().unwrap_or_default(),
-                                    date: imr.change_date.clone().unwrap_or_default(),
-                                    revision_id: imr
-                                        .change_revision_id
-                                        .map(|id| id.to_string())
-                                        .unwrap_or_default(),
-                                    kind: if imr.is_insertion == Some(true) {
-                                        RevisionKind::Ins
-                                    } else {
-                                        RevisionKind::Del
-                                    },
-                                }));
-                            }
+                        }
+                    }
+                    if imr.display_mode.as_deref() != Some("block")
+                        && imr.wrap_type.as_deref() != Some("topAndBottom")
+                    {
+                        pen_x += layout_width;
+                    }
+                    continue;
+                }
+                if let Some(inline_value) = imr.inline_chart.as_ref()
+                    && let Some(chart_block) = serde_json::to_string(inline_value)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<ChartBlockIn>(&s).ok())
+                {
+                    let stamp_from = prims.len();
+                    let fragment = ChartFragmentIn {
+                        block_id: chart_block.id.clone(),
+                        x: pen_x,
+                        y,
+                        width: layout_width,
+                        height: layout_height,
+                        doc_start: *pm_start,
+                        doc_end: *pm_end,
+                        pm_start: *pm_start,
+                        pm_end: *pm_end,
+                    };
+                    emit_chart_fragment(prims, &fragment, &chart_block);
+                    for primitive in &mut prims[stamp_from..] {
+                        if let Some(attrs) = doc_attrs_mut(primitive) {
+                            stamp_image_run_metadata(
+                                attrs,
+                                imr,
+                                *logical_order,
+                                logical_order.map(|_| *level),
+                            );
                         }
                     }
                     if imr.display_mode.as_deref() != Some("block")
@@ -7580,7 +7613,99 @@ fn field_metadata(f: &FieldRunIn) -> FieldMetadata {
 }
 
 fn border_visible(b: &BorderEdgeIn) -> bool {
-    !matches!(b.style.as_deref(), Some("none") | Some("nil")) && b.width != Some(0.0)
+    !matches!(b.style.as_deref(), Some("none") | Some("nil"))
+        && !matches!(b.ooxml_style.as_deref(), Some("none") | Some("nil"))
+        && b.width.unwrap_or(1.0) > 0.0
+}
+
+fn border_number(b: &BorderEdgeIn) -> u8 {
+    match b
+        .ooxml_style
+        .as_deref()
+        .or(b.style.as_deref())
+        .unwrap_or("single")
+    {
+        "single" | "solid" => 1,
+        "thick" => 2,
+        "double" => 3,
+        "dotted" => 4,
+        "dashed" => 5,
+        "dotDash" => 6,
+        "dotDotDash" => 7,
+        "triple" => 8,
+        "thinThickSmallGap" => 9,
+        "thickThinSmallGap" => 10,
+        "thinThickThinSmallGap" => 11,
+        "thinThickMediumGap" => 12,
+        "thickThinMediumGap" => 13,
+        "thinThickThinMediumGap" => 14,
+        "thinThickLargeGap" => 15,
+        "thickThinLargeGap" => 16,
+        "thinThickThinLargeGap" => 17,
+        "wave" => 18,
+        "doubleWave" => 19,
+        "dashSmallGap" => 20,
+        "dashDotStroked" => 21,
+        "threeDEmboss" | "ridge" => 22,
+        "threeDEngrave" | "groove" => 23,
+        "outset" => 24,
+        "inset" => 25,
+        _ => 1,
+    }
+}
+
+fn is_dot_dash_border(border_num: u8) -> bool {
+    matches!(border_num, 4..=7 | 20 | 21)
+}
+
+fn border_brightness_key(edge: &BorderEdgeIn) -> (u32, u32, u32) {
+    let (r, g, b) = edge
+        .color
+        .as_deref()
+        .map(|raw| raw.strip_prefix('#').unwrap_or(raw))
+        .filter(|hex| hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .and_then(|hex| {
+            Some((
+                u32::from(u8::from_str_radix(&hex[0..2], 16).ok()?),
+                u32::from(u8::from_str_radix(&hex[2..4], 16).ok()?),
+                u32::from(u8::from_str_radix(&hex[4..6], 16).ok()?),
+            ))
+        })
+        .unwrap_or((0, 0, 0));
+    (r + b + 2 * g, b + 2 * g, g)
+}
+
+/// Resolves a shared cell edge from both neighbours per ECMA-376 Part 1 §17.4.66.
+fn resolve_shared_border<'a>(
+    first: Option<&'a BorderEdgeIn>,
+    second: Option<&'a BorderEdgeIn>,
+) -> Option<&'a BorderEdgeIn> {
+    let first = first.filter(|edge| border_visible(edge));
+    let second = second.filter(|edge| border_visible(edge));
+    let (Some(a), Some(b)) = (first, second) else {
+        return first.or(second);
+    };
+    let num_a = border_number(a);
+    let num_b = border_number(b);
+    let weight_a = a.width.unwrap_or(1.0) * f64::from(num_a);
+    let weight_b = b.width.unwrap_or(1.0) * f64::from(num_b);
+    if (weight_a - weight_b).abs() > 1e-9 {
+        return if weight_a > weight_b {
+            Some(a)
+        } else {
+            Some(b)
+        };
+    }
+    let rank_a = (!is_dot_dash_border(num_a), num_a);
+    let rank_b = (!is_dot_dash_border(num_b), num_b);
+    if rank_a != rank_b {
+        return if rank_a > rank_b { Some(a) } else { Some(b) };
+    }
+    if border_brightness_key(b) < border_brightness_key(a) {
+        Some(b)
+    } else {
+        Some(a)
+    }
 }
 
 fn display_border_style(style: Option<&str>) -> DisplayBorderStyle {
@@ -9213,6 +9338,9 @@ struct CellPaint {
 struct TablePaintPlan {
     row_tops: Vec<f64>,
     grid: Vec<GridCell>,
+    row_count: usize,
+    col_count: usize,
+    cell_at: Vec<Option<usize>>,
     carried: bool,
     header_row_count: usize,
     semantic_header_count: usize,
@@ -9231,6 +9359,21 @@ impl TablePaintPlan {
     fn new(frag: &TableFragmentIn, block: &TableBlockIn, measure: &TableExtentIn) -> Self {
         let row_tops = row_y_positions(&measure.rows);
         let grid = compute_cell_grid(block, &measure.column_widths);
+        let row_count = block.rows.len();
+        let col_count = grid
+            .iter()
+            .map(|g| g.column_index + g.col_span)
+            .max()
+            .unwrap_or(0)
+            .max(measure.column_widths.len());
+        let mut cell_at = vec![None; row_count * col_count];
+        for (grid_index, g) in grid.iter().enumerate() {
+            for r in g.row_index..(g.row_index + g.row_span).min(row_count) {
+                for c in g.column_index..(g.column_index + g.col_span).min(col_count) {
+                    cell_at[r * col_count + c] = Some(grid_index);
+                }
+            }
+        }
         let full_bottom_border = frag.row_end == block.rows.len()
             && frag.clip_bottom.is_none()
             && frag.carried_to_next != Some(true)
@@ -9380,6 +9523,9 @@ impl TablePaintPlan {
         Self {
             row_tops,
             grid,
+            row_count,
+            col_count,
+            cell_at,
             carried,
             header_row_count,
             semantic_header_count,
@@ -9391,6 +9537,46 @@ impl TablePaintPlan {
             visible,
             paints,
         }
+    }
+
+    fn cell_at(&self, row: usize, col: usize) -> Option<&GridCell> {
+        if row >= self.row_count || col >= self.col_count {
+            return None;
+        }
+        let idx = self.cell_at[row * self.col_count + col]?;
+        Some(&self.grid[idx])
+    }
+
+    fn cell_starting_at(&self, row: usize, col: usize) -> Option<&GridCell> {
+        self.cell_at(row, col).filter(|g| g.row_index == row)
+    }
+
+    fn right_neighbour(&self, g: &GridCell, row: usize, bidi: bool) -> Option<&GridCell> {
+        let right_col = if bidi {
+            g.column_index.checked_sub(1)?
+        } else {
+            g.column_index + g.col_span
+        };
+        let ng = self.cell_at(row, right_col)?;
+        ((ng.x - (g.x + g.width)).abs() < 1e-4).then_some(ng)
+    }
+
+    /// The grid row this fragment paints directly below `g`: the next row in the same band, or
+    /// the first body row under a repeated header band.
+    fn row_painted_below(&self, g: &GridCell, frag: &TableFragmentIn) -> Option<usize> {
+        let below_row = g.row_index + g.row_span;
+        let body_end = frag.row_end.min(self.row_count);
+        if g.row_index < self.header_row_count {
+            if below_row < self.header_row_count {
+                return Some(below_row);
+            }
+            return (below_row == self.header_row_count
+                && frag.row_start >= self.header_row_count
+                && frag.row_start < body_end
+                && frag.clip_top.unwrap_or(0.0) == 0.0)
+                .then_some(frag.row_start);
+        }
+        (below_row >= frag.row_start && below_row < body_end).then_some(below_row)
     }
 
     /// The top of the band a cell clips to: header rows paint above the window.
@@ -9645,75 +9831,197 @@ pub(crate) fn emit_table_fragment(
             }
         }
 
-        if let Some(borders) = &cell.borders {
-            // shared-edge collapse: every cell owns bottom and right; top and
-            // left draw only on the table's outer boundary
-            let mut push_edge = |x1: f64, y1: f64, x2: f64, y2: f64, e: &BorderEdgeIn| {
-                if !border_visible(e) {
-                    return;
-                }
-                // clip vertically to the window band
-                let (y1c, y2c) = (y1.max(clip_top_y), y2.min(clip_bottom_y));
-                if y1 != y2 && y2c - y1c <= 0.0 {
-                    return;
-                }
-                if y1 == y2 && (y1 < clip_top_y || y1 > clip_bottom_y) {
-                    return;
-                }
-                let style = display_border_style(e.style.as_deref());
-                let width = e.width.unwrap_or(1.0);
-                // explicit ownership: the owning grid cell rides on the line so
-                // consumers associate borders exactly (no geometric fallback)
-                let line_attrs = DocAttrs {
-                    cell: Some(Box::new(cell_ref.clone())),
-                    ..DocAttrs::default()
-                };
-                prims.push(Primitive::Line(LinePrimitive {
-                    x1: px(x1),
-                    y1: px(if y1 == y2 { y1 } else { y1c }),
-                    x2: px(x2),
-                    y2: px(if y1 == y2 { y2 } else { y2c }),
-                    stroke_width: px(width),
-                    color: e.color.clone().unwrap_or_else(|| "#000000".to_string()),
-                    dash: border_dash(style, width),
-                    role: Some(LineRole::TableBorder),
-                    border_style: Some(style),
-                    border_owner: Some(BorderOwner::Cell),
-                    attrs: line_attrs,
-                    ..LinePrimitive::contract_defaults()
-                }));
-            };
-            if p.is_first_row
-                && let Some(e) = &borders.top
-            {
-                let starts_table = if carried {
-                    plan.header_row_count > 0
-                } else {
-                    frag.clip_top.unwrap_or(0.0) == 0.0
-                };
-                let inset = if p.g.row_index == 0 && starts_table {
-                    e.width.unwrap_or(1.0) / 2.0
-                } else {
-                    0.0
-                };
-                push_edge(cx, cy + inset, cx + p.g.width, cy + inset, e);
+        // shared-edge collapse: every cell owns bottom and right, resolved against
+        // the neighbour's facing edge; top and left draw only on the outer boundary
+        let borders = cell.borders.as_ref();
+        let bidi = block.bidi == Some(true);
+        let mut push_edge = |x1: f64, y1: f64, x2: f64, y2: f64, e: &BorderEdgeIn| {
+            if !border_visible(e) {
+                return;
             }
-            if let Some(e) = &borders.right {
+            // clip vertically to the window band
+            let (y1c, y2c) = (y1.max(clip_top_y), y2.min(clip_bottom_y));
+            if y1 != y2 && y2c - y1c <= 0.0 {
+                return;
+            }
+            if y1 == y2 && (y1 < clip_top_y || y1 > clip_bottom_y) {
+                return;
+            }
+            let style = display_border_style(e.style.as_deref());
+            let width = e.width.unwrap_or(1.0);
+            // explicit ownership: the owning grid cell rides on the line so
+            // consumers associate borders exactly (no geometric fallback)
+            let line_attrs = DocAttrs {
+                cell: Some(Box::new(cell_ref.clone())),
+                ..DocAttrs::default()
+            };
+            prims.push(Primitive::Line(LinePrimitive {
+                x1: px(x1),
+                y1: px(if y1 == y2 { y1 } else { y1c }),
+                x2: px(x2),
+                y2: px(if y1 == y2 { y2 } else { y2c }),
+                stroke_width: px(width),
+                color: e.color.clone().unwrap_or_else(|| "#000000".to_string()),
+                dash: border_dash(style, width),
+                role: Some(LineRole::TableBorder),
+                border_style: Some(style),
+                border_owner: Some(BorderOwner::Cell),
+                attrs: line_attrs,
+                ..LinePrimitive::contract_defaults()
+            }));
+        };
+        if p.is_first_row
+            && let Some(e) = borders.and_then(|b| b.top.as_ref())
+        {
+            let starts_table = if carried {
+                plan.header_row_count > 0
+            } else {
+                frag.clip_top.unwrap_or(0.0) == 0.0
+            };
+            let inset = if p.g.row_index == 0 && starts_table {
+                e.width.unwrap_or(1.0) / 2.0
+            } else {
+                0.0
+            };
+            push_edge(cx, cy + inset, cx + p.g.width, cy + inset, e);
+        }
+        let own_right = borders.and_then(|b| b.right.as_ref());
+        let span_end_row = (p.g.row_index + p.g.row_span).min(block.rows.len());
+        if p.g.row_span <= 1 || span_end_row <= p.g.row_index + 1 {
+            let neighbour_left = plan
+                .right_neighbour(p.g, p.g.row_index, bidi)
+                .and_then(|ng| {
+                    block.rows[ng.row_index].cells[ng.cell_index]
+                        .borders
+                        .as_ref()
+                })
+                .and_then(|b| b.left.as_ref());
+            if let Some(e) = resolve_shared_border(own_right, neighbour_left) {
                 push_edge(cx + p.g.width, cy, cx + p.g.width, cy + p.cell_h, e);
             }
-            if let Some(e) = &borders.bottom {
-                let y = if plan.full_bottom_border
-                    && p.g.row_index + p.g.row_span >= block.rows.len()
-                {
-                    frag.y + frag.height - e.width.unwrap_or(1.0) / 2.0
+        } else {
+            let base_top = row_tops.get(p.g.row_index).copied().unwrap_or(0.0);
+            let mut run_start_row = p.g.row_index;
+            let first_left = plan
+                .right_neighbour(p.g, p.g.row_index, bidi)
+                .and_then(|ng| {
+                    block.rows[ng.row_index].cells[ng.cell_index]
+                        .borders
+                        .as_ref()
+                })
+                .and_then(|b| b.left.as_ref());
+            let mut run_resolved = resolve_shared_border(own_right, first_left);
+            let mut uniform = true;
+            for r in (p.g.row_index + 1)..span_end_row {
+                let next_left = plan
+                    .right_neighbour(p.g, r, bidi)
+                    .and_then(|ng| {
+                        block.rows[ng.row_index].cells[ng.cell_index]
+                            .borders
+                            .as_ref()
+                    })
+                    .and_then(|b| b.left.as_ref());
+                let next_resolved = resolve_shared_border(own_right, next_left);
+                if !borders_edge_equal(run_resolved, next_resolved) {
+                    uniform = false;
+                    if let Some(e) = run_resolved {
+                        let y1 = cy
+                            + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top);
+                        let y2 = cy + (row_tops.get(r).copied().unwrap_or(base_top) - base_top);
+                        push_edge(cx + p.g.width, y1, cx + p.g.width, y2, e);
+                    }
+                    run_start_row = r;
+                    run_resolved = next_resolved;
+                }
+            }
+            if let Some(e) = run_resolved {
+                let y1 = if uniform {
+                    cy
                 } else {
-                    cy + p.cell_h
+                    cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top)
                 };
+                push_edge(cx + p.g.width, y1, cx + p.g.width, cy + p.cell_h, e);
+            }
+        }
+        let own_bottom = borders.and_then(|b| b.bottom.as_ref());
+        let bottom_y = |e: &BorderEdgeIn| {
+            if plan.full_bottom_border && p.g.row_index + p.g.row_span >= block.rows.len() {
+                frag.y + frag.height - e.width.unwrap_or(1.0) / 2.0
+            } else {
+                cy + p.cell_h
+            }
+        };
+        let below_row = plan.row_painted_below(p.g, frag);
+        if below_row.is_none() {
+            if let Some(e) = own_bottom {
+                let y = bottom_y(e);
                 push_edge(cx, y, cx + p.g.width, y, e);
             }
-            if is_first_col && let Some(e) = &borders.left {
-                push_edge(cx, cy, cx, cy + p.cell_h, e);
+        } else if p.g.col_span <= 1 {
+            let neighbour_top = below_row
+                .and_then(|row| plan.cell_starting_at(row, p.g.column_index))
+                .and_then(|ng| {
+                    block.rows[ng.row_index].cells[ng.cell_index]
+                        .borders
+                        .as_ref()
+                })
+                .and_then(|b| b.top.as_ref());
+            if let Some(e) = resolve_shared_border(own_bottom, neighbour_top) {
+                let y = bottom_y(e);
+                push_edge(cx, y, cx + p.g.width, y, e);
             }
+        } else {
+            let col_at = |offset: usize| {
+                if bidi {
+                    p.g.column_index + p.g.col_span - 1 - offset
+                } else {
+                    p.g.column_index + offset
+                }
+            };
+            let col_width = |col: usize| measure.column_widths.get(col).copied().unwrap_or(0.0);
+            let first_col = col_at(0);
+            let first_top = below_row
+                .and_then(|row| plan.cell_starting_at(row, first_col))
+                .and_then(|ng| {
+                    block.rows[ng.row_index].cells[ng.cell_index]
+                        .borders
+                        .as_ref()
+                })
+                .and_then(|b| b.top.as_ref());
+            let mut run_resolved = resolve_shared_border(own_bottom, first_top);
+            let mut run_x1 = cx;
+            let mut cursor_x = cx + col_width(first_col);
+            let mut uniform = true;
+            for offset in 1..p.g.col_span {
+                let c = col_at(offset);
+                let next_top = below_row
+                    .and_then(|row| plan.cell_starting_at(row, c))
+                    .and_then(|ng| {
+                        block.rows[ng.row_index].cells[ng.cell_index]
+                            .borders
+                            .as_ref()
+                    })
+                    .and_then(|b| b.top.as_ref());
+                let next_resolved = resolve_shared_border(own_bottom, next_top);
+                if !borders_edge_equal(run_resolved, next_resolved) {
+                    uniform = false;
+                    if let Some(e) = run_resolved {
+                        let y = bottom_y(e);
+                        push_edge(run_x1, y, cursor_x, y, e);
+                    }
+                    run_x1 = cursor_x;
+                    run_resolved = next_resolved;
+                }
+                cursor_x += col_width(c);
+            }
+            if let Some(e) = run_resolved {
+                let y = bottom_y(e);
+                let x2 = if uniform { cx + p.g.width } else { cursor_x };
+                push_edge(run_x1, y, x2, y, e);
+            }
+        }
+        if is_first_col && let Some(e) = borders.and_then(|b| b.left.as_ref()) {
+            push_edge(cx, cy, cx, cy + p.cell_h, e);
         }
 
         let content_stamp_from = prims.len();
@@ -9764,12 +10072,14 @@ pub(crate) fn emit_table_fragment(
             cell_clip_bottom
         };
         if let Some((frame, cell_measure)) = content_frame {
+            let content_cuts = frame.content_cuts(frag, g);
             emit_cell_content(
                 prims,
                 cell,
                 cell_measure,
                 frame,
                 windowed_lines.then_some((line_clip_top, line_clip_bottom)),
+                content_cuts.0 || content_cuts.1,
                 ctx,
                 p.selectable,
                 &cell_ref,
@@ -9914,6 +10224,47 @@ struct CellContentFrame {
     clip_bottom_y: f64,
     /// Index-aligned with the cell's blocks.
     block_tops: Vec<f64>,
+}
+
+impl CellContentFrame {
+    fn content_cuts(&self, frag: &TableFragmentIn, g: &GridCell) -> (bool, bool) {
+        let starts_before = g.row_index < frag.row_start
+            || (g.row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) > 0.0);
+        let ends_after = g.row_index + g.row_span > frag.row_end
+            || (g.row_index + g.row_span == frag.row_end && frag.clip_bottom.is_some());
+        (
+            starts_before && self.content_top < self.clip_top_y - 1e-6,
+            ends_after && self.content_end > self.clip_bottom_y + 1e-6,
+        )
+    }
+
+    fn shows_anchor(
+        &self,
+        cell: &TableCellIn,
+        measure: &TableCellExtentIn,
+        index: usize,
+        split_row: bool,
+    ) -> bool {
+        if !split_row {
+            return true;
+        }
+        let anchor = (index..cell.blocks.len())
+            .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
+            .or_else(|| {
+                (0..index)
+                    .rev()
+                    .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
+            })
+            .unwrap_or(index);
+        let y = self.content_top + self.block_tops[anchor];
+        match measure.blocks.get(anchor) {
+            Some(MeasureIn::Paragraph(paragraph)) => {
+                shown_line_window(paragraph, y, self.clip_top_y, self.clip_bottom_y)
+                    .is_some_and(|(lines, _)| lines.start == 0)
+            }
+            _ => y >= self.clip_top_y && y < self.clip_bottom_y,
+        }
+    }
 }
 
 /// Stacks a cell's paragraphs and nested tables with Word's spacing collapse.
@@ -10089,6 +10440,7 @@ fn emit_cell_content(
     cell_measure: &TableCellExtentIn,
     frame: CellContentFrame,
     line_clip: Option<(f64, f64)>,
+    split_row: bool,
     ctx: &RenderCtx<'_>,
     selectable: bool,
     cell_ref: &TableCellRef,
@@ -10103,7 +10455,7 @@ fn emit_cell_content(
         content_width,
         clip_top_y,
         clip_bottom_y,
-        block_tops,
+        ref block_tops,
         ..
     } = frame;
     let rotated = rotation != 0.0;
@@ -10116,11 +10468,8 @@ fn emit_cell_content(
         cell,
         cell_measure,
         block_ref,
-        content_x,
-        content_top,
-        content_width,
-        clip_top_y,
-        clip_bottom_y,
+        &frame,
+        split_row,
         cell_ref,
         selectable,
         true,
@@ -10130,6 +10479,15 @@ fn emit_cell_content(
         let Some(m) = cell_measure.blocks.get(i) else {
             continue;
         };
+        if let BlockIn::Shape(shape) = cell_block
+            && crate::cell_layout::cell_overlay_drawing(
+                shape.position.is_some(),
+                shape.wrap_type.as_deref(),
+            )
+            && !frame.shows_anchor(cell, cell_measure, i, split_row)
+        {
+            continue;
+        }
         if windowed_lines && !matches!(cell_block, BlockIn::Paragraph(_)) {
             let height = match m {
                 MeasureIn::Table(table) => table.total_height,
@@ -10358,11 +10716,8 @@ fn emit_cell_content(
         cell,
         cell_measure,
         block_ref,
-        content_x,
-        content_top,
-        content_width,
-        clip_top_y,
-        clip_bottom_y,
+        &frame,
+        split_row,
         cell_ref,
         selectable,
         false,
@@ -10582,9 +10937,8 @@ fn resolve_cell_float_position(
 /// Emits a cell's floating image runs, `want_behind` choosing the layer painted
 /// under the cell content or the one over it.
 ///
-/// The anchoring `paragraph_y` accumulates the cell's measured block heights
-/// with no spacing collapse. Each image clips to the fragment window, carries
-/// the cell's grid reference, and keeps its document positions only on a
+/// Each image clips to the fragment window, carries the cell's grid reference,
+/// and keeps its document positions only on a
 /// selectable slice — a vertical-merge continuation is a re-paint and carries
 /// none.
 #[allow(clippy::too_many_arguments)]
@@ -10593,11 +10947,8 @@ fn emit_cell_floating_images(
     cell: &TableCellIn,
     cell_measure: &TableCellExtentIn,
     block_ref: &BlockRef,
-    content_x: f64,
-    content_top: f64,
-    content_width: f64,
-    clip_top_y: f64,
-    clip_bottom_y: f64,
+    frame: &CellContentFrame,
+    split_row: bool,
     cell_ref: &TableCellRef,
     selectable: bool,
     want_behind: bool,
@@ -10615,16 +10966,28 @@ fn emit_cell_floating_images(
         };
         for run in &pb.runs {
             let RunIn::Image(imr) = run else { continue };
-            if !is_floating_image_run(imr) {
+            let split_anchor = split_row
+                && crate::cell_layout::cell_overlay_drawing(
+                    imr.position.is_some(),
+                    imr.wrap_type.as_deref(),
+                );
+            if !is_floating_image_run(imr)
+                || !frame.shows_anchor(cell, cell_measure, i, split_anchor)
+            {
                 continue;
             }
             let is_behind = imr.wrap_type.as_deref() == Some("behind");
             if is_behind != want_behind {
                 continue;
             }
-            let (x, y) = resolve_cell_float_position(imr, paragraph_y, content_width);
-            let page_x = content_x + x;
-            let page_y = content_top + y;
+            let anchor_y = if split_anchor {
+                frame.block_tops[i]
+            } else {
+                paragraph_y
+            };
+            let (x, y) = resolve_cell_float_position(imr, anchor_y, frame.content_width);
+            let page_x = frame.content_x + x;
+            let page_y = frame.content_top + y;
             let rot = imr
                 .rotation_deg
                 .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
@@ -10654,7 +11017,7 @@ fn emit_cell_floating_images(
             });
             // Clip to the fragment window.
             let (top, bottom) = primitive_v_extent(&prim);
-            if bottom < clip_top_y || top > clip_bottom_y {
+            if bottom < frame.clip_top_y || top > frame.clip_bottom_y {
                 continue;
             }
             prims.push(prim);
@@ -15023,6 +15386,71 @@ mod tests {
         assert!(child.get("docEnd").is_none());
     }
 
+    #[test]
+    fn inline_chart_preserves_run_attributes() {
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph", "id": "inline-para", "pmStart": 0, "pmEnd": 3,
+                    "runs": [{
+                        "kind": "image", "width": 192, "height": 96,
+                        "pmStart": 1, "pmEnd": 2,
+                        "hyperlink": {"href": "https://example.com", "tooltip": "Sales link"},
+                        "isInsertion": true, "changeAuthor": "Ada",
+                        "changeDate": "2026-01-01", "changeRevisionId": 9,
+                        "inlineChart": {
+                            "id": "chart:inline", "width": 192, "height": 96,
+                            "chart": {"chartType": "column", "title": "Sales", "series": [{
+                                "name": "North", "categories": ["Q1"], "values": [2.0]
+                            }]}
+                        }
+                    }]
+                },
+                "measure": {
+                    "kind": "paragraph", "totalHeight": 96,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                        "width": 192, "ascent": 96, "descent": 0, "lineHeight": 96,
+                        "bidiSlices": [{
+                            "runIndex": 0, "startChar": 0, "endChar": 1,
+                            "advance": 192, "bidiLevel": 1, "visualOrder": 0, "logicalOrder": 7
+                        }]
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {"pages": [{
+                "number": 1, "size": {"w": 400, "h": 400},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20},
+                "fragments": [{
+                    "kind": "paragraph", "blockId": "inline-para", "x": 20, "y": 20,
+                    "width": 360, "height": 96, "fromLine": 0, "toLine": 1,
+                    "pmStart": 0, "pmEnd": 3
+                }]
+            }]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let charts: Vec<_> = output["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|primitive| !primitive["chart"].is_null())
+            .collect();
+        assert!(!charts.is_empty());
+        for primitive in charts {
+            assert_eq!(primitive["href"], "https://example.com");
+            assert_eq!(primitive["tooltip"], "Sales link");
+            assert_eq!(primitive["logicalOrder"], 7);
+            assert_eq!(primitive["bidiLevel"], 1);
+            assert_eq!(primitive["revision"]["kind"], "ins");
+            assert_eq!(primitive["revision"]["author"], "Ada");
+            assert_eq!(primitive["revision"]["date"], "2026-01-01");
+            assert_eq!(primitive["revision"]["revisionId"], "9");
+        }
+    }
+
     /// A body paragraph followed by a three-category column chart.
     fn charted_page(values: Value) -> (crate::types::Input, crate::types::Layout) {
         let mut pagination: crate::types::Input = serde_json::from_value(serde_json::json!({
@@ -15239,6 +15667,361 @@ mod tests {
                 .map(|entry| (entry.block.as_str(), entry.page))
                 .collect::<Vec<_>>(),
             [("intro", Some(0))]
+        );
+    }
+
+    #[test]
+    fn shared_border_resolver_matches_word_conflict_and_equal_weight_rules() {
+        let edge = |ooxml: &str, sz: u32, color: &str| BorderEdgeIn {
+            color: Some(format!("#{color}")),
+            style: Some(
+                match ooxml {
+                    "double" | "triple" | "thinThickSmallGap" => "double",
+                    "dotted" => "dotted",
+                    "dashed" => "dashed",
+                    "nil" | "none" => "none",
+                    _ => "solid",
+                }
+                .to_string(),
+            ),
+            ooxml_style: Some(ooxml.to_string()),
+            width: Some(f64::from(sz) / 6.0),
+            space: None,
+        };
+        let (red, blue, gray, black) = ("FF0000", "0000FF", "808080", "000000");
+        let cases: &[((&str, u32, &str), (&str, u32, &str), bool)] = &[
+            (("single", 4, red), ("single", 24, blue), false),
+            (("double", 4, red), ("single", 8, blue), true),
+            (("single", 12, gray), ("single", 12, black), false),
+            (("single", 24, red), ("single", 4, blue), true),
+            (("single", 12, red), ("double", 4, blue), false),
+            (("double", 4, red), ("single", 12, blue), true),
+            (("dotted", 6, red), ("double", 8, blue), false),
+            (("dotted", 3, red), ("single", 12, blue), false),
+            (("single", 12, red), ("dotted", 3, blue), true),
+            (("dashed", 6, red), ("double", 10, blue), false),
+            (("dotted", 6, red), ("thick", 12, blue), false),
+            (("thick", 6, red), ("single", 12, blue), true),
+            (("triple", 3, red), ("double", 8, blue), true),
+            (("thinThickSmallGap", 4, red), ("double", 12, blue), true),
+            (("dashed", 4, red), ("dotted", 5, blue), true),
+            (("single", 12, red), ("single", 12, blue), true),
+            (("nil", 0, black), ("single", 6, black), false),
+            (("single", 6, black), ("nil", 0, black), true),
+        ];
+        for &(left, right, left_wins) in cases {
+            let l = edge(left.0, left.1, left.2);
+            let r = edge(right.0, right.1, right.2);
+            let expected = if left_wins { &l } else { &r };
+            let resolved = resolve_shared_border(Some(&l), Some(&r)).expect("visible winner");
+            assert_eq!(resolved, expected, "{left:?} vs {right:?}");
+        }
+        let odd = BorderEdgeIn {
+            color: Some("#\u{20ac}\u{20ac}".to_string()),
+            ..edge("single", 12, black)
+        };
+        assert!(resolve_shared_border(Some(&odd), Some(&odd)).is_some());
+        let nil = edge("nil", 0, black);
+        assert!(resolve_shared_border(Some(&nil), None).is_none());
+        assert!(resolve_shared_border(None, Some(&nil)).is_none());
+    }
+
+    #[test]
+    fn group_pictures_emit_composed_shape_primitives() {
+        let rect_path = serde_json::json!([
+            {"type": "move", "x": 0.0, "y": 0.0},
+            {"type": "line", "x": 1.0, "y": 0.0},
+            {"type": "line", "x": 1.0, "y": 1.0},
+            {"type": "line", "x": 0.0, "y": 1.0},
+            {"type": "close"}
+        ]);
+        let input = serde_json::json!({
+            "measured": [
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-flat",
+                        "shapeType": "rect",
+                        "width": 200.0,
+                        "height": 100.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-flat:child:0",
+                                "shapeType": "rect",
+                                "x": 20.0,
+                                "y": 10.0,
+                                "width": 60.0,
+                                "height": 30.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "picture",
+                                    "pictureSrc": "media:0",
+                                    "pictureRelId": "rIdPic",
+                                    "pictureFillMode": "stretch"
+                                }
+                            },
+                            {
+                                "id": "group-flat:child:1",
+                                "shapeType": "rect",
+                                "x": 100.0,
+                                "y": 20.0,
+                                "width": 40.0,
+                                "height": 20.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "solid",
+                                    "color": "#336699"
+                                }
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 200.0, "height": 100.0}
+                },
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-nested",
+                        "shapeType": "rect",
+                        "width": 400.0,
+                        "height": 200.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-nested:child:0",
+                                "shapeType": "rect",
+                                "x": 40.0,
+                                "y": 20.0,
+                                "width": 200.0,
+                                "height": 100.0,
+                                "geometryPath": rect_path,
+                                "children": [
+                                    {
+                                        "id": "group-nested:child:0:child:0",
+                                        "shapeType": "rect",
+                                        "x": 20.0,
+                                        "y": 20.0,
+                                        "width": 40.0,
+                                        "height": 20.0,
+                                        "geometryPath": rect_path,
+                                        "fill": {
+                                            "type": "picture",
+                                            "pictureSrc": "media:1",
+                                            "pictureRelId": "rIdNested"
+                                        }
+                                    },
+                                    {
+                                        "id": "group-nested:child:0:child:1",
+                                        "shapeType": "rect",
+                                        "x": 80.0,
+                                        "y": 40.0,
+                                        "width": 20.0,
+                                        "height": 10.0,
+                                        "geometryPath": rect_path,
+                                        "fill": {
+                                            "type": "solid",
+                                            "color": "#112233"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 400.0, "height": 200.0}
+                },
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-crop-rot",
+                        "shapeType": "rect",
+                        "width": 200.0,
+                        "height": 100.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-crop-rot:child:0",
+                                "shapeType": "rect",
+                                "x": 20.0,
+                                "y": 10.0,
+                                "width": 80.0,
+                                "height": 40.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "picture",
+                                    "pictureSrc": "media:2",
+                                    "pictureRelId": "rIdCrop",
+                                    "pictureSrcRect": {
+                                        "left": 0.1,
+                                        "top": 0.2,
+                                        "right": 0.15,
+                                        "bottom": 0.25
+                                    }
+                                },
+                                "transform": {
+                                    "rotation": 90.0,
+                                    "flipH": true,
+                                    "flipV": true
+                                }
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 200.0, "height": 100.0}
+                },
+                {
+                    "block": {
+                        "kind": "shape",
+                        "id": "group-missing-media",
+                        "shapeType": "rect",
+                        "width": 100.0,
+                        "height": 50.0,
+                        "geometryPath": rect_path,
+                        "children": [
+                            {
+                                "id": "group-missing-media:child:0",
+                                "shapeType": "rect",
+                                "x": 10.0,
+                                "y": 10.0,
+                                "width": 20.0,
+                                "height": 10.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "picture",
+                                    "pictureRelId": "rIdMissing"
+                                }
+                            },
+                            {
+                                "id": "group-missing-media:child:1",
+                                "shapeType": "rect",
+                                "x": 40.0,
+                                "y": 10.0,
+                                "width": 20.0,
+                                "height": 10.0,
+                                "geometryPath": rect_path,
+                                "fill": {
+                                    "type": "solid",
+                                    "color": "#aa0000"
+                                }
+                            }
+                        ]
+                    },
+                    "measure": {"kind": "shape", "width": 100.0, "height": 50.0}
+                }
+            ],
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "size": {"w": 800, "h": 1000},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                    "fragments": [
+                        {"kind": "shape", "blockId": "group-flat", "x": 96.0, "y": 96.0, "width": 200.0, "height": 100.0},
+                        {"kind": "shape", "blockId": "group-nested", "x": 96.0, "y": 220.0, "width": 400.0, "height": 200.0},
+                        {"kind": "shape", "blockId": "group-crop-rot", "x": 96.0, "y": 450.0, "width": 200.0, "height": 100.0},
+                        {"kind": "shape", "blockId": "group-missing-media", "x": 96.0, "y": 580.0, "width": 100.0, "height": 50.0}
+                    ]
+                }]
+            }
+        });
+
+        let list = build_display_list_value_with_fonts(
+            &input.to_string(),
+            &ooxml_text::FontStore::default(),
+        )
+        .expect("display list builds");
+        let page = serde_json::to_value(&list.pages[0]).unwrap();
+        let primitives = page["primitives"].as_array().expect("primitives");
+        let by_id = |id: &str| -> &Value {
+            primitives
+                .iter()
+                .find(|prim| prim["kind"] == "shape" && prim["blockKey"] == id)
+                .unwrap_or_else(|| panic!("missing shape primitive {id}"))
+        };
+
+        let flat_pic = by_id("group-flat:child:0");
+        assert_eq!(flat_pic["x"], serde_json::json!(116));
+        assert_eq!(flat_pic["y"], serde_json::json!(106));
+        assert_eq!(flat_pic["w"], serde_json::json!(60));
+        assert_eq!(flat_pic["h"], serde_json::json!(30));
+        assert_eq!(flat_pic["fillPaint"]["kind"], "picture");
+        assert_eq!(flat_pic["fillPaint"]["pictureSrc"], "media:0");
+        assert_eq!(flat_pic["fillPaint"]["pictureRelId"], "rIdPic");
+        assert_eq!(flat_pic["fillPaint"]["pictureFillMode"], "stretch");
+
+        let flat_shape = by_id("group-flat:child:1");
+        assert_eq!(flat_shape["x"], serde_json::json!(196));
+        assert_eq!(flat_shape["y"], serde_json::json!(116));
+        assert_eq!(flat_shape["w"], serde_json::json!(40));
+        assert_eq!(flat_shape["h"], serde_json::json!(20));
+        assert_eq!(flat_shape["fill"], "#336699");
+
+        let nested_pic = by_id("group-nested:child:0:child:0");
+        assert_eq!(nested_pic["x"], serde_json::json!(156));
+        assert_eq!(nested_pic["y"], serde_json::json!(260));
+        assert_eq!(nested_pic["w"], serde_json::json!(40));
+        assert_eq!(nested_pic["h"], serde_json::json!(20));
+        assert_eq!(nested_pic["fillPaint"]["pictureSrc"], "media:1");
+
+        let nested_shape = by_id("group-nested:child:0:child:1");
+        assert_eq!(nested_shape["x"], serde_json::json!(216));
+        assert_eq!(nested_shape["y"], serde_json::json!(280));
+        assert_eq!(nested_shape["w"], serde_json::json!(20));
+        assert_eq!(nested_shape["h"], serde_json::json!(10));
+
+        let crop_rot = by_id("group-crop-rot:child:0");
+        assert_eq!(crop_rot["x"], serde_json::json!(116));
+        assert_eq!(crop_rot["y"], serde_json::json!(460));
+        assert_eq!(crop_rot["w"], serde_json::json!(80));
+        assert_eq!(crop_rot["h"], serde_json::json!(40));
+        assert_eq!(crop_rot["fillPaint"]["pictureSrc"], "media:2");
+        assert_eq!(
+            crop_rot["fillPaint"]["pictureSrcRect"],
+            serde_json::json!({"left": 0.1, "top": 0.2, "right": 0.15, "bottom": 0.25})
+        );
+        assert_eq!(
+            crop_rot["transform"],
+            serde_json::json!({"rotation": 90, "flipH": true, "flipV": true})
+        );
+
+        let missing_pic = by_id("group-missing-media:child:0");
+        assert_eq!(missing_pic["x"], serde_json::json!(106));
+        assert_eq!(missing_pic["y"], serde_json::json!(590));
+        assert_eq!(missing_pic["fillPaint"]["kind"], "picture");
+        assert_eq!(missing_pic["fillPaint"]["pictureRelId"], "rIdMissing");
+        assert!(missing_pic["fillPaint"].get("pictureSrc").is_none());
+
+        let surviving_sibling = by_id("group-missing-media:child:1");
+        assert_eq!(surviving_sibling["x"], serde_json::json!(136));
+        assert_eq!(surviving_sibling["y"], serde_json::json!(590));
+        assert_eq!(surviving_sibling["fill"], "#aa0000");
+    }
+    #[test]
+    fn nested_shape_offsets_remain_parent_relative() {
+        let input = serde_json::json!({
+            "measured": [{"block": {"kind": "shape", "id": "root", "shapeType": "rect",
+                "width": 100, "height": 100, "children": [{"id": "child", "shapeType": "rect",
+                    "x": 40, "y": 20, "width": 40, "height": 40,
+                    "children": [{"id": "grandchild", "shapeType": "rect", "x": 5, "y": 5,
+                        "width": 10, "height": 10}]}]},
+                "measure": {"kind": "shape", "width": 100, "height": 100}}],
+            "options": {}, "layout": {"pages": [{"size": {"w": 800, "h": 1000},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "fragments": [{"kind": "shape", "blockId": "root", "x": 100, "y": 100,
+                    "width": 100, "height": 100}]}]}
+        });
+        let list = build_display_list_value_with_fonts(
+            &input.to_string(),
+            &ooxml_text::FontStore::default(),
+        )
+        .unwrap();
+        let page = serde_json::to_value(&list.pages[0]).unwrap();
+        let child = page["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["blockKey"] == "grandchild")
+            .unwrap();
+        assert_eq!(
+            (child["x"].as_i64(), child["y"].as_i64()),
+            (Some(145), Some(125))
         );
     }
 }

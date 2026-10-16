@@ -146,6 +146,8 @@ test('navigation builds and reaches a paragraph on an unresident page', async ({
       paragraphs: Array.from({ length: 100 }, (_, index) => ({ text: `Paragraph ${index + 1} needs a later resident page.` })) }] });
   });
   expect(filled).toMatchObject({ ok: true, applied: true });
+  // Wait for the probe plugin's async document-change read to update its panel state.
+  await expect(page.getByTestId('probe-card')).toHaveAttribute('data-version', (filled as { version: string }).version);
   await page.getByTestId('probe-navigate').click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __probe: { navigation: unknown } }).__probe.navigation)).toEqual({ ok: true });
   await expect.poll(() => page.locator('.docx-editor__scroll-container').evaluate(element => element.scrollTop)).toBeGreaterThan(1000);

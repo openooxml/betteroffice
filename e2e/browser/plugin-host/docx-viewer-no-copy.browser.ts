@@ -1,4 +1,5 @@
 import { expect, test, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type { DocxLayoutMap, DocxPagedStructuredContent } from '../../../packages/docx/src/yrs/pagedExport';
 import type { DocxExportInline } from '../../../packages/docx/src/yrs/structuredExport';
 
@@ -105,7 +106,7 @@ async function open(page: Page, kind = 'readOnly', source?: 'bytes' | 'prop' | '
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.mainDocumentLoads().sessionsCaptured
   )).toBeGreaterThan(0);
-  await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.whenLayoutComplete());
+  await pinnedEvaluate(page, () => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.whenLayoutComplete());
   await expectNoCopy(page);
   return page.evaluate(() => (window as unknown as ViewerWindow).__wasmInstantiations);
 }
@@ -140,7 +141,7 @@ async function focusPages(page: Page) {
 }
 
 async function exportPages(page: Page) {
-  return page.evaluate(async () => {
+  return pinnedEvaluate(page, async () => {
     const result = await (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.exportStructuredWithPages({
       revisionView: 'markup', stories: ['body'],
     });
@@ -152,7 +153,7 @@ async function exportPages(page: Page) {
 }
 
 async function pageContents(page: Page) {
-  return page.evaluate(async () => {
+  return pinnedEvaluate(page, async () => {
     const result = await (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.exportStructuredWithPages({
       revisionView: 'markup', stories: ['body'],
     });
@@ -200,14 +201,14 @@ for (const kind of ['readOnly', 'viewing']) {
   test(`a ${kind} viewer keeps every main session empty across reads, proposals and idle gates`, async ({ page }) => {
     const wasm = await open(page, kind);
     await focusPages(page);
-    await page.evaluate(async () => {
+    await pinnedEvaluate(page, async () => {
       (window as unknown as ViewerWindow).__viewerSidebarsProbe.copies.length = 0;
       await navigator.clipboard.writeText('copy sentinel');
     });
     await page.keyboard.press('ControlOrMeta+A');
     await expect(page.locator('[data-testid^="selection-rect-"]').first()).toBeVisible();
     await page.keyboard.press('ControlOrMeta+C');
-    await expect.poll(() => page.evaluate(async () => {
+    await expect.poll(() => pinnedEvaluate(page, async () => {
       const copies = (window as unknown as ViewerWindow).__viewerSidebarsProbe.copies;
       const clipboard = await navigator.clipboard.readText();
       return clipboard.includes('Commented text') || copies.some((text) => text.includes('Commented text'));
@@ -220,7 +221,7 @@ for (const kind of ['readOnly', 'viewing']) {
     const input = dialog.locator('.docx-find-replace-dialog-input').first();
     await input.fill('Commented text');
     await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b1\b/);
-    await expect.poll(() => page.evaluate(() =>
+    await expect.poll(() => pinnedEvaluate(page, () =>
       (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.readSelectionInfo()
     )).toMatchObject({ selectedText: 'Commented text' });
     await input.press('Escape');
@@ -231,7 +232,7 @@ for (const kind of ['readOnly', 'viewing']) {
       (window as unknown as ViewerWindow).__viewerSidebarsProbe.sidebarOpen
     );
     if (!sidebarOpen) {
-      expect(await page.evaluate(() =>
+      expect(await pinnedEvaluate(page, () =>
         (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.commands.execute('commentsSidebar', null)
       )).toMatchObject({ ok: true });
     }
@@ -243,7 +244,7 @@ for (const kind of ['readOnly', 'viewing']) {
     await expectNoCopy(page, wasm);
 
     expect(await exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
-    expect(await page.evaluate(() =>
+    expect(await pinnedEvaluate(page, () =>
       (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.listContentControls()
     )).toMatchObject({ ok: true, content: { controls: [] } });
     const refused = await page.evaluate(() => {
@@ -263,7 +264,7 @@ for (const kind of ['readOnly', 'viewing']) {
     expect(refused).toEqual({ editorRef: null, paragraphStyle: false, errorName: 'DocxAsyncOnlyError' });
     await expectNoCopy(page, wasm);
 
-    const decisions = await page.evaluate(async () => {
+    const decisions = await pinnedEvaluate(page, async () => {
       const editor = (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!;
       const identities = await editor.getParagraphIdentities();
       const first = identities.paragraphs.find((entry) => entry.session?.story === 'body')!;
@@ -310,7 +311,7 @@ for (const kind of ['readOnly', 'viewing']) {
       },
     });
     await expectNoCopy(page, wasm);
-    const markup = await page.evaluate(async () => {
+    const markup = await pinnedEvaluate(page, async () => {
       const editor = (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!;
       const snapshot = await editor.getProposals();
       const result = await editor.setProposalStates({
@@ -340,7 +341,7 @@ for (const kind of ['readOnly', 'viewing']) {
     for (const key of ['ArrowRight', 'ArrowDown', 'Home', 'End', 'a', 'Backspace', 'Enter']) {
       await page.keyboard.press(key);
     }
-    await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.flushPendingInput());
+    await pinnedEvaluate(page, () => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.flushPendingInput());
     expect(await exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
     await expectNoCopy(page, wasm);
   });
@@ -350,7 +351,7 @@ test('viewer save loads no main document and returns a valid DOCX', async ({ pag
   await open(page);
   await page.waitForTimeout(7000);
   await expectNoCopy(page);
-  const saved = await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.saveForTest());
+  const saved = await pinnedEvaluate(page, () => (window as unknown as ViewerWindow).__viewerSidebarsProbe.saveForTest());
   expect(saved.before.sessionsCaptured).toBeGreaterThan(0);
   expect(saved.before.total).toBe(0);
   expect(saved.before.events).toEqual([]);
@@ -360,7 +361,7 @@ test('viewer save loads no main document and returns a valid DOCX', async ({ pag
   expect(saved.after.total).toBe(0);
   expect(saved.after.events).toEqual([]);
   expect(await exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
-  expect(await page.evaluate(() =>
+  expect(await pinnedEvaluate(page, () =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.listContentControls()
   )).toMatchObject({ ok: true });
   expect(await page.evaluate(() => {

@@ -463,7 +463,7 @@ export type ResidentEngineWorkerResponse = (
       commandError?: ReplyError;
       failureCode?: SessionFailureCode;
       /** @internal */
-      code?: 'save-unavailable';
+      code?: 'save-unavailable' | 'cut-kept';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;

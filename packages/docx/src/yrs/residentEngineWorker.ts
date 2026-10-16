@@ -1073,6 +1073,7 @@ let openedParsed = false;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
 class SaveUnavailableError extends Error {}
+class SourceCutKeptError extends Error {}
 let openedVersion: string | null | undefined;
 /** A change before the whole document's first frame leaves no frame as opened. */
 function noteDocumentChange(): void {
@@ -1333,6 +1334,7 @@ function replyFailure(id: number, error: unknown): void {
     ok: false,
     error: error instanceof Error ? error.message : String(error),
     ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
+    ...(failure instanceof SourceCutKeptError ? { code: 'cut-kept' as const } : {}),
   });
 }
 
@@ -1500,7 +1502,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (error instanceof WebAssembly.RuntimeError) throw error;
       if (opening && session === opening) destroySession(true);
       else opening?.destroy();
-      if (replaced) await reopenSourceCut(replaced);
+      if (replaced && await reopenSourceCut(replaced)) throw new SourceCutKeptError(error instanceof Error ? error.message : String(error));
       throw error;
     }
     return;
@@ -3160,15 +3162,17 @@ function adoptResidentSource(
 }
 
 /** Restores a cut whose whole source failed to open, so the worker still holds the document its preview shows. */
-async function reopenSourceCut(source: ResidentSourceOpenRequest): Promise<void> {
+async function reopenSourceCut(source: ResidentSourceOpenRequest): Promise<boolean> {
   const opening = await createResidentEngineSession(source.heapLimitBytes);
   try {
-    if (!adoptResidentSource(opening, source)) opening.destroy();
+    if (adoptResidentSource(opening, source)) return true;
+    opening.destroy();
   } catch (error) {
     if (error instanceof WebAssembly.RuntimeError) throw error;
     if (session === opening) destroySession(true);
     else opening.destroy();
   }
+  return false;
 }
 
 async function replySourcePreview(

@@ -15,7 +15,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs';
 import docxPackage from '../../../../../docx/package.json';
-import { DocxEditor, type DocxEditorProps, type DocxEditorRef } from '../../DocxEditor';
+import { DocxEditor, type DocxEditorProps, type DocxEditorRef, type DocxErrorInfo } from '../../DocxEditor';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
 import type { DocxPluginContext } from '../../../plugins/types';
 import * as core from '../hooks/useYrsCoreSession';
@@ -58,9 +58,9 @@ let failPreview = false;
 let refuseCut = false;
 let holdCut = false;
 let failWholeOpen = false;
-/** Per source preview, in order: whether its first page is built, built showing the page total, or missing. */
-let previewPages: ('built' | 'pageTotal' | 'none')[] = [];
-const PREVIEW_EPOCHS = { built: 90, pageTotal: 91, none: 1 } as const;
+/** Per source preview, in order: whether its first page is built or missing. */
+let previewPages: ('built' | 'none')[] = [];
+const PREVIEW_EPOCHS = { built: 90, none: 1 } as const;
 
 function hostMetadata() {
   return {
@@ -234,13 +234,9 @@ function commandFrame(epoch: number, base = 0): DocxCommandFrame {
 }
 
 function previewPage(epoch: number): frameRender.RetainedFramePage | null {
-  if (epoch !== PREVIEW_EPOCHS.built && epoch !== PREVIEW_EPOCHS.pageTotal) return null;
-  const footer: frameRender.HfRegion = { rId: 'rIdFooter', kind: 'footer', y: 1000, height: 20, primitives: [] };
-  if (epoch === PREVIEW_EPOCHS.pageTotal) {
-    footer.primitives.push({ kind: 'text', x: 10, baselineY: 1010, width: 6, text: '7', font: '11px sans-serif', color: '#000', field: { category: 'NUMPAGES' } });
-  }
+  if (epoch !== PREVIEW_EPOCHS.built) return null;
   return { pageIndex: 0, pageId: 1n, fingerprint: 1n, primitiveIds: new BigUint64Array(0),
-    page: { pageIndex: 0, width: 816, height: 1056, primitives: [], footer } };
+    page: { pageIndex: 0, width: 816, height: 1056, primitives: [] } };
 }
 
 function installPreviewPages() {
@@ -290,7 +286,7 @@ function installSurface() {
           onReady?.(binding);
           setOpened(true);
         }
-      }, sessionOptions.onError);
+      }, (error: Error) => { if (!controller.signal.aborted) sessionOptions.onError?.(error); });
       return () => {
         void session?.dispose();
         controller.abort();
@@ -538,28 +534,15 @@ test('the preview releases its worker surfaces once the command session presents
   expect(view.queryByLabelText('Document preview')).toBeNull();
 });
 
-for (const kind of ['none', 'pageTotal'] as const) {
-  test(`a cut preview ${kind === 'none' ? 'without a built first page' : 'whose first page shows the page total'} keeps opening and previews the whole source`, async () => {
-    holdInitial = true;
-    previewPages = [kind, 'built'];
-    const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
-    await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
-    const order = requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type));
-    expect(order).toEqual(['openSource', 'previewSource', 'openSource', 'previewSource', 'attachCanvases', 'commandInit']);
-    expect(view.queryByText('Opening source')).toBeNull();
-    expect(view.getByLabelText('Document preview')).toBeTruthy();
-  });
-}
-
-test('a whole-source preview whose first page shows the page total is not presented', async () => {
+test('a cut preview without a built first page keeps opening and previews the whole source', async () => {
   holdInitial = true;
-  refuseCut = true;
-  previewPages = ['pageTotal'];
+  previewPages = ['none', 'built'];
   const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} loadingIndicator={<span>Opening source</span>} />);
   await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
-  expect(requests.some(request => request.type === 'attachCanvases')).toBe(false);
-  expect(view.getByText('Opening source')).toBeTruthy();
-  expect(view.queryByLabelText('Document preview')).toBeNull();
+  const order = requests.map(request => request.type).filter(type => ['openSource', 'previewSource', 'attachCanvases', 'commandInit'].includes(type));
+  expect(order).toEqual(['openSource', 'previewSource', 'openSource', 'previewSource', 'attachCanvases', 'commandInit']);
+  expect(view.queryByText('Opening source')).toBeNull();
+  expect(view.getByLabelText('Document preview')).toBeTruthy();
 });
 
 test('the preview budget covers the source cut and its late steps preview nothing', async () => {
@@ -601,6 +584,59 @@ test('a whole source that fails after the cut painted keeps the preview and repo
   expect(view.queryByText('Opening source')).toBeNull();
   expect(workers[0].terminate).not.toHaveBeenCalled();
   expect(requests.some(request => request.type === 'commandInit')).toBe(false);
+});
+
+test('a buffer load whose whole source fails after the cut painted rejects, and a later load opens', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} previewFirstPage showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  failWholeOpen = true;
+  let outcome = 'pending';
+  act(() => { ref.current!.loadDocumentBuffer(Uint8Array.of(8, 9)).catch((error: Error) => { outcome = error.message; }); });
+  await waitFor(() => expect(outcome).toBe('Whole source failed to open'));
+  await expect(ref.current!.whenLayoutComplete()).rejects.toThrow('Whole source failed to open');
+  failWholeOpen = false;
+  let pending!: Promise<void>;
+  act(() => { pending = ref.current!.loadDocumentBuffer(Uint8Array.of(10, 11)); });
+  await pending;
+});
+
+async function paintPreviewAfterBudget(onFirstPagePainted?: () => void) {
+  holdInitial = true;
+  holdPreviewPaint = true;
+  const budget = peerlessPreviewPaint.timeoutMs;
+  peerlessPreviewPaint.timeoutMs = 4_321;
+  const schedule = globalThis.setTimeout;
+  const expiries: (() => void)[] = [];
+  globalThis.setTimeout = ((callback: () => void, delay?: number, ...rest: unknown[]) =>
+    delay === 4_321 ? (expiries.push(callback), schedule(() => {}, 0)) : schedule(callback, delay, ...rest)) as typeof setTimeout;
+  restorers.push(() => { peerlessPreviewPaint.timeoutMs = budget; globalThis.setTimeout = schedule; });
+  const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} onFirstPagePainted={onFirstPagePainted}
+    loadingIndicator={<span>Opening source</span>} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'attachCanvases')).toBe(true));
+  act(() => expiries[0]!());
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  return view;
+}
+
+test('a preview that paints after its budget expired presents nothing', async () => {
+  const painted = mock(() => {});
+  const view = await paintPreviewAfterBudget(painted);
+  expect(painted).not.toHaveBeenCalled();
+  expect(view.getByText('Opening source')).toBeTruthy();
+});
+
+test('a preview that paints after its budget expired settles and releases its surfaces before the document opens', async () => {
+  const settled = spyOn(AbortSignal.prototype, 'removeEventListener');
+  restorers.push(() => settled.mockRestore());
+  const view = await paintPreviewAfterBudget();
+  expect(settled).toHaveBeenCalledWith('abort', expect.any(Function));
+  for (const reply of workers[0].pendingReplies.splice(0)) await act(async () => workers[0].onmessage?.({ data: reply } as MessageEvent<ResidentEngineWorkerResponse>));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(requests.filter(request => request.type === 'attachCanvases'))
+    .toMatchObject([{ pages: [expect.anything()] }, { pages: [], activePageIds: [] }]);
 });
 
 for (const failure of ['layout', 'paint'] as const) {
@@ -819,6 +855,21 @@ test('worker shell save flushes pending edits and calls host callbacks without a
   expect(coreSession).not.toHaveBeenCalled();
 });
 
+test('a failed worker save command reports a recoverable error and allows retry', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const failure = new Error('Save request failed');
+  let fail = true;
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} downloadOnSave={false}
+    onSaveRequest={() => { if (fail) throw failure; return true; }} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: false }); });
+  expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
+  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+  fail = false;
+  await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
+});
+
 test('worker saves retain source comments unless the host controls them', async () => {
   const metadata = hostMetadata();
   const comments = [{ id: 1, author: 'Writer', content: [] }];
@@ -860,6 +911,63 @@ test('worker file picker delegates to the host and save can be intercepted', asy
   await act(async () => { expect(await ref.current!.commands.execute('save', null)).toMatchObject({ ok: true }); });
   expect(requests.filter(({ type }) => type === 'save')).toHaveLength(0);
   expect(workers).toHaveLength(1);
+});
+
+test('a throwing file-open callback reports a recoverable error and keeps the document open', async () => {
+  const failure = new Error('Open request failed');
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} onOpen={() => { throw failure; }} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const editor = view.getByTestId('peerless-paged-editor');
+  await act(async () => {
+    fireEvent.change(view.getByTestId('docx-file-input'), { target: { files: [new File([source], 'picked.docx')] } });
+  });
+  expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
+  expect(view.getByTestId('peerless-paged-editor')).toBe(editor);
+  expect(editor.dataset.opened).toBe('true');
+});
+
+test('a superseded file open reports a recoverable error while the replacement opens', async () => {
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const read = spyOn(utils, 'toArrayBuffer').mockResolvedValue(source.buffer);
+  restorers.push(() => read.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => {
+    const input = view.getByTestId('docx-file-input');
+    fireEvent.change(input, { target: { files: [new File([source], 'first.docx')] } });
+    fireEvent.change(input, { target: { files: [new File([source], 'second.docx')] } });
+  });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  expect(onError.mock.calls).toEqual([[new Error('Document was replaced'), { recoverable: true }]]);
+});
+
+test('a property-dialog command failure reports a recoverable error and keeps the document open', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const failure = new Error('Watermark properties failed');
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentRead').mockRejectedValueOnce(failure);
+  restorers.push(() => read.mockRestore());
+  await act(async () => { expect(await ref.current!.commands.execute('watermark', null)).toMatchObject({ ok: false }); });
+  expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
+  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+});
+
+test('a find-dialog search failure reports a recoverable error and keeps the document open', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const failure = new Error('Search failed');
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { await ref.current!.commands.execute('find', null); });
+  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockRejectedValueOnce(failure);
+  restorers.push(() => read.mockRestore());
+  fireEvent.change(view.getByTestId('find-replace-dialog').querySelector('#find-text')!, { target: { value: 'cat' } });
+  await waitFor(() => expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]));
+  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
 });
 
 test('worker save downloads the worker bytes with the host document name', async () => {
@@ -1119,15 +1227,43 @@ test('peerless shell catches chrome failures and reports worker errors in the ba
 });
 
 test('a recoverable presentation failure reaches the host without closing the document', async () => {
-  const onError = mock((_error: Error) => {});
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
   const stall = new Error('Full frame responses did not satisfy requested coverage and revision');
   act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onRecoverableError!(stall); });
-  expect(onError.mock.calls).toEqual([[stall]]);
+  expect(onError.mock.calls).toEqual([[stall, { recoverable: true }]]);
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
   expect(view.queryByText(stall.message)).toBeNull();
+});
+
+for (const [name, update, message] of [
+  ['read-only', { readOnly: true }, 'DOCX read-only transition was rejected'],
+  ['render', { showHiddenText: true }, 'DOCX render environment was rejected: stale-version'],
+  ['font', { measurementFontProvider: { resolve: () => undefined } }, 'DOCX font environment was rejected: stale-version'],
+] as const) {
+  test(`a rejected ${name} environment reaches the host as recoverable`, async () => {
+    const onError = mock(() => {});
+    const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+    await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+    workers[0].refuseNextEdit = true;
+    view.rerender(<DocxEditor {...peerlessProps} {...update} onError={onError} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message }), { recoverable: true }));
+    expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
+    expect(view.queryByText(message)).toBeNull();
+  });
+}
+
+test('a failed open reaches the host without recoverable metadata', async () => {
+  const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const failure = new Error('worker failed to open');
+  act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onError!(failure); });
+  expect(onError.mock.calls).toEqual([[failure]]);
+  await waitFor(() => expect(view.getByText(failure.message)).toBeTruthy());
+  expect(view.queryByTestId('peerless-paged-editor')).toBeNull();
 });
 
 test('a failed Blob read ends opening and reaches the shell error banner', async () => {
@@ -1470,7 +1606,8 @@ test('context paste refuses a target changed while clipboard permission is pendi
   snapshot.version += 1;
   await act(async () => finish('clipboard text'));
   expect(requests.filter((request) => request.type === 'edit')).toHaveLength(0);
-  expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'Context menu target changed' }));
+  expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'Context menu target changed' }), { recoverable: true });
+  expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true');
 });
 
 test('worker shell reserves the widest scaled page and retains host styling', async () => {

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 
 interface DocxSessionParagraphAnchor {
   kind: 'session';
@@ -242,13 +243,13 @@ async function open(page: Page, arm: Arm, readOnly: boolean, options = '') {
 }
 
 async function getProposals(page: Page) {
-  return page.evaluate(() =>
+  return pinnedEvaluate(page, () =>
     (window as unknown as ProbeWindow).__workerProposalProbe.editor!.getProposals()
   );
 }
 
 async function prepare(page: Page, arm: Arm, readOnly: boolean) {
-  const identities = await page.evaluate(() =>
+  const identities = await pinnedEvaluate(page, () =>
     (window as unknown as ProbeWindow).__workerProposalProbe.editor!.getParagraphIdentities()
   );
   const afterIdentities = await getProposals(page);
@@ -257,7 +258,7 @@ async function prepare(page: Page, arm: Arm, readOnly: boolean) {
   expect(body).toHaveLength(72);
   const anchors = body.slice(0, 10).map((paragraph) => paragraph.persisted!);
   expect(anchors.every(Boolean)).toBe(true);
-  const resolved = await page.evaluate(
+  const resolved = await pinnedEvaluate(page,
     (input) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.resolveParagraphAnchors(input),
     anchors
   );
@@ -396,7 +397,7 @@ async function flow(page: Page, arm: Arm, readOnly: boolean, options = '') {
     return read;
   };
   const serial = await eventSerial(page);
-  const result = await page.evaluate(
+  const result = await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
     { expectVersion: prepared.resolved.version, proposals: prepared.proposals }
   );
@@ -409,7 +410,7 @@ async function flow(page: Page, arm: Arm, readOnly: boolean, options = '') {
     const before = snapshot;
     const serial = await eventSerial(page);
     const changes = ids.map((id) => ({ id, state }));
-    const result = await page.evaluate(
+    const result = await pinnedEvaluate(page,
       (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.setProposalStates(request),
       { expectVersion: before.version, expectPreviewVersion: before.previewVersion, changes }
     );
@@ -438,7 +439,7 @@ async function flow(page: Page, arm: Arm, readOnly: boolean, options = '') {
       instrumentation.deliberateScroll = true;
       return instrumentation.scrollEvents;
     });
-    const result = await page.evaluate(
+    const result = await pinnedEvaluate(page,
       ({ target, version }) => (window as unknown as ProbeWindow).__workerProposalProbe.navigate(target, version),
       { target: { story: target.story, paraId: target.paraId }, version: snapshot.version }
     );
@@ -452,7 +453,7 @@ async function flow(page: Page, arm: Arm, readOnly: boolean, options = '') {
       await expect(page.locator('canvas[data-page-index="0"]')).toBeInViewport();
     }
     await expect.poll(async () => (await status(page)).scrollEvents).toBeGreaterThan(scrollEvents);
-    await page.evaluate(() => new Promise<void>((resolve) => {
+    await pinnedEvaluate(page, () => new Promise<void>((resolve) => {
       const scroller = document.querySelector<HTMLElement>('.docx-editor__scroll-container')!;
       let previous = scroller.scrollTop;
       let stableFrames = 0;
@@ -477,7 +478,7 @@ async function flow(page: Page, arm: Arm, readOnly: boolean, options = '') {
     transcript.push({ name: `navigate-${name}`, result, read: canonical(read), geometry });
   }
   const withdrawalSerial = await eventSerial(page);
-  const withdrawn = await page.evaluate(
+  const withdrawn = await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.withdrawProposals(request),
     { expectVersion: snapshot.version, ids: IDS }
   );
@@ -508,7 +509,7 @@ test('hybrid: opening the built-in sidebar reads worker cards and preserves host
   await instrument(page);
   await open(page, 'hybrid', true);
   const prepared = await prepare(page, 'hybrid', true);
-  const result = await page.evaluate(
+  const result = await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
     { expectVersion: prepared.resolved.version, proposals: prepared.proposals }
   );
@@ -517,7 +518,7 @@ test('hybrid: opening the built-in sidebar reads worker cards and preserves host
   await overlay(page, before);
   expect(await getProposals(page)).toEqual(before);
   await assertReplica(page, 'hybrid', true);
-  const openSidebar = () => page.evaluate(() =>
+  const openSidebar = () => pinnedEvaluate(page, () =>
     (window as unknown as ProbeWindow).__workerProposalProbe.toggleSidebar()
   );
   expect(await openSidebar()).toMatchObject({ ok: true });
@@ -607,7 +608,7 @@ test(`${arm}: a worker viewer reports a proposal through onDocumentChange withou
   await instrument(page);
   await open(page, arm, true, 'onChange=1');
   const prepared = await prepare(page, arm, true);
-  const result = await page.evaluate(
+  const result = await pinnedEvaluate(page,
     (request) =>
       (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
     { expectVersion: prepared.resolved.version, proposals: prepared.proposals.slice(0, 1) }
@@ -634,7 +635,7 @@ test('hybrid: a worker viewer exports its retained page layout without opening t
   await instrument(page);
   await open(page, 'hybrid', true);
   const prepared = await prepare(page, 'hybrid', true);
-  const exportPages = (expectLayoutVersion?: string) => page.evaluate(async (layoutVersion) => {
+  const exportPages = (expectLayoutVersion?: string) => pinnedEvaluate(page, async (layoutVersion) => {
     const result = await (window as unknown as ProbeWindow).__workerProposalProbe.editor!.exportStructuredWithPages({
       revisionView: 'markup',
       stories: ['body', 'headers', 'footers', 'footnotes', 'endnotes'],
@@ -657,7 +658,7 @@ test('hybrid: a worker viewer exports its retained page layout without opening t
   const pinned = await exportPages(first.layoutVersion!);
   expect(pinned.ok).toBe(true);
   expect(pinned.layoutVersion).toBe(first.layoutVersion);
-  const result = await page.evaluate(
+  const result = await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
     { expectVersion: first.version, proposals: prepared.proposals.slice(0, 1) }
   );
@@ -680,7 +681,7 @@ for (const arm of ARMS) {
 test(`${arm}: a worker viewer reads content controls and refuses revision commands without the main-thread copy while host decisions apply`, async ({ page }) => {
   await instrument(page);
   await open(page, arm, true);
-  const reads = await page.evaluate(async () => {
+  const reads = await pinnedEvaluate(page, async () => {
     const editor = (window as unknown as ProbeWindow).__workerProposalProbe.editor!;
     return {
       list: await editor.listContentControls(),
@@ -695,11 +696,11 @@ test(`${arm}: a worker viewer reads content controls and refuses revision comman
   expect(reads.accept).toMatchObject({ ok: false, failure: { code: refusal } });
   expect(reads.reject).toMatchObject({ ok: false, failure: { code: refusal } });
   const prepared = await prepare(page, arm, true);
-  const proposed = snapshotOf(await page.evaluate(
+  const proposed = snapshotOf(await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
     { expectVersion: prepared.resolved.version, proposals: prepared.proposals.slice(0, 1) }
   ));
-  const accepted = snapshotOf(await page.evaluate(
+  const accepted = snapshotOf(await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.setProposalStates(request),
     {
       expectVersion: proposed.version,
@@ -718,7 +719,7 @@ test(`${arm}: Find in a worker viewer steps through worker matches without the m
   await instrument(page);
   await open(page, arm, true);
   const prepared = await prepare(page, arm, true);
-  const selection = () => page.evaluate(() =>
+  const selection = () => pinnedEvaluate(page, () =>
     (window as unknown as ProbeWindow).__workerProposalProbe.editor!.readSelectionInfo()
   );
   const unselected = (await selection())?.selectedText ?? '';
@@ -732,7 +733,7 @@ test(`${arm}: Find in a worker viewer steps through worker matches without the m
       .toMatchObject({ total: 6, current: Number(paragraphText.match(/^Page (\d+)/)![1]) - 1 });
     expect((await selection())?.selectedText ?? '').toBe(unselected);
   };
-  expect(await page.evaluate(() =>
+  expect(await pinnedEvaluate(page, () =>
     (window as unknown as ProbeWindow).__workerProposalProbe.editor!.commands.execute('find', null)
   )).toMatchObject({ ok: true });
   const dialog = page.locator('.docx-find-replace-dialog');
@@ -741,7 +742,7 @@ test(`${arm}: Find in a worker viewer steps through worker matches without the m
   await input.fill('paragraph 12:');
   await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText(/\b1\b\D+\b6\b/);
   await selects('Page 1 paragraph 12: Original text.');
-  snapshotOf(await page.evaluate(
+  snapshotOf(await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
     { expectVersion: prepared.resolved.version, proposals: prepared.proposals.slice(0, 2) }
   ));

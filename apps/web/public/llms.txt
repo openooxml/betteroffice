@@ -88,6 +88,7 @@ Every editor replica is a Yrs document, and the providers speak the standard Yjs
 - [Benchmark summary](https://betteroffice.dev/#benchmarks): BetterOffice and LibreOffice per format on visual similarity to Office, exact page counts, formula accuracy, and render and recalculation time.
 - [Benchmark method](https://github.com/openooxml/betteroffice/tree/main/scripts/office-quality): Office reference captures and image comparison.
 - [Agent edit evals](https://github.com/openooxml/betteroffice#evals): one model on 30 editing tasks, passing only if the requested change is there and nothing else in the file moved. BetterOffice MCP vs generic file tools: DOCX 10/10 vs 6/10, XLSX 10/10 vs 0/10, PPTX 10/10 vs 8/10.
+- [Evals site](https://evals.betteroffice.dev): per-task agent edit results and methodology.
 
 ## Links
 

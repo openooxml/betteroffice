@@ -27,6 +27,8 @@ import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot }
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
+export class WorkerReadSupersededError extends Error {}
+
 const OPEN_WAIT_MS = 120_000;
 const MAX_WAITING_ROUNDS = 64;
 const PROPOSAL_FAILURES = {
@@ -181,26 +183,26 @@ export function createPeerlessShellController(initial: Options) {
       const fail = (error: Error) => settle(error);
       const check = () => {
         if (closed) settle(new Error('Editor was closed'));
-        else if (snapshot.status === 'failed') settle(snapshot.error ?? new Error('Document failed to open'));
+        else if (snapshot.error) settle(snapshot.error);
         else if (generation !== awaited) settle(new Error('Document was replaced'));
         else if (binding && snapshot.status === 'ready') settle(null);
       };
       const timer = setTimeout(() => settle(new Error('The document did not open in time')), options.openTimeoutMs ?? OPEN_WAIT_MS);
-      waits.add(check); waiting.add(fail);
+      waits.add(check); waiting.add(fail); check();
     });
   };
   const flush = async () => {
     const current = ready();
     await flushAdmittedInput(current);
-    if (current !== binding) throw new Error('Document was replaced');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
     return current;
   };
   const read = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<ResidentDocumentReadValues[K]> => {
     const current = await flush();
     const version = current.viewStore.getSnapshot().version;
     const result = await options.read<K>(request);
-    if (current !== binding) throw new Error('Document was replaced');
-    if (version !== current.viewStore.getSnapshot().version) throw new Error('Worker read was superseded');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    if (version !== current.viewStore.getSnapshot().version) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const readAt = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }, token: string): Promise<ResidentDocumentReadValues[K]> => {
@@ -209,8 +211,8 @@ export function createPeerlessShellController(initial: Options) {
     if (!options.readAt) throw new Error('Versioned worker reads are unavailable');
     const result = await options.readAt<K>(request, token);
     const latest = current.viewStore.getSnapshot();
-    if (current !== binding) throw new Error('Document was replaced');
-    if (result.status !== 'ok' || result.version !== token || latest.version !== view.version || !sameIdentity(latest.identity, view.identity)) throw new Error('Worker read was superseded');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    if (result.status !== 'ok' || result.version !== token || latest.version !== view.version || !sameIdentity(latest.identity, view.identity)) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
@@ -523,7 +525,7 @@ export function createPeerlessShellController(initial: Options) {
       };
       const check = () => {
         if (closed) return settle(new Error('Editor was closed'));
-        if (snapshot.status === 'failed') return settle(snapshot.error ?? new Error('Document failed to open'));
+        if (snapshot.error) return settle(snapshot.error);
         if (current) {
           if (binding !== current) return settle(new Error('Document was replaced'));
           const view = current.viewStore.getSnapshot();
@@ -616,6 +618,9 @@ export function createPeerlessShellController(initial: Options) {
     painted,
     stalled(error: Error) {
       if (snapshot.status === 'opening') for (const fail of [...waiting]) fail(error);
+    },
+    failOpening(error: Error) {
+      if (snapshot.status === 'opening') { snapshot = { ...snapshot, error }; publish(); }
     },
     toolbarMetadata(result: PeerlessWorkerQuery<'toolbarMetadata'> | null) {
       const origin = result && queryOrigins.get(result);
