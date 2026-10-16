@@ -1,4 +1,4 @@
-import { tableAnchors, type DocxEditStep, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { tableAnchors, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
 
@@ -24,6 +24,11 @@ const PARAGRAPH_PROPERTIES = new Set([
   'pageBreakBefore', 'keepNext', 'keepLines', 'widowControl', 'contextualSpacing', 'snapToGrid',
   'autoSpaceDE', 'autoSpaceDN', 'outlineLevel', 'bidi',
 ]);
+const ONE_OFF = new Set(['pageBreakBefore', 'frame']);
+const LIST_PROPERTIES = [...PARAGRAPH_PROPERTIES,
+  'listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor',
+  'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId',
+].filter(key => !ONE_OFF.has(key));
 
 export function tableCells(story: string, segments: readonly YrsStorySegment[]): Map<string, TableCell> {
   const cells = new Map<string, TableCell>();
@@ -140,4 +145,39 @@ export function deleteTableRow(draft: YrsSession, target: DocxParagraphTarget, p
   const { story, tableIndex, anchor } = cell;
   const at = { story, tableIndex, row: anchor.row, column: anchor.column };
   return draft.deleteRow({ anchor: at, head: at }).deletedTable;
+}
+
+/** The zero-based list level of a paragraph with these pilcrow properties, or undefined outside a list. */
+export function listLevel(properties: Record<string, unknown>): number | undefined {
+  const numPr = properties.numPr as { numId?: number | null; ilvl?: number | null } | null | undefined;
+  return numPr?.numId ? numPr.ilvl ?? 0 : undefined;
+}
+
+/** Inserts paragraphs after a list item with its list, level, style and paragraph formatting; text takes its last plain run's formatting. */
+export function continueList(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
+  const segments = draft.storySegments(target.story);
+  const end = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
+  const anchor = segments[end] as Pilcrow;
+  if (listLevel(anchor.properties) === undefined) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'This paragraph is not a list item. Use a ref whose outline entry has list, or omit list.');
+  }
+  let run: YrsStorySegment | undefined;
+  for (let index = end - 1; index >= 0 && segments[index].kind !== 'pilcrow' && !run; index--) {
+    if (segments[index].kind === 'text' && !segments[index].attributes.hyperlink) run = segments[index];
+  }
+  const attrs = run && Object.fromEntries(Object.entries(run.attributes).filter(([key]) => !PROTECTED.has(key)));
+  const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs: paragraphs.map(({ text, styleId }) => ({ text: attrs ? '' : text, styleId })) }).newParagraphs;
+  const properties: Record<string, unknown> = { ...anchor.properties };
+  const original = properties._originalFormatting;
+  if (original && typeof original === 'object') properties._originalFormatting = Object.fromEntries(Object.entries(original).filter(([key]) => !ONE_OFF.has(key)));
+  const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
+  created.forEach(({ story, paraId }, index) => {
+    for (const key of LIST_PROPERTIES) {
+      const value = properties[key] ?? null;
+      if (JSON.stringify(current.get(paraId)?.[key] ?? null) !== JSON.stringify(value)) draft.setParagraphAttr(paraId, key, value);
+    }
+    const { text } = paragraphs[index];
+    if (attrs && text) draft.applyRawOps(story, [{ op: 'insert', index: draft.locateParagraph(story, paraId).start, text, attrs }]);
+  });
+  return created;
 }
