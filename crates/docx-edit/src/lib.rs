@@ -1784,10 +1784,11 @@ impl EditingDoc {
 
     /// A private replica of `state`, this document's committed state, that allocates identities
     /// as this document would: the same client id and key counter, the retained source index,
-    /// and every key and Word paragraph ID this replica has seen, deleted ones included. What
-    /// the fork allocates stays its own until its update is adopted.
+    /// and every key and Word paragraph ID this replica has seen, deleted ones included. It keeps
+    /// deleted content when this replica does. What the fork allocates stays its own until its
+    /// update is adopted.
     pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
-        let fork = Self::new(self.client_id);
+        let fork = Self::build(self.client_id, self.doc.skip_gc());
         fork.apply_verbatim_v1(state)?;
         fork.id_counter
             .store(self.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
