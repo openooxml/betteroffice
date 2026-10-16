@@ -155,9 +155,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       }
       if (hide) {
         const placement = repeatedOf(measured);
-        const end = hiddenBoundary(queries, resolved.ranges, resolved.ranges, resolved.paragraph);
-        const fallback = end || resolved.paragraph === null ? null : queries.anchorRect(resolved.paragraph);
-        const at = end ?? (fallback && { ...fallback, width: 0 });
+        const at = hiddenBoundary(queries, resolved.ranges, [...(review.proposalGeometry?.hidden ?? []), ...resolved.ranges], resolved.paragraph);
         return at && placement.pending(at.pageIndex) ? unavailable() : placement.respond([], at, unbuiltPagesOf(queries, resolved.ranges));
       }
       const raw = target.kind === 'proposal' ? review.proposalHighlights[target.id] ?? [] : resolved.ranges.flatMap(range => queries.rangeRects(range.from, range.to));

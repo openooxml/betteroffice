@@ -784,6 +784,17 @@ describe('semantic anchor geometry', () => {
     ).toMatchObject({ x: 153 });
   });
 
+  test('anchors a hidden target before neighbouring text that does not draw, in either direction', () => {
+    for (const rtl of [false, true]) {
+      const { geometry, source } = semanticGeometry();
+      textLine(source, [1, 2, 3], rtl);
+      expect(anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId: 'r2' }))).toMatchObject({
+        rects: [],
+        anchor: { pageIndex: 0, x: rtl ? 156 : 154, width: 0 },
+      });
+    }
+  });
+
   test('finds the last drawn unit behind a long hidden suffix', () => {
     for (const rtl of [false, true]) {
       const { geometry, session, source } = semanticGeometry();

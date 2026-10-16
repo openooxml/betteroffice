@@ -124,14 +124,17 @@ test('plugin selection ranges label the native worker caret with its accepted of
 
 interface LaidOut { main: YrsSession; engine: ResidentEngineSession; frame: ReturnType<typeof applyFrameDelta>; window: readonly [number, number] }
 
-/** The fixture laid out as the worker frames it, with pages outside `[first, end)` unbuilt. */
-async function laidOut(first = 0, end = 2 ** 32 - 1, reservations?: DocxReservationsPayload): Promise<LaidOut> {
+/** The fixture, changed by `prepare`, laid out as the worker frames it, with pages outside `[first, end)` unbuilt. */
+async function laidOut(first = 0, end = 2 ** 32 - 1, reservations?: DocxReservationsPayload | ((main: YrsSession) => DocxReservationsPayload),
+  prepare?: (main: YrsSession) => void): Promise<LaidOut> {
   const main = await createYrsSession();
   const engine = await createResidentEngineSession();
   destroy.push(main, engine);
   const host = main.openDocx(await storyAnchorsDocx(), true);
+  prepare?.(main);
+  const payload = typeof reservations === 'function' ? reservations(main) : reservations;
   const request = buildResidentRegionLayoutRequest(host.document, PAGE_GAP, { revisionPreview: proposalRevisionPreview(main.getProposals()),
-    ...(reservations ? { reservations: resolveReservations(main, reservations, main.version()) } : {}) });
+    ...(payload ? { reservations: resolveReservations(main, payload, main.version()) } : {}) });
   const requirements = JSON.parse(main.layoutFontRequirementsJson(JSON.stringify(request))) as { key: string }[];
   main.clearFonts();
   const font = main.registerFont(FONT);
@@ -496,6 +499,48 @@ test('a hidden reservation answers the boundary its hidden text leaves, read wit
   expect(hidden.anchor).toMatchObject({ pageIndex: visible.anchor.pageIndex, width: 0 });
   expect(hidden.anchor.x).toBeCloseTo(visible.anchor.x, 6);
   expect(hidden.anchor.y).toBeCloseTo(visible.anchor.y, 6);
+});
+
+const span = (version: string, paraId: string, from: number, to: number) =>
+  ({ kind: 'range', version, range: { story: 'body', start: at(paraId, from), end: at(paraId, to), view: 'accepted' } }) as const;
+
+/** `sets` laid out with the fixture as one sent set, their paragraph anchors naming each session's `sessionId`. */
+async function setShell(sets: (version: string, sessionId: string) => DocxReservationsPayload['sets'], prepare?: (main: YrsSession) => void) {
+  const laid = await laidOut(undefined, undefined, (main) => ({ version: 'v', sets: sets('v', main.paragraphIdentities().sessionId) }), prepare);
+  const version = laid.engine.geometryReader.version();
+  const sent = { version, key: '1', sets: sets(version, laid.engine.paragraphIdentities().sessionId) };
+  return { laid, shell: await shellOf(laid, { laidOutWith: LAID_OUT, sent: () => sent }) };
+}
+
+test.each(['another owner', 'the document'] as const)('a hidden reservation after text %s hides answers the edge of the visible text before both', async (hider) => {
+  const { laid, shell } = await setShell((version) => [
+    { owner: 'probe', items: [{ id: 'gone', kind: 'hide' as const, anchor: span(version, '00000005', 6, 11) }] },
+    ...(hider === 'another owner' ? [{ owner: 'other', items: [{ id: 'cut', kind: 'hide' as const, anchor: span(version, '00000005', 3, 6) }] }] : []),
+  ], hider === 'the document' ? (main) => {
+    const { start } = main.locateParagraph('body', '00000005');
+    main.applyRawOps('body', [{ op: 'format', index: start + 3, len: 3, attrs: { hidden: true } }]);
+  } : undefined);
+  const [gone, kept] = await scopePluginGeometry(shell.plugin.geometry()!, 'probe').readAnchorGeometries([
+    reservation('gone'), range(laid, shell.version, 'body', '00000005', 'Aft')]);
+  const hidden = ok(gone!);
+  const visible = ok(kept!);
+  expect(hidden.rects).toEqual([]);
+  expect(hidden.anchor).toMatchObject({ pageIndex: visible.anchor.pageIndex, width: 0 });
+  expect(hidden.anchor.x).toBeCloseTo(visible.anchor.x, 6);
+  expect(hidden.anchor.y).toBeCloseTo(visible.anchor.y, 6);
+});
+
+test('a hidden whole paragraph answers the start of the visible paragraph after it', async () => {
+  const { laid, shell } = await setShell((_, sessionId) => [{ owner: 'probe', items: [{ id: 'gone', kind: 'hide',
+    anchor: { kind: 'paragraph', paragraph: { kind: 'session', sessionId, story: 'body', paraId: '00000005' } } }] }]);
+  const [gone, next] = await scopePluginGeometry(shell.plugin.geometry()!, 'probe').readAnchorGeometries([
+    reservation('gone'), range(laid, shell.version, 'body', '00000006', 'Page four')]);
+  const hidden = ok(gone!);
+  const first = ok(next!).rects[0]!;
+  expect(hidden.rects).toEqual([]);
+  expect(hidden.anchor).toMatchObject({ pageIndex: first.pageIndex, width: 0 });
+  expect(hidden.anchor.x).toBeCloseTo(first.x, 6);
+  expect(hidden.anchor.y).toBeCloseTo(first.y, 6);
 });
 
 test('a reservation box on an unbuilt page waits for its layout, and an unknown one is missing once laid out', async () => {

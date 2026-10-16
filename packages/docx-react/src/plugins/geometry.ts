@@ -328,6 +328,42 @@ export interface RepeatedPlacement {
   unavailable(): DocxAnchorGeometryResult;
 }
 
+/** Just past the last unit of `[from, to)` that draws, over spans doubling back from `to`. */
+function lastUnitEnd(queries: DisplayListQueries, from: number, to: number): number | null {
+  const draws = (start: number) => queries.rangeRects(start, to).some((rect) => rect.width > 0);
+  let high = to;
+  let low = Math.max(to - 1, from);
+  for (let span = 2; !draws(low); span *= 2) {
+    if (low <= from) return null;
+    high = low;
+    low = Math.max(to - span, from);
+  }
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+    if (draws(middle)) low = middle;
+    else high = middle;
+  }
+  return low + 1;
+}
+
+/** Where the first unit of `[from, to)` that draws starts, over spans doubling from `from`. */
+function firstUnitStart(queries: DisplayListQueries, from: number, to: number): number | null {
+  const draws = (end: number) => queries.rangeRects(from, end).some((rect) => rect.width > 0);
+  let low = from;
+  let high = Math.min(from + 1, to);
+  for (let span = 2; !draws(high); span *= 2) {
+    if (high >= to) return null;
+    low = high;
+    high = Math.min(from + span, to);
+  }
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+    if (draws(middle)) high = middle;
+    else low = middle;
+  }
+  return high - 1;
+}
+
 /** The last unit drawn at `from`, which has width. */
 const unitAt = (queries: DisplayListQueries, from: number): DisplayListRect | null =>
   queries
@@ -363,8 +399,9 @@ function caretAt(queries: DisplayListQueries, pos: number, before = false): Disp
 }
 
 /**
- * @internal The caret `ranges` leave when none of them draws: before the hidden text around the
- * last one, else after it, else at `paragraph`.
+ * @internal The caret `ranges` leave when none of them draws: before the text that does not draw
+ * around the last one in `paragraph`, else after it, else at `paragraph`, else at the nearest unit
+ * that draws on built pages, the next one first.
  */
 export function hiddenBoundary(
   queries: DisplayListQueries,
@@ -372,11 +409,34 @@ export function hiddenBoundary(
   hidden: readonly Interval[],
   paragraph: number | null
 ): DisplayListRect | null {
+  const at = (): DisplayListRect | null => {
+    const rect =
+      paragraph === null ? null : (caretAt(queries, paragraph) ?? queries.anchorRect(paragraph));
+    return rect && { ...rect, width: 0 };
+  };
   const last = ranges.at(-1);
-  const gap = last && widen(last, hidden);
+  if (!last) return at();
+  const gap = widen(last, hidden);
+  const spans = (queries.displayList?.pages ?? []).flatMap(({ unbuilt, positionSpan }) =>
+    unbuilt && positionSpan ? [positionSpan] : []
+  );
+  const start = Math.min(paragraph ?? gap.from, gap.from);
+  const built = !spans.some(([low, high]) => start <= high && gap.to >= low);
+  const before = (): DisplayListRect | null => {
+    const end = built && paragraph !== null ? lastUnitEnd(queries, paragraph, gap.from) : null;
+    return end === null ? null : caretAt(queries, end, true);
+  };
+  const nearest = (): DisplayListRect | null => {
+    if (!built) return null;
+    const ceiling = Math.min(2 ** 32, ...spans.flatMap(([low]) => (low >= gap.to ? [low] : [])));
+    const next = firstUnitStart(queries, gap.to, ceiling);
+    if (next !== null) return caretAt(queries, next);
+    const floor = Math.max(0, ...spans.flatMap(([, high]) => (high < gap.from ? [high + 1] : [])));
+    const end = lastUnitEnd(queries, floor, gap.from);
+    return end === null ? null : caretAt(queries, end, true);
+  };
   return (
-    (gap && (caretAt(queries, gap.from, true) ?? caretAt(queries, gap.to))) ??
-    (paragraph === null ? null : caretAt(queries, paragraph))
+    caretAt(queries, gap.from, true) ?? before() ?? caretAt(queries, gap.to) ?? at() ?? nearest()
   );
 }
 
@@ -509,21 +569,8 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
-  /** Just past the last unit of `[from, to)` that draws, found by bisecting its visible suffix. */
-  const lastUnitEnd = (from: number, to: number): number | null => {
-    const draws = (start: number) => queries.rangeRects(start, to).some((rect) => rect.width > 0);
-    if (!draws(from)) return null;
-    let low = from;
-    let high = to - 1;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      if (draws(middle)) low = middle;
-      else high = middle - 1;
-    }
-    return low + 1;
-  };
   const endOf = ({ from, to }: Interval): DisplayListRect | null => {
-    const end = lastUnitEnd(from, to);
+    const end = lastUnitEnd(queries, from, to);
     return end === null ? null : caretAt(queries, end, true);
   };
   const pendingPage = (pageIndex: number): boolean => {
@@ -670,11 +717,8 @@ export function createPluginGeometry(
       tail !== null
         ? (endOf(tail) ?? lastInReadingOrder(drawn))
         : hiddenBoundary(queries, ranges, hidden, paragraph);
-    const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
-    if ((end && pendingPage(end.pageIndex)) || (fallback && pendingPage(fallback.pageIndex))) {
-      return unavailable();
-    }
-    return respond(drawn, end ?? (fallback && { ...fallback, width: 0 }), unbuiltPagesOf(queries, ranges));
+    if (end && pendingPage(end.pageIndex)) return unavailable();
+    return respond(drawn, end, unbuiltPagesOf(queries, ranges));
   };
   /** This layout's box for `owner`'s reservation `id`, or a hidden range's boundary. */
   const reservation = (owner: string, id: string): DocxAnchorGeometryResult => {
