@@ -23,19 +23,29 @@ export function createPeerlessCollaborationReplica<X>(client: ResidentEngineWork
       try { listener(update, 'local'); } catch {}
     }
   });
+  const merged = async (ticket: ReturnType<typeof session.submit>) => {
+    const outcome = await ticket.ack;
+    requireActive();
+    if (outcome.status === 'refused' || outcome.status === 'cancelled') throw new Error(`Collaboration merge ${outcome.status}: ${outcome.reason}`);
+    return ticket;
+  };
   const adapter = createAsyncCollaborationReplica({
     clientId,
     encodeStateVector: () => fenced(() => client.documentRead({ kind: 'collabStateVector' })),
     encodeStateAsUpdate: (stateVector) => fenced(() => client.documentRead({ kind: 'collabDiff', stateVector: stateVector?.slice() })),
+    encodeStateAsUpdateChunks: (stateVector, maxChunkBytes) =>
+      fenced(() => client.documentRead({ kind: 'collabDiffChunks', stateVector: stateVector.slice(), maxChunkBytes })),
     async applyUpdate(update) {
       requireActive();
-      const ticket = session.submit('applyRemoteUpdate', { update: update.slice().buffer }, { lane: 'collab', fence: true });
-      const outcome = await ticket.ack;
-      requireActive();
-      if (outcome.status === 'refused' || outcome.status === 'cancelled') throw new Error(`Collaboration merge ${outcome.status}: ${outcome.reason}`);
+      const ticket = await merged(session.submit('applyRemoteUpdate', { update: update.slice().buffer }, { lane: 'collab', fence: true }));
       const inference = ticket.seq === undefined ? undefined : inferences.get(ticket.seq);
       if (ticket.seq !== undefined) inferences.delete(ticket.seq);
       return inference ?? null;
+    },
+    async applyUpdateChunks(updates) {
+      requireActive();
+      await merged(session.submit('applyRemoteUpdateChunks', { updates: updates.map(update => update.slice().buffer) }, { lane: 'collab', fence: true }));
+      return null;
     },
     onUpdate(listener) { requireActive(); listeners.add(listener); return () => { listeners.delete(listener); }; },
   });

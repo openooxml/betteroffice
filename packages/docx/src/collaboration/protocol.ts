@@ -15,6 +15,8 @@ export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
 export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
 /** Largest configurable frame: one update at the per-update bound and its sync header. */
 export const MAX_FRAME_BYTES = MAX_UPDATE_BYTES + 6;
+/** Upper bound for `maxPendingBytes` and `maxSyncBytes`. */
+export const MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;

@@ -8,6 +8,7 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  MAX_BUFFERED_BYTES,
   MAX_FRAME_BYTES,
   maxSyncPayloadBytes,
   requestsChunkedSync,
@@ -47,8 +48,6 @@ import { asyncReplicaFor } from './asyncReplica';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_SYNC_BYTES = 64 * 1024 * 1024;
-/** Upper bound for `maxPendingBytes` and `maxSyncBytes`. */
-const MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 /** What a held update costs beyond its bytes, so empty updates cannot pile up for free. */
 const HELD_UPDATE_OVERHEAD_BYTES = 64;
 const CURSOR_BROADCAST_INTERVAL_MS = 80;
