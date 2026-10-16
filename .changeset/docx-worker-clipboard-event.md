@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Copy and cut in the worker editor write the selection's text and HTML into the native clipboard event, so they keep working where the async Clipboard API is denied or unavailable.
+Worker editor copy and cut write plain text, plus HTML for table selections, to the native clipboard. Pending copies attempt a fresh copy event while user activation is available, then fall back to the async Clipboard API if needed.

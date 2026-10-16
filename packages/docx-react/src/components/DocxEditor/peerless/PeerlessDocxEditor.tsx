@@ -39,7 +39,7 @@ import { createWorkerPluginGeometry } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
-import { copyWorkerSelection, createClipboardPrefetch, isPasteFragmentAllowed } from './clipboard';
+import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
 import { admitInputIntents } from './inputAdmission';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
@@ -616,10 +616,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       active.current = {
         binding, requestedReadOnly: binding.session.state.editState?.readOnly ?? settings.current.readOnly,
         requestedRenderEnvironment: renderEnvironment.current.requested,
-        clipboard: createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding,
-          readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-          readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }) }),
       };
+      active.current.clipboard = createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding,
+        readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
+        readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }) });
     }
     updateReadOnly();
     updateRenderEnvironment();
@@ -628,7 +628,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(updateReadOnly, [effectiveReadOnly, updateReadOnly]);
   useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, updateRenderEnvironment]);
   useLayoutEffect(updateFontEnvironment, [props.fonts, measurementFontProvider, props.onFontsLoaded, updateFontEnvironment]);
-  useLayoutEffect(() => () => { active.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }, []);
+  useLayoutEffect(() => () => { active.current?.clipboard?.dispose(); active.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }, []);
 
   const canvasForPage = useCallback((page: DocxCommandPageIdentity) => {
     if (!/^[1-9]\d*$/.test(page.pageId) || !Number.isSafeInteger(page.pageIndex) || page.pageIndex < 0) return null;
@@ -690,12 +690,28 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     setPreviewJob(null);
     releaseWorkerPreview(previewJob.client);
   }, [shellState.status, previewJob]);
+  const clipboardReplay = useRef<{ capture: ClipboardCapture; written: boolean } | null>(null);
   const onClipboard = useCallback(async (cut: boolean, data?: DataTransfer | null) => {
     const current = active.current;
     if (!current) return;
+    if (data && clipboardReplay.current) {
+      try { clipboardReplay.current.written = writeClipboardCapture(data, clipboardReplay.current.capture); } catch {}
+      return;
+    }
     try {
       const copied = await copyWorkerSelection({ binding: current.binding, cut, data, prefetched: current.clipboard?.take(),
         isCurrent: () => active.current === current,
+        readCapture: () => current.clipboard!.read(),
+        writeNative: (capture) => {
+          const input = host.current?.querySelector('.paged-editor__peerless-input');
+          if (!data || active.current !== current || document.activeElement !== input || !navigator.userActivation?.isActive ||
+            current.clipboard?.take() !== capture) return false;
+          const replay = { capture, written: false };
+          clipboardReplay.current = replay;
+          let completed = false;
+          try { completed = document.execCommand('copy'); } catch {} finally { clipboardReplay.current = null; }
+          return completed && replay.written;
+        },
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
         readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }),
         write: (text) => navigator.clipboard.writeText(text),
@@ -726,6 +742,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onPaste: props.onPaste, onError: reportRecoverableError });
   useLayoutEffect(() => {
+    active.current?.clipboard?.dispose();
     active.current = null;
     setPreviewJob(null);
     if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
