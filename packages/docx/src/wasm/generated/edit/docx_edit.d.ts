@@ -1182,6 +1182,7 @@ export class EditSession {
      * `width_twips` is finite and positive.
      */
     set_table_width(table_json: string, width_twips: number): string;
+    set_table_properties(table_json: string, patch_json: string): string;
     /**
      * Changes grouping policy while retaining undo and redo history.
      */
@@ -1886,6 +1887,7 @@ export interface InitOutput {
     readonly editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_set_table_properties: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_undo_input_time: (a: number, b: number, c: number) => void;
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];

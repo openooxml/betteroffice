@@ -27,7 +27,15 @@ type BrowserHarness = {
   exportBytes(): Promise<number[]>;
   viewportProbe(geometry: PeerlessFrameGeometry): void;
   setViewport(pages: number[]): Promise<void>;
+  tableAction(action: unknown): Promise<unknown>;
 };
+
+let tableActionExecutor: ((action: unknown) => Promise<unknown>) | undefined;
+
+export function registerTableActionExecutor(executor: (action: unknown) => Promise<unknown>): () => void {
+  tableActionExecutor = executor;
+  return () => { if (tableActionExecutor === executor) tableActionExecutor = undefined; };
+}
 
 let active: Probe | undefined;
 let exportRequest = 0;
@@ -91,6 +99,10 @@ export function registerBrowserHarness(controls: { setMode(mode: Mode): void }):
       checkpoints.length = 0;
     },
     setMode: controls.setMode,
+    tableAction(action) {
+      if (!tableActionExecutor) return Promise.reject(new Error('DOCX harness table actions are not registered'));
+      return tableActionExecutor(action);
+    },
     registerWorker(value) { worker = value; },
     viewportProbe(geometry) {
       frameEpoch = geometry.frameEpoch;

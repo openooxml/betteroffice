@@ -89,6 +89,7 @@ export type ResidentEngineSession = Pick<
   | 'splitCell'
   | 'setCellShading'
   | 'setCellBorders'
+  | 'setTableProperties'
   | 'insertTable'
   | 'insertTableFragment'
   | 'validateTableFragment'
@@ -702,6 +703,11 @@ export async function createResidentEngineSession(
     }),
     setCellBorders: (range, borders) => applyCommandMutation(range.anchor.story, () => {
       const receipt = JSON.parse(session.set_cell_borders(JSON.stringify(range), JSON.stringify(borders)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    setTableProperties: (table, patch) => applyCommandMutation(table.story, () => {
+      const receipt = JSON.parse(session.set_table_properties(JSON.stringify(table), JSON.stringify(patch)));
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),

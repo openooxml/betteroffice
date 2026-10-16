@@ -2752,6 +2752,40 @@ impl EditingDoc {
             Vec::new(),
         )
     }
+
+    pub fn set_table_properties(
+        &self,
+        ctx: &EditCtx,
+        locator: &TableLocator,
+        patch: &HashMap<String, Any>,
+    ) -> OpResult<TableReceipt> {
+        for (key, value) in patch {
+            let valid = match key.as_str() {
+                "width" => matches!(value, Any::Null | Any::Undefined) ||
+                    any_number(Some(value)).is_some_and(|width| width >= 0.0),
+                "widthType" => matches!(value, Any::Null | Any::Undefined) ||
+                    matches!(value, Any::String(kind) if ["auto", "dxa", "pct", "nil"].contains(&kind.as_str())),
+                "justification" => matches!(value, Any::Null | Any::Undefined) ||
+                    matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&kind.as_str())),
+                _ => false,
+            };
+            if !valid {
+                return Err(OpError::InvalidFormatValue(format!("invalid table property {key}")));
+            }
+        }
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, locator)?;
+        let mut data = read_table(&table, &txn)?;
+        for (key, value) in patch {
+            if matches!(value, Any::Null | Any::Undefined) {
+                data.tbl_pr.remove(key);
+            } else {
+                data.tbl_pr.insert(key.clone(), value.clone());
+            }
+        }
+        write_table(&mut txn, &table, &data);
+        receipt(locator.clone(), Some(&data), Vec::new(), Vec::new(), Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -3299,6 +3333,39 @@ mod tests {
             }
         }
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    }
+
+    #[test]
+    fn set_table_properties_patches_width_type_and_justification() {
+        let doc = seed_table();
+        let at = TableLocator::new("body", 0);
+        doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("width".to_owned(), Any::Number(2500.0)),
+            ("widthType".to_owned(), Any::from("pct")),
+            ("justification".to_owned(), Any::from("center")),
+        ])).unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], 2500);
+        assert_eq!(tbl_pr["widthType"], "pct");
+        assert_eq!(tbl_pr["justification"], "center");
+        doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("width".to_owned(), Any::Null),
+            ("widthType".to_owned(), Any::from("auto")),
+            ("justification".to_owned(), Any::Null),
+        ])).unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        assert_eq!(tbl_pr["widthType"], "auto");
+        assert_eq!(tbl_pr["justification"], Value::Null);
+        assert!(doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("widthType".to_owned(), Any::from("wide")),
+        ])).is_err());
+        assert!(doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("width".to_owned(), Any::Number(-1.0)),
+        ])).is_err());
+        assert!(doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("tableLayout".to_owned(), Any::from("fixed")),
+        ])).is_err());
     }
 
     #[test]

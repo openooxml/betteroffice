@@ -941,6 +941,12 @@ export type YrsCellBorders = Partial<
   Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
 
+export interface YrsTablePropertiesPatch {
+  width?: number | null;
+  widthType?: string | null;
+  justification?: 'left' | 'center' | 'right' | null;
+}
+
 /** Undo grouping for tracked local transactions. */
 export type YrsUndoCaptureMode = 'auto' | 'manual';
 
@@ -1313,6 +1319,7 @@ export interface YrsSession extends CollaborationReplica {
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
+  setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
   insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**

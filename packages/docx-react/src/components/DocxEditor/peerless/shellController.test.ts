@@ -346,7 +346,8 @@ test('table selection dispatches selectTableCells as fenced selection input', as
   expect(controller.environment().tableActions).toEqual(new Set(['selectTable', 'selectRow', 'selectColumn',
     'addRowAbove', 'addRowBelow', 'addColumnLeft', 'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable',
     'mergeCells', 'splitCell', 'cellFillColor', 'borderAll', 'borderOutside', 'borderInside', 'borderNone',
-    'borderTop', 'borderBottom', 'borderLeft', 'borderRight', 'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle']));
+    'borderTop', 'borderBottom', 'borderLeft', 'borderRight', 'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle',
+    'tableProperties', 'openTableProperties']));
   expect(await controller.commands.store.execute('tableAction', 'selectTable')).toMatchObject({ ok: true, status: 'noop' });
   expect(await controller.commands.store.execute('tableAction', 'selectRow')).toMatchObject({ ok: true });
   expect(await controller.commands.store.execute('tableAction', 'selectColumn')).toMatchObject({ ok: true });
@@ -377,7 +378,8 @@ test('table structure actions submit the worker table commands without a selecti
   expect(controller.environment().tableActions).toEqual(new Set(['selectTable', 'selectRow', 'selectColumn',
     'addRowAbove', 'addRowBelow', 'addColumnLeft', 'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable',
     'mergeCells', 'splitCell', 'cellFillColor', 'borderAll', 'borderOutside', 'borderInside', 'borderNone',
-    'borderTop', 'borderBottom', 'borderLeft', 'borderRight', 'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle']));
+    'borderTop', 'borderBottom', 'borderLeft', 'borderRight', 'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle',
+    'tableProperties', 'openTableProperties']));
   const cases: Array<[unknown, unknown]> = [
     ['addRowAbove', { kind: 'insertTableRow', payload: { side: 'above' } }],
     ['addRowBelow', { kind: 'insertTableRow', payload: { side: 'below' } }],
@@ -493,6 +495,49 @@ test('splitCell opens the dialog with span defaults and submits splitTableCell o
   expect(await captured!.apply(1, 3)).toMatchObject({ ok: true, status: 'executed' });
   expect((submit.mock.calls as unknown as Array<[unknown, unknown]>).map(([intent, options]) => ({ intent, options })))
     .toEqual([{ intent: { kind: 'splitTableCell', payload: { rows: 1, columns: 3 } }, options: { fence: true } }]);
+});
+
+test('table_properties_open_waits_for_admitted_input', async () => {
+  const { controller, binding, submit, read, viewStore } = tableFixture();
+  const view = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(view.identity, { ...view, selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } });
+  let captured: { initial: unknown; apply(props: unknown): Promise<unknown> } | undefined;
+  const openTableProperties = mock((initial: unknown, apply: (props: unknown) => Promise<unknown>) => {
+    captured = { initial, apply };
+  });
+  read.mockImplementation(async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } }));
+  const readAt = mock(async () => ({ status: 'ok', version: 'native',
+    value: { kind: 'table', properties: { width: 2500, widthType: 'pct', justification: 'center' } } }));
+  controller.update({ read: read as never, readAt: readAt as never, focus() {}, zoom: 1, openTableProperties } as never);
+  expect(await controller.commands.store.execute('tableAction', { type: 'openTableProperties' })).toMatchObject({ ok: true, status: 'opened' });
+  expect(openTableProperties).toHaveBeenCalledTimes(1);
+  expect(captured!.initial).toEqual({ width: 2500, widthType: 'pct', justification: 'center' });
+  expect((binding.session as unknown as { flush: unknown }).flush).toHaveBeenCalled();
+  expect(readAt).toHaveBeenCalledWith({ kind: 'properties', target: { kind: 'tableSelection', selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } } });
+  expect(submit).not.toHaveBeenCalled();
+  expect(await captured!.apply({ width: null, widthType: 'auto', justification: 'left' })).toMatchObject({ ok: true });
+  expect((submit.mock.calls as unknown as Array<[unknown, unknown]>).map(([intent, options]) => ({ intent, options }))).toEqual([{
+    intent: { kind: 'setTableProperties', payload: { op: 'patch', patch: { width: null, widthType: 'auto', justification: 'left' }, expectVersion: 'native', selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } } },
+    options: { fence: true },
+  }]);
+});
+
+test('table_properties_apply_rejects_changed_origin', async () => {
+  const { controller, binding, submit, read, viewStore } = tableFixture();
+  const view = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(view.identity, { ...view, selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } });
+  let captured: { apply(props: unknown): Promise<unknown> } | undefined;
+  const openTableProperties = mock((_initial: unknown, apply: (props: unknown) => Promise<unknown>) => { captured = { apply }; });
+  read.mockImplementation(async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } }));
+  const readAt = mock(async () => ({ status: 'ok', version: 'native',
+    value: { kind: 'table', properties: { width: 2500, widthType: 'pct', justification: 'center' } } }));
+  controller.update({ read: read as never, readAt: readAt as never, focus() {}, zoom: 1, openTableProperties } as never);
+  expect(await controller.commands.store.execute('tableAction', { type: 'openTableProperties' })).toMatchObject({ ok: true, status: 'opened' });
+  controller.detach(binding);
+  controller.attach({ ...binding } as never);
+  expect(await captured!.apply({ width: 100, widthType: 'dxa', justification: 'right' }))
+    .toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+  expect(submit).not.toHaveBeenCalled();
 });
 
 test('internal modes remain switchable after viewing and update mutation author context', async () => {

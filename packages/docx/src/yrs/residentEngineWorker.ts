@@ -1273,7 +1273,7 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
     kind === 'pasteFragment' ||
     kind === 'insertPageBreak' || kind === 'insertSectionBreak' ||
-    kind === 'setTableBorders';
+    kind === 'setTableBorders' || kind === 'setTableProperties';
 }
 
 function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {

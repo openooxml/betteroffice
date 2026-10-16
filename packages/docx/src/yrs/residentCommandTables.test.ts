@@ -349,6 +349,40 @@ test('table_formatting_refusals_leave_state_unchanged', async () => {
     .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
 }, TIMEOUT);
 
+test('set_table_properties_patches_tblpr_and_refuses_stale_versions', async () => {
+  const arm = await inCell();
+  const applied = execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+  }));
+  expect(applied.status).toBe('applied');
+  expect(payload(arm)!.tblPr).toMatchObject({ width: 2500, widthType: 'pct', justification: 'center' });
+  expect(undo(arm).status).toBe('applied');
+  expect(payload(arm)!.tblPr?.justification).toBeUndefined();
+  expect(redo(arm).status).toBe('applied');
+  expect(payload(arm)!.tblPr).toMatchObject({ width: 2500, widthType: 'pct', justification: 'center' });
+  const cleared = execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { width: null, widthType: 'auto', justification: null },
+  }));
+  expect(cleared.status).toBe('applied');
+  expect(payload(arm)!.tblPr?.width).toBeUndefined();
+  expect(payload(arm)!.tblPr?.widthType).toBe('auto');
+  const version = arm.engine.proposalEngine.version();
+  const before = JSON.stringify(payload(arm));
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { justification: 'right' }, expectVersion: 'stale',
+  }))).toMatchObject({ status: 'refused', reason: 'stale-version' });
+  expect(arm.engine.proposalEngine.version()).toBe(version);
+  expect(JSON.stringify(payload(arm))).toBe(before);
+  for (const extra of [{ op: 'patch', patch: { widthType: 'wide' } }, { op: 'patch', patch: { width: -5 } },
+    { op: 'rowHeight', patch: {} }, { op: 'patch', patch: { tableLayout: 'fixed' } }] as Record<string, unknown>[]) {
+    expect(execute(arm, tableCommand(arm, 'setTableProperties', extra)))
+      .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+  }
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { justification: 'right' }, suggesting: { name: 'W', date: '2026-01-01' },
+  }))).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+}, TIMEOUT);
+
 test('table_commands_refuse_outside_cells_readonly_and_bad_payloads_without_mutation', async () => {
   const arm = await openCommandEngine([], { bodyXml: body });
   const kinds: [string, Record<string, unknown>][] = [

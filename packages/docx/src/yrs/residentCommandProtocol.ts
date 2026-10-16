@@ -300,6 +300,7 @@ export interface DocxCommandPayloads {
   splitTableCell: DocxSelectionIntent & { rows: number; columns: number };
   setTableCellShading: DocxSelectionIntent & { color: string | null };
   setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
+  setTableProperties: DocxSelectionIntent & { op: 'patch'; patch: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }; expectVersion?: string };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };

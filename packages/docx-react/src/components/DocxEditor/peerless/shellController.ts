@@ -72,6 +72,8 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   pickImage?(insert: (image: Readonly<Record<string, unknown>>) => Promise<DocxCommandResult>): void;
   openSplitCell?(defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
     apply: (rows: number, columns: number) => Promise<DocxCommandResult>): void;
+  openTableProperties?(initialProps: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null },
+    apply: (props: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }) => Promise<DocxCommandResult>): void;
 }
 
 export function createPeerlessShellController(initial: Options) {
@@ -154,7 +156,7 @@ export function createPeerlessShellController(initial: Options) {
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
         'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
-        'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle']),
+        'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle', 'tableProperties', 'openTableProperties']),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
@@ -439,6 +441,23 @@ export function createPeerlessShellController(initial: Options) {
             const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
             options.openSplitCell(defaults, (rows, columns) =>
               deferred.complete(() => submit({ kind: 'splitTableCell', payload: { rows, columns } })));
+            return { ok: true, status: 'opened' };
+          }
+          case 'tableProperties': {
+            const props = (args as { props: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null } }).props;
+            return submit({ kind: 'setTableProperties', payload: { op: 'patch', patch: props } });
+          }
+          case 'openTableProperties': {
+            if (!options.openTableProperties) break;
+            const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
+            const selected = snapshot.view?.workerSelection;
+            if (!selected) return { ok: false, failure: { code: 'command-failed', message: 'Table selection is unavailable.' } };
+            const opened = await query({ kind: 'properties', target: { kind: 'tableSelection', selection: selected } });
+            if (opened.value?.kind !== 'table') return { ok: false, failure: { code: 'command-failed', message: 'Table properties are unavailable.' } };
+            const captured = opened.selection ?? selected;
+            options.openTableProperties(opened.value.properties, (props) =>
+              deferred.complete(() => applyQuery(opened, { kind: 'setTableProperties',
+                payload: { op: 'patch', patch: props, expectVersion: opened.version, selection: captured } })));
             return { ok: true, status: 'opened' };
           }
           default: break;
