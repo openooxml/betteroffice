@@ -9,9 +9,8 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
-  isStateVector,
-  stateVectorDominates,
-  withClientClockAhead,
+  parseSyncRequest,
+  withOpenSyncRequest,
   withoutDocumentFingerprint,
   type ProtocolError,
 } from './protocol';
@@ -529,12 +528,10 @@ export class CollaborationProvider {
 
   private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
     if (!this.isCurrentOpen(token, connection)) return;
-    let ahead: Uint8Array | undefined;
+    let marked: Uint8Array | undefined;
     try {
-      ahead = isStateVector(stateVector)
-        ? withClientClockAhead(stateVector, this.replica.clientId)
-        : stateVector;
-      this.sendFrame(encodeSyncStep1(ahead ?? stateVector, this.maxFrameBytes));
+      marked = withOpenSyncRequest(stateVector);
+      this.sendFrame(encodeSyncStep1(marked ?? stateVector, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(
         token,
@@ -542,7 +539,7 @@ export class CollaborationProvider {
       );
       return;
     }
-    if (!ahead && this.isCurrentOpen(token, connection)) this.sendFullUpdate(token, connection);
+    if (!marked && this.isCurrentOpen(token, connection)) this.sendFullUpdate(token, connection);
     if (!this.isCurrentOpen(token, connection)) return;
 
     try {
@@ -707,12 +704,14 @@ export class CollaborationProvider {
         if (!this.isCurrentOpen(token, connection)) return;
         try {
           if (message.type === 'sync-step-1') {
-            const update = await this.asyncReplica!.encodeStateAsUpdate(withoutDocumentFingerprint(message.stateVector).slice());
+            const request = parseSyncRequest(message.stateVector);
+            const update = await this.asyncReplica!.encodeStateAsUpdate(withoutDocumentFingerprint(request.stateVector).slice());
             if (!this.isCurrentOpen(token, connection)) return;
             this.sendFrame(encodeSyncStep2(requireBytes(update, 'encodeStateAsUpdate'), this.maxFrameBytes));
-            if (!this.isCurrentOpen(token, connection)) return;
-            const vector = requireBytes(await this.asyncReplica!.encodeStateVector(), 'encodeStateVector');
-            if (this.isCurrentOpen(token, connection)) this.requestMissingState(token, vector, message.stateVector);
+            if (request.open && this.isCurrentOpen(token, connection)) {
+              const vector = requireBytes(await this.asyncReplica!.encodeStateVector(), 'encodeStateVector');
+              if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep1(vector, this.maxFrameBytes));
+            }
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             await this.asyncReplica!.applyUpdate(withoutDocumentFingerprint(message.update).slice());
             if (message.type === 'sync-step-2' && this.isCurrentOpen(token, connection)) this.setStatus('connected', true);
@@ -730,10 +729,11 @@ export class CollaborationProvider {
   }
 
   private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
+    const request = parseSyncRequest(remoteStateVector);
     let update: Uint8Array;
     try {
       update = requireBytes(
-        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
+        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(request.stateVector).slice()),
         'encodeStateAsUpdate'
       );
     } catch (cause) {
@@ -750,7 +750,7 @@ export class CollaborationProvider {
       this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause));
       return;
     }
-    if (!this.isCurrent(token) || !this.isOpen) return;
+    if (!request.open || !this.isCurrent(token) || !this.isOpen) return;
 
     let stateVector: Uint8Array;
     try {
@@ -762,22 +762,6 @@ export class CollaborationProvider {
       );
       return;
     }
-    this.requestMissingState(token, stateVector, remoteStateVector);
-  }
-
-  private requestMissingState(
-    token: number,
-    stateVector: Uint8Array,
-    remoteStateVector: Uint8Array
-  ): void {
-    let missing: boolean;
-    try {
-      missing = !stateVectorDominates(stateVector, remoteStateVector);
-    } catch (cause) {
-      this.report(normalizeError('protocol', 'Invalid state vector', cause));
-      return;
-    }
-    if (!missing) return;
     try {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
     } catch (cause) {

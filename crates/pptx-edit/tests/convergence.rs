@@ -922,3 +922,44 @@ fn undo_and_redo_of_a_move_over_merged_concurrent_moves_restore_the_visible_orde
 fn undo_and_redo_of_a_delete_over_merged_concurrent_moves_restore_the_visible_order() {
     undo_and_redo_over_merged_concurrent_moves(true);
 }
+
+#[test]
+fn a_peer_can_apply_what_the_loser_of_a_concurrent_move_publishes_before_the_winning_move() {
+    let context = EditCtx::local("local");
+    let peer = DeckSession::open(FIXTURE, 201).unwrap();
+    let loser = DeckSession::open(FIXTURE, 202).unwrap();
+    let winner = DeckSession::open(FIXTURE, 203).unwrap();
+    let baseline = loser.encode_state_vector_v1();
+    let initial = loser.snapshot().unwrap();
+    let (slide, shape) = (&initial.slides[0].id, &initial.slides[0].shapes[0].id);
+    loser
+        .move_shape(&context, slide, shape, 1_111_111, 2_222_222)
+        .unwrap();
+    winner
+        .move_shape(&context, slide, shape, 3_333_333, 4_444_444)
+        .unwrap();
+    let lost = loser.encode_diff_v1(&baseline).unwrap();
+    let won = winner.encode_diff_v1(&baseline).unwrap();
+    let seen = loser.snapshot().unwrap();
+
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&published);
+    let _subscription = loser
+        .observe_update_v1(move |event| {
+            if event.origin == UpdateOrigin::Local {
+                sink.lock().unwrap().push(event.update);
+            }
+        })
+        .unwrap();
+    loser.apply_update_v1(&won).unwrap();
+
+    peer.apply_update_v1(&lost).unwrap();
+    for update in published.lock().unwrap().iter() {
+        peer.apply_update_v1(update).unwrap();
+    }
+    assert_eq!(peer.snapshot().unwrap(), seen);
+
+    peer.apply_update_v1(&won).unwrap();
+    winner.apply_update_v1(&lost).unwrap();
+    assert_converged(&[&loser, &winner, &peer]);
+}

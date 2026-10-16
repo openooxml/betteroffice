@@ -15,11 +15,14 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  CHUNKED_SYNC_CLIENT,
   encodeVarUint,
-  isStateVector,
+  holdsOpenSyncClient,
+  OPEN_SYNC_CLIENT,
+  parseSyncRequest,
   ProtocolError,
-  stateVectorDominates,
-  withClientClockAhead,
+  requireUnreservedClientId,
+  withSyncRequest,
 } from './protocol';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -296,79 +299,74 @@ function stateVector(...entries: [bigint, bigint][]): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
-describe('state vector dominance', () => {
-  it('compares clocks per client regardless of encoding order', () => {
-    expect(stateVectorDominates(stateVector(), stateVector())).toBe(true);
-    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector())).toBe(true);
-    expect(stateVectorDominates(stateVector(), stateVector([1n, 5n]))).toBe(false);
-    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([1n, 6n]))).toBe(false);
-    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([2n, 1n]))).toBe(false);
-    expect(stateVectorDominates(
-      stateVector([1n, 5n], [2n, 3n]),
-      stateVector([2n, 3n], [1n, 4n])
-    )).toBe(true);
+const OPEN = [BigInt(OPEN_SYNC_CLIENT), 0n] as [bigint, bigint];
+const CHUNKED = [BigInt(CHUNKED_SYNC_CLIENT), 0n] as [bigint, bigint];
+
+describe('sync request entries', () => {
+  it('appends each requested entry once at clock 0', () => {
+    const vector = stateVector([5n, 9n]);
+    expect(withSyncRequest(vector, { open: true })).toEqual(stateVector([5n, 9n], OPEN));
+    expect(withSyncRequest(vector, { chunked: true })).toEqual(stateVector([5n, 9n], CHUNKED));
+    const both = withSyncRequest(vector, { open: true, chunked: true });
+    expect(both).toEqual(stateVector([5n, 9n], OPEN, CHUNKED));
+    expect(withSyncRequest(both, { open: true, chunked: true })).toBe(both);
+    expect(withSyncRequest(stateVector([5n, 9n], CHUNKED), { open: true, chunked: true }))
+      .toEqual(stateVector([5n, 9n], CHUNKED, OPEN));
+    expect(withSyncRequest(vector, {})).toBe(vector);
   });
 
-  it('keeps 64-bit client ids distinct', () => {
-    const max = (1n << 64n) - 1n;
-    expect(stateVectorDominates(stateVector([1n << 53n, 9n]), stateVector([(1n << 53n) + 1n, 1n]))).toBe(false);
-    expect(stateVectorDominates(stateVector([max, 3n]), stateVector([max, 2n]))).toBe(true);
-    expect(stateVectorDominates(stateVector([max - 1n, 3n]), stateVector([max, 2n]))).toBe(false);
+  it('parses both requests and strips them wherever they sit', () => {
+    expect(parseSyncRequest(stateVector(OPEN, [5n, 9n], CHUNKED, [7n, 1n]))).toEqual({
+      stateVector: stateVector([5n, 9n], [7n, 1n]),
+      open: true,
+      chunked: true,
+    });
+    expect(parseSyncRequest(stateVector([5n, 9n], CHUNKED))).toEqual({
+      stateVector: stateVector([5n, 9n]),
+      open: false,
+      chunked: true,
+    });
+    const plain = stateVector([5n, 9n]);
+    expect(parseSyncRequest(plain)).toEqual({ stateVector: plain, open: false, chunked: false });
+    const ahead = stateVector([BigInt(OPEN_SYNC_CLIENT), 3n]);
+    expect(parseSyncRequest(ahead)).toEqual({ stateVector: ahead, open: false, chunked: false });
   });
 
-  it('rejects vectors that do not decode', () => {
-    expect(() => stateVectorDominates(stateVector([1n, 5n]), Uint8Array.of(2, 1, 5))).toThrow(ProtocolError);
-    expect(() => stateVectorDominates(Uint8Array.of(), stateVector([1n, 5n]))).toThrow(ProtocolError);
-    expect(() => stateVectorDominates(
-      stateVector(),
-      Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1)
-    )).toThrow('State vector varUint exceeds 64 bits');
-    expect(() => stateVectorDominates(stateVector(), Uint8Array.of(0, 1))).toThrow('Trailing state vector bytes');
-  });
-});
-
-describe('state vector shapes', () => {
-  it('accepts only whole v1 state vectors', () => {
-    expect(isStateVector(stateVector())).toBe(true);
-    expect(isStateVector(stateVector([1n << 60n, 5n], [2n, 3n]))).toBe(true);
-    expect(isStateVector(Uint8Array.of())).toBe(false);
-    expect(isStateVector(Uint8Array.of(7))).toBe(false);
-    expect(isStateVector(Uint8Array.of(0, 1))).toBe(false);
-  });
-});
-
-describe('state vector with the local clock ahead', () => {
-  it('advances only the given client, adding it at clock 1 when absent', () => {
-    expect(withClientClockAhead(stateVector(), 7)).toEqual(stateVector([7n, 1n]));
-    expect(withClientClockAhead(stateVector([5n, 3n]), 7)).toEqual(stateVector([5n, 3n], [7n, 1n]));
-    expect(withClientClockAhead(stateVector([7n, 4n], [5n, 3n]), 7)).toEqual(stateVector([7n, 5n], [5n, 3n]));
-    expect(withClientClockAhead(stateVector([300n, 127n]), 300)).toEqual(stateVector([300n, 128n]));
-    const max = Number.MAX_SAFE_INTEGER;
-    expect(withClientClockAhead(stateVector([BigInt(max), 9n]), max)).toEqual(stateVector([BigInt(max), 10n]));
-  });
-
-  it('is never dominated by the vector it came from, and dominates it', () => {
-    const vector = stateVector([1n, 5n], [2n, 3n]);
-    for (const client of [1, 2, 9]) {
-      const ahead = withClientClockAhead(vector, client)!;
-      expect(stateVectorDominates(vector, ahead)).toBe(false);
-      expect(stateVectorDominates(ahead, vector)).toBe(true);
+  it('tells a history that holds the open request client from a marked or plain vector', () => {
+    expect(holdsOpenSyncClient(stateVector([5n, 9n], [BigInt(OPEN_SYNC_CLIENT), 3n]))).toBe(true);
+    for (const vector of [stateVector([5n, 9n]), stateVector([5n, 9n], OPEN), Uint8Array.of(7)]) {
+      expect(holdsOpenSyncClient(vector)).toBe(false);
     }
   });
 
-  it('crosses no native clock limit', () => {
-    expect(withClientClockAhead(stateVector([7n, 0xffff_ffffn], [5n, 3n]), 7)).toBeUndefined();
-    expect(withClientClockAhead(stateVector([7n, 0xffff_fffen], [5n, 3n]), 7))
-      .toEqual(stateVector([7n, 0xffff_ffffn], [5n, 3n]));
-    expect(withClientClockAhead(stateVector([5n, 0xffff_ffffn]), 7))
-      .toEqual(stateVector([5n, 0xffff_ffffn], [7n, 1n]));
+  it('marks a local clock at the native limit without changing it', () => {
+    const marked = withSyncRequest(stateVector([7n, 0xffff_ffffn]), { open: true });
+    expect(parseSyncRequest(marked)).toEqual({
+      stateVector: stateVector([7n, 0xffff_ffffn]),
+      open: true,
+      chunked: false,
+    });
   });
 
-  it('rejects vectors that do not decode and invalid client ids', () => {
-    expect(() => withClientClockAhead(Uint8Array.of(7), 1)).toThrow(ProtocolError);
-    expect(() => withClientClockAhead(Uint8Array.of(0, 1), 1)).toThrow('Trailing state vector bytes');
-    for (const client of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => withClientClockAhead(stateVector(), client)).toThrow(ProtocolError);
+  it('marks vectors of any size', () => {
+    const entries = Array.from({ length: 70_000 }, (_, index) => [BigInt(index), 1n] as [bigint, bigint]);
+    const request = parseSyncRequest(withSyncRequest(stateVector(...entries), { open: true, chunked: true }));
+    expect(request.open && request.chunked).toBe(true);
+    expect(request.stateVector).toEqual(stateVector(...entries));
+  });
+
+  it('leaves vectors that do not decode unchanged and unmarked', () => {
+    const overlong = Uint8Array.of(1, ...new Array(11).fill(0x80));
+    for (const vector of [Uint8Array.of(), Uint8Array.of(7), Uint8Array.of(0, 1), overlong]) {
+      expect(withSyncRequest(vector, { open: true, chunked: true })).toBe(vector);
+      expect(parseSyncRequest(vector)).toEqual({ stateVector: vector, open: false, chunked: false });
+    }
+  });
+
+  it('refuses the reserved client ids', () => {
+    expect(requireUnreservedClientId(OPEN_SYNC_CLIENT - 1)).toBe(OPEN_SYNC_CLIENT - 1);
+    for (const client of [OPEN_SYNC_CLIENT, CHUNKED_SYNC_CLIENT]) {
+      expect(() => requireUnreservedClientId(client)).toThrow(RangeError);
     }
   });
 });

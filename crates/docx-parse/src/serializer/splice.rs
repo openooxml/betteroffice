@@ -118,11 +118,25 @@ fn marks(xml: &str) -> Option<Marks> {
     Some(marks)
 }
 
-/// How many comment markers of each kind and ID `xml` holds.
-fn comment_counts(xml: &str) -> Option<BTreeMap<(String, String), isize>> {
+/// Counts bookmark and comment markers by kind and ID.
+fn marker_counts(xml: &str) -> Option<BTreeMap<(String, String), isize>> {
     let mut counts = BTreeMap::new();
-    for (name, id, _) in marks(xml)?.comments {
-        *counts.entry((name, id)).or_insert(0) += 1;
+    for tag in tags(xml)? {
+        if !tag.end
+            && matches!(
+                tag.name,
+                "w:bookmarkStart"
+                    | "w:bookmarkEnd"
+                    | "w:commentRangeStart"
+                    | "w:commentRangeEnd"
+                    | "w:commentReference"
+            )
+        {
+            let id = attribute(&tag, "w:id")
+                .and_then(|range| unescaped(xml, range))
+                .unwrap_or_default();
+            *counts.entry((tag.name.to_owned(), id)).or_insert(0) += 1;
+        }
     }
     Some(counts)
 }
@@ -1016,21 +1030,21 @@ pub(crate) fn splice_story_part(
             .filter(|occurrence| occurrence.ordinal == ordinal)?;
         spans.insert(ordinal, paragraph_span(source, occurrence)?);
     }
-    let mut outside_source = comment_counts(source)?;
-    let mut outside_written = comment_counts(serialized)?;
+    let mut outside_source = marker_counts(source)?;
+    let mut outside_written = marker_counts(serialized)?;
     let mut end = 0;
     for (ordinal, span) in &spans {
         if span.start < end {
             return None;
         }
         end = span.end;
-        subtract(&mut outside_source, comment_counts(&source[span.clone()])?);
+        subtract(&mut outside_source, marker_counts(&source[span.clone()])?);
         if let Some(xml) = written.get(ordinal) {
-            subtract(&mut outside_written, comment_counts(xml)?);
+            subtract(&mut outside_written, marker_counts(xml)?);
         }
     }
     for (_, xml) in &inserted {
-        subtract(&mut outside_written, comment_counts(xml)?);
+        subtract(&mut outside_written, marker_counts(xml)?);
     }
     if outside_source != outside_written {
         return None;
@@ -1350,6 +1364,17 @@ mod tests {
         let whole = write_docx_s13(request, &original).unwrap();
         assert_eq!(document_part(&saved), document_part(&whole));
         assert_ne!(document_part(&saved), source.as_bytes());
+    }
+
+    #[test]
+    fn body_bookmarks_moved_into_a_paragraph_refuse_source_splicing() {
+        let first = "<w:p><w:r><w:t>Before</w:t></w:r></w:p>";
+        let second = "<w:p><w:r><w:t>After</w:t></w:r></w:p>";
+        let start = r#"<w:bookmarkStart w:id="7" w:name="Range"/>"#;
+        let end = r#"<w:bookmarkEnd w:id="7"/>"#;
+        let source = body(&format!("{first}{start}{end}{second}"));
+        let edited = format!("<w:p>{start}<w:r><w:t>Before</w:t></w:r>{end}</w:p>");
+        assert_eq!(splice(&source, &[(0, &edited), (1, second)], &[0]), None);
     }
 
     #[test]
@@ -2487,18 +2512,17 @@ mod tests {
     fn refuses_rewriting_a_paragraph_whose_range_ends_outside_every_paragraph_or_whose_prefix_an_ancestor_rebinds()
      {
         let paragraph = "<w:p><w:r><w:t>a</w:t></w:r><w:bookmarkEnd w:id=\"3\"/></w:p>";
-        let source = format!(
-            "{ROOT}<w:body><w:bookmarkStart w:id=\"3\" w:name=\"b\"/>{paragraph}</w:body></w:document>"
-        );
+        let start = r#"<w:bookmarkStart w:id="3" w:name="b"/>"#;
+        let source = format!("{ROOT}<w:body>{start}{paragraph}</w:body></w:document>");
         let edited = "<w:p><w:r><w:t>b</w:t></w:r><w:bookmarkEnd w:id=\"3\"/></w:p>";
         assert_eq!(
-            splice(&source, &[(0, edited)], &[0]),
+            splice_around(&source, &[(0, edited)], &[0], &[], (start, "")),
             Some(source.replace(paragraph, edited))
         );
         let dropped = "<w:p><w:r><w:t>b</w:t></w:r></w:p>";
-        assert!(splice(&source, &[(0, dropped)], &[0]).is_none());
+        assert!(splice_around(&source, &[(0, dropped)], &[0], &[], (start, "")).is_none());
         assert_eq!(
-            splice(&source, &[(0, paragraph)], &[]),
+            splice_around(&source, &[(0, paragraph)], &[], &[], (start, "")),
             Some(source.clone())
         );
 

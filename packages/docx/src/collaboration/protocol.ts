@@ -28,7 +28,6 @@ const SYNC_UPDATE = 2;
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
 const MAX_STATE_VECTOR_VAR_UINT_BYTES = 10;
-const MAX_NATIVE_CLOCK = 0xffff_ffffn;
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -195,39 +194,93 @@ export function syncFrameBytes(payloadBytes: number): number {
 }
 
 /**
- * A state-vector entry (this client id at clock 0) by which a peer asks for a chunked answer to its SyncStep1. Peers
- * that do not know it read an empty client, which changes no diff.
+ * Reserved state-vector entries at clock 0 that ask something of the peer answering a SyncStep1. Peers that do not
+ * know them read an empty client, which changes no diff. CHUNKED asks for a chunked answer; OPEN marks the opening
+ * request, which the peer answers with one SyncStep1 of its own.
  */
 export const CHUNKED_SYNC_CLIENT = Number.MAX_SAFE_INTEGER;
+export const OPEN_SYNC_CLIENT = Number.MAX_SAFE_INTEGER - 1;
 
-function stateVectorEntries(stateVector: Uint8Array): Array<[number, number]> | null {
-  try {
-    const decoder = new Decoder(stateVector);
-    const count = decoder.readVarUint();
-    const entries: Array<[number, number]> = [];
-    for (let index = 0; index < count; index++) entries.push([decoder.readVarUint(), decoder.readVarUint()]);
-    return decoder.done ? entries : null;
-  } catch {
-    return null;
+/** `clientId`, refused when it is one of the reserved request entries. */
+export function requireUnreservedClientId(clientId: number): number {
+  if (clientId >= OPEN_SYNC_CLIENT) {
+    throw new RangeError('clientId must be below Number.MAX_SAFE_INTEGER - 1');
   }
+  return clientId;
 }
 
-/** `stateVector` with the chunked-sync entry, or unchanged when it is malformed or already has that client. */
-export function withChunkedSyncRequest(stateVector: Uint8Array): Uint8Array {
-  const entries = stateVectorEntries(stateVector);
-  if (!entries || entries.some(([client]) => client === CHUNKED_SYNC_CLIENT)) return stateVector;
-  const body = stateVector.subarray(encodeVarUint(entries.length).byteLength);
-  return encodeFrame(
-    [encodeVarUint(entries.length + 1), body, encodeVarUint(CHUNKED_SYNC_CLIENT), encodeVarUint(0)],
-    Number.MAX_SAFE_INTEGER
-  );
+interface StateVectorEntry {
+  client: bigint;
+  clock: bigint;
+  start: number;
+  end: number;
 }
 
-/** Whether a SyncStep1 state vector asks for a chunked answer. */
-export function requestsChunkedSync(stateVector: Uint8Array): boolean {
-  return stateVectorEntries(stateVector)?.some(
-    ([client, clock]) => client === CHUNKED_SYNC_CLIENT && clock === 0
-  ) ?? false;
+function stateVectorEntries(body: Uint8Array): { header: number; entries: StateVectorEntry[] } | undefined {
+  let offset = 0;
+  const read = (): bigint | undefined => {
+    let value = 0n;
+    for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES && offset < body.byteLength; index += 1) {
+      const byte = body[offset++];
+      value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+      if (byte < 0x80) return value;
+    }
+    return undefined;
+  };
+  const count = read();
+  if (count === undefined) return undefined;
+  const header = offset;
+  const entries: StateVectorEntry[] = [];
+  for (let left = count; left > 0n; left -= 1n) {
+    const start = offset;
+    const client = read();
+    const clock = read();
+    if (client === undefined || clock === undefined) return undefined;
+    entries.push({ client, clock, start, end: offset });
+  }
+  return offset === body.byteLength ? { header, entries } : undefined;
+}
+
+/** `stateVector` with the requested entries, each added once; unchanged when it is malformed. */
+export function withSyncRequest(
+  stateVector: Uint8Array,
+  { open = false, chunked = false }: { open?: boolean; chunked?: boolean }
+): Uint8Array {
+  const decoded = stateVectorEntries(stateVector);
+  if (!decoded) return stateVector;
+  const clients = [...(open ? [OPEN_SYNC_CLIENT] : []), ...(chunked ? [CHUNKED_SYNC_CLIENT] : [])]
+    .filter((client) => !decoded.entries.some((entry) => entry.client === BigInt(client)));
+  if (!clients.length) return stateVector;
+  return encodeFrame([
+    encodeVarUint(decoded.entries.length + clients.length),
+    stateVector.subarray(decoded.header),
+    ...clients.flatMap((client) => [encodeVarUint(client), encodeVarUint(0)]),
+  ], Number.MAX_SAFE_INTEGER);
+}
+
+/** Whether the history behind `stateVector` already holds the open request client, which then cannot carry the mark. */
+export function holdsOpenSyncClient(stateVector: Uint8Array): boolean {
+  return stateVectorEntries(stateVector)?.entries
+    .some((entry) => entry.client === BigInt(OPEN_SYNC_CLIENT) && entry.clock !== 0n) ?? false;
+}
+
+/** The state vector of a SyncStep1 without its request entries, and which requests it carried. */
+export function parseSyncRequest(
+  stateVector: Uint8Array
+): { stateVector: Uint8Array; open: boolean; chunked: boolean } {
+  const decoded = stateVectorEntries(stateVector);
+  const asks = (entry: StateVectorEntry, client: number) => entry.client === BigInt(client) && entry.clock === 0n;
+  const open = decoded?.entries.some((entry) => asks(entry, OPEN_SYNC_CLIENT)) ?? false;
+  const chunked = decoded?.entries.some((entry) => asks(entry, CHUNKED_SYNC_CLIENT)) ?? false;
+  if (!decoded || (!open && !chunked)) return { stateVector, open, chunked };
+  const kept = decoded.entries.filter((entry) => !asks(entry, OPEN_SYNC_CLIENT) && !asks(entry, CHUNKED_SYNC_CLIENT));
+  return {
+    stateVector: encodeFrame([
+      encodeVarUint(kept.length), ...kept.map(({ start, end }) => stateVector.subarray(start, end)),
+    ], Number.MAX_SAFE_INTEGER),
+    open,
+    chunked,
+  };
 }
 
 export function encodeSyncStep1(
@@ -428,71 +481,6 @@ export function decodeAwarenessUpdate(
     throw new ProtocolError('Trailing awareness data');
   }
   return entries;
-}
-
-function varUintReader(payload: Uint8Array, label: string): { read(): bigint; done(): boolean } {
-  let offset = 0;
-  return {
-    read() {
-      let value = 0n;
-      for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES; index += 1) {
-        if (offset >= payload.byteLength) throw new ProtocolError(`Truncated ${label.toLowerCase()}`);
-        const byte = payload[offset++];
-        value |= BigInt(byte & 0x7f) << BigInt(7 * index);
-        if (byte < 0x80) return value;
-      }
-      throw new ProtocolError(`${label} varUint exceeds 64 bits`);
-    },
-    done: () => offset === payload.byteLength,
-  };
-}
-
-function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
-  const reader = varUintReader(payload, 'State vector');
-  const clocks = new Map<bigint, bigint>();
-  for (let count = reader.read(); count > 0n; count -= 1n) clocks.set(reader.read(), reader.read());
-  if (!reader.done()) throw new ProtocolError('Trailing state vector bytes');
-  return clocks;
-}
-
-/** Whether `payload` decodes as one v1 state vector. */
-export function isStateVector(payload: Uint8Array): boolean {
-  try {
-    decodeStateVector(payload);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Whether `vector` has every client clock of `other`; both are v1 state vectors. */
-export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boolean {
-  if (vector.byteLength === other.byteLength && vector.every((byte, index) => byte === other[index])) {
-    return true;
-  }
-  const clocks = decodeStateVector(vector);
-  for (const [client, clock] of decodeStateVector(other)) {
-    if (clock > (clocks.get(client) ?? 0n)) return false;
-  }
-  return true;
-}
-
-/** `vector` with `clientId`'s clock one past its own (1 when absent); undefined past the native clock limit. */
-export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array | undefined {
-  if (!Number.isSafeInteger(clientId) || clientId < 0) {
-    throw new ProtocolError('Client id must be a non-negative safe integer');
-  }
-  const clocks = decodeStateVector(vector);
-  const client = BigInt(clientId);
-  const clock = (clocks.get(client) ?? 0n) + 1n;
-  if (clock > MAX_NATIVE_CLOCK) return undefined;
-  clocks.set(client, clock);
-  const bytes: number[] = [];
-  for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
-    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
-    bytes.push(Number(value));
-  }
-  return Uint8Array.from(bytes);
 }
 
 export function decodeMessages(
