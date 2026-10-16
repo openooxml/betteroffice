@@ -2764,9 +2764,9 @@ impl EditingDoc {
                 "width" => matches!(value, Any::Null | Any::Undefined) ||
                     any_number(Some(value)).is_some_and(|width| width >= 0.0),
                 "widthType" => matches!(value, Any::Null | Any::Undefined) ||
-                    matches!(value, Any::String(kind) if ["auto", "dxa", "pct", "nil"].contains(&kind.as_str())),
+                    matches!(value, Any::String(kind) if ["auto", "dxa", "pct", "nil"].contains(&&**kind)),
                 "justification" => matches!(value, Any::Null | Any::Undefined) ||
-                    matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&kind.as_str())),
+                    matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&&**kind)),
                 _ => false,
             };
             if !valid {

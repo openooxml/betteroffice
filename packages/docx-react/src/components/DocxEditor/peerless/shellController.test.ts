@@ -362,7 +362,7 @@ test('table selection dispatches selectTableCells as fenced selection input', as
 });
 
 function tableFixture(tableContext: Record<string, unknown> = {}) {
-  const { controller, binding, viewStore } = fixture();
+  const { controller, binding, viewStore, read } = fixture();
   const state = viewStore.getSnapshot();
   viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection: null,
     editState: { ...state.editState!, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0, columnIndex: 0,
@@ -370,7 +370,7 @@ function tableFixture(tableContext: Record<string, unknown> = {}) {
   const submit = mock(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }) } }));
   binding.commands = { submit } as never;
   controller.attach(binding);
-  return { controller, binding, viewStore, submit };
+  return { controller, binding, viewStore, submit, read };
 }
 
 test('table structure actions submit the worker table commands without a selection', async () => {
@@ -500,7 +500,7 @@ test('splitCell opens the dialog with span defaults and submits splitTableCell o
 test('table_properties_open_waits_for_admitted_input', async () => {
   const { controller, binding, submit, read, viewStore } = tableFixture();
   const view = viewStore.getSnapshot();
-  viewStore.acceptWorkerState(view.identity, { ...view, selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } });
+  viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } });
   let captured: { initial: unknown; apply(props: unknown): Promise<unknown> } | undefined;
   const openTableProperties = mock((initial: unknown, apply: (props: unknown) => Promise<unknown>) => {
     captured = { initial, apply };
@@ -525,7 +525,7 @@ test('table_properties_open_waits_for_admitted_input', async () => {
 test('table_properties_apply_rejects_changed_origin', async () => {
   const { controller, binding, submit, read, viewStore } = tableFixture();
   const view = viewStore.getSnapshot();
-  viewStore.acceptWorkerState(view.identity, { ...view, selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } });
+  viewStore.acceptWorkerState(view.identity, { ...view, epoch: 1, selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } });
   let captured: { apply(props: unknown): Promise<unknown> } | undefined;
   const openTableProperties = mock((_initial: unknown, apply: (props: unknown) => Promise<unknown>) => { captured = { apply }; });
   read.mockImplementation(async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } }));

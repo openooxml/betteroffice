@@ -33,6 +33,7 @@ type BrowserHarness = {
 let tableActionExecutor: ((action: unknown) => Promise<unknown>) | undefined;
 
 export function registerTableActionExecutor(executor: (action: unknown) => Promise<unknown>): () => void {
+  if (!(globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__) return () => {};
   tableActionExecutor = executor;
   return () => { if (tableActionExecutor === executor) tableActionExecutor = undefined; };
 }
