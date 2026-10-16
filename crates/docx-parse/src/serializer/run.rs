@@ -69,7 +69,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 "w:eastAsiaTheme",
                 fonts.east_asia_theme.as_deref(),
             );
-            optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:cstheme", fonts.cs_theme.as_deref());
             optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
@@ -1414,6 +1414,15 @@ mod tests {
             let formatting = parse_run_properties(parsed.root(), None);
             assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
         }
+    }
+
+    #[test]
+    fn theme_fonts_survive_parse_and_serialize() {
+        let xml = r#"<w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/></w:rPr>"#;
+        let limits = ParseLimits::default();
+        let parsed = parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+        let formatting = parse_run_properties(parsed.root(), None);
+        assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
     }
 
     #[test]
