@@ -10,6 +10,10 @@ import {
 
 export const DEFAULT_MAX_FRAME_BYTES = MAX_COLLABORATION_FRAME_BYTES;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
+/** Largest update a replica accepts (docx-edit `MAX_UPDATE_BYTES`), the per-update bound. */
+export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
+/** Largest configurable frame: one update at the per-update bound and its sync header. */
+export const MAX_FRAME_BYTES = MAX_UPDATE_BYTES + 6;
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
@@ -175,6 +179,11 @@ function encodeSyncMessage(
     ],
     maxFrameBytes
   );
+}
+
+/** Largest sync payload that fits a frame of `maxFrameBytes`. */
+export function maxSyncPayloadBytes(maxFrameBytes: number): number {
+  return maxFrameBytes - 2 - encodeVarUint(maxFrameBytes).byteLength;
 }
 
 export function encodeSyncStep1(

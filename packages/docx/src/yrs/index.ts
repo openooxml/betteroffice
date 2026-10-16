@@ -1205,8 +1205,16 @@ export interface YrsSession extends CollaborationReplica {
   encodeStateVector(): Uint8Array;
   /** Full state, or only the state missing from a peer vector. */
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+  /**
+   * The state missing from a peer vector as ordered updates of at most `maxChunkBytes` each: one update when it fits,
+   * otherwise causally ordered structs and then the delete set alone. Only an update holding a single larger struct
+   * exceeds the limit.
+   */
+  encodeStateAsUpdateChunks(remoteStateVector: Uint8Array, maxChunkBytes: number): Uint8Array[];
   /** Applies a remote/incremental yrs v1 update. */
   applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
+  /** Applies one sync's ordered updates as a single remote change; refuses all if any is malformed or oversized. */
+  applyUpdateChunks(updates: readonly Uint8Array[]): void;
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array): void;
   /** Adopt another replica's host batch outside undo history. @internal */
