@@ -277,7 +277,7 @@ function sidebarFixture(options: { hostComments?: Note[]; readOnly?: boolean; mo
   let version = 0;
   const viewStore = createPeerlessViewStore({ identity: { session: 's', incarnation: 1, epoch: 1 }, version: 0,
     throughSeq: 0, presentedThroughSeq: 0, workerSelection: selection, anchors: null, editState, geometry: null });
-  const read = mock(async (request: { kind: string; target?: { id: number } }) => ({ status: 'ok', version: `native-${version}`, value:
+  const read = mock(async (request: { kind: string; target?: { id: number }; selection?: unknown }) => ({ status: 'ok', version: `native-${version}`, value:
     request.kind === 'readParagraphs' ? { ok: true, version: `native-${version}`, paragraphs: [] } :
     request.kind === 'commentSelectionRange' ? anchored :
     request.kind === 'reviewTarget' ? projected.some(comment => comment.id === request.target!.id) ? { id: `n${request.target!.id}`, ranges: [range] } : null :

@@ -3,7 +3,7 @@ import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { useCommentSidebarItems } from '../../../hooks/useCommentSidebarItems';
 import { useWorkerComments } from './useWorkerComments';
 import type { DocxCommandResult } from '../../../commands/types';
-import type { WorkerCommentAction } from './shellController';
+import type { WorkerCommentAction, WorkerCommentDraft } from './shellController';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -17,7 +17,7 @@ afterAll(async () => {
 const refused = (message: string): DocxCommandResult => ({ ok: false, failure: { code: 'command-failed', message } });
 
 function mount() {
-  const draft = { binding: {}, selection: { anchor: { story: 'body', paraId: 'p', offset: 1 }, focus: { story: 'body', paraId: 'p', offset: 4 } } };
+  const draft = { binding: {}, selection: { anchor: { story: 'body', paraId: 'p', offset: 1 }, focus: { story: 'body', paraId: 'p', offset: 4 } } } as unknown as WorkerCommentDraft;
   const results: DocxCommandResult[] = [];
   const comment = mock(async (_action: WorkerCommentAction): Promise<DocxCommandResult> => results.shift() ?? { ok: true, status: 'executed' });
   const controller = { beginComment: mock(async () => draft), comment } as never;
