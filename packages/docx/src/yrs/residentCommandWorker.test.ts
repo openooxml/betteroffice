@@ -261,7 +261,7 @@ test('render environment commands change hidden text and theme colors without ed
   } finally { client.destroy(); }
 }, TIMEOUT);
 
-test('render environment reservations lay out at their command version and never reach the document', async () => {
+test('render environment reservations lay out at their document version and never reach the document', async () => {
   const { client, engine, initial, point } = await openWorker({ bodyXml:
     '<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta</w:t></w:r></w:p>' +
     '<w:p w14:paraId="00000002"><w:r><w:t>Gamma</w:t></w:r></w:p>',
@@ -280,7 +280,7 @@ test('render environment reservations lay out at their command version and never
     expect(boxes()).toEqual([]);
 
     const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment({
-      version: '0', sets: [{ owner: 'plugin', items: [inline('0', 40)] }],
+      version: nativeVersion, sets: [{ owner: 'plugin', items: [inline(nativeVersion, 40)] }],
     })));
     expect(set.outcomes[0]?.status).toBe('noop');
     frame = applyFrameDeltaOwned(frame, decodeFrameDelta(set.frame!.payload.frame));
@@ -297,7 +297,7 @@ test('render environment reservations lay out at their command version and never
     expect(boxes()).toEqual([expect.objectContaining({ id: 'box', width: 40 })]);
 
     const invalid = await client.edit(intent(3, 0, 'setRenderEnvironment', environment({
-      version: '0', sets: [{ owner: 'plugin', items: [inline('0', -1)] }],
+      version: nativeVersion, sets: [{ owner: 'plugin', items: [inline(nativeVersion, -1)] }],
     })));
     expect(invalid.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
     if (invalid.frame) frame = applyFrameDeltaOwned(frame, decodeFrameDelta(invalid.frame.payload.frame));
@@ -306,7 +306,7 @@ test('render environment reservations lay out at their command version and never
     expect(locked.outcomes[0]?.status).toBe('noop');
     if (locked.frame) frame = applyFrameDeltaOwned(frame, decodeFrameDelta(locked.frame.payload.frame));
     const readOnly = await client.edit(intent(5, 0, 'setRenderEnvironment', environment({
-      version: '0', sets: [{ owner: 'plugin', items: [{
+      version: nativeVersion, sets: [{ owner: 'plugin', items: [{
         id: 'gap', kind: 'block', side: 'after', height: 50,
         anchor: { kind: 'paragraph', paragraph: {
           kind: 'session', sessionId: engine.paragraphIdentities().sessionId, story: 'body', paraId: point.paraId,
@@ -317,7 +317,7 @@ test('render environment reservations lay out at their command version and never
     frame = applyFrameDeltaOwned(frame, decodeFrameDelta(readOnly.frame!.payload.frame));
     expect(boxes()).toEqual([expect.objectContaining({ id: 'gap', height: 50 })]);
 
-    const cleared = await client.edit(intent(6, 0, 'setRenderEnvironment', environment({ version: '0', sets: [] })));
+    const cleared = await client.edit(intent(6, 0, 'setRenderEnvironment', environment({ version: nativeVersion, sets: [] })));
     frame = applyFrameDeltaOwned(frame, decodeFrameDelta(cleared.frame!.payload.frame));
     expect(boxes()).toEqual([]);
   } finally { client.destroy(); }
@@ -327,15 +327,16 @@ test('stale render environment reservations retain listed owners and clear remov
   const { client, engine, initial, point } = await openWorker();
   const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
   try {
+    const version = initial.frame!.payload.documentVersion!;
     const inline = (id: string, width: number, hideAnchor = false) => ({
       id, kind: 'inline', width, height: 20, hideAnchor,
-      anchor: { kind: 'range', version: '0', range: {
+      anchor: { kind: 'range', version, range: {
         story: 'body', view: 'accepted',
         start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 2 },
       } },
     });
     const environment = (sets: unknown[]) => ({
-      themeColors: {}, showHiddenText: false, reservations: { version: '0', sets },
+      themeColors: {}, showHiddenText: false, reservations: { version, sets },
     } as never);
     const applied = () => JSON.parse(layouts.mock.calls.at(-1)![0]).renderEnv.reservations;
     let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
@@ -384,14 +385,16 @@ test('frames name the reservation set their layout includes, or none current for
         story: 'body', view: 'accepted', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 } } },
     }] }] } } as never);
     expect(initial.frame!.payload.reservations).toBeUndefined();
-    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment('0', 'k1')));
-    expect(set.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
+    const opened = initial.frame!.payload.documentVersion!;
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment(opened, 'k1')));
+    expect(set.frame!.payload.reservations).toEqual({ version: opened, key: 'k1' });
     const edited = await client.edit(intent(2, 0, 'insertText', { text: '!' }));
-    expect(edited.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
-    const stale = await client.edit(intent(3, 1, 'setRenderEnvironment', environment('0', 'k2')));
-    expect(stale.frame!.payload.reservations).toEqual({ version: '0', key: null });
-    const current = await client.edit(intent(4, 1, 'setRenderEnvironment', environment('1', 'k3')));
-    expect(current.frame!.payload.reservations).toEqual({ version: '1', key: 'k3' });
+    expect(edited.frame!.payload.reservations).toEqual({ version: opened, key: 'k1' });
+    const stale = await client.edit(intent(3, 1, 'setRenderEnvironment', environment(opened, 'k2')));
+    expect(stale.frame!.payload.reservations).toEqual({ version: opened, key: null });
+    const changed = edited.frame!.payload.documentVersion!;
+    const current = await client.edit(intent(4, 1, 'setRenderEnvironment', environment(changed, 'k3')));
+    expect(current.frame!.payload.reservations).toEqual({ version: changed, key: 'k3' });
   } finally {
     client.destroy();
   }
@@ -400,14 +403,15 @@ test('frames name the reservation set their layout includes, or none current for
 test('a render environment command without reservations keeps the set its frames name', async () => {
   const { client, initial, point } = await openWorker();
   try {
+    const version = initial.frame!.payload.documentVersion!;
     const set = await client.edit(intent(1, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: false, reservations: {
-      version: '0', key: 'k1', sets: [{ owner: 'A', items: [{ id: 'a', kind: 'inline', width: 30, height: 20, anchor: { kind: 'range', version: '0',
+      version, key: 'k1', sets: [{ owner: 'A', items: [{ id: 'a', kind: 'inline', width: 30, height: 20, anchor: { kind: 'range', version,
         range: { story: 'body', view: 'accepted', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 } } } }] }],
     } } as never));
-    expect(set.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
+    expect(set.frame!.payload.reservations).toEqual({ version, key: 'k1' });
     const themed = await client.edit(intent(2, 0, 'setRenderEnvironment', { themeColors: { accent1: 'FF0000' }, showHiddenText: true } as never));
     expect(themed.outcomes[0]?.status).toBe('noop');
-    expect(themed.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
+    expect(themed.frame!.payload.reservations).toEqual({ version, key: 'k1' });
     const frame = [set, themed].reduce((retained, ack) => applyFrameDeltaOwned(retained, decodeFrameDelta(ack.frame!.payload.frame)),
       applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame)));
     expect(frame.displayList.pages.flatMap((page) => page.reservations ?? [])).toEqual([expect.objectContaining({ owner: 'A', id: 'a', width: 30 })]);
@@ -421,10 +425,11 @@ test.each([true, false])('render environment reservations survive a review previ
   try {
     let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
     const boxes = () => frame.displayList.pages.flatMap((page) => page.reservations ?? []);
+    const version = initial.frame!.payload.documentVersion!;
     const set = await client.edit(intent(1, 0, 'setRenderEnvironment', {
-      themeColors: {}, showHiddenText: false, reservations: { version: '0', sets: [{ owner: 'plugin', items: [{
+      themeColors: {}, showHiddenText: false, reservations: { version, sets: [{ owner: 'plugin', items: [{
         id: 'box', kind: 'inline', width: 40, height: 20,
-        anchor: { kind: 'range', version: '0', range: {
+        anchor: { kind: 'range', version, range: {
           story: 'body', view: 'accepted',
           start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 },
         } },
@@ -472,7 +477,7 @@ test('the worker and a main-thread session lay out one reservation set identical
     };
     const set = await client.edit(intent(1, 0, 'setRenderEnvironment', {
       themeColors: {}, showHiddenText: false,
-      reservations: { version: '0', sets: [{ owner: 'plugin', items: items(engine.paragraphIdentities().sessionId) }] },
+      reservations: { version: initial.frame!.payload.documentVersion!, sets: [{ owner: 'plugin', items: items(engine.paragraphIdentities().sessionId) }] },
     } as never));
     const worker = applyFrameDeltaOwned(
       applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame)),

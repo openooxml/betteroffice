@@ -675,7 +675,7 @@ function applyPreparedDocxCommand(
   engine: ResidentDocxCommandEngine,
   state: ResidentDocxCommandState,
   prepared: PreparedDocxCommand,
-  context: DocxCommandApplyContext,
+  _context: DocxCommandApplyContext,
   environment?: ResidentCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { command, range, selection } = prepared;
@@ -687,7 +687,7 @@ function applyPreparedDocxCommand(
   };
   if (command.kind === 'setRenderEnvironment') {
     const { reservations, ...rest } = command.payload;
-    const current = reservations?.version === String(context.currentVersion);
+    const current = reservations?.version === engine.proposalEngine.version();
     environment!.setRenderEnvironment!(reservations
       ? { ...rest, reservations: current
         ? resolveReservations(engine.geometryReader, reservations, engine.proposalEngine.version(),

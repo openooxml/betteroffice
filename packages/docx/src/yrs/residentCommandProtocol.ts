@@ -267,7 +267,7 @@ export interface DocxCommandPayloads {
   setRenderEnvironment: {
     themeColors: Record<string, string>;
     showHiddenText: boolean;
-    /** Applied only while the command version is still `reservations.version`. */
+    /** Applied only while the document version is still `reservations.version`. */
     reservations?: DocxReservationsPayload;
   };
   setFontEnvironment: ResidentFontEnvironment;
