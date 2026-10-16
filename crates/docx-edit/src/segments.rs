@@ -155,6 +155,11 @@ impl ParagraphIndex {
         Some((para.start, para.pilcrow))
     }
 
+    /// Where `para_id`'s inline content starts: past its leading block embeds.
+    pub(crate) fn node_start(&self, para_id: &str) -> Option<u32> {
+        Some(self.paras.get(*self.by_para.get(para_id)? as usize)?.node_start)
+    }
+
     /// How many paragraphs carry `para_id`: 0, 1, or 2 for two or more.
     pub(crate) fn para_id_count(&self, para_id: &str) -> u32 {
         if self.repeated.contains(para_id) {

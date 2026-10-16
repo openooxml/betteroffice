@@ -220,14 +220,8 @@ fn preview_refresh_plain_edits_match_recorded_region_outputs() {
     preview_refresh_edit_oracle(&preview_fixture::plain(), font);
 }
 
-#[test]
-fn preview_refresh_text_at_a_paragraph_led_by_a_table_matches_recorded_outputs() {
-    let _open = OpenSwitch::new(Some(false));
-    let _preview = PreviewSwitch::new(Some(false));
-    let fonts = docx_layout::MeasureFonts::default();
-    let _scope = fonts.enter();
-    let font = docx_layout::register_measure_font(LIBERATION).unwrap();
-    let bytes = preview_fixture::document(&format!(
+fn table_led_document() -> Vec<u8> {
+    preview_fixture::document(&format!(
         "{}{}{}",
         preview_fixture::paragraph(1, &preview_fixture::run("Before")),
         preview_fixture::table(&preview_fixture::paragraph(
@@ -235,8 +229,49 @@ fn preview_refresh_text_at_a_paragraph_led_by_a_table_matches_recorded_outputs()
             &preview_fixture::run("cell")
         )),
         preview_fixture::paragraph(3, &preview_fixture::run("After")),
-    ));
-    let (engine, oracle, request) = preview_refresh_sessions(&bytes, font);
+    ))
+}
+
+fn table_led_start(engine: &EngineSession) -> u32 {
+    engine
+        .doc()
+        .paragraph_index("body")
+        .unwrap()
+        .para_span("00000003")
+        .unwrap()
+        .0
+}
+
+#[test]
+fn resident_text_at_a_paragraph_led_by_a_table_patches_locally() {
+    let (engine, request) = local_patch_laid_out(&table_led_document(), 9701, true);
+    let start = table_led_start(&engine);
+    local_patch_step(&engine, &request, "body", (start, start, Some("x")), true);
+}
+
+#[test]
+fn deferred_resident_text_at_a_paragraph_led_by_a_table_matches_cold() {
+    let (engine, request) = local_patch_laid_out(&table_led_document(), 9702, true);
+    let start = table_led_start(&engine);
+    for (at, text) in [(1, "z"), (start + 1, "x")] {
+        engine
+            .edit_resident_text(crate::StoryRange::new("body", at, at), Some(text), true)
+            .unwrap();
+    }
+    assert!(engine.render.borrow().stories["body"].local.deferred);
+    let epoch = engine.display.borrow().binary_frame_epoch;
+    engine.apply_and_layout("body", epoch).unwrap();
+    assert_local_patch_matches_cold(&engine, &request, "deferred text after a leading table");
+}
+
+#[test]
+fn preview_refresh_text_at_a_paragraph_led_by_a_table_matches_recorded_outputs() {
+    let _open = OpenSwitch::new(Some(false));
+    let _preview = PreviewSwitch::new(Some(false));
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+    let (engine, oracle, request) = preview_refresh_sessions(&table_led_document(), font);
     let paragraphs = engine.doc().paragraph_index("body").unwrap();
     let start = paragraphs.para_span("00000003").unwrap().0;
     assert!(start < paragraphs.para_at(start).unwrap().node_start);

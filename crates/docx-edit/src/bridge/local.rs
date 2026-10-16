@@ -359,7 +359,7 @@ impl LocalLowering {
                     map.span_at(pm + 1)
                         .filter(|span| span.paragraph == seed.source)
                         .map(|span| span.raw_start)
-                        .or_else(|| doc.paragraph_index("body").ok()?.para_span(id).map(|s| s.0))
+                        .or_else(|| doc.paragraph_index("body").ok()?.node_start(id))
                         .unwrap_or(seed.raw_start)
                 } else {
                     seed.raw_start
