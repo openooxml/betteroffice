@@ -52,3 +52,20 @@ export async function tableFixture(tableRows: readonly string[]): Promise<Uint8A
   zip.file('word/document.xml', xml.replace(/<w:tr\b[\s\S]*?(?=<\/w:tbl>)/, tableRows.map(cells => `<w:tr>${cells}</w:tr>`).join('')));
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
+
+export const EXISTING_COMMENT = '<w:comment w:id="0" w:author="Existing Reviewer" w:date="2026-01-05T09:00:00Z" w:initials="ER"><w:p w14:paraId="1A2B3C4D" w14:textId="77777777"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>Keep this note.</w:t></w:r></w:p></w:comment>';
+
+export async function commentFixture(): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  zip.file('[Content_Types].xml', types.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>'));
+  const relationships = await zip.file('word/_rels/document.xml.rels')!.async('string');
+  zip.file('word/_rels/document.xml.rels', relationships.replace('</Relationships>', `<Relationship Id="comments" Type="${r}/comments" Target="comments.xml"/></Relationships>`));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>Closing note.</w:t></w:r></w:p>',
+    '<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Closing note.</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="0"/></w:r></w:p>'));
+  zip.file('word/comments.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">${EXISTING_COMMENT}</w:comments>`);
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}

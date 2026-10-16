@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
-import { editFixture, tableCell, tableFixture } from './fixture';
+import { commentFixture, editFixture, EXISTING_COMMENT, fixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 async function open(bytes?: Uint8Array) {
@@ -30,7 +30,7 @@ async function edited(doc: DocxAgentDocument, edits: DocxAgentEdit[]) {
   const bytes = await doc.export();
   const xml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string');
   expect(xml).not.toMatch(/<w:(ins|del)\b/);
-  return { receipt, xml, before: await paragraphs(baseline), after: await paragraphs(bytes) };
+  return { receipt, xml, bytes, before: await paragraphs(baseline), after: await paragraphs(bytes) };
 }
 
 async function refusal(promise: Promise<unknown>): Promise<DocumentToolError> {
@@ -278,4 +278,105 @@ test('outline lists table cells by numeric row and column before and after inser
   expect(table().map(item => item.text)).toEqual(expected);
   const reopened = await open(await doc.export());
   expect(table(reopened).map(item => item.text)).toEqual(expected);
+});
+
+const part = async (bytes: Uint8Array, name: string) => (await JSZip.loadAsync(bytes)).file(name)?.async('string');
+const texts = (xml: string) => [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]).join('');
+
+function comments(xml: string) {
+  return [...xml.matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)].map(([, attributes, body]) => ({
+    id: attributes.match(/w:id="([^"]*)"/)![1],
+    author: attributes.match(/w:author="([^"]*)"/)?.[1],
+    date: attributes.match(/w:date="([^"]*)"/)?.[1],
+    paragraphs: [...body.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)].map(([paragraph]) => texts(paragraph)),
+  }));
+}
+
+function anchored(xml: string, id: string) {
+  const marker = (name: string) => `<w:comment${name} w:id="${id}"/>`;
+  for (const name of ['RangeStart', 'RangeEnd', 'Reference']) expect(xml.split(marker(name))).toHaveLength(2);
+  const start = xml.indexOf(marker('RangeStart'));
+  const end = xml.indexOf(marker('RangeEnd'));
+  const reference = xml.indexOf(marker('Reference'));
+  expect(reference).toBeGreaterThan(end);
+  expect(xml.slice(start, reference)).not.toContain('</w:p>');
+  return texts(xml.slice(start, end));
+}
+
+test('add_comment anchors a comment on exactly the matched phrase, one paragraph per line', async () => {
+  const doc = await open();
+  const match = hit(doc, 'strongly in the third');
+  expect(await part(await doc.export(), 'word/comments.xml')).toBeUndefined();
+  const { receipt, xml, bytes, before, after } = await edited(doc, [
+    { op: 'add_comment', match: match.match, author: 'Ada Reviewer', text: 'Check the source.\nCompare with Q2.', date: '2026-10-01T09:30:00Z' },
+  ]);
+  expect(receipt).toEqual({ applied: true, version: doc.list().version, results: [{ index: 0, op: 'add_comment', ref: match.ref, start: match.start, end: match.end, comment: expect.any(String) }] });
+  expect(after.map(p => [p.text, p.style])).toEqual(before.map(p => [p.text, p.style]));
+  const [comment, ...rest] = comments((await part(bytes, 'word/comments.xml'))!);
+  expect(rest).toEqual([]);
+  expect(comment).toMatchObject({ author: 'Ada Reviewer', date: '2026-10-01T09:30:00Z', paragraphs: ['Check the source.', 'Compare with Q2.'] });
+  expect(anchored(xml, comment.id)).toBe('strongly in the third');
+});
+
+test('add_comment keeps existing comments byte-identical and anchors in body and table cells', async () => {
+  const source = await commentFixture();
+  const doc = await open(source);
+  expect(await part(await doc.export(), 'word/comments.xml')).toBe(await part(source, 'word/comments.xml'));
+  const revenue = hit(doc, 'Revenue grew');
+  const q1 = hit(doc, 'Q1');
+  const started = Math.floor(Date.now() / 1000) * 1000;
+  const { receipt, xml, bytes } = await edited(doc, [
+    { op: 'add_comment', match: revenue.match, author: 'Ada', text: 'Body note', date: '2026-10-01T09:30:00Z' },
+    { op: 'add_comment', match: q1.match, author: 'Ada', text: 'Cell note' },
+  ]);
+  expect(new Set(receipt.results.map(result => result.comment)).size).toBe(2);
+  const saved = (await part(bytes, 'word/comments.xml'))!;
+  expect(saved).toContain(EXISTING_COMMENT);
+  const all = comments(saved);
+  expect(all.map(comment => [comment.author, comment.paragraphs])).toEqual([['Existing Reviewer', ['Keep this note.']], ['Ada', ['Body note']], ['Ada', ['Cell note']]]);
+  const [existing, body, cell] = all;
+  expect(existing.id).toBe('0');
+  expect(anchored(xml, '0')).toBe('Closing note.');
+  expect(anchored(xml, body.id)).toBe('Revenue grew');
+  expect(anchored(xml, cell.id)).toBe('Q1');
+  expect(cell.date).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  expect(Date.parse(cell.date!)).toBeGreaterThanOrEqual(started);
+  expect(Date.parse(cell.date!)).toBeLessThanOrEqual(Date.now());
+  expect(await part(bytes, 'word/styles.xml')).toBe(await part(source, 'word/styles.xml'));
+});
+
+test('add_comment refusals are atomic: invalid input, stale version, stale match, non-body story', async () => {
+  const doc = await open();
+  const heading = hit(doc, 'Quarterly report');
+  const match = hit(doc, 'strongly');
+  const version = doc.list().version;
+  const comment = (extra: Partial<Extract<DocxAgentEdit, { op: 'add_comment' }>> = {}): DocxAgentEdit => ({ op: 'add_comment', match: match.match, author: 'Ada', text: 'Note', ...extra });
+  const refused = async (at: number, edits: DocxAgentEdit[], code: string) => {
+    const error = await refusal(doc.edit({ version: at, edits }));
+    expect(error.code).toBe(code);
+    expect(doc.session.listComments()).toEqual([]);
+    expect(doc.read(heading.ref).style).toBe('Heading1');
+    return error;
+  };
+  await refused(version, [comment({ text: 'Tab\there' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ text: 'Line\r\nbreak' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ author: 'Two\nlines' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ text: '' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ date: '1 October 2026' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ match: 'm999' })], 'UNKNOWN_MATCH');
+  expect(doc.list().version).toBe(version);
+  await doc.edit({ version, edits: [{ op: 'format_text', match: match.match, italic: true }] });
+  await refused(version, [comment({ match: hit(doc, 'Closing note').match })], 'STALE_VERSION');
+  const fresh = doc.list().version;
+  const atomic = await refused(fresh, [{ op: 'set_paragraph_style', paragraph: heading.ref, style: 'Heading2' }, comment()], 'STALE_TARGET');
+  expect(atomic.details).toMatchObject({ failedIndex: 1 });
+  expect(doc.list().version).toBe(fresh);
+  expect(await part(await doc.export(), 'word/comments.xml')).toBeUndefined();
+
+  const other = await open(await fixture());
+  const header = other.grep({ query: 'Internal' }).matches[0];
+  expect(header.story).not.toBe('body');
+  const error = await refusal(other.edit({ version: other.list().version, edits: [{ op: 'add_comment', match: header.match, author: 'Ada', text: 'Note' }] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(other.session.listComments()).toEqual([]);
 });
