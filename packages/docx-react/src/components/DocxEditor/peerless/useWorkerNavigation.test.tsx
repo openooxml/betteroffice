@@ -48,11 +48,13 @@ test('zoom updates the page indicator without requiring a scroll event', async (
   } finally { cleanup(); box.mockRestore(); controller.dispose(); viewStore.dispose(); }
 });
 
-function reviewNavigation(targets: Record<string, unknown>) {
+type Shown = { caret: { x: number; y: number; width: number; height: number } | null; selectionRects: { x: number; y: number; width: number; height: number }[] };
+
+function reviewNavigation(targets: Record<string, unknown>, shown: Shown = { caret: { x: 10, y: 400, width: 1, height: 12 }, selectionRects: [] }) {
   const identity = { session: 'review', incarnation: 1, epoch: 1 };
   const viewStore = createPeerlessViewStore({ identity, version: 1, throughSeq: 0, presentedThroughSeq: 0,
     workerSelection: null, anchors: null, editState: undefined, geometry: { identity, frameEpoch: 1, layoutRevision: 1,
-      coversThroughSeq: 0, caret: { x: 10, y: 400, width: 1, height: 12 }, selectionRects: [], pages: [] } });
+      coversThroughSeq: 0, ...shown, pages: [] } });
   const read = mock(async (request: { kind: string; target?: { kind: string; id?: number; revisionId?: string } }) => ({ status: 'ok', version: 'native',
     value: request.kind === 'reviewTarget' ? targets[JSON.stringify(request.target)] ?? null : null }));
   const submit = mock((_intent: unknown, _options?: unknown) => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }), presented: Promise.resolve('presented') } }));
@@ -85,6 +87,16 @@ test('review navigation selects the first anchored range of a comment or revisio
     expect(await controller.revealReviewTarget({ kind: 'revision', revisionId: '12' })).toBe(true);
     expect(await controller.ref.scrollToChange(12)).toBe(true);
     expect(submit).toHaveBeenCalledTimes(3);
+  } finally { dispose(); }
+});
+
+test('review navigation scrolls a selected range without a caret to its first selection rect', async () => {
+  const range = { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 9 } };
+  const { controller, scroller, dispose } = reviewNavigation({ [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native', ranges: [range] } },
+    { caret: null, selectionRects: [{ x: 10, y: 900, width: 40, height: 12 }, { x: 10, y: 914, width: 20, height: 12 }] });
+  try {
+    expect(await controller.ref.scrollToComment(7)).toBe(true);
+    expect(scroller.scrollTop).toBe(900 * 2 - 24);
   } finally { dispose(); }
 });
 
