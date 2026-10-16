@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
-    ClientID, Doc, OffsetKind, Options, ReadTxn, StateVector, StickyIndex, Subscription, Transact,
-    Update, WriteTxn,
+    ClientID, Doc, IdSet, OffsetKind, Options, ReadTxn, StateVector, StickyIndex, Subscription,
+    Transact, Update, WriteTxn,
 };
 
 mod batch;
@@ -179,7 +179,7 @@ impl DeckSession {
         let doc = session_doc(client_id);
         hydrate_doc(&doc, update)?;
         deck::migrate_doc(&doc)?;
-        collect_garbage(&doc);
+        collect_garbage(&doc, None);
         let (package, _snapshot) = deck::validate_doc(&doc)?;
         Self::assemble(
             doc,
@@ -267,7 +267,7 @@ impl DeckSession {
         story::import_source_numbering_restarts(&self.doc, import.source)?;
         outline_gradients::import_source(&self, &mut import)?;
         import.sync_package_json(&self.doc, self.package())?;
-        collect_garbage(&self.doc);
+        collect_garbage(&self.doc, None);
         Ok(Self {
             package: Arc::new(package),
             baseline_epoch: self.epoch(),
@@ -366,6 +366,10 @@ impl DeckSession {
         integration
             .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        drop(integration);
+        if self.undo.borrow().diagnostics() == (0, 0) {
+            collect_garbage(&self.doc, Some(&carried));
+        }
         Ok(snapshot)
     }
 
@@ -460,15 +464,15 @@ pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
 
 /// A doc an undo manager attaches to. Clearing the redo stack unkeeps the parents of deleted
 /// items the undo stack still keeps, so collecting such a parent would free what they point to;
-/// these docs collect only while opening, before any undo.
+/// these docs collect only while opening and while their undo manager holds no stack items.
 pub(crate) fn session_doc(client_id: u64) -> Doc {
     let mut options = doc_options(client_id);
     options.skip_gc = true;
     Doc::with_options(options)
 }
 
-fn collect_garbage(doc: &Doc) {
-    doc.transact_mut_with(HYDRATE_ORIGIN).gc(None);
+fn collect_garbage(doc: &Doc, scope: Option<&IdSet>) {
+    doc.transact_mut_with(HYDRATE_ORIGIN).gc(scope);
 }
 
 fn doc_options(client_id: u64) -> Options {
