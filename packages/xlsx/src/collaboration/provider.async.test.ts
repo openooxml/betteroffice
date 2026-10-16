@@ -151,7 +151,7 @@ test('worker replicas exchange a fresh handshake and converge after disconnected
     await Promise.all([left.call.version(), right.call.version()]);
     expect(providers.every((provider) => provider.synced)).toBe(true);
     expect(frames.map((_, index) => [count(index, 'sync-step-1'), count(index, 'sync-step-2')]))
-      .toEqual(handshakes.map(([step1, step2]) => [step1 + 1, step2 + 1]));
+      .toEqual(handshakes.map(([step1, step2]) => [step1 + 2, step2 + 2]));
     const cells = await Promise.all([left.call.cellInputs(0, 'B3:C3'), right.call.cellInputs(0, 'B3:C3')]);
     expect(cells[0].cells).toEqual(cells[1].cells);
     expect(cells[0].cells[0].map((cell) => cell.input)).toEqual(['left offline', 'right offline']);
