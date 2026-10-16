@@ -49,6 +49,7 @@ function openPeer(kind: Kind, clientId: number) {
       ? new CollaborationProvider(deck, transport)
       : new CollaborationProvider(replica, transport),
     edit: (text: string) => { deck.insertText(story(), 0, text); },
+    erase: (start: number, end: number) => { deck.deleteText(story(), start, end); },
     text: () => deck.story(story()).paragraphs.flatMap((paragraph) => paragraph.runs.map((run) => run.text)).join(''),
   };
 }
@@ -91,11 +92,26 @@ function relay(size: number) {
       for (const listener of [...listeners[frame.to]]) listener({ type: 'message', data: frame.data });
     }
   };
+  const carries = (data: Uint8Array, type: string) => decodeMessages(data).some((message) => message.type === type);
+  const holdBack = async (held: string, doubled: string) => {
+    for (let idle = 0, moved = 0; idle < 64 && moved < 32;) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const at = queue.findIndex((frame) => !carries(frame.data, held));
+      if (at < 0) { idle += 1; continue; }
+      idle = 0;
+      moved += 1;
+      const [frame] = queue.splice(at, 1);
+      const copies = carries(frame.data, doubled) ? 2 : 1;
+      for (let copy = 0; copy < copies; copy += 1) {
+        for (const listener of [...listeners[frame.to]]) listener({ type: 'message', data: frame.data });
+      }
+    }
+  };
   const count = (from: number, type: string, since: number) => sent.slice(since)
     .filter((frame) => frame.from === from)
     .flatMap((frame) => decodeMessages(frame.data))
     .filter((message) => message.type === type).length;
-  return { transports, setOnline, reopen, flush, sent, count };
+  return { transports, setOnline, reopen, flush, holdBack, sent, count };
 }
 
 async function network(kind: Kind, size: number) {
@@ -206,6 +222,54 @@ for (const kind of ['sync', 'async'] as const) {
         const settled = net.sent.length;
         await net.flush();
         expect(net.sent.length).toBe(settled);
+      } finally { close(); }
+    });
+
+    it('request each missing state once while answers are delayed and duplicated', async () => {
+      const { peers: [left, right], net, close } = await network(kind, 2);
+      try {
+        net.setOnline(0, false);
+        net.setOnline(1, false);
+        left.edit('left ');
+        right.edit('right ');
+        const mark = net.sent.length;
+        net.reopen(0, 1);
+        await net.holdBack('sync-step-2', 'sync-step-1');
+        await net.flush();
+        expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+        expect(left.text()).toContain('left ');
+        expect(left.text()).toContain('right ');
+        expect([0, 1].map((index) => net.count(index, 'sync-step-1', mark))).toEqual([2, 2]);
+        const settled = net.sent.length;
+        await net.flush();
+        expect(net.sent.length).toBe(settled);
+      } finally { close(); }
+    });
+
+    it('publish an offline deletion to a peer that saw no open', async () => {
+      const { peers: [left, right], net, close } = await network(kind, 2);
+      try {
+        net.setOnline(0, false);
+        const vector = left.deck.encodeStateVector();
+        left.erase(0, 2);
+        expect(left.deck.encodeStateVector()).toEqual(vector);
+        net.setOnline(0, true);
+        await net.flush();
+        expect(right.deck.snapshot()).toEqual(left.deck.snapshot());
+        expect(right.text()).toBe('pha');
+      } finally { close(); }
+    });
+
+    it('publish an offline deletion to every replica on a relay', async () => {
+      const { peers, net, close } = await network(kind, 3);
+      try {
+        net.setOnline(2, false);
+        peers[2].erase(0, 2);
+        net.setOnline(2, true);
+        await net.flush();
+        expect(peers[1].deck.snapshot()).toEqual(peers[0].deck.snapshot());
+        expect(peers[2].deck.snapshot()).toEqual(peers[0].deck.snapshot());
+        expect(peers[0].text()).toBe('pha');
       } finally { close(); }
     });
   });
