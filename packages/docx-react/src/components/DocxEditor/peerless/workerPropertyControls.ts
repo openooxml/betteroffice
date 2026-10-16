@@ -48,7 +48,8 @@ export function useWorkerWatermarkControls(controller: WorkerShellController, on
 export function useWorkerRulerControls(controller: WorkerShellController, onError?: (error: Error) => void, enabled = true) {
   const query = useWorkerQuery<'sectionProperties'>(controller, enabled ? { kind: 'sectionProperties' } : null);
   const state = controller.getSnapshot();
-  const page = state.view?.geometry?.pages.find(page => page.page.pageIndex === controller.ref.getCurrentPage() - 1);
+  const pageIndex = query ? controller.ref.getCurrentPage() - 1 : -1;
+  const page = state.view?.geometry?.pages.find(page => page.page.pageIndex === pageIndex);
   const section = query?.value.sections[page?.displayPage?.sectionIndex ?? query.value.sections.length - 1] ?? query?.value.sections.at(-1);
   const paragraph = query?.value.paragraphs.find(paragraph => paragraph.story === query.selection?.focus.story && paragraph.paraId === query.selection.focus.paraId);
   const attrs = state.view?.editState?.toolbar?.paragraphProperties;

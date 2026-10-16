@@ -16,12 +16,18 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
                 | "rightBrace"
                 | "donut"
                 | "bentArrow"
+                | "cloud"
                 | "cloudCallout"
                 | "wedgeRectCallout"
                 | "wedgeRoundRectCallout"
                 | "ribbon2"
                 | "swooshArrow"
                 | "circularArrow"
+                | "leftCircularArrow"
+                | "curvedLeftArrow"
+                | "curvedRightArrow"
+                | "curvedUpArrow"
+                | "uturnArrow"
                 | "foldedCorner"
                 | "ellipse"
                 | "roundRect"
@@ -33,6 +39,11 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
                 | "pie"
                 | "chord"
                 | "flowChartDelay"
+                | "flowChartOnlineStorage"
+                | "gear6"
+                | "gear9"
+                | "moon"
+                | "heart"
                 | "leftBracket"
                 | "rightBracket"
                 | "teardrop"
@@ -191,6 +202,47 @@ mod tests {
     }
 
     #[test]
+    fn callout_leader_lines_are_stroke_only() {
+        for (geometry, body_stroked) in [
+            ("callout1", false),
+            ("borderCallout1", true),
+            ("accentCallout1", false),
+            ("accentCallout2", false),
+        ] {
+            let source = serde_json::from_value(serde_json::json!({
+                "kind": "shape", "objectId": 1, "name": geometry, "geometry": geometry,
+                "x": 0, "y": 0, "w": 200, "h": 100, "path": [],
+                "fill": { "kind": "solid", "color": "#326496" },
+                "stroke": { "color": "#000000", "width": 1 }
+            }))
+            .unwrap();
+            let parts = preset_primitives(source);
+            assert_eq!(parts.len(), 2, "{geometry}");
+            let Primitive::Shape {
+                fill: body_fill,
+                stroke: body_stroke,
+                ..
+            } = &parts[0].0
+            else {
+                panic!()
+            };
+            assert!(body_fill.is_some() && parts[0].1);
+            assert_eq!(body_stroke.is_some(), body_stroked);
+
+            let Primitive::Shape {
+                fill: leader_fill,
+                stroke: leader_stroke,
+                ..
+            } = &parts[1].0
+            else {
+                panic!()
+            };
+            assert!(leader_fill.is_none() && !parts[1].1);
+            assert!(leader_stroke.is_some());
+        }
+    }
+
+    #[test]
     fn layered_presets_cast_one_shadow_with_every_fill_and_open_stroke() {
         for geometry in [
             "arc",
@@ -199,10 +251,18 @@ mod tests {
             "rightBrace",
             "ribbon2",
             "foldedCorner",
+            "cloud",
             "cloudCallout",
             "can",
             "leftBracket",
             "rightBracket",
+            "callout1",
+            "borderCallout1",
+            "accentCallout1",
+            "accentCallout2",
+            "curvedLeftArrow",
+            "curvedRightArrow",
+            "curvedUpArrow",
         ] {
             let source = serde_json::from_value(serde_json::json!({
                 "kind": "shape", "objectId": 1, "name": "shadow", "geometry": geometry,

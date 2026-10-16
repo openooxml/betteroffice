@@ -6,7 +6,8 @@ export type WorkerPropertyQuery = PeerlessWorkerQuery<'properties'>;
 
 export async function readWorkerSection(controller: WorkerShellController): Promise<WorkerPropertyQuery> {
   const parts = await controller.query({ kind: 'partSnapshot' });
-  const page = controller.getSnapshot().view?.geometry?.pages.find(page => page.page.pageIndex === controller.ref.getCurrentPage() - 1);
+  const pageIndex = controller.ref.getCurrentPage() - 1;
+  const page = controller.getSnapshot().view?.geometry?.pages.find(page => page.page.pageIndex === pageIndex);
   const source = parts.value.metadata.body.sections ?? [];
   const index = page?.displayPage?.sectionIndex;
   const section = index !== undefined && index >= 0 && index < source.length - 1 ? source[index]?.id ?? String(index) : 'final';

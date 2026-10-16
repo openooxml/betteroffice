@@ -1,0 +1,26 @@
+{
+  "name": "@betteroffice/evals",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "bun src/build.ts && bun styles.ts",
+    "predev": "bun run build",
+    "dev": "wrangler dev",
+    "predeploy": "bun run build",
+    "deploy": "wrangler deploy",
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260708.1",
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@tailwindcss/postcss": "^4.3.2",
+    "@types/bun": "^1.4.2",
+    "postcss": "^8.5.23",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.106.0"
+  }
+}

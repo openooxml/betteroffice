@@ -1,0 +1,116 @@
+@import 'tailwindcss' source('.');
+@import '../../../shared/site-tokens.css';
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/geist-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/geist-mono-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@theme {
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  --breakpoint-lg: 68.75rem;
+}
+
+@theme inline {
+  --color-bg: var(--bo-bg);
+  --color-surface: var(--bo-surface);
+  --color-fg: var(--bo-fg);
+  --color-ink: var(--bo-ink);
+  --color-dim: var(--bo-dim);
+  --color-faint: var(--bo-faint);
+  --color-line: var(--bo-line-soft);
+  --color-line-soft: var(--bo-line-soft);
+  --color-line-2: var(--bo-line);
+  --color-acc: var(--bo-acc);
+  --color-acc-soft: var(--bo-acc-soft);
+  --color-head: var(--bo-head);
+  --color-hover: var(--bo-surface);
+  --color-series: var(--c);
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+    --bg: var(--bo-bg);
+    --fg: var(--bo-fg);
+    --ink: var(--bo-ink);
+    --dim: var(--bo-dim);
+    --faint: var(--bo-faint);
+    --line: var(--bo-line-soft);
+    --line-2: var(--bo-line);
+    --ours: var(--bo-acc);
+    --lo: var(--bo-dim);
+    --grid: var(--bo-line-soft);
+    --grid-strong: var(--bo-line);
+    --band: color-mix(in srgb, var(--bo-fg) 3%, transparent);
+    --track: var(--bo-line-soft);
+    --hover: var(--bo-surface);
+    --over-frame: color-mix(in srgb, var(--bo-fg) 4%, transparent);
+    --tip-bg: var(--bo-bg);
+    --shadow: 0 10px 30px rgb(0 0 0 / 0.14);
+    --header: 4rem;
+  }
+  html {
+    scroll-padding-top: calc(var(--header) + 16px);
+    overflow-x: clip;
+  }
+  body {
+    background: var(--bo-bg);
+    color: var(--bo-fg);
+  }
+  :focus-visible {
+    outline: 1px solid var(--bo-fg);
+    outline-offset: 3px;
+  }
+}
+
+@layer components {
+  .prose { max-width: 52rem; }
+  .prose p, .prose ul, .prose pre { margin-top: 1.25rem; }
+  .prose h2 { margin-top: 2.5rem; font-size: 1.5rem; font-weight: 600; letter-spacing: -0.025em; }
+  .prose h3 { margin-top: 1.5rem; font-weight: 600; }
+  .prose ul { padding-left: 1.25rem; list-style: disc; }
+  .prose li { margin-block: 0.5rem; }
+  main a { text-decoration: underline; text-underline-offset: 3px; }
+  p, li, td, th, pre, code { overflow-wrap: anywhere; }
+  pre { white-space: pre-wrap; background: var(--bo-surface); padding: 1.25rem; font-family: var(--font-mono); font-size: 0.8rem; }
+  table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.875rem; }
+  th, td { padding: 1.25rem 1rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--bo-line-soft); }
+  th { font-family: var(--font-mono); font-size: 0.75rem; font-weight: 400; color: var(--bo-ink); }
+  th:first-child, td:first-child { padding-left: 0; }
+  th:last-child, td:last-child { padding-right: 0; }
+  td p { margin-top: 0.6rem; }
+  details { margin-top: 0.6rem; }
+  summary { cursor: pointer; color: var(--bo-ink); }
+  .pass { color: var(--bo-acc); }
+  .metric { background: var(--bo-bg); padding: 1.5rem; min-width: 0; }
+  .metric strong { display: block; font-size: 2.5rem; line-height: 1.1; letter-spacing: -0.04em; margin-block: 0.8rem; }
+  .metric p { margin-top: 0.5rem; font-size: 0.8rem; color: var(--bo-ink); }
+  .rate-bar { height: 3px; background: var(--bo-line); margin-block: 1rem; }
+  .rate-bar span { display: block; height: 100%; background: var(--bo-acc); }
+  .eyebrow { font-family: var(--font-mono); color: var(--bo-ink); font-size: 0.75rem; }
+  .section-title { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.03em; margin-bottom: 1.5rem; }
+  .model { margin-top: 2rem; font-family: var(--font-mono); font-size: 0.875rem; margin-bottom: 1.5rem; }
+  @media (max-width: 48rem) {
+    table, tbody, tr, td { display: block; width: 100%; }
+    thead { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+    tr { border-top: 1px solid var(--bo-line); padding-block: 0.75rem; }
+    td, td:first-child, td:last-child { padding: 0.75rem 0; border: 0; }
+    td[data-label]::before { content: attr(data-label); display: block; font-family: var(--font-mono); font-size: 0.75rem; color: var(--bo-ink); margin-bottom: 0.5rem; }
+    .task-table td:first-child { font-size: 1rem; }
+  }
+}
