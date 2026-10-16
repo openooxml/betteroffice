@@ -9,6 +9,7 @@ import { ImagePropertiesDialog, type ImagePropertiesData } from '../../dialogs/I
 import { ImagePositionDialog, type ImagePositionData } from '../../dialogs/ImagePositionDialog';
 import { PageSetupDialog } from '../../dialogs/PageSetupDialog';
 import { SplitCellDialog } from '../../dialogs/SplitCellDialog';
+import { TablePropertiesDialog, type TableProperties } from '../../dialogs/TablePropertiesDialog';
 import type { DocxCommandResult, DocxImageTransform } from '../../../commands/types';
 import { WatermarkDialog } from '../../dialogs/WatermarkDialog';
 import { imageWrapTarget } from '../hooks/useDocxCommands';
@@ -56,8 +57,12 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
     apply(rows: number, columns: number): Promise<DocxCommandResult> } | null>(null);
   const openSplitCell = useCallback((defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
     apply: (rows: number, columns: number) => Promise<DocxCommandResult>) => { setSplit({ defaults, apply }); }, []);
+  const [tableProps, setTableProps] = useState<{ initial: TableProperties;
+    apply(props: TableProperties): Promise<DocxCommandResult> } | null>(null);
+  const openTableProperties = useCallback((initial: TableProperties,
+    apply: (props: TableProperties) => Promise<DocxCommandResult>) => { setTableProps({ initial, apply }); }, []);
   const report = (error: unknown) => props.onError?.(error instanceof Error ? error : new Error(String(error)));
-  useEffect(() => { setImage(null); setNotes(null); setLink(null); setSplit(null); },
+  useEffect(() => { setImage(null); setNotes(null); setLink(null); setSplit(null); setTableProps(null); },
     [state.view?.identity.session, state.view?.identity.incarnation, state.view?.identity.epoch]);
   const openImage = async (position = false) => {
     try {
@@ -176,7 +181,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   return { openLink, applyPopupLink: (displayText: string, href: string, tooltip?: string) => changeLinkAtCaret({ displayText, url: href, tooltip }),
     removeLinkAtCaret: () => changeLinkAtCaret(null), openNotes, openImage, openImagePosition: () => openImage(true), imagePropertiesAvailable: object?.value?.kind === 'object',
     imageState, applyImageWrap, applyImageTransform,
-    openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell,
+    openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell, openTableProperties,
     element: <>
       {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps} onApply={page.handlePageSetupApply} />}
       {watermark.showWatermark && <WatermarkDialog isOpen onClose={watermark.close} current={watermark.currentWatermark}
@@ -186,6 +191,9 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
         onRemove={hyperlink ? () => { void applyLink(null); } : undefined} />}
       {notes?.value?.kind === 'section' && <FootnotePropertiesDialog isOpen onClose={() => setNotes(null)} onApply={applyNotes}
         footnotePr={notes.value.properties.footnotePr} endnotePr={notes.value.properties.endnotePr} />}
+      {tableProps && <TablePropertiesDialog isOpen onClose={() => setTableProps(null)}
+        currentProps={tableProps.initial as Record<string, unknown>}
+        onApply={(props) => { void tableProps.apply(props); setTableProps(null); }} />}
       {split && <SplitCellDialog isOpen onClose={() => setSplit(null)} initialRows={split.defaults.initialRows}
         initialCols={split.defaults.initialCols} minRows={split.defaults.minRows} minCols={split.defaults.minCols}
         onApply={(rows, columns) => { void split.apply(rows, columns); setSplit(null); }} />}

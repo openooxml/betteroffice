@@ -1044,6 +1044,15 @@ export function wrapSession(
           )
       );
     },
+    setTableProperties: (table, patch) => {
+      ensureUndo(table.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(session.set_table_properties(JSON.stringify(table), JSON.stringify(patch))) as YrsTableReceipt
+          )
+      );
+    },
     insertText: (at, text, suggesting) => {
       ensureUndo(at.story);
       return mutate(

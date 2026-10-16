@@ -28,6 +28,7 @@ import {
 import { createResidentCommandConnection, discardCommandPresentation } from '@betteroffice/docx/peerless';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
+import { registerTableActionExecutor } from './browserHarness';
 import { commandPageGeometry } from './commandPageGeometry';
 import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { usePluginReservations } from '../../../plugins/reservations';
@@ -172,7 +173,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const fileIO = useWorkerFileIO(recoverableProps, controller.ref, loadBuffer, () => active.current?.binding ?? null);
   const getBinding = useCallback(() => active.current?.binding ?? null, []);
   const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, recoverableProps);
-  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, perform: async (id) => {
+  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id) => {
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
     if (id === 'watermark') return propertyDialogs.openWatermark();
     if (id === 'insertLink') return propertyDialogs.openLink();
@@ -184,6 +185,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph,
     scrollToReviewTarget: navigation.scrollToReviewTarget }));
   const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  useEffect(() => registerTableActionExecutor((action) =>
+    controller.commands.store.execute('tableAction', action as never)), [controller]);
   const documentReady = shellState.status === 'ready' && openedSource.current === sourceKey;
   useEffect(() => {
     let current = true;

@@ -3588,6 +3588,21 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
+    pub fn set_table_properties(
+        &self,
+        table_json: &str,
+        patch_json: &str,
+    ) -> Result<String, JsValue> {
+        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
+        let patch = parse_any_object(patch_json, "table properties patch")?;
+        let receipt = self
+            .engine
+            .doc()
+            .set_table_properties(&EditCtx::local("", ""), &table, &patch)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
     /// Inserts `text` at `(story, para_id, offset)`. It must contain no
     /// paragraph or line breaks, and it inherits the formatting at the
     /// insertion point. Receipt: `{"revisionId": string|null, "range"}` —

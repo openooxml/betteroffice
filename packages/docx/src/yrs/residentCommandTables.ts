@@ -11,7 +11,7 @@ import { readCellSelection, resolveLiveCell, rootOf } from './residentCommandTab
 export type TableCommandKind =
   | 'insertTableRow' | 'insertTableColumn'
   | 'deleteTableRow' | 'deleteTableColumn' | 'deleteTable'
-  | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading';
+  | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading' | 'setTableBorders' | 'setTableProperties';
 
 export type TableCommandIntent = Extract<DocxCommandIntent, { kind: TableCommandKind }>;
 
@@ -24,7 +24,7 @@ export interface DocxTableCommandTarget {
 
 const TABLE_COMMANDS = {
   insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
-  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true,
+  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true, setTableProperties: true,
 } satisfies Record<TableCommandKind, true>;
 
 export function isTableCommandKind(kind: string): kind is TableCommandKind {
@@ -103,6 +103,10 @@ export function preflightTableCommand(
       (command.payload.rows === 1 && command.payload.columns === 1)) {
       return { reason: 'invalid-table-size' };
     }
+  }
+  if (command.kind === 'setTableProperties' && command.payload.expectVersion !== undefined &&
+    command.payload.expectVersion !== engine.proposalEngine.version()) {
+    return { reason: 'stale-version' };
   }
   const removes = command.kind === 'deleteTable' || command.kind === 'deleteTableRow' || command.kind === 'deleteTableColumn';
   return { target: { ...resolved, near: removes ? nearTable(engine, resolved.table) : null } };
@@ -256,6 +260,12 @@ export function applyTableCommand(
     }
     case 'setTableCellShading':
       engine.setCellShading(target.range, command.payload.color);
+      break;
+    case 'setTableBorders':
+      engine.setCellBorders(target.range, command.payload.borders);
+      break;
+    case 'setTableProperties':
+      engine.setTableProperties(target.table, command.payload.patch);
       break;
   }
   if (engine.proposalEngine.version() !== version) state.storedMarks = null;

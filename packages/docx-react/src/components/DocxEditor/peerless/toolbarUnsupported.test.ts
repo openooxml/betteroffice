@@ -32,11 +32,32 @@ test('worker table selection follows the shell table allowlist', () => {
     .toMatchObject({ enabled: true });
   for (const action of ['borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom',
     'borderLeft', 'borderRight'] as const) {
-    expect(controller.commands.store.getState('tableAction', action))
-      .toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
+    expect(controller.commands.store.getState('tableAction', action)).toMatchObject({ enabled: true });
   }
   for (const action of [{ type: 'borderColor', color: 'FF0000' }, { type: 'borderWidth', size: 8 },
-    { type: 'cellBorder', side: 'top', style: 'single', size: 4, color: 'FF0000' }] as const) {
+    { type: 'cellBorder', side: 'top', style: 'single', size: 4, color: 'FF0000' },
+    { type: 'applyTableStyle', styleId: 'TableGrid' }] as const) {
+    expect(controller.commands.store.getState('tableAction', action as never)).toMatchObject({ enabled: true });
+  }
+});
+
+test('worker table formatting gates match hybrid', () => {
+  const { controller, viewStore, selection } = toolbarFixture();
+  const state = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection,
+    editState: { ...state.editState!, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0, columnIndex: 0,
+      rowCount: 2, columnCount: 2, hasMultiCellSelection: true, canSplitCell: true, justification: 'center',
+      cellBorderColor: { rgb: '112233' }, cellBackgroundColor: 'AABBCC' } } });
+  expect(controller.commands.store.getState('tableAction')).toMatchObject({
+    enabled: true, value: { borderColor: '112233', fillColor: 'AABBCC', justification: 'center' },
+  });
+  for (const action of ['borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom',
+    'borderLeft', 'borderRight'] as const) {
+    expect(controller.commands.store.getState('tableAction', action)).toMatchObject({ enabled: true });
+  }
+  for (const action of [{ type: 'cellVerticalAlign', align: 'center' }, { type: 'cellMargins', margins: { top: 100 } },
+    { type: 'cellTextDirection', direction: 'btLr' }, { type: 'toggleNoWrap' }, { type: 'rowHeight', height: 400 },
+    { type: 'toggleHeaderRow' }, { type: 'distributeColumns' }, { type: 'autoFitContents' }] as const) {
     expect(controller.commands.store.getState('tableAction', action as never))
       .toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
   }

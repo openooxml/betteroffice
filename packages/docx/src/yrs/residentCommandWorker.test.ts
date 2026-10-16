@@ -2826,6 +2826,38 @@ test('worker saves table cell shading and reopens it from the bytes', async () =
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker_table_formatting_saves_and_reopens', async () => {
+  const { client, engine } = await openWorker({ bodyXml: TABLE_BODY });
+  try {
+    const cellA = cellPoint(engine, 'A');
+    await client.edit(intent(1, 0, 'select', { selection: cellA.selection }));
+    const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+    const bordered = await client.edit(intent(2, 0, 'setTableBorders', {
+      borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line },
+    }));
+    expect(bordered.outcomes[0]?.status).toBe('applied');
+    const styled = await client.edit(intent(3, 1, 'setTableProperties', {
+      op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+    }));
+    expect(styled.outcomes[0]?.status).toBe('applied');
+    const duplicate = await client.edit(intent(3, 1, 'setTableProperties', {
+      op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+    }));
+    expect(duplicate.outcomes).toEqual(styled.outcomes);
+    const saved = await client.save({ comments: [] });
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.bytes))['word/document.xml']!);
+    expect(xml).toContain('w:tcBorders');
+    expect(xml).toContain('<w:tblW w:w="2500" w:type="pct"/>');
+    expect(xml).toContain('<w:jc w:val="center"/>');
+    expect(xml).not.toContain('w:tblStyle');
+    const { parseDocx } = await import('../docx');
+    const reopened = await parseDocx(saved.bytes, { preloadFonts: false });
+    const tables = reopened.package.document.content.filter((block): block is Extract<typeof block, { type: 'table' }> => block.type === 'table');
+    expect(tables).toHaveLength(1);
+    expect(JSON.stringify(tables[0]!.formatting)).toContain('2500');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker refuses table structure commands in header stories', async () => {
   const { client, engine } = await openWorker({ headersFooters: true });
   try {
