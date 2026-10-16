@@ -28,6 +28,7 @@ import { readPresentedReview, reviewDescribes, reviewMatches } from './workerRev
 import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 import type { Comment } from '@betteroffice/docx/types/content';
 
+import { LAYOUT_REFUSALS, VIEWER_LAYOUT_WAIT_MS, type WorkerPageExportResult } from '../internals/workerOpenExport';
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
@@ -66,6 +67,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   onTableGridlines?(visible: boolean): void;
   read: ResidentEngineWorkerClient['documentRead'];
   readAt?: ResidentEngineWorkerClient['documentReadAt'];
+  layoutRequest?(): string | null;
   search?: DocxHostSearch;
   save?(): Promise<ArrayBuffer>;
   loadBuffer?(buffer: DocxInput): Promise<void>;
@@ -671,6 +673,56 @@ export function createPeerlessShellController(initial: Options) {
     if (receipt) return receipt;
     return { ok: false as const, version: request.expectVersion, failure: { code: (outcome.reason ?? 'unsupported') as import('@betteroffice/docx/yrs').DocxEditFailureCode, message: outcome.reason ?? 'Worker batch failed' } };
   };
+  const whenLayoutComplete: DocxEditorRef['whenLayoutComplete'] = ({ timeoutMs = 30000 } = {}) => new Promise<number>((resolve, reject) => {
+    let current: PeerlessEditSessionBinding | null = null;
+    let flushed = false;
+    let stop: (() => void) | undefined;
+    const settle = (error: Error | null) => {
+      clearTimeout(timeout); waits.delete(check); stop?.(); stop = undefined;
+      if (error) reject(error); else resolve(current?.viewStore.getSnapshot().geometry?.pages.length ?? 0);
+    };
+    const check = () => {
+      if (closed) return settle(new Error('Editor was closed'));
+      if (snapshot.error) return settle(snapshot.error);
+      if (current) {
+        if (binding !== current) return settle(new Error('Document was replaced'));
+        const view = current.viewStore.getSnapshot();
+        if (flushed && view.geometry && view.presentedThroughSeq >= view.throughSeq && !view.geometry.layoutProvisional) settle(null);
+        return;
+      }
+      if (snapshot.status !== 'ready' || !binding) return;
+      const opened = binding;
+      current = opened;
+      void flushAdmittedInput(opened).then(() => {
+        if (!waits.has(check)) return;
+        flushed = true; stop = opened.viewStore.subscribe(check); check();
+      }, (error: unknown) => { if (waits.has(check)) settle(error instanceof Error ? error : new Error(String(error))); });
+    };
+    const timeout = setTimeout(() => settle(new Error('Layout timed out')), timeoutMs);
+    waits.add(check);
+    check();
+  });
+  const exportStructuredWithPages: DocxEditorRef['exportStructuredWithPages'] = async (config) => {
+    const current = await opened();
+    await flush();
+    const assertCurrent = () => { if (binding !== current) throw new WorkerReadSupersededError('Document was replaced'); };
+    const attempt = async (): Promise<WorkerPageExportResult> => {
+      assertCurrent();
+      const request = options.layoutRequest?.() ?? null;
+      if (request === null) return { ok: false, version: current.viewStore.getSnapshot().editState?.documentVersion ?? '',
+        failure: { code: 'layout-unavailable', target: null, message: 'The fonts this document uses are not loaded yet.' } };
+      const value = await read({ kind: 'exportStructuredWithPages', options: config, currentRequest: request });
+      assertCurrent();
+      return JSON.parse(value) as WorkerPageExportResult;
+    };
+    let result = await attempt();
+    if (config.expectLayoutVersion === undefined && !result.ok && LAYOUT_REFUSALS.has(result.failure.code)) {
+      await whenLayoutComplete({ timeoutMs: VIEWER_LAYOUT_WAIT_MS }).catch(() => {});
+      assertCurrent();
+      result = await attempt();
+    }
+    return result;
+  };
   const implemented = {
     commands: commands.store,
     insertComment,
@@ -684,35 +736,8 @@ export function createPeerlessShellController(initial: Options) {
     validateEdits: async (request) => { await flush(); return batchPolicy(request) ?? read({ kind: 'validateEdits', request }); },
     applyEdits: (request) => applyEdits(request),
     readPositionAtPoint: (x, y) => options.readPositionAtPoint?.(x, y) ?? Promise.resolve(null),
-    whenLayoutComplete: ({ timeoutMs = 30000 } = {}) => new Promise<number>((resolve, reject) => {
-      let current: PeerlessEditSessionBinding | null = null;
-      let flushed = false;
-      let stop: (() => void) | undefined;
-      const settle = (error: Error | null) => {
-        clearTimeout(timeout); waits.delete(check); stop?.(); stop = undefined;
-        if (error) reject(error); else resolve(current?.viewStore.getSnapshot().geometry?.pages.length ?? 0);
-      };
-      const check = () => {
-        if (closed) return settle(new Error('Editor was closed'));
-        if (snapshot.error) return settle(snapshot.error);
-        if (current) {
-          if (binding !== current) return settle(new Error('Document was replaced'));
-          const view = current.viewStore.getSnapshot();
-          if (flushed && view.geometry && view.presentedThroughSeq >= view.throughSeq && !view.geometry.layoutProvisional) settle(null);
-          return;
-        }
-        if (snapshot.status !== 'ready' || !binding) return;
-        const opened = binding;
-        current = opened;
-        void flushAdmittedInput(opened).then(() => {
-          if (!waits.has(check)) return;
-          flushed = true; stop = opened.viewStore.subscribe(check); check();
-        }, (error: unknown) => { if (waits.has(check)) settle(error instanceof Error ? error : new Error(String(error))); });
-      };
-      const timeout = setTimeout(() => settle(new Error('Layout timed out')), timeoutMs);
-      waits.add(check);
-      check();
-    }),
+    whenLayoutComplete,
+    exportStructuredWithPages,
     flushPendingInput: async () => { await flushComments(); },
     readParagraphs: (request) => read({ kind: 'readParagraphs', request }),
     getParagraphIdentities: () => read({ kind: 'paragraphIdentities' }),

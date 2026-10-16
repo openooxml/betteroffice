@@ -124,6 +124,7 @@ class FakeWorker {
       response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'clipboardSlice' ? { text: 'Selected text', fragment: null }
         : message.read.kind === 'headings'
         ? [{ story: 'body', paraId: 'heading', text: 'Worker heading', level: 0, position: 1 }]
+        : message.read.kind === 'exportStructuredWithPages' ? JSON.stringify({ ok: true, version: 'worker-version', content: { structured: { text: this.text }, layout: { pages: [{ pageIndex: 0 }, { pageIndex: 1 }] } } })
         : message.read.kind === 'sectionProperties' ? { version: 'worker-version', sections: [{ section: 'final', properties: { marginLeft: 2160 } }], paragraphs: [] }
         : message.read.kind === 'searchText' ? { matches: [], carried: -1 }
         : message.read.kind === 'rangeHighlights' ? null
@@ -2124,3 +2125,26 @@ test('unmount disposes the real worker editor clipboard subscription', async () 
   view.unmount();
   expect(disposals[0]).toHaveBeenCalledTimes(1);
 });
+for (const readOnly of [false, true]) {
+  test(`${readOnly ? 'viewer' : 'editor'} paged export uses the open layout and current render environment`, async () => {
+    const ref = createRef<DocxEditorRef>();
+    const element = (showHiddenText: boolean) => <DocxEditor {...peerlessProps} ref={ref} readOnly={readOnly}
+      showHiddenText={showHiddenText} theme={{ colorScheme: { accent1: 'FF0000' } } as DocxEditorProps['theme']} />;
+    const view = render(element(false));
+    await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+    const init = requests.find(request => request.type === 'commandInit');
+    if (!init || init.type !== 'commandInit') throw new Error('Expected worker initialization');
+    view.rerender(element(true));
+    const options = { revisionView: 'markup' as const, stories: ['body' as const], includeGeometry: true, maxFragments: 50 };
+    const result = await ref.current!.exportStructuredWithPages(options);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.failure.message);
+    expect(result.content.layout.pages).toHaveLength(2);
+    const exported = requests.find(request => request.type === 'documentRead' && request.read.kind === 'exportStructuredWithPages');
+    if (!exported || exported.type !== 'documentRead' || exported.read.kind !== 'exportStructuredWithPages') throw new Error('Expected worker export read');
+    expect(exported.read.options).toEqual(options);
+    const initial = JSON.parse(init.request.layoutInput);
+    expect(JSON.parse(exported.read.currentRequest)).toEqual({ ...initial, renderEnv: { ...initial.renderEnv, showHiddenText: true } });
+    expect(coreSession).not.toHaveBeenCalled();
+  });
+}

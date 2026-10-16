@@ -170,6 +170,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
     comments: () => props.comments ?? sourceComments.current,
     tableGridlines, onTableGridlines: setTableGridlines,
+    layoutRequest: () => {
+      const opened = fontSource.current;
+      const current = active.current;
+      if (!opened || !current) return null;
+      const layout = JSON.parse(opened.layoutInput);
+      return JSON.stringify({ ...layout, renderEnv: { ...layout.renderEnv, ...JSON.parse(current.requestedRenderEnvironment || '{}') } });
+    },
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {

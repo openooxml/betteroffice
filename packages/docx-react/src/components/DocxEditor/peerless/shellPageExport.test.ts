@@ -38,12 +38,12 @@ async function fixture(readOnly = false) {
   const layout = buildResidentRegionLayoutRequest(document, 24, {});
   const requirements = JSON.parse(resident.layoutFontRequirementsJson(JSON.stringify(layout))) as { key: string }[];
   layout.measurement = { fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [font]])),
-    defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true };
+    defaults: { fontSize: 11, fontFamily: 'Calibri' }, compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true };
   const request = JSON.stringify(layout);
   const relayout = () => resident.layoutDocumentWithRegionsRetainedJson(request);
   relayout();
   const viewStore = createPeerlessViewStore({ identity: { session: 'worker', incarnation: 1, epoch: 1 },
-    version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, geometry: null, editState: null });
+    version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, geometry: null, editState: undefined });
   const binding = { viewStore, session: { flush: async () => {} } } as unknown as PeerlessEditSessionBinding;
   const settings = { read: client.documentRead.bind(client), layoutRequest: () => request, zoom: 1, readOnly, focus() {} };
   const controller = createPeerlessShellController(settings);
@@ -89,4 +89,25 @@ test('paged worker export flushes an edit pending at the ref call', async () => 
     expect(JSON.stringify(exported.content.structured)).toContain('Pending edit');
     expect(exported.content.layout.pages).toHaveLength(2);
   } finally { release(); await pending; await h.close(); }
+});
+
+test('paged worker export waits for the layout already in progress', async () => {
+  const h = await fixture();
+  let request: string | null = null;
+  let subscribed!: () => void;
+  const listening = new Promise<void>(resolve => { subscribed = resolve; });
+  const subscribe = h.viewStore.subscribe;
+  h.viewStore.subscribe = listener => { const stop = subscribe(listener); subscribed(); return stop; };
+  h.controller.update({ ...h.settings, layoutRequest: () => request });
+  try {
+    const pending = h.controller.ref.exportStructuredWithPages({ revisionView: 'markup', stories: ['body'] });
+    await listening;
+    request = h.request;
+    h.viewStore.installFrameGeometry({ identity: h.viewStore.getSnapshot().identity, coversThroughSeq: 0,
+      frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.failure.message);
+    expect(result.content.layout.pages).toHaveLength(2);
+  } finally { await h.close(); }
 });
