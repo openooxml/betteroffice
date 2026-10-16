@@ -44,7 +44,7 @@ async function fixture(readOnly = false) {
   relayout();
   const viewStore = createPeerlessViewStore({ identity: { session: 'worker', incarnation: 1, epoch: 1 },
     version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, geometry: null, editState: undefined });
-  const binding = { viewStore, session: { flush: async () => {} } } as unknown as PeerlessEditSessionBinding;
+  const binding = { viewStore, admission: {}, session: { flush: async () => {} } } as unknown as PeerlessEditSessionBinding;
   const settings = { read: client.documentRead.bind(client), layoutRequest: () => request, zoom: 1, readOnly, focus() {} };
   const controller = createPeerlessShellController(settings);
   controller.attach(binding);
