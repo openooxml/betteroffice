@@ -1,5 +1,5 @@
 import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { cellPosition, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -18,6 +18,7 @@ import {
 
 interface Paragraph extends ParagraphRef {
   paraId: string;
+  root: string;
   text: string;
   style: string | null;
   headingLevel: number | null;
@@ -106,7 +107,7 @@ export class DocxAgentDocument {
       stories: entries,
       nextOffset: offset + entries.length < stories.size ? offset + entries.length : null,
       capabilities: { grep: 'literal', proposals: true, atomicEdits: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
-      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs and table rows, use docx_edit with the outline version.',
+      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows and comments, use docx_edit with the outline version.',
     };
   }
 
@@ -388,7 +389,7 @@ export class DocxAgentDocument {
           const p: Paragraph = {
             ref: previous?.ref ?? `p${this.nextRef++}`,
             revision: previous ? previous.revision + Number(previous.fingerprint !== fingerprint) : 1,
-            story, paraId: segment.paraId, paragraph: ++ordinal, text, runs, fingerprint,
+            story, root: positions.get(story)!.root, paraId: segment.paraId, paragraph: ++ordinal, text, runs, fingerprint,
             style: typeof segment.properties.pStyle === 'string' ? segment.properties.pStyle : null,
             headingLevel: headings.get(segment.paraId) ?? null,
           };
@@ -495,18 +496,28 @@ export class DocxAgentDocument {
   }
 
   private plan(edit: DocxAgentEdit): EditStep {
-    if (edit.op === 'format_text') {
+    if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
       if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
-      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
-      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       const start = held.start ?? 0;
       const end = start + held.oldText.length;
+      const range = { story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } };
+      if (edit.op === 'add_comment') {
+        if (p.root !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comments anchor in the document body and its tables, not in headers, footers, notes or text boxes.');
+        const body = commentBody(edit.author, edit.text);
+        const date = edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+        return draft => {
+          requireParagraph(draft, p);
+          return { result: { ref: p.ref, start, end, comment: draft.addComment([range], edit.author, date, body).commentId } };
+        };
+      }
+      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
+      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       return draft => {
         requireParagraph(draft, p);
-        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, delta);
+        draft.formatRange(range, delta);
         return { result: { ref: p.ref, start, end } };
       };
     }
