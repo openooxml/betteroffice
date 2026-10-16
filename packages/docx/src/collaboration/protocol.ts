@@ -1,5 +1,4 @@
 import { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
-export { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
 import {
   MAX_AWARENESS_CURSOR_BYTES,
   MAX_AWARENESS_ENTRIES_PER_UPDATE,
