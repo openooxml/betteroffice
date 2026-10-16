@@ -8,10 +8,11 @@ import { DEFAULT_STYLES } from '../../ui/StylePicker';
 import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { memoryPressureLevel, type DocxMemoryPressureLevel, type DocxMemoryStats } from '../memoryStats';
 import type { DocxInput } from '@betteroffice/docx/utils';
+import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import type { DocxCommandSelection, DocxEditState, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
 import { createDocxCommandController, DocxCommandAdmissionError, type DocxCommandBinding } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandEnvironment } from '../../../commands/evaluate';
-import type { DocxCommandArgs, DocxCommandId, DocxCommandResult } from '../../../commands/types';
+import type { DocxCommandArgs, DocxCommandId, DocxCommandResult, DocxImageTransform } from '../../../commands/types';
 import type { DocxCommentInsertion, DocxDocumentChange, DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
@@ -51,6 +52,9 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   reviewTimeoutMs?: number;
   openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
+  image?: { wrap: ImageLayoutTarget | null } | null;
+  onImageWrap?: (wrap: ImageLayoutTarget) => void | boolean | Promise<boolean | DocxCommandResult>;
+  onImageTransform?: (action: DocxImageTransform) => void | boolean | Promise<boolean | DocxCommandResult>;
   zoom: number;
   isDark?: boolean;
   focus(): void;
@@ -146,7 +150,7 @@ export function createPeerlessShellController(initial: Options) {
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
       sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
+      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
         'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor']),
@@ -154,7 +158,7 @@ export function createPeerlessShellController(initial: Options) {
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
       table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext } : null,
-      image: options.imagePropertiesAvailable ? { wrap: null } : null, revisions: [], revisionIds: new Set(), currentRevisionId: null,
+      image: options.image !== undefined ? options.image : options.imagePropertiesAvailable ? { wrap: null } : null, revisions: [], revisionIds: new Set(), currentRevisionId: null,
       styles: workerStyleOptions(metadata && metadata.binding === binding && metadata.version === view?.version ? metadata.value.styles : [], translate), fonts: [
         ...choices.map(font => ({ args: { family: getPrimaryFontFamily(font.fontFamily) || font.name }, label: font.name,
           preview: { fontFamily: font.fontFamily, group: font.category ?? 'other' } })),
@@ -447,6 +451,16 @@ export function createPeerlessShellController(initial: Options) {
         options.onZoom?.(options.zoom);
         publish();
         return { ok: true, status: 'executed' };
+      }
+      if (id === 'imageWrap') {
+        const result = await options.onImageWrap?.((args as DocxCommandArgs['imageWrap']).wrap);
+        if (result && typeof result === 'object' && 'ok' in result) return result;
+        return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image wrap is unavailable.' } } : { ok: true, status: 'executed' };
+      }
+      if (id === 'imageTransform') {
+        const result = await options.onImageTransform?.((args as DocxCommandArgs['imageTransform']).action);
+        if (result && typeof result === 'object' && 'ok' in result) return result;
+        return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image transform is unavailable.' } } : { ok: true, status: 'executed' };
       }
       return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: 'Worker command is unavailable.' } };
     },

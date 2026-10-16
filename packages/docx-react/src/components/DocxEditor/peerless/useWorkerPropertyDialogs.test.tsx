@@ -1,6 +1,13 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
-import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
+import { evaluateDocxCommand } from '../../../commands/evaluate';
+import { useWorkerContextMenu } from './useWorkerContextMenu';
+import {
+  buildImageTransformPatch,
+  buildImageWrapPatch,
+  imageWrapTargetFromAttrs,
+  useWorkerPropertyDialogs,
+} from './useWorkerPropertyDialogs';
 import type { WorkerShellController } from './workerProperties';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -183,3 +190,296 @@ test('image position floats an inline image with the wrap property the worker ac
   expect(applyQuery.mock.calls[0]![1]).toEqual({ kind: 'setObjectProperties', payload: { handle: 'physical-first', expectVersion: 'captured-native',
     patch: { position: { horizontal: placement.horizontal, vertical: placement.vertical }, distTop: 0, distBottom: 0, distLeft: 0, distRight: 0, wrap: 'square' } } });
 });
+
+test('computes imageState.wrap and submits setObjectProperties patches for applyImageWrap and applyImageTransform', async () => {
+  expect(imageWrapTargetFromAttrs({ wrapType: 'inline' })).toBe('inline');
+  expect(imageWrapTargetFromAttrs({ wrapType: 'square', displayMode: 'float', cssFloat: 'left' })).toBe('squareLeft');
+  expect(imageWrapTargetFromAttrs({ wrapType: 'square', displayMode: 'float', cssFloat: 'right' })).toBe('squareRight');
+  expect(imageWrapTargetFromAttrs({ wrapType: 'behind', displayMode: 'float', cssFloat: 'none' })).toBe('behind');
+  expect(buildImageTransformPatch({}, 'rotateCW')).toEqual({ transform: 'rotate(90deg)' });
+  expect(buildImageTransformPatch({ transform: 'rotate(90deg)' }, 'flipH')).toEqual({ transform: 'rotate(90deg) scaleX(-1)' });
+  expect(buildImageTransformPatch({ transform: 'rotate(90deg)' }, 'rotateCCW')).toEqual({ transform: null });
+
+  const { applyQuery, controller, selection } = fixture();
+  let currentProps: Record<string, unknown> = { width: 80, height: 40, wrapType: 'square', displayMode: 'float', cssFloat: 'left' };
+  controller.query = (async () => ({
+    version: 'captured-native',
+    selection,
+    value: { kind: 'object', handle: 'physical-first', properties: currentProps },
+  })) as never;
+  const hook = renderHook(() => useWorkerPropertyDialogs(controller, {}));
+  await act(async () => {});
+  expect(hook.result.current.imageState).toEqual({ wrap: 'squareLeft' });
+
+  await act(async () => { await hook.result.current.applyImageWrap('behind'); });
+  expect(applyQuery.mock.calls[0]![1]).toEqual({
+    kind: 'setObjectProperties',
+    payload: {
+      handle: 'physical-first',
+      expectVersion: 'captured-native',
+      patch: buildImageWrapPatch(currentProps, 'behind'),
+    },
+  });
+
+  currentProps = { ...currentProps, transform: 'rotate(90deg)' };
+  await act(async () => { await hook.result.current.applyImageTransform('flipH'); });
+  expect(applyQuery.mock.calls[1]![1]).toEqual({
+    kind: 'setObjectProperties',
+    payload: {
+      handle: 'physical-first',
+      expectVersion: 'captured-native',
+      patch: { transform: 'rotate(90deg) scaleX(-1)' },
+    },
+  });
+
+  await act(async () => { await hook.result.current.applyImageWrap('inline', 'context-menu-handle'); });
+  expect(applyQuery.mock.calls[2]![1]).toEqual({
+    kind: 'setObjectProperties',
+    payload: {
+      handle: 'context-menu-handle',
+      expectVersion: 'captured-native',
+      patch: buildImageWrapPatch(currentProps, 'inline'),
+    },
+  });
+});
+
+test('buildImageWrapPatch omits wrap distance keys for non-inline targets so existing distances survive', () => {
+  const currentWithDistances = {
+    wrapType: 'inline',
+    distTop: 12,
+    distBottom: 24,
+    distLeft: 36,
+    distRight: 48,
+  };
+  for (const target of ['squareLeft', 'behind'] as const) {
+    const patch = buildImageWrapPatch(currentWithDistances, target);
+    expect('distTop' in patch).toBe(false);
+    expect('distBottom' in patch).toBe(false);
+    expect('distLeft' in patch).toBe(false);
+    expect('distRight' in patch).toBe(false);
+  }
+  const inlinePatch = buildImageWrapPatch(currentWithDistances, 'inline');
+  expect(inlinePatch).toMatchObject({
+    distTop: null,
+    distBottom: null,
+    distLeft: null,
+    distRight: null,
+  });
+});
+
+test('image context-menu wrap action refuses in header, footer, note stories and in suggesting mode without sending a worker mutation', async () => {
+  const { hook: dialogsHook, applyQuery, controller, selection, submit } = fixture();
+  let currentStory = 'hf:header';
+  let currentMode: 'editing' | 'suggesting' = 'editing';
+  const translate = (key: string) => key;
+
+  const createViewSnapshot = () => ({
+    identity: { session: 's', incarnation: 1, epoch: 1 },
+    version: 1,
+    throughSeq: 1,
+    workerSelection: {
+      anchor: { story: currentStory, paraId: 'p', offset: 0 },
+      focus: { story: currentStory, paraId: 'p', offset: 1 },
+    },
+    geometry: {
+      frameEpoch: 2,
+      layoutRevision: 3,
+      documentVersion: 'native',
+      pages: [
+        {
+          page: { pageId: 'p', pageIndex: 0 },
+          bounds: { x: 0, y: 0, width: 600, height: 800 },
+        },
+      ],
+      objects: {
+        version: 'native',
+        frameEpoch: 2,
+        layoutRevision: 3,
+        objects: [
+          {
+            handle: 'image-handle-1',
+            kind: 'image' as const,
+            story: currentStory,
+            rects: [{ pageIndex: 0, x: 10, y: 10, width: 100, height: 80 }],
+          },
+        ],
+      },
+    },
+  });
+
+  const getEnvironment = () => ({
+    status: 'ready' as const,
+    readOnly: false,
+    mode: currentMode,
+    bodyStory: currentStory === 'body',
+    image: { wrap: null },
+    translate,
+  });
+
+  let snapshot = { status: 'ready', view: createViewSnapshot() };
+  const getViewSnapshot = () => snapshot.view;
+  controller.getSnapshot = (() => snapshot) as never;
+  controller.environment = getEnvironment as never;
+  const binding = { viewStore: { getSnapshot: getViewSnapshot } };
+
+  const onWrapImage = mock(
+    async (
+      handle: string,
+      wrap: 'inline' | 'squareLeft' | 'squareRight' | 'topAndBottom' | 'behind' | 'inFront',
+    ) => dialogsHook.result.current.applyImageWrap(wrap, handle),
+  );
+  const errors: Error[] = [];
+  const onError: NonNullable<Parameters<typeof useWorkerContextMenu>[0]['onError']> = (err) => {
+    errors.push(err);
+  };
+  const menuHook = renderHook(() =>
+    useWorkerContextMenu({
+      binding: () => binding,
+      environment: getEnvironment,
+      commands: { getState: () => ({ enabled: false }) },
+      clipboard: async () => {},
+      submit,
+      onWrapImage,
+      onError,
+    } as unknown as Parameters<typeof useWorkerContextMenu>[0]),
+  );
+
+  const pageEl = document.createElement('div');
+  pageEl.className = 'paged-editor__page';
+  pageEl.dataset.pageIndex = '0';
+  pageEl.getBoundingClientRect = () =>
+    ({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800,
+      width: 600,
+      height: 800,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    }) as DOMRect;
+  document.body.appendChild(pageEl);
+
+  const readContextMenu = () =>
+    (
+      menuHook.result.current.element as unknown as {
+        props: {
+          children: Array<{
+            props: {
+              items: Array<{ action: string; disabled?: boolean }>;
+              onAction: (action: string) => void;
+            };
+          } | null>;
+        };
+      }
+    ).props.children[0]!;
+
+  for (const story of ['hf:header', 'hf:footer', 'fn:1', 'en:1'] as const) {
+    currentStory = story;
+    currentMode = 'editing';
+    selection.anchor.story = story;
+    selection.focus.story = story;
+    snapshot = { status: 'ready', view: createViewSnapshot() };
+    errors.length = 0;
+
+    act(() => {
+      menuHook.result.current.open({
+        preventDefault() {},
+        stopPropagation() {},
+        clientX: 30,
+        clientY: 30,
+        target: pageEl,
+      } as never);
+    });
+
+    const contextMenu = readContextMenu();
+    const wrapItems = contextMenu.props.items.filter((item) => item.action.startsWith('wrap:'));
+    expect(wrapItems.length).toBeGreaterThan(0);
+    for (const item of wrapItems) {
+      expect(item.disabled).toBe(true);
+    }
+
+    const expectedGate = evaluateDocxCommand(
+      'imageWrap',
+      { wrap: 'squareLeft' },
+      {
+        status: 'ready',
+        readOnly: false,
+        mode: 'editing',
+        bodyStory: false,
+        image: { wrap: null },
+        translate,
+      } as never,
+    );
+    expect(expectedGate).toMatchObject({
+      enabled: false,
+      disabledReason: { code: 'unsupported-story' },
+    });
+
+    await act(async () => {
+      contextMenu.props.onAction('wrap:squareLeft');
+    });
+
+    expect(errors.map((e) => e.message)).toEqual([
+      expectedGate.enabled ? '' : expectedGate.disabledReason.message,
+    ]);
+    expect(onWrapImage).not.toHaveBeenCalled();
+    expect(applyQuery).not.toHaveBeenCalled();
+  }
+
+  currentStory = 'body';
+  currentMode = 'suggesting';
+  selection.anchor.story = 'body';
+  selection.focus.story = 'body';
+  snapshot = { status: 'ready', view: createViewSnapshot() };
+  errors.length = 0;
+
+  act(() => {
+    menuHook.result.current.open({
+      preventDefault() {},
+      stopPropagation() {},
+      clientX: 30,
+      clientY: 30,
+      target: pageEl,
+    } as never);
+  });
+
+  const suggestingMenu = readContextMenu();
+  const suggestingWrapItems = suggestingMenu.props.items.filter((item) =>
+    item.action.startsWith('wrap:'),
+  );
+  expect(suggestingWrapItems.length).toBeGreaterThan(0);
+  for (const item of suggestingWrapItems) {
+    expect(item.disabled).toBe(true);
+  }
+
+  const expectedSuggestingGate = evaluateDocxCommand(
+    'imageWrap',
+    { wrap: 'squareLeft' },
+    {
+      status: 'ready',
+      readOnly: false,
+      mode: 'suggesting',
+      bodyStory: true,
+      image: { wrap: null },
+      translate,
+    } as never,
+  );
+  expect(expectedSuggestingGate).toMatchObject({
+    enabled: false,
+    disabledReason: { code: 'suggesting-unsupported' },
+  });
+
+  await act(async () => {
+    suggestingMenu.props.onAction('wrap:squareLeft');
+  });
+
+  expect(errors.map((e) => e.message)).toEqual([
+    expectedSuggestingGate.enabled ? '' : expectedSuggestingGate.disabledReason.message,
+  ]);
+  expect(onWrapImage).not.toHaveBeenCalled();
+  expect(applyQuery).not.toHaveBeenCalled();
+  pageEl.remove();
+});
+

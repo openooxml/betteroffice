@@ -1,9 +1,9 @@
-import { expect, test } from 'bun:test';
+import { expect, mock, test } from 'bun:test';
 import { toolbarFixture } from './toolbarCommands.testing';
 
 test('worker toolbar preserves unsupported command reasons', () => {
   const { controller } = toolbarFixture();
-  for (const id of ['insertTOC', 'imageWrap', 'imageTransform',
+  for (const id of ['insertTOC',
     'reviewAccept', 'reviewReject', 'reviewPrevious', 'reviewNext', 'commentsSidebar', 'reportIssue'] as const) {
     expect(controller.commands.store.getState(id)).toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
   }
@@ -45,4 +45,53 @@ test('worker table selection follows the shell table allowlist', () => {
 test('worker image properties need a selected image', () => {
   const { controller } = toolbarFixture();
   expect(controller.commands.store.getState('imageProperties')).toMatchObject({ enabled: false, disabledReason: { code: 'image-required' } });
+  expect(controller.commands.store.getState('imageWrap')).toMatchObject({ enabled: false, disabledReason: { code: 'image-required' } });
+  expect(controller.commands.store.getState('imageTransform')).toMatchObject({ enabled: false, disabledReason: { code: 'image-required' } });
+});
+
+test('enables and dispatches imageWrap and imageTransform when an image is selected', async () => {
+  const { controller, parity } = toolbarFixture();
+  const onImageWrap = mock((_wrap: unknown) => true);
+  const onImageTransform = mock((_action: unknown) => true);
+  controller.update({
+    read: (async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } })) as never,
+    focus() {},
+    zoom: 1,
+    imagePropertiesAvailable: true,
+    image: { wrap: 'inline' },
+    onImageWrap,
+    onImageTransform,
+  });
+  expect(controller.commands.store.getState('imageWrap', { wrap: 'inline' })).toMatchObject({ enabled: true, active: true, value: 'inline' });
+  expect(controller.commands.store.getState('imageWrap', { wrap: 'squareLeft' })).toMatchObject({ enabled: true, active: false, value: 'inline' });
+  expect(controller.commands.store.getState('imageTransform', { action: 'rotateCW' })).toMatchObject({ enabled: true });
+  parity('imageWrap', { wrap: 'inline' });
+  parity('imageTransform', { action: 'rotateCW' });
+
+  expect(await controller.commands.store.execute('imageWrap', { wrap: 'squareLeft' })).toEqual({ ok: true, status: 'executed' });
+  expect(onImageWrap).toHaveBeenCalledWith('squareLeft');
+  expect(await controller.commands.store.execute('imageTransform', { action: 'rotateCW' })).toEqual({ ok: true, status: 'executed' });
+  expect(onImageTransform).toHaveBeenCalledWith('rotateCW');
+
+  controller.update({
+    read: (async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } })) as never,
+    focus() {},
+    zoom: 1,
+    mode: 'suggesting',
+    imagePropertiesAvailable: true,
+    image: { wrap: 'inline' },
+  });
+  expect(controller.commands.store.getState('imageWrap', { wrap: 'squareLeft' })).toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-unsupported' } });
+  expect(controller.commands.store.getState('imageTransform', { action: 'rotateCW' })).toMatchObject({ enabled: false, disabledReason: { code: 'suggesting-unsupported' } });
+
+  controller.update({
+    read: (async () => ({ status: 'ok', version: 'native', value: { version: 'native', paragraphs: [] } })) as never,
+    focus() {},
+    zoom: 1,
+    readOnly: true,
+    imagePropertiesAvailable: true,
+    image: { wrap: 'inline' },
+  });
+  expect(controller.commands.store.getState('imageWrap', { wrap: 'squareLeft' })).toMatchObject({ enabled: false, disabledReason: { code: 'read-only' } });
+  expect(controller.commands.store.getState('imageTransform', { action: 'rotateCW' })).toMatchObject({ enabled: false, disabledReason: { code: 'read-only' } });
 });

@@ -1721,6 +1721,12 @@ impl EditingDoc {
         self.doc.transact().state_vector().encode_v1()
     }
 
+    /// Whether yrs holds remote structs or deletions whose dependencies have not arrived.
+    pub fn holds_pending_update(&self) -> bool {
+        let txn = self.doc.transact();
+        txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
+    }
+
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
         let state_vector = StateVector::decode_v1(remote_state_vector)
             .map_err(|error| EditError::InvalidStateVector(error.to_string()))?;

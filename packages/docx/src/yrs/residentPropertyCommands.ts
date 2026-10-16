@@ -52,13 +52,19 @@ function imagePatch(value: unknown): boolean {
     if (['widthEmu', 'heightEmu'].includes(key)) return finite(entry) && entry > 0;
     if (['width', 'height', 'borderWidth', 'distTop', 'distBottom', 'distLeft', 'distRight'].includes(key)) return entry === null || finite(entry) && entry >= 0;
     if (['hOffsetEmu', 'vOffsetEmu', 'distTopEmu', 'distBottomEmu', 'distLeftEmu', 'distRightEmu'].includes(key)) return entry === null || finite(entry);
-    if (key === 'wrap') return choice(entry, ['inline', 'square', 'tight', 'through', 'topAndBottom', 'behind', 'inFront']);
+    if (key === 'wrap' || key === 'wrapType') return choice(entry, ['inline', 'square', 'tight', 'through', 'topAndBottom', 'behind', 'inFront']);
+    if (key === 'displayMode') return entry === null || choice(entry, ['inline', 'float', 'block']);
+    if (key === 'cssFloat') return entry === null || choice(entry, ['left', 'right', 'none']);
+    if (key === 'wrapText') return entry === null || choice(entry, ['bothSides', 'left', 'right', 'largest']);
+    if (key === 'transform') return entry === null || text(entry) && entry.length <= 128;
     if (['alt', 'title', 'borderColor', 'relativeFromHorizontal', 'relativeFromVertical'].includes(key)) return entry === null || text(entry);
     if (key === 'borderColorValue') return entry === null;
     if (key === 'borderStyle') return entry === null || choice(entry, ['solid', 'dashed', 'dotted', 'double']);
     if (key === 'position') return entry === null || record(entry) && Object.entries(entry).every(([axis, position]) =>
-      ['horizontal', 'vertical'].includes(axis) && record(position) && Object.entries(position).every(([k, v]) =>
-        k === 'posOffset' ? finite(v) : ['relativeTo', 'align'].includes(k) && text(v)));
+      axis === 'relativeHeight' ? position === null || finite(position)
+      : axis === 'behindDoc' ? position === null || typeof position === 'boolean'
+      : ['horizontal', 'vertical'].includes(axis) && record(position) && Object.entries(position).every(([k, v]) =>
+        k === 'posOffset' ? v === null || finite(v) : ['relativeTo', 'align'].includes(k) && (v === null || text(v))));
     if (key === 'decorative') return typeof entry === 'boolean';
     return false;
   });
@@ -135,8 +141,10 @@ export function applyPropertyCommand(engine: ResidentDocxCommandEngine, command:
       const read = readResidentProperties(engine, { kind: 'object', at });
       if (read?.kind !== 'object') throw new Error('Image handle no longer resolves');
       const patch = command.payload.patch;
-      if (Object.entries(patch).every(([key, value]) => value === null ? read.properties[key] === undefined
-        : JSON.stringify(read.properties[key]) === JSON.stringify(value))) break;
+      if (Object.entries(patch).every(([key, value]) => {
+        const current = key === 'wrap' ? (read.properties.wrapType ?? read.properties.wrap) : read.properties[key];
+        return value === null ? current === undefined || current === null : JSON.stringify(current) === JSON.stringify(value);
+      })) break;
       const other = { ...patch, ...(patch.widthEmu === undefined ? {} : { width: Number(patch.widthEmu) / 9525 }),
         ...(patch.heightEmu === undefined ? {} : { height: Number(patch.heightEmu) / 9525 }),
         ...(patch.wrap === undefined ? {} : { wrapType: patch.wrap }) };

@@ -4970,10 +4970,27 @@ impl EngineSession {
             })
             .flatten()
         });
-        let (blocks, map, revealable_blocks, preview) = if let Some(units) = refreshed {
-            crate::bridge::preview::lower_refreshed(&self.doc, story, env, &mut local, units)?
+        let lowered = if let Some(units) = refreshed {
+            crate::bridge::preview::lower_refreshed(&self.doc, story, env, &mut local, units)
         } else {
-            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
+            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)
+        };
+        let (blocks, map, revealable_blocks, preview) = match lowered {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                let mut render = self.render.borrow_mut();
+                let Some(stale) = render
+                    .stories
+                    .get_mut(story)
+                    .filter(|_| self.doc.holds_pending_update())
+                else {
+                    return Err(error);
+                };
+                if let Some(retained) = retained_local {
+                    stale.local = retained;
+                }
+                return Ok(());
+            }
         };
         if let Some(mut retained) = retained_local {
             if local.blocked {
@@ -11327,6 +11344,69 @@ mod tests {
         assert_eq!(engine.doc_epoch(), edited_epoch + 1);
         assert_eq!(engine.doc().version(), merged_version);
         assert_eq!(events.borrow().len(), 2);
+    }
+
+    #[test]
+    fn projection_keeps_the_last_story_while_remote_structs_wait_and_fails_loud_after() {
+        let env = RenderEnv::default();
+        let ctx = crate::EditCtx::local("", "");
+        let engine = EngineSession::new(7);
+        engine
+            .doc()
+            .create_story("body", "AB", "Normal", "left")
+            .unwrap();
+        let base = engine.doc().encode_state_as_update_v1();
+        let replica = |id| {
+            let doc = EditingDoc::new(id);
+            doc.apply_update_v1(&base).unwrap();
+            doc
+        };
+        let (embedder, typist) = (replica(8), replica(10));
+        let diff = |doc: &EditingDoc, op: crate::RawOp| {
+            let vector = doc.encode_state_vector_v1();
+            doc.apply_raw_ops("body", vec![op], &ctx).unwrap();
+            doc.encode_diff_v1(&vector).unwrap()
+        };
+        let text = |index| crate::RawOp::Insert {
+            index,
+            text: "x".to_owned(),
+            attrs: Attrs::new(),
+        };
+        let first = diff(&typist, text(0));
+        let second = diff(&typist, text(1));
+        let embed = diff(
+            &embedder,
+            crate::RawOp::InsertEmbed {
+                index: 1,
+                kind: "unknown".to_owned(),
+                payload: Vec::new(),
+                attrs: Attrs::new(),
+            },
+        );
+        let removal = diff(&embedder, crate::RawOp::Delete { index: 1, len: 1 });
+        let unlowered = EngineSession::new(9);
+        unlowered.doc().apply_update_v1(&base).unwrap();
+        engine.lowering_map("body", &env).unwrap();
+        for session in [&engine, &unlowered] {
+            session.doc().apply_update_v1(&second).unwrap();
+            session.doc().apply_update_v1(&embed).unwrap();
+            assert!(session.doc().holds_pending_update());
+        }
+        assert!(matches!(
+            unlowered.lowering_map("body", &env),
+            Err(BridgeError::UnsupportedEmbed { .. })
+        ));
+        assert!(engine.lowering_map("body", &env).is_ok());
+        assert!(!engine.story_is_resident("body", engine.doc_epoch(), &env));
+        engine.doc().apply_update_v1(&first).unwrap();
+        assert!(!engine.doc().holds_pending_update());
+        assert!(matches!(
+            engine.lowering_map("body", &env),
+            Err(BridgeError::UnsupportedEmbed { .. })
+        ));
+        engine.doc().apply_update_v1(&removal).unwrap();
+        engine.lowering_map("body", &env).unwrap();
+        assert!(engine.story_is_resident("body", engine.doc_epoch(), &env));
     }
 
     #[test]
