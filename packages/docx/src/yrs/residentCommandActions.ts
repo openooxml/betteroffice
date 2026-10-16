@@ -905,6 +905,7 @@ function applyPreparedDocxCommand(
     state.storedMarks = null;
     const projected = result(applied.status);
     if (applied.comment) projected.editState!.comment = { seq: command.seq, ...applied.comment };
+    if (applied.commentChange) projected.editState!.commentChange = { seq: command.seq, ...applied.commentChange };
     return projected;
   }
   if (command.kind === 'setReadOnly') {

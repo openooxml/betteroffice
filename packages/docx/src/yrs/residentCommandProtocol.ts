@@ -86,10 +86,16 @@ export type DocxEffectiveFormatting = Pick<
   | 'fontFamily' | 'color' | 'highlight' | 'styleId' | 'alignment'
 > & { fontSizePt: number | null };
 
-/** Every comment after a comment command, with the ID saves and the host use for the one an `addComment` added. */
+/** The comment an `addComment` command added, under the ID saves and the host use, with every comment after it. */
 export interface DocxCommentResult {
   seq: number;
-  id?: number;
+  id: number;
+  comments: Comment[];
+}
+
+/** Every comment after an `updateComment`, `setCommentRanges` or `removeComment` command. */
+export interface DocxCommentChangeResult {
+  seq: number;
   comments: Comment[];
 }
 
@@ -97,6 +103,7 @@ export interface DocxEditState {
   documentVersion?: string;
   batch?: { seq: number; result: DocxEditResult };
   comment?: DocxCommentResult;
+  commentChange?: DocxCommentChangeResult;
   activePart?: ResidentPartTarget | null;
   readOnly: boolean;
   review?: { version: string; previewVersion: number };

@@ -83,8 +83,9 @@ function reviewFixture(options: { readOnly?: boolean; mode?: 'viewing' } = {}) {
     if (intent.kind === 'addComment') comments = [...comments, { id: 8, author: intent.payload.author!, content: [], parentId: 7 }];
     if (intent.kind === 'updateComment') comments = comments.map(comment => comment.id === 7 ? { ...comment, done: intent.payload.patch!.done } : comment);
     const view = viewStore.getSnapshot();
+    const result = { seq, comments: structuredClone(comments) };
     viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version + 1, throughSeq: seq, presentedThroughSeq: 0, selection: null,
-      editState: { ...editState, comment: { seq, ...(intent.kind === 'addComment' ? { id: 8 } : {}), comments: structuredClone(comments) } } });
+      editState: { ...editState, ...(intent.kind === 'addComment' ? { comment: { ...result, id: 8 } } : { commentChange: result }) } });
     return { status: 'submitted', ticket: { seq, ack: Promise.resolve({ status: 'applied', seq }), presented: Promise.resolve('presented') } };
   });
   const changes: TestComment[][] = [];

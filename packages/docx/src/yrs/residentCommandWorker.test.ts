@@ -2878,11 +2878,11 @@ test('a reply comment links its parent in one undo step and comment commands rep
     expect(replied.outcomes[0]?.status).toBe('applied');
     const added = engine.listComments().find(comment => comment.id !== parent.id)!;
     expect(added.parentId).toBe(parent.id);
-    const replyId = replied.editState!.comment!.id!;
+    const replyId = replied.editState!.comment!.id;
     expect(replied.editState!.comment!.comments.find(comment => comment.id === replyId)).toMatchObject({ parentId, author: 'B' });
     const done = await client.edit(intent(3, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
-    expect(done.editState!.comment).toMatchObject({ seq: 3, comments: expect.arrayContaining([expect.objectContaining({ id: parentId, done: true })]) });
-    expect(done.editState!.comment!.id).toBeUndefined();
+    expect(done.editState!.commentChange).toMatchObject({ seq: 3, comments: expect.arrayContaining([expect.objectContaining({ id: parentId, done: true })]) });
+    expect(done.editState!.comment).toBeUndefined();
     const undone = await client.edit(intent(4, done.version, 'undo', {}));
     expect(undone.outcomes[0]?.status).toBe('applied');
     const undoneReply = await client.edit(intent(5, undone.version, 'undo', {}));
