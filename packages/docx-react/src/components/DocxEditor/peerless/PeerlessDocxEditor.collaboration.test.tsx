@@ -6,6 +6,7 @@ import * as peerless from '@betteroffice/docx/peerless';
 import * as measurement from '@betteroffice/docx/layout';
 import * as paged from './PeerlessPagedEditor';
 import { PeerlessDocxEditor as DocxEditor } from './PeerlessDocxEditor';
+import { DocxEditor as DefaultDocxEditor } from '../../DocxEditor';
 import { setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 import { createPeerlessCollaborationReplica } from './peerlessCollaboration';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
@@ -293,4 +294,19 @@ test('a parsed document reopens its worker on a room change', async () => {
   expect(open.mock.calls[1]![0]?.collaboration?.clientId).toBe(42);
   view.unmount();
   expect(onReplica.mock.calls.at(-1)![0]).toBeNull();
+});
+
+test('the default editor publishes an async replica whose sync reads name the async API and legacySyncApi', async () => {
+  mockWorkerEditor();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  restores.push(() => warn.mockRestore());
+  const onReplica = mock<(replica: CollaborationReplica | null) => void>(() => {});
+  const view = render(<DefaultDocxEditor documentBuffer={source} showToolbar={false} collaboration={{ onReplica }} />);
+  await waitFor(() => expect(onReplica).toHaveBeenCalledTimes(1));
+  const replica = onReplica.mock.calls[0]![0] as AsyncReplicaAdapter;
+  expect(typeof replica.async.encodeStateVector).toBe('function');
+  expect(() => replica.encodeStateVector()).toThrow(/async\.encodeStateVector\(\).*legacySyncApi/);
+  expect(() => replica.encodeStateAsUpdate()).toThrow(/async\.encodeStateAsUpdate\(\).*legacySyncApi/);
+  expect(warn.mock.calls.map(([message]) => String(message)).filter(message => message.includes('collaboration'))).toEqual([]);
+  view.unmount();
 });
