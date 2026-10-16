@@ -44,13 +44,19 @@ async function savedText(
 }
 
 async function focusDocument(page: Page) {
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  await expect(input).toBeEditable();
+  const caret = () =>
+    input.evaluate((el: HTMLElement) => `${el.style.left},${el.style.top}`);
+  await expect.poll(caret).not.toBe('0px,0px');
+  const home = await caret();
   await page
     .locator('.canvas-page canvas, .paged-editor__page canvas')
     .first()
     .click({ position: { x: 150, y: 150 } });
-  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
-  await expect(input).toBeEditable();
+  await expect.poll(caret).not.toBe(home);
   await input.press('ControlOrMeta+Home');
+  await expect.poll(caret).toBe(home);
   return input;
 }
 
@@ -281,6 +287,7 @@ test('docx: a double-click on the first page header opens the header for editing
   await open(page);
   await focusDocument(page);
   const header = page.locator('.layout-page[data-page-index="0"] .layout-page-header');
+  await expect(header).toBeInViewport();
   const box = (await header.boundingBox())!;
 
   await header.click({ force: true });
@@ -301,11 +308,13 @@ test('docx: with the first page footer open, a double-click on the next page hea
   await focusDocument(page);
   const footer = page.locator('.layout-page[data-page-index="0"] .layout-page-footer');
   await footer.evaluate((band) => band.scrollIntoView({ block: 'center' }));
+  await expect(footer).toBeInViewport();
   await footer.dblclick({ force: true });
   await expect(page.locator('.hf-inline-editor')).toContainText('Footer');
 
   const header = page.locator('.layout-page[data-page-index="1"] .layout-page-header');
   await header.scrollIntoViewIfNeeded();
+  await expect(header).toBeInViewport();
   const box = (await header.boundingBox())!;
   await header.dblclick({ force: true });
   await expect(page.locator('.hf-inline-editor')).toContainText('Header');
