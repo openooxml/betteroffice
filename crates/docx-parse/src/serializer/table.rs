@@ -166,6 +166,7 @@ pub fn serialize_table_cell(
         append_generated(&mut writer, &serialize_block_content(block, context)?);
     }
     if cell.content.is_empty() {
+        context.record_placeholder();
         writer.start_element("w:p").end_element();
     }
     writer.end_element();
