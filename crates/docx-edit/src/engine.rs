@@ -811,7 +811,7 @@ fn exact_prefix_block(block: &LayoutBlock) -> bool {
                     })
                     && local(&run.fmt)
             }
-            Run::Unsupported => false,
+            Run::Reserved(_) | Run::Unsupported => false,
         }),
         LayoutBlock::Table(table) => {
             table.floating.is_none()
@@ -1963,6 +1963,21 @@ fn plain_layout_options_fingerprint(mut request: serde_json::Value) -> String {
     pages::sha256_hex(canonical_json(&request).as_bytes())
 }
 
+/// `request_json` without the view-only `renderEnv.reservations`.
+fn without_reservations(request_json: &str) -> String {
+    let Ok(mut request) = serde_json::from_str::<serde_json::Value>(request_json) else {
+        return request_json.to_owned();
+    };
+    match request
+        .get_mut("renderEnv")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|env| env.remove("reservations"))
+    {
+        Some(_) => request.to_string(),
+        None => request_json.to_owned(),
+    }
+}
+
 /// Identifies the revision preview a pass lays out under; 0 is none.
 fn revision_preview_key(env: &RenderEnv) -> Result<u64, String> {
     if env.revision_preview.is_empty() {
@@ -2117,6 +2132,7 @@ fn window_build_pages(
                         Fragment::Shape(value) => (value.pm_start, value.pm_end),
                         Fragment::Chart(value) => (value.pm_start, value.pm_end),
                         Fragment::TextBox(value) => (value.pm_start, value.pm_end),
+                        Fragment::Reserved(_) => (None, None),
                     };
                     start
                         .zip(end)
@@ -2276,7 +2292,7 @@ fn measurement_shift_safe(block: &LayoutBlock) -> bool {
                 && position(paragraph.pm_end)
                 && paragraph.sdt_groups.is_none()
                 && paragraph.runs.iter().all(|run| {
-                    !matches!(run, Run::Image(_) | Run::Unsupported)
+                    !matches!(run, Run::Image(_) | Run::Reserved(_) | Run::Unsupported)
                         && !matches!(run, Run::Text(text) if text.inline_sdt_widget.is_some())
                         && position(run.pm_start())
                         && position(run.pm_end())
@@ -2481,7 +2497,7 @@ fn paragraph_identity(block: &LayoutBlock) -> Option<(&BlockId, Option<f64>)> {
             if paragraph
                 .runs
                 .iter()
-                .all(|run| !matches!(run, Run::Image(_) | Run::Unsupported)) =>
+                .all(|run| !matches!(run, Run::Image(_) | Run::Reserved(_) | Run::Unsupported)) =>
         {
             Some((&paragraph.id, paragraph.pm_start))
         }
@@ -2507,6 +2523,7 @@ fn fragment_identity(block: &LayoutBlock) -> Option<&BlockId> {
         LayoutBlock::TextBox(block) => Some(&block.id),
         LayoutBlock::Shape(block) => Some(&block.id),
         LayoutBlock::Chart(block) => Some(&block.id),
+        LayoutBlock::Reserved(block) => Some(&block.id),
         _ => None,
     }
 }
@@ -3813,6 +3830,7 @@ fn region_reservation_restart_index(
             Fragment::TextBox(fragment) => &fragment.block_id,
             Fragment::Shape(fragment) => &fragment.block_id,
             Fragment::Chart(fragment) => &fragment.block_id,
+            Fragment::Reserved(fragment) => &fragment.block_id,
         };
         let mut matching = input
             .measured
@@ -5424,7 +5442,7 @@ impl EngineSession {
                                 .is_none_or(|wrap| wrap == "inline")
                             && !matches!(image.display_mode.as_deref(), Some("anchor" | "float"))
                     }
-                    Run::Unsupported => false,
+                    Run::Reserved(_) | Run::Unsupported => false,
                 }),
                 LayoutBlock::Table(table) => table.floating.is_none(),
                 LayoutBlock::Image(_)
@@ -5552,6 +5570,7 @@ impl EngineSession {
                     Run::Field(run) => (&mut run.pm_start, &mut run.pm_end),
                     Run::LineBreak(run) => (&mut run.pm_start, &mut run.pm_end),
                     Run::Image(run) => (&mut run.pm_start, &mut run.pm_end),
+                    Run::Reserved(run) => (&mut run.pm_start, &mut run.pm_end),
                     Run::Unsupported => continue,
                 };
                 *start = next.pm_start();
@@ -10572,7 +10591,71 @@ impl EngineSession {
         })
     }
 
+    /// Exports document truth: a retained layout that holds view-only reservations is laid out
+    /// again without them for the export, then restored under its own layout version.
     fn export_with_pages(
+        &self,
+        options: &PageExportOptions,
+        scope: AnchorScope,
+        current: Option<&str>,
+    ) -> Result<ExportRead<DocxPagedStructuredContent<DocxLayoutMap>>, ExportRefusal> {
+        let current = current.map(without_reservations);
+        let reserved = self.capture.borrow().as_ref().and_then(|capture| {
+            (!capture.render_env.reservations.is_empty() && capture.version == self.doc.version())
+                .then_some(capture.serial)
+        });
+        let request = self
+            .regions
+            .borrow()
+            .as_ref()
+            .map(|state| state.request_json.clone());
+        let (Some(serial), Some(request)) = (reserved, request) else {
+            return self.export_with_retained_pages(options, scope, current.as_deref());
+        };
+        let refuse = |code, message: &str| ExportRefusal {
+            version: self.doc.version(),
+            failure: pages::failure(code, message),
+        };
+        let layout_version = format!("{}:{serial}", self.doc.version());
+        if options
+            .expect_layout_version
+            .as_ref()
+            .is_some_and(|expected| *expected != layout_version)
+        {
+            return Err(refuse(
+                ExportFailureCode::StaleLayout,
+                "The layout is not the one expectLayoutVersion names.",
+            ));
+        }
+        if let Err(error) =
+            self.layout_document_with_regions_retained(&without_reservations(&request))
+        {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                &format!("The document cannot be laid out without its reservations: {error}"),
+            ));
+        }
+        let truth = PageExportOptions {
+            expect_layout_version: None,
+            ..options.clone()
+        };
+        let read = self.export_with_retained_pages(&truth, scope, current.as_deref());
+        if let Err(error) = self.layout_document_with_regions_retained(&request) {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                &format!("The reserved layout cannot be restored: {error}"),
+            ));
+        }
+        if let Some(capture) = self.capture.borrow_mut().as_mut() {
+            capture.serial = serial;
+        }
+        read.map(|mut read| {
+            read.content.layout.layout_version = layout_version;
+            read
+        })
+    }
+
+    fn export_with_retained_pages(
         &self,
         options: &PageExportOptions,
         scope: AnchorScope,

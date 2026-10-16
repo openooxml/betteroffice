@@ -1,5 +1,6 @@
 import { createPortal } from 'react-dom';
 import type { DocxPluginActivation, DocxPluginHost } from './createDocxPluginHost';
+import { scopePluginGeometry } from './geometry';
 import { PluginRenderScope } from './PluginRenderScope';
 import type { DocxPluginGeometry } from './types';
 
@@ -40,7 +41,9 @@ export function PluginOverlays({
     >
       {activations.map((activation) => {
         const Overlay = activation.plugin.overlay;
-        const geometry = heldGeometry ?? activation.context.geometry;
+        const geometry = heldGeometry
+          ? scopePluginGeometry(heldGeometry, activation.pluginId)
+          : activation.context.geometry;
         return Overlay && geometry ? (
           <PluginRenderScope key={activation.key} host={host} activation={activation}>
             <Overlay context={activation.context} geometry={geometry} />

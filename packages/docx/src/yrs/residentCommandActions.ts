@@ -19,6 +19,7 @@ import { validControlValue, resolveControlHandle } from './residentControls';
 import { propertyCommand, validPropertyCommand, propertyCommandTarget, applyPropertyCommand } from './residentPropertyCommands';
 import { validSectionMargins, nativeTabStops, residentSectionPropertiesAt } from './residentSections';
 import { validFontEnvironment } from './residentFontEnvironment';
+import { resolveReservations, retainReservationOwners, validReservationsPayload } from './reservations';
 import { resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
@@ -192,7 +193,7 @@ const DOCX_COMMAND_POLICIES = {
   toggleMark: { keys: ['mark'] }, formatRange: { keys: ['delta'] }, clearFormatting: { keys: [] },
   setParagraphAttrs: { keys: ['attrs'] }, applyParagraphStyle: { keys: ['styleId'] },
   setReadOnly: { keys: ['readOnly'], exact: true },
-  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText'], exact: true },
+  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText', 'reservations'], exact: true },
 } satisfies Record<DocxCommandKind, DocxCommandPolicy>;
 
 function commandPolicy(kind: string): DocxCommandPolicy | undefined {
@@ -347,7 +348,8 @@ function validCommandIntent(
       break;
     case 'setRenderEnvironment':
       if (!object(payload.themeColors) || !Object.values(payload.themeColors).every(value =>
-        typeof value === 'string' && /^[0-9a-f]{6}$/i.test(value)) || !boolean(payload.showHiddenText)) return refuse('invalid-payload');
+        typeof value === 'string' && /^[0-9a-f]{6}$/i.test(value)) || !boolean(payload.showHiddenText) ||
+        (payload.reservations !== undefined && !validReservationsPayload(payload.reservations))) return refuse('invalid-payload');
       break;
   }
   return true;
@@ -728,7 +730,14 @@ function applyPreparedDocxCommand(
     return { status, selection: corrected?.ok ? corrected.selection : null, editState: projectDocxEditState(engine, state, corrected, toolbar) };
   };
   if (command.kind === 'setRenderEnvironment') {
-    environment!.setRenderEnvironment!(command.payload);
+    const { reservations, ...rest } = command.payload;
+    const current = reservations?.version === engine.proposalEngine.version();
+    environment!.setRenderEnvironment!(reservations
+      ? { ...rest, reservations: current
+        ? resolveReservations(engine.geometryReader, reservations, engine.proposalEngine.version(),
+          environment?.getLayoutReservations?.() ?? null)
+        : retainReservationOwners(reservations, environment?.getLayoutReservations?.() ?? null) }
+      : rest, reservations ? (current ? { version: reservations.version, key: reservations.key ?? null } : null) : undefined);
     return result('noop');
   }
   if (command.kind === 'applyEdits') {

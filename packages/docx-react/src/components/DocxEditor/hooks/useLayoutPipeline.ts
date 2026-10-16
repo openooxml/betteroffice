@@ -49,9 +49,11 @@ import {
   markLayoutQueued,
   markSupersededLayout,
   readSessionVersion,
+  resolvedReservationsKey,
   revisionPreviewKey,
   revisionPreviewKeyOf,
   sourceVersionOf,
+  stampReservationsKey,
   stampRevisionPreviewKey,
   stampSourceVersion,
 } from '../internals/layoutProvenance';
@@ -613,6 +615,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version
           );
           stampRevisionPreviewKey(newLayout, previewKey);
+          stampReservationsKey(newLayout, resolvedReservationsKey(passRenderEnv.reservationSets ?? passRenderEnv.reservations));
           laidOutRef.current = {
             session,
             layout: newLayout,

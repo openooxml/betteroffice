@@ -434,6 +434,27 @@ pub struct FieldRun {
     pub pm_end: Option<f64>,
 }
 
+/// The host-scoped name of a layout reservation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ReservationRef {
+    pub owner: String,
+    pub id: String,
+}
+
+/// Inline space a host reserves: measured as an atom, never painted, and
+/// owning no document positions (`pm_start == pm_end`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReservedRun {
+    pub reservation: ReservationRef,
+    pub width: f64,
+    pub height: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pm_start: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pm_end: Option<f64>,
+}
+
 /// Inline content of a paragraph. An unknown `kind` becomes `Unsupported`, and
 /// a paragraph containing one cannot be placed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +470,8 @@ pub enum Run {
     LineBreak(LineBreakRun),
     #[serde(rename = "field")]
     Field(FieldRun),
+    #[serde(rename = "reserved")]
+    Reserved(ReservedRun),
     #[serde(other, rename = "unsupported")]
     Unsupported,
 }
@@ -462,6 +485,7 @@ impl Run {
             Run::Image(r) => r.pm_start,
             Run::LineBreak(r) => r.pm_start,
             Run::Field(r) => r.pm_start,
+            Run::Reserved(r) => r.pm_start,
             Run::Unsupported => None,
         }
     }
@@ -474,6 +498,7 @@ impl Run {
             Run::Image(r) => r.pm_end,
             Run::LineBreak(r) => r.pm_end,
             Run::Field(r) => r.pm_end,
+            Run::Reserved(r) => r.pm_end,
             Run::Unsupported => None,
         }
     }
@@ -1136,6 +1161,18 @@ pub struct ColumnBreakBlock {
     pub pm_end: Option<f64>,
 }
 
+/// Block space a host reserves beside a paragraph: unbreakable, never
+/// painted, and without document positions. `width` defaults to the column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReservedBlock {
+    pub id: BlockId,
+    pub reservation: ReservationRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxBlock {
@@ -1206,6 +1243,8 @@ pub enum LayoutBlock {
     PageBreak(PageBreakBlock),
     #[serde(rename = "columnBreak")]
     ColumnBreak(ColumnBreakBlock),
+    #[serde(rename = "reserved")]
+    Reserved(ReservedBlock),
     #[serde(other, rename = "unsupported")]
     Unsupported,
 }
@@ -1238,6 +1277,7 @@ impl PartialEq for LayoutBlock {
             (Self::SectionBreak(a), Self::SectionBreak(b)) => a == b,
             (Self::PageBreak(a), Self::PageBreak(b)) => a == b,
             (Self::ColumnBreak(a), Self::ColumnBreak(b)) => a == b,
+            (Self::Reserved(a), Self::Reserved(b)) => a == b,
             (Self::Unsupported, Self::Unsupported) => true,
             (Self::Paragraph(_), _)
             | (Self::Table(_), _)
@@ -1248,6 +1288,7 @@ impl PartialEq for LayoutBlock {
             | (Self::SectionBreak(_), _)
             | (Self::PageBreak(_), _)
             | (Self::ColumnBreak(_), _)
+            | (Self::Reserved(_), _)
             | (Self::Unsupported, _) => false,
         }
     }
@@ -1267,6 +1308,7 @@ impl LayoutBlock {
             Self::SectionBreak(block) => Some(&block.id),
             Self::PageBreak(block) => Some(&block.id),
             Self::ColumnBreak(block) => Some(&block.id),
+            Self::Reserved(block) => Some(&block.id),
             Self::Unsupported => None,
         }
     }
@@ -1282,7 +1324,7 @@ impl LayoutBlock {
             Self::TextBox(block) => block.pm_start,
             Self::PageBreak(block) => block.pm_start,
             Self::ColumnBreak(block) => block.pm_start,
-            Self::SectionBreak(_) | Self::Unsupported => None,
+            Self::SectionBreak(_) | Self::Reserved(_) | Self::Unsupported => None,
         }
     }
 }
@@ -1295,12 +1337,14 @@ impl PartialEq for Run {
             (Self::Image(a), Self::Image(b)) => a == b,
             (Self::LineBreak(a), Self::LineBreak(b)) => a == b,
             (Self::Field(a), Self::Field(b)) => a == b,
+            (Self::Reserved(a), Self::Reserved(b)) => a == b,
             (Self::Unsupported, Self::Unsupported) => true,
             (Self::Text(_), _)
             | (Self::Tab(_), _)
             | (Self::Image(_), _)
             | (Self::LineBreak(_), _)
             | (Self::Field(_), _)
+            | (Self::Reserved(_), _)
             | (Self::Unsupported, _) => false,
         }
     }
@@ -1420,6 +1464,36 @@ impl PartialEq for ImageRun {
             && self.change_author == other.change_author
             && self.change_date == other.change_date
             && self.change_revision_id == other.change_revision_id
+    }
+}
+
+impl PartialEq for ReservedRun {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            reservation: _,
+            width: _,
+            height: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.reservation == other.reservation
+            && self.width == other.width
+            && self.height == other.height
+    }
+}
+
+impl PartialEq for ReservedBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            id: _,
+            reservation: _,
+            width: _,
+            height: _,
+        } = other;
+        self.id == other.id
+            && self.reservation == other.reservation
+            && self.width == other.width
+            && self.height == other.height
     }
 }
 
@@ -2216,6 +2290,17 @@ pub struct TextBoxFragment {
     pub z_index: Option<f64>,
 }
 
+/// The space a [`ReservedBlock`] takes on a page.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReservedFragment {
+    pub block_id: BlockId,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// A positioned piece of a block on one page. Break blocks produce none.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -2226,6 +2311,7 @@ pub enum Fragment {
     Shape(ShapeFragment),
     Chart(ChartFragment),
     TextBox(TextBoxFragment),
+    Reserved(ReservedFragment),
 }
 
 impl Fragment {
@@ -2253,6 +2339,10 @@ impl Fragment {
                 f.y = y;
             }
             Fragment::TextBox(f) => {
+                f.x = x;
+                f.y = y;
+            }
+            Fragment::Reserved(f) => {
                 f.x = x;
                 f.y = y;
             }
@@ -2289,6 +2379,7 @@ impl Fragment {
             Fragment::TextBox(f) => {
                 (f.is_floating != Some(true)).then_some((f.y, f.height, f.height))
             }
+            Fragment::Reserved(f) => Some((f.y, f.height, f.height)),
         }
     }
 
@@ -2301,6 +2392,7 @@ impl Fragment {
             Fragment::Shape(f) => f.y += delta,
             Fragment::Chart(f) => f.y += delta,
             Fragment::TextBox(f) => f.y += delta,
+            Fragment::Reserved(f) => f.y += delta,
         }
     }
 }

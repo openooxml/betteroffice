@@ -264,6 +264,14 @@ export interface MergedRange {
   end: CellPoint;
 }
 
+export interface WorkbookHyperlink {
+  range: MergedRange;
+  externalTarget?: string;
+  location?: string;
+  tooltip?: string;
+  display?: string;
+}
+
 export interface HistoryState {
   canUndo: boolean;
   canRedo: boolean;
@@ -489,6 +497,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
   /** Move a range within one sheet and rewrite references in one native undo step. */
   moveRange(sheet: number, source: string, destination: string): EditResult;
+  setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
+  removeHyperlink(sheet: number, range: MergedRange): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -996,6 +1006,20 @@ function wrapWorkbookDocument(
     },
     moveRange(sheet: number, source: string, destination: string): EditResult {
       return parseJson(() => doc.moveRangeJson(JSON.stringify({ sheet, source, destination })), true);
+    },
+    setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult {
+      return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{
+        type: 'setHyperlink', sheet, hyperlink: {
+          range: hyperlink.range,
+          external_target: hyperlink.externalTarget ?? null,
+          location: hyperlink.location ?? null,
+          tooltip: hyperlink.tooltip ?? null,
+          display: hyperlink.display ?? null,
+        },
+      }] })), true);
+    },
+    removeHyperlink(sheet: number, range: MergedRange): EditResult {
+      return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{ type: 'removeHyperlink', sheet, range }] })), true);
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);
