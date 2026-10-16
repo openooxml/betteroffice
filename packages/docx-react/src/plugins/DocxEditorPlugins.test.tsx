@@ -34,6 +34,7 @@ import {
   useDocxCommands,
   type DocxCommandResult,
   type DocxEditorBaseProps,
+  type DocxEditorPluginProps,
   type DocxEditorRef,
   type DocxPlugin,
   type DocxPluginCommandResult,
@@ -274,7 +275,7 @@ function installWorkerEngine() {
   } as unknown as typeof Worker;
 }
 
-type Mount = (props?: Partial<DocxEditorBaseProps>) => Promise<{ ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render> }>;
+type Mount = (props: DocxEditorPluginProps) => Promise<{ ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render> }>;
 
 async function loadHookAppliesOnce(mount: Mount) {
   const loads: string[] = [];
@@ -1893,9 +1894,15 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
 });
 
 describe('DocxEditor plugins (peer-less engine)', () => {
-  beforeEach(installWorkerEngine);
+  let canvasContext: ReturnType<typeof spyOn<HTMLCanvasElement, 'getContext'>>;
+  beforeEach(() => {
+    installWorkerEngine();
+    canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ save() {}, restore() {}, setTransform() {},
+      clearRect() {}, drawImage() {}, beginPath() {}, rect() {}, clip() {} } as unknown as CanvasRenderingContext2D);
+  });
+  afterEach(() => canvasContext.mockRestore());
 
-  const mount: Mount = async (props = {}) => {
+  const mount: Mount = async (props) => {
     const ref = createRef<DocxEditorRef>();
     const view = render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
     await until(() => ref.current?.commands.getState('save').enabled === true);
