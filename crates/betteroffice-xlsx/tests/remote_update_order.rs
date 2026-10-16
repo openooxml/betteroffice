@@ -63,12 +63,19 @@ fn deliver(target: Workbook, updates: &[&Vec<u8>]) -> Workbook {
 }
 
 fn merge(updates: &[&Vec<u8>]) -> Vec<u8> {
-    Update::merge_updates(updates.iter().map(|update| Update::decode_v1(update).unwrap()))
-        .encode_v1()
+    Update::merge_updates(
+        updates
+            .iter()
+            .map(|update| Update::decode_v1(update).unwrap()),
+    )
+    .encode_v1()
 }
 
 fn assert_same_state(left: &Workbook, right: &Workbook) {
-    assert_eq!(left.encode_state_vector_v1(), right.encode_state_vector_v1());
+    assert_eq!(
+        left.encode_state_vector_v1(),
+        right.encode_state_vector_v1()
+    );
     assert_eq!(left.model(), right.model());
     assert!(
         Update::decode_v1(&left.encode_state_as_update_v1()).unwrap()
@@ -152,7 +159,8 @@ fn a_held_update_carrying_an_older_schema_from_a_higher_client_settles() {
         .apply_update(Update::decode_v1(&open(852).encode_state_as_update_v1()).unwrap())
         .unwrap();
     let before = doc.transact().state_vector();
-    doc.get_or_insert_map("xlsx").insert(&mut doc.transact_mut(), "schemaVersion", 5_i64);
+    doc.get_or_insert_map("xlsx")
+        .insert(&mut doc.transact_mut(), "schemaVersion", 5_i64);
     let stale = doc.transact().encode_diff_v1(&before);
 
     let target = deliver(open(853), &[&merge(&[&stale, &updates[1]])]);
