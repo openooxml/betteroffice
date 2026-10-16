@@ -86,6 +86,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const { session, viewStore, echoPainter } = _options;
   const pending = new Map<CommandTicket, number>();
   const prefixes = new WeakMap<CommandTicket, Promise<boolean>>();
+  const reviewDependencies = new WeakMap<CommandTicket, CommandTicket | undefined>();
   const deferred = new WeakMap<CommandTicket, Promise<{ ticket?: CommandTicket; blocked?: boolean }>>();
   const cancellations = new Set<() => void>();
   const held: Array<{ intent: AdmissionIntent; options: PeerlessAdmissionOptions; deletionExtension: boolean;
@@ -127,10 +128,11 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const workerSelection = () => latestSelection(session, viewStore);
   const documentVersion = () => (session.state.throughSeq >= viewStore.getSnapshot().throughSeq ? session.state.editState : undefined)?.documentVersion ??
     viewStore.getSnapshot().editState?.documentVersion ?? '';
-  const track = (ticket: CommandTicket) => {
+  const dependencyOf = (ticket: CommandTicket | undefined) => ticket && reviewDependencies.has(ticket) ? reviewDependencies.get(ticket) : ticket;
+  const track = (ticket: CommandTicket, review = false) => {
     const prefix = tail ? prefixes.get(tail) ?? Promise.resolve(true) : Promise.resolve(true);
     prefixes.set(ticket, Promise.all([prefix, ticket.ack]).then(([ok, outcome]) =>
-      ok && outcome.status !== 'refused' && outcome.status !== 'cancelled', () => false));
+      ok && (review || (outcome.status !== 'refused' && outcome.status !== 'cancelled')), () => false));
     tail = ticket;
     pending.set(ticket, 1);
     const settle = () => {
@@ -277,10 +279,11 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
             : target?.kind === 'worker-selection' && target.snapshot.workerSelection && isText(intent)
               ? { ...intent.payload, selection: target.snapshot.workerSelection } : intent.payload;
         const ticket = session.submit(intent.kind, payload, {
-          ...metadata, after: predecessor, fence: !!fence,
+          ...metadata, after: dependencyOf(predecessor), fence: !!fence,
           coalesceKey: fence ? undefined : metadata.coalesceKey ?? intent.kind,
           echo,
         });
+        if (isRevision(intent)) reviewDependencies.set(ticket, dependencyOf(predecessor));
         if (onSubmitted) {
           try { onSubmitted(ticket); } catch (error) { console.error('[PeerlessInput] submission observer failed', error); }
         }
@@ -290,7 +293,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const ticket = deletionExtension || vertical || (after && (waitForSelection || deferred.has(after))) ||
         (intent.kind === 'formatRange' && !workerSelection())
         ? defer(after, waitForSelection, send, vertical) : send(after)!;
-      track(ticket);
+      track(ticket, isRevision(intent));
       return { status: 'submitted', ticket, echoEnabled: echo !== undefined };
     } catch (error) {
       if (!counted) releaseCount();

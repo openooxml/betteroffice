@@ -117,10 +117,9 @@ test('a queued review command settles as replaced instead of reaching the next d
   expect(next.submit).not.toHaveBeenCalled();
 });
 
-test('review commands take their admission place between keystrokes and expect the version their predecessor left', async () => {
-  const { controller, binding, viewStore, feed } = reviewFixture();
-  await feed();
+function workerAdmission({ binding, viewStore }: ReturnType<typeof reviewFixture>) {
   const applied: string[] = [];
+  const decided = new Set<string>();
   const tickets: CommandTicket[] = [];
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -129,9 +128,12 @@ test('review commands take their admission place between keystrokes and expect t
     submit(kind, payload, options) {
       const seq = tickets.length + 1;
       const ack: Promise<TicketOutcome> = Promise.all([options?.after?.ack, seq === 1 ? gate : undefined]).then(([previous]) => {
-        if (previous && previous.status !== 'applied') return { seq, status: 'cancelled', reason: 'dependency-refused' };
+        if (previous?.status === 'refused' || previous?.status === 'cancelled') return { seq, status: 'cancelled', reason: 'dependency-refused' };
         if ('expectVersion' in payload && payload.expectVersion !== session.state.editState?.documentVersion) return { seq, status: 'refused', reason: 'stale-version' };
-        applied.push(kind === 'insertText' ? (payload as { text: string }).text : kind);
+        const revisionId = (payload as { revisionId?: string }).revisionId;
+        if (revisionId !== undefined && decided.has(revisionId)) return { seq, status: 'refused', reason: 'unknown-revision' };
+        if (revisionId !== undefined) decided.add(revisionId);
+        applied.push(kind === 'insertText' ? (payload as { text: string }).text : revisionId ? `${kind} ${revisionId}` : kind);
         const editState = { ...session.state.editState!, documentVersion: `v${seq}` };
         session.state = { ...session.state, throughSeq: seq, editState };
         viewStore.acceptWorkerState(viewStore.getSnapshot().identity, { ...session.state, selection: viewStore.getSnapshot().workerSelection });
@@ -148,6 +150,14 @@ test('review commands take their admission place between keystrokes and expect t
     echoPainter: { disable() {}, preview: () => undefined } as unknown as PeerlessEchoPainter });
   binding.commands = createPeerlessCommandBinding(binding.admission);
   const type = (text: string) => { const admitted = admitIntent(binding.admission, { kind: 'insertText', payload: { text } }); if (admitted.status !== 'submitted') throw new Error('not admitted'); return admitted.ticket.ack; };
+  return { applied, release, type };
+}
+
+test('review commands take their admission place between keystrokes and expect the version their predecessor left', async () => {
+  const fixture = reviewFixture();
+  await fixture.feed();
+  const { controller, binding } = fixture;
+  const { applied, release, type } = workerAdmission(fixture);
   const keys = [type('a')];
   const first = controller.commands.store.execute('reviewAccept', { revisionId: '7' });
   keys.push(type('b'));
@@ -157,7 +167,25 @@ test('review commands take their admission place between keystrokes and expect t
   expect(await first).toEqual({ ok: true, status: 'executed' });
   expect(await second).toEqual({ ok: true, status: 'executed' });
   expect((await Promise.all(keys)).map(outcome => outcome.status)).toEqual(['applied', 'applied', 'applied']);
-  expect(applied).toEqual(['a', 'acceptRevision', 'b', 'rejectRevision', 'c']);
+  expect(applied).toEqual(['a', 'acceptRevision 7', 'b', 'rejectRevision 9', 'c']);
+  binding.admission.dispose();
+});
+
+test('a review decision the engine refuses leaves later typing and decisions to run from the unchanged document', async () => {
+  const fixture = reviewFixture();
+  await fixture.feed();
+  const { controller, binding } = fixture;
+  const { applied, release, type } = workerAdmission(fixture);
+  const first = controller.commands.store.execute('reviewAccept', { revisionId: '7' });
+  const second = controller.commands.store.execute('reviewAccept', { revisionId: '7' });
+  const typed = type('x');
+  const rejected = controller.commands.store.execute('reviewReject', { revisionId: '9' });
+  release();
+  expect(await first).toEqual({ ok: true, status: 'executed' });
+  expect(await second).toMatchObject({ ok: false, failure: { code: 'revision-not-found' } });
+  expect((await typed).status).toBe('applied');
+  expect(await rejected).toEqual({ ok: true, status: 'executed' });
+  expect(applied).toEqual(['acceptRevision 7', 'x', 'rejectRevision 9']);
   binding.admission.dispose();
 });
 
