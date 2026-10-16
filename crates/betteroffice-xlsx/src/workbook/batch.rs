@@ -608,7 +608,7 @@ impl Workbook {
                 format!("a batch addresses at most {MAX_CELL_VISITS} target and guard cells"),
             ));
         }
-        if let Some((code, message)) = self.sheet_write_refusal(resolved.sheet) {
+        if let Some((code, message)) = self.step_write_refusal(&step.operation, resolved) {
             return Err(at(code, message));
         }
         let mut text = step
