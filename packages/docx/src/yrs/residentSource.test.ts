@@ -317,3 +317,14 @@ test('a whole source that fails to open leaves the worker on the cut it was to r
     expect((await client.commandInit({ ...init(), ...{ provisionalPages: 1 } })).frame).toBeDefined();
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+test('a whole source that fails after its cut failed leaves the client free for a new cut', async () => {
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    const cut = client.openSourceCut({ bytes: new Uint8Array([1, 2, 3]), cut: { blocks: 20 } }).catch(() => null);
+    await expect(client.openSource({ bytes: new Uint8Array([1, 2, 3]) })).rejects.toThrow();
+    await cut;
+    expect(await client.openSourceCut({ bytes: source(400), cut: { blocks: 20 } })).toBeDefined();
+  } finally { client.destroy(); }
+}, TIMEOUT);

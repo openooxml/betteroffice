@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DocxEditor, type DocxEditorRef } from "@betteroffice/docx-react";
+import { DocxEditor, type DocxEditorRef, type DocxErrorInfo } from "@betteroffice/docx-react";
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
@@ -211,6 +211,10 @@ export default function Editor({
       apiUnavailable(error);
     callbacks.current.onError(error);
   }, [file.format, apiUnavailable]);
+  const docxError = useCallback((cause: Error, info?: DocxErrorInfo) => {
+    if (info?.recoverable) console.warn(cause);
+    else error(cause);
+  }, [error]);
   const apiReady = useCallback(
     <Api,>(ref: { current: Api | null }, api: Api, disposed: string) => {
       ref.current = api;
@@ -334,7 +338,7 @@ export default function Editor({
         documentName={name}
         onDocumentChange={changed}
         onFirstPagePainted={firstPainted}
-        onError={error}
+        onError={docxError}
         onOpen={onOpen}
         showToolbar
         showRuler

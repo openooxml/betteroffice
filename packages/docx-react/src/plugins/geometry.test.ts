@@ -23,7 +23,7 @@ import {
   UNKNOWN_REVISION_PREVIEW_KEY,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { bindDisplayWindow } from '../components/DocxEditor/internals/displayWindow';
-import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, toOverlayRect } from './geometry';
+import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, toOverlayRect, unbuiltPagesOf } from './geometry';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
 import * as proposalPreview from './proposalPreview';
@@ -492,6 +492,19 @@ describe('semantic anchor geometry', () => {
       const last = result.rects.at(-1)!;
       expect(result.anchor).toEqual({ ...last, x: last.x + last.width, width: 0 });
     }
+  });
+
+  test('readAnchorGeometries answers every target right away, in order', async () => {
+    const { geometry } = semanticGeometry();
+    const targets: DocxGeometryTarget[] = [
+      PARAGRAPH_TARGET,
+      { kind: 'revision', revisionId: 'r1' },
+      { kind: 'range', version: 'v0', range: TEXT_RANGE },
+    ];
+    const read = geometry.readAnchorGeometries(targets);
+    const answered = targets.map((target) => geometry.getAnchorGeometry(target));
+    expect(answered.map((result) => result.ok || result.failure.code)).toEqual([true, true, 'stale-version']);
+    expect(await read).toEqual(answered);
   });
 
   test('keeps both pages and places the anchor and page rectangle on the last page', () => {
@@ -1172,3 +1185,54 @@ for (const change of ['id', 'version', 'zoom'] as const) {
     expect(await result).toBeNull();
   });
 }
+
+test('getPageRect answers a page box in overlay pixels with whether it is built', async () => {
+  const pages = document.createElement('div');
+  const canvases = [0, 1].map((pageIndex) => {
+    const canvas = document.createElement('canvas');
+    canvas.dataset.pageIndex = String(pageIndex);
+    pages.appendChild(canvas);
+    return canvas;
+  });
+  const layer = document.createElement('div');
+  place(pages, rectAt(130, 60, 800, 2000));
+  canvases.forEach((canvas, index) => place(canvas, rectAt(180, 84 + index * 500, PAGE.width * 2, PAGE.height * 2)));
+  place(layer, rectAt(20, 10, 900, 2100));
+  const source = {
+    ...queries(),
+    pageCount: () => 2,
+    pageBounds: (pageIndex: number) => (pageIndex < 2 ? { pageIndex, x: 0, y: 0, ...PAGE } : null),
+    displayList: { pages: [{}, { unbuilt: true }] },
+  } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 2, { displayListQueries: source, projector: createCanvasHostProjector(pages, source, 2) });
+  let current = true;
+  const geometry = createPluginGeometry({ id: 'layout', version: 'v', previewVersion: 0, zoom: 2, pageCount: 2 }, dom, layer,
+    () => current, () => null, source, () => null);
+  expect(geometry.getPageRect(0)).toEqual({ pageIndex: 0, x: 160, y: 74, width: PAGE.width * 2, height: PAGE.height * 2, built: true });
+  expect(geometry.getPageRect(1)).toEqual({ pageIndex: 1, x: 160, y: 574, width: PAGE.width * 2, height: PAGE.height * 2, built: false });
+  expect(geometry.getPageRect(2)).toBeNull();
+  expect(await geometry.readAnchorGeometries([])).toEqual([]);
+  current = false;
+  expect(geometry.getPageRect(0)).toBeNull();
+});
+
+test('isPageBuilt answers from the display list without measuring the pages, and false once not shown', () => {
+  const pages = document.createElement('div');
+  let measured = 0;
+  pages.getBoundingClientRect = () => { measured += 1; return rectAt(0, 0, 100, 100); };
+  const source = { ...queries(), pageCount: () => 2, displayList: { pages: [{}, { unbuilt: true }] } } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 1, { displayListQueries: source, projector: createCanvasHostProjector(pages, source, 1) });
+  let current = true;
+  const geometry = createPluginGeometry({ id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 2 }, dom,
+    document.createElement('div'), () => current, () => null, source, () => null);
+  expect([0, 1, 2, -1].map((pageIndex) => geometry.isPageBuilt(pageIndex))).toEqual([true, false, false, false]);
+  expect(measured).toBe(0);
+  current = false;
+  expect(geometry.isPageBuilt(0)).toBe(false);
+});
+
+test('unbuiltPages takes range ends as exclusive and an empty range where it sits', () => {
+  const source = { displayList: { pages: [{}, { unbuilt: true, positionSpan: [100, 199] }] } } as unknown as DisplayListQueries;
+  const pagesOf = (from: number, to: number) => unbuiltPagesOf(source, [{ from, to }]);
+  expect([pagesOf(90, 100), pagesOf(90, 101), pagesOf(100, 100), pagesOf(199, 205), pagesOf(200, 205)]).toEqual([[], [1], [1], [1], []]);
+});

@@ -41,7 +41,7 @@ TRACKED = {f'{{{NS["w"]}}}{name}' for name in ('ins', 'del', 'moveFrom', 'moveTo
 
 
 def tasks():
-    return json.loads((ROOT / 'tasks.json').read_text())
+    return json.loads(Path(os.environ.get('FORMAT_EVAL_TASKS') or ROOT / 'tasks.json').read_text())
 
 
 def verified(data, entry, name):
@@ -51,7 +51,7 @@ def verified(data, entry, name):
 
 
 def fixture(task):
-    manifest = json.loads((ROOT / 'fixtures.json').read_text())
+    manifest = json.loads(Path(os.environ.get('FORMAT_EVAL_MANIFEST') or ROOT / 'fixtures.json').read_text())
     name = task['fixture']
     entry = manifest['fixtures'][name]
     local = os.environ.get('FORMAT_EVAL_FIXTURES', '').strip()
@@ -1026,6 +1026,7 @@ def main():
     parser.add_argument('output', type=Path)
     args = parser.parse_args()
     task = next(task for task in tasks() if task['id'] == args.task)
+    fixture(task)
     try:
         print(f'PASS: {task["id"]}: {check(task, args.output)}')
     except Exception as error:

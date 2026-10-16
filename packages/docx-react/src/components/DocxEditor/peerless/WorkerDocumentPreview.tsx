@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
-import { applyFrameDelta, CANVAS_PAGE_GAP_PX, decodeFrameDelta, type DisplayPage, type RetainedFramePage } from '@betteroffice/docx/layout/render';
+import { applyFrameDelta, CANVAS_PAGE_GAP_PX, decodeFrameDelta, type RetainedFramePage } from '@betteroffice/docx/layout/render';
 import type { ResidentEngineWorkerClient, ResidentEngineWorkerFrame } from '@betteroffice/docx/yrs';
 
 /** @internal How long the open waits for the preview to paint before it lays out the document anyway. */
@@ -16,26 +16,24 @@ export interface WorkerPreviewJob {
   client: ResidentEngineWorkerClient;
   frame: ResidentEngineWorkerFrame;
   pages: WorkerPreviewPages;
-  signal: AbortSignal;
+  live(): boolean;
   resolve(): void;
   reject(error: unknown): void;
 }
 
-function showsPageTotal(page: DisplayPage): boolean {
-  return [page.primitives, page.header?.primitives, page.footer?.primitives,
-    ...(page.noteAreas ?? []).flatMap(area => [area.primitives, area.separatorPrimitives])]
-    .some(primitives => primitives?.some(primitive => primitive.field?.category === 'NUMPAGES'));
-}
-
-/** Decodes a preview frame; a page is presented only when it and every page before it are built and none shows the page total. */
+/** Decodes a preview frame; a page is presented only when it and every page before it are built. */
 export function workerPreviewPages(frame: ResidentEngineWorkerFrame): WorkerPreviewPages {
   const { pages } = applyFrameDelta(null, decodeFrameDelta(frame.frame));
   const presented: RetainedFramePage[] = [];
   for (const entry of pages) {
-    if (entry.pageIndex !== presented.length || entry.page.unbuilt || showsPageTotal(entry.page)) break;
+    if (entry.pageIndex !== presented.length || entry.page.unbuilt) break;
     presented.push(entry);
   }
   return { pages, presented };
+}
+
+export function releaseWorkerPreview(client: ResidentEngineWorkerClient): void {
+  void client.attachCanvases([], [], globalThis.devicePixelRatio || 1, 1, { color: '#000', width: 2 }).catch(() => {});
 }
 
 export function WorkerDocumentPreview({ job, zoom, onPresented }: {
@@ -69,7 +67,7 @@ export function WorkerDocumentPreview({ job, zoom, onPresented }: {
       });
       void job.client.attachCanvases(surfaces, surfaces.map(({ pageId }) => pageId), globalThis.devicePixelRatio || 1, 1,
         { color: '#000', width: 2 }).then(() => {
-        if (!current || job.signal.aborted) return;
+        if (!current || !job.live()) return;
         onPresented(job.frame);
         job.resolve();
       }, job.reject);

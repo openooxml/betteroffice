@@ -171,6 +171,11 @@ export interface DocxAnchorRect extends DocxPluginRect {
   pageIndex: number;
 }
 
+/** A page box in overlay-layer pixels; `built` is false while its content is not laid out. */
+export interface DocxPluginPageRect extends DocxAnchorRect {
+  built: boolean;
+}
+
 export type DocxGeometryTarget =
   | { kind: 'proposal'; id: string }
   | { kind: 'revision'; revisionId: string }
@@ -192,11 +197,13 @@ export type DocxAnchorGeometryResult =
       rects: readonly DocxAnchorRect[];
       anchor: DocxAnchorRect;
       pageRect: DocxPluginRect;
+      /** Pages the target reaches that are not built yet; the answer is provisional while set. */
+      unbuiltPages?: readonly number[];
     }
   | {
       ok: false;
       failure: {
-        code: DocxPluginNavigationFailureCode | 'unknown-proposal';
+        code: DocxPluginNavigationFailureCode | 'unknown-proposal' | 'pending' | 'read-failed';
         message: string;
       };
     };
@@ -222,8 +229,29 @@ export interface DocxPluginGeometry {
    * A header or footer target has fragments on every built page that paints it and anchors on
    * the first; one that no laid-out page paints, built or not, is `missing-target` once the
    * layout is complete and `layout-unavailable` before. Refuses stale or unrendered layouts.
+   * In the worker-only editor, a target whose geometry is still being read is `pending`, and one
+   * whose read failed is `read-failed`; overlays render again once either read settles.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
+  /**
+   * {@link getAnchorGeometry} of every target, in order; it never answers `pending` and never
+   * rejects. Only the worker-only editor awaits reads, one batched read for the targets asked in
+   * one tick; the hybrid editor, removed in 0.6.0, answers right away and still answers
+   * `layout-unavailable` while its own reads are in flight. A target whose read failed answers
+   * `read-failed` and is read again only when this method asks for it, so retry with backoff.
+   * Answers come from the layout current when the reads land, so a newer layout gives its own
+   * `layoutId` or `stale-version`. `layout-unavailable` means no presented layout of this document
+   * showed the target then (an edit, zoom or proposal preview not yet painted, or the document
+   * was replaced); ask again on `layout-change`.
+   */
+  readAnchorGeometries(targets: readonly DocxGeometryTarget[]): Promise<DocxAnchorGeometryResult[]>;
+  /** Page `pageIndex` in overlay-layer pixels; null when no rendered layout places it. */
+  getPageRect(pageIndex: number): DocxPluginPageRect | null;
+  /**
+   * Whether page `pageIndex` is laid out, without measuring the DOM; false, like `getPageRect`'s
+   * null, once this layout is no longer shown.
+   */
+  isPageBuilt(pageIndex: number): boolean;
 }
 
 export type DocxPluginNavigationFailureCode =

@@ -2,6 +2,7 @@
 
 mod authority;
 mod error;
+mod move_range;
 mod sheet_json;
 #[cfg_attr(not(test), allow(dead_code))]
 mod snapshot;
