@@ -346,13 +346,13 @@ impl DeckSession {
             )));
         }
         let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
-        let carried = incoming.delete_set().clone();
         let staged = doc_with_client_id(self.client_id);
         hydrate_doc(&staged, &self.encode_state_as_update_v1())?;
-        staged
-            .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        let carried = remote_cleanup::apply_staged_update(
+            &mut staged.transact_mut_with(REMOTE_ORIGIN),
+            incoming,
+        )
+        .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         let (_, snapshot) = deck::validate_doc(&staged)?;
 
         let diff = staged
