@@ -128,6 +128,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
       },
     },
     commandHooksFactory: factory,
+    collaboration: null,
     init: { epoch: 1, readOnly: false, layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,

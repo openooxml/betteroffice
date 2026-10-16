@@ -54,7 +54,7 @@ import { useWorkerNavigation } from './useWorkerNavigation';
 import { createWorkerSearch } from './workerSearch';
 import { FindReplaceDialog } from '../../dialogs/FindReplaceDialog';
 import { WorkerDocumentReader } from './WorkerDocumentReader';
-import { DEFAULT_PAGE_WIDTH } from '../internals/styles';
+import { DEFAULT_PAGE_WIDTH, pluginOverlaysStyles } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
@@ -88,6 +88,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const documentBuffer = replaced ? replacement.input : props.documentBuffer;
   const parsedDocument = documentBuffer ? null : props.document;
   const hasSource = !!(documentBuffer || parsedDocument);
+  const sourceKey = useMemo(() => crypto.randomUUID(), [documentBuffer, parsedDocument]);
+  const openedSource = useRef(sourceKey);
   const loadRequest = useRef<{ input: DocxInput; resolve(): void; reject(error: Error): void } | null>(null);
   const loadBuffer = useCallback((input: DocxInput) => {
     loadRequest.current?.reject(new Error('Document was replaced'));
@@ -171,6 +173,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
     currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph }));
   const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const documentReady = shellState.status === 'ready' && openedSource.current === sourceKey;
   useEffect(() => {
     let current = true;
     if (shellState.status === 'ready' && (props.plugins?.length || props.showHostProposalsInSidebar) && shellState.view?.geometry && shellState.view.editState?.review) {
@@ -221,12 +224,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return pluginHost.subscribe(() => pluginHost.syncCommands());
   }, [pluginHost, props.plugins, props.pluginGrants, props.onPluginError]);
   useEffect(() => {
-    if (shellState.status === 'ready') {
+    if (documentReady) {
+      pluginHost.modeChanged(shellState.mode, effectiveReadOnly);
       if (pluginHost.generation() === null) pluginHost.openWorker(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
       else pluginHost.workerChanged(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
       const review = controller.reviewSnapshot();
       if (review) pluginHost.workerProposalsChanged(review.proposals);
-      pluginHost.modeChanged(shellState.mode, readOnly);
       const layout = pluginGeometry.layout();
       pluginHost.layoutChanged(layout);
       const toolbar = shellState.view?.editState?.toolbar;
@@ -235,9 +238,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (layout) pluginHost.geometryPresented(layout);
       pluginHost.syncCommands();
     } else { pluginHost.close('document-replaced'); setExpandedSidebarItem(null); }
-  }, [shellState, pluginHost, props.mode, readOnly, pluginGeometry, overlayLayer, geometryRevision]);
-  useLayoutEffect(() => { if (activations.length || props.onRenderedDomContextReady || props.showHostProposalsInSidebar) void pluginGeometry.update().catch(() => {}); },
-    [shellState.view, zoom, overlayLayer, pluginGeometry, activations.length, props.onRenderedDomContextReady, props.showHostProposalsInSidebar]);
+  }, [shellState, documentReady, pluginHost, props.mode, effectiveReadOnly, pluginGeometry, overlayLayer, geometryRevision]);
+  const pluginSidebarItemCount = props.pluginSidebarItems?.length ?? 0;
+  useLayoutEffect(() => { if (activations.length || pluginSidebarItemCount || props.onRenderedDomContextReady || props.showHostProposalsInSidebar) void pluginGeometry.update().catch(() => {}); },
+    [shellState.view, zoom, overlayLayer, pluginGeometry, activations.length, pluginSidebarItemCount, props.onRenderedDomContextReady, props.showHostProposalsInSidebar]);
   useLayoutEffect(() => {
     const scrollerElement = scroller.current;
     const refresh = () => pluginHost.geometryChanged();
@@ -723,8 +727,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => {
     active.current = null;
     setPreviewJob(null);
+    openedSource.current = sourceKey;
+    pluginGeometry.clear();
     if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
-  }, [controller, source, documentBuffer, parsedDocument, hasSource]);
+  }, [controller, source, sourceKey, documentBuffer, parsedDocument, hasSource, pluginGeometry]);
   useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
@@ -761,7 +767,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       top: activePage.bounds.y + activeBox.y - 24, zIndex: 10 }}><button type="button" onClick={() => { void parts.close(); }}>Close note</button>{!effectiveReadOnly && <button type="button" onClick={() => { void propertyDialogs.openNotes(); }}>Note properties</button>}</div> : null;
   const ignore = () => {};
   const horizontalRulerProps = {
-    sectionProps: rulers.sectionProps, zoom, unit: 'inch' as const, editable: rulers.editable,
+    sectionProps: rulers.sectionProps, zoom, unit: props.rulerUnit ?? 'inch', editable: rulers.editable,
     paragraphEditable: rulers.paragraphEditable,
     onLeftMarginChange: rulers.handleLeftMarginChange, onRightMarginChange: rulers.handleRightMarginChange,
     indentLeft: rulers.indentLeft, indentRight: rulers.indentRight,
@@ -775,11 +781,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     <DocxEditorToolbar renderLogo={props.renderLogo} documentName={props.documentName}
       onDocumentNameChange={props.onDocumentNameChange} documentNameEditable={props.documentNameEditable}
       renderTitleBarRight={props.renderTitleBarRight} />;
-  const geometry = pluginGeometry.geometry();
+  const geometry = documentReady && pluginGeometry.layout() ? pluginGeometry.geometry() : null;
   const managedItems = managedSidebarItems(pluginHost, activations, anchor => {
     const at = { paraId: anchor.paraId, offset: 0 };
     const target = { kind: 'range' as const, version: anchor.version, range: { story: anchor.story, start: at, end: at, view: 'accepted' as const } };
-    if (anchor.version !== pluginHost.version()) return null;
+    if (!geometry || anchor.version !== pluginHost.version()) return null;
     pluginGeometry.requestTarget(target);
     const placed = geometry?.getAnchorGeometry(target);
     if (!placed?.ok) return null;
@@ -796,16 +802,18 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const commentItems = useCommentSidebarItems({ comments: props.commentsSidebarOpen === false ? [] : comments, trackedChanges: [], callbacks: {} });
   const positionedComments = commentItems.map(item => {
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
-    const rect = nativeId ? review?.commentGeometry[nativeId]?.[0] : undefined;
+    const rect = documentReady && nativeId ? review?.commentGeometry[nativeId]?.[0] : undefined;
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
     return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
   });
   const commentsOpen = props.commentsSidebarOpen === true || (props.commentsSidebarOpen !== false && !!comments.length);
   const hostProposalItems = workerProposalSidebarItems(controller, currentReview, geometry,
-    props.allowHostProposals === true && props.showHostProposalsInSidebar === true && commentsOpen, reportRecoverableError);
+    documentReady && props.allowHostProposals === true && props.showHostProposalsInSidebar === true && commentsOpen, reportRecoverableError);
   const sidebarItems = mergeSidebarItems([...positionedComments, ...hostProposalItems], props.pluginSidebarItems ?? [], managedItems);
   const sidebarOpen = commentsOpen || sidebarItems.some((item) => !item.hidden);
+  const anchorPositions = new Map([...positionedComments, ...hostProposalItems].flatMap(item =>
+    !item.hidden && item.anchorKey && item.fixedY != null ? [[item.anchorKey, item.fixedY] as const] : []));
   const sidebarWidth = sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0;
   const pages = shellState.view?.geometry?.pages;
   const pageWidth = shellState.view?.geometry?.documentWidth ??
@@ -826,7 +834,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         event.preventDefault(); focus();
       }} onEditorContextMenu={contextMenu.open}
       horizontalRulerProps={horizontalRulerProps}
-      verticalRulerProps={{ sectionProps: rulers.sectionProps, zoom, unit: 'inch', editable: rulers.editable,
+      verticalRulerProps={{ sectionProps: rulers.sectionProps, zoom, unit: props.rulerUnit ?? 'inch', editable: rulers.editable,
         onTopMarginChange: rulers.handleTopMarginChange, onBottomMarginChange: rulers.handleBottomMarginChange,
         onDragStart: rulers.startDrag, onDragEnd: () => { void rulers.endDrag(); } }}
       outlineProps={{ headings: navigation.headings.map((heading) => ({ text: heading.text, level: heading.level, pmPos: heading.position })),
@@ -838,7 +846,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       renderDock={(placement, available) => <PluginDock host={pluginHost} placement={placement}
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
       overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}
-        layerRef={setPluginLayer} heldGeometry={geometry} /></>} dialogs={<>{propertyDialogs.element}<FindReplaceDialog isOpen={searchState.isOpen} replaceMode={searchState.replaceMode}
+        layerRef={setPluginLayer} heldGeometry={documentReady ? pluginGeometry.geometry() : null} /></>} dialogs={<>{propertyDialogs.element}<FindReplaceDialog isOpen={searchState.isOpen} replaceMode={searchState.replaceMode}
         onClose={() => search.close()} currentResult={searchState.result}
         onFind={(text, options) => { void search.find(text, options).catch((error) => reportRecoverableError(error)); return null; }}
         onFindNext={() => { search.host.searchNext(); return search.getSnapshot().result?.matches[search.getSnapshot().result!.currentIndex] ?? null; }}
@@ -857,8 +865,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       pagedArea={<div ref={host} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: sidebarWidth }} onMouseDown={(event) => {
         if (event.target === event.currentTarget) { event.preventDefault(); focus(); }
       }}>
-      {sidebarItems.length > 0 && <UnifiedSidebar key={pluginHost.generation()} items={sidebarItems} anchorPositions={new Map()} renderedDomContext={geometry?.dom ?? null}
+      {documentReady && sidebarItems.length > 0 && <UnifiedSidebar key={`${sourceKey}:${JSON.stringify(shellState.view?.identity)}`} items={sidebarItems} anchorPositions={anchorPositions} renderedDomContext={geometry?.dom ?? null}
         pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
+      {documentReady && props.pluginOverlays && <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>{props.pluginOverlays}</div>}
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}
       {previewJob && shellState.preview === previewJob.frame &&
         <WorkerDocumentPreview job={previewJob} zoom={zoom} onPresented={onPreviewPresented} />}
