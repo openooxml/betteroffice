@@ -37,7 +37,7 @@ function scalar(value: XlsxScalar): XlsxCellValue {
 function failure(error: unknown, index?: number): never {
   if (error instanceof DocumentToolError) {
     const item = index ?? (typeof error.details?.stepIndex === 'number' ? error.details.stepIndex : undefined);
-    const fix = error.code === 'overlapping-steps' ? 'Use disjoint ranges or split overlapping writes into separate calls.' : error.code === 'locked-target' ? 'Choose editable cells outside merged followers and array formulas.' : error.code === 'stale-version' ? 'Read the range again and use its current version.' : '';
+    const fix = error.code === 'overlapping-steps' ? 'Use disjoint ranges or split overlapping writes into separate calls.' : error.code === 'locked-target' ? error.message.includes('protected') ? 'Write only unlocked cells, or ask the user to unprotect the sheet.' : 'Choose editable cells outside merged followers and array formulas.' : error.code === 'stale-version' ? 'Read the range again and use its current version.' : '';
     throw new DocumentToolError(error.code, `${error.message} ${item === undefined ? '' : `Fix edits[${item}] and retry the whole batch. `}${fix} No edits were applied.`, { ...error.details, ...(item === undefined ? {} : { item }) });
   }
   throw new DocumentToolError('ENGINE_REFUSAL', `${error instanceof Error ? error.message : String(error)}. ${index === undefined ? '' : `Fix edits[${index}]. `}No edits were applied.`, index === undefined ? undefined : { item: index });

@@ -433,6 +433,24 @@ impl PreservedPackage {
                 })
             })
     }
+
+    /// Whether a protected source sheet still lets users format cells (`formatCells="0"`).
+    /// A declaration that cannot be read allows nothing.
+    #[doc(hidden)]
+    pub fn source_sheet_allows_format_cells(&self, index: usize) -> bool {
+        self.source_sheet_is_protected(index)
+            && self
+                .sheets
+                .get(index)
+                .and_then(|sheet| sheet.template.child("sheetProtection"))
+                .and_then(|protection| attributes_from_fragment(&protection.bytes).ok())
+                .is_some_and(|attributes| {
+                    attributes.iter().any(|attribute| {
+                        attribute.local_name() == "formatCells"
+                            && matches!(attribute.value.as_str(), "0" | "false")
+                    })
+                })
+    }
 }
 
 fn table_move_unsupported(

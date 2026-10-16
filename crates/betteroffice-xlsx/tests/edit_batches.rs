@@ -8,7 +8,7 @@ use betteroffice_xlsx::{
     UpdateOrigin, UpdateSubscription, Workbook, WorkbookModel,
 };
 use serde_json::{Value, json};
-use xlsx_model::Xf;
+use xlsx_model::{ColStyle, Protection, Xf};
 
 fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -651,6 +651,286 @@ fn merged_array_and_protected_cells_refuse_writes() {
                 .collect::<Vec<_>>(),
             [("Data", true), ("Totals", true), ("Locked", false)]
         );
+    }
+}
+
+/// Instructions is a protected form whose J13, K13, merge anchor B15 (of B15:I15), column M and
+/// row 20 are unlocked while row 21 is locked; Rows lets users insert and delete rows and leaves
+/// C6:C9 unlocked.
+fn protected_fixture(protection: &str) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    model.styles.cell_xfs.push(Xf {
+        protection: Some(Protection {
+            locked: false,
+            hidden: false,
+        }),
+        ..Xf::default()
+    });
+    let mut form = Sheet::new("Instructions");
+    put(&mut form, "B13", text("Name"), None, None);
+    for address in ["J13", "K13", "B15"] {
+        put(&mut form, address, CellValue::Empty, None, Some(1));
+    }
+    form.merges.push(CellRange::parse_a1("B15:I15").unwrap());
+    form.col_styles.push(ColStyle {
+        first: 12,
+        last: 12,
+        xf: 1,
+    });
+    form.row_styles.insert(19, 1);
+    form.row_styles.insert(20, 0);
+    let mut rows = Sheet::new("Rows");
+    put(&mut rows, "C5", text("Amount"), None, None);
+    for address in ["C6", "C7", "C8", "C9"] {
+        put(&mut rows, address, CellValue::Empty, None, Some(1));
+    }
+    model.sheets.extend([form, rows]);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    for (part, attributes) in [
+        ("xl/worksheets/sheet1.xml", protection),
+        (
+            "xl/worksheets/sheet2.xml",
+            r#"sheet="1" insertRows="0" deleteRows="0""#,
+        ),
+    ] {
+        let sheet = parts.iter_mut().find(|(name, _)| name == part).unwrap();
+        let xml = String::from_utf8(sheet.1.clone()).unwrap().replace(
+            "</sheetData>",
+            &format!("</sheetData><sheetProtection {attributes}/>"),
+        );
+        assert!(xml.contains("sheetProtection"));
+        sheet.1 = xml.into_bytes();
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn part(bytes: &[u8], name: &str) -> Vec<u8> {
+    ooxml_opc::unzip_parts(bytes)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == name)
+        .unwrap()
+        .1
+}
+
+#[test]
+fn protected_sheets_take_content_in_unlocked_cells_only() {
+    let protection = r#"<sheetProtection sheet="1" objects="1" scenarios="1"/>"#;
+    let source = protected_fixture(r#"sheet="1" objects="1" scenarios="1""#);
+    assert!(
+        String::from_utf8(part(&source, "xl/worksheets/sheet1.xml"))
+            .unwrap()
+            .contains(protection)
+    );
+    for mut workbook in [
+        Workbook::open(&source).unwrap(),
+        Workbook::open_collaborative(&source, 12).unwrap(),
+    ] {
+        applied(
+            &mut workbook,
+            json!([
+                inputs("sheet:0", "J13:K13", json!([["Ada", "42"]])),
+                inputs("sheet:0", "B15", json!([["notes"]])),
+                { "op": "setCellValues", "target": target("sheet:0", "M40"), "values": [[{ "kind": "number", "value": 7 }]] },
+                { "op": "setFormulas", "target": target("sheet:0", "A20"), "formulas": [["K13*2"]] },
+                inputs("sheet:1", "C6:C9", json!([["1"], ["2"], ["3"], [""]])),
+            ]),
+        );
+        assert_eq!(input(&workbook, 0, "J13"), "Ada");
+        assert_eq!(value(&workbook, 0, "B15"), text("notes"));
+        assert_eq!(value(&workbook, 0, "M40"), number(7.0));
+        assert_eq!(value(&workbook, 0, "A20"), number(84.0));
+        assert_eq!(value(&workbook, 1, "C8"), number(3.0));
+        applied(
+            &mut workbook,
+            json!([
+                { "op": "setFormulas", "target": target("sheet:0", "M40"), "formulas": [["K13+1"]] },
+                { "op": "setCellValues", "target": target("sheet:0", "A20"), "values": [[{ "kind": "number", "value": 5 }]] },
+            ]),
+        );
+        assert_eq!(value(&workbook, 0, "M40"), number(43.0));
+        assert_eq!(value(&workbook, 0, "A20"), number(5.0));
+
+        let refusal = refused(
+            &mut workbook,
+            json!([inputs("sheet:0", "B13", json!([["x"]]))]),
+        );
+        assert_eq!(refusal.failure.code, EditFailureCode::LockedTarget);
+        assert_eq!(
+            refusal.failure.message,
+            r#"B13 is locked on protected sheet "Instructions""#
+        );
+        for (sheet, range, step, locked) in [
+            (
+                "sheet:0",
+                "J12:K13",
+                json!({ "op": "setCellInputs", "inputs": [["", ""], ["", ""]] }),
+                "J12",
+            ),
+            (
+                "sheet:0",
+                "M21",
+                json!({ "op": "setFormulas", "formulas": [["1"]] }),
+                "M21",
+            ),
+            (
+                "sheet:0",
+                "C15",
+                json!({ "op": "setCellValues", "values": [[{ "kind": "empty" }]] }),
+                "C15",
+            ),
+            (
+                "sheet:1",
+                "C9:C10",
+                json!({ "op": "setCellInputs", "inputs": [["4"], ["5"]] }),
+                "C10",
+            ),
+        ] {
+            let mut step = step;
+            step["target"] = target(sheet, range);
+            let refusal = refused(&mut workbook, json!([step]));
+            assert_eq!(
+                refusal.failure.code,
+                EditFailureCode::LockedTarget,
+                "{range}"
+            );
+            assert!(
+                refusal
+                    .failure
+                    .message
+                    .starts_with(&format!("{locked} is locked on protected sheet")),
+                "{}",
+                refusal.failure.message
+            );
+        }
+        let catalog = workbook
+            .read_cells(&ReadRequest::default())
+            .unwrap()
+            .unwrap();
+        assert!(catalog.sheets.iter().all(|sheet| !sheet.editable));
+
+        let saved = workbook.save().unwrap();
+        assert!(
+            String::from_utf8(part(&saved, "xl/worksheets/sheet1.xml"))
+                .unwrap()
+                .contains(protection)
+        );
+        assert_eq!(
+            part(&saved, "xl/styles.xml"),
+            part(&source, "xl/styles.xml")
+        );
+        let mut reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(value(&reopened, 0, "K13"), number(42.0));
+        for address in ["M40", "A20"] {
+            let sheet = reopened.sheet(SheetId(0)).unwrap();
+            assert_eq!(
+                sheet.cell(cell(address)).unwrap().style,
+                Some(1),
+                "{address}"
+            );
+        }
+        applied(
+            &mut reopened,
+            json!([
+                inputs("sheet:0", "K13", json!([["43"]])),
+                { "op": "setCellValues", "target": target("sheet:0", "M40"), "values": [[{ "kind": "number", "value": 8 }]] },
+                { "op": "setFormulas", "target": target("sheet:0", "A20"), "formulas": [["M40*2"]] },
+            ]),
+        );
+        let refusal = refused(
+            &mut reopened,
+            json!([inputs("sheet:0", "B13", json!([["x"]]))]),
+        );
+        assert_eq!(refusal.failure.code, EditFailureCode::LockedTarget);
+    }
+}
+
+#[test]
+fn values_and_formulas_take_the_row_or_column_style_of_a_missing_cell() {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    model.styles.cell_xfs.push(Xf {
+        num_fmt_id: Some(2),
+        ..Xf::default()
+    });
+    let mut sheet = Sheet::new("Plain");
+    sheet.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: 1,
+    });
+    sheet.row_styles.insert(9, 1);
+    model.sheets.push(sheet);
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    for mut workbook in [
+        Workbook::open(&source).unwrap(),
+        Workbook::open_collaborative(&source, 14).unwrap(),
+    ] {
+        applied(
+            &mut workbook,
+            json!([
+                { "op": "setCellValues", "target": target("sheet:0", "B5:C5"), "values": [[{ "kind": "number", "value": 1.5 }, { "kind": "number", "value": 4 }]] },
+                { "op": "setFormulas", "target": target("sheet:0", "A10"), "formulas": [["B5*2"]] },
+            ]),
+        );
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        for copy in [&workbook, &reopened] {
+            let sheet = copy.sheet(SheetId(0)).unwrap();
+            assert_eq!(sheet.cell(cell("B5")).unwrap().style, Some(1));
+            assert_eq!(sheet.cell(cell("A10")).unwrap().style, Some(1));
+            assert_eq!(sheet.cell(cell("C5")).unwrap().style, None);
+            assert_eq!(display(copy, "sheet:0", "B5"), "1.50");
+            assert_eq!(display(copy, "sheet:0", "A10"), "3.00");
+        }
+    }
+}
+
+#[test]
+fn protected_sheets_take_formats_only_when_they_allow_formatting_cells() {
+    let format = json!([
+        { "op": "patchStyle", "target": target("sheet:0", "B13:K13"), "patch": { "bold": true } },
+        { "op": "setNumberFormat", "target": target("sheet:0", "J13"), "format": "percent" },
+    ]);
+    let mut workbook = Workbook::open(&protected_fixture(r#"sheet="1""#)).unwrap();
+    for step in format.as_array().unwrap() {
+        let refusal = refused(&mut workbook, json!([step]));
+        assert_eq!(refusal.failure.code, EditFailureCode::LockedTarget);
+        assert_eq!(
+            refusal.failure.message,
+            r#"sheet "Instructions" is protected"#
+        );
+    }
+
+    let source = protected_fixture(r#"sheet="1" formatCells="0""#);
+    for mut workbook in [
+        Workbook::open(&source).unwrap(),
+        Workbook::open_collaborative(&source, 13).unwrap(),
+    ] {
+        applied(&mut workbook, format.clone());
+        let range = CellRange::parse_a1("B13").unwrap();
+        assert_eq!(
+            workbook
+                .selection_formatting(SheetId(0), range)
+                .unwrap()
+                .bold,
+            Some(true)
+        );
+        applied(
+            &mut workbook,
+            json!([inputs("sheet:0", "J13", json!([["50%"]]))]),
+        );
+        let refusal = refused(
+            &mut workbook,
+            json!([inputs("sheet:0", "B13", json!([["x"]]))]),
+        );
+        assert_eq!(refusal.failure.code, EditFailureCode::LockedTarget);
+        let refusal = refused(
+            &mut workbook,
+            json!([{ "op": "patchStyle", "target": target("sheet:1", "C6"), "patch": { "bold": true } }]),
+        );
+        assert_eq!(refusal.failure.code, EditFailureCode::LockedTarget);
+        assert_eq!(refusal.failure.message, r#"sheet "Rows" is protected"#);
     }
 }
 
