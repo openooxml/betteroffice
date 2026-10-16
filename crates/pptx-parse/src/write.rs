@@ -2961,7 +2961,8 @@ fn is_flattened_colour_snapshot(
         return false;
     }
     resolve_color_value_to_hex_with_theme(Some(authored), theme)
-        .is_some_and(|hex| requested.rgb.as_deref() == Some(&hex[1..]))
+        .zip(requested.rgb.as_deref())
+        .is_some_and(|(hex, rgb)| rgb.eq_ignore_ascii_case(&hex[1..]))
 }
 
 /// Updates modeled styling while preserving unmodeled XML.
@@ -3774,6 +3775,20 @@ mod tests {
             !serialized.contains("solidFill"),
             "it must not be rewritten as a solid fill"
         );
+    }
+
+    #[test]
+    fn a_lowercase_flattened_colour_keeps_the_gradient() {
+        let (mut element, prefixes, mut properties) = run_properties(
+            br#"<a:rPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" lang="en"><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst></a:gradFill></a:rPr>"#,
+        );
+        properties.color = Some(ColorValue {
+            rgb: Some("ff0000".to_owned()),
+            ..ColorValue::default()
+        });
+        let gradient = element.child("gradFill").unwrap().clone();
+        apply_run_properties(&mut element, &properties, None, &prefixes);
+        assert_eq!(element.child("gradFill"), Some(&gradient));
     }
 
     #[test]
