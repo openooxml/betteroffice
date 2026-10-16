@@ -315,7 +315,8 @@ export function createPeerlessShellController(initial: Options) {
     const outcome = await result.ticket.ack;
     if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
     if (outcome.status === 'applied' || outcome.status === 'noop') return { ok: true, status: outcome.status === 'applied' ? 'executed' : 'noop' };
-    const code = outcome.reason === 'read-only' ? 'read-only' : outcome.reason === 'unknown-revision' ? 'revision-not-found' : 'command-failed';
+    const code = outcome.reason === 'read-only' ? 'read-only' : outcome.reason === 'revision-required' ? 'revision-required'
+      : outcome.reason === 'unknown-revision' ? 'revision-not-found' : 'command-failed';
     return { ok: false, failure: { code, message: outcome.reason ?? 'Worker command failed.' } };
   };
   const submit = (intent: PeerlessInputIntent): Promise<DocxCommandResult> => {
@@ -362,7 +363,7 @@ export function createPeerlessShellController(initial: Options) {
       }
       return operation();
     },
-    async perform(id, args, env) {
+    async perform(id, args) {
       if (id === 'editingMode') {
         const next = (args as { mode: NonNullable<DocxEditorProps['mode']> }).mode;
         if (options.mode) { emit(options.onModeChange, next); return { ok: true, status: 'requested' }; }
@@ -371,8 +372,8 @@ export function createPeerlessShellController(initial: Options) {
       }
       if (id === 'undo' || id === 'redo') return submit({ kind: id, payload: {} });
       if (id === 'reviewAccept' || id === 'reviewReject') {
-        const revisionId = (args as DocxCommandArgs['reviewAccept'])?.revisionId ?? env.currentRevisionId;
-        return revisionId ? submit({ kind: id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', payload: { revisionId } }) : { ok: true, status: 'noop' };
+        const revisionId = (args as DocxCommandArgs['reviewAccept'])?.revisionId;
+        return submit({ kind: id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', payload: revisionId ? { revisionId } : {} });
       }
       if (id === 'reviewNext' || id === 'reviewPrevious') {
         const target = await query({ kind: 'adjacentRevision', selection: ready().viewStore.getSnapshot().workerSelection ?? null, direction: id === 'reviewNext' ? 'next' : 'previous' });

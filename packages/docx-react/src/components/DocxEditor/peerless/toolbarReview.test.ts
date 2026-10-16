@@ -4,6 +4,7 @@ import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
 import type { CommandTicket, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import { toolbarFixture } from './toolbarCommands.testing';
 import { admitIntent, createInputAdmission } from './inputAdmission';
+import type { PeerlessInputIntent } from './inputEvents';
 import { createPeerlessCommandBinding } from './commandBinding';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 
@@ -49,7 +50,7 @@ test('worker review commands target the tracked change the worker reports at the
   expect(controller.commands.store.getState('reviewReject', { revisionId: '12' }))
     .toMatchObject({ enabled: false, disabledReason: { code: 'revision-not-found' } });
   expect(await controller.commands.store.execute('reviewAccept', null)).toMatchObject({ ok: true });
-  expect(submit).toHaveBeenLastCalledWith({ kind: 'acceptRevision', payload: { revisionId: '7' } }, { fence: true });
+  expect(submit).toHaveBeenLastCalledWith({ kind: 'acceptRevision', payload: {} }, { fence: true });
   expect(await controller.commands.store.execute('reviewReject', { revisionId: '9' })).toMatchObject({ ok: true });
   expect(submit).toHaveBeenLastCalledWith({ kind: 'rejectRevision', payload: { revisionId: '9' } }, { fence: true });
   const view = viewStore.getSnapshot();
@@ -120,6 +121,7 @@ test('a queued review command settles as replaced instead of reaching the next d
 function workerAdmission({ binding, viewStore }: ReturnType<typeof reviewFixture>) {
   const applied: string[] = [];
   const decided = new Set<string>();
+  const revisionAt: Record<string, string | undefined> = { p1: '7', p2: '9' };
   const tickets: CommandTicket[] = [];
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -134,7 +136,8 @@ function workerAdmission({ binding, viewStore }: ReturnType<typeof reviewFixture
         if (revisionId !== undefined && decided.has(revisionId)) return { seq, status: 'refused', reason: 'unknown-revision' };
         if (revisionId !== undefined) decided.add(revisionId);
         applied.push(kind === 'insertText' ? (payload as { text: string }).text : revisionId ? `${kind} ${revisionId}` : kind);
-        const editState = { ...session.state.editState!, documentVersion: `v${seq}` };
+        const editState = { ...session.state.editState!, documentVersion: `v${seq}`,
+          ...(kind === 'select' ? { currentRevisionId: revisionAt[(payload as { selection: { anchor: { paraId: string } } }).selection.anchor.paraId] } : {}) };
         session.state = { ...session.state, throughSeq: seq, editState };
         viewStore.acceptWorkerState(viewStore.getSnapshot().identity, { ...session.state, selection: viewStore.getSnapshot().workerSelection });
         return { seq, status: 'applied' };
@@ -149,8 +152,10 @@ function workerAdmission({ binding, viewStore }: ReturnType<typeof reviewFixture
   binding.admission = createInputAdmission({ session: binding.session, viewStore,
     echoPainter: { disable() {}, preview: () => undefined } as unknown as PeerlessEchoPainter });
   binding.commands = createPeerlessCommandBinding(binding.admission);
-  const type = (text: string) => { const admitted = admitIntent(binding.admission, { kind: 'insertText', payload: { text } }); if (admitted.status !== 'submitted') throw new Error('not admitted'); return admitted.ticket.ack; };
-  return { applied, release, type };
+  const admit = (intent: PeerlessInputIntent) => { const admitted = admitIntent(binding.admission, intent); if (admitted.status !== 'submitted') throw new Error('not admitted'); return admitted.ticket.ack; };
+  const type = (text: string) => admit({ kind: 'insertText', payload: { text } });
+  const select = (paraId: string) => admit({ kind: 'select', payload: { selection: { anchor: { story: 'body', paraId, offset: 1 }, focus: { story: 'body', paraId, offset: 1 } } } });
+  return { applied, release, type, select };
 }
 
 test('review commands take their admission place between keystrokes and expect the version their predecessor left', async () => {
@@ -186,6 +191,24 @@ test('a review decision the engine refuses leaves later typing and decisions to 
   expect((await typed).status).toBe('applied');
   expect(await rejected).toEqual({ ok: true, status: 'executed' });
   expect(applied).toEqual(['acceptRevision 7', 'x', 'rejectRevision 9']);
+  binding.admission.dispose();
+});
+
+test('an implicit review decision targets the change at the selection its admitted predecessor leaves', async () => {
+  const fixture = reviewFixture();
+  await fixture.feed();
+  const { controller, binding } = fixture;
+  const { applied, release, type, select } = workerAdmission(fixture);
+  const moves = [select('p2')];
+  const rejected = controller.commands.store.execute('reviewReject', null);
+  moves.push(select('p9'));
+  const accepted = controller.commands.store.execute('reviewAccept', null);
+  const typed = type('x');
+  release();
+  expect(await rejected).toEqual({ ok: true, status: 'executed' });
+  expect(await accepted).toMatchObject({ ok: false, failure: { code: 'revision-required' } });
+  expect((await Promise.all([...moves, typed])).map(outcome => outcome.status)).toEqual(['applied', 'applied', 'applied']);
+  expect(applied).toEqual(['select', 'rejectRevision 9', 'select', 'x']);
   binding.admission.dispose();
 });
 

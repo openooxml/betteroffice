@@ -126,8 +126,11 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   };
   const readOnly = () => requestedReadOnly ?? viewStore.getSnapshot().editState?.readOnly ?? session.state.editState?.readOnly ?? false;
   const workerSelection = () => latestSelection(session, viewStore);
-  const documentVersion = () => (session.state.throughSeq >= viewStore.getSnapshot().throughSeq ? session.state.editState : undefined)?.documentVersion ??
-    viewStore.getSnapshot().editState?.documentVersion ?? '';
+  const latestEditState = () => (session.state.throughSeq >= viewStore.getSnapshot().throughSeq ? session.state.editState : undefined) ??
+    viewStore.getSnapshot().editState;
+  const documentVersion = () => latestEditState()?.documentVersion ?? viewStore.getSnapshot().editState?.documentVersion ?? '';
+  const refusal = (reason: string): CommandTicket => ({ id: --nextTicket, seq: undefined,
+    ack: Promise.resolve({ status: 'refused', reason }), presented: Promise.resolve('dropped') });
   const dependencyOf = (ticket: CommandTicket | undefined) => ticket && reviewDependencies.has(ticket) ? reviewDependencies.get(ticket) : ticket;
   const track = (ticket: CommandTicket, review = false) => {
     const prefix = tail ? prefixes.get(tail) ?? Promise.resolve(true) : Promise.resolve(true);
@@ -271,9 +274,15 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
           verticalGoal = hasImplicitVerticalGoal(intent) ? goalX : intent.payload.goalX;
           goalX = verticalGoal;
         } else verticalGoal = undefined;
+        const revisionId = isRevision(intent) ? intent.payload.revisionId ?? latestEditState()?.currentRevisionId : undefined;
+        if (isRevision(intent) && !revisionId) {
+          const refused = refusal('revision-required');
+          reviewDependencies.set(refused, dependencyOf(predecessor));
+          return refused;
+        }
         const payload = intent.kind === 'formatRange'
           ? { ...intent.payload, selection: requireSelection(selection) }
-          : isRevision(intent) ? { ...intent.payload, expectVersion: documentVersion() }
+          : revisionId ? { revisionId, expectVersion: documentVersion() }
           : vertical && intent.kind === 'navigate' && goalX !== undefined
             ? { ...intent.payload, goalX }
             : target?.kind === 'worker-selection' && target.snapshot.workerSelection && isText(intent)
