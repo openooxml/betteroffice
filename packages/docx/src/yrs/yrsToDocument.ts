@@ -2613,16 +2613,30 @@ function isBlockBookmark(block: BlockContent): boolean {
   return isRawXml(block) && /^<w:bookmark(?:Start|End)(?=[\s/>])/.test(block.xml);
 }
 
-function restoreBlockBookmarks(
-  projected: BlockContent[],
-  base: readonly BlockContent[],
-  storyId: string
-): void {
-  if (!base.some(isBlockBookmark)) return;
+type BookmarkKind = 'start' | 'end';
+
+function rawBlockBookmark(xml: string): { kind: BookmarkKind; id?: string } | undefined {
+  const kind = /^<w:bookmark(Start|End)(?=[\s/>])/.exec(xml)?.[1];
+  if (!kind) return undefined;
+  let value: string | undefined;
+  for (const attribute of xml.matchAll(/([^\s=<>/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    if (attribute[1] !== 'w:id') continue;
+    value = (attribute[2] ?? attribute[3]!).replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, (entity, hex, decimal) => {
+      const code = Number.parseInt(hex ?? decimal, hex === undefined ? 10 : 16);
+      return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+    });
+    break;
+  }
+  const id = value === undefined ? undefined
+    : Number.isSafeInteger(Number(value)) ? String(Number(value)) : value;
+  return { kind: kind === 'Start' ? 'start' : 'end', id };
+}
+
+function storyBlockKeys(blocks: readonly BlockContent[], storyId: string): Array<string | undefined> {
   let paragraph = 0;
   let table = 0;
   let sdt = 0;
-  const keys = base.map((block): string | undefined => {
+  return blocks.map((block) => {
     const memo = projectedBlocks.get(block);
     if (block.type === 'paragraph') {
       const key = memo?.sessionKey ?? ((!block.repeatedParaId && block.paraId) || `${storyId}:p${paragraph}`);
@@ -2641,37 +2655,122 @@ function restoreBlockBookmarks(
     }
     return undefined;
   });
-  const live = new Map<string, BlockContent>();
-  for (const block of projected) {
-    const memo = projectedBlocks.get(block);
-    const key = block.type === 'paragraph' ? `P${memo?.sessionKey}`
-      : block.type === 'table' ? `T${memo?.tableSourcePrefix}` : memo?.key;
-    if (key !== undefined) live.set(key, block);
+}
+
+function projectedBookmarkPositions(blocks: readonly BlockContent[]): Map<string, Partial<Record<BookmarkKind, number>>> {
+  const positions = new Map<string, Partial<Record<BookmarkKind, number>>>();
+  const visited = new WeakSet<object>();
+  const visit = (value: unknown, position: number): void => {
+    if (value === null || typeof value !== 'object' || visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child, position);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const marker = record.type === 'rawXml' && typeof record.xml === 'string'
+      ? rawBlockBookmark(record.xml)
+      : record.type === 'bookmarkStart' || record.type === 'bookmarkEnd'
+        ? { kind: record.type === 'bookmarkStart' ? 'start' as const : 'end' as const, id: String(record.id) }
+        : undefined;
+    if (marker?.id !== undefined) {
+      let pair = positions.get(marker.id);
+      if (!pair) positions.set(marker.id, pair = {});
+      pair[marker.kind] ??= position;
+      return;
+    }
+    for (const child of Object.values(record)) visit(child, position);
+  };
+  blocks.forEach((block, index) => visit(block, index + 0.5));
+  return positions;
+}
+
+interface BlockBookmarkPlacement {
+  block: BlockContent;
+  index: number;
+  position: number;
+  omit?: boolean;
+  following?: BlockContent;
+}
+
+function restoreBlockBookmarks(
+  projected: BlockContent[],
+  base: readonly BlockContent[],
+  storyId: string
+): BlockContent[] {
+  if (!base.some(isBlockBookmark)) return projected;
+  const keys = storyBlockKeys(base, storyId);
+  const live = new Map<string, number>();
+  storyBlockKeys(projected, storyId).forEach((key, index) => {
+    if (key !== undefined) live.set(key, index);
+  });
+  const nextPositions = new Array<number | undefined>(base.length);
+  let next: number | undefined;
+  for (let index = base.length - 1; index >= 0; index -= 1) {
+    nextPositions[index] = next;
+    const key = keys[index];
+    const position = key === undefined ? undefined : live.get(key);
+    if (position !== undefined) next = position;
   }
-  const after = new Map<BlockContent, number>();
+  const present = projectedBookmarkPositions(projected);
+  const pairs = new Map<string, Partial<Record<BookmarkKind, BlockBookmarkPlacement>>>();
+  const boundaries: BlockBookmarkPlacement[] = [];
+  let previous: number | undefined;
   for (let index = 0; index < base.length; index += 1) {
     const block = base[index]!;
-    if (!isBlockBookmark(block)) continue;
-    const next = keys.slice(index + 1).find((key) => key !== undefined);
-    const previous = keys.slice(0, index).reverse().find((key) => key !== undefined);
-    const key = next ?? previous;
-    const anchor = key === undefined ? undefined : live.get(key);
-    if (key !== undefined && anchor === undefined) {
-      throw new Error('Cannot save body bookmark boundaries after their neighboring block was removed');
+    const marker = isRawXml(block) ? rawBlockBookmark(block.xml) : undefined;
+    if (marker) {
+      const id = marker.id ?? `\0${index}`;
+      let pair = pairs.get(id);
+      if (!pair) pairs.set(id, pair = {});
+      if (!pair[marker.kind]) {
+        const boundary = {
+          block, index,
+          position: nextPositions[index] ?? (previous === undefined ? 0 : previous + 1),
+          omit: present.get(id)?.[marker.kind] !== undefined,
+        };
+        pair[marker.kind] = boundary;
+        boundaries.push(boundary);
+      }
     }
-    const position = anchor === undefined ? projected.length
-      : projected.indexOf(anchor) + (next === undefined ? 1 + (after.get(anchor) ?? 0) : 0);
-    projected.splice(position, 0, block);
-    if (anchor !== undefined && next === undefined) after.set(anchor, (after.get(anchor) ?? 0) + 1);
+    const key = keys[index];
+    const position = key === undefined ? undefined : live.get(key);
+    if (position !== undefined) previous = position;
   }
-  const expected = base.filter(isBlockBookmark);
-  if (projected.filter(isBlockBookmark).some((block, index) => block !== expected[index])) {
-    throw new Error('Cannot save reordered body bookmark boundaries');
+  for (const [id, pair] of pairs) {
+    const { start, end } = pair;
+    const existing = present.get(id);
+    if (start && !start.omit && existing?.end !== undefined) {
+      start.position = Math.min(start.position, Math.floor(existing.end));
+    }
+    if (end && !end.omit && existing?.start !== undefined) {
+      end.position = Math.max(end.position, Math.ceil(existing.start));
+    }
+    if (start && end && !start.omit && !end.omit && (
+      end.position < start.position || (end.position === start.position && end.index < start.index)
+    )) {
+      start.following = end.block;
+      end.omit = true;
+    }
   }
+  const insertions = new Map<number, BlockContent[]>();
+  for (const boundary of boundaries) {
+    if (boundary.omit) continue;
+    let bucket = insertions.get(boundary.position);
+    if (!bucket) insertions.set(boundary.position, bucket = []);
+    bucket.push(boundary.block);
+    if (boundary.following) bucket.push(boundary.following);
+  }
+  const restored: BlockContent[] = [];
+  for (let index = 0; index <= projected.length; index += 1) {
+    for (const block of insertions.get(index) ?? []) restored.push(block);
+    if (index < projected.length) restored.push(projected[index]!);
+  }
+  return restored;
 }
 
 function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[], storyId: string): BlockContent[] {
-  restoreBlockBookmarks(projected, base, storyId);
+  projected = restoreBlockBookmarks(projected, base, storyId);
   let offset = 0;
   for (let index = 0; index < base.length; index += 1) {
     const block = base[index]!;

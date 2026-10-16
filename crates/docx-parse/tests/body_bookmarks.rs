@@ -13,7 +13,7 @@ const PARAGRAPH: &str = "<w:p><w:r><w:t>Unrelated</w:t></w:r></w:p>";
 fn package(body: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&[
         ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
-        ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:bookmark"><w:body>{body}<w:sectPr/></w:body></w:document>"#).into_bytes()),
+        ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:bookmark"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#).into_bytes()),
     ]).unwrap()
 }
 
@@ -30,19 +30,36 @@ fn rewrite(body: &str, edit: bool) -> (Vec<String>, String) {
     if edit {
         content[0]["content"][0]["content"][0]["text"] = json!("Edited");
     }
+    (
+        types,
+        save_content(
+            &source,
+            content,
+            serde_json::to_value(&parsed.document.package.document.final_section_properties)
+                .unwrap(),
+        ),
+    )
+}
+
+fn save_content(
+    source: &[u8],
+    content: serde_json::Value,
+    final_section_properties: serde_json::Value,
+) -> String {
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
-        "document": {"content": content, "finalSectionProperties": parsed.document.package.document.final_section_properties},
+        "document": {"content": content, "finalSectionProperties": final_section_properties},
         "options": {"updateModifiedDate": false}
-    })).unwrap();
-    let saved = write_docx_s13(request, &source).unwrap();
+    }))
+    .unwrap();
+    let saved = write_docx_s13(request, source).unwrap();
     let xml = ooxml_opc::unzip_parts(&saved)
         .unwrap()
         .into_iter()
         .find(|(name, _)| name == "word/document.xml")
         .unwrap()
         .1;
-    (types, String::from_utf8(xml).unwrap())
+    String::from_utf8(xml).unwrap()
 }
 
 fn assert_order(xml: &str, fragments: &[&str]) {
@@ -104,6 +121,58 @@ fn body_bookmarks_survive_unrelated_edit_and_whole_part_rewrite() {
             SECTION_START,
             ">Section<",
             SECTION_END,
+        ],
+    );
+}
+
+#[test]
+fn body_bookmarks_end_before_a_table_on_whole_part_rewrite() {
+    let (_, xml) = rewrite(
+        &format!("{PARAGRAPH}{TABLE_START}{SECTION}{TABLE_END}{TABLE}"),
+        true,
+    );
+    assert_order(
+        &xml,
+        &[
+            "Edited",
+            TABLE_START,
+            ">Section<",
+            TABLE_END,
+            "<w:tbl>",
+            "</w:tbl>",
+        ],
+    );
+    assert!(xml.rfind("<w:sectPr").unwrap() > xml.find(TABLE_END).unwrap());
+}
+
+#[test]
+fn body_bookmarks_moved_into_a_paragraph_are_not_written_twice() {
+    let source = package(&format!("{PARAGRAPH}{TABLE_START}{TABLE}{TABLE_END}"));
+    let parsed = parse_docx_s9_wire(&source, S9ParseOptions::default()).unwrap();
+    let mut content = serde_json::to_value(&parsed.document.package.document.content).unwrap();
+    content
+        .as_array_mut()
+        .unwrap()
+        .retain(|block| block["type"] != "rawXml");
+    content[0]["content"] = json!([
+        {"type": "bookmarkStart", "id": 7, "name": "Table&Range"},
+        {"type": "run", "content": [{"type": "text", "text": "Edited"}]},
+        {"type": "bookmarkEnd", "id": 7}
+    ]);
+    let xml = save_content(
+        &source,
+        content,
+        serde_json::to_value(&parsed.document.package.document.final_section_properties).unwrap(),
+    );
+    assert_eq!(xml.matches("<w:bookmarkStart").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:bookmarkEnd").count(), 1, "{xml}");
+    assert_order(
+        &xml,
+        &[
+            r#"<w:bookmarkStart w:id="7" w:name="Table&amp;Range"/>"#,
+            "Edited",
+            r#"<w:bookmarkEnd w:id="7"/>"#,
+            "<w:tbl>",
         ],
     );
 }
