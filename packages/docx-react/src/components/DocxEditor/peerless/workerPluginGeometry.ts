@@ -31,9 +31,10 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     return answers;
   };
   const valid = (layout: DocxPluginLayout, frame: PeerlessFrameGeometry) => {
-    const view = controller.getSnapshot().view;
+    const snapshot = controller.getSnapshot();
+    const view = snapshot.view;
     const review = controller.describedReview();
-    return current?.layout === layout && view?.geometry === frame && view.presentedThroughSeq >= view.throughSeq && view.version === current.version && controller.ref.getZoom() === layout.zoom &&
+    return snapshot.status === 'ready' && !!view && sameView(view.identity, frame.identity) && current?.layout === layout && view?.geometry === frame && view.presentedThroughSeq >= view.throughSeq && view.version === current.version && controller.ref.getZoom() === layout.zoom &&
       review?.version === layout.version && review.previewVersion === layout.previewVersion;
   };
   const resolveBatch = (entry: Answers) => {
@@ -70,13 +71,21 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     entry.requested.set(key, entry.batch.read);
     return entry.batch.read;
   };
+  const clear = () => {
+    generation++;
+    const hadGeometry = !!current || !!answers;
+    current?.queries.dispose(); current = null; answers = null; displaySelection = null;
+    if (hadGeometry) publish();
+  };
   const update = async () => {
+    const snapshot = controller.getSnapshot();
+    const view = snapshot.view;
+    if (snapshot.status !== 'ready' || !view || (current && !sameView(current.frame.identity, view.identity))) clear();
     const request = ++generation;
-    const view = controller.getSnapshot().view;
     const frame = view?.geometry;
     const container = pages();
     const overlay = layer();
-    if (!view || !frame || !container || !overlay || view.presentedThroughSeq < view.throughSeq) return;
+    if (snapshot.status !== 'ready' || !view || !frame || !container || !overlay || !sameView(view.identity, frame.identity) || view.presentedThroughSeq < view.throughSeq) return;
     const zoom = controller.ref.getZoom();
     if (current?.frame === frame && current.layout.zoom === zoom) return;
     const native = await loadRustDisplayListQueryEngine();
@@ -233,8 +242,12 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   };
   return {
     update,
+    clear,
     displaySelection: () => displaySelection,
-    geometry: () => current?.geometry ?? null,
+    geometry: () => {
+      const snapshot = controller.getSnapshot();
+      return current && snapshot.status === 'ready' && snapshot.view && sameView(current.frame.identity, snapshot.view.identity) ? current.geometry : null;
+    },
     layout: () => current && valid(current.layout, current.frame) ? current.layout : null,
     requestTarget,
     navigation,
