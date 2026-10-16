@@ -14,6 +14,7 @@ import {
   expireAwarenessRecords,
   MAX_AWARENESS_CURSOR_BYTES,
   MAX_AWARENESS_STRING_LENGTH,
+  MAX_AWARENESS_TRACKED_PEERS,
   reduceAwarenessEntries,
   reduceTypingInference,
   resolvePresenceColor,
@@ -168,6 +169,7 @@ export class CollaborationProvider {
   private awarenessRecords: ReadonlyMap<number, AwarenessRecord> = new Map();
   private readonly awarenessGenerations = new Map<number, number>();
   private awarenessGeneration = 0;
+  private awarenessFloor = 0;
   private readonly arrivalsInFlight = new Map<number, number>();
   private unsubscribeReplica: () => void;
   private unsubscribeTransport: () => void = () => {};
@@ -790,7 +792,7 @@ export class CollaborationProvider {
       this.awarenessGenerations.clear();
       return;
     }
-    const oldest = Math.min(...this.arrivalsInFlight.keys());
+    const [oldest] = this.arrivalsInFlight.keys();
     for (const [clientId, changed] of this.awarenessGenerations) {
       if (changed <= oldest) this.awarenessGenerations.delete(clientId);
     }
@@ -806,6 +808,10 @@ export class CollaborationProvider {
         if (records.has(clientId)) continue;
         this.awarenessGenerations.set(clientId, ++this.awarenessGeneration);
       }
+      if (this.awarenessGenerations.size > MAX_AWARENESS_TRACKED_PEERS) {
+        this.awarenessGenerations.clear();
+        this.awarenessFloor = this.awarenessGeneration;
+      }
     }
     this.awarenessRecords = records;
   }
@@ -815,7 +821,8 @@ export class CollaborationProvider {
     if (!inference) return;
     if (
       awarenessAtArrival !== undefined &&
-      (this.awarenessGenerations.get(inference.clientId) ?? 0) > awarenessAtArrival
+      (awarenessAtArrival < this.awarenessFloor ||
+        (this.awarenessGenerations.get(inference.clientId) ?? 0) > awarenessAtArrival)
     ) return;
     const reduction = reduceTypingInference(
       this.awarenessRecords,
