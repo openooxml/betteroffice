@@ -2093,6 +2093,26 @@ def v3_partial(source, task, output):
         spec.clear()
     partial = Package(source)
     v3_correct(partial, partial_task)
+    if 'format_phrase' in spec:
+        def saved(package):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / ('candidate.' + task['format'])
+                v3_save(package, path)
+                return Package(path).parts
+        reference = Package(output).parts
+        if saved(partial) == reference:
+            phrase = task['expected']['format_phrase']['phrase']
+            paragraph = task['expected']['format_phrase']['paragraph']
+            for candidate in (phrase[len(phrase) // 2:], phrase[1:], phrase[:-1]):
+                if not candidate or paragraph.count(candidate) != 1:
+                    continue
+                spec['format_phrase']['phrase'] = candidate
+                partial = Package(source)
+                v3_correct(partial, partial_task)
+                if saved(partial) != reference:
+                    break
+            else:
+                raise AssertionError(f'{task["id"]} partial-edit: no format_phrase candidate differs from the reference output')
     if 'rename' in task['expected'] and len(task['expected']) == 1:
         partial = Package(source)
         old, new = next(iter(task['expected']['rename'].items()))
