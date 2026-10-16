@@ -38,6 +38,12 @@ pub(crate) struct SnapshotValidation {
     merge_edits: BTreeMap<usize, MergeEdits>,
     merge_projection: Option<MergeProjection>,
     merge_projected: usize,
+    hyperlink_edits: BTreeMap<usize, HyperlinkEdits>,
+    hyperlink_projection: Option<HyperlinkProjection>,
+    hyperlink_baseline: HyperlinkBaseline,
+    hyperlink_projected: usize,
+    hyperlink_value: hyperlinks::HyperlinkJson,
+    hyperlink_compare: Option<(Arc<str>, usize, usize)>,
 }
 
 fn invalid() -> SnapshotError {
@@ -48,6 +54,178 @@ fn invalid() -> SnapshotError {
 mod pattern_tests {
     use super::*;
     use xlsx_model::{BorderEdge, BorderStyle, Color, Fill, PatternType};
+
+    #[test]
+    fn hyperlink_values_and_baselines_advance_within_byte_budget() {
+        use crate::sheet_json::MAX_HYPERLINK_FIELD_BYTES;
+
+        for (edited, max_bytes) in [(false, 1024), (true, 1024), (false, 4096), (true, 4096)] {
+            let mut model = WorkbookModel::default();
+            let mut sheet = Sheet::new("Data");
+            let value = "\u{0001}".repeat(MAX_HYPERLINK_FIELD_BYTES);
+            let baseline = Hyperlink {
+                range: CellRange::parse_a1("A1").unwrap(),
+                external_target: Some(value.clone()),
+                location: Some(value.clone()),
+                tooltip: Some(value.clone()),
+                display: Some(value),
+            };
+            sheet.hyperlinks.push(baseline.clone());
+            model.sheets.push(sheet);
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, 270).unwrap();
+            let map = {
+                let txn = authority.doc.transact();
+                txn.get_map(SHEETS)
+                    .unwrap()
+                    .get(&txn, "sheet:0")
+                    .unwrap()
+                    .cast::<MapRef>()
+                    .unwrap()
+            };
+            let mut keys = SnapshotKeys::new();
+            if edited {
+                let mut link = baseline;
+                link.range = CellRange::parse_a1("Z1").unwrap();
+                map.try_update(
+                    &mut authority.doc.transact_mut(),
+                    "hyperlink:Z1",
+                    serde_json::to_string(&link).unwrap(),
+                );
+                keys.insert((parent(&map), Arc::from("hyperlink:Z1")));
+            }
+            let mut projected = authority.strict_materialize().unwrap().0;
+            let mut validation = SnapshotValidation {
+                phase: 2,
+                version: SCHEMA_VERSION,
+                ..Default::default()
+            };
+            validation.maps.insert(parent(&map), (0, "sheet"));
+            validation.sheet_keys.insert(0, Arc::from("sheet:0"));
+            let budget = SnapshotBudget::new(1, max_bytes).unwrap();
+            let mut steps = 0;
+            while validation.phase != 3 {
+                crate::snapshot::step::reset();
+                validation
+                    .advance(&authority, &mut projected, &mut keys, budget)
+                    .unwrap();
+                assert!(crate::snapshot::step::current().bytes <= budget.max_bytes());
+                for edits in validation.hyperlink_edits.values() {
+                    for link in edits.values().flatten() {
+                        assert_eq!(link, &hyperlinks::hyperlink_metadata(link.range));
+                    }
+                }
+                steps += 1;
+                assert!(steps < 100_000);
+            }
+            assert!(steps > 500);
+            assert!(validation.hyperlink_edits.is_empty());
+            assert!(validation.hyperlink_compare.is_none());
+            validate_for_test(&authority, projected).unwrap();
+        }
+    }
+
+    #[test]
+    fn hyperlink_streaming_resumes_when_byte_budget_increases() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 272).unwrap();
+        let map = {
+            let txn = authority.doc.transact();
+            txn.get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap()
+        };
+        let mut keys = SnapshotKeys::new();
+        for (range, target) in [
+            ("A1", "https://example.com".into()),
+            ("B1", "x".repeat(512)),
+        ] {
+            let mut link = hyperlinks::hyperlink_metadata(CellRange::parse_a1(range).unwrap());
+            link.external_target = Some(target);
+            let json = serde_json::to_string(&link).unwrap();
+            assert_eq!(json.len() <= 256, range == "A1");
+            let key = format!("hyperlink:{range}");
+            map.try_update(&mut authority.doc.transact_mut(), key.as_str(), json);
+            keys.insert((parent(&map), Arc::from(key)));
+        }
+        let mut projected = authority.strict_materialize().unwrap().0;
+        let mut validation = SnapshotValidation {
+            phase: 2,
+            version: SCHEMA_VERSION,
+            ..Default::default()
+        };
+        validation.maps.insert(parent(&map), (0, "sheet"));
+        validation.sheet_keys.insert(0, Arc::from("sheet:0"));
+        validation
+            .advance(
+                &authority,
+                &mut projected,
+                &mut keys,
+                SnapshotBudget::new(1, 768).unwrap(),
+            )
+            .unwrap();
+        assert!(validation.hyperlink_value.bytes() > 0);
+        assert_eq!(keys.len(), 2);
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        let mut steps = 0;
+        while validation.phase != 3 {
+            validation
+                .advance(&authority, &mut projected, &mut keys, budget)
+                .unwrap();
+            steps += 1;
+            assert!(steps < 1000);
+        }
+        assert_eq!(validation.hyperlink_value.bytes(), 0);
+        validate_for_test(&authority, projected).unwrap();
+    }
+
+    #[test]
+    fn oversized_hyperlink_values_are_refused_before_parsing() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 271).unwrap();
+        let map = {
+            let txn = authority.doc.transact();
+            txn.get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap()
+        };
+        map.try_update(
+            &mut authority.doc.transact_mut(),
+            "hyperlink:A1",
+            " ".repeat(crate::sheet_json::MAX_HYPERLINK_VALUE_BYTES + 1),
+        );
+        let mut keys = SnapshotKeys::new();
+        keys.insert((parent(&map), Arc::from("hyperlink:A1")));
+        let mut validation = SnapshotValidation {
+            phase: 2,
+            version: SCHEMA_VERSION,
+            ..Default::default()
+        };
+        validation.maps.insert(parent(&map), (0, "sheet"));
+        let budget = SnapshotBudget::new(1, 4096).unwrap();
+        crate::snapshot::step::reset();
+        let error = validation
+            .advance(&authority, &mut model, &mut keys, budget)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "sheet hyperlink value exceeds its size limit"
+        );
+        assert!(crate::snapshot::step::current().bytes < 512);
+        assert!(
+            authority
+                .strict_materialize()
+                .unwrap_err()
+                .contains("value exceeds its size limit")
+        );
+    }
 
     #[test]
     fn pattern_border_streamed_format_matches_serde() {
@@ -546,6 +724,67 @@ impl SnapshotValidation {
         Ok(false)
     }
 
+    fn collect_hyperlink_edit(
+        &mut self,
+        sheet: usize,
+        key: &str,
+        value: &Out,
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<bool> {
+        let json = match value {
+            Out::Any(Any::String(json)) => Some(json),
+            _ => None,
+        };
+        if json.is_some_and(|json| json.len() > crate::sheet_json::MAX_HYPERLINK_VALUE_BYTES) {
+            return Err(SnapshotError::new(
+                "sheet hyperlink value exceeds its size limit",
+            ));
+        }
+        let limit = budget
+            .max_bytes()
+            .saturating_sub(self.unit_bytes + 512)
+            .min(4096);
+        let inline = self.hyperlink_value.bytes() == 0
+            && json.is_some_and(|json| {
+                json.len() <= 256 && self.unit_bytes + 512 + json.len() * 8 <= budget.max_bytes()
+            });
+        let bytes = match json {
+            Some(json) if inline => 512 + json.len() * 8,
+            Some(_) => 640.max(512 + limit),
+            None => 512,
+        };
+        augment(self.unit_bytes + bytes, budget, &mut self.unit_bytes)?;
+        let edits = self.hyperlink_edits.entry(sheet).or_default();
+        if let Some(json) = json.filter(|_| !inline) {
+            let Some(range) = self
+                .hyperlink_value
+                .advance(json, limit)
+                .map_err(SnapshotError::new)?
+            else {
+                return Ok(false);
+            };
+            if self.hyperlink_value.bytes() != json.len() {
+                return Err(invalid());
+            }
+            insert_hyperlink_edit(edits, key, &Out::Any(Any::Bool(false)))
+                .map_err(SnapshotError::new)?;
+            if range.to_a1() != key[HYPERLINK_PREFIX.len()..] {
+                return Err(SnapshotError::new(format!(
+                    "hyperlink edit {key} has a different range"
+                )));
+            }
+            *edits.get_mut(&key[HYPERLINK_PREFIX.len()..]).unwrap() =
+                Some(hyperlinks::hyperlink_metadata(range));
+        } else {
+            insert_hyperlink_edit(edits, key, value).map_err(SnapshotError::new)?;
+            if let Some(Some(link)) = edits.get_mut(&key[HYPERLINK_PREFIX.len()..]) {
+                *link = hyperlinks::hyperlink_metadata(link.range);
+            }
+        }
+        self.hyperlink_value = hyperlinks::HyperlinkJson::default();
+        Ok(true)
+    }
+
     fn advance_unit(
         &mut self,
         authority: &WorkbookAuthority,
@@ -820,49 +1059,13 @@ impl SnapshotValidation {
                                 self.metadata_child = 0;
                             }
                             HYPERLINKS => {
+                                allowance(64, budget, &mut self.unit_bytes)?;
                                 let json = string(&value)?;
-                                let start = self.json.bytes;
-                                let link = sheet.hyperlinks.get(self.metadata_child);
-                                let (done, bytes) = json_window(
-                                    &mut self.json,
-                                    budget,
-                                    &mut self.unit_bytes,
-                                    |window| {
-                                        if let Some(link) = link {
-                                            window.raw(if self.metadata_child == 0 {
-                                                b"["
-                                            } else {
-                                                b","
-                                            })?;
-                                            window.hyperlink(link)
-                                        } else {
-                                            window.raw(if self.metadata_child == 0 {
-                                                b"[]"
-                                            } else {
-                                                b"]"
-                                            })
-                                        }
-                                    },
-                                )?;
-                                if json.as_bytes().get(start..self.json.bytes)
-                                    != Some(bytes.as_slice())
-                                {
-                                    return Err(invalid());
+                                if json.len() > crate::sheet_json::MAX_HYPERLINK_STATE_BYTES {
+                                    return Err(SnapshotError::new(
+                                        "sheet hyperlink state exceeds its size limit",
+                                    ));
                                 }
-                                if !done {
-                                    return Ok(false);
-                                }
-                                self.json.token = 0;
-                                self.json.offset = 0;
-                                if link.is_some() {
-                                    self.metadata_child += 1;
-                                    return Ok(false);
-                                }
-                                if json.len() != self.json.bytes {
-                                    return Err(invalid());
-                                }
-                                self.metadata_child = 0;
-                                self.json = JsonPosition::default();
                             }
                             _ => return Err(invalid()),
                         }
@@ -1262,6 +1465,13 @@ impl SnapshotValidation {
                                 let sheet = &model.sheets[sheet_index];
                                 match field {
                                     "sheet" => {
+                                        #[cfg(test)]
+                                        if SCHEMA_SIX_KEY_VALIDATION.get()
+                                            && (key.starts_with(MERGE_PREFIX)
+                                                || key.starts_with(HYPERLINK_PREFIX))
+                                        {
+                                            return Err(invalid());
+                                        }
                                         if key.starts_with(MERGE_PREFIX) {
                                             insert_merge_edit(
                                                 self.merge_edits.entry(sheet_index).or_default(),
@@ -1269,6 +1479,18 @@ impl SnapshotValidation {
                                                 &value,
                                             )
                                             .map_err(SnapshotError::new)?;
+                                        } else if key.starts_with(HYPERLINK_PREFIX) {
+                                            if self.version < SCHEMA_VERSION {
+                                                return Err(invalid());
+                                            }
+                                            if !self.collect_hyperlink_edit(
+                                                sheet_index,
+                                                key,
+                                                &value,
+                                                budget,
+                                            )? {
+                                                return Ok(false);
+                                            }
                                         } else if !sheet_schema_keys(self.version)
                                             .contains(&key.as_ref())
                                             && !sheet_schema_optional_keys(self.version)
@@ -1386,6 +1608,102 @@ impl SnapshotValidation {
                 self.merge_projection = None;
                 self.merge_projected = 0;
                 self.metadata_child = 0;
+                self.sheet += 1;
+                return Ok(false);
+            }
+            self.phase = 12;
+            self.sheet = 0;
+            return Ok(false);
+        }
+        if self.phase == 12 {
+            if let Some((json, start, end)) = &self.hyperlink_compare {
+                let sheet = &model.sheets[self.sheet];
+                let link = sheet
+                    .hyperlinks
+                    .get(self.hyperlink_projected)
+                    .ok_or_else(invalid)?;
+                let at = self.json.bytes;
+                let (done, bytes) =
+                    json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
+                        window.hyperlink(link)
+                    })?;
+                if json.as_bytes().get(start + at..start + self.json.bytes)
+                    != Some(bytes.as_slice())
+                    || start + self.json.bytes > *end
+                {
+                    return Err(invalid());
+                }
+                if done {
+                    if start + self.json.bytes != *end {
+                        return Err(invalid());
+                    }
+                    self.hyperlink_compare = None;
+                    self.json = JsonPosition::default();
+                    self.hyperlink_projected += 1;
+                }
+                return Ok(false);
+            }
+            let limit = budget.max_bytes().saturating_sub(512).min(4096);
+            allowance(640.max(512 + limit), budget, &mut self.unit_bytes)?;
+            if let Some(sheet) = model.sheets.get(self.sheet) {
+                if self.version < HYPERLINK_SCHEMA_VERSION {
+                    self.sheet += 1;
+                    return Ok(false);
+                }
+                let projection = self.hyperlink_projection.get_or_insert_with(|| {
+                    HyperlinkProjection::new(
+                        self.hyperlink_edits.remove(&self.sheet).unwrap_or_default(),
+                    )
+                });
+                let key = self.sheet_keys.get(&self.sheet).ok_or_else(invalid)?;
+                let map = sheets
+                    .get(&txn, key.as_ref())
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .ok_or_else(invalid)?;
+                let Out::Any(Any::String(baseline)) =
+                    map.get(&txn, HYPERLINKS).ok_or_else(invalid)?
+                else {
+                    return Err(invalid());
+                };
+                let (next, source) = match self
+                    .hyperlink_baseline
+                    .advance(&baseline, limit)
+                    .map_err(SnapshotError::new)?
+                {
+                    hyperlinks::HyperlinkRead::Pending => return Ok(false),
+                    hyperlinks::HyperlinkRead::Link(range, start, end) => (
+                        Some(
+                            projection
+                                .baseline(hyperlinks::hyperlink_metadata(range))
+                                .map_err(SnapshotError::new)?,
+                        ),
+                        Some((baseline, start, end)),
+                    ),
+                    hyperlinks::HyperlinkRead::Done => (projection.next_edit(), None),
+                };
+                if let Some(link) = next {
+                    if let Some(link) = link {
+                        let edit_key = format!("{HYPERLINK_PREFIX}{}", link.range.to_a1());
+                        self.hyperlink_compare = match map.get(&txn, &edit_key) {
+                            Some(Out::Any(Any::String(json))) => {
+                                let end = json.len();
+                                Some((json, 0, end))
+                            }
+                            None => source,
+                            _ => return Err(invalid()),
+                        };
+                        if self.hyperlink_compare.is_none() {
+                            return Err(invalid());
+                        }
+                    }
+                    return Ok(false);
+                }
+                if self.hyperlink_projected != sheet.hyperlinks.len() {
+                    return Err(invalid());
+                }
+                self.hyperlink_projection = None;
+                self.hyperlink_baseline = HyperlinkBaseline::default();
+                self.hyperlink_projected = 0;
                 self.sheet += 1;
                 return Ok(false);
             }

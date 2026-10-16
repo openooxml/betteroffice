@@ -22,6 +22,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { requireUnreservedClientId } from '../collaboration/protocol';
 import type {
   DocxEditResult,
   DocxFindTextResult,
@@ -48,7 +49,6 @@ import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 import { decodeDocxHostJson, wrapSession } from './yrsSessionFacade';
-import { requireUnreservedClientId } from '../collaboration/protocol';
 import { documentToYrs } from './documentToYrs';
 import { tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
@@ -258,6 +258,7 @@ export async function createResidentEngineSession(
   heapLimitBytes?: number,
   clientId = randomClientId()
 ): Promise<ResidentEngineSession> {
+  requireUnreservedClientId(clientId);
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
   const session = createEditSession(requireUnreservedClientId(clientId));

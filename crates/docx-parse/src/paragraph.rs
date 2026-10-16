@@ -363,6 +363,7 @@ pub fn parse_document_paragraph_properties(
             children: vec![XmlNode::Element(run_properties.clone())],
             paragraph_ordinal: None,
             para_id_attribute: None,
+            bookmark_xml: None,
         };
         value.run_properties = parse_run(&shell, theme, styles, None).run.formatting;
     }
@@ -1005,6 +1006,7 @@ pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
         attributes: element.attributes.clone(),
         paragraph_ordinal: element.paragraph_ordinal,
         para_id_attribute: element.para_id_attribute.clone(),
+        bookmark_xml: element.bookmark_xml.clone(),
         children: element
             .children
             .iter()

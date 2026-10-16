@@ -2331,6 +2331,34 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
     assert!(ids(&doc).is_empty());
 }
 
+#[test]
+fn body_bookmarks_do_not_apply_opaque_block_restrictions() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+    let start = r#"<w:bookmarkStart w:id="7" w:name="Range"/>"#;
+    let end = r#"<w:bookmarkEnd w:id="7"/>"#;
+    for body in [
+        format!(
+            "{}{start}{}{end}{table}{}",
+            p("00000001", &r("Before")),
+            p("00000002", &r("Anchor")),
+            p("00000003", &r("After"))
+        ),
+        format!(
+            "{}{start}{}{end}",
+            p("00000001", &r("Before")),
+            p("00000002", &r("Anchor"))
+        ),
+    ] {
+        let doc = open(&body);
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![delete_paragraphs("00000002", "00000002")],
+        );
+        assert_eq!(accepted(&doc)[0], "Before");
+    }
+}
+
 fn formatted(text: &str) -> String {
     format!(
         r#"<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:b/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>"#

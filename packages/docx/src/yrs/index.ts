@@ -31,6 +31,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { requireUnreservedClientId } from '../collaboration/protocol';
 import type {
   DocxEditRefusal,
   DocxEditRequest,
@@ -75,7 +76,6 @@ import type {
   DocxSnapshotLayoutMap,
 } from './pagedExport';
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
-import { requireUnreservedClientId } from '../collaboration/protocol';
 export { decodeDocxHostJson } from './yrsSessionFacade';
 
 /** @internal */
