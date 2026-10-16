@@ -126,6 +126,14 @@ test('worker replicas exchange a fresh handshake and converge after disconnected
   };
   const count = (index: number, type: string) => frames[index].flatMap((frame) => decodeMessages(frame))
     .filter((message) => message.type === type).length;
+  const quiet = async () => {
+    for (let idle = 0, seen = -1; idle < 64;) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const moved = frames[0].length + frames[1].length;
+      idle = moved === seen ? idle + 1 : 0;
+      seen = moved;
+    }
+  };
   try {
     right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 202 });
     providers.push(new CollaborationProvider(left.replica!, transports[0]),
@@ -149,6 +157,7 @@ test('worker replicas exchange a fresh handshake and converge after disconnected
     connection(1, true);
     await synced;
     await Promise.all([left.call.version(), right.call.version()]);
+    await quiet();
     expect(providers.every((provider) => provider.synced)).toBe(true);
     expect(frames.map((_, index) => [count(index, 'sync-step-1'), count(index, 'sync-step-2')]))
       .toEqual(handshakes.map(([step1, step2]) => [step1 + 2, step2 + 2]));
