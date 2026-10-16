@@ -18,20 +18,20 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 
-function documentBytes() {
+function documentBytes(revisions: boolean) {
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   return new Uint8Array(rezipPartsToArrayBuffer(new Map([
     ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
     ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${r}/officeDocument" Target="word/document.xml"/></Relationships>`)],
-    ['word/document.xml', toBytes(`<w:document xmlns:w="${w}"><w:body><w:p><w:r><w:t>First page</w:t></w:r></w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Second page</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`)],
+    ['word/document.xml', toBytes(`<w:document xmlns:w="${w}"><w:body><w:p><w:r><w:t>First page</w:t></w:r>${revisions ? '<w:ins w:id="1" w:author="Writer" w:date="2026-01-01T00:00:00Z"><w:r><w:t> Revised text</w:t></w:r></w:ins>' : ''}</w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Second page</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`)],
   ])));
 }
 
-async function fixture(readOnly = false, commandFonts = false) {
+async function fixture(readOnly = false, commandFonts = false, revisions = false) {
   const port = startWorker();
   const client = new ResidentEngineWorkerClient(port);
-  const bytes = documentBytes();
+  const bytes = documentBytes(revisions);
   const opened = await client.open(bytes);
   const resident = port.sessions[0]!;
   const document = decodeDocxHostJson(opened.hostJson, bytes).document;
@@ -153,7 +153,7 @@ function presentLayout(h: Awaited<ReturnType<typeof fixture>>) {
 
 for (const revisionView of ['accepted', 'original'] as const) {
   test(`paged worker export waits for markup layout when exporting ${revisionView} revisions`, async () => {
-    const h = await fixture(true);
+    const h = await fixture(true, false, true);
     const preview = JSON.parse(h.request);
     preview.renderEnv = { ...preview.renderEnv, revisionPreview: { '1': 'accepted' } };
     h.resident.layoutDocumentWithRegionsRetainedJson(JSON.stringify(preview));
@@ -166,7 +166,10 @@ for (const revisionView of ['accepted', 'original'] as const) {
     try {
       expect(JSON.parse(h.resident.exportStructuredWithPagesJson({ revisionView }, h.request)))
         .toMatchObject({ ok: false, failure: { code: 'unsupported-revision-layout' } });
-      expect((await h.controller.ref.exportStructuredWithPages({ revisionView })).ok).toBe(true);
+      const result = await h.controller.ref.exportStructuredWithPages({ revisionView });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.failure.message);
+      expect(JSON.stringify(result.content.structured).includes('Revised text')).toBe(revisionView === 'accepted');
     } finally { await h.close(); }
   });
 }
