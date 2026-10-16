@@ -671,11 +671,11 @@ test('suggesting mode leaves comment and object commands without text suggestion
   const { admission, submitted } = lane();
   admission.setSuggesting!('Writer');
   const range = { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 4 } };
-  const intents: PeerlessInputIntent[] = [
+  const intents = [
     { kind: 'addComment', payload: { ranges: [range], author: 'Writer', date: '2026-01-01', body: 'Note', expectVersion: 'native' } },
     { kind: 'resizeObject', payload: { handle: 'image', widthEmu: 9525, heightEmu: 9525, expectVersion: 'native' } },
     { kind: 'moveObject', payload: { handle: 'image', hOffsetEmu: 0, vOffsetEmu: 0, expectVersion: 'native' } },
-  ];
+  ] satisfies PeerlessInputIntent[];
   for (const intent of intents) expect(admitIntent(admission, intent).status).toBe('submitted');
   expect(submitted.map(entry => entry.payload)).toEqual(intents.map(intent => intent.payload));
   admitIntent(admission, { kind: 'insertText', payload: { text: 'tracked' } });
