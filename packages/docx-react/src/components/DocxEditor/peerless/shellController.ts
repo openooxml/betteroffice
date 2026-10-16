@@ -716,7 +716,6 @@ export function createPeerlessShellController(initial: Options) {
     };
     const attempt = async (): Promise<WorkerPageExportResult> => {
       assertCurrent();
-      if (view.version !== current.viewStore.getSnapshot().version) return moved();
       request = options.layoutRequest?.() ?? null;
       if (request === null) return { ok: false, version: view.editState?.documentVersion ?? '',
         failure: { code: 'layout-unavailable', target: null, message: 'The fonts this document uses are not loaded yet.' } };

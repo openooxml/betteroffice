@@ -235,7 +235,13 @@ test('paged worker export polls for font readiness after layout completion', asy
   let fontsReady = false;
   h.controller.update({ ...h.settings, layoutRequest: () => {
     requests += 1;
-    if (requests === 2) queueMicrotask(() => { h.relayout(); fontsReady = true; });
+    if (requests === 2) queueMicrotask(() => {
+      h.relayout();
+      const state = h.viewStore.getSnapshot();
+      h.viewStore.acceptWorkerState(state.identity, { epoch: 1, version: state.version + 1, throughSeq: 0,
+        presentedThroughSeq: 0, selection: null });
+      fontsReady = true;
+    });
     return fontsReady ? h.request : null;
   } });
   const subscribe = h.viewStore.subscribe;
