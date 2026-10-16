@@ -2611,7 +2611,11 @@ test('worker saves a reply added through comment commands with its parent and th
 
 test('reopening an imported resolved comment updates the projection and saved extended metadata', async () => {
   const { parseDocx } = await import('../docx/parser');
-  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended });
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended,
+    prepare: engine => {
+      expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+      return { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 };
+    } });
   try {
     const result = await client.edit(intent(1, 0, 'updateComment', { id: '0', patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
     expect(result.outcomes[0]?.status).toBe('applied');

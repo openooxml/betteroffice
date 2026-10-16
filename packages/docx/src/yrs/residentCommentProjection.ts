@@ -18,7 +18,7 @@ function commentContent(body: unknown, fallback: Comment['content']): Comment['c
  * The comments a save writes: the source package's, each with the fields the session wrote over its
  * seeded placeholders and without the ones it removed, then the comments added in the session.
  */
-export function projectResidentComments(engine: ResidentEngineSession, aliases: Map<string, number>): ResidentCommentProjection {
+export function projectResidentComments(engine: ResidentEngineSession, aliases: Map<string, number>, initialized = false): ResidentCommentProjection {
   const source = engine.propertyDocument().package.document.comments ?? [];
   const native = engine.listComments();
   const used = new Set([...source.map(comment => comment.id), ...aliases.values()]);
@@ -37,10 +37,11 @@ export function projectResidentComments(engine: ResidentEngineSession, aliases: 
     const comment = held.get(original.id);
     if (!comment) return aliases.has(String(original.id)) ? [] : [original];
     const parentId = parentOf(comment);
+    const done = initialized ? comment.done : comment.done || (original.done ?? false);
     return [{ ...original, ...(comment.author ? { author: comment.author } : {}), ...(comment.date ? { date: comment.date } : {}),
       ...(comment.body == null ? {} : { content: commentContent(comment.body, original.content) }),
-      ...(comment.done === (original.done ?? false) ? {} : { done: comment.done,
-        ...(original.status === undefined ? {} : { status: comment.done ? 'resolved' as const : 'active' as const }) }),
+      ...(done === (original.done ?? false) ? {} : { done,
+        ...(original.status === undefined ? {} : { status: done ? 'resolved' as const : 'active' as const }) }),
       ...(parentId === undefined ? {} : { parentId }) }];
   });
   const sourceIds = new Set(source.map(comment => comment.id));

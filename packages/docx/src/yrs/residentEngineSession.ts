@@ -259,6 +259,7 @@ export async function createResidentEngineSession(
   const session = createEditSession(clientId);
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
+  let commentsInitialized = false;
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
@@ -275,6 +276,7 @@ export async function createResidentEngineSession(
       parentId: comment.parentId === undefined ? null : String(comment.parentId),
       ...(existing.has(String(comment.id)) ? {} : { body: comment.blockContent ?? comment.content }),
     }));
+    commentsInitialized = true;
   };
   const partDocument = (): Document => {
     if (!partBase) throw new Error('Part metadata requires an opened package');
@@ -602,7 +604,7 @@ export async function createResidentEngineSession(
       const at = session.clear_cell_selection();
       return at === undefined ? null : JSON.parse(at) as YrsLoc;
     },
-    commentProjection: () => partBase ? projectResidentComments(resident, commentAliases) : null,
+    commentProjection: () => partBase ? projectResidentComments(resident, commentAliases, commentsInitialized) : null,
     initializeComments,
     sectionProperties,
     setSectionMargins: (section, margins) => {
@@ -843,6 +845,7 @@ export async function createResidentEngineSession(
     },
     openDocument: (document, options) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
@@ -874,6 +877,7 @@ export async function createResidentEngineSession(
     },
     openDocx: (bytes, digest, generation, seedStories = true) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       const json = resolveHostJsonCommentMedia(
@@ -889,6 +893,7 @@ export async function createResidentEngineSession(
     },
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       const json =
