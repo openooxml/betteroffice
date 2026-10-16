@@ -345,6 +345,68 @@ test('an indent edit is kept when its new style inherits w:start from a basedOn 
   expect(paragraphs(xml)[0]).toContain('w:left="720"');
 });
 
+const AUTO_SPACE_NUMBERING =
+  '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>' +
+  '<w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>' +
+  '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>';
+
+const AUTO_SPACE_STYLES = `<w:styles xmlns:w="${W}">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="AutoSpaced"><w:name w:val="AutoSpaced"/><w:basedOn w:val="Normal"/><w:pPr><w:autoSpaceDE w:val="0"/><w:autoSpaceDN w:val="0"/></w:pPr></w:style>
+</w:styles>`;
+
+function editThirdText(session: YrsSession): void {
+  const paragraph = session.paragraphs('body')[2]!;
+  session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'Edited ');
+}
+
+test('a numbered paragraph keeps style auto-spacing inherited on save', async () => {
+  const bytes = fixture(
+    '<w:pStyle w:val="AutoSpaced"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>',
+    '',
+    '',
+    { styles: AUTO_SPACE_STYLES, numbering: AUTO_SPACE_NUMBERING }
+  );
+  const xml = await repackAfter(bytes, editThirdText);
+  const saved = paragraphs(xml)[2]!;
+  expect(saved).toContain('Edited Override QA');
+  expect(saved).not.toContain('<w:autoSpaceDE');
+  expect(saved).not.toContain('<w:autoSpaceDN');
+  expect(saved).toContain('<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>');
+  expect(saved).not.toContain('<w:ind');
+});
+
+test('an unnumbered paragraph keeps style auto-spacing inherited on save', async () => {
+  const bytes = fixture('<w:pStyle w:val="AutoSpaced"/>', '', '', { styles: AUTO_SPACE_STYLES });
+  const xml = await repackAfter(bytes, editThirdText);
+  const saved = paragraphs(xml)[2]!;
+  expect(saved).toContain('Edited Override QA');
+  expect(saved).not.toContain('<w:autoSpaceDE');
+  expect(saved).not.toContain('<w:autoSpaceDN');
+});
+
+test('a direct auto-spacing opt-out survives a text edit', async () => {
+  const bytes = fixture('<w:autoSpaceDE w:val="0"/>');
+  const xml = await repackAfter(bytes, editThirdText);
+  const saved = paragraphs(xml)[2]!;
+  expect(saved).toContain('Edited Override QA');
+  expect(saved).toContain('<w:autoSpaceDE w:val="0"/>');
+});
+
+test('adjustRightInd and a paragraph cnfStyle survive a text edit', async () => {
+  const cnfStyle =
+    '<w:cnfStyle w:val="010000000001" w:firstRow="1" w:lastRow="off" w:firstColumn="true" ' +
+    'w:lastColumn="0" w:oddVBand="on" w:evenVBand="false" w:oddHBand="1" w:evenHBand="off" ' +
+    'w:firstRowFirstColumn="true" w:firstRowLastColumn="0" w:lastRowFirstColumn="on" ' +
+    'w:lastRowLastColumn="false"/>';
+  const bytes = fixture(`<w:adjustRightInd w:val="0"/>${cnfStyle}`);
+  const xml = await repackAfter(bytes, editThirdText);
+  const saved = paragraphs(xml)[2]!;
+  expect(saved).toContain('Edited Override QA');
+  expect(saved).toContain('<w:adjustRightInd w:val="0"/>');
+  expect(saved).toContain(cnfStyle);
+});
+
 test('a spacing edit is kept when the resolver synthesizes the paragraph defaults', async () => {
   const bytes = fixture('', '', '', { styles: `<w:styles xmlns:w="${W}"/>` });
   const xml = await repackAfter(bytes, (session) => setFirst(session, { spaceAfter: 160 }));

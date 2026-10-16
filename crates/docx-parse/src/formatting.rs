@@ -1477,6 +1477,85 @@ mod tests {
         assert!(xml.contains("w:afterLines=\"0\""));
     }
 
+    #[test]
+    fn adjust_right_ind_survives_parsing_and_serialization_in_schema_order() {
+        let save = |xml: &str| {
+            let parsed = parse_paragraph_properties(Some(&root(xml)), None);
+            crate::serializer::serialize_paragraph_formatting(
+                parsed.as_ref(),
+                None,
+                None,
+                None,
+                false,
+                None,
+            )
+            .unwrap()
+        };
+        let off = save(
+            r#"<w:pPr><w:bidi/><w:adjustRightInd w:val="0"/><w:snapToGrid/></w:pPr>"#,
+        );
+        assert_eq!(
+            off,
+            "<w:pPr><w:bidi/><w:adjustRightInd w:val=\"0\"/><w:snapToGrid/></w:pPr>"
+        );
+        assert_eq!(
+            parse_paragraph_properties(Some(&root(&off)), None),
+            parse_paragraph_properties(
+                Some(&root(
+                    r#"<w:pPr><w:bidi/><w:adjustRightInd w:val="0"/><w:snapToGrid/></w:pPr>"#
+                )),
+                None
+            )
+        );
+        let bare = save(r#"<w:pPr><w:adjustRightInd/></w:pPr>"#);
+        assert_eq!(bare, "<w:pPr><w:adjustRightInd/></w:pPr>");
+        let absent = save(r#"<w:pPr><w:bidi/></w:pPr>"#);
+        assert_eq!(absent, "<w:pPr><w:bidi/></w:pPr>");
+        assert!(!absent.contains("adjustRightInd"));
+    }
+
+    #[test]
+    fn paragraph_cnf_style_survives_parsing_and_serialization_byte_identical() {
+        let cnf = "<w:cnfStyle w:val=\"010000000001\" w:firstRow=\"1\" w:lastRow=\"off\" \
+                   w:firstColumn=\"true\" w:lastColumn=\"0\" w:oddVBand=\"on\" \
+                   w:evenVBand=\"false\" w:oddHBand=\"1\" w:evenHBand=\"off\" \
+                   w:firstRowFirstColumn=\"true\" w:firstRowLastColumn=\"0\" \
+                   w:lastRowFirstColumn=\"on\" w:lastRowLastColumn=\"false\"/>";
+        let parsed = parse_paragraph_properties(
+            Some(&root(&format!("<w:pPr>{cnf}</w:pPr>"))),
+            None,
+        );
+        let xml = crate::serializer::serialize_paragraph_formatting(
+            parsed.as_ref(),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(xml, format!("<w:pPr>{cnf}</w:pPr>"));
+        let zero = "<w:cnfStyle w:val=\"000000000000\" w:firstRow=\"0\" w:lastRow=\"0\" \
+                    w:firstColumn=\"0\" w:lastColumn=\"0\" w:oddVBand=\"0\" w:evenVBand=\"0\" \
+                    w:oddHBand=\"0\" w:evenHBand=\"0\" w:firstRowFirstColumn=\"0\" \
+                    w:firstRowLastColumn=\"0\" w:lastRowFirstColumn=\"0\" \
+                    w:lastRowLastColumn=\"0\"/>";
+        let parsed = parse_paragraph_properties(
+            Some(&root(&format!("<w:pPr>{zero}</w:pPr>"))),
+            None,
+        );
+        let xml = crate::serializer::serialize_paragraph_formatting(
+            parsed.as_ref(),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(xml, format!("<w:pPr>{zero}</w:pPr>"));
+    }
+
     fn root(xml: &str) -> XmlElement {
         let limits = ParseLimits::default();
         parse_xml(
