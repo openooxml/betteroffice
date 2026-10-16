@@ -8,14 +8,11 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
-  isStateVector,
   MAX_FRAME_BYTES,
   maxSyncPayloadBytes,
-  requestsChunkedSync,
-  stateVectorDominates,
   syncFrameBytes,
-  withChunkedSyncRequest,
-  withClientClockAhead,
+  parseSyncRequest,
+  withSyncRequest,
 } from './protocol';
 import {
   awarenessPeers,
@@ -588,15 +585,11 @@ export class CollaborationProvider {
 
   private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
     if (!this.isCurrentOpen(token, connection)) return;
-    let ahead: Uint8Array | undefined;
     try {
-      ahead = isStateVector(stateVector)
-        ? withClientClockAhead(stateVector, this.replica.clientId)
-        : stateVector;
-      const advertised = ahead ?? stateVector;
-      this.sendFrame(
-        encodeSyncStep1(this.syncHeld ? withChunkedSyncRequest(advertised) : advertised, this.maxFrameBytes)
-      );
+      this.sendFrame(encodeSyncStep1(
+        withSyncRequest(stateVector, { open: true, chunked: this.syncHeld !== null }),
+        this.maxFrameBytes
+      ));
     } catch (cause) {
       this.failConnection(
         token,
@@ -604,7 +597,6 @@ export class CollaborationProvider {
       );
       return;
     }
-    if (!ahead && this.isCurrentOpen(token, connection)) this.sendFullUpdate(token, connection);
     if (!this.localUser || !this.isCurrentOpen(token, connection)) return;
 
     try {
@@ -616,39 +608,6 @@ export class CollaborationProvider {
     this.broadcastLocalAwareness();
     if (!this.isCurrentOpen(token, connection)) return;
     this.startPresence();
-  }
-
-  private sendFullUpdate(token: number, connection: number): void {
-    const send = (update: Uint8Array) => {
-      if (!this.isCurrentOpen(token, connection)) return;
-      try {
-        this.sendFrame(encodeUpdate(update, this.maxFrameBytes));
-      } catch (cause) {
-        this.failConnection(
-          token,
-          normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
-        );
-      }
-    };
-    const fail = (cause: unknown) => {
-      if (this.isCurrentOpen(token, connection)) {
-        this.failConnection(token, normalizeError('replica', 'Failed to encode replica update', cause));
-      }
-    };
-    if (this.asyncReplica) {
-      void this.asyncReplica.encodeStateAsUpdate()
-        .then((update) => requireBytes(update, 'encodeStateAsUpdate'))
-        .then(send, fail);
-      return;
-    }
-    let update: Uint8Array;
-    try {
-      update = requireBytes(this.replica.encodeStateAsUpdate(), 'encodeStateAsUpdate');
-    } catch (cause) {
-      fail(cause);
-      return;
-    }
-    send(update);
   }
 
   private handleMessage(
@@ -796,16 +755,19 @@ export class CollaborationProvider {
         try {
           if (message.type === 'sync-step-1') {
             const replica = this.asyncReplica!;
-            const updates = this.chunksAnswer(message.stateVector, replica)
+            const request = parseSyncRequest(message.stateVector);
+            const updates = this.chunksAnswer(request.chunked, replica)
               ? requireUpdates(
-                await replica.encodeStateAsUpdateChunks!(message.stateVector.slice(), this.syncChunkLimit()),
+                await replica.encodeStateAsUpdateChunks!(request.stateVector.slice(), this.syncChunkLimit()),
                 'encodeStateAsUpdateChunks'
               )
-              : [requireBytes(await replica.encodeStateAsUpdate(message.stateVector.slice()), 'encodeStateAsUpdate')];
+              : [requireBytes(await replica.encodeStateAsUpdate(request.stateVector.slice()), 'encodeStateAsUpdate')];
             if (!this.isCurrentOpen(token, connection)) return;
             this.sendSyncAnswer(token, updates, () => this.isCurrentOpen(token, connection));
-            if (!this.isCurrentOpen(token, connection)) return;
-            this.requestMissingStateFromWorker(token, connection, message.stateVector);
+            if (request.open && this.isCurrentOpen(token, connection)) {
+              const vector = requireBytes(await replica.encodeStateVector(), 'encodeStateVector');
+              if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep1(vector, this.maxFrameBytes));
+            }
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             const applied = message.type === 'sync-step-2'
               ? await applySync(this.asyncReplica!, held, message.update.slice())
@@ -853,14 +815,15 @@ export class CollaborationProvider {
   }
 
   private respondToSyncStep1(token: number, connection: number, remoteStateVector: Uint8Array): void {
+    const request = parseSyncRequest(remoteStateVector);
     let updates: Uint8Array[];
     try {
-      updates = this.chunksAnswer(remoteStateVector, this.replica)
+      updates = this.chunksAnswer(request.chunked, this.replica)
         ? requireUpdates(
-          this.replica.encodeStateAsUpdateChunks!(remoteStateVector.slice(), this.syncChunkLimit()),
+          this.replica.encodeStateAsUpdateChunks!(request.stateVector.slice(), this.syncChunkLimit()),
           'encodeStateAsUpdateChunks'
         )
-        : [requireBytes(this.replica.encodeStateAsUpdate(remoteStateVector.slice()), 'encodeStateAsUpdate')];
+        : [requireBytes(this.replica.encodeStateAsUpdate(request.stateVector.slice()), 'encodeStateAsUpdate')];
     } catch (cause) {
       this.failConnection(
         token,
@@ -869,7 +832,7 @@ export class CollaborationProvider {
       return;
     }
     this.sendSyncAnswer(token, updates, () => this.isCurrentOpen(token, connection));
-    if (!this.isCurrentOpen(token, connection)) return;
+    if (!request.open || !this.isCurrentOpen(token, connection)) return;
 
     let stateVector: Uint8Array;
     try {
@@ -881,41 +844,6 @@ export class CollaborationProvider {
       );
       return;
     }
-    this.requestMissingState(token, stateVector, remoteStateVector);
-  }
-
-  private requestMissingStateFromWorker(
-    token: number,
-    connection: number,
-    remoteStateVector: Uint8Array
-  ): void {
-    void this.asyncReplica!.encodeStateVector().then((vector) => {
-      if (this.isCurrentOpen(token, connection)) {
-        this.requestMissingState(token, requireBytes(vector, 'encodeStateVector'), remoteStateVector);
-      }
-    }).catch((cause) => {
-      if (this.isCurrentOpen(token, connection)) {
-        this.failConnection(
-          token,
-          normalizeError('replica', 'Failed to encode replica state vector', cause)
-        );
-      }
-    });
-  }
-
-  private requestMissingState(
-    token: number,
-    stateVector: Uint8Array,
-    remoteStateVector: Uint8Array
-  ): void {
-    let missing: boolean;
-    try {
-      missing = !stateVectorDominates(stateVector, remoteStateVector);
-    } catch (cause) {
-      this.report(normalizeError('protocol', 'Invalid state vector', cause));
-      return;
-    }
-    if (!missing) return;
     try {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
     } catch (cause) {
@@ -932,13 +860,13 @@ export class CollaborationProvider {
    * partial states.
    */
   private chunksAnswer(
-    remoteStateVector: Uint8Array,
+    requested: boolean,
     replica: Pick<CollaborationReplica | AsyncCollaborationReplica, 'encodeStateAsUpdateChunks'>
   ): boolean {
     return (
       this.syncChunkBytes !== undefined &&
       typeof replica.encodeStateAsUpdateChunks === 'function' &&
-      requestsChunkedSync(remoteStateVector)
+      requested
     );
   }
 

@@ -1,4 +1,5 @@
 ---
+"@betteroffice/docx": patch
 "@betteroffice/xlsx": patch
 "@betteroffice/pptx": patch
 ---
