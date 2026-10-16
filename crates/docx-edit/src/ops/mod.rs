@@ -231,6 +231,78 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
     chunks
 }
 
+/// The formatting of each map embed from `index` up to the next text or other embed.
+fn map_attrs_from<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec<Attrs> {
+    let mut offset = 0;
+    let mut maps = Vec::new();
+    for diff in story.diff(txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if offset + len > index {
+            if matches!(diff.insert, Out::Any(_)) {
+                break;
+            }
+            maps.push(diff.attributes.map(|attrs| *attrs).unwrap_or_default());
+        }
+        offset += len;
+    }
+    maps
+}
+
+/// Removes `len` units at `index`, keeping the formatting of the paragraph marks and other map
+/// embeds after them. yrs tidies the format markers a removal leaves behind up to the next text,
+/// past any map embed, so formatting that closed before them could merge with the same formatting
+/// reopening after them. `chunks` hold the units on either side of the range when known.
+pub(crate) fn remove_units(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    index: u32,
+    len: u32,
+    chunks: &[Chunk],
+) {
+    let unit = |at: u32| {
+        chunks
+            .iter()
+            .find(|chunk| chunk.start <= at && at < chunk.end())
+    };
+    let formatted_before = index.checked_sub(1).is_some_and(|before| {
+        unit(before).is_none_or(|chunk| chunk.attrs.values().any(|value| *value != Any::Null))
+    });
+    let text_after =
+        unit(index + len).is_some_and(|chunk| matches!(chunk.kind, ChunkKind::Text(_)));
+    if !formatted_before || text_after {
+        story.remove_range(txn, index, len);
+        return;
+    }
+    let before = map_attrs_from(story, txn, index + len);
+    story.remove_range(txn, index, len);
+    if before.is_empty() {
+        return;
+    }
+    let mut restores: Vec<(u32, u32, Attrs)> = Vec::new();
+    for (at, (was, now)) in (index..).zip(before.iter().zip(&map_attrs_from(story, txn, index))) {
+        if was == now {
+            continue;
+        }
+        let restore: Attrs = now
+            .keys()
+            .filter(|key| !was.contains_key(*key))
+            .map(|key| (key.clone(), Any::Null))
+            .chain(
+                was.iter()
+                    .filter(|(key, value)| now.get(*key) != Some(value))
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            )
+            .collect();
+        match restores.last_mut() {
+            Some((start, len, attrs)) if *start + *len == at && *attrs == restore => *len += 1,
+            _ => restores.push((at, 1, restore)),
+        }
+    }
+    for (start, len, attrs) in restores {
+        story.format(txn, start, len, attrs);
+    }
+}
+
 pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
     snapshot_range(story, txn, index, index.saturating_add(1))
         .first()
