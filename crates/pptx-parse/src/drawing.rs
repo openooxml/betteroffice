@@ -20,9 +20,9 @@ const MAX_TEXT_SPACING_HUNDREDTHS: i32 = 400_000;
 const MAX_TAB_STOPS: usize = 64;
 
 #[derive(Clone, Copy)]
-struct GuideValue {
-    value: f64,
-    extent_power: f64,
+pub(crate) struct GuideValue {
+    pub(crate) value: f64,
+    pub(crate) extent_power: f64,
 }
 
 impl GuideValue {
@@ -239,7 +239,7 @@ fn parse_shape(
         paths: properties
             .filter(|value| value.child("prstGeom").is_none())
             .and_then(|value| value.child("custGeom"))
-            .and_then(|custom| parse_custom_geometry(custom, parse_shape_extent(transform)))
+            .and_then(|custom| parse_custom_geometry(custom, parse_custom_shape_extent(transform)))
             .unwrap_or_default(),
         base: parse_base(
             element
@@ -686,6 +686,13 @@ fn parse_shape_extent(transform: Option<&XmlElement>) -> Option<(f64, f64)> {
     (width > 0 && height > 0).then_some((width as f64, height as f64))
 }
 
+fn parse_custom_shape_extent(transform: Option<&XmlElement>) -> Option<(f64, f64)> {
+    let extent = transform?.child("ext")?;
+    let width = numeric_attribute(Some(extent), "cx")?;
+    let height = numeric_attribute(Some(extent), "cy")?;
+    (width >= 0 && height >= 0).then_some((width as f64, height as f64))
+}
+
 fn parse_adjust_values(
     properties: Option<&XmlElement>,
     extent: Option<(f64, f64)>,
@@ -725,7 +732,7 @@ fn parse_adjust_values(
     adjustments
 }
 
-fn standard_guide_values((width, height): (f64, f64)) -> BTreeMap<String, GuideValue> {
+pub(crate) fn standard_guide_values((width, height): (f64, f64)) -> BTreeMap<String, GuideValue> {
     let short = width.min(height);
     let long = width.max(height);
     let mut values = BTreeMap::from([
@@ -776,7 +783,7 @@ fn standard_guide_values((width, height): (f64, f64)) -> BTreeMap<String, GuideV
     values
 }
 
-fn evaluate_guide_formula(
+pub(crate) fn evaluate_guide_formula(
     formula: &str,
     values: &BTreeMap<String, GuideValue>,
 ) -> Option<GuideValue> {
@@ -876,7 +883,10 @@ fn additive_extent_power(values: &[GuideValue]) -> f64 {
         .unwrap_or_default()
 }
 
-fn guide_operand(token: &str, values: &BTreeMap<String, GuideValue>) -> Option<GuideValue> {
+pub(crate) fn guide_operand(
+    token: &str,
+    values: &BTreeMap<String, GuideValue>,
+) -> Option<GuideValue> {
     token
         .parse::<f64>()
         .ok()
@@ -1702,7 +1712,13 @@ mod tests {
         let ShapeNode::Shape(guided) = &data.shapes[1] else {
             panic!("expected a shape");
         };
-        assert!(guided.paths.is_empty());
+        assert_eq!(
+            guided.paths[0].commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.5, y: 1.0 },
+            ]
+        );
     }
 
     #[test]
