@@ -1363,6 +1363,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         decorative: block.decorative,
                         hyperlink: formatting.hyperlink.clone(),
                         inline_shape: Some(Box::new(block)),
+                        inline_chart: None,
                         is_insertion: formatting.is_insertion,
                         is_deletion: formatting.is_deletion,
                         change_author: formatting.change_author.clone(),
@@ -1425,9 +1426,8 @@ fn walk_story_chunks<T: ReadTxn>(
             {
                 let pm_offset = paragraph_pm_units;
                 let Some(block) = lower_chart_block(
-                    chart,
-                    txn,
-                    paragraph_pm_start + 1 + u64::from(pm_offset),
+                    &shared_values(chart, txn),
+                    Some(paragraph_pm_start + 1 + u64::from(pm_offset)),
                     env,
                 ) else {
                     return Err(BridgeError::UnsupportedEmbed {
@@ -2209,6 +2209,7 @@ fn lower_image_values(
         decorative: None,
         hyperlink: None,
         inline_shape: None,
+        inline_chart: None,
         is_insertion: formatting.is_insertion,
         is_deletion: formatting.is_deletion,
         change_author: formatting.change_author.clone(),
@@ -2419,27 +2420,29 @@ fn lower_shape_block<T: ReadTxn>(
     })
 }
 
-fn lower_chart_block<T: ReadTxn>(
-    chart: &MapRef,
-    txn: &T,
-    pm_start: u64,
+fn lower_chart_block(
+    values: &std::collections::HashMap<String, Any>,
+    pm_start: Option<u64>,
     env: &RenderEnv,
 ) -> Option<ChartBlock> {
-    let values = shared_values(chart, txn);
-    let chart = map_string(&values, "chartJson")
+    let chart = map_string(values, "chartJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())?;
     let (width, height) = constrain_to_page(
-        map_number(&values, "width")
+        map_number(values, "width")
             .filter(|value| *value != 0.0)
             .unwrap_or(320.0),
-        map_number(&values, "height")
+        map_number(values, "height")
             .filter(|value| *value != 0.0)
             .unwrap_or(220.0),
         env,
     );
     Some(ChartBlock {
         sdt_groups: None,
-        id: BlockId::Str(format!("chart:{pm_start}")),
+        id: BlockId::Str(
+            pm_start
+                .map(|start| format!("chart:{start}"))
+                .unwrap_or_else(|| "chart:inline".to_owned()),
+        ),
         chart,
         width,
         height,
@@ -2448,10 +2451,10 @@ fn lower_chart_block<T: ReadTxn>(
         wrap_text: None,
         relative_height: None,
         behind_doc: None,
-        doc_start: Some(pm_start as f64),
-        doc_end: Some((pm_start + 1) as f64),
-        pm_start: Some(pm_start as f64),
-        pm_end: Some((pm_start + 1) as f64),
+        doc_start: pm_start.map(|start| start as f64),
+        doc_end: pm_start.map(|start| (start + 1) as f64),
+        pm_start: pm_start.map(|start| start as f64),
+        pm_end: pm_start.map(|start| (start + 1) as f64),
     })
 }
 
