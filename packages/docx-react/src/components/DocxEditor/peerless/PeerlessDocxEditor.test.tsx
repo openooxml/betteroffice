@@ -468,6 +468,81 @@ test('unmanaged plugin sidebar items are placed from worker geometry without plu
   h.controller.dispose();
 });
 
+test('plugin sidebar cards discard placement across source replacement', async () => {
+  const hosts = [proposalHost(), proposalHost()];
+  for (const h of hosts) h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  let y: number | null = 30;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(hosts[0]!.readAt as never);
+  const load = spyOn(frameRender, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
+  const create = spyOn(frameRender, 'createDisplayListQueries').mockImplementation(() => {
+    const top = y;
+    return { pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 600, height: 800 }),
+      anchorRect: () => null, rangeRects: (from: number) => from === 4 && top !== null
+        ? [{ pageIndex: 0, x: 10, y: top, width: 5, height: 12 }] : [], dispose() {} } as unknown as frameRender.DisplayListQueries;
+  });
+  restorers.push(() => readAt.mockRestore(), () => load.mockRestore(), () => create.mockRestore(),
+    () => hosts.forEach(h => h.controller.dispose()));
+  const items = [{ id: 'note', anchorPos: 4, render: () => <div data-testid="host-note" /> }];
+  const element = (documentBuffer: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false} pluginSidebarItems={items} />;
+  const view = render(element(source));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  view.getByTestId('peerless-paged-editor').setAttribute('data-peerless-pages-host', '');
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[0]!.binding); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('30px'));
+  const isPlaced = () => {
+    const note = view.queryByTestId('host-note');
+    const sidebar = note?.closest<HTMLElement>('.docx-unified-sidebar');
+    return !!sidebar && sidebar.style.opacity !== '0' && note!.parentElement!.style.visibility !== 'hidden';
+  };
+  holdInitial = true;
+  view.rerender(element(Uint8Array.of(4, 5, 6)));
+  expect(isPlaced()).toBe(false);
+  await waitFor(() => expect(workers.at(-1)!.pendingReplies.length).toBeGreaterThan(0));
+  expect(isPlaced()).toBe(false);
+  y = null;
+  await act(async () => {
+    const worker = workers.at(-1)!;
+    for (const response of worker.pendingReplies.splice(0)) worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[1]!.binding); });
+  await waitFor(() => expect(create.mock.calls.length).toBeGreaterThan(1));
+  expect(isPlaced()).toBe(false);
+  y = 140;
+  const frame = hosts[1]!.binding.viewStore.getSnapshot().geometry!;
+  await act(async () => { hosts[1]!.binding.viewStore.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1 }); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('140px'));
+});
+
+test('unmanaged plugin overlays wait for a ready document and clear on replacement', async () => {
+  holdInitial = true;
+  const element = (documentBuffer: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false}
+    pluginOverlays={<div data-testid="host-overlay" />} />;
+  const view = render(element(source));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  await waitFor(() => expect(workers[0]!.pendingReplies.length).toBeGreaterThan(0));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  await act(async () => {
+    for (const response of workers[0]!.pendingReplies.splice(0)) workers[0]!.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(view.queryByTestId('host-overlay')).not.toBeNull());
+  view.rerender(element(Uint8Array.of(4, 5, 6)));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+});
+
+test('unmanaged plugin overlays stay hidden for placeholder and parse errors', async () => {
+  const element = (documentBuffer?: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false}
+    pluginOverlays={<div data-testid="host-overlay" />} />;
+  const view = render(element());
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  failWholeOpen = true;
+  const onError = mock(() => {});
+  view.rerender(<DocxEditor {...peerlessProps} showToolbar={false} onError={onError}
+    pluginOverlays={<div data-testid="host-overlay" />} />);
+  await waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+});
+
 test('unmanaged plugin sidebar items keyed to a host proposal card are placed at that card', async () => {
   const h = proposalHost();
   await h.submit('propose', { proposals: inputs }, {}).ack;
