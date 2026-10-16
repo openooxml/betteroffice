@@ -24,6 +24,7 @@ const inference = { clientId: 8, story: 'body', paraId: 'p1', endOffset: 6 };
 
 class ChunkReplica implements CollaborationReplica {
   readonly clientId = 1;
+  whole = new Uint8Array(64);
   chunks: unknown = [Uint8Array.of(1), Uint8Array.of(2), Uint8Array.of(0, 3)];
   readonly limits: number[] = [];
   readonly applied: Uint8Array[] = [];
@@ -35,7 +36,7 @@ class ChunkReplica implements CollaborationReplica {
   }
 
   encodeStateAsUpdate(): Uint8Array {
-    throw new Error('the provider asks for chunks');
+    return this.whole;
   }
 
   encodeStateAsUpdateChunks(_vector: Uint8Array, maxChunkBytes: number): Uint8Array[] {
@@ -122,9 +123,11 @@ function sent(transport: Transport) {
 }
 
 describe('CollaborationProvider chunked sync answers', () => {
-  it('answers SyncStep1 with Update chunks closed by a SyncStep2', () => {
+  const frame = { maxFrameBytes: 32 };
+
+  it('answers SyncStep1 that does not fit a frame with Update chunks closed by a SyncStep2', () => {
     const replica = new ChunkReplica();
-    const { transport, errors } = open(replica);
+    const { transport, errors } = open(replica, frame);
     transport.receive(encodeSyncStep1(Uint8Array.of(4)));
 
     expect(sent(transport)).toEqual([
@@ -132,39 +135,37 @@ describe('CollaborationProvider chunked sync answers', () => {
       { type: 'update', update: Uint8Array.of(2) },
       { type: 'sync-step-2', update: Uint8Array.of(0, 3) },
     ]);
-    expect(replica.limits).toEqual([MiB]);
+    expect(replica.limits).toEqual([32 - 3]);
     expect(errors).toEqual([]);
   });
 
-  it('answers with one SyncStep2 when the state fits a chunk', () => {
+  it('answers with the whole diff as one SyncStep2 when it fits a frame', () => {
     const replica = new ChunkReplica();
-    replica.chunks = [Uint8Array.of(5)];
-    const { transport } = open(replica);
+    replica.whole = new Uint8Array(29).fill(5);
+    const { transport } = open(replica, frame);
     transport.receive(encodeSyncStep1(Uint8Array.of(4)));
-    expect(sent(transport)).toEqual([{ type: 'sync-step-2', update: Uint8Array.of(5) }]);
+    expect(sent(transport)).toEqual([{ type: 'sync-step-2', update: replica.whole }]);
+    expect(replica.limits).toEqual([]);
   });
 
   it('keeps chunks within syncChunkBytes and one frame', () => {
-    const replica = new ChunkReplica();
-    const { transport } = open(replica, { syncChunkBytes: 4096 });
-    transport.receive(encodeSyncStep1(Uint8Array.of(4)));
-    const small = new ChunkReplica();
-    open(small, { maxFrameBytes: 64 }).transport.receive(encodeSyncStep1(Uint8Array.of(4)));
-    const framed = new ChunkReplica();
-    open(framed, { maxFrameBytes: 4096, syncChunkBytes: 4096 }).transport.receive(
-      encodeSyncStep1(Uint8Array.of(4))
-    );
-
-    expect(replica.limits).toEqual([4096]);
-    expect(transport.sent).toHaveLength(3);
-    expect(small.limits).toEqual([64 - 3]);
-    expect(framed.limits).toEqual([4096 - 4]);
+    const limits = [
+      { maxFrameBytes: 8192, syncChunkBytes: 4096 },
+      { maxFrameBytes: 64 },
+      { maxFrameBytes: 4096, syncChunkBytes: 4096 },
+    ].map((options) => {
+      const replica = new ChunkReplica();
+      replica.whole = new Uint8Array(10_000);
+      open(replica, options).transport.receive(encodeSyncStep1(Uint8Array.of(4)));
+      return replica.limits;
+    });
+    expect(limits).toEqual([[4096], [64 - 3], [4096 - 4]]);
   });
 
   it('fails before sending when a chunk does not fit a frame', () => {
     const replica = new ChunkReplica();
     replica.chunks = [Uint8Array.of(1), new Uint8Array(64)];
-    const { provider, transport, errors } = open(replica, { maxFrameBytes: 32 });
+    const { provider, transport, errors } = open(replica, frame);
     transport.receive(encodeSyncStep1(Uint8Array.of(4)));
 
     expect(transport.sent).toEqual([]);
@@ -176,7 +177,7 @@ describe('CollaborationProvider chunked sync answers', () => {
     it(`fails with replica when the chunks are ${JSON.stringify(chunks)}`, () => {
       const replica = new ChunkReplica();
       replica.chunks = chunks;
-      const { transport, errors } = open(replica);
+      const { transport, errors } = open(replica, frame);
       transport.receive(encodeSyncStep1(Uint8Array.of(4)));
 
       expect(transport.sent).toEqual([]);
@@ -186,7 +187,7 @@ describe('CollaborationProvider chunked sync answers', () => {
 
   it('queues refused chunks in order against maxPendingBytes', () => {
     const replica = new ChunkReplica();
-    const { provider, transport, errors } = open(replica);
+    const { provider, transport, errors } = open(replica, frame);
     transport.accept = false;
     transport.receive(encodeSyncStep1(Uint8Array.of(4)));
     expect(provider.pendingBytes).toBeGreaterThan(0);
@@ -195,7 +196,7 @@ describe('CollaborationProvider chunked sync answers', () => {
     expect(sent(transport).map((message) => message.type)).toEqual(['update', 'update', 'sync-step-2']);
     expect(errors).toEqual([]);
 
-    const tight = open(new ChunkReplica(), { maxPendingBytes: 8 });
+    const tight = open(new ChunkReplica(), { ...frame, maxPendingBytes: 8 });
     tight.transport.accept = false;
     tight.transport.receive(encodeSyncStep1(Uint8Array.of(4)));
     expect(tight.errors.map((error) => error.code)).toEqual(['backpressure']);
@@ -319,7 +320,7 @@ class AsyncChunkReplica implements AsyncCollaborationReplica {
   }
 
   encodeStateAsUpdate(): Promise<Uint8Array> {
-    return Promise.reject(new Error('the provider asks for chunks'));
+    return Promise.resolve(new Uint8Array(64));
   }
 
   encodeStateAsUpdateChunks(_vector: Uint8Array, limit: number): Promise<Uint8Array[]> {
@@ -354,10 +355,10 @@ async function openAsync(options: CollaborationProviderOptions = {}) {
 
 describe('CollaborationProvider chunked sync with async replicas', () => {
   it('answers SyncStep1 with chunks from the async replica', async () => {
-    const { replica, transport, errors } = await openAsync();
+    const { replica, transport, errors } = await openAsync({ maxFrameBytes: 32 });
     transport.receive(encodeSyncStep1(Uint8Array.of(4)));
     await settle();
-    expect(replica.answers.map((answer) => answer.limit)).toEqual([MiB]);
+    expect(replica.answers.map((answer) => answer.limit)).toEqual([32 - 3]);
     replica.answers[0].result.resolve([Uint8Array.of(1), Uint8Array.of(0, 2)]);
     await settle();
 
@@ -369,7 +370,7 @@ describe('CollaborationProvider chunked sync with async replicas', () => {
   });
 
   it('holds updates past the inbound limit and merges them with the SyncStep2 in order', async () => {
-    const { replica, provider, transport, errors } = await openAsync({ maxPendingBytes: 16 });
+    const { replica, provider, transport, errors } = await openAsync({ maxFrameBytes: 32, maxPendingBytes: 16 });
     transport.receive(encodeSyncStep1(Uint8Array.of(4)));
     for (let value = 1; value <= 4; value++) transport.receive(encodeUpdate(Uint8Array.of(value, value, value)));
     transport.receive(encodeSyncStep2(Uint8Array.of(0, 9)));

@@ -751,13 +751,17 @@ export class CollaborationProvider {
         try {
           if (message.type === 'sync-step-1') {
             const replica = this.asyncReplica!;
-            const updates = typeof replica.encodeStateAsUpdateChunks === 'function'
-              ? requireUpdates(
-                await replica.encodeStateAsUpdateChunks(message.stateVector.slice(), this.syncChunkLimit()),
-                'encodeStateAsUpdateChunks'
-              )
-              : [requireBytes(await replica.encodeStateAsUpdate(message.stateVector.slice()), 'encodeStateAsUpdate')];
+            let updates = [
+              requireBytes(await replica.encodeStateAsUpdate(message.stateVector.slice()), 'encodeStateAsUpdate'),
+            ];
             if (!this.isCurrentOpen(token, connection)) return;
+            if (this.chunksAnswer(updates[0], replica)) {
+              updates = requireUpdates(
+                await replica.encodeStateAsUpdateChunks!(message.stateVector.slice(), this.syncChunkLimit()),
+                'encodeStateAsUpdateChunks'
+              );
+              if (!this.isCurrentOpen(token, connection)) return;
+            }
             this.sendSyncAnswer(token, updates, () => this.isCurrentOpen(token, connection));
             if (!this.isCurrentOpen(token, connection)) return;
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
@@ -809,12 +813,13 @@ export class CollaborationProvider {
   private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
     let updates: Uint8Array[];
     try {
-      updates = typeof this.replica.encodeStateAsUpdateChunks === 'function'
-        ? requireUpdates(
-          this.replica.encodeStateAsUpdateChunks(remoteStateVector.slice(), this.syncChunkLimit()),
+      updates = [requireBytes(this.replica.encodeStateAsUpdate(remoteStateVector.slice()), 'encodeStateAsUpdate')];
+      if (this.chunksAnswer(updates[0], this.replica)) {
+        updates = requireUpdates(
+          this.replica.encodeStateAsUpdateChunks!(remoteStateVector.slice(), this.syncChunkLimit()),
           'encodeStateAsUpdateChunks'
-        )
-        : [requireBytes(this.replica.encodeStateAsUpdate(remoteStateVector.slice()), 'encodeStateAsUpdate')];
+        );
+      }
     } catch (cause) {
       this.failConnection(
         token,
@@ -823,6 +828,20 @@ export class CollaborationProvider {
       return;
     }
     this.sendSyncAnswer(token, updates, () => this.isCurrent(token) && this.isOpen);
+  }
+
+  /**
+   * Chunks only an answer that cannot travel as one SyncStep2, so every room that syncs in one frame keeps doing so:
+   * peers without `applyUpdateChunks` merge chunks one at a time, each with its own typing inference.
+   */
+  private chunksAnswer(
+    update: Uint8Array,
+    replica: Pick<CollaborationReplica | AsyncCollaborationReplica, 'encodeStateAsUpdateChunks'>
+  ): boolean {
+    return (
+      update.byteLength > maxSyncPayloadBytes(this.maxFrameBytes) &&
+      typeof replica.encodeStateAsUpdateChunks === 'function'
+    );
   }
 
   /** Largest update a chunked sync answer may carry: `syncChunkBytes`, within one frame. */

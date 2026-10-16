@@ -85,10 +85,10 @@ export interface CollaborationProviderOptions {
    */
   maxPendingBytes?: number;
   /**
-   * Largest update in a chunked answer to SyncStep1. When the state a peer lacks exceeds it and the replica implements
-   * `encodeStateAsUpdateChunks`, the answer travels as Update messages and a final SyncStep2, which every peer applies
-   * as it would ordinary updates. Default 1 MiB or `maxFrameBytes` if smaller; at most `maxFrameBytes`. A struct
-   * larger than a frame, such as an inline image, still fails to encode.
+   * Largest update in a chunked answer to SyncStep1. When the state a peer lacks does not fit one frame and the replica
+   * implements `encodeStateAsUpdateChunks`, the answer travels as Update messages and a final SyncStep2, which every
+   * peer applies as it would ordinary updates. Default 1 MiB or `maxFrameBytes` if smaller; at most `maxFrameBytes`.
+   * A struct larger than a frame, such as an inline image, still fails to encode.
    */
   syncChunkBytes?: number;
   /**
