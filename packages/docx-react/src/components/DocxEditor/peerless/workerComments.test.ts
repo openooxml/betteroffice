@@ -223,3 +223,43 @@ test('a review refresh from the previous incarnation cannot overwrite getComment
   await controller.query({ kind: 'reviewSnapshot' });
   expect(controller.ref.getComments()).toEqual([{ id: 7, author: 'A', content: [] }]);
 });
+
+
+test('a new incarnation starts its own presented review refresh before an old read settles', async () => {
+  const { controller, read, viewStore } = reviewFixture();
+  const original = read.getMockImplementation()!;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let reading!: () => void;
+  const started = new Promise<void>(resolve => { reading = resolve; });
+  let first = true;
+  read.mockImplementation(async request => {
+    const response = await original(request);
+    if (request.kind !== 'reviewSnapshot') return response;
+    const old = first;
+    first = false;
+    if (old) { reading(); await held; }
+    return { ...response, value: { version: 'native', previewVersion: 0, frameEpoch: 1, layoutRevision: 1,
+      comments: [], uiComments: [{ id: old ? 70 : 80, author: 'B', content: [] }], commentIds: {},
+      proposals: { version: 'native', previewVersion: 0, proposals: [] },
+      proposalGeometry: { version: 'native', previewVersion: 0 } } as never };
+  });
+  const install = (identity: { session: string; incarnation: number; epoch: number }) => viewStore.installFrameGeometry({
+    identity, documentVersion: 'native', coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [],
+  });
+  install(viewStore.getSnapshot().identity);
+  const old = controller.review();
+  void old.catch(() => {});
+  await started;
+  const fresh = controller.review();
+  const identity = { session: 's', incarnation: 2, epoch: 2 };
+  viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, presentedThroughSeq: 0, selection: null, editState });
+  install(identity);
+  try {
+    expect((await fresh).uiComments).toEqual([{ id: 80, author: 'B', content: [] }]);
+    await expect(old).rejects.toThrow('Document was replaced');
+    release();
+    expect(controller.ref.getComments()).toEqual([{ id: 80, author: 'B', content: [] }]);
+    expect((await controller.review()).uiComments).toEqual([{ id: 80, author: 'B', content: [] }]);
+  } finally { release(); controller.dispose(); viewStore.dispose(); }
+});
