@@ -8,7 +8,7 @@ import { DEFAULT_STYLES } from '../../ui/StylePicker';
 import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { memoryPressureLevel, type DocxMemoryPressureLevel, type DocxMemoryStats } from '../memoryStats';
 import type { DocxInput } from '@betteroffice/docx/utils';
-import type { DocxCommandSelection, DocxEditState, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
 import { createDocxCommandController, DocxCommandAdmissionError, type DocxCommandBinding } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandArgs, DocxCommandId, DocxCommandResult } from '../../../commands/types';
@@ -466,7 +466,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   commands.attach(commandBinding);
   const batchResults = new Map<number, DocxEditResult>();
-  const commentResults = new Map<number, NonNullable<DocxEditState['comment'] | DocxEditState['commentChange']>>();
+  const commentResults = new Map<number, { id?: number; comments: Comment[] }>();
   let commentTail: Promise<unknown> = Promise.resolve();
   let commentList: { binding: PeerlessEditSessionBinding; version: number; comments: Comment[] } | null = null;
   const rememberComments = (current: PeerlessEditSessionBinding, version: number, comments: Comment[] | undefined) => {
@@ -499,7 +499,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const addComment = async (current: PeerlessEditSessionBinding, payload: Extract<PeerlessInputIntent, { kind: 'addComment' }>['payload']) => {
     const { result, comment } = await commentCommand(current, { kind: 'addComment', payload });
-    return result.ok && result.status === 'executed' && binding === current && comment && 'id' in comment ? comment.id : null;
+    return result.ok && result.status === 'executed' && binding === current ? comment?.id ?? null : null;
   };
   const insertComment = (request: DocxCommentInsertion): Promise<number | null> => commentRound(() => null, async current => {
     const target = await query({ kind: 'commentInsertionRange', paraId: request.paraId,
