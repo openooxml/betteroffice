@@ -388,7 +388,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     layout?.id !== layoutStable.current?.id ||
     layout?.version !== layoutStable.current?.version ||
     layout?.previewVersion !== layoutStable.current?.previewVersion ||
-    layout?.reservationsVersion !== layoutStable.current?.reservationsVersion ||
+    (layout?.reservationsVersion ?? null) !== (layoutStable.current?.reservationsVersion ?? null) ||
     layout?.zoom !== layoutStable.current?.zoom
   ) {
     layoutStable.current = layout;

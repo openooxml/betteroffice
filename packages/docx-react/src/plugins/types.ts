@@ -145,8 +145,8 @@ export interface DocxPluginLayout {
   version: string;
   /** The proposal preview its pixels show. */
   previewVersion: number;
-  /** The `version` of the reservation sets its pixels include; null before any. */
-  reservationsVersion: string | null;
+  /** The `version` of the reservation sets its pixels include; null or absent before any. */
+  reservationsVersion?: string | null;
   zoom: number;
   pageCount: number;
 }

@@ -143,7 +143,7 @@ function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boo
       a.id === b.id &&
       a.version === b.version &&
       a.previewVersion === b.previewVersion &&
-      a.reservationsVersion === b.reservationsVersion &&
+      (a.reservationsVersion ?? null) === (b.reservationsVersion ?? null) &&
       a.zoom === b.zoom)
   );
 }
