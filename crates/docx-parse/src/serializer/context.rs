@@ -43,6 +43,9 @@ pub(crate) struct RecordedParagraphs {
     /// Every recorded paragraph in writing order: its `sourceOrdinal`, or `None` for the next
     /// of `inserted`.
     pub(crate) order: Vec<Option<u32>>,
+    /// The empty paragraph written for each table cell without content, as the number of
+    /// `order` entries written before it.
+    pub(crate) placeholders: Vec<usize>,
 }
 
 impl SerializerContext {
@@ -168,6 +171,18 @@ impl SerializerContext {
             }
         }
         recorded.order.push(ordinal);
+    }
+
+    /// Records the empty paragraph written outside any other paragraph for a table cell
+    /// without content.
+    pub(crate) fn record_placeholder(&mut self) {
+        if !self.rendered_page_breaks.is_empty() {
+            return;
+        }
+        if let Some(recorder) = self.splice.as_mut() {
+            let recorded = &mut recorder.recorded;
+            recorded.placeholders.push(recorded.order.len());
+        }
     }
 
     pub(crate) fn enter_paragraph(&mut self, rendered_page_break_before: bool) {

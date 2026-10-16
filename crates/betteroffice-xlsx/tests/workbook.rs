@@ -1481,6 +1481,111 @@ fn saving_rejects_invalid_palette_colors_from_model_json() {
 }
 
 #[test]
+fn dxf_plain_open_save_and_current_state_skip_legacy_style_reading() {
+    let source = dxf_count_source(1);
+    let before = xlsx_parse::legacy_style_reads();
+    let plain = Workbook::open(&source).unwrap();
+    let saved = plain.save().unwrap();
+    Workbook::open_for_read(&saved).unwrap();
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+    let peer = Workbook::open_collaborative(&source, 903).unwrap();
+    replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+}
+
+fn dxf_count_source(count: usize) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let dxfs = r#"<dxf><numFmt numFmtId="14" formatCode="0%"/></dxf>"#.repeat(count);
+    let styles = format!("<styleSheet><dxfs>{dxfs}</dxfs></styleSheet>");
+    set_test_part(&mut parts, "xl/styles.xml", styles.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn dxf_entries_over_legacy_style_cap_still_open() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    Workbook::open(&source).unwrap();
+    Workbook::open_collaborative(&source, 902).unwrap();
+}
+
+#[test]
+fn dxf_legacy_style_cap_preserves_fingerprint_mismatch() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    let mut other = WorkbookModel::default();
+    other.sheets.push(Sheet::new("Different"));
+    let peer = Workbook::from_model_collaborative(other, 903).unwrap();
+    let before = replica.model().clone();
+    let reads = xlsx_parse::legacy_style_reads();
+    let error = replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("base fingerprint"), "{error}");
+    assert_eq!(xlsx_parse::legacy_style_reads(), reads + 1);
+    assert_eq!(replica.model(), &before);
+}
+
+#[test]
+fn persisted_dxf_base_fingerprints_keep_pre_filter_pool_readings() {
+    for flags in [
+        "",
+        r#"applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1""#,
+    ] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.styles.cell_xfs.push(xlsx_model::Xf::default());
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let prefix = r#"<numFmts><numFmt numFmtId="164" formatCode="0.000"/></numFmts>"#;
+        let fonts = "<font/><font><b/></font>";
+        let fills = r#"<fill/><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>"#;
+        let borders = r#"<border/><border><left style="thin"/></border>"#;
+        let xf = format!(r#"<xf numFmtId="164" fontId="0" fillId="0" borderId="0" {flags}/>"#);
+        let extension_xf = format!(r#"<xf numFmtId="164" fontId="0" {flags}/>"#);
+        let legacy_projection = format!(
+            r#"<styleSheet><numFmts><numFmt numFmtId="164" formatCode="0.000"/><numFmt numFmtId="14" formatCode="0%"/><numFmt numFmtId="165" formatCode="@"/></numFmts><fonts>{fonts}</fonts><fills>{fills}</fills><borders>{borders}</borders><cellXfs>{xf}{extension_xf}</cellXfs></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", legacy_projection.into_bytes());
+        let pre_fix = xlsx_parse::parse_workbook(&parts).unwrap();
+        let legacy = Workbook::from_model_collaborative(pre_fix, 901).unwrap();
+        let state = legacy.encode_state_as_update_v1();
+        let source_xml = format!(
+            r#"<styleSheet>{prefix}<fonts><font/></fonts><dxfs><dxf><font><b/></font></dxf></dxfs><fills><fill/></fills><extLst><ext><fills><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills></ext></extLst><borders><border/></borders><dxfs><dxf><border><left style="thin"/></border></dxf></dxfs><cellXfs>{xf}</cellXfs><dxfs><dxf><numFmt numFmtId="14" formatCode="0%"/></dxf></dxfs><extLst><ext><numFmt numFmtId="165" formatCode="@"/><cellXfs>{extension_xf}</cellXfs></ext></extLst></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", source_xml.into_bytes());
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut restored = Workbook::open_collaborative(&source, 902).unwrap();
+        restored
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap();
+        assert_eq!(restored.model().styles.num_fmts, [(164, "0.000".into())]);
+        assert_eq!(restored.model().styles.fonts.len(), 1);
+        assert_eq!(restored.model().styles.fills.len(), 1);
+        assert_eq!(restored.model().styles.borders.len(), 1);
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", br#"<worksheet><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#.to_vec());
+        let different = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut different = Workbook::open_collaborative(&different, 903).unwrap();
+        let before = different.model().clone();
+        let error = different
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("base fingerprint"), "{error}");
+        assert_eq!(different.model(), &before);
+    }
+}
+
+#[test]
 fn restored_legacy_snapshots_publish_the_current_palette_identity() {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Data"));
@@ -4996,13 +5101,16 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
     let _remote_subscription = target
         .observe_update_v1(move |event| observed.lock().unwrap().push(event))
         .unwrap();
+    let state_vector = target.encode_state_vector_v1();
     assert!(
         target
             .apply_update_v1(&updates[1], CalculationOptions::default())
             .unwrap()
             .applied
     );
-    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "9");
+    assert_eq!(target.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "");
+    assert_eq!(target.encode_state_vector_v1(), state_vector);
     assert_eq!(remote_events.lock().unwrap().len(), 1);
     assert!(
         target
@@ -5011,7 +5119,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .applied
     );
     assert_eq!(target.model(), source.model());
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
     assert_eq!(
         remote_events.lock().unwrap()[0].origin,
         UpdateOrigin::Remote
@@ -5028,7 +5136,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .unwrap()
             .applied
     );
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
 }
 
 #[test]
