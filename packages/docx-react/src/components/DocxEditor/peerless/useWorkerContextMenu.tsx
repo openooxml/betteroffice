@@ -41,6 +41,7 @@ export function useWorkerContextMenu(options: {
   submit?(intent: PeerlessPropertyIntent): Promise<DocxCommandResult>;
   onPaste?: () => void;
   onError?: (error: Error) => void;
+  beginAddComment?(): Promise<void>;
 }) {
   const [menu, setMenu] = useState<{
     binding: PeerlessEditSessionBinding; snapshot: ReturnType<PeerlessEditSessionBinding['viewStore']['getSnapshot']>;
@@ -87,6 +88,9 @@ export function useWorkerContextMenu(options: {
     ],
     { action: 'selectAll', label: t('contextMenu.selectAll') },
   ];
+  if (hasSelection && !readOnly && options.beginAddComment && (selection?.focus.story === 'body' || selection?.focus.story.startsWith('body:'))) {
+    items.push({ action: 'addComment', label: 'Comment' });
+  }
   if (menu?.object && !readOnly && options.submit) {
     if (menu.object.kind === 'image') items.unshift({ action: 'resizeImage', label: 'Resize image' }, { action: 'moveImage', label: 'Move image', dividerAfter: true });
     else items.unshift({ action: 'resizeColumn', label: 'Column width', dividerAfter: true });
@@ -118,7 +122,8 @@ export function useWorkerContextMenu(options: {
         return;
       }
       if (options.environment().readOnly || options.environment().mode === 'viewing') return;
-      if (action === 'delete' && selection) current.commands.submit({ kind: 'replaceSelection', payload: { text: '', selection } }, { fence: true, source: 'paste' });
+      if (action === 'addComment') await options.beginAddComment?.();
+      else if (action === 'delete' && selection) current.commands.submit({ kind: 'replaceSelection', payload: { text: '', selection } }, { fence: true, source: 'paste' });
       else if (action === 'paste' || action === 'pasteAsPlainText') {
         if (action === 'paste') {
           const fragment = await readClipboardFragment();

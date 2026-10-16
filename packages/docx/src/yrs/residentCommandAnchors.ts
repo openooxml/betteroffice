@@ -40,7 +40,7 @@ function position(value: unknown): value is DocxCommandPosition {
 }
 
 export function commandSelectionRange(
-  engine: ResidentDocxCommandEngine,
+  engine: Pick<ResidentDocxCommandEngine, 'geometryReader'>,
   selected: DocxCommandSelection
 ): YrsStoryRange | null {
   if (!selected || typeof selected !== 'object' || Array.isArray(selected) ||

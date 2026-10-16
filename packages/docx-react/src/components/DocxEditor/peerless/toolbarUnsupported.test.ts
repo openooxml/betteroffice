@@ -5,9 +5,25 @@ test('worker toolbar preserves unsupported command reasons', () => {
   const { controller } = toolbarFixture();
   for (const id of ['highlightColor', 'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous',
     'insertTOC', 'imageWrap', 'imageTransform',
-    'commentsSidebar', 'reportIssue'] as const) {
+    'reportIssue'] as const) {
     expect(controller.commands.store.getState(id)).toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
   }
+});
+
+test('worker comments sidebar toggles through its host binding and refuses a fixed controlled sidebar', async () => {
+  const { controller } = toolbarFixture();
+  expect(controller.commands.store.getState('commentsSidebar')).toMatchObject({ enabled: false, disabledReason: { code: 'controlled-sidebar' } });
+  for (const [control, status] of [['internal', 'executed'], ['host', 'requested']] as const) {
+    let open = false;
+    const update = () => controller.update({ read: (async () => null) as never, focus() {}, zoom: 1,
+      commentsSidebar: { open, control, toggle: () => { open = !open; update(); } } });
+    update();
+    expect(controller.commands.store.getState('commentsSidebar')).toMatchObject({ enabled: true, active: false });
+    expect(await controller.commands.execute('commentsSidebar', null)).toEqual({ ok: true, status });
+    expect(controller.commands.store.getState('commentsSidebar')).toMatchObject({ enabled: true, active: true });
+  }
+  controller.update({ read: (async () => null) as never, focus() {}, zoom: 1, commentsSidebar: { open: true, control: 'fixed', toggle() {} } });
+  expect(controller.commands.store.getState('commentsSidebar')).toMatchObject({ enabled: false, active: true, disabledReason: { code: 'controlled-sidebar' } });
 });
 
 test('worker table selection follows the shell table allowlist', () => {

@@ -263,3 +263,104 @@ test('a new incarnation starts its own presented review refresh before an old re
     expect((await controller.review()).uiComments).toEqual([{ id: 80, author: 'B', content: [] }]);
   } finally { release(); controller.dispose(); viewStore.dispose(); }
 });
+
+type Note = { id: number; author: string; date: string; content: unknown[]; done?: boolean; parentId?: number };
+const note = (id: number, text: string, extra: Partial<Note> = {}): Note => ({ id, author: 'A', date: '2026-01-01T00:00:00Z',
+  content: [{ type: 'paragraph', formatting: {}, content: [{ type: 'run', formatting: {}, content: [{ type: 'text', text }] }] }], ...extra });
+
+function sidebarFixture(options: { hostComments?: Note[]; readOnly?: boolean; mode?: 'viewing' } = {}) {
+  const range = { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 7 } };
+  const selection = { anchor: { story: 'body', paraId: 'p', offset: 7 }, focus: { story: 'body', paraId: 'p', offset: 3 } };
+  let projected: Note[] = [note(7, 'Root'), note(8, 'Child', { parentId: 7 })];
+  let seq = 0;
+  const viewStore = createPeerlessViewStore({ identity: { session: 's', incarnation: 1, epoch: 1 }, version: 0,
+    throughSeq: 0, presentedThroughSeq: 0, workerSelection: selection, anchors: null, editState, geometry: null });
+  const read = mock(async (request: { kind: string; target?: { id: number } }) => ({ status: 'ok', version: `native-${seq}`, value:
+    request.kind === 'readParagraphs' ? { ok: true, version: `native-${seq}`, paragraphs: [] } :
+    request.kind === 'commentSelectionRange' ? range :
+    request.kind === 'reviewTarget' ? projected.some(comment => comment.id === request.target!.id) ? { id: `n${request.target!.id}`, ranges: [range] } : null :
+    request.kind === 'reviewSnapshot' ? { comments: [], uiComments: structuredClone(projected), commentIds: {}, frameEpoch: 1, layoutRevision: 1 } : null }));
+  const submit = mock((intent: { kind: string; payload: { id?: string; body?: string; parentId?: string; patch?: { done: boolean } } }) => {
+    seq += 1;
+    const id = Number(intent.payload.id?.slice(1));
+    if (intent.kind === 'addComment') projected = [...projected, note(20 + seq, intent.payload.body!, intent.payload.parentId ? { parentId: Number(intent.payload.parentId.slice(1)) } : {})];
+    if (intent.kind === 'updateComment') projected = projected.map(comment => comment.id === id ? { ...comment, done: intent.payload.patch!.done } : comment);
+    if (intent.kind === 'removeComment') projected = projected.filter(comment => comment.id !== id);
+    const receipt = intent.kind === 'addComment' ? { comment: { seq, id: 20 + seq, comments: structuredClone(projected) } } : { commentChange: { seq, comments: structuredClone(projected) } };
+    const view = viewStore.getSnapshot();
+    viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version + 1, throughSeq: seq, presentedThroughSeq: 0, selection, editState: { ...editState, ...receipt } });
+    return { status: 'submitted', ticket: { seq, ack: Promise.resolve({ status: 'applied', seq }), presented: Promise.resolve('presented') } };
+  });
+  const events: unknown[][] = [];
+  const controller = createPeerlessShellController({ read: read as never, readAt: read as never, focus() {}, zoom: 1, author: 'Me',
+    readOnly: options.readOnly, mode: options.mode, hostComments: options.hostComments as never,
+    onCommentsChange: comments => events.push(['change', comments]), onCommentAdd: comment => events.push(['add', comment]),
+    onCommentReply: (reply, parent) => events.push(['reply', reply, parent]), onCommentResolve: comment => events.push(['resolve', comment]),
+    onCommentDelete: comment => events.push(['delete', comment]) });
+  const binding = { session: { flush: async () => {} }, admission: {}, commands: { submit }, viewStore } as unknown as PeerlessEditSessionBinding;
+  controller.attach(binding);
+  return { controller, submit, events, range, projected: () => projected };
+}
+
+test('comment sidebar actions apply through the worker and notify the host in hybrid order', async () => {
+  const { controller, submit, events, range, projected } = sidebarFixture();
+  await controller.query({ kind: 'reviewSnapshot' });
+  const draft = await controller.beginComment();
+  expect(draft).toMatchObject({ ranges: [range] });
+  expect(events).toEqual([]);
+  expect(await controller.comment({ kind: 'add', draft: draft!, text: 'New' })).toEqual({ ok: true, status: 'executed' });
+  expect(submit.mock.calls[0]![0]).toMatchObject({ kind: 'addComment', payload: { ranges: [range], author: 'Me', body: 'New', expectVersion: 'native-0' } });
+  const added = projected().at(-1)!;
+  expect(events.splice(0)).toEqual([['change', projected()], ['add', added]]);
+  const root = projected()[0]!;
+  expect(await controller.comment({ kind: 'reply', id: 7, text: 'Answer' })).toMatchObject({ ok: true });
+  expect(submit.mock.calls[1]![0]).toMatchObject({ kind: 'addComment', payload: { parentId: 'n7', body: 'Answer', author: 'Me' } });
+  expect(events.splice(0)).toEqual([['change', projected()], ['reply', projected().at(-1), root]]);
+  expect(await controller.comment({ kind: 'resolve', id: 7 })).toMatchObject({ ok: true });
+  expect(events.splice(0)).toEqual([['change', projected()], ['resolve', { ...root, done: true }]]);
+  expect(await controller.comment({ kind: 'reopen', id: 7 })).toMatchObject({ ok: true });
+  expect(events.splice(0)).toEqual([['change', projected()]]);
+  const reopened = projected()[0]!;
+  expect(await controller.comment({ kind: 'delete', id: 7 })).toMatchObject({ ok: true });
+  expect(submit.mock.calls.slice(4).map(call => call[0])).toEqual([
+    { kind: 'removeComment', payload: { id: 'n8', expectVersion: 'native-4' } },
+    { kind: 'removeComment', payload: { id: 'n22', expectVersion: 'native-5' } },
+    { kind: 'removeComment', payload: { id: 'n7', expectVersion: 'native-6' } }]);
+  expect(projected().map(comment => comment.id)).toEqual([21]);
+  expect(events).toEqual([['change', projected()], ['delete', reopened]]);
+});
+
+test('read-only and viewing editors refuse comment sidebar actions without notifying the host', async () => {
+  for (const options of [{ readOnly: true }, { mode: 'viewing' as const }]) {
+    const { controller, submit, events } = sidebarFixture(options);
+    await controller.query({ kind: 'reviewSnapshot' });
+    expect(await controller.beginComment()).toBeNull();
+    for (const action of [{ kind: 'reply', id: 7, text: 'No' }, { kind: 'resolve', id: 7 }, { kind: 'reopen', id: 7 }, { kind: 'delete', id: 7 }] as const) {
+      expect(await controller.comment(action)).toMatchObject({ ok: false });
+    }
+    expect(submit).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  }
+});
+
+test('controlled comment actions change only the requested entries of the host list', async () => {
+  const hosted = [note(7, 'Host root'), note(30, 'Host only')];
+  const { controller, submit, events } = sidebarFixture({ hostComments: hosted });
+  expect(await controller.comment({ kind: 'resolve', id: 7 })).toMatchObject({ ok: true });
+  expect(submit).toHaveBeenCalledTimes(1);
+  expect(events.splice(0)).toEqual([['change', [{ ...hosted[0], done: true }, hosted[1]]], ['resolve', { ...hosted[0], done: true }]]);
+  expect(await controller.comment({ kind: 'resolve', id: 30 })).toMatchObject({ ok: true });
+  expect(await controller.comment({ kind: 'reopen', id: 30 })).toMatchObject({ ok: true });
+  expect(submit).toHaveBeenCalledTimes(1);
+  expect(events.splice(0)).toEqual([['change', [hosted[0], { ...hosted[1], done: true }]], ['resolve', { ...hosted[1], done: true }],
+    ['change', [hosted[0], { ...hosted[1], done: undefined }]]]);
+  expect(await controller.comment({ kind: 'reply', id: 30, text: 'Metadata reply' })).toMatchObject({ ok: true });
+  const [[, changed], [, reply, parent]] = events.splice(0) as [[string, Note[]], [string, Note, Note]];
+  expect(reply).toMatchObject({ id: 31, parentId: 30, author: 'Me' });
+  expect(changed).toEqual([...hosted, reply]);
+  expect(parent).toEqual(hosted[1]);
+  expect(await controller.comment({ kind: 'delete', id: 30 })).toMatchObject({ ok: true });
+  expect(submit).toHaveBeenCalledTimes(1);
+  expect(events).toEqual([['change', [hosted[0]]], ['delete', hosted[1]]]);
+  expect(controller.ref.getComments()).toEqual(hosted as never);
+});

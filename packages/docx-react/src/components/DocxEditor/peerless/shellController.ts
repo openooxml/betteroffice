@@ -23,7 +23,7 @@ import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
 import { workerRevisions, type WorkerRevisionState } from './workerRevisions';
-import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget } from '@betteroffice/docx/yrs';
+import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget, YrsStoryRange } from '@betteroffice/docx/yrs';
 import type { Comment } from '@betteroffice/docx/types/content';
 
 import { PeerlessSyncApiError } from './contracts';
@@ -49,7 +49,11 @@ export interface PeerlessWorkerQuery<K extends ResidentDocumentRead['kind'] = Re
   selection: DocxCommandSelection | null | undefined;
 }
 
-interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
+export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; ranges: YrsStoryRange[]; expectVersion: string }
+export type WorkerCommentAction = { kind: 'add'; draft: WorkerCommentDraft; text: string } | { kind: 'reply'; id: number; text: string } |
+  { kind: 'resolve' | 'reopen' | 'delete'; id: number };
+
+interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
   openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
@@ -70,6 +74,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   scrollToReviewTarget?(target: ResidentReviewTarget): Promise<boolean>;
   comments?(): Comment[];
   hostComments?: Comment[];
+  commentsSidebar?: { open: boolean; control: DocxCommandEnvironment['sidebarControl']; toggle(): void };
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
@@ -151,9 +156,9 @@ export function createPeerlessShellController(initial: Options) {
       status: snapshot.status === 'failed' ? 'unavailable' : snapshot.status === 'opening' ? 'loading' : snapshot.status,
       readOnly: options.readOnly === true || (mode() !== 'viewing' && view?.editState?.readOnly === true),
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
-      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
+      sidebarOpen: options.commentsSidebar?.open ?? false, sidebarControl: options.commentsSidebar?.control ?? 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
+      supportedCommands: new Set(['zoom', 'commentsSidebar', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage', 'tableAction',
         'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor']),
@@ -364,7 +369,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'open', 'print', 'insertTable', 'reviewAccept', 'reviewReject'].includes(id),
+    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'commentsSidebar', 'open', 'print', 'insertTable', 'reviewAccept', 'reviewReject'].includes(id),
     admit: async (operation) => {
       const current = binding;
       if (current && snapshot.status === 'ready') {
@@ -467,6 +472,10 @@ export function createPeerlessShellController(initial: Options) {
         const delta = { color: nativeColor, other: { textColor: value } };
         return settleCommand(current, current.commands.format({ kind: 'formatRange', payload: { delta } }, { fence: true }));
       }
+      if (id === 'commentsSidebar' && options.commentsSidebar) {
+        options.commentsSidebar.toggle();
+        return { ok: true, status: options.commentsSidebar.control === 'internal' ? 'executed' : 'requested' };
+      }
       if (id === 'zoom') {
         options = { ...options, zoom: (args as { scale: number }).scale };
         options.onZoom?.(options.zoom);
@@ -524,51 +533,133 @@ export function createPeerlessShellController(initial: Options) {
     commentTail = pending.catch(() => null);
     return pending;
   };
-  const commentCommand = async (current: PeerlessEditSessionBinding, intent: PeerlessInputIntent) => {
+  const commentTicket = async (current: PeerlessEditSessionBinding, intent: PeerlessInputIntent) => {
     const { result, seq } = await settleTicket(current, current.commands.submit(intent, { fence: true }));
     const comment = seq === undefined ? undefined : commentResults.get(seq);
     if (seq !== undefined) commentResults.delete(seq);
-    if (result.ok && result.status === 'executed' && comment && binding === current) emit(options.onCommentsChange, comment.comments);
-    return { result, comment };
+    return { result, comment: result.ok && result.status === 'executed' && binding === current ? comment : undefined };
   };
+  const knownComments = (): Comment[] => options.hostComments ??
+    (snapshot.view && commentsMatch(snapshot.view) ? commentList!.comments : options.comments?.() ?? []);
+  const commentsChanged = (current: PeerlessEditSessionBinding, receipt: { comments: Comment[] } | undefined, change: (comments: Comment[]) => Comment[]) => {
+    const next = options.hostComments ? change(options.hostComments) : receipt?.comments;
+    if (next && binding === current) emit(options.onCommentsChange, next);
+  };
+  const hostOnly = (commentId: number) => !!options.hostComments?.some(comment => comment.id === commentId);
   const addComment = async (current: PeerlessEditSessionBinding, payload: Extract<PeerlessInputIntent, { kind: 'addComment' }>['payload']) => {
-    const { result, comment } = await commentCommand(current, { kind: 'addComment', payload });
-    return result.ok && result.status === 'executed' && binding === current ? comment?.id ?? null : null;
+    const { comment } = await commentTicket(current, { kind: 'addComment', payload });
+    const added = comment?.comments.find(entry => entry.id === comment.id);
+    if (added) commentsChanged(current, comment, comments => [...comments, added]);
+    return added ?? null;
   };
   const insertComment = (request: DocxCommentInsertion): Promise<number | null> => commentRound(() => null, async current => {
     const target = await query({ kind: 'commentInsertionRange', paraId: request.paraId,
       ...(request.search === undefined ? {} : { search: request.search }) });
     if (!target.value || 'status' in target.value || current !== binding) return null;
-    return addComment(current, { ranges: [target.value], author: request.author, date: new Date().toISOString(), body: request.text, expectVersion: target.version });
+    return (await addComment(current, { ranges: [target.value], author: request.author, date: new Date().toISOString(), body: request.text, expectVersion: target.version }))?.id ?? null;
   });
-  /** Adds a reply anchored where its parent is; null when the parent does not exist or the editor is read-only. */
-  const replyToComment = (commentId: number, text: string, author: string): Promise<number | null> => commentRound(() => null, async current => {
+  const reply = (commentId: number, text: string, author: string): Promise<Comment | null> => commentRound(() => null, async current => {
     const target = await query({ kind: 'reviewTarget', target: { kind: 'comment', id: commentId } });
-    if (!target.value?.ranges.length || current !== binding) return null;
+    if (current !== binding) return null;
+    if (!target.value?.ranges.length) {
+      if (target.value || !hostOnly(commentId)) return null;
+      const id = Math.max(-1, ...knownComments().map(comment => comment.id), ...(commentList?.comments ?? []).map(comment => comment.id)) + 1;
+      const added: Comment = { id, author, date: new Date().toISOString(), parentId: commentId,
+        content: [{ type: 'paragraph', formatting: {}, content: [{ type: 'run', formatting: {}, content: [{ type: 'text', text }] }] }] };
+      commentsChanged(current, undefined, comments => [...comments, added]);
+      return added;
+    }
     return addComment(current, { ranges: target.value.ranges, author, date: new Date().toISOString(), body: text,
       parentId: target.value.id, expectVersion: target.version });
   });
-  const changeComment = (commentId: number, intent: (id: string, expectVersion: string) => PeerlessInputIntent): Promise<DocxCommandResult> => {
-    const refused = (): DocxCommandResult => {
-      const env = environment();
-      return { ok: false, failure: env.mode === 'viewing' ? { code: 'viewing-mode', message: 'The editor is viewing.' }
-        : env.readOnly ? { code: 'read-only', message: 'The editor is read-only.' } : { code: 'document-replaced', message: 'Document was replaced.' } };
-    };
-    return commentRound(refused, async current => {
-      const target = await query({ kind: 'reviewTarget', target: { kind: 'comment', id: commentId } });
-      if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
-      if (!target.value) return { ok: false, failure: { code: 'command-failed', message: 'unknown-comment' } };
-      return (await commentCommand(current, intent(target.value.id, target.version))).result;
-    }, error => ({ ok: false, failure: { code: 'command-failed', message: error.message } }));
+  /** Adds a reply anchored where its parent is; null when the parent does not exist or the editor is read-only. */
+  const replyToComment = async (commentId: number, text: string, author: string): Promise<number | null> => (await reply(commentId, text, author))?.id ?? null;
+  const refusedComment = (): DocxCommandResult => {
+    const env = environment();
+    return { ok: false, failure: env.mode === 'viewing' ? { code: 'viewing-mode', message: 'The editor is viewing.' }
+      : env.readOnly ? { code: 'read-only', message: 'The editor is read-only.' } : { code: 'document-replaced', message: 'Document was replaced.' } };
   };
+  const unknownComment: DocxCommandResult = { ok: false, failure: { code: 'command-failed', message: 'unknown-comment' } };
+  const replacedComment: DocxCommandResult = { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+  const changeComments = (commentIds: number[], intent: (id: string, expectVersion: string) => PeerlessInputIntent,
+    change: (comments: Comment[], changed: number[]) => Comment[]): Promise<DocxCommandResult> =>
+    commentRound(refusedComment, async current => {
+      let receipt: { comments: Comment[] } | undefined;
+      const changed: number[] = [];
+      for (const commentId of commentIds) {
+        const target = await query({ kind: 'reviewTarget', target: { kind: 'comment', id: commentId } });
+        if (current !== binding) return replacedComment;
+        if (!target.value) {
+          if (hostOnly(commentId)) { changed.push(commentId); continue; }
+          if (commentId !== commentIds.at(-1)) continue;
+          if (changed.length) commentsChanged(current, receipt, comments => change(comments, changed));
+          return unknownComment;
+        }
+        const step = await commentTicket(current, intent(target.value.id, target.version));
+        if (!step.result.ok) {
+          if (changed.length) commentsChanged(current, receipt, comments => change(comments, changed));
+          return step.result;
+        }
+        receipt = step.comment ?? receipt;
+        changed.push(commentId);
+      }
+      commentsChanged(current, receipt, comments => change(comments, changed));
+      return { ok: true, status: 'executed' };
+    }, error => ({ ok: false, failure: { code: 'command-failed', message: error.message } }));
   /** Marks a comment done or open again through the worker command queue. */
-  const setCommentDone = (commentId: number, done: boolean) =>
-    changeComment(commentId, (id, expectVersion) => ({ kind: 'updateComment', payload: { id, patch: { done }, expectVersion } }));
+  const setCommentDone = (commentId: number, done: boolean) => changeComments([commentId],
+    (id, expectVersion) => ({ kind: 'updateComment', payload: { id, patch: { done }, expectVersion } }),
+    comments => comments.map(comment => comment.id === commentId ? { ...comment, done: done || undefined } : comment));
   /** Removes a comment through the worker command queue. */
-  const removeComment = (commentId: number) =>
-    changeComment(commentId, (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }));
-  const getComments = (): Comment[] => snapshot.status !== 'ready' ? [] :
-    structuredClone(options.hostComments ?? (snapshot.view && commentsMatch(snapshot.view) ? commentList!.comments : options.comments?.() ?? []));
+  const removeComment = (commentId: number) => changeComments([commentId],
+    (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }),
+    comments => comments.filter(comment => comment.id !== commentId));
+  const removeThread = (commentId: number) => changeComments(
+    [...knownComments().filter(comment => comment.parentId === commentId).map(comment => comment.id), commentId],
+    (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }),
+    (comments, removed) => comments.filter(comment => !removed.includes(comment.id) && !(removed.includes(commentId) && comment.parentId === commentId)));
+  /** Reads the current body selection as the range a new comment anchors; null when nothing commentable is selected. */
+  const beginComment = async (): Promise<WorkerCommentDraft | null> => {
+    const env = environment();
+    if (!binding || snapshot.status !== 'ready' || env.readOnly || env.mode === 'viewing') return null;
+    const current = await flush();
+    const selection = current.viewStore.getSnapshot().workerSelection;
+    if (!selection) return null;
+    const target = await query({ kind: 'commentSelectionRange', selection });
+    const range = target.value;
+    if (!range || current !== binding || JSON.stringify(target.selection) !== JSON.stringify(selection) ||
+      (range.story !== 'body' && !range.story.startsWith('body:')) ||
+      (range.start.paraId === range.end.paraId && range.start.offset === range.end.offset)) return null;
+    return { binding: current, ranges: [range], expectVersion: target.version };
+  };
+  const failedComment: DocxCommandResult = { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } };
+  /** Runs a comment sidebar action and reports it to the host callbacks the way the hybrid editor does. */
+  const comment = async (action: WorkerCommentAction): Promise<DocxCommandResult> => {
+    const author = options.author ?? 'User';
+    const target = action.kind === 'add' ? undefined : knownComments().find(entry => entry.id === action.id);
+    if (action.kind === 'add') {
+      const added = await commentRound(() => null, async current => current !== action.draft.binding ? null : addComment(current, {
+        ranges: action.draft.ranges, author, date: new Date().toISOString(), body: action.text, expectVersion: action.draft.expectVersion }));
+      if (!added) return failedComment;
+      emit(options.onCommentAdd, added);
+      return { ok: true, status: 'executed' };
+    }
+    if (action.kind === 'reply') {
+      const added = await reply(action.id, action.text, author);
+      if (!added) return failedComment;
+      if (target) emit<[Comment, Comment]>(options.onCommentReply && (([value, parent]: [Comment, Comment]) => options.onCommentReply?.(value, parent)), [added, target]);
+      return { ok: true, status: 'executed' };
+    }
+    if (action.kind === 'delete') {
+      const result = await removeThread(action.id);
+      if (result.ok && target) emit(options.onCommentDelete, target);
+      return result;
+    }
+    const result = await setCommentDone(action.id, action.kind === 'resolve');
+    if (result.ok && action.kind === 'resolve' && target) emit(options.onCommentResolve, { ...target, done: true });
+    return result;
+  };
+  const getComments = (): Comment[] => snapshot.status !== 'ready' ? [] : structuredClone(knownComments());
   /** Selects a comment's or revision's first anchored range and scrolls it into view; false when it does not exist. */
   const revealReviewTarget = (target: ResidentReviewTarget): Promise<boolean> =>
     options.scrollToReviewTarget?.(target) ?? Promise.resolve(false);
@@ -690,7 +781,7 @@ export function createPeerlessShellController(initial: Options) {
   });
   return {
     commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview, revealReviewTarget,
-    replyToComment, setCommentDone, removeComment,
+    replyToComment, setCommentDone, removeComment, beginComment, comment,
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,

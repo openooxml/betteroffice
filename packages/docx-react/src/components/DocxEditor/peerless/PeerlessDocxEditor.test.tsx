@@ -500,6 +500,35 @@ test('controlled comments replace the worker comment projection in the sidebar a
   h.controller.dispose();
 });
 
+test('worker comments sidebar opens once for comments, toggles with its callback and shows resolved comments', async () => {
+  const h = proposalHost({ automatic: false });
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.ResidentReviewSnapshot };
+  const review = { ...base.value, uiComments: [noteComment(3, 'Open note'), noteComment(4, 'Done note', { done: true })], commentIds: {}, commentGeometry: {} };
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
+    ({ status: 'ok', version, value: request.kind === 'reviewSnapshot' ? review : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
+  restorers.push(() => readAt.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const opened = mock((_open: boolean) => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} onCommentsSidebarOpenChange={opened} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-comment-card')).toHaveLength(1));
+  expect(view.container.querySelectorAll('[data-comment-resolved="true"]')).toHaveLength(1);
+  expect(opened.mock.calls).toEqual([[true]]);
+  expect(ref.current!.commands.getState('commentsSidebar')).toMatchObject({ enabled: true, active: true });
+  await act(async () => { expect(await ref.current!.commands.execute('commentsSidebar', null)).toEqual({ ok: true, status: 'executed' }); });
+  expect(opened.mock.calls).toEqual([[true], [false]]);
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-comment-card, [data-comment-resolved="true"]')).toHaveLength(0));
+  view.rerender(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} onCommentsSidebarOpenChange={opened} commentsSidebarOpen={false} />);
+  await act(async () => { expect(await ref.current!.commands.execute('commentsSidebar', null)).toEqual({ ok: true, status: 'requested' }); });
+  expect(opened.mock.calls.at(-1)).toEqual([true]);
+  expect(view.container.querySelectorAll('.docx-comment-card')).toHaveLength(0);
+  view.unmount();
+  h.controller.dispose();
+});
+
 test('d8a_peerless_mount_creates_no_main_document', async () => {
   const main = spyOn(yrs, 'createYrsSession').mockImplementation(() => {
     throw new Error('main document created');

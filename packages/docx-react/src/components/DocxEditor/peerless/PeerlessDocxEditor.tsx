@@ -51,6 +51,8 @@ import { openPrintWindow } from '@betteroffice/docx';
 import { createWorkerPrintCapture, printBitmap } from './printPages';
 import { decodeCommandFrameDeltas } from './frameDeltas';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
+import { useWorkerComments, WorkerCommentButton } from './useWorkerComments';
+import { useControllableBoolean } from '../hooks/useControllableBoolean';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createWorkerSearch } from './workerSearch';
 import { FindReplaceDialog } from '../../dialogs/FindReplaceDialog';
@@ -153,8 +155,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, reportRecoverableError]);
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
+  const [commentsOpen, setCommentsOpen] = useControllableBoolean(props.commentsSidebarOpen, props.onCommentsSidebarOpenChange);
+  const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
   const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
     comments: () => props.comments ?? sourceComments.current, hostComments: props.comments,
+    commentsSidebar: { open: commentsOpen, control: props.commentsSidebarOpen === undefined ? 'internal' as const : props.onCommentsSidebarOpenChange ? 'host' as const : 'fixed' as const,
+      toggle: () => { setCommentsOpen(open => !open); setExpandedSidebarItem(null); } },
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
@@ -197,7 +203,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
     (target, focus) => navigation.revealParagraph(target.paraId, target.story, focus)));
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
-  const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
   const [pluginHost] = useState(() => createDocxPluginHost({
     pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
     commands: () => controller.commands, layout: () => ({ queries: null, complete: false, failed: false }),
@@ -717,9 +722,19 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     props.onPaste?.();
     return true;
   }, [controller, props.onPaste]);
+  const selectionAnchor = useCallback(() => {
+    const frame = controller.getSnapshot().view?.geometry;
+    const rect = frame?.selectionRects[0];
+    const page = rect && frame.pages.find(({ bounds }) => rect.y >= bounds.y && rect.y < bounds.y + bounds.height);
+    if (!rect || !page) return null;
+    const bounds = pluginGeometry.geometry()?.dom.getPageBounds(page.page.pageIndex);
+    return { y: (bounds?.y ?? page.bounds.y + 48 / zoom) + rect.y - page.bounds.y, right: bounds ? bounds.x + bounds.width : page.bounds.x + page.bounds.width };
+  }, [controller, pluginGeometry, zoom]);
+  const workerComments = useWorkerComments({ controller, documentKey: shellState.view?.identity.session, setOpen: setCommentsOpen,
+    setExpanded: setExpandedSidebarItem, selectionAnchor, focus, onError: reportRecoverableError });
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
-    submit: controller.submit, onPaste: props.onPaste, onError: reportRecoverableError });
+    submit: controller.submit, onPaste: props.onPaste, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment });
   useLayoutEffect(() => {
     active.current = null;
     setPreviewJob(null);
@@ -804,8 +819,19 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const trackedChanges = controller.trackedChanges();
   const revisionCallbacks = useMemo(() => workerRevisionCallbacks(controller), [controller]);
   const comments = props.comments ?? review?.uiComments ?? sourceComments.current;
-  const commentItems = useCommentSidebarItems({ comments: props.commentsSidebarOpen === false ? [] : comments, trackedChanges: props.commentsSidebarOpen === false ? [] : trackedChanges?.entries ?? [], callbacks: revisionCallbacks });
+  const documentKey = shellState.view?.identity.session;
+  const hasCards = comments.length > 0 || !!trackedChanges?.entries.length;
+  const autoOpened = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!hasCards || documentKey === undefined || autoOpened.current === documentKey) return;
+    autoOpened.current = documentKey;
+    setCommentsOpen(true);
+  }, [hasCards, documentKey, setCommentsOpen]);
+  const commentCallbacks = useMemo(() => ({ ...revisionCallbacks, ...workerComments.callbacks }), [revisionCallbacks, workerComments.callbacks]);
+  const commentItems = useCommentSidebarItems({ comments: commentsOpen ? comments : [], trackedChanges: commentsOpen ? trackedChanges?.entries ?? [] : [],
+    callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
   const positionedComments = commentItems.map(item => {
+    if (item.isTemporary) return item;
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
     const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
     const rect = (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
@@ -814,7 +840,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
     return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
   });
-  const commentsOpen = props.commentsSidebarOpen === true || (props.commentsSidebarOpen !== false && !!comments.length);
+  const selected = shellState.view?.workerSelection;
+  const floating = shellState.status === 'ready' && !effectiveReadOnly && !workerComments.adding && !!selected &&
+    (selected.focus.story === 'body' || selected.focus.story.startsWith('body:')) && selected.anchor.story === selected.focus.story &&
+    (selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset) &&
+    (shellState.view?.geometry?.coversThroughSeq ?? -1) >= (shellState.view?.throughSeq ?? 0) ? selectionAnchor() : null;
   const hostProposalItems = workerProposalSidebarItems(controller, currentReview, geometry,
     props.allowHostProposals === true && props.showHostProposalsInSidebar === true && commentsOpen, reportRecoverableError);
   const sidebarItems = mergeSidebarItems([...positionedComments, ...hostProposalItems], props.pluginSidebarItems ?? [], managedItems);
@@ -870,6 +900,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       pagedArea={<div ref={host} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: sidebarWidth }} onMouseDown={(event) => {
         if (event.target === event.currentTarget) { event.preventDefault(); focus(); }
       }}>
+      {floating && <WorkerCommentButton top={floating.y * zoom} left={floating.right * zoom + 24} onAdd={() => { void workerComments.beginAddComment(); }} />}
       {sidebarItems.length > 0 && <UnifiedSidebar key={pluginHost.generation()} items={sidebarItems} anchorPositions={new Map()} renderedDomContext={geometry?.dom ?? null}
         pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}

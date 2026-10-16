@@ -122,6 +122,7 @@ export type ResidentDocumentRead =
   | { kind: 'rangeHighlights'; ranges: YrsStoryRange[]; expectVersion: string; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'reviewSnapshot'; expectPreviewVersion?: number }
   | { kind: 'commentInsertionRange'; paraId: string; search?: string }
+  | { kind: 'commentSelectionRange'; selection: DocxCommandSelection }
   | { kind: 'toolbarMetadata' }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
@@ -169,6 +170,7 @@ export interface ResidentDocumentReadValues {
   rangeHighlights: ResidentRangeHighlights | null;
   reviewSnapshot: ResidentReviewSnapshot | null;
   commentInsertionRange: ResidentCommentInsertionRange;
+  commentSelectionRange: YrsStoryRange | null;
   toolbarMetadata: ResidentToolbarMetadata;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
