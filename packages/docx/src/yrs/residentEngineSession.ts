@@ -3,7 +3,6 @@ import { PeerMetadataError } from './peerMetadata';
 import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
-  YrsCommentInfo,
   YrsParagraph,
   YrsParagraphLength,
   YrsParagraphSpan,
@@ -270,14 +269,11 @@ export async function createResidentEngineSession(
   let parsedFacade: YrsSession | undefined;
   const initializeComments = () => {
     const source = partBase?.package.document.comments ?? [];
-    const existing = new Set<string>(JSON.parse(session.list_comments()).map((comment: YrsCommentInfo) => comment.id));
-    const missing = source.filter(comment => !existing.has(String(comment.id)));
-    if (missing.length) session.apply_seed_raw_ops('body', JSON.stringify(missing.map(comment => ({
-      op: 'setComment', id: String(comment.id), ranges: [], author: comment.author ?? '', date: comment.date ?? '', body: comment.blockContent ?? comment.content,
-    }))));
-    for (const comment of source) session.update_comment_metadata_json(String(comment.id), JSON.stringify({
+    const existing = new Set<string>(JSON.parse(session.list_comments()).map((comment: { id: string }) => comment.id));
+    for (const comment of source) session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
       author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
       parentId: comment.parentId === undefined ? null : String(comment.parentId),
+      ...(existing.has(String(comment.id)) ? {} : { body: comment.blockContent ?? comment.content }),
     }));
   };
   const partDocument = (): Document => {
