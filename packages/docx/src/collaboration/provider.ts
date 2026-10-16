@@ -8,7 +8,9 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  isStateVector,
   stateVectorDominates,
+  withClientClockAhead,
 } from './protocol';
 import {
   awarenessPeers,
@@ -535,7 +537,10 @@ export class CollaborationProvider {
   private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
     if (!this.isCurrentOpen(token, connection)) return;
     try {
-      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+      const advertised = isStateVector(stateVector)
+        ? withClientClockAhead(stateVector, this.replica.clientId)
+        : stateVector;
+      this.sendFrame(encodeSyncStep1(advertised, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(
         token,

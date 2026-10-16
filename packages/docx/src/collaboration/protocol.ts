@@ -403,6 +403,16 @@ function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
   return clocks;
 }
 
+/** Whether `payload` decodes as one v1 state vector. */
+export function isStateVector(payload: Uint8Array): boolean {
+  try {
+    decodeStateVector(payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `vector` has every client clock of `other`; both are v1 state vectors. */
 export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boolean {
   if (vector.byteLength === other.byteLength && vector.every((byte, index) => byte === other[index])) {
@@ -413,6 +423,22 @@ export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boo
     if (clock > (clocks.get(client) ?? 0n)) return false;
   }
   return true;
+}
+
+/** `vector` with `clientId`'s clock one past its own (1 when absent). */
+export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array {
+  if (!Number.isSafeInteger(clientId) || clientId < 0) {
+    throw new ProtocolError('Client id must be a non-negative safe integer');
+  }
+  const clocks = decodeStateVector(vector);
+  const client = BigInt(clientId);
+  clocks.set(client, (clocks.get(client) ?? 0n) + 1n);
+  const bytes: number[] = [];
+  for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  }
+  return Uint8Array.from(bytes);
 }
 
 export function decodeMessages(
