@@ -573,7 +573,10 @@ fn assert_converged(peers: &[&DeckSession]) -> Vec<String> {
     let saved = DeckSession::open(&first.save().unwrap(), 9).unwrap();
     assert_eq!(saved.slide_ids().unwrap().len(), ids.len());
     for peer in &peers[1..] {
-        assert_eq!(peer.encode_state_vector_v1(), first.encode_state_vector_v1());
+        assert_eq!(
+            peer.encode_state_vector_v1(),
+            first.encode_state_vector_v1()
+        );
         assert_eq!(peer.slide_ids().unwrap(), ids);
         assert_eq!(peer.snapshot().unwrap(), snapshot);
     }
@@ -619,7 +622,9 @@ fn three_peers_converge_after_move_delete_and_move_of_one_slide_in_any_order() {
     peers[0].move_slide(&context, &second, 0).unwrap();
     peers[1].delete_slide(&context, &second).unwrap();
     peers[2].move_slide(&context, &second, 2).unwrap();
-    let updates = peers.each_ref().map(|peer| peer.encode_state_as_update_v1());
+    let updates = peers
+        .each_ref()
+        .map(|peer| peer.encode_state_as_update_v1());
     let orders = [
         [0, 1, 2],
         [0, 2, 1],
