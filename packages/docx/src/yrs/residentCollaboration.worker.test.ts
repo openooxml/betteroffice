@@ -312,6 +312,27 @@ test('a merge that deletes the story holding the local selection repairs the con
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
 
+test('a merge that deletes header content repairs the local selection within the header story', async () => {
+  const a = await open(9201, undefined, undefined, documentBytes('HeaderSeed'));
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const story = 'hf:rIdH1';
+    const paraId = a.engine.paragraphs(story)[0]!.paraId;
+    const inHeader = { story, paraId, offset: 6 };
+    expect((await a.session.submit('select', { selection: { anchor: inHeader, focus: inHeader } }).ack).status).toBe('noop');
+    expect(a.session.state.selection?.focus).toMatchObject(inHeader);
+    remote.deleteRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 10 } });
+    expect((await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack).status).toBe('applied');
+    expect(a.engine.paragraphs(story).map(paragraph => paragraph.text)).toEqual(['']);
+    const repaired = { story, paraId, offset: 0 };
+    expect(a.session.state.selection).toMatchObject({ anchor: repaired, focus: repaired });
+    expect((await a.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
+    expect(a.engine.paragraphs(story).map(paragraph => paragraph.text)).toEqual(['Z']);
+    expect(a.engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Second']);
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
 test('ordinary typing behind an unacknowledged merge resolves through sticky positions', async () => {
   const a = await open(9201);
   const remote = await createYrsSession({ clientId: 9203 });
