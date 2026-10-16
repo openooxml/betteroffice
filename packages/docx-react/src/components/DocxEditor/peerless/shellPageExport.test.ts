@@ -45,7 +45,7 @@ async function fixture(readOnly = false, commandFonts = false) {
   relayout();
   if (commandFonts) await client.commandInit({
     session: 'page-export', incarnation: 1, epoch: 1, readOnly,
-    fonts: [fontBytes, { substituteOf: 0, family: 'Times New Roman' }],
+    fonts: [fontBytes, { substituteOf: 0, family: 'MS Mincho' }],
     fontRegistrationSlots: { fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [1]])) },
     layoutInput: request, layoutWithRegions: true, layoutRevision: 1, extras: '{}', provisionalPages: 3, displayWindow: [0, 3],
   });
