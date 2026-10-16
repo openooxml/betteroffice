@@ -16,8 +16,10 @@ import {
   encodeSyncStep2,
   encodeUpdate,
   encodeVarUint,
+  isStateVector,
   ProtocolError,
   stateVectorDominates,
+  withClientClockAhead,
 } from './protocol';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -322,5 +324,43 @@ describe('state vector dominance', () => {
       Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1)
     )).toThrow('State vector varUint exceeds 64 bits');
     expect(() => stateVectorDominates(stateVector(), Uint8Array.of(0, 1))).toThrow('Trailing state vector bytes');
+  });
+});
+
+describe('state vector shapes', () => {
+  it('accepts only whole v1 state vectors', () => {
+    expect(isStateVector(stateVector())).toBe(true);
+    expect(isStateVector(stateVector([1n << 60n, 5n], [2n, 3n]))).toBe(true);
+    expect(isStateVector(Uint8Array.of())).toBe(false);
+    expect(isStateVector(Uint8Array.of(7))).toBe(false);
+    expect(isStateVector(Uint8Array.of(0, 1))).toBe(false);
+  });
+});
+
+describe('state vector with the local clock ahead', () => {
+  it('advances only the given client, adding it at clock 1 when absent', () => {
+    expect(withClientClockAhead(stateVector(), 7)).toEqual(stateVector([7n, 1n]));
+    expect(withClientClockAhead(stateVector([5n, 3n]), 7)).toEqual(stateVector([5n, 3n], [7n, 1n]));
+    expect(withClientClockAhead(stateVector([7n, 4n], [5n, 3n]), 7)).toEqual(stateVector([7n, 5n], [5n, 3n]));
+    expect(withClientClockAhead(stateVector([300n, 127n]), 300)).toEqual(stateVector([300n, 128n]));
+    const max = Number.MAX_SAFE_INTEGER;
+    expect(withClientClockAhead(stateVector([BigInt(max), 9n]), max)).toEqual(stateVector([BigInt(max), 10n]));
+  });
+
+  it('is never dominated by the vector it came from, and dominates it', () => {
+    const vector = stateVector([1n, 5n], [2n, 3n]);
+    for (const client of [1, 2, 9]) {
+      const ahead = withClientClockAhead(vector, client);
+      expect(stateVectorDominates(vector, ahead)).toBe(false);
+      expect(stateVectorDominates(ahead, vector)).toBe(true);
+    }
+  });
+
+  it('rejects vectors that do not decode and invalid client ids', () => {
+    expect(() => withClientClockAhead(Uint8Array.of(7), 1)).toThrow(ProtocolError);
+    expect(() => withClientClockAhead(Uint8Array.of(0, 1), 1)).toThrow('Trailing state vector bytes');
+    for (const client of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => withClientClockAhead(stateVector(), client)).toThrow(ProtocolError);
+    }
   });
 });
