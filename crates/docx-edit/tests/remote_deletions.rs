@@ -70,9 +70,18 @@ fn race(edit: impl Fn(&EditingDoc, &ParagraphId, bool)) -> Race {
     let converged = loser.story_segments("body").unwrap();
     assert_eq!(winner.story_segments("body").unwrap(), converged);
     assert_eq!(peer.story_segments("body").unwrap(), converged);
-    assert_eq!(winner.paragraphs("body").unwrap(), loser.paragraphs("body").unwrap());
-    assert_eq!(peer.paragraphs("body").unwrap(), loser.paragraphs("body").unwrap());
-    assert_eq!(peer.encode_state_vector_v1(), loser.encode_state_vector_v1());
+    assert_eq!(
+        winner.paragraphs("body").unwrap(),
+        loser.paragraphs("body").unwrap()
+    );
+    assert_eq!(
+        peer.paragraphs("body").unwrap(),
+        loser.paragraphs("body").unwrap()
+    );
+    assert_eq!(
+        peer.encode_state_vector_v1(),
+        loser.encode_state_vector_v1()
+    );
     Race { seen, early }
 }
 
@@ -97,7 +106,11 @@ fn a_peer_keeps_every_paragraph_id_of_a_lost_concurrent_split() {
         doc.split_paragraph(&ctx(), Position::new("body", at), None)
             .unwrap();
     });
-    assert!(race.early.iter().all(|paragraph| !paragraph.para_id.is_empty()));
+    assert!(
+        race.early
+            .iter()
+            .all(|paragraph| !paragraph.para_id.is_empty())
+    );
     assert_eq!(race.early, race.seen);
 }
 
