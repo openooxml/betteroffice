@@ -79,11 +79,19 @@ export function readReviewTarget(engine: ResidentEngineSession, target: Resident
       .map(({ story, range }) => ({ story, start: range.start, end: range.end }));
     return ranges.length ? { id: target.revisionId, ranges } : null;
   }
-  const id = engine.commentProjection()?.sessionIds.get(target.id) ?? String(target.id);
+  const projection = engine.commentProjection();
+  const id = projection?.sessionIds.get(target.id) ?? String(target.id);
   if (!engine.listComments().some(comment => comment.id === id)) return null;
-  let anchors: ReturnType<ResidentEngineSession['resolveComment']>;
-  try { anchors = engine.resolveComment(id); }
-  catch (error) { if (error instanceof WebAssembly.RuntimeError) throw error; anchors = []; }
+  let anchors: ReturnType<ResidentEngineSession['resolveComment']> = [];
+  const visited = new Set<number>();
+  let publicId: number | undefined = target.id;
+  while (publicId !== undefined && !visited.has(publicId)) {
+    visited.add(publicId);
+    try { anchors = engine.resolveComment(projection?.sessionIds.get(publicId) ?? String(publicId)); }
+    catch (error) { if (error instanceof WebAssembly.RuntimeError) throw error; anchors = []; }
+    if (anchors.length) break;
+    publicId = projection?.comments.find(comment => comment.id === publicId)?.parentId;
+  }
   return { id, ranges: anchors.flatMap(anchor => {
     const start = locationAt(engine, anchor.story, anchor.start);
     const end = locationAt(engine, anchor.story, anchor.end);

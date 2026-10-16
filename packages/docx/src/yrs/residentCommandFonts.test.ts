@@ -45,6 +45,7 @@ async function initializeFonts(
   let hydrated: unknown;
   let bound: ResidentCommandInitRequest | undefined;
   const session = {
+    initializeComments() {},
     clearFonts() {},
     registerFont() {
       if (failure?.base) throw failure.base;

@@ -98,6 +98,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   let nextSlot = 0;
   let nextTicket = 0;
   let disposed = false;
+  const disposedError = () => Object.assign(new Error('Input admission is disposed'), { code: 'disposed' });
   const compositionWaiters = new Set<{ resolve(): void; reject(error: Error): void }>();
   let verticalGoal: number | undefined;
   let suggesting: string | null = null;
@@ -152,7 +153,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       unsubscribe();
       cancellations.delete(cancel);
     };
-    const cancel = () => { finish(); reject(new Error('Input admission is disposed')); };
+    const cancel = () => { finish(); reject(disposedError()); };
     const check = () => {
       const snapshot = viewStore.getSnapshot();
       const geometry = snapshot.geometry;
@@ -230,7 +231,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     target?: PeerlessAdmissionTarget,
     deletionExtension = false
   ): PeerlessAdmissionResult => {
-    if (disposed) throw new Error('Input admission is disposed');
+    if (disposed) throw disposedError();
     const environment = intent.kind === 'setRenderEnvironment' || intent.kind === 'setFontEnvironment';
     const { source, onSubmitted, hostProposal, ...metadata } = options;
     const granted = isProposal(intent) && hostProposal === true;
@@ -312,7 +313,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const admission: PeerlessInputAdmission = {
     session, viewStore, echoPainter,
     whenCompositionSettled() {
-      if (disposed) return Promise.reject(new Error('Input admission is disposed'));
+      if (disposed) return Promise.reject(disposedError());
       if (compositionSlot === null) return Promise.resolve();
       return new Promise<void>((resolve, reject) => { compositionWaiters.add({ resolve, reject }); });
     },
@@ -323,7 +324,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     }),
     setSuggesting(author) { suggesting = author; },
     setReadOnly(value) {
-      if (disposed) throw new Error('Input admission is disposed');
+      if (disposed) throw disposedError();
       const send = () => session.submit('setReadOnly', { readOnly: value }, { fence: true });
       const ticket = tail && deferred.has(tail) ? defer(tail, false, send, undefined, true) : send();
       requestedReadOnly = value;
@@ -347,7 +348,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       return () => { modeListeners.delete(listener); };
     },
     reserveComposition() {
-      if (disposed) throw new Error('Input admission is disposed');
+      if (disposed) throw disposedError();
       if (compositionSlot !== null) throw new Error('Composition is already active');
       compositionSlot = ++nextSlot;
       const target: PeerlessAdmissionTarget = tail
@@ -360,7 +361,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       return { slot: compositionSlot, target };
     },
     settleComposition(slot, commit) {
-      if (disposed) throw new Error('Input admission is disposed');
+      if (disposed) throw disposedError();
       if (slot !== compositionSlot) throw new Error('Composition slot is not active');
       compositionSlot = null;
       let failed = false;
@@ -386,11 +387,11 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     },
     dispose() {
       disposed = true;
-      for (const waiter of compositionWaiters) waiter.reject(new Error('Input admission is disposed'));
+      for (const waiter of compositionWaiters) waiter.reject(disposedError());
       compositionWaiters.clear();
       for (const cancel of cancellations) cancel();
       cancellations.clear();
-      for (const entry of held.splice(0)) entry.drop(new Error('Input admission is disposed'));
+      for (const entry of held.splice(0)) entry.drop(disposedError());
       pending.clear();
       modeListeners.clear();
       tail = undefined;
@@ -454,7 +455,7 @@ const SUGGESTED = {
   insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
   deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true,
   selectTableCells: false,
-  addComment: false, resizeObject: false, moveObject: false,
+  addComment: false, updateComment: false, removeComment: false, resizeObject: false, moveObject: false,
   setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
   setSectionMargins: false, setTabStops: false, removeTabStop: false,
   setContentControlValue: false, addRepeatingItem: false, removeRepeatingItem: false,

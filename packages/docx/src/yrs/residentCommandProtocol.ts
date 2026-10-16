@@ -92,10 +92,17 @@ export interface DocxCommentResult {
   comments: Comment[];
 }
 
+/** Every comment after an `updateComment`, `setCommentRanges` or `removeComment` command. */
+export interface DocxCommentChangeResult {
+  seq: number;
+  comments: Comment[];
+}
+
 export interface DocxEditState {
   documentVersion?: string;
   batch?: { seq: number; result: DocxEditResult };
   comment?: DocxCommentResult;
+  commentChange?: DocxCommentChangeResult;
   activePart?: ResidentPartTarget | null;
   readOnly: boolean;
   review?: { version: string; previewVersion: number };
@@ -309,7 +316,7 @@ export interface DocxCommandPayloads {
   replaceMatches: { targets: DocxTextRange[]; text: string; expectVersion: string; suggesting?: YrsAuthor };
   undo: Record<string, never>;
   redo: Record<string, never>;
-  addComment: { ranges: YrsStoryRange[]; author: string; date: string; body: unknown; expectVersion: string };
+  addComment: { ranges: YrsStoryRange[]; author: string; date: string; body: unknown; expectVersion: string; parentId?: string };
   updateComment: { id: string; patch: DocxCommentPatch; expectVersion: string };
   setCommentRanges: { id: string; ranges: YrsStoryRange[]; expectVersion: string };
   removeComment: { id: string; expectVersion: string };

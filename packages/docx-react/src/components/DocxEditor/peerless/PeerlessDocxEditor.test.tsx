@@ -929,6 +929,20 @@ test('worker ref buffer loads replace the worker and resolve on readiness', asyn
   expect(coreSession).not.toHaveBeenCalled();
 });
 
+test('worker ref document loads open the parsed document in a new worker', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  act(() => { expect(ref.current!.loadDocument(parsed)).toBeUndefined(); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await waitFor(() => expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(2));
+  expect(requests.filter(request => request.type === 'openSource').at(-1)).toMatchObject({ source: { document: parsed } });
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  await waitFor(() => expect(workers[0]!.terminate).toHaveBeenCalled());
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
 test('worker file picker delegates to the host and save can be intercepted', async () => {
   const ref = createRef<DocxEditorRef>();
   const onOpen = mock(async (_file: File) => {});
@@ -1882,4 +1896,48 @@ test('worker-only opens request the font-ready certified initial display window'
   expect(request?.type === 'commandInit' && request.request).toMatchObject({
     provisionalPages: 3, displayWindow: [0, 3], layoutWithRegions: true,
   });
+});
+
+
+test('loading the same parsed prop document reopens exactly once for every load', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
+  const view = render(<DocxEditor document={parsed} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  for (const count of [2, 3]) {
+    act(() => { ref.current!.loadDocument(parsed); });
+    await waitFor(() => expect(workers).toHaveLength(count));
+    await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(count);
+  }
+  view.unmount();
+});
+
+
+test('each file load waits for its own bytes and opens one worker when revisiting a source', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const file = new Blob([source]);
+  const view = render(<DocxEditor documentBuffer={file} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  let pending!: Promise<void>;
+  act(() => { pending = ref.current!.loadDocumentBuffer(Uint8Array.of(8, 9)); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await pending;
+  let finish!: (bytes: ArrayBuffer) => void;
+  const read = spyOn(file, 'arrayBuffer').mockImplementationOnce(() => new Promise<ArrayBuffer>(resolve => { finish = resolve; }));
+  restorers.push(() => read.mockRestore());
+  act(() => { pending = ref.current!.loadDocumentBuffer(file); });
+  void pending.catch(() => {});
+  try {
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    expect(workers).toHaveLength(2);
+    act(() => { finish(new Uint8Array(source).buffer); });
+    await waitFor(() => expect(workers).toHaveLength(3));
+    await pending;
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(3);
+    act(() => { pending = ref.current!.loadDocumentBuffer(file); });
+    await waitFor(() => expect(workers).toHaveLength(4));
+    await pending;
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(4);
+  } finally { finish?.(new Uint8Array(source).buffer); view.unmount(); }
 });
