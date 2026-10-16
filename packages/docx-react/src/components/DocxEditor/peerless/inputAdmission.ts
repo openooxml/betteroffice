@@ -282,7 +282,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         }
         const payload = intent.kind === 'formatRange'
           ? { ...intent.payload, selection: requireSelection(selection) }
-          : revisionId ? { revisionId, expectVersion: documentVersion() }
+          : isRevision(intent) ? { revisionId: revisionId ?? '', expectVersion: documentVersion() }
           : vertical && intent.kind === 'navigate' && goalX !== undefined
             ? { ...intent.payload, goalX }
             : target?.kind === 'worker-selection' && target.snapshot.workerSelection && isText(intent)
