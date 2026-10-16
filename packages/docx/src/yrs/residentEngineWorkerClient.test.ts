@@ -18,6 +18,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 import type { DocxCommandFrame, ResidentCommandInitReply } from './residentCommandProtocol';
+import { ResidentSourceWorkerClient } from './residentSourceWorkerClient';
 
 class FakeWorker implements ResidentEngineWorkerPort {
   static instances: FakeWorker[] = [];
@@ -142,6 +143,52 @@ function setup() {
   const worker = new FakeWorker();
   const client = new ResidentEngineWorkerClient(worker);
   return { worker, client };
+}
+
+test('remote command updates transfer an owned buffer and preserve caller bytes', async () => {
+  const { worker, client } = setup();
+  const update = new Uint8Array([1, 2, 3]).buffer;
+  const pending = client.edit({ session: 'room', incarnation: 1, seq: 1, basis: { epoch: 1, version: 0 },
+    kind: 'applyRemoteUpdate', payload: { update } });
+  const request = worker.requestAt(0);
+  expect(request.type).toBe('edit');
+  if (request.type !== 'edit' || request.command.kind !== 'applyRemoteUpdate' || !('update' in request.command.payload)) throw new Error('Expected remote edit');
+  const owned = request.command.payload.update;
+  const transfers = worker.transfers[0]!;
+  const received = structuredClone(request, { transfer: transfers });
+  worker.reply({ id: request.id, ok: false, error: 'test complete' });
+  await expect(pending).rejects.toThrow('test complete');
+  expect(transfers).toEqual([owned]);
+  expect(owned.byteLength).toBe(0);
+  expect(new Uint8Array(update)).toEqual(new Uint8Array([1, 2, 3]));
+  expect(received).toMatchObject({ command: { payload: { update } } });
+  client.destroy();
+});
+
+for (const input of ['view', 'buffer', 'shared'] as const) {
+  test(`source joins transfer an owned initial update without detaching a caller ${input}`, async () => {
+    const worker = new FakeWorker();
+    const client = new ResidentSourceWorkerClient(worker);
+    const bytes = new Uint8Array([1, 2]);
+    const backing = input === 'buffer' ? Buffer.from([9, 3, 4, 9]) : input === 'shared'
+      ? new Uint8Array(new SharedArrayBuffer(4)) : new Uint8Array(4);
+    backing.set([9, 3, 4, 9]);
+    const initialUpdate = backing.subarray(1, 3);
+    const pending = client.openSource({ bytes, collaboration: { clientId: 1, initialUpdate } });
+    const request = worker.requestAt(0);
+    if (request.type !== 'openSource') throw new Error('Expected source open');
+    const owned = request.source.collaboration!.initialUpdate!;
+    const transfers = worker.transfers[0]!;
+    const received = structuredClone(request, { transfer: transfers });
+    worker.reply({ id: request.id, ok: false, error: 'test complete' });
+    await expect(pending).rejects.toThrow('test complete');
+    expect(transfers).toContain(owned.buffer);
+    expect(owned.byteLength).toBe(0);
+    expect([...backing]).toEqual([9, 3, 4, 9]);
+    expect(bytes).toEqual(new Uint8Array([1, 2]));
+    expect(received).toMatchObject({ source: { collaboration: { initialUpdate: new Uint8Array([3, 4]) } } });
+    client.destroy();
+  });
 }
 
 function stagedFrame(revision: number, closed: string[]): DocxCommandFrame {
