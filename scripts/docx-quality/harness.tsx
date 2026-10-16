@@ -17,6 +17,7 @@ declare const __QUALITY_FONT_BASE_CJK__: string | null;
 const search = new URLSearchParams(window.location.search);
 // Local-only captures load this checkout's fonts from the viewer's own origin.
 const localFonts = search.get('local') === '1' && typeof __QUALITY_FONT_BASE__ === 'string';
+const legacySyncApi = search.get('peerless') === '0';
 const provider = createFontProvider(
   localFonts
     ? {
@@ -86,6 +87,7 @@ api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
   root.render(
     <DocxEditor
       ref={editor}
+      {...(legacySyncApi ? { legacySyncApi: true as const } : {})}
       documentBuffer={bytes}
       readOnly
       initialZoom={1}

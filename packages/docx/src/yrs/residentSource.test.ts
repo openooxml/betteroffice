@@ -26,7 +26,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 
-function source(paragraphs = 120): Uint8Array {
+function source(paragraphs = 120, pageTotal = false): Uint8Array {
   const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   return new Uint8Array(rezipPartsToArrayBuffer(new Map([
     ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
@@ -34,7 +34,8 @@ function source(paragraphs = 120): Uint8Array {
     ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${r}/image" Target="media/picture.png"/></Relationships>`)],
     ['word/media/picture.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4])],
     ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="${r}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>` +
-      Array.from({ length: paragraphs }, (_, i) => `<w:p w14:paraId="${(i + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph ${i + 1}</w:t></w:r></w:p>`).join('') +
+      Array.from({ length: paragraphs }, (_, i) => `<w:p w14:paraId="${(i + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph ${i + 1}</w:t></w:r>` +
+        (pageTotal && i === 0 ? `<w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>${paragraphs}</w:t></w:r></w:fldSimple>` : '') + '</w:p>').join('') +
       '<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>')],
   ])));
 }
@@ -46,6 +47,14 @@ function init(): ResidentCommandInitRequest {
     fontRegistrationSlots: true, layoutInput: LAYOUT, layoutWithRegions: true,
     layoutRevision: 1, extras: JSON.stringify({ fontChains: { 'liberation sans|0|0': [0] } }), displayWindow: [0, 1],
   };
+}
+
+function firstPage(buffers: readonly (ArrayBuffer | Uint8Array)[]) {
+  let frame: ReturnType<typeof applyFrameDelta> | null = null;
+  for (const bytes of buffers) frame = applyFrameDelta(frame, decodeFrameDelta(bytes));
+  const page = frame!.pages.find(({ pageIndex }) => pageIndex === 0)!.page;
+  return { width: page.width, height: page.height, runs: page.primitives.flatMap(primitive =>
+    primitive.kind === 'glyphRun' ? [{ text: primitive.text, glyphs: primitive.glyphs }] : primitive.kind === 'text' ? [{ text: primitive.text }] : []) };
 }
 
 async function parsed(bytes: Uint8Array) {
@@ -230,17 +239,92 @@ test('invalid or failed sources leave the client available for a new opening', a
 }, TIMEOUT);
 
 for (const input of ['bytes', 'document'] as const) {
-  test(`viewport-first ${input} opening defers preview until command fonts are ready`, async () => {
+  test(`viewport-first ${input} opening previews its first page with the command fonts before commands start`, async () => {
     const bytes = source();
     const document = input === 'document' ? await parsed(bytes) : undefined;
     const worker = startWorker();
     const client = new ResidentEngineWorkerClient(worker);
     try {
-      const opened = await client.openSource({ ...(document ? { document } : { bytes }), preview: true,
-        ...{ deferPreview: true } });
+      const opened = await client.openSource(document ? { document } : { bytes });
       expect(opened.preview).toBeUndefined();
+      const { fonts, fontRegistrationSlots, layoutInput, extras } = init();
+      const preview = await client.previewSource({ fonts, fontRegistrationSlots, layoutInput, extras });
+      expect(preview.documentPreview).toBe(true);
+      const pages = applyFrameDelta(null, decodeFrameDelta(preview.frame)).pages.filter(({ page }) => !page.unbuilt);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.page.primitives.some(primitive => primitive.kind === 'glyphRun' || primitive.kind === 'text')).toBe(true);
       const initial = await client.commandInit({ ...init(), ...{ provisionalPages: 1 } });
       expect(initial.frame.payload.layoutProvisional).toBe(true);
+      await expect(client.previewSource({ layoutInput })).rejects.toThrow('before commands');
     } finally { client.destroy(); }
   });
 }
+
+for (const pageTotal of [false, true]) {
+  test(`a source preview paints the first page the command session paints${pageTotal ? ' with a saved page total' : ''}`, async () => {
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    try {
+      await client.openSource({ bytes: source(120, pageTotal) });
+      const { fonts, fontRegistrationSlots, layoutInput, extras } = init();
+      const preview = await client.previewSource({ fonts, fontRegistrationSlots, extras,
+        layoutInput: JSON.stringify({ ...JSON.parse(layoutInput), cachedPageTotals: true }) });
+      const initial = await client.commandInit({ ...init(), ...{ provisionalPages: 1 } });
+      expect(initial.frame.payload.layoutProvisional === true).toBe(!pageTotal);
+      const previewed = firstPage([...(preview.pageFrames ?? []), preview.frame]);
+      expect(previewed).toEqual(firstPage([...(initial.frame.payload.pageFrames ?? []), initial.frame.payload.frame]));
+      expect(previewed.runs.map(({ text }) => text).join('')).toBe(pageTotal ? 'Paragraph 1 of 120' : 'Paragraph 1');
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+for (const pageTotal of [false, true]) {
+  test(`a source cut previews the first page the whole source's command session paints${pageTotal ? ' with a saved page total' : ''}`, async () => {
+    const worker = startWorker();
+    const client = new ResidentEngineWorkerClient(worker);
+    try {
+      const bytes = source(400, pageTotal);
+      expect(await client.openSourceCut({ bytes, cut: { blocks: 20 } })).toBeDefined();
+      const cutParagraphs = worker.sessions.at(-1)!.geometryReader.paragraphs('body').length;
+      await expect(client.commandInit(init())).rejects.toThrow('whole opened document');
+      const { fonts, fontRegistrationSlots, layoutInput, extras } = init();
+      const preview = await client.previewSource({ fonts, fontRegistrationSlots, extras,
+        layoutInput: JSON.stringify({ ...JSON.parse(layoutInput), cachedPageTotals: true }) });
+      await expect(client.openSource({ bytes, cut: { blocks: 20 } })).rejects.toThrow('openSourceCut');
+      await client.openSource({ bytes });
+      expect(cutParagraphs).toBeGreaterThan(0);
+      expect(cutParagraphs).toBeLessThan(worker.sessions.at(-1)!.geometryReader.paragraphs('body').length);
+      const initial = await client.commandInit({ ...init(), ...{ provisionalPages: 1 } });
+      const previewed = firstPage([...(preview.pageFrames ?? []), preview.frame]);
+      expect(previewed).toEqual(firstPage([...(initial.frame.payload.pageFrames ?? []), initial.frame.payload.frame]));
+      expect(previewed.runs.map(({ text }) => text).join('')).toBe(pageTotal ? 'Paragraph 1 of 400' : 'Paragraph 1');
+      await expect(client.openSourceCut({ bytes, cut: { blocks: 20 } })).rejects.toThrow('already holds');
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('a whole source that fails to open leaves the worker on the cut it was to replace', async () => {
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    const bytes = source(400);
+    expect(await client.openSourceCut({ bytes, cut: { blocks: 20 } })).toBeDefined();
+    await expect(client.openSource({ bytes: new Uint8Array([1, 2, 3]) })).rejects.toThrow();
+    const { fonts, fontRegistrationSlots, layoutInput, extras } = init();
+    const preview = await client.previewSource({ fonts, fontRegistrationSlots, layoutInput, extras });
+    expect(firstPage([...(preview.pageFrames ?? []), preview.frame]).runs.map(({ text }) => text).join('')).toBe('Paragraph 1');
+    await client.openSource({ bytes });
+    expect((await client.commandInit({ ...init(), ...{ provisionalPages: 1 } })).frame).toBeDefined();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a whole source that fails after its cut failed leaves the client free for a new cut', async () => {
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    const cut = client.openSourceCut({ bytes: new Uint8Array([1, 2, 3]), cut: { blocks: 20 } }).catch(() => null);
+    await expect(client.openSource({ bytes: new Uint8Array([1, 2, 3]) })).rejects.toThrow();
+    await cut;
+    expect(await client.openSourceCut({ bytes: source(400), cut: { blocks: 20 } })).toBeDefined();
+  } finally { client.destroy(); }
+}, TIMEOUT);

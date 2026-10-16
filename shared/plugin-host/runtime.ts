@@ -107,6 +107,8 @@ export interface PluginRuntime<Plugin, Context, Event, Phase extends string> {
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   notify(event: Event): void;
+  /** @internal Resolves after queued lifecycle notifications finish. */
+  notificationsIdle(): Promise<void>;
   /** Rebuilds render contexts after snapshot inputs changed without an event. */
   touch(): void;
   /** Ready activations in registration order; stable until listeners are notified. */
@@ -213,6 +215,16 @@ export function createPluginRuntime<
   let committing: AbortSignal | null = null;
   let published: readonly Entry[] = [];
   let scheduled = false;
+  const idleWaiters = new Set<() => void>();
+  const notificationsIdle = (): boolean => !scheduled && [...registrations.values()].every(({ activation }) =>
+    !activation || activation.status === 'disposed' ||
+    (activation.status === 'ready' && !activation.running && !activation.pumping && !activation.pending.length)
+  );
+  const settleIdle = (): void => {
+    if (!idleWaiters.size || !notificationsIdle()) return;
+    for (const resolve of idleWaiters) resolve();
+    idleWaiters.clear();
+  };
 
   const report = (error: PluginError<Phase | RuntimePhase>): void => {
     try {
@@ -258,6 +270,7 @@ export function createPluginRuntime<
       next.length === published.length && next.every((entry, index) => entry === published[index]);
     if (!same) published = next;
     for (const listener of [...listeners]) listener();
+    settleIdle();
   };
 
   const changed = (): void => {
@@ -429,6 +442,7 @@ export function createPluginRuntime<
       }
     } finally {
       activation.pumping = false;
+      settleIdle();
     }
   }
 
@@ -627,6 +641,10 @@ export function createPluginRuntime<
         if (registration.activation) enqueue(registration.activation, event);
       }
       changed();
+    },
+
+    notificationsIdle() {
+      return notificationsIdle() ? Promise.resolve() : new Promise((resolve) => idleWaiters.add(resolve));
     },
 
     touch: changed,

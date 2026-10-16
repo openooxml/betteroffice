@@ -13,6 +13,7 @@ use crate::eval::{
     evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
 };
 use crate::functions::Func;
+use crate::functions::lookups::comparable;
 use crate::parser::Expr;
 
 #[cfg(test)]
@@ -1820,6 +1821,9 @@ fn match_position(data: &Array, target: &CellValue, kind: f64) -> (Option<usize>
     for (position, value) in data.values.iter().enumerate() {
         visits += 1;
         step();
+        if kind != 0.0 && !comparable(value, target) {
+            continue;
+        }
         let ordering = cmp_values(value, target);
         let hit = match kind {
             0.0 => ordering == std::cmp::Ordering::Equal,
@@ -1892,6 +1896,9 @@ fn lookup_position(
             ) {
                 return (Some(position), visited + 1);
             }
+            continue;
+        }
+        if mode != 0.0 && !comparable(value, key) {
             continue;
         }
         let ordering = cmp_values(value, key);

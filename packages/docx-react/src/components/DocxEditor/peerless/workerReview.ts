@@ -2,15 +2,19 @@ import type { ResidentEngineWorkerClient, ResidentReviewSnapshot } from '@better
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
 
-export function reviewMatches(view: PeerlessViewSnapshot, review: ResidentReviewSnapshot): boolean {
+/** Whether `review` describes the document and proposal preview `view` presents, in any frame of it. */
+export function reviewDescribes(view: PeerlessViewSnapshot, review: ResidentReviewSnapshot): boolean {
   const frame = view.geometry;
   const version = view.editState?.review?.version ?? view.editState?.documentVersion ?? frame?.documentVersion;
   const previewVersion = view.editState?.review?.previewVersion ?? 0;
   return !!frame && view.presentedThroughSeq >= view.throughSeq && frame.coversThroughSeq >= view.throughSeq &&
     frame.documentVersion === version && review.version === version && review.previewVersion === previewVersion &&
-    review.frameEpoch === frame.frameEpoch && review.layoutRevision === frame.layoutRevision &&
     review.proposals.version === version && review.proposals.previewVersion === previewVersion &&
     review.proposalGeometry.version === version && review.proposalGeometry.previewVersion === previewVersion;
+}
+
+export function reviewMatches(view: PeerlessViewSnapshot, review: ResidentReviewSnapshot): boolean {
+  return reviewDescribes(view, review) && review.frameEpoch === view.geometry!.frameEpoch && review.layoutRevision === view.geometry!.layoutRevision;
 }
 
 export async function readPresentedReview(options: {

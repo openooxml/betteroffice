@@ -1,4 +1,5 @@
 import { createWorkerEditSession } from '../../../../shared/office-session/commands/session';
+import { cloneData } from '../../../../shared/office-session/commands/clone';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
@@ -13,6 +14,7 @@ export function createDocxWorkerEditSession<O, X = never>(
   const connections = new WeakMap<object, ResidentCommandConnection>([[options.connection, options.connection]]);
   return createWorkerEditSession({
     ...options,
+    copyCommandForDispatch: command => command.kind === 'applyRemoteUpdate' ? command : cloneData(command),
     discardFrame: discardCommandPresentation,
     sameCoverageFrames: true,
     transactionalPresentation: true,

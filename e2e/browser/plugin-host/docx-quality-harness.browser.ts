@@ -39,7 +39,7 @@ async function pagedDocx(pages: number): Promise<number[]> {
   return [...(await zip.generateAsync({ type: 'uint8array' }))];
 }
 
-test('the DOCX quality harness captures every page when the first pages paint first', async ({
+test('the DOCX quality harness captures every page when the first pages paint first on the legacy sync editor', async ({
   page,
 }) => {
   // Holds the rest of the layout past the harness's page-count stability window.
@@ -52,6 +52,77 @@ test('the DOCX quality harness captures every page when the first pages paint fi
       const queue = queued.get(this);
       if (queue) return void queue.push(args);
       if ((args[0] as { type?: string } | null)?.type !== 'completeLayout') {
+        return post.apply(this, args as Parameters<typeof post>);
+      }
+      state.__held = true;
+      const held = [args];
+      queued.set(this, held);
+      setTimeout(() => {
+        queued.delete(this);
+        for (const message of held) post.apply(this, message as Parameters<typeof post>);
+      }, hold);
+    } as typeof post;
+  }, HOLD_MS);
+  await page.goto('/docx-quality.html?peerless=0');
+  await page.waitForFunction(() => (window as unknown as { oracleReady?: boolean }).oracleReady, null, {
+    timeout: 120_000,
+  });
+  const result = await pinnedEvaluate(page,
+    (bytes) =>
+      (
+        window as unknown as {
+          oracleInit(bytes: number[], fonts: boolean): Promise<{ pages: number }>;
+        }
+      ).oracleInit(bytes, false),
+    await pagedDocx(PAGES)
+  );
+  expect(await page.evaluate(() => (window as unknown as { __held: boolean }).__held)).toBe(true);
+  expect(result.pages).toBe(PAGES);
+  const last = await pinnedEvaluate(page,
+    (index) =>
+      (window as unknown as { oraclePage(index: number): Promise<string> }).oraclePage(index),
+    PAGES - 1
+  );
+  expect(last).toMatch(/^data:image\/png;base64,/);
+});
+
+test('the DOCX quality harness captures every page on the default worker-only editor', async ({ page }) => {
+  await page.goto('/docx-quality.html');
+  await page.waitForFunction(() => (window as unknown as { oracleReady?: boolean }).oracleReady, null, {
+    timeout: 120_000,
+  });
+  const result = await pinnedEvaluate(page,
+    (bytes) =>
+      (
+        window as unknown as {
+          oracleInit(bytes: number[], fonts: boolean): Promise<{ pages: number }>;
+        }
+      ).oracleInit(bytes, false),
+    await pagedDocx(PAGES)
+  );
+  await expect(page.locator('[data-peerless-docx]')).toHaveCount(1);
+  expect(result.pages).toBe(PAGES);
+  const last = await pinnedEvaluate(page,
+    (index) =>
+      (window as unknown as { oraclePage(index: number): Promise<string> }).oraclePage(index),
+    PAGES - 1
+  );
+  expect(last).toMatch(/^data:image\/png;base64,/);
+});
+
+test('the DOCX quality harness captures every page when the default worker-only editor paints its first pages first', async ({
+  page,
+}) => {
+  // Holds the rest of the layout past the harness's page-count stability window.
+  await page.addInitScript((hold) => {
+    const state = window as unknown as { __held: boolean };
+    state.__held = false;
+    const post = Worker.prototype.postMessage;
+    const queued = new WeakMap<Worker, unknown[][]>();
+    Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+      const queue = queued.get(this);
+      if (queue) return void queue.push(args);
+      if ((args[0] as { type?: string } | null)?.type !== 'commandViewport') {
         return post.apply(this, args as Parameters<typeof post>);
       }
       state.__held = true;
@@ -76,6 +147,7 @@ test('the DOCX quality harness captures every page when the first pages paint fi
       ).oracleInit(bytes, false),
     await pagedDocx(PAGES)
   );
+  await expect(page.locator('[data-peerless-docx]')).toHaveCount(1);
   expect(await page.evaluate(() => (window as unknown as { __held: boolean }).__held)).toBe(true);
   expect(result.pages).toBe(PAGES);
   const last = await pinnedEvaluate(page,

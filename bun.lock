@@ -64,7 +64,7 @@
         "react-dom": "^19.2.7",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.8.3",
+        "@happy-dom/global-registrator": "^20.11.2",
         "@testing-library/react": "^16.0.0",
         "@types/react": "^19.2.17",
         "@types/react-dom": "^19.2.3",
@@ -281,7 +281,7 @@
         "sonner": "^2.0.7",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.8.3",
+        "@happy-dom/global-registrator": "^20.11.2",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.0.0",
         "@types/react": "19.2.17",
@@ -356,7 +356,7 @@
         "@betteroffice/pptx-i18n": "workspace:*",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.8.3",
+        "@happy-dom/global-registrator": "^20.11.2",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.4.2",
         "@types/react": "^19.2.17",
@@ -398,7 +398,7 @@
         "@betteroffice/vsdx-i18n": "workspace:*",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.8.3",
+        "@happy-dom/global-registrator": "^20.11.2",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.4.2",
         "@types/react": "^19.2.17",
@@ -439,7 +439,7 @@
         "@betteroffice/xlsx-i18n": "workspace:*",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "^20.8.3",
+        "@happy-dom/global-registrator": "^20.11.2",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.4.2",
         "@types/react": "^19.2.17",
@@ -840,7 +840,7 @@
 
     "@fumadocs/tailwind": ["@fumadocs/tailwind@0.0.5", "", { "peerDependencies": { "@tailwindcss/oxide": "^4.0.0", "tailwindcss": "^4.0.0" }, "optionalPeers": ["@tailwindcss/oxide", "tailwindcss"] }, "sha512-ENKPWUDRmriccsrUDE4bDBq3FNr/ms3BP2rWlsAEMV1yP23pcCaan+ceGfeBUsAQjw7sj9Q3R4Kl3g/TCStPzQ=="],
 
-    "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.10.6", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^20.10.6" } }, "sha512-Nu/IjRkkNxmeG2ywWsyJSO4d1BrWTqVzxCPL+gXj0b97klhmjd6wLzt6Bx/laNpkZ3WLW7zNCqmtMIbIlahqug=="],
+    "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.11.2", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^20.11.2" } }, "sha512-7fkpoXZWzyxaBkzRtlD0wRU5ckxbNT4j6BywzpSYh+SFPsGxEVmNR9KHaMwM2xkHB0pADQLl4Z8DSrztECJ7Ww=="],
 
     "@hono/node-server": ["@hono/node-server@2.0.10", "", { "peerDependencies": { "hono": "^4" } }, "sha512-ZcnNVhKTmyDJeg0UlnZjvM73JBsTAuhrH/J4fjwGOw59PwOW51r4J+p6CsKZWXdKSme4MFqU62CZMOsdDrU4CA=="],
 
@@ -1928,7 +1928,7 @@
 
     "gzip-size": ["gzip-size@6.0.0", "", { "dependencies": { "duplexer": "^0.1.2" } }, "sha512-ax7ZYomf6jqPTQ4+XCpUGyXKHk5WweS+e05MBO4/y3WJ5RkmPXNKvX+bx1behVILVwr6JSQvZAku021CHPXG3Q=="],
 
-    "happy-dom": ["happy-dom@20.10.6", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "buffer-image-size": "^0.6.4", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.21.0" } }, "sha512-6QD0ilzDDt93tX44y8tbmZdAcdTRYDhUP+Asgi6pC8Pp5IA3cvaZGyoVN/EGtlq9ziT65iPuBBn3ASLr6hCgVw=="],
+    "happy-dom": ["happy-dom@20.11.2", "", { "dependencies": { "@types/node": ">=20.0.0", "@types/whatwg-mimetype": "^3.0.2", "@types/ws": "^8.18.1", "buffer-image-size": "^0.6.4", "entities": "^7.0.1", "whatwg-mimetype": "^3.0.0", "ws": "^8.21.0" } }, "sha512-7MB+bJLkxu3SowAfBJbjW+c55kNz5tkR45gu2qzrxznezhLeN5YIlJbwUgSzlGc+qWoZ8Ykg71H5ezz69xixrw=="],
 
     "has-symbols": ["has-symbols@1.1.0", "", {}, "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ=="],
 

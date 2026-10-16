@@ -336,3 +336,16 @@ export function resolveBookmarkPosition(
   if (index.reader.version() !== expectVersion) return null;
   return index.projection(rootStory)?.bookmarkPosition(name) ?? null;
 }
+
+export function resolveBookmarkTarget(
+  index: DisplayPositionIndex,
+  rootStory: string,
+  name: string,
+  expectVersion: string
+): { loc: YrsLoc; position: number } | null {
+  const bookmark = resolveBookmarkPosition(index, rootStory, name, expectVersion);
+  if (bookmark === null) return null;
+  const position = bookmark + 1;
+  const resolved = resolvePosition(index, rootStory, position);
+  return resolved ? { loc: resolved.loc, position } : null;
+}

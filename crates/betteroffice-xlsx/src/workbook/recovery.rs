@@ -617,7 +617,7 @@ impl Workbook {
         workbook.authority = authority;
         if checkpoint.collaborative {
             workbook.mode = WorkbookMode::Collaborative {
-                structure: workbook.authority.structure().map_err(authority_error)?,
+                structure: Box::new(workbook.authority.structure().map_err(authority_error)?),
             };
         } else if !pending_remote_updates.is_empty() {
             return Err(invalid("Standalone recovery has remote updates"));

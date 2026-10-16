@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -189,7 +190,7 @@ test('a failure without a message rejects waits during and after the load', asyn
 async function mountTwoPagesInWorker() {
   const workers = await installWorker();
   const ref = createRef<DocxEditorRef>();
-  render(<DocxEditor ref={ref} documentBuffer={await pagedDocx(2)} />);
+  render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={await pagedDocx(2)} />);
   await until(() => ref.current !== null);
   expect(await layoutComplete(ref)).toBe(2);
   expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
@@ -281,7 +282,7 @@ describe('DocxEditor layout waits (worker engine)', () => {
 
   test('a failed load before any layout rejects the wait on the worker engine', async () => {
     const ref = createRef<DocxEditorRef>();
-    render(<DocxEditor ref={ref} experimentalWorkerOpen />);
+    render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} experimentalWorkerOpen />);
     await until(() => ref.current !== null);
     const detached = await pagedDocx(1);
     structuredClone(detached, { transfer: [detached] });

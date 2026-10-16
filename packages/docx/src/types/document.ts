@@ -33,6 +33,7 @@ export type {
   TabStop,
   LineSpacingRule,
   ParagraphAlignment,
+  ParagraphCnfStyle,
   ParagraphFormatting,
   TableWidthType,
   TableMeasurement,

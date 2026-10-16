@@ -294,7 +294,7 @@ async function harnessText(page: Page) {
 
 async function open(page: Page, peerless = true, contextBytes: number | null = null, pageCount = 1, buffer?: Buffer) {
   await installProbe(page);
-  await page.goto(peerless ? '/?format=docx&peerless=1' : '/?format=docx');
+  await page.goto(peerless ? '/?format=docx&peerless=1' : '/?format=docx&peerless=0');
   await page.evaluate((bytes) => { window.__docxPeerlessInput.contextBytes = bytes; }, contextBytes);
   await page.locator('input[type=file]').last().setInputFiles({
     name: 'peerless-input.docx',

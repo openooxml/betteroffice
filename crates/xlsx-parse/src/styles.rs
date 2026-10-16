@@ -10,6 +10,17 @@ use xlsx_model::styles::{
 use crate::xml::{attr, local_name, next_event, reader, xml_err};
 use crate::{MAX_STYLE_ENTRIES, ParseError};
 
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static LEGACY_STYLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn legacy_style_reads() -> u64 {
+    LEGACY_STYLE_READS.get()
+}
+
 /// build the stylesheet from the optional style and theme parts; either falls
 /// back to the model defaults.
 pub(crate) fn parse_stylesheet(
@@ -33,11 +44,35 @@ pub(crate) fn parse_stylesheet(
     Ok((sheet, legacy))
 }
 
-/// which top-level pool the cursor is inside; disambiguates elements that recur
-/// across sections (`<xf>` in cellStyleXfs vs cellXfs, `<color>` everywhere).
+pub(crate) fn legacy_style_readings(
+    styles: Option<&[u8]>,
+    sheet: &Stylesheet,
+    legacy: Option<&Stylesheet>,
+    references_zero_style: bool,
+) -> Result<Vec<Stylesheet>, ParseError> {
+    let mut readings = Vec::new();
+    if let Some(bytes) = styles {
+        let (mut unfiltered, xfs) = parse_style_pools(bytes, true)?;
+        unfiltered.theme = sheet.theme.clone();
+        let mut held = unfiltered.clone();
+        held.cell_xfs = xfs;
+        for mut reading in [unfiltered, held] {
+            if reading.cell_xfs.is_empty() && references_zero_style {
+                reading.cell_xfs.push(Xf::default());
+            }
+            if &reading != sheet && legacy != Some(&reading) && !readings.contains(&reading) {
+                readings.push(reading);
+            }
+        }
+    }
+    Ok(readings)
+}
+
+/// A stylesheet pool selected by logical parentage.
 #[derive(PartialEq)]
 enum Section {
     None,
+    NumFmts,
     Fonts,
     Fills,
     Borders,
@@ -48,9 +83,26 @@ enum Section {
 /// parse the style pools (numFmts, fonts, fills, borders, cellXfs). the theme is
 /// filled in by the caller.
 fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    parse_style_pools(data, false)
+}
+
+struct Scope {
+    depth: usize,
+    read: bool,
+    transparent: bool,
+    alternate: bool,
+    taken: bool,
+}
+
+fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    #[cfg(feature = "test-counters")]
+    if unfiltered {
+        LEGACY_STYLE_READS.set(LEGACY_STYLE_READS.get() + 1);
+    }
     let mut reader = reader(data);
     let mut buf = Vec::new();
-    let mut depth = 0;
+    let mut physical_depth = 0;
+    let mut scopes: Vec<Scope> = Vec::new();
 
     let mut ss = Stylesheet::default();
     let mut section = Section::None;
@@ -71,7 +123,47 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut plain_xfs = Vec::new();
 
     loop {
-        let event = next_event(&mut reader, &mut buf, &mut depth)?;
+        let event = next_event(&mut reader, &mut buf, &mut physical_depth)?;
+        let depth = if unfiltered {
+            physical_depth
+        } else {
+            match &event {
+                Event::Start(e) => {
+                    let name = local_name(e);
+                    let parent = scopes.last_mut();
+                    let mut read = parent.as_ref().is_none_or(|parent| parent.read);
+                    let parent_depth = parent.as_ref().map_or(0, |parent| parent.depth);
+                    let alternate = name == b"AlternateContent";
+                    let branch = matches!(name.as_slice(), b"Choice" | b"Fallback")
+                        && parent.as_ref().is_some_and(|parent| parent.alternate);
+                    if branch && let Some(parent) = parent {
+                        read &= !parent.taken;
+                        parent.taken = true;
+                    }
+                    let transparent = alternate || branch;
+                    let depth = parent_depth + usize::from(!transparent);
+                    scopes.push(Scope {
+                        depth,
+                        read,
+                        transparent,
+                        alternate,
+                        taken: false,
+                    });
+                    if !read || transparent {
+                        continue;
+                    }
+                    depth
+                }
+                Event::End(_) => {
+                    let scope = scopes.pop();
+                    if scope.is_some_and(|scope| !scope.read || scope.transparent) {
+                        continue;
+                    }
+                    scopes.last().map_or(0, |scope| scope.depth)
+                }
+                _ => scopes.last().map_or(0, |scope| scope.depth),
+            }
+        };
         if let (Event::Start(e), Some(open)) = (&event, markup.as_mut()) {
             open.child(e, depth)?;
         }
@@ -91,13 +183,19 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     };
                     ss.indexed_colors.push(rgb);
                 }
-                b"numFmts" => section = Section::None,
-                b"fonts" => section = Section::Fonts,
-                b"fills" => section = Section::Fills,
-                b"borders" => section = Section::Borders,
-                b"cellStyleXfs" => section = Section::CellStyleXfs,
-                b"cellXfs" => section = Section::CellXfs,
-                b"numFmt" => {
+                b"numFmts" if unfiltered || depth == 2 => {
+                    section = if unfiltered {
+                        Section::None
+                    } else {
+                        Section::NumFmts
+                    }
+                }
+                b"fonts" if unfiltered || depth == 2 => section = Section::Fonts,
+                b"fills" if unfiltered || depth == 2 => section = Section::Fills,
+                b"borders" if unfiltered || depth == 2 => section = Section::Borders,
+                b"cellStyleXfs" if unfiltered || depth == 2 => section = Section::CellStyleXfs,
+                b"cellXfs" if unfiltered || depth == 2 => section = Section::CellXfs,
+                b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
                     if let (Some(id), Some(code)) = (
                         attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
                         attr(&e, b"formatCode")?,
@@ -106,15 +204,15 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                         ss.num_fmts.push((id, code));
                     }
                 }
-                b"font" if section == Section::Fonts => {
+                b"font" if section == Section::Fonts && (unfiltered || depth == 3) => {
                     font = Some(Font::default());
                     markup = Some(Markup::open(Entry::Font, &e, depth)?);
                 }
-                b"fill" if section == Section::Fills => {
+                b"fill" if section == Section::Fills && (unfiltered || depth == 3) => {
                     fill = Some(Fill::None);
                     markup = Some(Markup::open(Entry::Fill, &e, depth)?);
                 }
-                b"border" if section == Section::Borders => {
+                b"border" if section == Section::Borders && (unfiltered || depth == 3) => {
                     border = Some(Border::default());
                     markup = Some(Markup::open(Entry::Border, &e, depth)?);
                 }
@@ -174,7 +272,7 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                         ed.color = parse_color(&e)?;
                     }
                 }
-                b"xf" if section == Section::CellXfs => {
+                b"xf" if section == Section::CellXfs && (unfiltered || depth == 3) => {
                     let (parsed, flags) = parse_xf(&e)?;
                     xf = Some(parsed);
                     explicit = flags;
@@ -197,6 +295,10 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                 }
                 _ => {}
             },
+            Event::End(_) if !unfiltered && depth == 1 => {
+                section = Section::None;
+                colors_depth = None;
+            }
             Event::End(e) => match e.name().local_name().as_ref() {
                 b"colors" if colors_depth == Some(depth + 1) => colors_depth = None,
                 b"indexedColors" if indexed_colors_depth == Some(depth + 1) => {
