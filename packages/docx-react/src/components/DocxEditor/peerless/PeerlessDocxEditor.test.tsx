@@ -468,12 +468,16 @@ test('unmanaged plugin sidebar items are placed from worker geometry without plu
   h.controller.dispose();
 });
 
-test('plugin sidebar cards discard placement across source replacement', async () => {
-  const hosts = [proposalHost(), proposalHost()];
+test('plugin sidebar cards discard placement across source replacement and incarnations', async () => {
+  const hosts = [proposalHost(), proposalHost(), proposalHost()];
+  hosts[2]!.binding.viewStore.getSnapshot().identity.incarnation = 2;
+  hosts[2]!.binding.viewStore.getSnapshot().geometry!.identity.incarnation = 2;
   for (const h of hosts) h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
     bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
   let y: number | null = 30;
-  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(hosts[0]!.readAt as never);
+  let currentHost = hosts[0]!;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt')
+    .mockImplementation(((...args: Parameters<typeof currentHost.readAt>) => currentHost.readAt(...args)) as never);
   const load = spyOn(frameRender, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
   const create = spyOn(frameRender, 'createDisplayListQueries').mockImplementation(() => {
     const top = y;
@@ -501,6 +505,7 @@ test('plugin sidebar cards discard placement across source replacement', async (
   await waitFor(() => expect(workers.at(-1)!.pendingReplies.length).toBeGreaterThan(0));
   expect(isPlaced()).toBe(false);
   y = null;
+  currentHost = hosts[1]!;
   await act(async () => {
     const worker = workers.at(-1)!;
     for (const response of worker.pendingReplies.splice(0)) worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
@@ -512,6 +517,16 @@ test('plugin sidebar cards discard placement across source replacement', async (
   const frame = hosts[1]!.binding.viewStore.getSnapshot().geometry!;
   await act(async () => { hosts[1]!.binding.viewStore.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1 }); });
   await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('140px'));
+  const previousQueries = create.mock.calls.length;
+  y = null;
+  currentHost = hosts[2]!;
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[2]!.binding); });
+  await waitFor(() => expect(create.mock.calls.length).toBeGreaterThan(previousQueries));
+  expect(isPlaced()).toBe(false);
+  y = 250;
+  const recoveredFrame = hosts[2]!.binding.viewStore.getSnapshot().geometry!;
+  await act(async () => { hosts[2]!.binding.viewStore.installFrameGeometry({ ...recoveredFrame, frameEpoch: recoveredFrame.frameEpoch + 1 }); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('250px'));
 });
 
 test('unmanaged plugin overlays wait for a ready document and clear on replacement', async () => {
