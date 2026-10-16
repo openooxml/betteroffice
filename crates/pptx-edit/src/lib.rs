@@ -157,7 +157,7 @@ impl DeckSession {
         let baseline = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        let doc = doc_with_client_id(client_id);
+        let doc = session_doc(client_id);
         hydrate_doc(&doc, &baseline)?;
         deck::validate_doc(&doc)?;
         Self::assemble(
@@ -176,9 +176,10 @@ impl DeckSession {
                 "update exceeds {MAX_UPDATE_BYTES} bytes"
             )));
         }
-        let doc = doc_with_client_id(client_id);
+        let doc = session_doc(client_id);
         hydrate_doc(&doc, update)?;
         deck::migrate_doc(&doc)?;
+        collect_garbage(&doc);
         let (package, _snapshot) = deck::validate_doc(&doc)?;
         Self::assemble(
             doc,
@@ -266,6 +267,7 @@ impl DeckSession {
         story::import_source_numbering_restarts(&self.doc, import.source)?;
         outline_gradients::import_source(&self, &mut import)?;
         import.sync_package_json(&self.doc, self.package())?;
+        collect_garbage(&self.doc);
         Ok(Self {
             package: Arc::new(package),
             baseline_epoch: self.epoch(),
@@ -453,9 +455,26 @@ impl DeckSession {
 }
 
 pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
+    Doc::with_options(doc_options(client_id))
+}
+
+/// A doc an undo manager attaches to. Clearing the redo stack unkeeps the parents of deleted
+/// items the undo stack still keeps, so collecting such a parent would free what they point to;
+/// these docs collect only while opening, before any undo.
+pub(crate) fn session_doc(client_id: u64) -> Doc {
+    let mut options = doc_options(client_id);
+    options.skip_gc = true;
+    Doc::with_options(options)
+}
+
+fn collect_garbage(doc: &Doc) {
+    doc.transact_mut_with(HYDRATE_ORIGIN).gc(None);
+}
+
+fn doc_options(client_id: u64) -> Options {
     let mut options = Options::with_client_id(ClientID::new(client_id));
     options.offset_kind = OffsetKind::Utf16;
-    Doc::with_options(options)
+    options
 }
 
 fn validate_client_id(client_id: u64) -> EditResult<()> {
