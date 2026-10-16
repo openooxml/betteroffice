@@ -2977,3 +2977,17 @@ test('a host comment list wins over the worker comment projection on save and ke
     expect(await part({ comments: [note(id, 'Ignored')] }, 'word/comments.xml')).toContain('Parent');
   } finally { client.destroy(); }
 }, TIMEOUT);
+
+test('a comment selection range follows its issued sticky positions across later edits', async () => {
+  const { client, engine, point } = await openWorker();
+  try {
+    const locs = [{ ...point, offset: 1 }, { ...point, offset: 3 }];
+    const [anchor, focus] = (await client.documentRead({ kind: 'stickyAnchors', locs, version: engine.proposalEngine.version() })).value;
+    const atStart = { ...point, offset: 0 };
+    expect((await client.edit(intent(1, 0, 'insertText', { text: '--', selection: { anchor: atStart, focus: atStart } }))).outcomes[0]?.status).toBe('applied');
+    const read = await client.documentRead({ kind: 'commentSelectionRange', selection: {
+      anchor: { ...locs[0]!, sticky: anchor!.encoded }, focus: { ...locs[1]!, sticky: focus!.encoded } } });
+    expect(read.value).toEqual({ story: point.story, start: { paraId: point.paraId, offset: 3 }, end: { paraId: point.paraId, offset: 5 } });
+    expect(read.version).toBe(engine.proposalEngine.version());
+  } finally { client.destroy(); }
+}, TIMEOUT);

@@ -271,42 +271,50 @@ const note = (id: number, text: string, extra: Partial<Note> = {}): Note => ({ i
 function sidebarFixture(options: { hostComments?: Note[]; readOnly?: boolean; mode?: 'viewing' } = {}) {
   const range = { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 7 } };
   const selection = { anchor: { story: 'body', paraId: 'p', offset: 7 }, focus: { story: 'body', paraId: 'p', offset: 3 } };
+  let anchored = range;
   let projected: Note[] = [note(7, 'Root'), note(8, 'Child', { parentId: 7 })];
   let seq = 0;
+  let version = 0;
   const viewStore = createPeerlessViewStore({ identity: { session: 's', incarnation: 1, epoch: 1 }, version: 0,
     throughSeq: 0, presentedThroughSeq: 0, workerSelection: selection, anchors: null, editState, geometry: null });
-  const read = mock(async (request: { kind: string; target?: { id: number } }) => ({ status: 'ok', version: `native-${seq}`, value:
-    request.kind === 'readParagraphs' ? { ok: true, version: `native-${seq}`, paragraphs: [] } :
-    request.kind === 'commentSelectionRange' ? range :
+  const read = mock(async (request: { kind: string; target?: { id: number } }) => ({ status: 'ok', version: `native-${version}`, value:
+    request.kind === 'readParagraphs' ? { ok: true, version: `native-${version}`, paragraphs: [] } :
+    request.kind === 'commentSelectionRange' ? anchored :
     request.kind === 'reviewTarget' ? projected.some(comment => comment.id === request.target!.id) ? { id: `n${request.target!.id}`, ranges: [range] } : null :
     request.kind === 'reviewSnapshot' ? { comments: [], uiComments: structuredClone(projected), commentIds: {}, frameEpoch: 1, layoutRevision: 1 } : null }));
   const submit = mock((intent: { kind: string; payload: { id?: string; body?: string; parentId?: string; patch?: { done: boolean }; ranges?: unknown; author?: string; expectVersion?: string } }) => {
     seq += 1;
+    const stale = intent.payload.expectVersion !== undefined && intent.payload.expectVersion !== `native-${version}`;
     const id = Number(intent.payload.id?.slice(1));
-    if (intent.kind === 'addComment') projected = [...projected, note(20 + seq, intent.payload.body!, intent.payload.parentId ? { parentId: Number(intent.payload.parentId.slice(1)) } : {})];
-    if (intent.kind === 'updateComment') projected = projected.map(comment => comment.id === id ? { ...comment, done: intent.payload.patch!.done } : comment);
-    if (intent.kind === 'removeComment') projected = projected.filter(comment => comment.id !== id);
-    const receipt = intent.kind === 'addComment' ? { comment: { seq, id: 20 + seq, comments: structuredClone(projected) } } : { commentChange: { seq, comments: structuredClone(projected) } };
+    if (!stale) {
+      version += 1;
+      if (intent.kind === 'addComment') projected = [...projected, note(20 + seq, intent.payload.body!, intent.payload.parentId ? { parentId: Number(intent.payload.parentId.slice(1)) } : {})];
+      if (intent.kind === 'updateComment') projected = projected.map(comment => comment.id === id ? { ...comment, done: intent.payload.patch!.done } : comment);
+      if (intent.kind === 'removeComment') projected = projected.filter(comment => comment.id !== id);
+    }
+    const receipt = stale ? {} : intent.kind === 'addComment' ? { comment: { seq, id: 20 + seq, comments: structuredClone(projected) } } : { commentChange: { seq, comments: structuredClone(projected) } };
     const view = viewStore.getSnapshot();
-    viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version + 1, throughSeq: seq, presentedThroughSeq: 0, selection, editState: { ...editState, ...receipt } as never });
-    return { status: 'submitted', ticket: { seq, ack: Promise.resolve({ status: 'applied', seq }), presented: Promise.resolve('presented') } };
+    viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version + (stale ? 0 : 1), throughSeq: seq, presentedThroughSeq: 0, selection, editState: { ...editState, ...receipt } as never });
+    return { status: 'submitted', ticket: { seq, ack: Promise.resolve(stale ? { status: 'refused', seq, reason: 'stale-version' } : { status: 'applied', seq }), presented: Promise.resolve('presented') } };
   });
   const events: unknown[][] = [];
-  const controller = createPeerlessShellController({ read: read as never, readAt: read as never, focus() {}, zoom: 1, author: 'Me',
+  const settings = { read: read as never, readAt: read as never, focus() {}, zoom: 1, author: 'Me',
     readOnly: options.readOnly, mode: options.mode, hostComments: options.hostComments as never,
-    onCommentsChange: comments => events.push(['change', comments]), onCommentAdd: comment => events.push(['add', comment]),
-    onCommentReply: (reply, parent) => events.push(['reply', reply, parent]), onCommentResolve: comment => events.push(['resolve', comment]),
-    onCommentDelete: comment => events.push(['delete', comment]) });
+    onCommentsChange: (comments: unknown) => events.push(['change', comments]), onCommentAdd: (comment: unknown) => events.push(['add', comment]),
+    onCommentReply: (reply: unknown, parent: unknown) => events.push(['reply', reply, parent]), onCommentResolve: (comment: unknown) => events.push(['resolve', comment]),
+    onCommentDelete: (comment: unknown) => events.push(['delete', comment]) };
+  const controller = createPeerlessShellController(settings);
   const binding = { session: { flush: async () => {} }, admission: {}, commands: { submit }, viewStore } as unknown as PeerlessEditSessionBinding;
   controller.attach(binding);
-  return { controller, submit, events, range, projected: () => projected };
+  return { controller, submit, read, events, range, selection, settings, projected: () => projected,
+    anchor: (next: typeof range) => { anchored = next; } };
 }
 
 test('comment sidebar actions apply through the worker and notify the host in hybrid order', async () => {
-  const { controller, submit, events, range, projected } = sidebarFixture();
+  const { controller, submit, events, range, selection, projected } = sidebarFixture();
   await controller.query({ kind: 'reviewSnapshot' });
   const draft = await controller.beginComment();
-  expect(draft).toMatchObject({ ranges: [range] });
+  expect(draft).toMatchObject({ selection });
   expect(events).toEqual([]);
   expect(await controller.comment({ kind: 'add', draft: draft!, text: 'New' })).toEqual({ ok: true, status: 'executed' });
   expect(submit.mock.calls[0]![0]).toMatchObject({ kind: 'addComment', payload: { ranges: [range], author: 'Me', body: 'New', expectVersion: 'native-0' } });
@@ -363,4 +371,35 @@ test('controlled comment actions change only the requested entries of the host l
   expect(submit).toHaveBeenCalledTimes(1);
   expect(events).toEqual([['change', [hosted[0]]], ['delete', hosted[1]]]);
   expect(controller.ref.getComments()).toEqual(hosted as never);
+});
+
+test('a composer draft re-reads its anchor when another change lands first and adds at the current version', async () => {
+  const { controller, submit, read, events, range, selection, anchor } = sidebarFixture();
+  await controller.query({ kind: 'reviewSnapshot' });
+  const draft = await controller.beginComment();
+  expect(await controller.comment({ kind: 'resolve', id: 7 })).toMatchObject({ ok: true });
+  events.splice(0);
+  const moved = { ...range, start: { paraId: 'p', offset: 5 }, end: { paraId: 'p', offset: 9 } };
+  anchor(moved);
+  expect(await controller.comment({ kind: 'add', draft: draft!, text: 'Late' })).toEqual({ ok: true, status: 'executed' });
+  expect(read.mock.calls.filter(([request]) => request.kind === 'commentSelectionRange').at(-1)![0]).toEqual({ kind: 'commentSelectionRange', selection });
+  expect(submit.mock.calls.at(-1)![0]).toMatchObject({ kind: 'addComment', payload: { ranges: [moved], body: 'Late', expectVersion: 'native-1' } });
+  expect(events.map(([kind]) => kind)).toEqual(['change', 'add']);
+});
+
+test('a composer add whose anchored text is gone refuses as a value without admission', async () => {
+  const { controller, submit, events, anchor } = sidebarFixture();
+  const draft = await controller.beginComment();
+  anchor({ story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 3 } });
+  expect(await controller.comment({ kind: 'add', draft: draft!, text: 'Gone' }))
+    .toEqual({ ok: false, failure: { code: 'command-failed', message: 'invalid-range' } });
+  expect(submit).not.toHaveBeenCalled();
+  expect(events).toEqual([]);
+});
+
+test('a composer open that turns read-only while it reads the selection opens nothing', async () => {
+  const { controller, settings } = sidebarFixture();
+  const pending = controller.beginComment();
+  controller.update({ ...settings, readOnly: true });
+  expect(await pending).toBeNull();
 });
