@@ -116,8 +116,12 @@ export function createClipboardPrefetch(options: SelectionRead & {
     take,
     async read(): Promise<ClipboardCapture | null> {
       await flushAdmittedInput(binding);
+      const key = snapshotKey(binding);
+      const identity = { ...binding.viewStore.getSnapshot().identity };
       schedule();
       while (!disposed && options.isCurrent()) {
+        if (!sameIdentity(identity, binding.viewStore.getSnapshot().identity)) return null;
+        if (snapshotKey(binding) !== key) throw new Error('Selection read was superseded');
         if (reading) { await reading; continue; }
         if (cached?.key === snapshotKey(binding) && cached?.error) throw cached.error;
         return take();
