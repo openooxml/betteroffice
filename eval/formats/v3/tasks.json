@@ -656,19 +656,19 @@
     "cross_model": false
   },
   {
-    "id": "docx-v3-32-bold-session-title",
+    "id": "docx-v3-32-italic-session-title",
     "format": "docx",
-    "title": "Bold the Session 1 title in the conference programme",
+    "title": "Italicize the Session 1 title in the conference programme",
     "difficulty": 2,
     "fixture": "govuk-publication-attachments-e9e489926952.docx",
     "input": "input.docx",
     "output": "output.docx",
-    "prompt": "In input.docx, in the Conference Programme, apply bold formatting to the exact phrase “Session 1: Lost Art: Experience of claimants and institutions” in the 10 30 session line. Retain its font and all other formatting; keep the session times, chairs, panels and session descriptions unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
+    "prompt": "In input.docx, in the Conference Programme, italicize the exact phrase “Session 1: Lost Art: Experience of claimants and institutions” in the 10 30 session line. Retain its font and all other formatting; keep the session times, chairs, panels and session descriptions unchanged. Save the result as output.docx, leaving input.docx unchanged and preserving everything else.",
     "expected": {
       "format_phrase": {
         "paragraph": "10 30Session 1: Lost Art: Experience of claimants and institutions",
         "phrase": "Session 1: Lost Art: Experience of claimants and institutions",
-        "property": "b"
+        "property": "i"
       }
     },
     "cross_model": false
