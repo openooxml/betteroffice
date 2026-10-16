@@ -234,7 +234,7 @@ export type ResidentEngineSession = Pick<
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string, seedStories?: boolean): string;
   /** With `initialUpdate`, the shared state replaces the package's stories. */
-  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): string;
+  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array; state?: Uint8Array }): string;
   decodeFont(bytes: Uint8Array): Uint8Array;
   openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
@@ -875,9 +875,10 @@ export async function createResidentEngineSession(
     decodeFont: bytes => session.decode_font(bytes),
     openSourceDocx: (bytes, options) => {
       session.set_media_tokens(options.mediaTokens === true);
-      const json = resident.openDocx(bytes, options.digest, options.generation, !options.initialUpdate);
-      if (options.initialUpdate) {
-        resident.loadState(options.initialUpdate);
+      const state = options.state ?? options.initialUpdate;
+      const json = resident.openDocx(bytes, options.digest, options.generation, state === undefined);
+      if (state) {
+        resident.loadState(state);
         partBase = keySections(partBase!);
         markProjectionStories(session.story_ids());
       }

@@ -184,6 +184,47 @@ for (const section of ['first', '0']) {
   }, TIMEOUT);
 }
 
+test('a checkpoint reopens a source in a fresh worker that resumes commands at its version and saves the same package', async () => {
+  const bytes = source(1);
+  const workers = [startWorker(), startWorker()];
+  const [first, second] = workers.map(worker => new ResidentEngineWorkerClient(worker));
+  try {
+    await first!.openSource({ bytes });
+    const initial = await first!.commandInit(init());
+    const paraId = workers[0]!.sessions[0]!.paragraphs('body')[0]!.paraId;
+    const insert = (client: ResidentEngineWorkerClient, incarnation: number, seq: number, offset: number, text: string) => client.edit({
+      session: initial.session, incarnation, seq, basis: { epoch: initial.epoch, version: seq - 1 }, kind: 'insertText',
+      payload: { text, selection: { anchor: { story: 'body', paraId, offset }, focus: { story: 'body', paraId, offset } } },
+    });
+    expect((await insert(first!, 1, 1, 0, 'One ')).outcomes[0]?.status).toBe('applied');
+    const checkpoint = await first!.checkpoint();
+    expect(checkpoint).toMatchObject({ epoch: initial.epoch, version: 1, throughSeq: 1 });
+    expect((await insert(first!, 1, 2, 4, 'Two ')).outcomes[0]?.status).toBe('applied');
+    const expected = unzipContainer(new Uint8Array((await first!.save({ comments: [] })).bytes));
+
+    await second!.openSource({ bytes, state: checkpoint.state });
+    const resumed = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq });
+    expect(resumed).toMatchObject({ incarnation: 2, version: 1, throughSeq: 1 });
+    expect(workers[1]!.sessions[0]!.paragraphs('body').map(paragraph => [paragraph.paraId, paragraph.text]))
+      .toEqual([[paraId, 'One Paragraph 1'], expect.anything()]);
+    expect((await insert(second!, 2, 2, 4, 'Two ')).outcomes[0]).toMatchObject({ seq: 2, status: 'applied' });
+    expect(workers[1]!.sessions[0]!.paragraphs('body')[0]!.text).toBe('One Two Paragraph 1');
+    expect(unzipContainer(new Uint8Array((await second!.save({ comments: [] })).bytes))).toEqual(expected);
+  } finally {
+    first!.destroy();
+    second!.destroy();
+  }
+}, TIMEOUT);
+
+test('a source state needs whole source bytes', async () => {
+  const client = new ResidentEngineWorkerClient(startWorker());
+  try {
+    for (const invalid of [{ document: await parsed(source(1)) }, { bytes: source(1), preview: true }, { bytes: source(1), cut: { blocks: 1 } }]) {
+      await expect(client.openSource({ ...invalid, state: Uint8Array.of(0) } as never)).rejects.toThrow('Invalid DOCX source state');
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('source opening adopts a warmed client and retains its worker and memory subscription', async () => {
   const worker = startWorker();
   const warmed = new DefaultWorkerClient(worker);

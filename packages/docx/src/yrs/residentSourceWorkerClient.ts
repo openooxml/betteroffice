@@ -118,12 +118,13 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     this.openedHeapLimit = reservation;
     try {
       const owned: ResidentSourceOpenRequest = source.bytes
-        ? { ...source, bytes: source.bytes.slice() } : source;
+        ? { ...source, bytes: source.bytes.slice(), ...(source.state ? { state: source.state.slice() } : {}) } : source;
       const initialUpdate = source.collaboration?.initialUpdate === undefined
         ? undefined : new Uint8Array(source.collaboration.initialUpdate);
       const requestSource = initialUpdate
         ? { ...owned, collaboration: { ...owned.collaboration!, initialUpdate } } : owned;
       const transfer: Transferable[] = owned.bytes ? [owned.bytes.buffer] : [];
+      if (owned.state) transfer.push(owned.state.buffer);
       if (initialUpdate) transfer.push(initialUpdate.buffer);
       const response = await this.request({ type: 'openSource', source: requestSource }, transfer);
       if (!response.sourceDocument || !response.stateVector) {

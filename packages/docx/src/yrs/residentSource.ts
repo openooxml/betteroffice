@@ -23,6 +23,8 @@ export type ResidentSourceOpenRequest = (
    * and a joined state behind it would reuse later ones, so either opens under a fresh client id.
    */
   collaboration?: { clientId: number; initialUpdate?: Uint8Array; clientClock?: number };
+  /** Yrs state restored over the unseeded package of `bytes`, such as a command checkpoint. */
+  state?: Uint8Array;
 };
 
 export function validateResidentSource(source: ResidentSourceOpenRequest): void {
@@ -38,6 +40,10 @@ export function validateResidentSource(source: ResidentSourceOpenRequest): void 
   if (source.cut !== undefined && (source.bytes === undefined || !Number.isSafeInteger(source.cut?.blocks) || source.cut.blocks < 1 ||
     (source.cut.paragraphBudget !== undefined && (!Number.isSafeInteger(source.cut.paragraphBudget) || source.cut.paragraphBudget < 1)))) {
     throw new TypeError('Invalid DOCX source cut');
+  }
+  if (source.state !== undefined && (!(source.state instanceof Uint8Array) || source.bytes === undefined ||
+    source.cut !== undefined || source.preview)) {
+    throw new TypeError('Invalid DOCX source state');
   }
   if (source.preview !== undefined && typeof source.preview !== 'boolean') {
     if (!source.preview || typeof source.preview !== 'object') throw new TypeError('Invalid DOCX preview options');
