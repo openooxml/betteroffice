@@ -446,7 +446,7 @@ const SUGGESTED = {
   openPart: false, ensurePart: false, removePart: false,
   select: false, navigate: false, selectPoint: false, extendSelection: false,
   undo: false, redo: false, setRenderEnvironment: false, setFontEnvironment: false,
-  propose: false, setProposalStates: false, withdrawProposals: false,
+  propose: false, setProposalStates: false, withdrawProposals: false, acceptRevision: false, rejectRevision: false,
 } satisfies Record<AdmissionIntent['kind'], boolean>;
 const admissions = new WeakMap<PeerlessInputAdmission,
   (intent: AdmissionIntent, options?: PeerlessAdmissionOptions, deletionExtension?: boolean) => PeerlessAdmissionResult>();
