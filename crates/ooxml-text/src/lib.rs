@@ -30,6 +30,8 @@
 //! - [`caps`] — the casing `w:caps`/`w:smallCaps` and `a:rPr/@cap` share:
 //!   language-aware uppercasing ([`uppercase_for_language`]) and the
 //!   synthesized small-cap advance scales.
+//! - [`auto_space`] — `w:autoSpaceDE`/`w:autoSpaceDN`: the quarter-em Word
+//!   inserts where East Asian text meets Latin letters or digits.
 //! - [`word_fonts`] — the vertical metrics of the East Asian faces Word
 //!   ships, so a substituted face measures as the one the document named.
 //! - [`symbol_font`] — what a Wingdings or Webdings character actually
@@ -46,8 +48,10 @@
 
 #![allow(clippy::type_complexity)]
 
+pub mod auto_space;
 pub mod bidi;
 pub mod caps;
+pub mod echo;
 pub mod font_store;
 pub mod line_break;
 pub mod measure;
@@ -57,17 +61,22 @@ pub mod symbol_font;
 pub mod word_fonts;
 pub mod word_metrics;
 
+pub use auto_space::{AUTO_SPACE_EM, AutoSpace};
 pub use bidi::{
     BaseDirection, BidiParagraph, BidiRun, bidi_paragraphs, level_is_rtl, visual_order_for_levels,
 };
 pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
+pub use echo::{EchoGlyphSet, echo_glyph_set};
 pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
-pub use line_break::{BreakOpportunity, break_opportunities};
+pub use line_break::{
+    BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
+};
 pub use measure::{
-    FontChains, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut, TypesetRowOut,
-    measure_paragraph, measure_paragraph_json, measure_paragraph_typed,
+    FontChains, FontSlotUse, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut,
+    TypesetRowOut, font_slot_use, measure_paragraph, measure_paragraph_json,
+    measure_paragraph_typed, min_content_width_typed,
 };
 pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};

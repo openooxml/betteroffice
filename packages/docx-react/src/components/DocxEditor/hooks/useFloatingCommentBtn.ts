@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -85,9 +86,10 @@ export function useFloatingCommentBtn({
     const size = queries.pageSize(rect.pageIndex);
     if (!pageRect || !size) return;
     const parentRect = parentEl.getBoundingClientRect();
+    const parentZoom = effectiveZoom(parentEl);
     const scaleY = size.height > 0 ? pageRect.height / size.height : 1;
-    const top = pageRect.top - parentRect.top + rect.y * scaleY;
-    const left = pageRect.right - parentRect.left;
+    const top = (pageRect.top - parentRect.top + rect.y * scaleY) / parentZoom;
+    const left = (pageRect.right - parentRect.left) / parentZoom;
     setFloatingCommentBtn({ top, left });
   }, [
     pagedEditorRef,

@@ -109,8 +109,7 @@
 //! automatically-determined heights snap: pinned `exact` boxes are fixed
 //! regardless of content and `atLeast` floors are author-set, so Word snaps
 //! neither (measured against Word 16.112: an `atLeast`-ruled body under an
-//! active grid keeps its natural pitch, not a grid multiple). Absolute
-//! grid-phase alignment against the page origin is not modeled.
+//! active grid keeps its natural pitch, not a grid multiple).
 //!
 //! The box rounds up to a *whole* number of rows. Measured off Word's own
 //! exported references: on the `linesAndChars` grids of two Chinese theses

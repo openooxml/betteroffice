@@ -1,10 +1,7 @@
 # Deck schema fixtures
 
-Deck schema 2.1 replaces the never-released 3–21 chain: `migrate_doc` carries a
-released 1.0 or 2.0 snapshot forward in a single transaction. Only snapshots at
-those released versions are kept here; the intermediate `v3`–`v21` seeds and the
-generators that produced them were removed with that chain and remain in git
-history.
+Deck schema 2.2 migrates released 1.0, 2.0 and 2.1 snapshots. These fixtures
+cover those released versions.
 
 `deck-schema-v1.update.bin` was produced by release `4bdccdd` and is documented
 in `../schema_migration.rs`. `deck-schema-v2*.update.bin` and
@@ -59,6 +56,31 @@ CARGO_TARGET_DIR=/absolute/path/to/main-target cargo run --locked -p betteroffic
 
 The generator asserts that main seeds schema 6 before restamping.
 
+## Released 2.1 defaults
+
+`deck-schema-v2.1-defaults.pptx` is `../../../pptx-render/tests/fixtures/run-caps.pptx`
+with its master's `p:clrMap` inverted (`bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2"`), its
+first two runs coloured `tx1`, and seven preset shapes added: a default `star5` and one
+authoring `adj` 45000, a default trapezoid and one authoring 30000, a default `arc`, and a
+default `star8` inside a group. It is repacked with `ooxml_opc::rezip_parts`, so a no-op
+save reproduces its bytes. `deck-schema-v2.1-defaults.update.bin` is its seed by release
+0.1.1 (`cf3d220f7`, schema 2.1, client ID 2101), which stored the old star and trapezoid
+defaults, no caps and colours resolved without the colour map.
+
+`deck-schema-v2.1-edits.pptx` is the same deck with the `Direct all caps` text box
+replaced by two paragraphs of differently capped and coloured runs holding supplementary
+characters (`𝐁`, `😀`). `deck-schema-v2.1-edits.update.bin` is its 0.1.1 seed (client ID
+2102) after that release deleted within and across runs, including a surrogate pair,
+and inserted `NEW` and `𝐂`; `schema_migration.rs` applies the same edits to a fresh
+open and expects the recovered story to match it.
+
+The generator `generate_v2_1_defaults_snapshot.rs` writes both updates. Copy it into
+that checkout's `crates/pptx-edit/examples/`, then run from that checkout:
+
+```sh
+CARGO_TARGET_DIR=/absolute/path/to/release-target cargo run --locked -p betteroffice-pptx-edit --example generate_v2_1_defaults_snapshot -- /absolute/path/to/this/branch
+```
+
 ## Connectors and comments
 
 `connectors.md` documents the connector decks and
@@ -74,3 +96,11 @@ character spacing) each combine two features in one deck. `schema_migration.rs` 
 them through synthetic 2.0 snapshots: it parses the deck, strips the fields a released
 2.0 writer never stored, stamps the seed 2.0, migrates it, and asserts the reattached
 source restores them.
+
+## Structured export
+
+`structured-export.golden.json` and `structured-export.golden.md` are the
+structured export and Markdown of the synthetic deck `../structured_export.rs`
+builds, with hidden slides, notes and comments included. Rewrite them with
+`PPTX_EXPORT_GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-edit --test
+structured_export golden` and review the diff.

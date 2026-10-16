@@ -1,6 +1,8 @@
 //! logical functions. all take lazy arguments so only the taken branch is
 //! evaluated: IF/IFS/SWITCH/IFERROR/IFNA never touch the paths they skip.
 
+use std::borrow::Cow;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{EvalContext, as_area, boolean, cmp_values, err, evaluate, to_bool};
@@ -112,6 +114,15 @@ pub(crate) fn xor(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     fold_bools(args, ctx, false, |a, b| a ^ b)
 }
 
+/// TRUE()/FALSE(): the literal spelled as a call.
+pub(crate) fn constant(args: &[Expr], value: bool) -> CellValue {
+    if args.is_empty() {
+        boolean(value)
+    } else {
+        err(ErrorValue::Value)
+    }
+}
+
 pub(crate) fn not(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 1 {
         return err(ErrorValue::Value);
@@ -134,24 +145,24 @@ fn fold_bools(
     let mut seen = false;
     for arg in args {
         let values = match as_area(arg, ctx) {
-            Some(area) => match area.values(ctx) {
+            Some(area) => match area.values_ref(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            match v {
+            match v.as_ref() {
                 CellValue::Bool { value } => {
-                    acc = combine(acc, value);
+                    acc = combine(acc, *value);
                     seen = true;
                 }
                 CellValue::Number { value } => {
-                    acc = combine(acc, value != 0.0);
+                    acc = combine(acc, *value != 0.0);
                     seen = true;
                 }
                 CellValue::Empty | CellValue::Text { .. } => {}
-                CellValue::Error { value } => return err(value),
+                CellValue::Error { value } => return err(*value),
             }
         }
     }

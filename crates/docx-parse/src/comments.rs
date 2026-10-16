@@ -2,6 +2,7 @@
 //! comment-range integrity.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -73,7 +74,9 @@ pub fn parse_comments(
             continue;
         }
         parser.budget.charge_comment(parser.part)?;
-        let id = integer_attribute(child, "w", "id").unwrap_or(0.0);
+        let Some(id) = integer_attribute(child, "w", "id") else {
+            continue;
+        };
         let author = child
             .attribute(Some("w"), "author")
             .unwrap_or("Unknown")
@@ -95,7 +98,7 @@ pub fn parse_comments(
         let content = block_content
             .iter()
             .filter_map(|block| match block {
-                BlockContent::Paragraph(paragraph) => Some(paragraph.clone()),
+                BlockContent::Paragraph(paragraph) => Some(paragraph.as_ref().clone()),
                 _ => None,
             })
             .collect();
@@ -299,20 +302,33 @@ pub fn remove_orphan_comment_ranges(blocks: &mut [BlockContent], comment_ids: &[
 fn prune_blocks(blocks: &mut [BlockContent], comment_ids: &HashSet<u64>) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => paragraph.content.retain(|content| {
-                let ParagraphContent::CommentRange(marker) = content else {
-                    return true;
-                };
-                comment_ids.contains(&number_key(marker.id))
-            }),
+            BlockContent::Paragraph(paragraph) => {
+                if !paragraph.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        ParagraphContent::CommentRange(marker)
+                            if !comment_ids.contains(&number_key(marker.id))
+                    )
+                }) {
+                    continue;
+                }
+                Arc::make_mut(paragraph).content.retain(|content| {
+                    let ParagraphContent::CommentRange(marker) = content else {
+                        return true;
+                    };
+                    comment_ids.contains(&number_key(marker.id))
+                })
+            }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         prune_blocks(&mut cell.content, comment_ids);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => prune_blocks(&mut sdt.content, comment_ids),
+            BlockContent::BlockSdt(sdt) => {
+                prune_blocks(&mut Arc::make_mut(sdt).content, comment_ids)
+            }
             BlockContent::RawXml(_) => {}
         }
     }
@@ -360,6 +376,24 @@ mod tests {
             &mut parser,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn keeps_comment_zero_and_drops_comments_without_an_id() {
+        let comments = parse(
+            r#"<w:comments xmlns:w="w" xmlns:w14="w14"><w:comment w:author="Missing"><w:p w14:paraId="FFFF"/></w:comment><w:comment w:id="0" w:author="Ada"><w:p w14:paraId="AAAA"/></w:comment><w:comment w:id="x" w:author="Invalid"><w:p w14:paraId="EEEE"/></w:comment><w:comment w:id="1" w:author="Grace"><w:p w14:paraId="BBBB"/></w:comment></w:comments>"#,
+            None,
+            Some(
+                r#"<w15:commentsEx xmlns:w15="x"><w15:commentEx w15:paraId="BBBB" w15:paraIdParent="AAAA"/></w15:commentsEx>"#,
+            ),
+        );
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, 0.0);
+        assert_eq!(comments[0].author, "Ada");
+        assert_eq!(comments[0].palette_index, 0.0);
+        assert_eq!(comments[1].id, 1.0);
+        assert_eq!(comments[1].palette_index, 1.0);
+        assert_eq!(comments[1].parent_id, Some(0.0));
     }
 
     #[test]
@@ -451,7 +485,7 @@ mod tests {
         limits.max_comments = 1;
         let mut budget = ParseBudget::new(&limits);
         let document = parse_xml(
-            br#"<w:comments xmlns:w="w"><w:comment w:id="1"/><w:comment w:id="2"/></w:comments>"#,
+            br#"<w:comments xmlns:w="w"><w:comment/><w:comment w:id="2"/></w:comments>"#,
             "word/comments.xml",
             &mut budget,
         )

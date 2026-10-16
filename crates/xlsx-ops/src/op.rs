@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, DefinedName, FreezePane, Hyperlink,
-    RowId, SheetChart, SheetId,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, ColStyle, DefinedName, FreezePane,
+    Hyperlink, RowId, SheetChart, SheetId,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -100,6 +100,16 @@ pub enum Op {
         sheet: SheetId,
         hyperlinks: Vec<Hyperlink>,
     },
+    #[doc(hidden)]
+    RestoreColStyles {
+        sheet: SheetId,
+        styles: Vec<ColStyle>,
+    },
+    #[doc(hidden)]
+    RestoreRowStyles {
+        sheet: SheetId,
+        styles: std::collections::BTreeMap<RowId, u32>,
+    },
     /// Absolute replacement emitted as the inverse of a chart remap.
     #[doc(hidden)]
     SetCharts {
@@ -149,6 +159,10 @@ pub enum Op {
     },
     RemoveSheet {
         index: usize,
+    },
+    MoveSheet {
+        from: usize,
+        to: usize,
     },
     RenameSheet {
         sheet: SheetId,

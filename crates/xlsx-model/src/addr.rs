@@ -154,6 +154,14 @@ impl CellRange {
         }
     }
 
+    /// whether two rectangles share at least one cell.
+    pub fn overlaps(&self, other: &CellRange) -> bool {
+        self.start.row <= other.end.row
+            && other.start.row <= self.end.row
+            && self.start.col <= other.end.col
+            && other.start.col <= self.end.col
+    }
+
     pub fn contains(&self, cell: CellRef) -> bool {
         cell.row >= self.start.row
             && cell.row <= self.end.row

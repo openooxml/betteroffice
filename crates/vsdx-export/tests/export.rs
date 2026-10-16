@@ -398,7 +398,7 @@ fn docx_round_trips_through_engine() {
     let tables: Vec<&docx_parse::Table> = content
         .iter()
         .filter_map(|block| match block {
-            docx_parse::BlockContent::Table(table) => Some(table),
+            docx_parse::BlockContent::Table(table) => Some(table.as_ref()),
             _ => None,
         })
         .collect();

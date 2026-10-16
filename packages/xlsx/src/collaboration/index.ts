@@ -1,4 +1,10 @@
 export { CollaborationProvider } from './provider';
+/** @experimental */
+export { createAsyncCollaborationReplica } from './asyncReplica';
+/** @experimental */
+export type { AsyncCollaborationReplica } from './asyncReplica';
+/** @experimental */
+export type { AsyncReplicaAdapter } from './asyncReplica';
 export {
   AWARENESS_BROADCAST_INTERVAL_MS,
   AWARENESS_COLORS,

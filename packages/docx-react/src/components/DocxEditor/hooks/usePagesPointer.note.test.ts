@@ -168,6 +168,29 @@ afterAll(async () => {
 const canvasOf = () => host.firstElementChild as HTMLCanvasElement;
 const note: PartEdit = { kind: 'footnote', noteId: NOTE_ID };
 
+test('a double-click on an empty header band opens the header', () => {
+  const opened: Array<['header' | 'footer', number | undefined]> = [];
+  const options = stableOptions();
+  renderHook(() =>
+    usePagesPointer(options({
+      displayListQueries: fakeQueries({
+        region: 'header',
+        rId: 'rIdHeader',
+        pos: null,
+        target: 'none',
+      }),
+      onHeaderFooterDoubleClick: (region, pageNumber) => opened.push([region, pageNumber]),
+    }))
+  );
+
+  mouse('mousedown', 400, 35, canvasOf());
+  mouse('click', 400, 35, canvasOf());
+  expect(selections).toEqual([]);
+  expect(opened).toEqual([]);
+  act(() => dispatchMouse('click', 400, 35, canvasOf(), { detail: 2 }));
+  expect(opened).toEqual([['header', 1]]);
+});
+
 describe('clicking a note', () => {
   test('a click in the note area opens that note instead of moving the body caret', () => {
     const opened: PartEdit[] = [];
@@ -604,7 +627,7 @@ describe('closing an open part with Escape', () => {
   test('lets an open menu consume Escape without closing the part', () => {
     let closed = 0;
     const view = render(createElement(EscapeMenuHarness, { onEscape: () => (closed += 1) }));
-    const trigger = view.getByRole('button', { name: 'File' });
+    const trigger = view.getByRole('menuitem', { name: 'File' });
     act(() => trigger.click());
 
     expect(view.getByText('Open')).toBeTruthy();

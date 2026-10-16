@@ -15,7 +15,8 @@ import { extractEmbeddedFontFaces } from '@betteroffice/docx/utils';
 export type RustFontChainsProvider = () => Record<string, number[]> | undefined;
 
 export interface UseRustMeasurementOptions {
-  onError?: (error: Error) => void;
+  /** `textEngine`: the engine whose fonts failed to load, if any. */
+  onError?: (error: Error, textEngine?: RustTextEngine | null) => void;
   document: Document | null;
   fontProvider?: BundledFontProvider;
   fontChainsProviderRef?: React.RefObject<RustFontChainsProvider | null>;
@@ -30,6 +31,29 @@ export interface UseRustMeasurementReturn {
   runLayoutPipelineRef: React.RefObject<(() => void) | null>;
 }
 
+/** `engine` until `release()`: fonts that finish loading after it register nothing. */
+function releasableTextEngine(engine: RustTextEngine): {
+  engine: RustTextEngine;
+  release: () => void;
+} {
+  let released = false;
+  return {
+    engine: {
+      registerFont: (bytes) => (released ? -1 : engine.registerFont(bytes)),
+      ...(engine.registerSubstituteFont && {
+        registerSubstituteFont: (id: number, family: string) =>
+          released ? id : engine.registerSubstituteFont!(id, family),
+      }),
+      clearFonts: () => {
+        if (!released) engine.clearFonts();
+      },
+    },
+    release: () => {
+      released = true;
+    },
+  };
+}
+
 export function useRustMeasurement(
   options: UseRustMeasurementOptions
 ): UseRustMeasurementReturn {
@@ -39,7 +63,13 @@ export function useRustMeasurement(
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
+  const releaseSourceRef = useRef<(() => void) | null>(null);
   const latestFontChainsRef = useRef<Record<string, number[]>>({});
+  // The latest font requirement for each key a layout of this document asked
+  // for. A revision preview can show or hide the only runs in a font; keeping
+  // the ready fonts no run uses now in the configuration keeps it, and with it
+  // the retained measurements, unchanged across such toggles.
+  const requiredRef = useRef(new Map<string, ResidentFontRequirement>());
   const requirementWarmupsRef = useRef(new Map<string, Promise<void>>());
   const fedFontSourceRef = useRef<{
     buffer: ArrayBuffer | null;
@@ -61,12 +91,18 @@ export function useRustMeasurement(
           sourceEngineRef.current = engine;
           fedFontSourceRef.current = null;
           latestFontChainsRef.current = {};
+          requiredRef.current = new Map();
           requirementWarmupsRef.current.clear();
         }
         const firstLoad = !source;
         if (!source) {
-          source = createRustMeasureSource({ engine, bundled: fontProviderRef.current });
+          const releasable = releasableTextEngine(engine);
+          source = createRustMeasureSource({
+            engine: releasable.engine,
+            bundled: fontProviderRef.current,
+          });
           sourceRef.current = source;
+          releaseSourceRef.current = releasable.release;
         }
         source.setCompat(document?.package.settings?.compatibilityFlags);
 
@@ -79,11 +115,14 @@ export function useRustMeasurement(
           source.setEmbeddedFaces(faces);
           fedFontSourceRef.current = { buffer, fontTable };
           latestFontChainsRef.current = {};
+          requiredRef.current = new Map();
         }
         if (firstLoad) runLayoutPipelineRef.current?.();
       } catch (error) {
         console.error('[useRustMeasurement] Rust font engine failed to load', error);
-        if (!cancelled) onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+        if (!cancelled) {
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), textEngine);
+        }
       }
     })();
     return () => {
@@ -91,14 +130,39 @@ export function useRustMeasurement(
     };
   }, [document, textEngine]);
 
+  // A replaced or unmounted editor may free the session behind `textEngine`: font loads and
+  // layout passes its source still has pending end with it.
+  useEffect(
+    () => () => {
+      releaseSourceRef.current?.();
+      releaseSourceRef.current = null;
+      sourceRef.current = null;
+      // The next source starts over, even on the same engine.
+      sourceEngineRef.current = null;
+    },
+    [textEngine]
+  );
+
   const deferLayoutPass = useCallback((): boolean => sourceRef.current === null, []);
 
   const residentMeasurementConfig = useCallback(
     (requirements: ResidentFontRequirement[]): ResidentMeasurementConfig | null => {
       const source = sourceRef.current;
       if (!source) return null;
-      const ready = source.measurementConfigForRequirements(requirements);
-      if (ready) {
+      const required = requiredRef.current;
+      for (const requirement of requirements) required.set(requirement.key, requirement);
+      const current = source.measurementConfigForRequirements(requirements);
+      if (current) {
+        const wanted = new Set(requirements.map((requirement) => requirement.key));
+        const kept = [...required.values()].filter(
+          (requirement) =>
+            !wanted.has(requirement.key) &&
+            source.measurementConfigForRequirements([requirement]) !== undefined
+        );
+        const ready =
+          source.measurementConfigForRequirements(
+            [...requirements, ...kept].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+          ) ?? current;
         latestFontChainsRef.current = ready.fontChains;
         return ready;
       }

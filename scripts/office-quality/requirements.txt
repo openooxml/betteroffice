@@ -2,3 +2,4 @@ numpy==2.2.6
 scikit-image==0.25.2
 Pillow==11.3.0
 PyMuPDF==1.26.4
+pypdfium2==5.13.0

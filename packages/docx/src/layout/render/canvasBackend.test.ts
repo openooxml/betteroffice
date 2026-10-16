@@ -8,9 +8,12 @@ import {
   registerMeasureFont,
 } from '../../wasm/layout';
 import {
+  drawDisplayPage,
   drawPrimitive,
   rasterizeDisplayPageToBackBuffer,
+  releaseOffscreenPageCanvas,
   sizeCanvasForPage,
+  withFontFamilies,
 } from './canvasBackend';
 import type {
   DisplayList,
@@ -310,6 +313,59 @@ describe('Canvas page extents', () => {
   );
 });
 
+describe('Canvas page layers', () => {
+  it.each([undefined, 2])(
+    'paints the watermark prefix (%s) under the header, footer and body',
+    async (watermarkPrimitiveCount) => {
+      const painted: string[] = [];
+      const context = {
+        fillStyle: '',
+        clearRect: () => {},
+        fillRect(this: { fillStyle: string }) {
+          painted.push(this.fillStyle);
+        },
+      } as unknown as CanvasRenderingContext2D;
+      const rect = (fill: string) => ({ kind: 'rect' as const, x: 0, y: 0, w: 10, h: 10, fill });
+      const watermark = watermarkPrimitiveCount === undefined
+        ? []
+        : [rect('watermark'), rect('wash')];
+      await drawDisplayPage(context, {
+        pageIndex: 0,
+        width: 20,
+        height: 20,
+        background: '#fefefe',
+        primitives: [...watermark, rect('behind'), rect('body'), rect('front')],
+        watermarkPrimitiveCount,
+        header: {
+          rId: 'rIdHeader',
+          kind: 'header',
+          y: 0,
+          height: 10,
+          primitives: [rect('header')],
+        },
+        footer: {
+          rId: 'rIdFooter',
+          kind: 'footer',
+          y: 10,
+          height: 10,
+          primitives: [rect('footer')],
+        },
+        noteAreas: [{ kind: 'footnote', y: 10, height: 10, primitives: [rect('note')] }],
+      } as unknown as Parameters<typeof drawDisplayPage>[1]);
+      expect(painted).toEqual([
+        '#fefefe',
+        ...watermark.map((primitive) => primitive.fill),
+        'header',
+        'footer',
+        'behind',
+        'body',
+        'front',
+        'note',
+      ]);
+    }
+  );
+});
+
 describe('Canvas text-run slot clipping', () => {
   it('clips a Rust-shaped run from a synthetic mixed-family line', async () => {
     const list = syntheticMixedFamilyDisplayList();
@@ -435,5 +491,84 @@ describe('Canvas text-run slot clipping', () => {
     expect(paints).toHaveLength(1);
     expect(paints[0].right).toBe(paints[0].naturalRight);
     expect(paints[0].right).toBeGreaterThan(run.width);
+  });
+});
+
+describe('Canvas font families', () => {
+  it('swaps only the mapped families of a CSS font shorthand', () => {
+    const families = new Map([['Calibri', 'Calibri#1f2e']]);
+    expect(withFontFamilies('italic 700 13.333px Calibri, sans-serif', families)).toBe(
+      'italic 700 13.333px "Calibri#1f2e", sans-serif'
+    );
+    expect(withFontFamilies('400 11px "Calibri", serif', families)).toBe(
+      '400 11px "Calibri#1f2e", serif'
+    );
+    expect(withFontFamilies('400 11px Cambria, sans-serif', families)).toBe(
+      '400 11px Cambria, sans-serif'
+    );
+    expect(withFontFamilies('400 11px calibri, sans-serif', families)).toBe(
+      '400 11px "Calibri#1f2e", sans-serif'
+    );
+    expect(withFontFamilies('Calibri', families)).toBe('"Calibri#1f2e"');
+    expect(
+      withFontFamilies('400 11px "Review, Sans", Calibri', new Map([['Review, Sans', 'Review#2']]))
+    ).toBe('400 11px "Review#2", Calibri');
+  });
+
+  it('paints browser text with the family the document registered', async () => {
+    const fonts: string[] = [];
+    const { ctx } = recordingContext(new Map([['Hi', { width: 10, ascent: 8, descent: 2 }]]));
+    const recorded = new Proxy(ctx, {
+      set(target, key, value) {
+        if (key === 'font') fonts.push(value as string);
+        return Reflect.set(target, key, value);
+      },
+    });
+    const run = {
+      kind: 'text',
+      text: 'Hi',
+      x: 0,
+      baselineY: 10,
+      width: 10,
+      font: '400 13px Calibri, sans-serif',
+      color: '#000000',
+    } as TextRunPrimitive;
+    await drawPrimitive(recorded, run, { fontFamilies: new Map([['Calibri', 'Calibri#1f2e']]) });
+    expect(fonts).toEqual(['400 13px "Calibri#1f2e", sans-serif']);
+  });
+});
+
+describe('Offscreen page canvas release', () => {
+  it('shrinks to one pixel with an empty bitmap, never to 0x0, and only once', () => {
+    const bitmaps: unknown[] = [];
+    const sizes: number[] = [];
+    let width = 794;
+    let height = 1123;
+    const canvas = {
+      get width() {
+        return width;
+      },
+      set width(value: number) {
+        sizes.push(value);
+        width = value;
+      },
+      get height() {
+        return height;
+      },
+      set height(value: number) {
+        sizes.push(value);
+        height = value;
+      },
+      getContext: (kind: string) =>
+        kind === 'bitmaprenderer'
+          ? { transferFromImageBitmap: (bitmap: unknown) => bitmaps.push(bitmap) }
+          : null,
+    };
+    releaseOffscreenPageCanvas(canvas as unknown as OffscreenCanvas);
+    expect(sizes).toEqual([1, 1]);
+    expect(bitmaps).toEqual([null]);
+    releaseOffscreenPageCanvas(canvas as unknown as OffscreenCanvas);
+    expect(sizes).toEqual([1, 1]);
+    expect(bitmaps).toEqual([null]);
   });
 });

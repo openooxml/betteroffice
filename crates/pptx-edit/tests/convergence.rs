@@ -491,3 +491,45 @@ fn comment_ids_are_deterministic_per_client_not_random() {
     assert_eq!(second.comment_id, "comment:606:1");
     assert_ne!(mine.comment_id, second.comment_id);
 }
+
+#[test]
+fn manual_capture_groups_text_and_comment_edits_until_a_boundary() {
+    use pptx_edit::UndoCaptureMode;
+    let session = DeckSession::open(FIXTURE, 9904).unwrap();
+    let before = session.snapshot().unwrap();
+    let story = first_text_story(&session);
+    let context = EditCtx::local("host");
+    assert_eq!(session.undo_capture_mode(), UndoCaptureMode::Auto);
+    session.set_undo_capture_mode(UndoCaptureMode::Manual);
+    session
+        .insert_text(&context, &story, 0, "First ", &TextStyle::default())
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(510));
+    session.set_undo_capture_mode(UndoCaptureMode::Manual);
+    session
+        .add_comment(
+            &context,
+            &before.slides[0].id,
+            "Host",
+            "H",
+            "Grouped",
+            "2026-09-23T00:00:00Z",
+            0,
+            0,
+        )
+        .unwrap();
+    session.add_undo_barrier();
+    let grouped = session.snapshot().unwrap();
+    session
+        .insert_text(&context, &story, 0, "Second ", &TextStyle::default())
+        .unwrap();
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), grouped);
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), before);
+    assert!(session.redo());
+    assert_eq!(session.snapshot().unwrap(), grouped);
+    session.set_undo_capture_mode(UndoCaptureMode::Auto);
+    assert_eq!(session.undo_capture_mode(), UndoCaptureMode::Auto);
+    assert!(session.can_redo());
+}

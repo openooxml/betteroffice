@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { rangeRect } from '@betteroffice/xlsx';
-import type { CellRange, GridMeta, MergedRange } from '@betteroffice/xlsx';
+import type { GridMeta, MergedRange } from '@betteroffice/xlsx';
 import {
   AWARENESS_LABEL_DURATION_MS,
   normalizeAwarenessColor,
   resolveAwarenessCursor,
   type AwarenessPeer,
 } from '@betteroffice/xlsx/collaboration';
+import { expandRangeToMergedCells } from '../viewer/sessionGeometry';
+
+export { expandRangeToMergedCells } from '../viewer/sessionGeometry';
 
 const MAX_PRESENCE_CHIPS = 8;
 const MAX_REMOTE_SELECTIONS = 32;
@@ -42,50 +45,6 @@ function translucent(color: string): string {
   const green = Number.parseInt(color.slice(3, 5), 16);
   const blue = Number.parseInt(color.slice(5, 7), 16);
   return `rgba(${red}, ${green}, ${blue}, 0.1)`;
-}
-
-function intersects(left: CellRange, right: CellRange): boolean {
-  return (
-    left.left <= right.right &&
-    left.right >= right.left &&
-    left.top <= right.bottom &&
-    left.bottom >= right.top
-  );
-}
-
-export function expandRangeToMergedCells(
-  range: CellRange,
-  mergedRanges: readonly MergedRange[]
-): CellRange {
-  const expanded = { ...range };
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const merged of mergedRanges) {
-      const mergedRange = {
-        top: Math.min(merged.start.row, merged.end.row),
-        left: Math.min(merged.start.col, merged.end.col),
-        bottom: Math.max(merged.start.row, merged.end.row),
-        right: Math.max(merged.start.col, merged.end.col),
-      };
-      if (!intersects(expanded, mergedRange)) continue;
-      const top = Math.min(expanded.top, mergedRange.top);
-      const left = Math.min(expanded.left, mergedRange.left);
-      const bottom = Math.max(expanded.bottom, mergedRange.bottom);
-      const right = Math.max(expanded.right, mergedRange.right);
-      if (
-        top === expanded.top &&
-        left === expanded.left &&
-        bottom === expanded.bottom &&
-        right === expanded.right
-      ) {
-        continue;
-      }
-      Object.assign(expanded, { top, left, bottom, right });
-      changed = true;
-    }
-  }
-  return expanded;
 }
 
 function useLabelClock(peers: readonly AwarenessPeer[]): number {

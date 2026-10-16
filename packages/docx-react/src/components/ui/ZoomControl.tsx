@@ -84,7 +84,7 @@ export function ZoomControl({
     () => sorted.find((l) => l.value > value + 0.001),
     [sorted, value]
   );
-  const btnCls = compact ? 'h-7 w-7' : 'h-8 w-8';
+  const btnCls = 'h-7 w-7';
 
   return (
     <div className="flex items-center">
@@ -94,7 +94,7 @@ export function ZoomControl({
         className={cn(
           btnCls,
           'text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-r-none',
-          (disabled || !prevLevel) && 'opacity-30 cursor-not-allowed'
+          (disabled || !prevLevel) && 'opacity-[0.38] cursor-not-allowed'
         )}
         onClick={() => prevLevel && onChange?.(prevLevel.value)}
         disabled={disabled || !prevLevel}
@@ -105,7 +105,7 @@ export function ZoomControl({
       <Select value={value.toString()} onValueChange={handleValueChange} disabled={disabled}>
         <SelectTrigger
           className={cn(
-            compact ? 'h-7 min-w-[55px] text-xs' : 'h-8 min-w-[64px] text-sm',
+            compact ? 'h-7 min-w-[55px] text-xs' : 'h-7 min-w-[64px] text-sm',
             'rounded-none',
             className
           )}
@@ -127,7 +127,7 @@ export function ZoomControl({
         className={cn(
           btnCls,
           'text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-l-none',
-          (disabled || !nextLevel) && 'opacity-30 cursor-not-allowed'
+          (disabled || !nextLevel) && 'opacity-[0.38] cursor-not-allowed'
         )}
         onClick={() => nextLevel && onChange?.(nextLevel.value)}
         disabled={disabled || !nextLevel}

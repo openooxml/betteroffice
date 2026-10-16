@@ -1,6 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use xlsx_model::{
-    BorderEdge, BorderStyle, CellFormat, CellRange, Color, Fill, HAlign, NumberFormat, VAlign,
+    Alignment, Border, BorderEdge, BorderStyle, CellFormat, CellRange, Color, Fill, Font, HAlign,
+    NumberFormat, Protection, VAlign,
 };
 
 use crate::apply::OpError;
@@ -126,11 +127,339 @@ pub enum NumberFormatMutation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(from = "CapturedFormatWire", into = "CapturedFormatWire")]
 pub struct CapturedFormat {
     pub rows: u32,
     pub columns: u32,
     pub formats: Vec<CellFormat>,
+    /// Per format, the facets applying it keeps from the target cell. Empty
+    /// when every format sets all of them.
+    pub kept: Vec<KeptFacets>,
+    pub source_styles: Vec<Option<u32>>,
+    pub source_formats: Vec<PreservedCellFormat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreservedCellFormat {
+    #[serde(flatten)]
+    pub format: CellFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_xf: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<u32>,
+}
+
+impl PreservedCellFormat {
+    pub fn from_style(styles: &xlsx_model::Stylesheet, style: Option<u32>) -> Self {
+        let (source_xf, derived_from) = style
+            .map(|index| styles.format_source(index))
+            .unwrap_or((None, None));
+        Self {
+            format: styles.cell_format(style),
+            source_xf,
+            derived_from,
+        }
+    }
+}
+
+/// Facets a captured format can leave to the target cell. A capture written
+/// before they were modeled carries none of them, so applying it keeps them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeptFacets {
+    pub protection: bool,
+    pub xf_id: bool,
+    pub quote_prefix: bool,
+    pub pivot_button: bool,
+    pub text_rotation: bool,
+    pub indent: bool,
+    pub relative_indent: bool,
+    pub justify_last_line: bool,
+    pub reading_order: bool,
+}
+
+impl KeptFacets {
+    /// Copies each kept facet of `current` into `format`.
+    pub fn keep(&self, current: &CellFormat, format: &mut CellFormat) {
+        let Self {
+            protection,
+            xf_id,
+            quote_prefix,
+            pivot_button,
+            text_rotation,
+            indent,
+            relative_indent,
+            justify_last_line,
+            reading_order,
+        } = *self;
+        if protection {
+            format.protection = current.protection;
+        }
+        if xf_id {
+            format.xf_id = current.xf_id;
+        }
+        if quote_prefix {
+            format.quote_prefix = current.quote_prefix;
+        }
+        if pivot_button {
+            format.pivot_button = current.pivot_button;
+        }
+        let (alignment, from) = (&mut format.alignment, &current.alignment);
+        if text_rotation {
+            alignment.text_rotation = from.text_rotation;
+        }
+        if indent {
+            alignment.indent = from.indent;
+        }
+        if relative_indent {
+            alignment.relative_indent = from.relative_indent;
+        }
+        if justify_last_line {
+            alignment.justify_last_line = from.justify_last_line;
+        }
+        if reading_order {
+            alignment.reading_order = from.reading_order;
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CapturedFormatWire {
+    rows: u32,
+    columns: u32,
+    formats: Vec<CapturedCellFormat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_styles: Vec<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_formats: Vec<PreservedCellFormat>,
+}
+
+/// A `CellFormat` as captured: every facet it sets is written, and an absent
+/// one keeps the target cell's value.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CapturedCellFormat {
+    font: Font,
+    fill: Fill,
+    border: Border,
+    number_format: NumberFormat,
+    alignment: CapturedAlignment,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    protection: Option<Option<Protection>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    xf_id: Option<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quote_prefix: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pivot_button: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CapturedAlignment {
+    h: Option<HAlign>,
+    v: Option<VAlign>,
+    wrap_text: bool,
+    shrink_to_fit: bool,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    text_rotation: Option<Option<u16>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    indent: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    relative_indent: Option<Option<i32>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    justify_last_line: Option<Option<bool>>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    reading_order: Option<Option<u32>>,
+}
+
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+fn unless<T>(kept: bool, value: T) -> Option<T> {
+    (!kept).then_some(value)
+}
+
+impl CapturedCellFormat {
+    fn new(format: CellFormat, kept: KeptFacets) -> Self {
+        let CellFormat {
+            font,
+            fill,
+            border,
+            number_format,
+            alignment,
+            protection,
+            xf_id,
+            quote_prefix,
+            pivot_button,
+        } = format;
+        let Alignment {
+            h,
+            v,
+            wrap_text,
+            shrink_to_fit,
+            text_rotation,
+            indent,
+            relative_indent,
+            justify_last_line,
+            reading_order,
+        } = alignment;
+        Self {
+            font,
+            fill,
+            border,
+            number_format,
+            alignment: CapturedAlignment {
+                h,
+                v,
+                wrap_text,
+                shrink_to_fit,
+                text_rotation: unless(kept.text_rotation, text_rotation),
+                indent: unless(kept.indent, indent),
+                relative_indent: unless(kept.relative_indent, relative_indent),
+                justify_last_line: unless(kept.justify_last_line, justify_last_line),
+                reading_order: unless(kept.reading_order, reading_order),
+            },
+            protection: unless(kept.protection, protection),
+            xf_id: unless(kept.xf_id, xf_id),
+            quote_prefix: unless(kept.quote_prefix, quote_prefix),
+            pivot_button: unless(kept.pivot_button, pivot_button),
+        }
+    }
+
+    fn into_format(self) -> (CellFormat, KeptFacets) {
+        let Self {
+            font,
+            fill,
+            border,
+            number_format,
+            alignment,
+            protection,
+            xf_id,
+            quote_prefix,
+            pivot_button,
+        } = self;
+        let CapturedAlignment {
+            h,
+            v,
+            wrap_text,
+            shrink_to_fit,
+            text_rotation,
+            indent,
+            relative_indent,
+            justify_last_line,
+            reading_order,
+        } = alignment;
+        let kept = KeptFacets {
+            protection: protection.is_none(),
+            xf_id: xf_id.is_none(),
+            quote_prefix: quote_prefix.is_none(),
+            pivot_button: pivot_button.is_none(),
+            text_rotation: text_rotation.is_none(),
+            indent: indent.is_none(),
+            relative_indent: relative_indent.is_none(),
+            justify_last_line: justify_last_line.is_none(),
+            reading_order: reading_order.is_none(),
+        };
+        let format = CellFormat {
+            font,
+            fill,
+            border,
+            number_format,
+            alignment: Alignment {
+                h,
+                v,
+                wrap_text,
+                shrink_to_fit,
+                text_rotation: text_rotation.flatten(),
+                indent: indent.flatten(),
+                relative_indent: relative_indent.flatten(),
+                justify_last_line: justify_last_line.flatten(),
+                reading_order: reading_order.flatten(),
+            },
+            protection: protection.flatten(),
+            xf_id: xf_id.flatten(),
+            quote_prefix: quote_prefix.unwrap_or(false),
+            pivot_button: pivot_button.unwrap_or(false),
+        };
+        (format, kept)
+    }
+}
+
+impl From<CapturedFormatWire> for CapturedFormat {
+    fn from(wire: CapturedFormatWire) -> Self {
+        let (formats, kept): (Vec<_>, Vec<_>) = wire
+            .formats
+            .into_iter()
+            .map(CapturedCellFormat::into_format)
+            .unzip();
+        let any_kept = kept.iter().any(|kept| *kept != KeptFacets::default());
+        Self {
+            rows: wire.rows,
+            columns: wire.columns,
+            formats,
+            kept: if any_kept { kept } else { Vec::new() },
+            source_styles: wire.source_styles,
+            source_formats: wire.source_formats,
+        }
+    }
+}
+
+impl From<CapturedFormat> for CapturedFormatWire {
+    fn from(format: CapturedFormat) -> Self {
+        let CapturedFormat {
+            rows,
+            columns,
+            formats,
+            kept,
+            source_styles,
+            source_formats,
+        } = format;
+        let formats = formats
+            .into_iter()
+            .enumerate()
+            .map(|(index, format)| {
+                CapturedCellFormat::new(format, kept.get(index).copied().unwrap_or_default())
+            })
+            .collect();
+        Self {
+            rows,
+            columns,
+            formats,
+            source_styles,
+            source_formats,
+        }
+    }
 }
 
 pub(crate) fn patch_cell_format(

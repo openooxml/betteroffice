@@ -14,6 +14,9 @@ categories = ["data-structures", "parser-implementations"]
 [lib]
 name = "xlsx_model"
 
+[features]
+test-counters = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 

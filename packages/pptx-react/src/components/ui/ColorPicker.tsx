@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
 import type { ToolbarIconName } from './ToolbarIcon';
-import { toolbarColors } from './ToolbarPrimitives';
+import { tooltipText, useDisabledDescription } from './ToolbarPrimitives';
+import {
+  TOOLBAR_DISABLED_OPACITY,
+  toolbarFocusStyle,
+  toolbarTheme,
+  useFocusRing,
+} from '../../../../../shared/react-toolbar/theme';
 
 export interface ColorPickerProps {
   value: string;
@@ -12,6 +18,8 @@ export interface ColorPickerProps {
   none?: boolean;
   clearLabel?: string;
   disabled?: boolean;
+  /** Why the picker is disabled; announced and shown on hover. */
+  description?: string;
   testId?: string;
 }
 
@@ -24,9 +32,12 @@ export function ColorPicker({
   none = false,
   clearLabel,
   disabled = false,
+  description,
   testId,
 }: ColorPickerProps) {
   const [hovered, setHovered] = useState(false);
+  const focus = useFocusRing<HTMLInputElement>();
+  const described = useDisabledDescription(disabled, description);
   return (
     <span
       style={{
@@ -36,36 +47,38 @@ export function ColorPicker({
       }}
     >
       <label
-        title={label}
+        title={tooltipText(label, null, described.reason)}
         aria-label={label}
         style={{
           display: 'inline-grid',
           placeItems: 'center',
           width: 28,
           height: 28,
-          borderRadius: 4,
-          background: hovered && !disabled ? toolbarColors.hover : 'transparent',
-          color: disabled ? toolbarColors.disabled : toolbarColors.text,
+          borderRadius: 6,
+          background: hovered && !disabled ? toolbarTheme.hover : 'transparent',
+          color: hovered && !disabled ? toolbarTheme.ink : toolbarTheme.inkMuted,
           cursor: disabled ? 'default' : 'pointer',
-          opacity: disabled ? 0.48 : 1,
+          opacity: disabled ? TOOLBAR_DISABLED_OPACITY : 1,
           boxSizing: 'border-box',
           position: 'relative',
+          ...toolbarFocusStyle(focus.focusRing),
         }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       >
-        <ToolbarIcon name={icon} size={20} />
+        <ToolbarIcon name={icon} />
         <span
           aria-hidden="true"
           style={{
             position: 'absolute',
-            left: 5,
-            right: 5,
-            bottom: 2,
+            left: 7,
+            right: 7,
+            bottom: 5,
             height: 3,
-            borderRadius: 2,
+            borderRadius: 1,
+            boxShadow: `inset 0 0 0 1px ${toolbarTheme.line}`,
             background: none ? 'transparent' : value,
-            border: none ? `1px solid ${toolbarColors.disabled}` : 0,
+            border: none ? `1px solid ${toolbarTheme.inkMuted}` : 0,
             boxSizing: 'border-box',
           }}
         />
@@ -74,22 +87,32 @@ export function ColorPicker({
             aria-hidden="true"
             style={{
               position: 'absolute',
-              left: 5,
-              bottom: 3,
-              width: 18,
+              left: 7,
+              bottom: 6,
+              width: 14,
               height: 1,
               background: '#d93025',
               transform: 'rotate(-18deg)',
             }}
           />
         ) : null}
+        {described.node}
         <input
           data-testid={testId}
           type="color"
+          {...focus.focusProps}
           value={value}
-          disabled={disabled}
+          {...described.props}
           aria-label={label}
-          onChange={(event) => onChange?.(event.target.value)}
+          onClick={(event) => {
+            if (disabled) event.preventDefault();
+          }}
+          onKeyDown={(event) => {
+            if (disabled && (event.key === 'Enter' || event.key === ' ')) event.preventDefault();
+          }}
+          onChange={(event) => {
+            if (!disabled) onChange?.(event.target.value);
+          }}
           style={{
             position: 'absolute',
             inset: 0,
@@ -113,11 +136,11 @@ export function ColorPicker({
             height: 28,
             padding: 0,
             border: 0,
-            borderRadius: 3,
+            borderRadius: 6,
             background: 'transparent',
-            color: disabled ? toolbarColors.disabled : toolbarColors.muted,
+            color: toolbarTheme.inkMuted,
             cursor: disabled ? 'default' : 'pointer',
-            opacity: disabled ? 0.48 : 1,
+            opacity: disabled ? TOOLBAR_DISABLED_OPACITY : 1,
             font: '500 14px ui-sans-serif, system-ui, sans-serif',
           }}
         >

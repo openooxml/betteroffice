@@ -21,7 +21,11 @@ if ((await readdir(out).catch(() => [])).length) throw new Error('output must be
 const source = await readFile(file);
 const format = extname(file).slice(1).toLowerCase();
 if (!['docx', 'pptx', 'xlsx', 'vsdx'].includes(format)) throw new Error('Invalid source format');
-const profile = JSON.parse(process.env.QUALITY_CAPTURE_CONFIG ?? 'null');
+const profile = JSON.parse(
+  process.env.QUALITY_CAPTURE_CONFIG_FILE
+    ? await readFile(process.env.QUALITY_CAPTURE_CONFIG_FILE, 'utf8')
+    : process.env.QUALITY_CAPTURE_CONFIG ?? 'null'
+);
 const sha256 = createHash('sha256').update(source).digest('hex');
 const metadata = {
   source: basename(file),
@@ -75,7 +79,7 @@ try {
       cookie: request.headers().cookie ?? null,
     };
     externalRequests.push(record);
-    if (!isAllowedFontRequest(record)) {
+    if (process.env.QUALITY_LOCAL_ONLY === '1' || !isAllowedFontRequest(record)) {
       networkViolations.push(record);
       await route.abort();
       return;

@@ -603,18 +603,14 @@ proptest! {
     }
 
     #[test]
-    fn a_table_naming_no_style_resolves_through_def(
+    fn a_table_naming_no_style_never_resolves_through_def(
         styles in vec(parts(), 0..IDS.len()),
         default in option::of(0..IDS.len()),
         flags in flags(),
         cell in position(MAX_SIDE),
     ) {
         let list = style_list(&styles, default);
-        let expected = default
-            .and_then(|index| list.styles.get(index))
-            .map(|style| style.resolve_cell(flags, cell))
-            .unwrap_or_default();
 
-        prop_assert_eq!(list.resolve_cell(None, flags, cell), expected);
+        prop_assert_eq!(list.resolve_cell(None, flags, cell), ResolvedCellStyle::default());
     }
 }

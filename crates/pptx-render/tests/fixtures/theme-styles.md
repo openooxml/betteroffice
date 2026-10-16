@@ -1,10 +1,6 @@
 # Theme style reference fixtures
 
-The integration baseline is `origin/main` at `7fdc0ee8042bbe91b5948da7a8152f972fc25c23`, including #273 (connectors), #283 (font reference colours), and #277 (slide numbering). Both builds use the same lockfile and Liberation Sans font. Every slide's `SurfaceDisplayList` is serialized with `serde_json::to_vec` before comparison.
-
-The PR ships schema 5. Legacy v1/v2 updates commit schema 3, then main's schema 4 migration, then this PR's schema 5 migration in separate transactions. Version 3 starts at step 4; version 4 runs only step 5. Main's migration remains numbered 4. Unsupported versions, including 6, are rejected.
-
-`master-style-deck.pptx` is the contributor's original repro. Its master rectangle gains a black fill and a black 2 px outline. The red oval keeps its explicit fill and gains a `#030E13`, 2 px outline. Text, geometry and paths stay unchanged; font reference colours retain the behaviour from main’s PR #283.
+`master-style-deck.pptx` is the original repro. Its master rectangle gains a black fill and a black 2 px outline. The red oval keeps its explicit fill and gains a `#030E13`, 2 px outline. Text, geometry and paths stay unchanged; font reference colours retain the behaviour from main’s PR #283.
 
 Review: [PR #253](https://github.com/openooxml/betteroffice/pull/253).
 
@@ -48,37 +44,3 @@ Use separate Cargo target directories for the two worktrees.
 The alpha integration test adds 50% alpha to matrix references, then 25% alpha to their theme styles. Solid fills, placeholder gradient stops and partial outlines retain the expected `80` and `40` alpha bytes; the literal gradient stop stays opaque.
 
 Theme line slot 3 retains a triangle head (15 × 6 px) and an oval tail (6 × 15 px). Placeholder50 retains its explicit 8 px outline width, scaling those ends to 40 × 16 px and 16 × 40 px. Pictures retain the same theme-derived ends.
-
-## Isolation
-
-All twelve tracked PPTX paths cover 35 slides. Twenty-three slides are byte-identical against current main. The three original repro slides contain 18 changed primitives. Main's new `shape-style.pptx` also declares `lnRef idx="2"` on eleven shapes across nine slides: those shapes gain only the referenced `#4472C4`, 1⅓ px outline. Its slide without a style reference remains byte-identical.
-
-Only `fill` and `stroke` differ in the 29 affected primitives. Removing only those properties from those primitives makes every complete display list identical. All text, font colours, positions, geometry, paths, image references, crops, masks and primitive order are unchanged. Every off-target slide and property is byte-identical.
-
-| Fixture | Slides | Byte-identical slides |
-| --- | --- | --- |
-| `apps/demo/public/betteroffice-demo.pptx` | 3 | 3 |
-| `crates/ooxml-drawingml/tests/fixtures/preset-adjustments.pptx` | 3 | 3 |
-| `crates/ooxml-opc/tests/fixtures/betteroffice-demo.pptx` | 3 | 3 |
-| `crates/pptx-edit/tests/fixtures/deck-schema-v2-connectors.pptx` | 1 | 1 |
-| `crates/pptx-edit/tests/fixtures/deck-schema-v2-nested-connectors.pptx` | 1 | 1 |
-| `crates/pptx-parse/tests/fixtures/chart-deck.pptx` | 2 | 2 |
-| `crates/pptx-parse/tests/fixtures/master-style-deck.pptx` | 1 | 0 |
-| `crates/pptx-parse/tests/fixtures/shape-style.pptx` | 10 | 1 |
-| `crates/pptx-parse/tests/fixtures/slide-number-fields.pptx` | 3 | 3 |
-| `crates/pptx-parse/tests/fixtures/style-matrix-deck.pptx` | 2 | 0 |
-| `crates/pptx-render/tests/fixtures/line-ends.pptx` | 3 | 3 |
-| `crates/pptx-render/tests/fixtures/picture-crop-mask.pptx` | 3 | 3 |
-
-All twelve fresh deck snapshots match byte for byte. All 215 ZIP file parts retain their content and order after no-edit saves on both builds; ZIP directory entries are excluded.
-
-## Schema mutation checks
-
-Each mutation failed a regression assertion with exit 101, then passed after restoring the original source bytes with exit 0.
-
-| Mutation | Failing regression test | Restored |
-| --- | --- | --- |
-| Skip schema 5 migration | `main_generated_snapshots_commit_each_migration_in_order` | PASS |
-| Skip main's schema 4 migration | `main_generated_snapshots_commit_each_migration_in_order` | PASS |
-| Revert `SCHEMA_VERSION` to 4 | `a_fresh_v5_snapshot_preserves_numbering_and_theme_formatting` | PASS |
-| Accept schema 6 | `unmigratable_schema_versions_stay_rejected` | PASS |

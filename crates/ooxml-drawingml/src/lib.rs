@@ -8,6 +8,8 @@ mod geometry;
 #[cfg(feature = "tiff")]
 pub mod media;
 mod picture;
+#[cfg(feature = "png")]
+pub mod png_encode;
 mod shape;
 mod style;
 mod table_grid;

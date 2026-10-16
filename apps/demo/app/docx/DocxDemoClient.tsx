@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { CollaborationProvider } from "@betteroffice/docx/collaboration";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
-import { Logo } from "../components/Logo";
+import type { DocxPlugin, DocxPluginGrant } from "@betteroffice/docx-react";
+import { DemoTopBar, barText } from "../components/DemoTopBar";
 import {
   CollaborationControls,
   COLLAB_RELAY_ORIGIN,
@@ -17,6 +17,7 @@ import {
   type CollaborationReplica,
   type CollaborationTransport,
 } from "../collab";
+import { isFatalDocxError } from "./docxError";
 import { planDemoSession } from "../../lib/demoSession";
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts/cdn") });
@@ -25,10 +26,26 @@ setGoogleFontsEnabled(false);
 // The editor is browser-only (canvas + wasm + worker); keep it out of SSR.
 const DocxEditor = dynamic(
   () => import("@betteroffice/docx-react").then((m) => m.DocxEditor),
+  { ssr: false, loading: () => <DocumentLoading /> }
+);
+const CompactToolbar = dynamic(
+  () => import("./CompactToolbar").then((m) => m.CompactToolbar),
   { ssr: false }
 );
 
 const SHOWCASE = { url: "/betteroffice-demo.docx", name: "betteroffice-demo.docx" };
+
+function DocumentLoading() {
+  return (
+    <div
+      className="oox-root flex flex-col items-center justify-center gap-5 bg-[var(--doc-bg)] text-[var(--doc-text-muted)]"
+      role="status"
+    >
+      <div className="size-9 animate-[spin_0.8s_linear_infinite] rounded-full border-3 border-[var(--doc-border)] border-t-[var(--doc-primary)]" />
+      <div className="text-[14px]">Loading document...</div>
+    </div>
+  );
+}
 
 /** `id` keys the editor, so each loaded document gets its own session. */
 interface DemoSource {
@@ -57,6 +74,31 @@ export function DocxDemoClient() {
     createProvider,
   );
   const [error, setError] = useState<string | null>(null);
+  const [compact, setCompact] = useState(false);
+  const [reviewPlugin, setReviewPlugin] = useState<DocxPlugin | null>(null);
+  const [reviewEnabled, setReviewEnabled] = useState(false);
+  const [reviewWrites, setReviewWrites] = useState(false);
+  const plugins = useMemo(
+    () => (reviewEnabled && reviewPlugin ? [reviewPlugin] : []),
+    [reviewEnabled, reviewPlugin],
+  );
+  const pluginGrants = useMemo<Record<string, DocxPluginGrant> | undefined>(
+    () =>
+      reviewWrites && reviewPlugin
+        ? { [reviewPlugin.id]: { document: "write", editBatches: true } }
+        : undefined,
+    [reviewPlugin, reviewWrites],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void import("./ReviewPlugin").then((module) => {
+      if (!cancelled) setReviewPlugin(module.reviewPlugin);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,56 +180,45 @@ export function DocxDemoClient() {
 
   return (
     <div className="fixed inset-0 z-20 flex flex-col bg-surface text-fg">
-      <header className="z-2 flex items-center gap-3.5 border-b border-hairline bg-white/92 px-4 py-[11px] backdrop-blur-lg">
-        <div className="flex min-w-0 items-baseline gap-2.5">
-          <Link
-            href="/"
-            className="inline-flex items-baseline gap-2 text-[14px] font-[650] tracking-[-0.01em] whitespace-nowrap text-fg no-underline"
-          >
-            <Logo height={18} className="self-center" />
-            BetterOffice <span className="font-normal text-faint">/ docx</span>
-          </Link>
-          <span className="overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">
-            In-browser .docx editor
-          </span>
-        </div>
-
-        <div className="flex-1" />
-
-        {source && (
-          <span className="max-w-[180px] overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">
-            {source.name}
-          </span>
-        )}
-
-        <div className="flex flex-none items-center gap-2">
-          <CollaborationControls
-            status={collab.status}
-            synced={collab.synced}
-            peerCount={collab.peerCount}
-            error={collab.error}
-            shared={session.status === "shared"}
-          />
-          <a
-            className="inline-flex size-8 items-center justify-center rounded-[5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg"
-            href="https://github.com/openooxml/betteroffice"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="View on GitHub"
-            title="View on GitHub"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 16 16"
-              fill="currentColor"
-              aria-hidden="true"
-            >
-              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
-            </svg>
-          </a>
-        </div>
-      </header>
+      <DemoTopBar
+        format="docx"
+        tagline="In-browser .docx editor"
+        fileName={source?.name}
+      >
+        <button
+          type="button"
+          className={barText}
+          aria-pressed={compact}
+          onClick={() => setCompact((value) => !value)}
+        >
+          Compact toolbar
+        </button>
+        <button
+          type="button"
+          className={barText}
+          aria-pressed={reviewEnabled}
+          disabled={!reviewPlugin}
+          onClick={() => setReviewEnabled((value) => !value)}
+        >
+          Review plugin
+        </button>
+        <button
+          type="button"
+          className={barText}
+          aria-pressed={reviewWrites}
+          disabled={!reviewEnabled}
+          onClick={() => setReviewWrites((value) => !value)}
+        >
+          Plugin write access
+        </button>
+        <CollaborationControls
+          status={collab.status}
+          synced={collab.synced}
+          peerCount={collab.peerCount}
+          error={collab.error}
+          shared={session.status === "shared"}
+        />
+      </DemoTopBar>
       <main
         className="flex min-h-0 flex-1 flex-col *:min-h-0 *:flex-1"
         data-testid="docx-demo-stage"
@@ -203,13 +234,33 @@ export function DocxDemoClient() {
             collaboration={collaboration}
             documentName={source.name}
             onOpen={handleOpen}
-            onError={(cause) => setError(cause.message)}
+            onError={(cause, info) => {
+              if (isFatalDocxError(info)) setError(cause.message);
+              else console.warn(cause);
+            }}
+            plugins={plugins}
+            pluginGrants={pluginGrants}
+            onPluginError={(failure) =>
+              console.error(
+                `Plugin ${failure.pluginId} failed (${failure.phase})`,
+                failure.error,
+              )
+            }
+            toolbar={
+              compact ? (
+                <CompactToolbar
+                  onShare={() =>
+                    void navigator.clipboard?.writeText(window.location.href)
+                  }
+                />
+              ) : undefined
+            }
             showToolbar
             showRuler
             showZoomControl
           />
         ) : (
-          <p className="m-auto text-mute">Loading document…</p>
+          <DocumentLoading />
         )}
       </main>
     </div>

@@ -36,3 +36,13 @@ test('imported paragraph spacing keeps the updated authored properties', () => {
   expect(paragraphAttrsToFormatting({ ...formatting, _originalFormatting: formatting }))
     .toMatchObject(formatting);
 });
+
+test('paragraph auto-spacing opt-outs survive a save', () => {
+  expect(paragraphAttrsToFormatting({ autoSpaceDE: false, autoSpaceDN: false }))
+    .toMatchObject({ autoSpaceDE: false, autoSpaceDN: false });
+  const on = { autoSpaceDE: true, autoSpaceDN: true };
+  expect(paragraphAttrsToFormatting({ autoSpaceDE: false, autoSpaceDN: false, _originalFormatting: on }))
+    .toMatchObject({ autoSpaceDE: false, autoSpaceDN: false });
+  expect(paragraphAttrsToFormatting({ ...on, _originalFormatting: on }))
+    .toMatchObject(on);
+});

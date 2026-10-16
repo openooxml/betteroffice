@@ -4,6 +4,8 @@
  * they share a single value rather than a flag each.
  */
 
+import { headerFooterStory, type YrsSession } from '@betteroffice/docx/yrs';
+
 import type {
   DisplayListImageRegion,
   DisplayListRegionHit,
@@ -34,10 +36,10 @@ function isNote(part: PartEdit): part is NoteEdit {
 }
 
 /** yrs root story the open part types into; the body when none is typeable. */
-export function partEditStory(part: PartEdit | null): string {
+export function partEditStory(part: PartEdit | null, session?: YrsSession | null): string {
   if (!part) return 'body';
   if (isNote(part)) return `${part.kind === 'footnote' ? 'fn' : 'en'}:${part.noteId}`;
-  return part.rId ? `hf:${part.rId}` : 'body';
+  return part.rId ? headerFooterStory(session, part.rId) : 'body';
 }
 
 /** Whether a hit lands in the open part — what separates typing from leaving. */

@@ -20,6 +20,9 @@ use crate::collaboration_protocol::MAX_FRAME_BYTES;
 
 pub const DEFAULT_RELAY_ORIGIN: &str = "https://betteroffice-collaboration-relay.elia7.workers.dev";
 pub const BROWSER_SEED_CLIENT_ID: u64 = 1;
+/// The opening generation of the shared DOCX seed, as the browser demo's
+/// `apps/demo/scripts/build-collaboration-seeds.ts` writes it.
+pub const BROWSER_SEED_GENERATION: &str = "betteroffice-demo";
 const INITIAL_RETRY: Duration = Duration::from_millis(250);
 const MAX_RETRY: Duration = Duration::from_secs(5);
 const COMMAND_QUEUE_CAPACITY: usize = 64;

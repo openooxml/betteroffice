@@ -16,16 +16,16 @@ theme are present.
 
 ## Explicit non-goals
 
-The following residual categories are intentionally outside this profile:
+The following categories are intentionally outside this profile:
 
-- Event cells (937): event and recalculation plumbing is not display evaluation.
-- `Inh` has no concrete inherited value (825): catalog sheets have no inheritance
+- Event cells: event and recalculation plumbing is not display evaluation.
+- `Inh` has no concrete inherited value: catalog sheets have no inheritance
   graph, so resolving these values would manufacture results, and inheritance chains
   that exhaust before reaching a concrete value — including the `DocLangID` locale
   cells — have nothing to return.
-- `THEMEVAL` without host context or a theme (2): theme values require both to be
+- `THEMEVAL` without host context or a theme: theme values require both to be
   meaningful.
-- `THEMEVAL` values outside the resolvable colour slots (238): non-colour theme
+- `THEMEVAL` values outside the resolvable colour slots: non-colour theme
   data and variation-dependent colours stay unsupported rather than guessed.
 - `SHADE` and `LUMDIFF`: their Visio semantics are undocumented, so they remain
   unsupported rather than guessed.
@@ -38,9 +38,7 @@ The corpus harness compares evaluated formulas with Visio's cell `@V` cache,
 interpreting `@V` using its `@U` display unit before comparison. Numeric agreement
 requires both equal canonical magnitudes and equal dimensions. Those cache values
 may be stale; the reported agreement rate is an imperfect compatibility signal,
-not proof of exact Visio compatibility. Coverage and agreement must be measured
-against the current engine revision and the exact corpus; no current percentages
-are claimed here because the private corpus is not available in every checkout.
+not proof of exact Visio compatibility.
 
 The oracle excludes only nine demonstrated stale cache encodings, pinned to their
 corpus source parts and shapes: four `LineWeight` `F="Inh"` values from a prior

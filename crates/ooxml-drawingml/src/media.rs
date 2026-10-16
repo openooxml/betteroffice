@@ -2,7 +2,7 @@
 
 extern crate tiff as tiff_crate;
 
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
@@ -75,7 +75,7 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
         }
     };
     let (rgba, width, height) = apply_orientation(rgba, width, height, orientation);
-    encode_png_rgba8(&rgba, width, height)
+    crate::png_encode::encode_rgba8(&rgba, width, height)
 }
 
 /// Single numeric IFD entry.
@@ -599,48 +599,6 @@ fn apply_orientation(
         }
     }
     (out, output_width as u32, output_height as u32)
-}
-
-/// RGBA8 raster to PNG bytes.
-fn encode_png_rgba8(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let mut png = Vec::new();
-    png.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
-    let mut header = [0u8; 13];
-    header[0..4].copy_from_slice(&width.to_be_bytes());
-    header[4..8].copy_from_slice(&height.to_be_bytes());
-    header[8] = 8;
-    header[9] = 6;
-    png_chunk(&mut png, b"IHDR", &header);
-    png_chunk(&mut png, b"IDAT", &deflate_idat(rgba, width as usize)?);
-    png_chunk(&mut png, b"IEND", &[]);
-    Ok(png)
-}
-
-/// Scanlines with a zero filter byte, compressed as one zlib stream.
-fn deflate_idat(rgba: &[u8], width: usize) -> Result<Vec<u8>, String> {
-    let stride = width * 4;
-    if stride == 0 || !rgba.len().is_multiple_of(stride) {
-        return Err("Malformed TIFF image data".to_owned());
-    }
-    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    for row in rgba.chunks_exact(stride) {
-        encoder
-            .write_all(&[0])
-            .and_then(|()| encoder.write_all(row))
-            .map_err(|error| error.to_string())?;
-    }
-    encoder.finish().map_err(|error| error.to_string())
-}
-
-/// Length, type, data and CRC32 of tag and data.
-fn png_chunk(png: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
-    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    png.extend_from_slice(tag);
-    png.extend_from_slice(data);
-    let mut crc = crc32fast::Hasher::new();
-    crc.update(tag);
-    crc.update(data);
-    png.extend_from_slice(&crc.finalize().to_be_bytes());
 }
 
 trait U16Bytes {

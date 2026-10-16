@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { useState } from 'react';
 import type { Document, HeaderFooter, SectionProperties } from '@betteroffice/docx/types/document';
 import { parseDocx } from '@betteroffice/docx/docx';
 import type { PartEditTarget } from '../partEdit';
@@ -134,4 +135,28 @@ describe('useHeaderFooterEditing on a last section that inherits its header', ()
     expect(next.document.sections?.[0]?.properties.headerReferences).toBeUndefined();
     expect(targets).toEqual([{ kind: 'header', isFirstPage: false, pageIndex: 1 }]);
   });
+});
+
+test('switching to read-only closes an open header or footer', () => {
+  for (const kind of ['header', 'footer'] as const) {
+    const hook = renderHook(
+      ({ readOnly }: { readOnly: boolean }) => {
+        const [partEditTarget, setPartEditTarget] = useState<PartEditTarget | null>(null);
+        const editing = useHeaderFooterEditing({
+          document: probe,
+          pushDocument: () => {},
+          partEditTarget,
+          setPartEditTarget,
+          readOnly,
+        });
+        return { partEditTarget, editing };
+      },
+      { initialProps: { readOnly: false } }
+    );
+    act(() => hook.result.current.editing.handleHeaderFooterDoubleClick(kind, 1));
+    expect(hook.result.current.partEditTarget?.kind).toBe(kind);
+    hook.rerender({ readOnly: true });
+    expect(hook.result.current.partEditTarget).toBeNull();
+    hook.unmount();
+  }
 });

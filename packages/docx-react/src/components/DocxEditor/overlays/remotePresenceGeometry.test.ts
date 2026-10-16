@@ -39,6 +39,10 @@ describe('remote presence geometry', () => {
     expect(scrolled).toEqual({ start: 39, end: 41 });
     expect(oversized).not.toBeNull();
     expect((oversized?.end ?? 0) - (oversized?.start ?? 0) + 1).toBe(REMOTE_PRESENCE_MAX_PAGES);
+    expect(remotePresencePageWindow(metrics, 50, 50, 20_000, Infinity)).toEqual({
+      start: 0,
+      end: 99,
+    });
   });
 
   test('clamps a document-wide selection to the page window', () => {

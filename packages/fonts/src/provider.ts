@@ -1,14 +1,22 @@
 import {
+  resolveBundledFamilyFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
   resolveLastResortFace,
   type BundledFontFace,
+  type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
 
 /** Structural provider contract keeps this package independent of the engine. */
 export interface BundledFontSource {
   resolve(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+  ): (() => Promise<ArrayBuffer>) | undefined;
+  /** Like `resolve`, but also accepts bundled family names such as `"Gelasio"`, and never substitutes another style. */
+  resolveFamily(
     family: string,
     bold: boolean,
     italic: boolean,
@@ -22,6 +30,7 @@ export interface BundledFontSource {
     family: string,
     bold: boolean,
     italic: boolean,
+    office?: LastResortOffice,
   ): () => Promise<ArrayBuffer>;
 }
 
@@ -34,12 +43,16 @@ export function fontProvider(
       const face = resolveMetricCompatFace(family, bold, italic);
       return face ? load(face) : undefined;
     },
+    resolveFamily(family, bold, italic) {
+      const face = resolveBundledFamilyFace(family, bold, italic);
+      return face ? load(face) : undefined;
+    },
     resolveScriptFallback(script, bold, italic) {
       const face = resolveScriptFallbackFace(script, bold, italic);
       return face ? load(face) : undefined;
     },
-    resolveLastResort(family, bold, italic) {
-      return load(resolveLastResortFace(family, bold, italic));
+    resolveLastResort(family, bold, italic, office) {
+      return load(resolveLastResortFace(family, bold, italic, office));
     },
   };
 }

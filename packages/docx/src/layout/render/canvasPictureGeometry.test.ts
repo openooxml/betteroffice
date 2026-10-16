@@ -92,3 +92,13 @@ test.each([undefined, 'rect', 'roundRect'])('preset %s retains rectangular pictu
   expect(recorder.calls).toContainEqual(['strokeRect', 10, 20, 100, 80]);
   expect(recorder.depth()).toBe(0);
 });
+
+test.each(['data:image/x-emf;base64,AQAAAA==', 'rId7'])(
+  'a picture the resolver returns null for (%s) paints nothing',
+  async (relId) => {
+    const recorder = recordingContext();
+    await drawPrimitive(recorder.ctx, { ...image(), relId, border: { width: 2 } }, { resolveImage: async () => null });
+    expect(recorder.calls).toEqual([]);
+    expect(recorder.depth()).toBe(0);
+  }
+);

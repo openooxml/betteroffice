@@ -6,6 +6,10 @@ Compare DOCX, PPTX, and XLSX renders against Microsoft Office. Inputs and genera
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
+## Private DOCX layout gate
+
+`node scripts/office-quality/private-ssim.mjs --source <docx> --reference-pdf <word.pdf> --reference-dir <dir> --package-root packages/docx --react-root packages/docx-react --fonts-dist packages/fonts/dist --out <dir> [--baseline <score.json>]` scores a local document against its Word PDF without leaving the machine: page-penalized and text-aligned SSIM at 150 DPI, page and break agreement, and the first diverging page; it exits 1 when a baseline comparison regresses.
+
 ## Local benchmark
 
 Run from the repository root with Bun, Node.js, Python 3.13, and the project's Rust/Wasm toolchain installed:
@@ -41,7 +45,7 @@ chart typography can still differ from Excel.
 
 ## Manual CI and generated README
 
-After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main`, use **Actions → Benchmarks → Run workflow**, or:
+Run the [workflow](../../.github/workflows/visual-fidelity.yml) from **Actions → Benchmarks → Run workflow**, or:
 
 ```sh
 gh workflow run visual-fidelity.yml --ref main -f branch=main
@@ -53,7 +57,7 @@ The final job requires every selected format and sample, combines the original c
 
 ## Native DOCX and LibreOffice
 
-The DOCX table adds LibreOffice fidelity and a native CLI render-time row. BetterOffice fidelity still measures the browser renderer at 150 DPI. Native timings exercise the Rust rasterizer at 96 DPI; they do not claim that it has the browser renderer's fidelity or feature coverage. PPTX adds the same render-time comparison; XLSX adds calculation accuracy and recalculation time.
+The DOCX table adds LibreOffice fidelity and a native CLI render-time row. BetterOffice fidelity still measures the browser renderer at 150 DPI. Native timings exercise the Rust rasterizer at 96 DPI; they do not claim that it has the browser renderer's fidelity or feature coverage. PPTX adds the same render-time comparison; XLSX adds LibreOffice SSIM, recalculation accuracy and recalculation time.
 
 Both BetterOffice executables use the same [`native/main.rs`](native/main.rs) host, compiled in release mode (`opt-level=3`, thin LTO), against the frozen current source and the exact source of the published npm version. The host reads the original DOCX, imports it into the engine, loads fonts, lays out the document, constructs the display list, rasterizes page one, PNG-encodes it, and writes the file. All of that work and process startup are timed. No prepared layout, display list, resident engine, Wasm, or browser is supplied to the executable. Unsupported raster operations, skipped images, blank output for a nonblank reference, and invalid output dimensions count as failures.
 
@@ -103,8 +107,9 @@ written last, so it never points at an incomplete upload. Every published SHA is
 
 Missing format reports or incomplete render artifacts prevent publication. An R2 upload failure
 also stops the final job before the README update. [`apps/fidelity`](../../apps/fidelity)
-serves those renders next to the public Office references, so a page can be compared by swiping or
-by a difference blend. It reads scores only from `report.json` and never derives its own.
+serves the benchmarks site: an overview that charts
+`report.json` with the README's aggregation rules, and a viewer that shows those renders next to
+the public Office references, so a page can be compared by swiping or by a difference blend.
 
 ## Office references
 
@@ -189,4 +194,37 @@ Recalculation timing measures the complete native CLI operation: process startup
 
 ## LibreOffice presentations
 
-PPTX has an independent benchmark worker and two native build jobs. It renders the same frozen corpus files to PDF using `impress_pdf_Export`, rasterizes at 150 DPI, and uses the existing PowerPoint references, SSIM calculation, and slide-count penalties. It shares DOCX’s pinned LibreOffice release and font bundle. The existing one-pixel edge correction handles PDF raster rounding without resampling or image alignment. Failures and scored coverage are retained. Native render timing compares the published and current Rust crates against the prebuilt LibreOffice CLI, using the same warmup, five fresh processes, rotation, 96-DPI PNG validation, and common successful subset as DOCX. The BetterOffice host imports the original presentation, registers the frozen font bundle and aliases, renders slide one, and writes its PNG; LibreOffice uses [`impress_png_Export`](https://help.libreoffice.org/latest/en-US/text/shared/guide/graphic_export_params.html). The table shows SSIM, scored coverage, and render time, with pagination metrics reserved for DOCX. The reconciler requires this worker’s report before publishing the combined tables. LibreOffice XLSX rendering is not measured; its XLSX column currently contains calculation results only.
+PPTX has an independent benchmark worker and two native build jobs. It renders the same frozen corpus files to PDF using `impress_pdf_Export`, rasterizes at 150 DPI, and uses the existing PowerPoint references, SSIM calculation, and slide-count penalties. It shares DOCX’s pinned LibreOffice release and font bundle. The existing one-pixel edge correction handles PDF raster rounding without resampling or image alignment. Failures and scored coverage are retained. Native render timing compares the published and current Rust crates against the prebuilt LibreOffice CLI, using the same warmup, five fresh processes, rotation, 96-DPI PNG validation, and common successful subset as DOCX. The BetterOffice host imports the original presentation, registers the frozen font bundle and aliases, renders slide one, and writes its PNG; LibreOffice uses [`impress_png_Export`](https://help.libreoffice.org/latest/en-US/text/shared/guide/graphic_export_params.html). The table shows SSIM, scored coverage, and render time, with pagination metrics reserved for DOCX. The reconciler requires this worker’s report before publishing the combined tables.
+
+
+## LibreOffice spreadsheet fidelity
+
+Up to four independent workers render every selected XLSX, including workbooks without formula references. They use the same frozen source, Excel PNG references, bundled fonts, pinned LibreOffice build, and 150-DPI grayscale SSIM as the other format comparisons. The XLSX table shows LibreOffice SSIM and scored/total alongside recalculation accuracy and time. Per-cell mismatches and reference coverage remain in the JSON artifacts.
+
+Each recorded range is exported separately through `calc_pdf_Export`. A temporary copy selects its worksheet, hides the others, and applies the reference's print area, fixed scale, landscape paper size, margins, gridlines, and empty headers/footers and print titles. Source cells, formulas, and cached values are retained. LibreOffice may recalculate on import. [Print ranges](https://help.libreoffice.org/latest/en-GB/text/scalc/guide/printranges.html) constrain the export; whole-sheet export and fit-to-page scaling are disabled. Recorded Letter, Legal, A3 and A4 paper dimensions are supported; an unknown size fails explicitly.
+
+Each range must produce exactly one PDF page at the recorded physical dimensions. Overflow, a missing range, or a larger raster-size mismatch fails the workbook comparison and reduces scored/total. Raster rounding permits at most one pixel of right/bottom edge adjustment; no resizing or alignment correction is applied. SSIM averages successful workbook comparisons only, so compare coverage too.
+
+The final reconciler requires every XLSX render shard, including explicit failures, and matching plan, source, font and LibreOffice identities. It rejects a different LibreOffice build between fidelity and recalculation. `xlsx-fidelity-diagnostics-*` retains the prepared range workbooks, PDF exports, PNGs, logs and source/prepared hashes for seven days. No generated assets are committed.
+
+## Parse success and edit/save preservation
+
+The benchmark compares the published and current Rust facades with the pinned LibreOffice release for DOCX, PPTX and XLSX. Every selected corpus original is attempted, independently of its render or calculation result. Parse success is the percentage for which the normal native `open` API succeeds or LibreOffice loads the file as the correct document type. It does not establish complete feature support or rendering fidelity. A later edit, save, reopen or preservation failure cannot erase that parse success.
+
+Preservation diagnostics remain experimental and are not displayed as a `Lossless roundtrip` percentage in the README. One deterministic probe is chosen from the original package and given unchanged to all three engines: append a marker to an unambiguous single-run paragraph/text box for DOCX/PPTX, or change the first finite numeric literal to zero (one if already zero) for XLSX. The original stays unchanged. Each engine must perform the edit, save, reopen its output and verify the new value. Files without an eligible probe, errors and timeouts remain non-passes in the raw full-corpus totals, with their reasons recorded. A no-op save cannot pass.
+
+An independent ZIP/XML checker then compares the original with the saved package. Part names must match exactly; every part outside the edited XML part must retain identical uncompressed bytes, including unknown XML, relationships, custom parts and embedded files. The edited part must match the original XML tree with only the selected text/value replaced. Its other elements, attributes, namespace bindings, comments and text remain significant. Attribute ordering, XML declaration spelling, escaping and empty-element spelling in that one part do not affect the result. ZIP entry order, compression and timestamps are excluded.
+
+This is a strict preservation probe, not a verdict that every non-pass lost user content: even benign serialization changes outside the edit, updated metadata, or dependent formula-cache recalculation fail it. No part, formula cache, extension or subtree is broadly exempted. One passing edit also does not prove all edits are lossless. The per-file artifacts distinguish parse/edit/save/reopen failures from added, removed or changed parts and an edited-part mismatch.
+
+LibreOffice uses the bundled Python/UNO runtime from the same pinned Linux installation as the other comparisons. Each file gets its own headless process, profile and private UNO pipe. It loads the original with macros and external updates disabled, performs the same edit through Writer/Impress/Calc APIs, and saves with the [OOXML export filter](https://help.libreoffice.org/latest/en-US/text/shared/guide/convertfilters.html) before reopening. Runtime setup is checked before measuring any files. The original is never pre-edited on LibreOffice’s behalf.
+
+The README shows only parse success from these probes. Preservation counts, exact edit footprints, source/output hashes and diagnostics stay in `roundtrip_benchmark` and per-sample `roundtrip`/`roundtrip_probe` report fields. SSIM, recalculation accuracy and timing comparisons continue separately.
+
+Two native builds per selected format feed batches of at most 16 files, with four files processed concurrently per worker. Each file runs all three channels sequentially in fresh processes with independent 180-second limits. Probe selection and each preservation check run in separate processes with 30-second limits. Even if every engine and helper reaches its limit, one batch spends at most 44 minutes on those subprocesses, leaving room for installation, downloads and artifacts within the 90-minute job. Timeout cleanup kills the process group, including LibreOffice children; already recorded parse successes survive a later timeout. These probes do not contribute to timing metrics. The reconciler requires every planned shard and file, all three channels, matching source/build/checker/LibreOffice identities and explicit preservation evidence before publication. `roundtrip-diagnostics-*` retains saved documents, probe definitions and process logs for seven days. Runs remain manual.
+
+Compile-check a host without executing measurements:
+
+```sh
+node scripts/office-quality/build-roundtrip.mjs docx /path/to/source .source/roundtrip-check --check
+```

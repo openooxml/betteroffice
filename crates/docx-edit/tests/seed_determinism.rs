@@ -1,11 +1,11 @@
-use docx_edit::{EditingDoc, seed_from_docx, story_checksum};
+use docx_edit::{EditingDoc, seed_from_docx_with_generation, story_checksum};
 use yrs::{Map, ReadTxn, Transact};
 
 const DOCX: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.docx");
 
 fn seeded() -> EditingDoc {
     let doc = EditingDoc::new(1);
-    seed_from_docx(&doc, DOCX).unwrap();
+    seed_from_docx_with_generation(&doc, DOCX, "determinism").unwrap();
     doc
 }
 
@@ -44,4 +44,15 @@ fn independently_seeded_replicas_have_identical_canonical_checksums() {
         right.encode_state_vector_v1()
     );
     assert_eq!(checksums(&left), checksums(&right));
+}
+
+#[test]
+fn a_native_shared_seed_matches_the_committed_browser_seed() {
+    let native = EditingDoc::new(1);
+    seed_from_docx_with_generation(&native, DOCX, "betteroffice-demo").unwrap();
+    let browser = include_bytes!("../../../apps/demo/public/seeds/docx.bin");
+    assert!(native.encode_state_as_update_v1() == browser.as_slice());
+    let replica = EditingDoc::new(2);
+    replica.apply_update_v1(browser).unwrap();
+    assert_eq!(replica.session_id(), native.session_id());
 }

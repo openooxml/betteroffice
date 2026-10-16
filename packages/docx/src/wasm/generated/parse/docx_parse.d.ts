@@ -76,11 +76,23 @@ export function serialize_docx_s12(request_json: string): string;
  */
 export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Array): Uint8Array;
 
+/**
+ * [`write_docx_s13_wasm`], framing save diagnostics ahead of the package
+ * bytes: `u64 LE warnings_len || warnings_json || docx_bytes`.
+ */
+export function write_docx_s13_wasm_with_warnings(request_json: string, original_docx: Uint8Array): Uint8Array;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
+    readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_start: () => void;
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
+    readonly memory: WebAssembly.Memory;
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
@@ -95,12 +107,7 @@ export interface InitOutput {
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __externref_table_dealloc: (a: number) => void;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_start: () => void;
+    readonly write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

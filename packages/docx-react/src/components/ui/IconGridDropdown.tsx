@@ -12,6 +12,7 @@ import { Button } from './Button';
 import { Tooltip } from './Tooltip';
 import { cn } from '../../lib/utils';
 import { useFixedDropdown } from '../../hooks/useFixedDropdown';
+import { useDisabledDescription } from './disabledDescription';
 
 const ICON_SIZE = 20;
 
@@ -43,6 +44,8 @@ export interface IconGridDropdownProps<T extends string = string> {
    * (e.g. image wrap modes where the icons are visually similar).
    */
   showLabels?: boolean;
+  /** Why the dropdown is disabled. */
+  description?: string;
 }
 
 export function IconGridDropdown<T extends string = string>({
@@ -55,7 +58,9 @@ export function IconGridDropdown<T extends string = string>({
   ariaLabel,
   testId,
   showLabels = false,
+  description,
 }: IconGridDropdownProps<T>) {
+  const reason = useDisabledDescription(disabled, description);
   const [isOpen, setIsOpen] = useState(false);
   const onClose = useCallback(() => setIsOpen(false), []);
   const { containerRef, dropdownRef, dropdownStyle, handleMouseDown } = useFixedDropdown({
@@ -82,7 +87,7 @@ export function IconGridDropdown<T extends string = string>({
       )}
       onMouseDown={handleMouseDown}
       onClick={() => !disabled && setIsOpen((prev) => !prev)}
-      disabled={disabled}
+      {...reason.triggerProps}
       aria-label={ariaLabel ?? tooltipContent}
       aria-expanded={isOpen}
       aria-haspopup="true"
@@ -95,7 +100,14 @@ export function IconGridDropdown<T extends string = string>({
 
   return (
     <div ref={containerRef} style={{ position: 'relative', display: 'inline-block' }}>
-      {!isOpen ? <Tooltip content={tooltipContent}>{triggerButton}</Tooltip> : triggerButton}
+      {!isOpen ? (
+        <Tooltip content={reason.title ? `${tooltipContent}: ${reason.title}` : tooltipContent}>
+          {triggerButton}
+        </Tooltip>
+      ) : (
+        triggerButton
+      )}
+      {reason.node}
 
       {isOpen && !disabled && (
         <div

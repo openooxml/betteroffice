@@ -2,8 +2,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotDataLabels, PlotFont, PlotOp, PlotRect, PlotSink, PlotTextAlign,
-    chart_aria_label, plot_chart_into,
+    ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect, PlotSink,
+    PlotTextAlign, chart_aria_label, plot_chart_into,
 };
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
@@ -27,6 +27,7 @@ pub(crate) struct ChartText<'a> {
     pub font: PlotFont,
     pub color: &'a str,
     pub align: PlotTextAlign,
+    pub rotation_deg: f64,
 }
 
 /// The chart primitive for `space`, with at most `budget` parts. Chart text
@@ -68,9 +69,13 @@ pub(crate) fn chart_primitive<'a>(
     })
 }
 
-/// Supplies value labels only for legacy charts without `c:dLbls`.
+/// Supplies value labels only for legacy charts without `c:dLbls`, and leaves
+/// a chart area with no `c:spPr` unfilled, as PowerPoint draws it.
 fn plot_model(space: &ChartSpace) -> PlotChart<'_> {
     let mut chart = PlotChart::from(space);
+    if space.fill.is_none() {
+        chart.fill = Some(PlotFill::None);
+    }
     for (group, plotted) in space.plot_groups.iter().zip(chart.plot_groups.iter_mut()) {
         if !group.show_data_labels {
             continue;
@@ -99,6 +104,10 @@ struct ChartSink<'a> {
 }
 
 impl PlotSink for ChartSink<'_> {
+    fn turns_text(&self) -> bool {
+        true
+    }
+
     fn accepts_more(&mut self) -> bool {
         self.remaining > 0 && self.error.is_none()
     }
@@ -116,8 +125,13 @@ impl PlotSink for ChartSink<'_> {
             font: font.clone(),
             color: "#000000",
             align: PlotTextAlign::Start,
+            rotation_deg: 0.0,
         }) {
-            Ok(Primitive::TextBox { lines, .. }) => lines.first().map(|line| f64::from(line.width)),
+            Ok(Primitive::TextBox {
+                text_shadow: None,
+                lines,
+                ..
+            }) => lines.first().map(|line| f64::from(line.width)),
             Ok(_) => None,
             Err(error) => {
                 self.error = Some(error);
@@ -217,6 +231,7 @@ impl PlotSink for ChartSink<'_> {
                 font,
                 color,
                 align,
+                rotation_deg,
             } => {
                 let request = ChartText {
                     object_id: self.object_id,
@@ -227,6 +242,7 @@ impl PlotSink for ChartSink<'_> {
                     font,
                     color: &color,
                     align,
+                    rotation_deg,
                 };
                 match (self.text)(request) {
                     Ok(primitive) => primitive,
@@ -331,6 +347,7 @@ fn normalize(command: GeometryPathCommand, x: f64, y: f64, w: f64, h: f64) -> Ge
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ooxml_drawingml::chart::ChartFill;
     use pptx_parse::{
         ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup,
         ChartPoint, ChartSeries,
@@ -366,6 +383,7 @@ mod tests {
             legend: Some(ChartLegend {
                 position: Some("right".to_owned()),
                 visible: true,
+                overlay: false,
                 text: None,
             }),
             series: groups
@@ -432,6 +450,7 @@ mod tests {
     fn plot(space: &ChartSpace) -> Primitive {
         chart_primitive(frame("Chart 1"), space, "", 100_000, &mut |text| {
             Ok(Primitive::TextBox {
+                text_shadow: None,
                 object_id: text.object_id,
                 shape_id: None,
                 story_id: None,
@@ -506,6 +525,37 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_chart_area_without_a_fill_stays_transparent() {
+        let bare = space(
+            "column",
+            vec![group(
+                "column",
+                vec![series("North", &[3.0, 1.0], "#112233")],
+            )],
+        );
+        assert!(!fills(&plot(&bare)).contains(&"#FFFFFF"));
+        let mut filled = bare.clone();
+        filled.fill = Some(ChartFill::Solid {
+            color: "#FFFFFF".to_owned(),
+        });
+        assert!(fills(&plot(&filled)).contains(&"#FFFFFF"));
+        filled.fill = Some(ChartFill::Gradient {
+            colors: vec!["#000000".to_owned(), "#FEFEFE".to_owned()],
+        });
+        assert!(fills(&plot(&filled)).contains(&"#7F7F7F"));
+        filled.fill = Some(ChartFill::Gradient {
+            colors: vec!["#00000000".to_owned(), "#FEFEFE00".to_owned()],
+        });
+        assert!(fills(&plot(&filled)).contains(&"#7F7F7F00"));
+        filled.fill = Some(ChartFill::Gradient {
+            colors: vec!["#00000000".to_owned(), "#FFFFFFFF".to_owned()],
+        });
+        assert!(fills(&plot(&filled)).contains(&"#FFFFFF7F"));
+        filled.fill = Some(ChartFill::Unsupported);
+        assert!(fills(&plot(&filled)).contains(&"#FFFFFF"));
     }
 
     #[test]
@@ -588,6 +638,7 @@ mod tests {
             space.legend = Some(ChartLegend {
                 position: Some(position.to_owned()),
                 visible: true,
+                overlay: false,
                 text: None,
             });
             assert!(
@@ -605,6 +656,7 @@ mod tests {
         hidden.legend = Some(ChartLegend {
             position: None,
             visible: false,
+            overlay: false,
             text: None,
         });
         assert!(!texts(&plot(&hidden)).contains(&"North".to_owned()));
@@ -664,9 +716,9 @@ mod tests {
         assert!(
             parts(&chart).iter().any(
                 |primitive| matches!(primitive, Primitive::Shape { geometry, w, .. }
-                if geometry == "custom" && (*w - 11.0).abs() < 0.001)
+                if geometry == "custom" && (*w - 11.0 * 4.0 / 3.0).abs() < 0.001)
             ),
-            "a circle symbol draws its own outline at the marker size"
+            "a circle symbol draws its own outline at the marker size, in points"
         );
         for value in ["3", "1", "2"] {
             assert!(texts(&chart).contains(&value.to_owned()), "{value}");

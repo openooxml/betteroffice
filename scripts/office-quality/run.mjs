@@ -142,6 +142,7 @@ async function viewer(overrides = {}) {
   const env = { ...process.env, QUALITY_PORT: String(port) };
   delete env.QUALITY_PACKAGE_ROOT;
   delete env.QUALITY_REACT_ROOT;
+  delete env.QUALITY_FONT_ASSETS;
   Object.assign(env, overrides);
   const child = spawn(process.execPath, ['scripts/docx-quality/server.mjs'], {
     env,
@@ -202,7 +203,11 @@ for (const format of selectedFormats) {
   for (const channel of ['published', 'commit']) {
     const server = await viewer({
       QUALITY_FORMAT: format,
-      ...(channel === 'published' ? roots : {}),
+      ...(channel === 'published'
+        ? roots
+        : // The commit channel renders with the fonts this checkout ships,
+          // which the pinned CDN only carries once they are published.
+          { QUALITY_FONT_ASSETS: resolve('packages/fonts/assets') }),
     });
     try {
       await measureSamples(

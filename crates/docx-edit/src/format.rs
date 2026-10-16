@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{Any, Out, ReadTxn, Text, TextRef};
@@ -238,6 +239,168 @@ impl InlineFormatDelta {
     }
 }
 
+/// Parses the `format_range` delta JSON object. Shared by the wasm entry
+/// and table-fragment paste, which lowers the result with [`InlineFormatDelta::to_attrs`].
+pub(crate) fn parse_inline_format_delta(
+    object: &serde_json::Map<String, Value>,
+) -> Result<InlineFormatDelta, String> {
+    let bool_patch = |key: &str| -> Result<Patch<bool>, String> {
+        match object.get(key) {
+            None => Ok(Patch::Keep),
+            Some(Value::Null) => Ok(Patch::Clear),
+            Some(Value::Bool(value)) => Ok(Patch::Set(*value)),
+            Some(_) => Err(format!("format delta {key:?} must be a boolean or null")),
+        }
+    };
+
+    let underline = match object.get("underline") {
+        None => Patch::Keep,
+        Some(Value::Null | Value::Bool(false)) => Patch::Clear,
+        Some(Value::Bool(true)) => Patch::Set(Default::default()),
+        Some(Value::Object(value)) => {
+            let string = |key: &str| -> Result<Option<String>, String> {
+                value
+                    .get(key)
+                    .map(|entry| {
+                        entry
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| format!("underline {key:?} must be a string"))
+                    })
+                    .transpose()
+            };
+            Patch::Set(UnderlinePatch {
+                style: string("style")?,
+                color: string("color")?,
+            })
+        }
+        Some(_) => {
+            return Err("format delta \"underline\" must be a boolean, object, or null".to_owned());
+        }
+    };
+
+    let strike = match object.get("strike") {
+        None => Patch::Keep,
+        Some(Value::Null | Value::Bool(false)) => Patch::Clear,
+        Some(Value::Bool(true)) => Patch::Set(StrikePatch { double: false }),
+        Some(Value::Object(value)) => {
+            let double = value
+                .get("double")
+                .map(|entry| {
+                    entry
+                        .as_bool()
+                        .ok_or_else(|| "strike \"double\" must be a boolean".to_owned())
+                })
+                .transpose()?
+                .unwrap_or(false);
+            Patch::Set(StrikePatch { double })
+        }
+        Some(_) => {
+            return Err("format delta \"strike\" must be a boolean, object, or null".to_owned());
+        }
+    };
+
+    let color = match object.get("color") {
+        None => Patch::Keep,
+        Some(Value::Null) => Patch::Clear,
+        Some(Value::Object(value)) => match (
+            value.get("rgb").and_then(Value::as_str),
+            value.get("themeColor").and_then(Value::as_str),
+        ) {
+            (Some(rgb), None) => Patch::Set(ColorPatch::Rgb(rgb.to_owned())),
+            (None, Some(theme)) => Patch::Set(ColorPatch::Theme(theme.to_owned())),
+            _ => {
+                return Err(
+                    "format delta \"color\" requires exactly one of \"rgb\" or \"themeColor\""
+                        .to_owned(),
+                );
+            }
+        },
+        Some(_) => {
+            return Err("format delta \"color\" must be an object or null".to_owned());
+        }
+    };
+
+    let highlight = match object.get("highlight") {
+        None => Patch::Keep,
+        Some(Value::Null) => Patch::Clear,
+        Some(Value::String(value)) => Patch::Set(value.clone()),
+        Some(_) => {
+            return Err("format delta \"highlight\" must be a string or null".to_owned());
+        }
+    };
+
+    let font_size = match object.get("fontSize") {
+        None => Patch::Keep,
+        Some(Value::Null) => Patch::Clear,
+        Some(Value::Number(value)) => Patch::Set(
+            value
+                .as_f64()
+                .ok_or_else(|| "format delta \"fontSize\" must be finite".to_owned())?,
+        ),
+        Some(_) => {
+            return Err("format delta \"fontSize\" must be a number or null".to_owned());
+        }
+    };
+
+    let font_family = match object.get("fontFamily") {
+        None => Patch::Keep,
+        Some(Value::Null) => Patch::Clear,
+        Some(Value::Object(value)) => {
+            let ascii = value.get("ascii").and_then(Value::as_str).ok_or_else(|| {
+                "format delta \"fontFamily\" requires string \"ascii\"".to_owned()
+            })?;
+            let h_ansi = value
+                .get("hAnsi")
+                .map(|entry| {
+                    entry
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "fontFamily \"hAnsi\" must be a string".to_owned())
+                })
+                .transpose()?;
+            Patch::Set(FontFamilyPatch {
+                ascii: ascii.to_owned(),
+                h_ansi,
+            })
+        }
+        Some(_) => {
+            return Err("format delta \"fontFamily\" must be an object or null".to_owned());
+        }
+    };
+
+    let mut other = BTreeMap::new();
+    if let Some(value) = object.get("other") {
+        let entries = value
+            .as_object()
+            .ok_or_else(|| "format delta \"other\" must be an object".to_owned())?;
+        for (key, value) in entries {
+            other.insert(
+                key.clone(),
+                if value.is_null() {
+                    None
+                } else {
+                    Some(Any::from_json(&value.to_string()).map_err(|error| {
+                        format!("format delta \"other\" entry {key:?} is not JSON: {error}")
+                    })?)
+                },
+            );
+        }
+    }
+
+    Ok(InlineFormatDelta {
+        bold: bool_patch("bold")?,
+        italic: bool_patch("italic")?,
+        underline,
+        strike,
+        color,
+        highlight,
+        font_size,
+        font_family,
+        other,
+    })
+}
+
 /// Formatting policy for [`EditingDoc::insert_text`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum FormatPolicy {
@@ -283,7 +446,7 @@ impl EditingDoc {
     pub fn toggle_format(
         &self,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         format: SimpleFormat,
     ) -> OpResult<Receipt> {
         let len = range_len(&range)?;
@@ -293,6 +456,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         let (key, on_value, counterpart) = match format {
             SimpleFormat::Bold => ("bold", Any::Bool(true), None),
             SimpleFormat::Italic => ("italic", Any::Bool(true), None),
@@ -336,7 +502,7 @@ impl EditingDoc {
     pub fn format_range(
         &self,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         delta: &InlineFormatDelta,
     ) -> OpResult<Receipt> {
         let len = range_len(&range)?;
@@ -347,6 +513,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         if !attrs.is_empty() {
             story.format(&mut txn, range.start, len, attrs);
         }
@@ -364,7 +533,7 @@ impl EditingDoc {
     pub fn set_hyperlink(
         &self,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         hyperlink: Option<Any>,
     ) -> OpResult<Receipt> {
         let len = range_len(&range)?;
@@ -374,6 +543,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         story.format(
             &mut txn,
             range.start,
@@ -389,7 +561,7 @@ impl EditingDoc {
     }
 
     /// Clears formatting while retaining tracked-change stamps and hyperlinks.
-    pub fn clear_formatting(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
+    pub fn clear_formatting(&self, ctx: &EditCtx, mut range: StoryRange) -> OpResult<Receipt> {
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -397,6 +569,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        let len = range.end - range.start;
         let mut keys: BTreeMap<String, ()> = BTreeMap::new();
         let mut offset = 0;
         for diff in story.diff(&txn, YChange::identity) {

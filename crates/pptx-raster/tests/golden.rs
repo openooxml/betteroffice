@@ -166,6 +166,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
     }
     let width = pen - x;
     Primitive::TextBox {
+        text_shadow: None,
         object_id: 2,
         shape_id: Some("text-1".into()),
         story_id: Some("story-1".into()),
@@ -321,6 +322,7 @@ fn golden_image() {
     check(
         "image",
         &slide(vec![Primitive::Image {
+            tile: None,
             geometry_fallback: false,
             object_id: 3,
             shape_id: Some("pic-1".into()),
@@ -353,6 +355,7 @@ fn golden_picture_shadow() {
     check(
         "picture-shadow",
         &slide(vec![Primitive::Image {
+            tile: None,
             geometry_fallback: false,
             object_id: 5,
             shape_id: Some("pic-2".into()),
@@ -386,6 +389,7 @@ fn golden_picture_fill() {
     check(
         "picture-fill",
         &slide(vec![Primitive::Image {
+            tile: None,
             geometry_fallback: false,
             object_id: 4,
             shape_id: Some("shape-2".into()),

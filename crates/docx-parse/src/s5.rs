@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::canonical::{canonical_sha256, from_serializable, to_canonical_bytes};
 use crate::inline::{
     BookmarkEnd, BookmarkStart, Hyperlink, InlineNode, ParsedFieldInstruction, RunProjection,
-    SdtProperties, SimpleField, parse_bookmark_end, parse_bookmark_start, parse_field_instruction,
-    parse_hyperlink, parse_inline_container, parse_run, parse_sdt_properties, parse_simple_field,
+    SdtProperties, SimpleField, has_bookmark_id, parse_bookmark_end, parse_bookmark_start,
+    parse_field_instruction, parse_hyperlink, parse_inline_container, parse_run,
+    parse_sdt_properties, parse_simple_field,
 };
 use crate::relationships::{RelationshipMap, parse_relationships};
 use crate::settings::{is_valid_utf8_xml_text, parse_settings};
@@ -177,13 +178,17 @@ pub fn project_xml_part(
             }
             "bookmarkStart" => {
                 budget.charge_leaf_value(path)?;
-                projection
-                    .bookmark_starts
-                    .push(parse_bookmark_start(element));
+                if has_bookmark_id(element) {
+                    projection
+                        .bookmark_starts
+                        .push(parse_bookmark_start(element));
+                }
             }
             "bookmarkEnd" => {
                 budget.charge_leaf_value(path)?;
-                projection.bookmark_ends.push(parse_bookmark_end(element));
+                if has_bookmark_id(element) {
+                    projection.bookmark_ends.push(parse_bookmark_end(element));
+                }
             }
             "sdt" => {
                 budget.charge_leaf_value(path)?;
@@ -227,28 +232,23 @@ fn collect_complex_field_instructions(
         match node {
             InlineNode::ComplexField(field) => {
                 output.push(parse_field_instruction(&field.instruction));
-                if let Some(tree) = field.field_tree.as_ref() {
-                    collect_tree_instructions(tree, output);
+                for content in [
+                    field.structured_code.as_ref(),
+                    field.structured_result.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some(nodes) = content.inline.as_deref() {
+                        collect_complex_field_instructions(nodes, output);
+                    }
                 }
             }
             InlineNode::InlineSdt(sdt) => collect_complex_field_instructions(&sdt.content, output),
+            InlineNode::Tracked(change) => {
+                collect_complex_field_instructions(&change.content, output)
+            }
             _ => {}
-        }
-    }
-}
-
-fn collect_tree_instructions(
-    tree: &crate::inline::StructuredFieldTree,
-    output: &mut Vec<ParsedFieldInstruction>,
-) {
-    // Child trees intentionally carry no duplicate instruction string. The
-    // nested ComplexField node in code/result is the authoritative source.
-    for content in [tree.code.as_ref(), tree.result.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(nodes) = content.inline.as_deref() {
-            collect_complex_field_instructions(nodes, output);
         }
     }
 }
@@ -306,6 +306,39 @@ mod tests {
     use crate::xml::parse_xml;
 
     #[test]
+    fn keeps_bookmark_zero_and_drops_bookmarks_without_an_id() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let document = parse_xml(
+            r#"<w:document xmlns:w="w"><w:body><w:p><w:bookmarkStart/><w:bookmarkStart w:id="x"/><w:bookmarkStart w:id="0" w:name="zero"/><w:r><w:t>A😀</w:t></w:r><w:bookmarkEnd w:id="0"/><w:bookmarkEnd/><w:bookmarkEnd w:id="x"/></w:p></w:body></w:document>"#.as_bytes(),
+            "word/document.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let projection = project_xml_part(
+            document.root().unwrap(),
+            "word/document.xml",
+            &RelationshipMap::new(),
+            None,
+            None,
+            None,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(projection.bookmark_starts.len(), 1);
+        assert_eq!(projection.bookmark_starts[0].id, 0.0);
+        assert_eq!(projection.bookmark_ends.len(), 1);
+        assert_eq!(projection.bookmark_ends[0].id, 0.0);
+        assert_eq!(projection.paragraph_inlines[0].len(), 3);
+        let InlineNode::BookmarkEnd(end) = &projection.paragraph_inlines[0][2] else {
+            panic!("bookmark end")
+        };
+        assert_eq!(end.id, 0.0);
+        assert_eq!(end.position.as_ref().unwrap().offset, Some(3.0));
+    }
+
+    #[test]
     fn projects_complete_inline_elements_in_document_order() {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
@@ -348,7 +381,7 @@ mod tests {
         let InlineNode::BookmarkEnd(end) = projection.paragraph_inlines[0].last().unwrap() else {
             panic!("bookmark end")
         };
-        assert_eq!(end.position.as_ref().unwrap().offset, Some(3.0));
+        assert_eq!(end.position.as_ref().unwrap().offset, Some(4.0));
     }
 
     #[test]

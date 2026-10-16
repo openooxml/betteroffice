@@ -12,7 +12,7 @@ fn paragraph(id: usize, heights: &[u32], keep_next: bool) -> Value {
         .collect();
     json!({
         "block":{"kind":"paragraph","id":id,"runs":[{"kind":"text","text":"x"}],
-            "attrs":{"keepNext":keep_next}},
+            "attrs":{"keepNext":keep_next,"widowControl":false}},
         "measure":{"kind":"paragraph","lines":lines,"totalHeight":heights.iter().sum::<u32>()}
     })
 }

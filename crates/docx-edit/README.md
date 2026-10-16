@@ -16,6 +16,58 @@ encoding what changed between two frames so the host repaints the minimum.
 Because a story is plain CRDT text, concurrent edits merge in the engine rather
 than on a server, and the same schema serves the native and wasm editors.
 
+Hosts edit through version-checked batches: `EditingDoc::version`,
+`read_paragraphs` and `find_text` return projected paragraph text with the
+session version it was read at, and `apply_edits` resolves every step against
+that version, stages the whole batch on a private clone, and adopts it as one
+transaction (one undo step by default) or returns an `EditRefusal` with the
+document, history and id allocation untouched. `validate_edits` runs the same
+checks without changing anything. The operation, target, failure-code and atom
+enums are `#[non_exhaustive]`, so later releases can add variants.
+
+`structured` exports read-only structured content and Markdown in schema
+version 1: `EditingDoc::export_structured` and `export_markdown` read a live
+session with its version, and `export_docx_structured` reads DOCX bytes through
+the same walker. Blocks and inlines carry anchors (paragraph ids, batch-offset
+ranges, table and control ids, `sourcePart` locations in retained XML, or
+`unlocated` with the reason there is no location), and
+everything omitted or not represented is diagnosed. `read_types` holds the
+anchor, story-selection and content-control types shared by the read APIs.
+`EngineSession::export_structured_with_pages` attaches a page map read from the
+region layout the session retains (physical and displayed page numbers, header,
+footer and note occurrences, per-page text ranges, table row windows and optional
+geometry), refusing a layout older than the document, lowered from other stories,
+section, settings or note metadata, or measured with other or missing fonts or
+options; `export_structured_with_pages_for` also requires the inputs an editor
+would lay out with now, and `export_snapshot_with_private_fonts` lays a private
+session out with fonts registered in a store of its own.
+`render_docx_markdown_with_pages` adds optional page markers.
+
+`content_controls` lists every content control in document order with the
+export's control metadata, placement, anchor, parent, canonical text and
+effective lock: `EditingDoc::list_content_controls` and `find_content_controls`
+read a live session with its version, and `list_docx_content_controls` and
+`list_package_content_controls` read bytes and parsed packages. A
+`SetContentControlText` batch step fills a plain- or rich-text control by engine
+id (valid for the version it was read at), unique tag or unique authored `w:id`
+(`ooxml_id`, which survives save and reopen), replacing inline control content or
+a block control's child story and clearing its placeholder state in the same
+transaction; locked, bound, nested and non-text controls and ambiguous tags or
+`w:id`s are refused as data. Text
+controls hold their text as content: local embed and raw writes never introduce,
+replace or move an authored text `value`, retyping a valued control drops it,
+and a fill drops it outside undo history. Collaboration updates integrate
+whatever values they carry; saving ignores a text control's value, and
+discovery reads its content and flags the value with `legacy-control-value`.
+
+`compare` backs the JavaScript package's `compareDocx`: it inspects two DOCX
+packages in full, aligns their body paragraphs, diffs the text of paired
+paragraphs with the bounded LCS from
+[betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff),
+and applies each supported difference to the original's session as a rich
+tracked replacement in one batch; anything else is diagnosed and refuses the
+comparison. The saved result is verified against both inputs.
+
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 
 Measure DOCX parsing, seeding, and body lowering with:

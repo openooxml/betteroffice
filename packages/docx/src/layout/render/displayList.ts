@@ -34,6 +34,8 @@ export interface DisplayPage {
   /** Formatted PAGE label (for example, "vii"). */
   pageLabel?: string;
   primitives: DisplayPrimitive[]; // body content, paint order
+  /** Leading primitives painted beneath the header and footer. */
+  watermarkPrimitiveCount?: number;
   /** Resolved page background. Undefined = transparent/host white. */
   background?: string;
   pageBorders?: PageBorderPrimitive[];
@@ -41,6 +43,12 @@ export interface DisplayPage {
   footer?: HfRegion;
   /** Footnote/endnote regions in page coordinates. Undefined = none. */
   noteAreas?: NoteRegion[];
+  /** Geometry only: the page's content is built when the host asks for it. */
+  unbuilt?: boolean;
+  /** For an unbuilt page, the lowest and highest body position its layout places. */
+  positionSpan?: [number, number];
+  /** For an unbuilt page, the relationship ids of the header and footer parts its build paints. */
+  hfParts?: { header?: string; footer?: string };
 }
 
 /** A page-local rectangle emitted as display-list metadata. */
@@ -421,6 +429,8 @@ export interface GlyphRunPrimitive extends DocAttrs {
   color: string; // "#rrggbb"
   text: string; // source text — the a11y mirror renders this as a real text node
   glyphs: PositionedGlyph[];
+  echo?: { x: number; right: number; kern?: boolean; primaryFont?: boolean;
+    kerning?: number; letterSpacing?: number; position?: number; scale?: number; canEmpty?: boolean };
   paintClip?: DisplayPaintClip;
   // resolved CSS font shorthand of the face this run was shaped with (same
   // recipe as TextRunPrimitive.font). The canvas backend's fillText safety net

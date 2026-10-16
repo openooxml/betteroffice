@@ -15,6 +15,8 @@ import { FORMATS, renderSection } from './readme.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
+import { mergeXlsxFidelity, xlsxFidelityShards } from './xlsx-fidelity.mjs';
+import { mergeRoundtrips, roundtripShards } from './roundtrip.mjs';
 import { mergePptxBenchmark } from './pptx-benchmark.mjs';
 import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
 
@@ -216,6 +218,8 @@ export async function mergeFromPaths({
   requireDocxBenchmark = false,
   requirePptxBenchmark = false,
   requireXlsxBenchmark = false,
+  requireXlsxFidelity = false,
+  requireRoundtrip = false,
 }) {
   const planBytes = await readFile(planPath);
   const plan = normalizePlan(JSON.parse(planBytes));
@@ -244,6 +248,16 @@ export async function mergeFromPaths({
     const benchmarks = await Promise.all(xlsxShards(plan).map(async (_, shard) =>
       JSON.parse(await readFile(resolve(parts, `xlsx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
     report = mergeXlsxBenchmarks(plan, report, benchmarks, digest(planBytes));
+  }
+  if (requireXlsxFidelity && plan.formats.includes('xlsx')) {
+    const benchmarks = await Promise.all(xlsxFidelityShards(plan).map(async (_, shard) =>
+      JSON.parse(await readFile(resolve(parts, `xlsx-fidelity-report-${shard}`, 'report.json'), 'utf8'))));
+    report = mergeXlsxFidelity(plan, report, benchmarks, digest(planBytes));
+  }
+  if (requireRoundtrip) {
+    const benchmarks = await Promise.all(roundtripShards(plan).map(async ({ format, shard }) =>
+      JSON.parse(await readFile(resolve(parts, `roundtrip-report-${format}-${shard}`, 'report.json'), 'utf8'))));
+    report = mergeRoundtrips(plan, report, benchmarks, digest(planBytes));
   }
   const section = renderSection(report);
   await emptyOutput(output);
@@ -274,5 +288,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     requireDocxBenchmark: process.env.QUALITY_REQUIRE_DOCX_BENCHMARK === 'true',
     requirePptxBenchmark: process.env.QUALITY_REQUIRE_PPTX_BENCHMARK === 'true',
     requireXlsxBenchmark: process.env.QUALITY_REQUIRE_XLSX_BENCHMARK === 'true',
+    requireXlsxFidelity: process.env.QUALITY_REQUIRE_XLSX_FIDELITY === 'true',
+    requireRoundtrip: process.env.QUALITY_REQUIRE_ROUNDTRIP === 'true',
   });
 }

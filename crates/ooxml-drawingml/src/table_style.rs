@@ -19,13 +19,11 @@ impl TableStyleList {
         self.default_style_id.is_none() && self.styles.is_empty()
     }
 
-    /// The style `style_id` names, or `def` when a table names none. An id the
-    /// package does not define resolves to nothing, not to `def`.
+    /// The style `style_id` names. `def` names the style the authoring UI hands
+    /// a *new* table, not a fallback for one that names none, so a table naming
+    /// no style resolves to nothing, as does an id the package does not define.
     pub fn style(&self, style_id: Option<&str>) -> Option<&TableStyle> {
-        match style_id {
-            Some(id) => self.by_id(id),
-            None => self.by_id(self.default_style_id.as_deref()?),
-        }
+        self.by_id(style_id?)
     }
 
     /// Resolves one cell against the named style, or to defaults when none resolves.
@@ -522,16 +520,13 @@ mod tests {
     }
 
     #[test]
-    fn a_table_naming_no_style_takes_the_default() {
+    fn a_table_naming_no_style_stays_unstyled_rather_than_taking_the_default() {
         let list = TableStyleList {
             default_style_id: Some("{STYLE}".to_owned()),
             styles: vec![fixture_style()],
         };
 
-        assert_eq!(
-            list.resolve_cell(None, flags(), position(0, 0)).fill,
-            Some(solid("4472C4"))
-        );
+        assert_eq!(list.resolve_cell(None, flags(), position(0, 0)).fill, None);
     }
 
     #[test]

@@ -90,6 +90,7 @@ export function ParseError({ message }: { message: string }): React.ReactElement
   const { t } = useTranslation();
   return (
     <div
+      role="alert"
       style={{
         display: 'flex',
         flexDirection: 'column',

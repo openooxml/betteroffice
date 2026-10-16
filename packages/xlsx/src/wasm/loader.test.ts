@@ -41,6 +41,95 @@ describe('wasm loader', () => {
     expect(wasmVersion().length).toBeGreaterThan(0);
   });
 
+  it('saves the source container verbatim after opening and painting formulas', () => {
+    const source = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../test-fixtures/no-edit-save.xlsx'
+    )));
+    for (const options of [{}, { collaborative: true, clientId: 707 }]) {
+      const handle = openWorkbook(source, options);
+      try {
+        const frame = handle.displayList({ x: 0, y: 0, width: 600, height: 200 });
+        for (const text of ['3', '5']) {
+          expect(frame.commands.some((c) => c.op === 'text' && c.text === text)).toBe(true);
+        }
+        expect(handle.save()).toEqual(source);
+      } finally {
+        handle.dispose();
+      }
+    }
+  });
+
+  it('restores persisted state from the published 0.2.1 package', () => {
+    const update = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+    )));
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5020 });
+    const peer = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5021 });
+    try {
+      handle.applyUpdate(update);
+      expect(handle.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+      handle.editCell(0, 42, 1, 'after restore');
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      expect(peer.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+      expect(peer.cell(0, 42, 1).input).toBe('after restore');
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+        expect(reopened.cell(0, 42, 1).input).toBe('after restore');
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      handle.dispose();
+      peer.dispose();
+    }
+  });
+
+  it('refuses an old snapshot after a local edit', () => {
+    const update = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+    )));
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5022 });
+    try {
+      handle.editCell(0, 42, 0, 'local edit');
+      expect(() => handle.applyUpdate(update)).toThrow();
+      expect(handle.cell(0, 42, 0).input).toBe('local edit');
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('preserves a cleared cell and its undo history when applying a snapshot', () => {
+    for (const legacy of [false, true]) {
+      const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5023 });
+      try {
+        const original = handle.cell(0, 0, 0).input;
+        expect(original).not.toBe('');
+        const update = legacy
+          ? new Uint8Array(readFileSync(resolve(
+            import.meta.dir,
+            '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+          )))
+          : handle.encodeStateAsUpdate();
+        handle.editCell(0, 0, 0, '');
+        expect(handle.cell(0, 0, 0).input).toBe('');
+        if (legacy) {
+          expect(() => handle.applyUpdate(update)).toThrow();
+        } else {
+          handle.applyUpdate(update);
+        }
+        expect(handle.cell(0, 0, 0).input).toBe('');
+        handle.undo();
+        expect(handle.cell(0, 0, 0).input).toBe(original);
+      } finally {
+        handle.dispose();
+      }
+    }
+  });
+
   it('opens the hand-built fixture and reads sheet info', () => {
     const handle = openWorkbook(sampleBytes());
     try {
@@ -58,6 +147,36 @@ describe('wasm loader', () => {
       const position = handle.cellPosition(0, 7, 2);
       expect(position.x).toBeGreaterThan(0);
       expect(position.y).toBeGreaterThan(0);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('restores inherited column formatting when undoing a deletion', () => {
+    const bytes = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/column-style-undo.xlsx'
+    )));
+    const handle = openWorkbook(bytes);
+    const viewport = { x: 0, y: 0, width: 500, height: 250 };
+    const redFills = () => JSON.stringify(handle.displayList(viewport)).match(/#ff0000/gi)?.length ?? 0;
+    try {
+      expect(redFills()).toBeGreaterThan(0);
+      const before = handle.displayList(viewport);
+      handle.applyOps([{ type: 'deleteCols', sheet: 0, at: 1, count: 1 }]);
+      expect(redFills()).toBe(0);
+      for (let i = 0; i < 2; i += 1) {
+        handle.undo();
+        expect(handle.displayList(viewport)).toEqual(before);
+        const reopened = openWorkbook(handle.save());
+        try {
+          expect(reopened.displayList(viewport)).toEqual(before);
+        } finally {
+          reopened.dispose();
+        }
+        handle.redo();
+        expect(redFills()).toBe(0);
+      }
     } finally {
       handle.dispose();
     }
@@ -444,6 +563,10 @@ describe('wasm loader — proposals', () => {
       }
       expect(stale).toBeInstanceOf(StaleProposalError);
       expect(stale?.cells).toContain('E7');
+      expect(stale?.message).toBe('stale: E7');
+      expect(stale?.targets).toEqual([
+        { sheet: 0, sheetId: 'sheet:0', row: 6, col: 4, a1: 'E7' },
+      ]);
 
       // force applies despite the drift.
       const forced = handle.acceptProposal(proposal.id, { force: true });

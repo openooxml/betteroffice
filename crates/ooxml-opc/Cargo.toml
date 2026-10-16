@@ -23,7 +23,7 @@ wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 quick-xml = "0.41"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

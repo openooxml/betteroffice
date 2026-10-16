@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/pptx-react",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "PowerPoint-faithful React PPTX editor and viewer — full OOXML fidelity, real-time human + AI agent collaboration.",
   "keywords": [
     "pptx",
@@ -50,7 +50,7 @@
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.8.3",
     "@testing-library/react": "^16.0.0",
-    "@types/bun": "^1.3.14",
+    "@types/bun": "^1.4.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "react": "^19.2.7",

@@ -1,16 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from '../../i18n';
 import { MaterialSymbol } from '../ui/Icons';
+import { useDisabledDescription } from '../ui/disabledDescription';
 import { EDITING_MODES, type EditorMode } from './internals/editing-modes';
 
 export function EditingModeDropdown({
   mode,
   onModeChange,
+  disabled = false,
+  description,
+  optionState,
 }: {
   mode: EditorMode;
   onModeChange: (mode: EditorMode) => void;
+  disabled?: boolean;
+  /** Why the dropdown is disabled. */
+  description?: string;
+  /** Availability of one mode; unavailable modes explain why. */
+  optionState?: (mode: EditorMode) => { enabled: boolean; description?: string };
 }) {
   const { t } = useTranslation();
+  const reason = useDisabledDescription(disabled, description);
   const [isOpen, setIsOpen] = useState(false);
   const [compact, setCompact] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -62,8 +72,12 @@ export function EditingModeDropdown({
         ref={triggerRef}
         type="button"
         onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setIsOpen(!isOpen)}
-        title={`${t(current.labelKey)} (Ctrl+Shift+E)`}
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+        {...reason.triggerProps}
+        aria-label={t(current.labelKey)}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        title={reason.title ? `${t(current.labelKey)}: ${reason.title}` : t(current.labelKey)}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -84,11 +98,14 @@ export function EditingModeDropdown({
         {!compact && <span>{t(current.labelKey)}</span>}
         <MaterialSymbol name="arrow_drop_down" size={16} />
       </button>
+      {reason.node}
 
       {isOpen && (
         <div
           ref={dropdownRef}
           data-docx-escape-layer="true"
+          role="menu"
+          aria-label={t('commands.editingMode')}
           onMouseDown={(e) => e.preventDefault()}
           style={{
             position: 'fixed',
@@ -103,12 +120,19 @@ export function EditingModeDropdown({
             minWidth: 220,
           }}
         >
-          {EDITING_MODES.map((m) => (
+          {EDITING_MODES.map((m) => {
+            const state = optionState?.(m.value) ?? { enabled: true };
+            return (
             <button
               key={m.value}
               type="button"
+              role="menuitemradio"
+              aria-checked={m.value === mode}
+              aria-disabled={state.enabled ? undefined : true}
+              title={state.enabled ? undefined : state.description}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
+                if (!state.enabled) return;
                 onModeChange(m.value);
                 setIsOpen(false);
               }}
@@ -126,7 +150,8 @@ export function EditingModeDropdown({
                 padding: '8px 12px',
                 border: 'none',
                 background: 'transparent',
-                cursor: 'pointer',
+                cursor: state.enabled ? 'pointer' : 'default',
+                opacity: state.enabled ? 1 : 0.5,
                 fontSize: 13,
                 color: 'var(--doc-text)',
                 width: '100%',
@@ -136,7 +161,9 @@ export function EditingModeDropdown({
               <MaterialSymbol name={m.icon} size={20} />
               <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
                 <span style={{ fontWeight: 500 }}>{t(m.labelKey)}</span>
-                <span style={{ fontSize: 11, color: 'var(--doc-text-muted)' }}>{t(m.descKey)}</span>
+                <span style={{ fontSize: 11, color: 'var(--doc-text-muted)' }}>
+                  {state.enabled ? t(m.descKey) : state.description}
+                </span>
               </span>
               {m.value === mode && (
                 <MaterialSymbol
@@ -146,7 +173,8 @@ export function EditingModeDropdown({
                 />
               )}
             </button>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

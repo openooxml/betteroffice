@@ -1,6 +1,7 @@
 /** Rust-backed selective DOCX save compatibility wrapper. */
 
-import type { BlockContent, Document } from '../types/document';
+import type { BlockContent, Document, ParagraphContent } from '../types/document';
+import { visitTrackedControlContent } from '../utils/trackedControlContent';
 import { writeDocumentWithRust } from './rustSaveFacade';
 
 export interface SelectiveSaveOptions {
@@ -53,6 +54,15 @@ function hasNewImagesOrHyperlinks(blocks: BlockContent[]): boolean {
         !content.image.rId
     );
 
+  const nestedHasNewResource = (item: ParagraphContent, revision = false): boolean => {
+    let found = false;
+    visitTrackedControlContent(item, (node) => {
+      found ||= node.type === 'run' && runHasNewImage(node) ||
+        node.type === 'hyperlink' && Boolean(node.href && !node.rId && !node.anchor);
+    }, false, revision);
+    return found;
+  };
+
   for (const block of blocks) {
     if (block.type === 'paragraph') {
       for (const item of block.content) {
@@ -65,9 +75,11 @@ function hasNewImagesOrHyperlinks(blocks: BlockContent[]): boolean {
           item.type === 'moveTo'
         ) {
           for (const child of item.content) {
-            if (child.type === 'run' && runHasNewImage(child)) return true;
+            if (child.type === 'run') {
+              if (runHasNewImage(child)) return true;
+            } else if (nestedHasNewResource(child, true)) return true;
           }
-        }
+        } else if (item.type !== 'run' && nestedHasNewResource(item)) return true;
       }
     } else if (block.type === 'table') {
       for (const row of block.rows) {

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { DocxEditor, type DocxEditorRef } from "@betteroffice/docx-react";
-import { XlsxEditor, type XlsxEditorApi } from "@betteroffice/xlsx-react";
-import { PptxEditor, type PptxEditorApi } from "@betteroffice/pptx-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DocxEditor, type DocxEditorRef, type DocxErrorInfo } from "@betteroffice/docx-react";
+import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
+import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider } from "@betteroffice/docx/collaboration";
@@ -9,8 +9,8 @@ import { CollaborationProvider as XlsxProvider } from "@betteroffice/xlsx/collab
 import {
   CollaborationProvider as PptxProvider,
   type PptxFontFace,
-} from "@betteroffice/pptx";
-import type { Document } from "@betteroffice/docx/types/document";
+  type AsyncCollaborationReplica,
+} from "@betteroffice/pptx/editor";
 import {
   loadBundledFontBytes,
   resolveLastResortFace,
@@ -19,15 +19,25 @@ import {
 import { createRoomTransport } from "../../demo/app/collab/createRoomTransport";
 import type { CollaborationReplica } from "../../demo/app/collab/types";
 import type { Format } from "./bridge";
+import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
+
+const EDITOR_READY_TIMEOUT_MS = 30_000;
+const WORKBOOK_DISPOSED = "The workbook editor was disposed.";
+const PRESENTATION_DISPOSED = "The presentation editor was disposed.";
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
 
+function peerlessDocx() {
+  if (typeof location === "undefined") return false;
+  const query = new URLSearchParams(location.search);
+  return query.get("format") === "docx" && query.get("peerless") === "1";
+}
+
 export interface PreparedFile {
   bytes: Uint8Array;
   format: Format;
-  document?: Document;
   fonts?: PptxFontFace[];
 }
 
@@ -36,17 +46,23 @@ export async function prepareFile(
   format: Format
 ): Promise<PreparedFile> {
   if (format === "docx") {
+    if (peerlessDocx()) return { bytes, format };
     const { parseDocx } = await import("@betteroffice/docx/docx");
-    return { bytes, format, document: await parseDocx(bytes) };
+    await parseDocx(bytes);
+    return { bytes, format };
   }
   if (format === "xlsx") {
+    if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
+      const { openWorkbookSession } = await import("@betteroffice/xlsx");
+      const session = await openWorkbookSession(bytes);
+      await session.dispose();
+      return { bytes, format };
+    }
     const { initWasm, openWorkbook } = await import("@betteroffice/xlsx");
     await initWasm();
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const { initWasm, openPresentation } = await import("@betteroffice/pptx");
-  await initWasm();
   const fonts = await Promise.all(
     [false, true].flatMap((bold) =>
       [false, true].map(async (italic) => {
@@ -62,7 +78,15 @@ export async function prepareFile(
       })
     )
   );
-  openPresentation(bytes, { fonts }).dispose();
+  if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
+    const { openPresentationSession } = await import("@betteroffice/pptx/editor");
+    const session = await openPresentationSession(bytes, { fonts });
+    await session.dispose();
+  } else {
+    const { initWasm, openPresentation } = await import("@betteroffice/pptx/editor");
+    await initWasm();
+    openPresentation(bytes, { fonts }).dispose();
+  }
   return { bytes, format, fonts };
 }
 
@@ -97,22 +121,46 @@ export default function Editor({
   onOpen(file: File): Promise<void>;
   onStatus(status: string): void;
 }) {
-  const serializing = useRef(false);
+  const serialization = useRef<{ failure: Error | null; bytes?: Uint8Array } | null>(null);
+  const serializations = useRef<Promise<unknown>>(Promise.resolve());
   const docx = useRef<DocxEditorRef>(null);
-  const xlsx = useRef<XlsxEditorApi | null>(null);
-  const pptx = useRef<PptxEditorApi | null>(null);
+  const xlsx = useRef<XlsxAsyncEditorApi | null>(null);
+  const pptx = useRef<PptxAsyncEditorApi | null>(null);
+  const apiWaiter = useRef<{ resolve(): void; reject(error: Error): void } | null>(null);
+  const apiFailure = useRef<Error | null>(null);
+  const harness = (globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__
+    && file.format === "docx" && peerlessDocx();
+  const [harnessMode, setHarnessMode] = useState<"editing" | "viewing">("editing");
+  useEffect(() => {
+    if (!(globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__) return;
+    if (!harness) return;
+    let current = true;
+    let unregister: (() => void) | undefined;
+    void import("@betteroffice/docx-react/peerless-harness").then((module) => {
+      if (current) unregister = module.registerBrowserHarness({ setMode: setHarnessMode });
+    });
+    return () => { current = false; unregister?.(); };
+  }, [harness]);
   const clientId = useRef(
     crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff || 1
   ).current;
   const [replica, setReplica] = useState<CollaborationReplica | null>(null);
+  const [presentationReplica, setPresentationReplica] = useState<AsyncCollaborationReplica | null>(null);
   const [provider, setProvider] = useState<
     DocxProvider | XlsxProvider | PptxProvider | null
   >(null);
+  const presentationPresence = provider instanceof PptxProvider ? provider : undefined;
+  const presentationCollaboration = useMemo(() => room ? {
+    roomId: room.id,
+    clientId,
+    onReplica: setPresentationReplica,
+    presence: presentationPresence,
+  } : undefined, [room?.id, clientId, presentationPresence]);
   const callbacks = useRef({ onSave, onChange, onError, onStatus });
   callbacks.current = { onSave, onChange, onError, onStatus };
 
   useEffect(() => {
-    if (!room || !replica) return;
+    if (!room || (file.format === "pptx" ? !presentationReplica : !replica)) return;
     const transport = createRoomTransport(
       "https://betteroffice-collaboration-relay.elia7.workers.dev",
       room.id
@@ -120,10 +168,10 @@ export default function Editor({
     const options = { user: { name: room.name } };
     const next =
       file.format === "docx"
-        ? new DocxProvider(replica, transport, options)
+        ? new DocxProvider(replica!, transport, options)
         : file.format === "xlsx"
-        ? new XlsxProvider(replica, transport, options)
-        : new PptxProvider(replica, transport, options);
+        ? new XlsxProvider(replica!, transport, options)
+        : new PptxProvider(presentationReplica!, transport, options);
     setProvider(next);
     const unsubscribe = next.onStatus(({ status, synced }) =>
       callbacks.current.onStatus(synced ? "Connected" : status)
@@ -138,33 +186,83 @@ export default function Editor({
       next.destroy();
       setProvider(null);
     };
-  }, [file.format, replica, room]);
+  }, [file.format, replica, presentationReplica, room]);
 
   const changed = useCallback(() => callbacks.current.onChange(), []);
   const saveBytes = useCallback(
     (bytes: Uint8Array) => callbacks.current.onSave(bytes),
     []
   );
-  const error = useCallback(
-    (error: Error) => callbacks.current.onError(error),
-    []
-  );
-  const workbookReady = useCallback(
-    (api: XlsxEditorApi) => {
-      xlsx.current = api;
-      const unsubscribe = api.handle.onUpdate(changed);
+  const apiUnavailable = useCallback((failure: Error) => {
+    apiFailure.current = failure;
+    apiWaiter.current?.reject(failure);
+    apiWaiter.current = null;
+  }, []);
+  const error = useCallback((error: Error) => {
+    if (serialization.current) serialization.current.failure = error;
+    if (file.format === "xlsx" ? !xlsx.current : file.format === "pptx" && !pptx.current)
+      apiUnavailable(error);
+    callbacks.current.onError(error);
+  }, [file.format, apiUnavailable]);
+  const docxError = useCallback((cause: Error, info?: DocxErrorInfo) => {
+    if (info?.recoverable) console.warn(cause);
+    else error(cause);
+  }, [error]);
+  const apiReady = useCallback(
+    <Api,>(ref: { current: Api | null }, api: Api, disposed: string) => {
+      ref.current = api;
+      apiFailure.current = null;
+      apiWaiter.current?.resolve();
+      apiWaiter.current = null;
       return () => {
-        unsubscribe();
-        xlsx.current = null;
+        if (ref.current !== api) return;
+        ref.current = null;
+        apiUnavailable(new Error(disposed));
       };
     },
-    [changed]
+    [apiUnavailable]
   );
-  const presentationReady = useCallback((api: PptxEditorApi) => {
-    pptx.current = api;
-  }, []);
+  const workbookReady = useCallback(
+    (api: XlsxAsyncEditorApi) => apiReady(xlsx, api, WORKBOOK_DISPOSED),
+    [apiReady]
+  );
+  const presentationReady = useCallback(
+    (api: PptxAsyncEditorApi) => apiReady(pptx, api, PRESENTATION_DISPOSED),
+    [apiReady]
+  );
+
+  const serializeWorkbook = async (api: XlsxAsyncEditorApi) => {
+    const result = await api.commands.execute("save", null);
+    if (!result.ok) throw new Error(result.failure.message);
+    return serialization.current?.bytes;
+  };
 
   useEffect(() => {
+    let active = true;
+    const disposed = new Error(
+      file.format === "xlsx" ? WORKBOOK_DISPOSED : PRESENTATION_DISPOSED
+    );
+    const whenReady = async <Api,>(ref: { current: Api | null }): Promise<Api> => {
+      if (!active) throw disposed;
+      let api = ref.current;
+      if (!api) {
+        if (apiFailure.current) throw apiFailure.current;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        await new Promise<void>((resolve, reject) => {
+          const waiter = { resolve, reject };
+          apiWaiter.current = waiter;
+          timeout = setTimeout(() => {
+            if (apiWaiter.current !== waiter) return;
+            apiUnavailable(new Error(
+              "The editor is still opening the file. Try again in a moment."
+            ));
+          }, EDITOR_READY_TIMEOUT_MS);
+        }).finally(() => clearTimeout(timeout));
+        api = ref.current;
+      }
+      if (!active || !api || ref.current !== api) throw disposed;
+      return api;
+    };
     onReady({
       print() {
         if (file.format === "docx") docx.current?.print();
@@ -175,43 +273,58 @@ export default function Editor({
         else if (file.format === "xlsx") xlsx.current?.focus();
         else pptx.current?.focus();
       },
-      async serialize() {
-        if (document.activeElement instanceof HTMLElement)
-          document.activeElement.blur();
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        serializing.current = true;
-        try {
-          const bytes =
-            file.format === "docx"
-              ? await docx.current?.save()
-              : file.format === "xlsx"
-              ? xlsx.current?.handle.save()
-              : pptx.current?.save();
-          if (!bytes)
-            throw new Error(
-              "The editor is still opening the file. Try again in a moment."
-            );
-          return new Uint8Array(bytes);
-        } finally {
-          serializing.current = false;
-        }
+      serialize() {
+        const attempt = async () => {
+          if (document.activeElement instanceof HTMLElement)
+            document.activeElement.blur();
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          const current: { failure: Error | null; bytes?: Uint8Array } = { failure: null };
+          serialization.current = current;
+          try {
+            const bytes =
+              file.format === "docx"
+                ? await docx.current?.save()
+                : file.format === "xlsx"
+                ? await serializeWorkbook(await whenReady(xlsx))
+                : await (await whenReady(pptx)).saveAsync();
+            return savedBytes(bytes, current.failure);
+          } finally {
+            serialization.current = null;
+          }
+        };
+        const next = serializations.current.then(attempt, attempt);
+        serializations.current = next.catch(() => undefined);
+        return next;
       },
     });
-    return () => onReady(null);
-  }, [file.format, onReady]);
+    return () => {
+      active = false;
+      if (file.format !== "docx") apiUnavailable(disposed);
+      onReady(null);
+    };
+  }, [file.format, onReady, apiUnavailable]);
 
   if (file.format === "docx")
     return (
+      <>
+      {harness && <div data-testid="peerless-harness-mode">
+        <button type="button" aria-pressed={harnessMode === "viewing"} onClick={() => setHarnessMode("viewing")}>Viewing</button>
+        <button type="button" aria-pressed={harnessMode === "editing"} onClick={() => setHarnessMode("editing")}>Editing</button>
+      </div>}
       <DocxEditor
         ref={docx}
-        document={file.document}
+        experimentalPeerless={peerlessDocx()}
+        mode={harness ? harnessMode : undefined}
+        readOnly={harness ? harnessMode === "viewing" : undefined}
+        documentBuffer={file.bytes}
         downloadOnSave={false}
         onSave={(buffer) => {
-          if (!serializing.current) saveBytes(new Uint8Array(buffer));
+          if (!serialization.current) saveBytes(new Uint8Array(buffer));
         }}
         documentName={name}
-        onChange={changed}
-        onError={error}
+        onChange={peerlessDocx() ? undefined : changed}
+        onDocumentChange={peerlessDocx() ? changed : undefined}
+        onError={docxError}
         onOpen={onOpen}
         showToolbar
         showRuler
@@ -230,13 +343,19 @@ export default function Editor({
             : undefined
         }
       />
+      </>
     );
   if (file.format === "xlsx")
     return (
       <XlsxEditor
         file={file.bytes}
         fileName={name}
-        onSave={saveBytes}
+        onSave={(bytes) => {
+          if (serialization.current) serialization.current.bytes = bytes;
+          else saveBytes(bytes);
+        }}
+        onChange={changed}
+        onError={error}
         onReady={workbookReady}
         collaboration={
           room
@@ -259,15 +378,7 @@ export default function Editor({
       onChange={changed}
       onReady={presentationReady}
       onError={error}
-      collaboration={
-        room
-          ? {
-              clientId,
-              onReplica: setReplica,
-              presence: provider instanceof PptxProvider ? provider : undefined,
-            }
-          : undefined
-      }
+      collaboration={presentationCollaboration}
     />
   );
 }

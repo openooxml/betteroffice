@@ -17,7 +17,8 @@ name = "ooxml_drawingml"
 [features]
 default = []
 chart = []
-tiff = ["dep:tiff", "dep:weezl", "dep:flate2", "dep:crc32fast"]
+png = ["dep:flate2", "dep:crc32fast"]
+tiff = ["png", "dep:tiff", "dep:weezl"]
 
 [dependencies]
 indexmap = { version = "2", features = ["serde"] }

@@ -26,14 +26,84 @@ pub(super) fn list_marker_inline_width(
     input: &MeasureRequest<'_>,
     attrs: &AttrsIn,
 ) -> Result<f32, MeasureError> {
-    let marker = match attrs.list_marker.as_deref() {
-        Some(m) if !m.is_empty() => m,
-        _ => return Ok(0.0),
-    };
-    if attrs.list_marker_hidden {
+    let Some(marker) = visible_marker(attrs) else {
         return Ok(0.0);
+    };
+    let (natural_width, size_px) = marker_text_width(store, input, attrs, marker)?;
+
+    match attrs.list_marker_suffix.as_deref() {
+        Some("nothing") => return Ok(natural_width),
+        Some("space") => {
+            let (space, _) = marker_text_width(store, input, attrs, " ")?;
+            return Ok(natural_width + space);
+        }
+        _ => {}
     }
 
+    let indent = attrs.indent.as_ref();
+    let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
+    let first_line = indent.and_then(|i| i.first_line).unwrap_or(0.0);
+    let marker_start_px = indent_left + first_line;
+    let marker_end_px = marker_start_px + natural_width;
+    // Default suffix `tab`: body text aligns at the closest stop past the marker end.
+    match marker_tab_stop(attrs, marker_end_px)? {
+        Some(body_start) => Ok(body_start - marker_start_px),
+        // No tab grid at all: half-em visual gap after the marker.
+        None => Ok(natural_width + size_px * 0.5),
+    }
+}
+
+/// Extra first-line indent when a tab-suffixed marker overruns its hanging slot.
+pub(super) fn list_marker_tab_overrun(
+    store: &FontStore,
+    input: &MeasureRequest<'_>,
+    attrs: &AttrsIn,
+) -> Result<f32, MeasureError> {
+    if attrs.bidi || !matches!(attrs.list_marker_suffix.as_deref(), None | Some("tab")) {
+        return Ok(0.0);
+    }
+    let indent = attrs.indent.as_ref();
+    let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
+    let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
+    if indent_left <= 0.0 || hanging <= 0.0 || hanging > indent_left {
+        return Ok(0.0);
+    }
+    let Some(marker) = visible_marker(attrs) else {
+        return Ok(0.0);
+    };
+    let (natural_width, size_px) = marker_text_width(store, input, attrs, marker)?;
+    let marker_end_px = indent_left - hanging + natural_width;
+    if marker_end_px <= indent_left {
+        return Ok(0.0);
+    }
+    let body_start =
+        marker_tab_stop(attrs, marker_end_px)?.unwrap_or(marker_end_px + size_px * 0.5);
+    let overrun = body_start - indent_left;
+    let indent_right = indent.and_then(|i| i.right).unwrap_or(0.0);
+    let body_width = input.max_width - indent_left - indent_right;
+    // Keep today's text start when the stop leaves less than an em for the text.
+    Ok(if overrun <= body_width - size_px {
+        overrun
+    } else {
+        0.0
+    })
+}
+
+/// Returns nonempty marker text only when the marker is visible.
+fn visible_marker(attrs: &AttrsIn) -> Option<&str> {
+    attrs
+        .list_marker
+        .as_deref()
+        .filter(|marker| !attrs.list_marker_hidden && !marker.is_empty())
+}
+
+/// Measures marker text and returns its width and font size in pixels.
+fn marker_text_width(
+    store: &FontStore,
+    input: &MeasureRequest<'_>,
+    attrs: &AttrsIn,
+    text: &str,
+) -> Result<(f32, f32), MeasureError> {
     // Font precedence: level, first text run, paragraph, document.
     let first_text_run = input.block.runs.iter().find(|r| r.kind == "text");
     let family = attrs
@@ -59,25 +129,12 @@ pub(super) fn list_marker_inline_width(
     } else {
         crate::bidi::BaseDirection::Ltr
     };
-    let natural_width = super::prepare::measure_plain_text(store, &chain, marker, size_px, base)?;
+    let natural_width = super::prepare::measure_plain_text(store, &chain, text, size_px, base)?;
+    Ok((natural_width, size_px))
+}
 
-    match attrs.list_marker_suffix.as_deref() {
-        Some("nothing") => return Ok(natural_width),
-        Some("space") => {
-            let space = super::prepare::measure_plain_text(store, &chain, " ", size_px, base)?;
-            return Ok(natural_width + space);
-        }
-        _ => {}
-    }
-
-    // Default suffix `tab`: body text aligns at the closest stop past
-    // `markerStart + naturalWidth`.
-    let indent = attrs.indent.as_ref();
-    let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
-    let first_line = indent.and_then(|i| i.first_line).unwrap_or(0.0);
-    let marker_start_px = indent_left + first_line;
-    let min_body_start = marker_start_px + natural_width;
-
+/// Finds the closest marker tab stop, or none when no stops exist.
+fn marker_tab_stop(attrs: &AttrsIn, marker_end_px: f32) -> Result<Option<f32>, MeasureError> {
     let first_custom_past = attrs
         .tabs
         .as_deref()
@@ -85,7 +142,7 @@ pub(super) fn list_marker_inline_width(
         .iter()
         .filter(|t| t.val != "clear" && t.val != "bar")
         .map(|t| twips_to_px(t.pos))
-        .filter(|&px| px >= min_body_start)
+        .filter(|&px| px >= marker_end_px)
         .fold(None::<f32>, |acc, px| {
             Some(acc.map_or(px, |best| best.min(px)))
         });
@@ -100,20 +157,14 @@ pub(super) fn list_marker_inline_width(
     }
     let default_tab_stop_px = twips_to_px(default_tab_stop_twips);
     let first_grid_past = if default_tab_stop_px > 0.0 {
-        Some(((min_body_start / default_tab_stop_px).floor() + 1.0) * default_tab_stop_px)
+        Some(((marker_end_px / default_tab_stop_px).floor() + 1.0) * default_tab_stop_px)
     } else {
         None
     };
 
     // Closest wins — a far custom tab must not override a nearer grid stop.
-    let body_start = match (first_custom_past, first_grid_past) {
+    Ok(match (first_custom_past, first_grid_past) {
         (Some(c), Some(g)) => Some(c.min(g)),
         (c, g) => c.or(g),
-    };
-
-    match body_start {
-        // No tab grid at all: half-em visual gap after the marker.
-        None => Ok(natural_width + size_px * 0.5),
-        Some(b) => Ok(b - marker_start_px),
-    }
+    })
 }

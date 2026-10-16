@@ -15,6 +15,9 @@ categories = ["rendering", "text-processing"]
 name = "docx_layout"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+test-support = []
+
 # wasm-pack runs a wasm-opt post-pass after rustc/LLVM codegen. Pin it to -O3
 # (speed) here so the layout wasm — the per-keystroke display-list hot path — is
 # optimized for latency rather than the size-leaning default. This is read only
@@ -24,6 +27,7 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ['-O3']
 
 [dependencies]
+foldhash = { version = "0.2", default-features = false }
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-text.workspace = true
 wasm-bindgen = "0.2"

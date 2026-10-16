@@ -215,7 +215,7 @@ pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutB
     }
 }
 
-pub(crate) fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
+pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
     for i in 0..blocks.len().saturating_sub(1) {
         let (head, tail) = blocks.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i], &mut tail[0]);
@@ -318,6 +318,31 @@ mod tests {
         ];
         apply_contextual_spacing_blocks(&mut matched);
         assert_eq!(after(&matched[0]), 0.0);
+    }
+
+    #[test]
+    fn contextual_spacing_applied_again_changes_nothing() {
+        let measured = |block| crate::types::MeasuredBlock {
+            block,
+            measure: crate::types::BlockExtent::Paragraph(crate::types::ParagraphExtent {
+                lines: Vec::new(),
+                total_height: 0.0,
+            }),
+        };
+        let mut once = vec![
+            measured(paragraph(Some("Normal"), None)),
+            measured(paragraph(Some("Normal"), None)),
+            measured(paragraph(Some("Other"), None)),
+            measured(paragraph(Some("Other"), None)),
+        ];
+        apply_contextual_spacing_measured(&mut once);
+        let mut twice = once.clone();
+        apply_contextual_spacing_measured(&mut twice);
+        assert_eq!(after(&once[0].block), 0.0);
+        assert_eq!(
+            serde_json::to_value(&once).unwrap(),
+            serde_json::to_value(&twice).unwrap()
+        );
     }
 
     #[test]

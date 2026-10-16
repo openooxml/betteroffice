@@ -61,7 +61,17 @@ pub struct KeepWithNextFit {
 ///   there is nothing above the group to detach from, and advancing would only
 ///   emit a blank page, so Word splits in place
 pub fn keep_with_next_group_must_advance(fit: KeepWithNextFit) -> bool {
-    let intact_placement_exists = fit.group_height <= fit.page_content_height;
+    keep_with_next_group_must_advance_from(fit, fit.group_height)
+}
+
+/// [`keep_with_next_group_must_advance`] for a group that needs
+/// `fresh_page_height` at the top of a blank page, which can be less than at
+/// the cursor: spacing owed there does not follow it.
+pub fn keep_with_next_group_must_advance_from(
+    fit: KeepWithNextFit,
+    fresh_page_height: f64,
+) -> bool {
+    let intact_placement_exists = fresh_page_height <= fit.page_content_height;
     if !intact_placement_exists {
         return false;
     }
@@ -142,6 +152,18 @@ mod tests {
             page_content_height: 600.0,
             page_has_content: true,
         }));
+    }
+
+    #[test]
+    fn weighs_a_blank_page_without_the_spacing_owed_at_the_cursor() {
+        let fit = KeepWithNextFit {
+            group_height: 120.0,
+            available_height: 80.0,
+            page_content_height: 100.0,
+            page_has_content: true,
+        };
+        assert!(keep_with_next_group_must_advance_from(fit, 90.0));
+        assert!(!keep_with_next_group_must_advance_from(fit, 110.0));
     }
 
     #[test]

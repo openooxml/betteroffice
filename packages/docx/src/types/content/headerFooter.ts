@@ -118,6 +118,8 @@ export interface Footnote {
   customRootBindings?: { name: string; value: string }[];
   /** Verbatim note XML for unmodeled bookmarks or custom XML. */
   verbatimXml?: string;
+  /** The source occurrence of the verbatim note's first `w:p`, on documents parsed for an editing session. */
+  sourceOrdinal?: number;
 }
 
 /**
@@ -139,4 +141,6 @@ export interface Endnote {
   customRootBindings?: { name: string; value: string }[];
   /** Verbatim note XML for unmodeled blocks. */
   verbatimXml?: string;
+  /** The source occurrence of the verbatim note's first `w:p`, on documents parsed for an editing session. */
+  sourceOrdinal?: number;
 }

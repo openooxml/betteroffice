@@ -6,7 +6,8 @@
   "compatibility_flags": ["global_fetch_strictly_public"],
   "assets": {
     "directory": "dist",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    "run_worker_first": true
   },
   "r2_buckets": [
     {
@@ -14,7 +15,10 @@
       "bucket_name": "betteroffice-fidelity"
     }
   ],
-  "routes": [{ "pattern": "fidelity.betteroffice.dev", "custom_domain": true }],
+  "routes": [
+    { "pattern": "benchmarks.betteroffice.dev", "custom_domain": true },
+    { "pattern": "fidelity.betteroffice.dev", "custom_domain": true }
+  ],
   "observability": {
     "enabled": true
   }

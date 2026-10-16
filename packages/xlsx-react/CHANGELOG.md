@@ -1,5 +1,59 @@
 # @betteroffice/xlsx-react
 
+## 0.3.0
+
+### Minor Changes
+
+- 8132fe0: Add version-checked, all-or-nothing XLSX edit batches. `WorkbookHandle.version()`, `readCells()` and `findText()` return values, formulas and display text with the session version they were read at; `validateEdits()` and `applyEdits()` resolve every step against that version and either commit cell inputs, formulas, number formats and style patches as one recalculated change and one undo step, or return a typed refusal (`stale-version`, `missing-target`, `content-mismatch`, `overlapping-steps`, `locked-target`, `unsupported`, `invalid-step`, `limit-exceeded`) with the workbook untouched. Steps can guard each cell's value, formula or display text, the experimental `history: "none"` keeps a batch out of undo, and volatile functions see only the request's `nowSerial`. `XlsxEditorApi` gains the same operations, committing pending drafts, nudges and pastes first, rejecting with the newly exported `XlsxCommandAdmissionError` (`input-failed`, `gesture-active`, `document-replaced`) when that input cannot be written, a chart drag is unfinished or the workbook was replaced, and refusing with `read-only` while the editor is read-only. The Rust `Workbook` and the Python bindings expose the same API. Update observers now run after recalculation, cell batches, raw operations and proposal acceptance stage the authority change before adopting it, and `StaleProposalError` gains `targets` naming each drifted cell's sheet. Edits to cells that carry formats created in the same session now reach the shared Yrs state with the right format, and a value-changing `recalculate_all` notifies Rust observers with a new `UpdateOrigin::Recalculation` event that carries no update. The editor's cut now clears only the cells selected when it was accepted, and only while that workbook is still open and writable. The Rust `EditOperation` and `EditFailureCode` enums are non-exhaustive.
+- f07e295: Expose the XLSX editor's commands as `XlsxEditorApi.commands`: serializable state with a stated reason for every disabled command, descriptors with shortcuts, and `execute`, which runs in order with the pastes, cell entries and chart moves accepted before it, ends an IME composition and writes the text typed so far, and checks availability again, failing with `target-changed` when its selection moved meanwhile; print waits for the canvas to paint that text and fails with `render-failed` otherwise. The synchronous `api.save()` throws the new `XlsxSaveRefusedError` (`input-pending`, `input-failed`) instead of returning bytes without accepted input. A cell entry the engine refuses keeps the cell editor open with its error, and Save and Mod+S fail with `input-failed` until the entry is corrected or cancelled with Escape. Hosts compose built-in controls with their own actions through the `toolbar` and `showToolbar` props, `XlsxCommandProvider`, `useXlsxCommands`/`useXlsxCommandState`/`useXlsxCommand`, `EditorToolbar mode="commands"` (with `EditorToolbar.FormulaBar`), `ToolbarCommand`, `ToolbarCommandButton`, `ToolbarCommandSelect` and `ToolbarOverflow`, inside or outside the editor. The prop-based `EditorToolbar`, `Toolbar` and `useEditorToolbar` keep working in the default legacy mode. Toolbars, shortcuts and the proposals panel share one gate: read-only mode, cell selection, merge shape, collaboration and PNG support each disable commands with a coded reason. Shortcuts dispatch from the descriptors with platform-aware labels (now including Mod+B and Mod+I), only for the editor that owns the event, and leave text undo to the cell editor. Narrow toolbars move trailing groups into a keyboard-accessible More menu with radio choices, custom size and zoom prompts and color pickers, and `ToolbarDropdown` popups follow menu or dialog semantics by their content. New locale keys cover command labels and disabled reasons. The command and toolbar composition API is experimental and may change in minor releases.
+- 5206ccf: Add host-controlled viewing mode, change notifications, imperative save, and cell selection APIs.
+- 667fae3: Host editor plugins in `XlsxEditor` through the new `plugins`, `pluginGrants` and `onPluginError` props. The plugin API is experimental and may change in minor releases. A plugin created with `defineXlsxPlugin` can contribute a docked panel (left, right or bottom of the grid, above the sheet tabs), an overlay on the grid, and commands registered as `plugin:<pluginId>/<id>`, whose results carry the plugin's own failure codes or a refused edit batch unchanged, with toolbar entries (`XlsxPluginToolbar` places them in replacement chrome) and shortcuts; `ToolbarCommandButton`, `ToolbarCommand`, `useXlsxCommand` and `useXlsxCommandState` accept those ids. Each activation receives `load`, `document-change` (the committed version after recalculation), `selection-change` (sheet, cells in their direction, chart), `mode-change`, `layout-change` and `grants-change` events, restricted clients (versioned `readCells`, `findText` and `validateEdits`, commands, granted edit batches, and `selectCells` and `scrollToCell` navigation that keeps focus unless asked), grid geometry that returns cell and range rectangles in overlay pixels for the painted frame, zoom, scroll and frozen panes, version-guarded state and `onCleanup` disposers. Plugins read, validate and navigate by default; built-in commands and edit batches need an explicit grant, rechecked with `readOnly` immediately before every write, and mutating built-in commands refuse plugins with `unsupported-policy`. Every contribution renders behind its own error boundary with a plugin-scoped command context and without the editor's formula bar binding, its keys and clicks never reach the grid, and a failing plugin is stopped and reported without affecting the editor or other plugins. Plugin shortcuts must use Mod or Alt, or a function key; built-in shortcuts win and a clashing plugin shortcut, including one the grid handles itself, is reported and not bound. The proposals panel now opens inside the grid area. New locale keys cover plugin panels, the plugin toolbar group and the new disabled reasons.
+
+### Patch Changes
+
+- Updated dependencies [6c30f4a]
+- Updated dependencies [9639a6b]
+- Updated dependencies [80341ac]
+- Updated dependencies [e7f4868]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [3153c95]
+- Updated dependencies [ae8c931]
+- Updated dependencies [6bd3783]
+- Updated dependencies [c01cc85]
+- Updated dependencies [0f23444]
+- Updated dependencies [21d83b3]
+- Updated dependencies [21d83b3]
+- Updated dependencies [91554bf]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [8132fe0]
+- Updated dependencies [f07e295]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [ddbfd29]
+- Updated dependencies [b56efb3]
+- Updated dependencies [b4db492]
+- Updated dependencies [65f0ce9]
+- Updated dependencies [667fae3]
+- Updated dependencies [6d28c9d]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [dfb5c82]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [9a6cdd5]
+- Updated dependencies [adb8999]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [6d28c9d]
+- Updated dependencies [6c30f4a]
+- Updated dependencies [bcc90ba]
+- Updated dependencies [35f9cec]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [c01cc85]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [b56efb3]
+- Updated dependencies [b56efb3]
+  - @betteroffice/xlsx@0.3.0
+  - @betteroffice/xlsx-i18n@0.3.0
+
 ## 0.2.1
 
 ### Patch Changes

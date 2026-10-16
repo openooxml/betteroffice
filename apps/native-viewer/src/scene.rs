@@ -53,7 +53,38 @@ pub fn translate_page(
     {
         translate_border_or_placeholder(&mut scene, border, &mut skipped);
     }
-    for primitive in &page.primitives {
+    let (watermark, body) = page.primitives.split_at(
+        page.watermark_primitive_count
+            .unwrap_or(0)
+            .min(page.primitives.len()),
+    );
+    for primitive in watermark {
+        translate_or_placeholder(
+            &mut scene,
+            primitive,
+            fonts,
+            images,
+            ImageScope::Body,
+            width,
+            height,
+            &mut skipped,
+        );
+    }
+    for region in [&page.header, &page.footer].into_iter().flatten() {
+        for primitive in &region.primitives {
+            translate_or_placeholder(
+                &mut scene,
+                primitive,
+                fonts,
+                images,
+                ImageScope::HeaderFooter(&region.r_id),
+                width,
+                height,
+                &mut skipped,
+            );
+        }
+    }
+    for primitive in body {
         translate_or_placeholder(
             &mut scene,
             primitive,
@@ -79,20 +110,6 @@ pub fn translate_page(
                 fonts,
                 images,
                 scope,
-                width,
-                height,
-                &mut skipped,
-            );
-        }
-    }
-    for region in [&page.header, &page.footer].into_iter().flatten() {
-        for primitive in &region.primitives {
-            translate_or_placeholder(
-                &mut scene,
-                primitive,
-                fonts,
-                images,
-                ImageScope::HeaderFooter(&region.r_id),
                 width,
                 height,
                 &mut skipped,
@@ -941,6 +958,62 @@ mod tests {
 
     fn n(value: i64) -> Number {
         Number::from(value)
+    }
+
+    #[test]
+    fn page_layers_put_watermarks_under_header_footer_body_and_notes() {
+        let (watermark, header, footer, behind, front, separator, note) = (
+            "#cc0000", "#00cc00", "#0000cc", "#cccc00", "#000000", "#cc00cc", "#00cccc",
+        );
+        let rect = |fill: &str| {
+            serde_json::json!({"kind":"rect","x":0,"y":0,"w":20,"h":20,"fill":fill})
+        };
+        let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
+            "pageIndex": 0, "width": 20, "height": 20,
+            "primitives": [rect(watermark), rect(behind), rect(front)],
+            "header": {"rId":"rIdHeader","kind":"header","y":0,"height":10,
+                "primitives":[rect(header)]},
+            "footer": {"rId":"rIdFooter","kind":"footer","y":10,"height":10,
+                "primitives":[rect(footer)]},
+            "noteAreas": [{"kind":"footnote","separatorPrimitives":[rect(separator)],
+                "primitives":[rect(note)]}]
+        }))
+        .unwrap();
+        let fonts = FontRegistry {
+            faces: Vec::new(),
+            store: ooxml_text::FontStore::new(),
+            chains: Default::default(),
+            chain_ids: Default::default(),
+            requirements: Vec::new(),
+        };
+        let images = ImageRegistry::load(&crate::test_fixtures::editing_docx("")).unwrap();
+        for (count, fills) in [
+            (
+                Some(1),
+                [watermark, header, footer, behind, front, separator, note],
+            ),
+            (
+                None,
+                [header, footer, watermark, behind, front, separator, note],
+            ),
+        ] {
+            page.watermark_primitive_count = count;
+            let actual = translate_page(&page, &fonts, &images).unwrap();
+            let mut expected = Scene::new();
+            for fill in fills {
+                expected.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    color(fill, 1.0).unwrap(),
+                    None,
+                    &Rect::new(0.0, 0.0, 20.0, 20.0),
+                );
+            }
+            assert_eq!(
+                actual.scene.encoding().draw_data,
+                expected.encoding().draw_data
+            );
+        }
     }
 
     #[test]

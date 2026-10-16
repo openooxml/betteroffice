@@ -557,6 +557,14 @@ pub struct ParagraphFormatting {
     /// (snap when a grid is active); `Some(false)` opts the paragraph out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_to_grid: Option<bool>,
+    /// Direct `w:autoSpaceDE` on pPr (§17.3.1.11) — the space Word inserts
+    /// between East Asian and Latin text. `None` is the OOXML default (on).
+    #[serde(rename = "autoSpaceDE", skip_serializing_if = "Option::is_none")]
+    pub auto_space_de: Option<bool>,
+    /// Direct `w:autoSpaceDN` on pPr (§17.3.1.12) — the same between East
+    /// Asian text and numbers. `None` is the OOXML default (on).
+    #[serde(rename = "autoSpaceDN", skip_serializing_if = "Option::is_none")]
+    pub auto_space_dn: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_properties: Option<TextFormatting>,
 }
@@ -588,6 +596,12 @@ pub fn parse_paragraph_properties(
     if let Some(indent) = p_pr.child("w", "ind") {
         value.indent_left = indent.parse_numeric_attribute(Some("w"), "left", 1.0);
         value.indent_right = indent.parse_numeric_attribute(Some("w"), "right", 1.0);
+        if value.indent_left.is_none() {
+            value.indent_left = indent.parse_numeric_attribute(Some("w"), "start", 1.0);
+        }
+        if value.indent_right.is_none() {
+            value.indent_right = indent.parse_numeric_attribute(Some("w"), "end", 1.0);
+        }
         value.indent_first_line = indent.parse_numeric_attribute(Some("w"), "firstLine", 1.0);
         if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hanging", 1.0) {
             value.indent_first_line = Some(-hanging);
@@ -629,6 +643,8 @@ pub fn parse_paragraph_properties(
     value.suppress_line_numbers = boolean_child(p_pr, "suppressLineNumbers");
     value.suppress_auto_hyphens = boolean_child(p_pr, "suppressAutoHyphens");
     value.snap_to_grid = boolean_child(p_pr, "snapToGrid");
+    value.auto_space_de = boolean_child(p_pr, "autoSpaceDE");
+    value.auto_space_dn = boolean_child(p_pr, "autoSpaceDN");
     let run_properties_element = p_pr.child("w", "rPr");
     value.run_properties = parse_run_properties(run_properties_element, theme);
     (value != ParagraphFormatting::default()
@@ -1542,6 +1558,20 @@ mod tests {
         let hanging = parse_paragraph_properties(hanging.child("w", "pPr"), None).unwrap();
         assert_eq!(hanging.indent_first_line_chars, Some(-150.0));
         assert_eq!(hanging.hanging_indent, Some(true));
+    }
+
+    #[test]
+    fn a_style_indent_reads_start_and_end_when_left_and_right_are_absent() {
+        let style = root(r#"<w:style><w:pPr><w:ind w:start="720" w:end="360"/></w:pPr></w:style>"#);
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left, Some(720.0));
+        assert_eq!(paragraph.indent_right, Some(360.0));
+        let style = root(
+            r#"<w:style><w:pPr><w:ind w:left="100" w:start="720" w:right="200" w:end="360"/></w:pPr></w:style>"#,
+        );
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left, Some(100.0));
+        assert_eq!(paragraph.indent_right, Some(200.0));
     }
 
     #[test]

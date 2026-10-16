@@ -74,7 +74,7 @@ impl Default for ParseLimits {
 }
 
 /// One package-wide budget shared across every XML part.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ParseBudget<'a> {
     limits: &'a ParseLimits,
     xml_bytes: usize,
@@ -89,6 +89,9 @@ pub struct ParseBudget<'a> {
     table_cells: usize,
     notes: usize,
     comments: usize,
+    source_ordinals: bool,
+    media: Option<&'a crate::media::MediaTable>,
+    media_error: Option<String>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -107,7 +110,39 @@ impl<'a> ParseBudget<'a> {
             table_cells: 0,
             notes: 0,
             comments: 0,
+            source_ordinals: false,
+            media: None,
+            media_error: None,
         }
+    }
+
+    /// Reads the bytes behind `media:{n}` image sources from `table`.
+    pub(crate) fn read_media_from(&mut self, table: &'a crate::media::MediaTable) {
+        self.media = Some(table);
+    }
+
+    /// The table `media:{n}` image sources name, when parsing with one.
+    pub(crate) fn media_table(&self) -> Option<&'a crate::media::MediaTable> {
+        self.media
+    }
+
+    /// Fails the parse with the first media part that could not be read.
+    pub(crate) fn fail_media_read(&mut self, error: String) {
+        self.media_error.get_or_insert(error);
+    }
+
+    pub(crate) fn media_read_error(&mut self) -> Option<String> {
+        self.media_error.take()
+    }
+
+    /// Records each parsed paragraph's `w:p` occurrence in its part; see
+    /// [`XmlElement::paragraph_ordinal`].
+    pub fn record_source_ordinals(&mut self) {
+        self.source_ordinals = true;
+    }
+
+    pub(crate) fn records_source_ordinals(&self) -> bool {
+        self.source_ordinals
     }
 
     pub(crate) fn charge_xml_bytes(&mut self, amount: usize, part: &str) -> Result<(), ParseError> {
@@ -118,6 +153,10 @@ impl<'a> ParseBudget<'a> {
             "xmlBytes",
             part,
         )
+    }
+
+    pub(crate) fn limits(&self) -> &ParseLimits {
+        self.limits
     }
 
     /// XML events charged so far.
@@ -179,6 +218,10 @@ impl<'a> ParseBudget<'a> {
             "paragraphs",
             part,
         )
+    }
+
+    pub(crate) fn paragraph_count(&self) -> usize {
+        self.paragraphs
     }
 
     /// Charge one table before parsing its grid and rows.
@@ -302,6 +345,13 @@ pub struct XmlElement {
     pub name: String,
     pub attributes: IndexMap<String, String>,
     pub children: Vec<XmlNode>,
+    /// For a `w:p` element, its zero-based index among the part's `w:p`
+    /// elements in document order.
+    pub paragraph_ordinal: Option<u32>,
+    /// For a `w:p` element, the name of its attribute that resolves to the
+    /// Word 2010 `paraId` under the namespace bindings in scope; see
+    /// [`crate::paragraph_identity::word_para_id_name`].
+    pub para_id_attribute: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -467,6 +517,14 @@ impl XmlElement {
     }
 
     /// Serializes raw inline XML, escaping only double quotes in attributes.
+    /// The occurrence of the first `w:p` in this subtree; see [`Self::paragraph_ordinal`].
+    pub fn first_paragraph_ordinal(&self) -> Option<u32> {
+        self.paragraph_ordinal.or_else(|| {
+            self.child_elements()
+                .find_map(Self::first_paragraph_ordinal)
+        })
+    }
+
     pub fn to_raw_inline_xml(&self) -> String {
         let mut output = String::new();
         self.write_raw_inline_xml(&mut output);
@@ -551,8 +609,538 @@ pub fn parse_xml(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<XmlDocument, ParseError> {
-    let repaired = escape_stray_ampersands(xml);
-    parse_xml_strict(repaired.as_ref(), part, budget)
+    parse_xml_strict(repaired(xml).as_ref(), part, budget)
+}
+
+/// `xml` as [`parse_xml`] reads it: borrowed unless the part needed repair.
+fn repaired(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    escape_stray_ampersands(xml)
+}
+
+/// Whether a splice may keep `xml`'s bytes verbatim: [`parse_xml`] reads it without repair, and
+/// it is UTF-8 holding only the plain XML below, a subset of XML 1.0 (Fifth Edition) with
+/// Namespaces in XML 1.0 (Third Edition). Any other part is written whole.
+///
+/// ```text
+/// part        ::= BOM? XMLDecl? S? element S?
+/// XMLDecl     ::= '<?xml' S 'version' Eq Q('1.0') (S 'encoding' Eq Q('UTF-8'))?
+///                 (S 'standalone' Eq Q('yes' | 'no'))? S? '?>'
+/// element     ::= '<' QName (S Attribute)* S? ('/>' | '>' content '</' QName S? '>')
+/// Attribute   ::= QName Eq ('"' ((Char - [<&"]) | Reference)* '"'
+///                         | "'" ((Char - [<&']) | Reference)* "'")
+/// content     ::= ((Char - [<&]) | Reference | element)*
+/// Reference   ::= '&' ('amp' | 'lt' | 'gt' | 'quot' | 'apos') ';'
+///               | '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'
+/// QName       ::= NCName (':' NCName)?
+/// NCName      ::= [A-Za-z_] [A-Za-z0-9._-]*
+/// Eq          ::= S? '=' S?
+/// S           ::= (#x20 | #x9 | #xD | #xA)+
+/// Char        ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+/// ```
+///
+/// `Q(v)` is `v` in single or double quotes, `UTF-8` in any case. Character data holds no `]]>`,
+/// a character reference names a `Char` in at most 12 bytes, and an end tag's name is its start
+/// tag's. So there are no comments, processing instructions, CDATA sections or document type
+/// declarations. Namespaces: every element and attribute prefix is bound (`xml` implicitly), no
+/// element has the `xmlns` prefix, attributes are unique by expanded name, a prefixed declaration
+/// is non-empty, `xmlns` is never declared, `xml` only to its own namespace, and no other prefix or
+/// default to the `xml` or `xmlns` namespace; declaration values hold no reference or whitespace.
+///
+/// The loader names elements and attributes by their written prefix and local name, so a part
+/// is also refused where that reading and a namespace-aware one could differ: a standard prefix
+/// bound to another namespace or a standard namespace under another prefix, an element of another
+/// namespace inside a `w` element, and an unprefixed attribute on a WordprocessingML element. It is
+/// refused too where a `w:t`, `w:delText`, `w:instrText`, `w:delInstrText` or `m:t` holds an
+/// element or, without `xml:space="preserve"` in scope, a leading or trailing space, and where
+/// other text that is not only whitespace between tags holds a carriage return. Other whitespace
+/// (tabs, line breaks and inner runs of spaces in text, attribute-value normalization) is left as
+/// written: kept bytes read in Word as they did before the save.
+pub fn reads_as_written(xml: &[u8]) -> bool {
+    matches!(repaired(xml), std::borrow::Cow::Borrowed(_)) && PlainXml::new(xml).accepts()
+}
+
+/// Prefixes the loader reads by name, with the namespaces they stand for.
+const STANDARD_NAMESPACES: [(&str, &str); 22] = [
+    ("w", namespaces::W),
+    ("v", namespaces::V),
+    ("o", namespaces::O),
+    ("a", namespaces::A),
+    ("r", namespaces::R),
+    ("wp", namespaces::WP),
+    ("wp14", namespaces::WP14),
+    ("wps", namespaces::WPS),
+    ("wpc", namespaces::WPC),
+    ("wpg", namespaces::WPG),
+    ("pic", namespaces::PIC),
+    ("m", namespaces::M),
+    ("mc", namespaces::MC),
+    ("w14", namespaces::W14),
+    ("w15", namespaces::W15),
+    ("w10", "urn:schemas-microsoft-com:office:word"),
+    (
+        "w16se",
+        "http://schemas.microsoft.com/office/word/2015/wordml/symex",
+    ),
+    (
+        "w16cid",
+        "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+    ),
+    (
+        "w16",
+        "http://schemas.microsoft.com/office/word/2018/wordml",
+    ),
+    (
+        "w16cex",
+        "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+    ),
+    (
+        "w16sdtdh",
+        "http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash",
+    ),
+    (
+        "wne",
+        "http://schemas.microsoft.com/office/word/2006/wordml",
+    ),
+];
+
+/// WordprocessingML prefixes, whose attributes are always prefixed.
+const WORD_PREFIXES: [&[u8]; 9] = [
+    b"w",
+    b"w14",
+    b"w15",
+    b"w16se",
+    b"w16cid",
+    b"w16",
+    b"w16cex",
+    b"w16sdtdh",
+    b"wne",
+];
+
+const XML_NAMESPACE: &[u8] = b"http://www.w3.org/XML/1998/namespace";
+const XMLNS_NAMESPACE: &[u8] = b"http://www.w3.org/2000/xmlns/";
+const UNPREFIXED: &[u8] = b"";
+
+/// A part's attribute: its prefix (empty when unprefixed), local name and raw value.
+type PlainAttribute<'a> = (&'a [u8], &'a [u8], &'a [u8]);
+
+/// An element [`PlainXml`] has read the start tag of.
+struct OpenElement<'a> {
+    name: &'a [u8],
+    prefix: &'a [u8],
+    /// The length of `bindings` before its start tag.
+    mark: usize,
+    /// Whether `xml:space="preserve"` is in scope.
+    preserve: bool,
+    /// For a text element, where its content starts.
+    text: Option<usize>,
+}
+
+/// The scanner behind [`reads_as_written`].
+struct PlainXml<'a> {
+    xml: &'a [u8],
+    at: usize,
+    open: Vec<OpenElement<'a>>,
+    /// In-scope prefix bindings, innermost last; the default namespace has the empty prefix.
+    bindings: Vec<(&'a [u8], &'a [u8])>,
+    attributes: Vec<PlainAttribute<'a>>,
+    names: Vec<(&'a [u8], &'a [u8])>,
+}
+
+impl<'a> PlainXml<'a> {
+    fn new(xml: &'a [u8]) -> Self {
+        Self {
+            xml,
+            at: 0,
+            open: Vec::new(),
+            bindings: Vec::new(),
+            attributes: Vec::new(),
+            names: Vec::new(),
+        }
+    }
+
+    fn accepts(mut self) -> bool {
+        let xml = self.xml;
+        if std::str::from_utf8(xml).is_err()
+            || xml.iter().enumerate().any(|(index, &byte)| {
+                (byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r'))
+                    || (byte == 0xEF
+                        && xml.get(index + 1) == Some(&0xBF)
+                        && matches!(xml.get(index + 2), Some(0xBE | 0xBF)))
+            })
+        {
+            return false;
+        }
+        self.eat(b"\xEF\xBB\xBF");
+        if xml[self.at..].starts_with(b"<?xml") && !self.declaration() {
+            return false;
+        }
+        let mut roots = 0usize;
+        loop {
+            let start = self.at;
+            while !matches!(xml.get(self.at), None | Some(b'<' | b'&')) {
+                self.at += 1;
+            }
+            let run = &xml[start..self.at];
+            if self.open.is_empty() {
+                if !run.iter().all(is_xml_space) {
+                    return false;
+                }
+            } else if run.windows(3).any(|window| window == b"]]>")
+                || (run.contains(&b'\r')
+                    && self.open.last().is_some_and(|open| open.text.is_none())
+                    && !(run.iter().all(is_xml_space)
+                        && xml.get(self.at) == Some(&b'<')
+                        && xml[..start].last() == Some(&b'>')))
+            {
+                return false;
+            }
+            match xml.get(self.at) {
+                None => return self.open.is_empty() && roots == 1,
+                Some(b'&') => {
+                    if self.open.is_empty() || !self.reference() {
+                        return false;
+                    }
+                }
+                Some(_) => {
+                    self.at += 1;
+                    let accepted = if self.eat(b"/") {
+                        self.end_tag()
+                    } else {
+                        if self.open.is_empty() {
+                            roots += 1;
+                        }
+                        roots == 1 && self.start_tag()
+                    };
+                    if !accepted {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    fn declaration(&mut self) -> bool {
+        self.at += b"<?xml".len();
+        if !(self.space()
+            && self.eat(b"version")
+            && self.eq()
+            && self.quoted(|value| value == b"1.0"))
+        {
+            return false;
+        }
+        let mut spaced = self.space();
+        if spaced && self.eat(b"encoding") {
+            if !(self.eq() && self.quoted(|value| value.eq_ignore_ascii_case(b"utf-8"))) {
+                return false;
+            }
+            spaced = self.space();
+        }
+        if spaced && self.eat(b"standalone") {
+            if !(self.eq() && self.quoted(|value| value == b"yes" || value == b"no")) {
+                return false;
+            }
+            self.space();
+        }
+        self.eat(b"?>")
+    }
+
+    fn start_tag(&mut self) -> bool {
+        let Some((name, prefix, local)) = self.qname() else {
+            return false;
+        };
+        let mark = self.bindings.len();
+        let mut attributes = std::mem::take(&mut self.attributes);
+        attributes.clear();
+        let empty = loop {
+            let spaced = self.space();
+            if self.eat(b">") {
+                break false;
+            }
+            if self.eat(b"/>") {
+                break true;
+            }
+            let Some((_, key_prefix, key_local)) = self.qname().filter(|_| spaced) else {
+                return false;
+            };
+            if !self.eq() {
+                return false;
+            }
+            let Some(value) = self.attribute_value() else {
+                return false;
+            };
+            attributes.push((key_prefix, key_local, value));
+        };
+        let parent = self.open.last();
+        let mut preserve = parent.is_some_and(|parent| parent.preserve);
+        for &(key_prefix, key_local, value) in &attributes {
+            if (key_prefix, key_local) == (b"xml", b"space") {
+                preserve = value == b"preserve";
+            }
+            let declared = match (key_prefix, key_local) {
+                (b"xmlns", b"xmlns") => return false,
+                (b"xmlns", local) => {
+                    if value.is_empty() || (local == b"xml") != (value == XML_NAMESPACE) {
+                        return false;
+                    }
+                    local
+                }
+                (b"", b"xmlns") => {
+                    if value == XML_NAMESPACE {
+                        return false;
+                    }
+                    UNPREFIXED
+                }
+                _ => continue,
+            };
+            if value == XMLNS_NAMESPACE
+                || value
+                    .iter()
+                    .any(|&byte| byte == b'&' || is_xml_space(&byte))
+                || STANDARD_NAMESPACES.iter().any(|(standard, namespace)| {
+                    (standard.as_bytes() == declared) != (namespace.as_bytes() == value)
+                })
+            {
+                return false;
+            }
+            self.bindings.push((declared, value));
+        }
+        if prefix == b"xmlns"
+            || (!prefix.is_empty() && self.resolve(prefix).is_none())
+            || parent.is_some_and(|parent| {
+                parent.text.is_some()
+                    || (parent.prefix == b"w"
+                        && !STANDARD_NAMESPACES
+                            .iter()
+                            .any(|(standard, _)| standard.as_bytes() == prefix))
+            })
+            || (WORD_PREFIXES.contains(&prefix)
+                && attributes.iter().any(|&(key_prefix, key_local, _)| {
+                    key_prefix.is_empty() && key_local != b"xmlns"
+                }))
+        {
+            return false;
+        }
+        let mut names = std::mem::take(&mut self.names);
+        names.clear();
+        for &(key_prefix, key_local, _) in &attributes {
+            let namespace = match (key_prefix, key_local) {
+                (b"xmlns", _) | (b"", b"xmlns") => XMLNS_NAMESPACE,
+                (b"", _) => UNPREFIXED,
+                _ => match self.resolve(key_prefix) {
+                    Some(namespace) => namespace,
+                    None => return false,
+                },
+            };
+            let local = if key_prefix.is_empty() && key_local == b"xmlns" {
+                UNPREFIXED
+            } else {
+                key_local
+            };
+            names.push((namespace, local));
+        }
+        names.sort_unstable();
+        let unique = names.windows(2).all(|pair| pair[0] != pair[1]);
+        self.attributes = attributes;
+        self.names = names;
+        if !unique {
+            return false;
+        }
+        if empty {
+            self.bindings.truncate(mark);
+        } else {
+            let text = ((prefix == b"w"
+                && matches!(local, b"t" | b"delText" | b"instrText" | b"delInstrText"))
+                || (prefix == b"m" && local == b"t"))
+                .then_some(self.at);
+            self.open.push(OpenElement {
+                name,
+                prefix,
+                mark,
+                preserve,
+                text,
+            });
+        }
+        true
+    }
+
+    fn end_tag(&mut self) -> bool {
+        let close = self.at - 2;
+        let Some((name, _, _)) = self.qname() else {
+            return false;
+        };
+        self.space();
+        let Some(open) = self.open.pop() else {
+            return false;
+        };
+        self.bindings.truncate(open.mark);
+        open.name == name
+            && self.eat(b">")
+            && open
+                .text
+                .is_none_or(|start| self.text_reads_as_written(start, close, open.preserve))
+    }
+
+    /// Whether the text content `xml[start..end]` starts and ends with something other than a
+    /// space, written or referenced, unless `preserve`.
+    fn text_reads_as_written(&self, start: usize, end: usize, preserve: bool) -> bool {
+        let content = &self.xml[start..end];
+        let space = |reference: &[u8]| {
+            let value = match reference {
+                [b'&', b'#', b'x', digits @ .., b';'] => std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|digits| u32::from_str_radix(digits, 16).ok()),
+                [b'&', b'#', digits @ .., b';'] => std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|digits| digits.parse().ok()),
+                _ => None,
+            };
+            value == Some(u32::from(b' '))
+        };
+        let first = match content.first() {
+            Some(b'&') => content
+                .iter()
+                .position(|&byte| byte == b';')
+                .is_some_and(|end| space(&content[..=end])),
+            first => first == Some(&b' '),
+        };
+        let last = match content.last() {
+            Some(b';') => content
+                .iter()
+                .rposition(|&byte| byte == b'&')
+                .is_some_and(|start| space(&content[start..])),
+            last => last == Some(&b' '),
+        };
+        preserve || !(first || last)
+    }
+
+    fn resolve(&self, prefix: &[u8]) -> Option<&'a [u8]> {
+        if prefix == b"xml" {
+            return Some(XML_NAMESPACE);
+        }
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(bound, _)| *bound == prefix)
+            .map(|(_, namespace)| *namespace)
+    }
+
+    fn attribute_value(&mut self) -> Option<&'a [u8]> {
+        let quote = *self
+            .xml
+            .get(self.at)
+            .filter(|&&byte| byte == b'"' || byte == b'\'')?;
+        self.at += 1;
+        let start = self.at;
+        loop {
+            match *self.xml.get(self.at)? {
+                byte if byte == quote => {
+                    self.at += 1;
+                    let xml = self.xml;
+                    return Some(&xml[start..self.at - 1]);
+                }
+                b'<' => return None,
+                b'&' => {
+                    if !self.reference() {
+                        return None;
+                    }
+                }
+                _ => self.at += 1,
+            }
+        }
+    }
+
+    fn reference(&mut self) -> bool {
+        let rest = &self.xml[self.at..];
+        let Some(end) = rest.iter().take(12).position(|&byte| byte == b';') else {
+            return false;
+        };
+        self.at += end + 1;
+        let number = |digits: &[u8], radix: u32| {
+            !digits.is_empty()
+                && std::str::from_utf8(digits)
+                    .ok()
+                    .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .and_then(|digits| u32::from_str_radix(digits, radix).ok())
+                    .and_then(char::from_u32)
+                    .is_some_and(is_legal_xml_character)
+        };
+        match &rest[1..end] {
+            b"amp" | b"lt" | b"gt" | b"quot" | b"apos" => true,
+            [b'#', b'x', digits @ ..] => number(digits, 16),
+            [b'#', digits @ ..] => digits.iter().all(u8::is_ascii_digit) && number(digits, 10),
+            _ => false,
+        }
+    }
+
+    /// A QName as (whole name, prefix, local name), the prefix empty when unprefixed.
+    fn qname(&mut self) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+        let start = self.at;
+        let first = self.ncname()?;
+        if !self.eat(b":") {
+            return Some((first, UNPREFIXED, first));
+        }
+        let local = self.ncname()?;
+        let xml = self.xml;
+        Some((&xml[start..self.at], first, local))
+    }
+
+    fn ncname(&mut self) -> Option<&'a [u8]> {
+        let start = self.at;
+        if !matches!(self.xml.get(self.at), Some(byte) if byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            return None;
+        }
+        self.at += 1;
+        while matches!(self.xml.get(self.at), Some(byte) if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            self.at += 1;
+        }
+        let xml = self.xml;
+        Some(&xml[start..self.at])
+    }
+
+    fn quoted(&mut self, valid: impl Fn(&[u8]) -> bool) -> bool {
+        let Some(&quote) = self
+            .xml
+            .get(self.at)
+            .filter(|&&byte| byte == b'"' || byte == b'\'')
+        else {
+            return false;
+        };
+        let start = self.at + 1;
+        let Some(length) = self.xml[start..].iter().position(|&byte| byte == quote) else {
+            return false;
+        };
+        self.at = start + length + 1;
+        valid(&self.xml[start..start + length])
+    }
+
+    fn eq(&mut self) -> bool {
+        self.space();
+        let equals = self.eat(b"=");
+        self.space();
+        equals
+    }
+
+    fn space(&mut self) -> bool {
+        let start = self.at;
+        while self.xml.get(self.at).is_some_and(is_xml_space) {
+            self.at += 1;
+        }
+        self.at > start
+    }
+
+    fn eat(&mut self, token: &[u8]) -> bool {
+        let found = self.xml[self.at..].starts_with(token);
+        if found {
+            self.at += token.len();
+        }
+        found
+    }
+}
+
+fn is_xml_space(byte: &u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 /// Parse emitted XML without repairing malformed entity references.
@@ -568,6 +1156,25 @@ pub(crate) fn parse_xml_strict(
 
     let mut roots = Vec::new();
     let mut stack: Vec<XmlElement> = Vec::new();
+    let mut paragraphs = 0u32;
+    let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
+        if element.name == "w:p" {
+            element.paragraph_ordinal = Some(paragraphs);
+            paragraphs += 1;
+            element.para_id_attribute = crate::paragraph_identity::word_para_id_name(
+                element.attributes.keys().map(String::as_str),
+                |prefix| {
+                    let declaration = format!("xmlns:{prefix}");
+                    std::iter::once(&element)
+                        .chain(ancestors.iter().rev())
+                        .find_map(|scope| scope.attributes.get(&declaration))
+                        .map(String::as_str)
+                },
+            )
+            .map(str::to_owned);
+        }
+        element
+    };
     loop {
         let event = reader
             .read_event()
@@ -581,7 +1188,9 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                stack.push(decode_element(&reader, start, part, budget)?);
+                let element = decode_element(&reader, start, part, budget)?;
+                let element = number(element, &stack);
+                stack.push(element);
             }
             Event::Empty(start) => {
                 if stack.len() + 1 > budget.limits.max_xml_depth {
@@ -590,7 +1199,8 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                let mut element = decode_element(&reader, start, part, budget)?;
+                let element = decode_element(&reader, start, part, budget)?;
+                let mut element = number(element, &stack);
                 retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
@@ -681,35 +1291,14 @@ pub(crate) fn parse_xml_strict(
     Ok(XmlDocument { roots })
 }
 
-fn canonical_namespace(prefix: &str) -> Option<&'static str> {
+pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
     if !crate::serializer::parts::is_story_root_prefix(prefix) {
         return None;
     }
-    match prefix {
-        "w" => Some(namespaces::W),
-        "v" => Some(namespaces::V),
-        "o" => Some(namespaces::O),
-        "a" => Some(namespaces::A),
-        "r" => Some(namespaces::R),
-        "wp" => Some(namespaces::WP),
-        "wp14" => Some(namespaces::WP14),
-        "wps" => Some(namespaces::WPS),
-        "wpc" => Some(namespaces::WPC),
-        "wpg" => Some(namespaces::WPG),
-        "pic" => Some(namespaces::PIC),
-        "m" => Some(namespaces::M),
-        "mc" => Some(namespaces::MC),
-        "w14" => Some(namespaces::W14),
-        "w15" => Some(namespaces::W15),
-        "w10" => Some("urn:schemas-microsoft-com:office:word"),
-        "w16se" => Some("http://schemas.microsoft.com/office/word/2015/wordml/symex"),
-        "w16cid" => Some("http://schemas.microsoft.com/office/word/2016/wordml/cid"),
-        "w16" => Some("http://schemas.microsoft.com/office/word/2018/wordml"),
-        "w16cex" => Some("http://schemas.microsoft.com/office/word/2018/wordml/cex"),
-        "w16sdtdh" => Some("http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash"),
-        "wne" => Some("http://schemas.microsoft.com/office/word/2006/wordml"),
-        _ => None,
-    }
+    STANDARD_NAMESPACES
+        .iter()
+        .find(|(standard, _)| *standard == prefix)
+        .map(|(_, namespace)| *namespace)
 }
 
 fn retain_drawing_namespace_aliases(
@@ -860,6 +1449,8 @@ fn decode_element(
         name,
         attributes,
         children: Vec::new(),
+        paragraph_ordinal: None,
+        para_id_attribute: None,
     })
 }
 
@@ -923,26 +1514,28 @@ fn malformed(reader: &Reader<&[u8]>, part: &str, error: impl ToString) -> ParseE
     }
 }
 
-fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     // Stray ampersands are repaired only in UTF-8 or ASCII input.
     let mut output: Option<Vec<u8>> = None;
-    let mut index = 0;
-    while index < xml.len() {
-        if xml[index] != b'&' || is_entity_reference(&xml[index..]) {
-            if let Some(output) = &mut output {
-                output.push(xml[index]);
-            }
-            index += 1;
+    let mut start = 0;
+    for index in memchr::memchr_iter(b'&', xml) {
+        if is_entity_reference(&xml[index..]) {
             continue;
         }
-        let output = output.get_or_insert_with(|| xml[..index].to_vec());
+        let output = output.get_or_insert_with(|| Vec::with_capacity(xml.len()));
+        output.extend_from_slice(&xml[start..index]);
         output.extend_from_slice(b"&amp;");
-        index += 1;
+        start = index + 1;
     }
-    output.map_or(std::borrow::Cow::Borrowed(xml), std::borrow::Cow::Owned)
+    if let Some(mut output) = output {
+        output.extend_from_slice(&xml[start..]);
+        std::borrow::Cow::Owned(output)
+    } else {
+        std::borrow::Cow::Borrowed(xml)
+    }
 }
 
-fn is_legal_xml_character(character: char) -> bool {
+pub(crate) fn is_legal_xml_character(character: char) -> bool {
     matches!(character, '\u{9}' | '\u{A}' | '\u{D}')
         || matches!(character as u32, 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
 }
@@ -1128,6 +1721,188 @@ mod tests {
     }
 
     #[test]
+    fn reads_as_written_only_plain_xml() {
+        let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
+        let part = |body: &str| {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<w:document {w}><w:body>{body}</w:body></w:document>"
+            )
+        };
+        let paragraph = "<w:p w:rsidR='00A1'><w:r><w:t xml:space=\"preserve\">A &amp; B &#x41;&#66; ]] &gt; \u{e9} </w:t></w:r></w:p>";
+        for xml in [
+            part(paragraph),
+            format!("\u{feff}{}", part(paragraph)),
+            part(paragraph).replacen(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+                "<?xml version='1.0'?>",
+                1,
+            ),
+            format!(
+                "<w:document {w} xmlns=\"urn:x\" xmlns:mc=\"{}\"><w:body><mc:AlternateContent><mc:Choice Requires=\"x\"><p xmlns=\"\"/><x:p xmlns:x=\"urn:y\" x:a=\"1\" a=\"1\"/></mc:Choice></mc:AlternateContent></w:body></w:document>\n",
+                namespaces::MC
+            ),
+            part("<w:p><w:r xml:space=\"preserve\"><w:t> a </w:t></w:r></w:p>"),
+            part("<w:p><w:r><w:t>a  b</w:t></w:r></w:p>"),
+            part("<w:p w:val=\"a\tb\r\nc\"/>"),
+            part("<w:p>\r\n<w:r/>\r\n</w:p>"),
+            part("<w:p><w:r><w:t>a\tb\r\nc&#10;d&#x9;e</w:t></w:r></w:p>"),
+        ] {
+            assert!(reads_as_written(xml.as_bytes()), "{xml}");
+        }
+        let declaration = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+        for (case, xml) in [
+            (
+                "stray ampersand",
+                part("<w:p><w:r><w:t>A & B</w:t></w:r></w:p>"),
+            ),
+            (
+                "undefined entity",
+                part("<w:p><w:r><w:t>A&nbsp;B</w:t></w:r></w:p>"),
+            ),
+            (
+                "reference to a control",
+                part("<w:p><w:r><w:t>&#1;</w:t></w:r></w:p>"),
+            ),
+            (
+                "reference to a noncharacter",
+                part("<w:p w:val=\"&#xFFFE;\"/>"),
+            ),
+            (
+                "control character",
+                part("<w:p><w:r><w:t>\u{1}</w:t></w:r></w:p>"),
+            ),
+            (
+                "noncharacter",
+                part("<w:p><w:r><w:t>\u{ffff}</w:t></w:r></w:p>"),
+            ),
+            (
+                "declared encoding",
+                part("").replace("UTF-8", "windows-1252"),
+            ),
+            (
+                "declaration without a version",
+                part("").replacen(declaration, "<?xml?>", 1),
+            ),
+            (
+                "declaration without a version, with an encoding",
+                part("").replacen(declaration, "<?xml encoding=\"UTF-8\"?>", 1),
+            ),
+            ("version 1.1", part("").replacen("1.0", "1.1", 1)),
+            (
+                "declaration fields out of order",
+                part("").replacen(
+                    declaration,
+                    "<?xml version=\"1.0\" standalone=\"yes\" encoding=\"UTF-8\"?>",
+                    1,
+                ),
+            ),
+            ("space before the declaration", format!(" {}", part(""))),
+            ("late declaration", part("<?xml version=\"1.0\"?>")),
+            ("processing instruction", part("<?pi x?>")),
+            ("empty processing instruction", part("<??>")),
+            ("comment", part("<!-- note -->")),
+            ("control character in a comment", part("<!--\u{1}-->")),
+            (
+                "CDATA section",
+                part("<w:p><w:r><w:t><![CDATA[x]]></w:t></w:r></w:p>"),
+            ),
+            (
+                "document type",
+                part("").replacen("<w:document", "<!DOCTYPE w:document><w:document", 1),
+            ),
+            (
+                "character data end",
+                part("<w:p><w:r><w:t>A ]]> B</w:t></w:r></w:p>"),
+            ),
+            ("invalid attribute name", part("<w:p bad?=\"x\"/>")),
+            ("non-ASCII name", part("<w:p\u{e9}/>")),
+            (
+                "attributes without space",
+                part("<w:p w:a=\"1\"w:b=\"2\"/>"),
+            ),
+            ("less-than in a value", part("<w:p w:a=\"<\"/>")),
+            ("duplicate attribute", part("<w:p w:a=\"1\" w:a=\"2\"/>")),
+            (
+                "duplicate expanded name",
+                part("<w:p><w:r xmlns:y=\"urn:d\" xmlns:z=\"urn:d\" y:a=\"1\" z:a=\"2\"/></w:p>"),
+            ),
+            (
+                "standard prefix bound to another namespace",
+                part("<w:p xmlns:r=\"urn:unrelated\"/>"),
+            ),
+            (
+                "standard namespace under another prefix",
+                part(&format!("<w:p xmlns:x=\"{}\"/>", namespaces::R)),
+            ),
+            (
+                "standard namespace as the default",
+                part(&format!("<w:p xmlns=\"{}\"/>", namespaces::W)),
+            ),
+            (
+                "element of another namespace in a w element",
+                part("<w:p><x:r xmlns:x=\"urn:x\"/></w:p>"),
+            ),
+            ("unprefixed element in a w element", part("<w:p><r/></w:p>")),
+            (
+                "unprefixed attribute on a WordprocessingML element",
+                part("<w:bookmarkStart id=\"1\" w:name=\"b\"/>"),
+            ),
+            (
+                "element in text",
+                part("<w:p><w:r><w:t>a<w:b/></w:t></w:r></w:p>"),
+            ),
+            (
+                "leading space without preserve",
+                part("<w:p><w:r><w:t> a</w:t></w:r></w:p>"),
+            ),
+            (
+                "leading referenced space without preserve",
+                part("<w:p><w:r><w:t>&#x020;a</w:t></w:r></w:p>"),
+            ),
+            (
+                "trailing referenced space without preserve",
+                part("<w:p><w:r><w:delText>a&#32;</w:delText></w:r></w:p>"),
+            ),
+            (
+                "preserve overridden by default",
+                part(
+                    "<w:p xml:space=\"preserve\"><w:r><w:t xml:space=\"default\">a </w:t></w:r></w:p>",
+                ),
+            ),
+            ("carriage return in other text", part("<w:p>a\r</w:p>")),
+            ("unbound element", part("<x:p/>")),
+            ("unbound attribute", part("<w:p x:a=\"1\"/>")),
+            ("element with the xmlns prefix", part("<xmlns:p/>")),
+            ("empty prefixed declaration", part("<w:p xmlns:x=\"\"/>")),
+            ("declared xmlns", part("<w:p xmlns:xmlns=\"urn:x\"/>")),
+            ("xml rebound", part("<w:p xmlns:xml=\"urn:x\"/>")),
+            (
+                "xml namespace on another prefix",
+                part("<w:p xmlns:x=\"http://www.w3.org/XML/1998/namespace\"/>"),
+            ),
+            (
+                "xmlns namespace as the default",
+                part("<w:p xmlns=\"http://www.w3.org/2000/xmlns/\"/>"),
+            ),
+            (
+                "reference in a declaration",
+                part("<w:p xmlns:x=\"urn:&amp;\"/>"),
+            ),
+            ("mismatched end tag", part("<w:p></w:r>")),
+            ("unclosed element", part("<w:p>")),
+            ("second root", format!("{}<w:document {w}/>", part(""))),
+            ("text after the root", format!("{}text", part(""))),
+            ("reference after the root", format!("{}&amp;", part(""))),
+        ] {
+            assert!(!reads_as_written(xml.as_bytes()), "{case}");
+        }
+        let mut latin1 = part("<w:p w:val=\"#\"/>").into_bytes();
+        let at = latin1.iter().position(|&byte| byte == b'#').unwrap();
+        latin1[at] = 0xE9;
+        assert!(!reads_as_written(&latin1), "not UTF-8");
+    }
+
+    #[test]
     fn preserves_whitespace_repairs_stray_ampersands_and_supports_helpers() {
         let doc =
             parse("<w:p w:val=\"12px\"><w:r> left & right </w:r><w:r><![CDATA[<x>]]></w:r></w:p>")
@@ -1141,6 +1916,84 @@ mod tests {
         assert_eq!(root.text_content(), " left & right <x>");
         assert_eq!(root.children_named("w", "r").count(), 2);
         assert!(root.to_xml().contains(" left &amp; right "));
+    }
+
+    fn escape_stray_ampersands_scalar(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+        let mut output: Option<Vec<u8>> = None;
+        let mut index = 0;
+        while index < xml.len() {
+            if xml[index] != b'&' || is_entity_reference(&xml[index..]) {
+                if let Some(output) = &mut output {
+                    output.push(xml[index]);
+                }
+                index += 1;
+                continue;
+            }
+            let output = output.get_or_insert_with(|| xml[..index].to_vec());
+            output.extend_from_slice(b"&amp;");
+            index += 1;
+        }
+        output.map_or(std::borrow::Cow::Borrowed(xml), std::borrow::Cow::Owned)
+    }
+
+    #[test]
+    fn ampersand_repair_borrows_unchanged_bytes() {
+        for xml in [
+            "",
+            "<w:t>plain text</w:t>",
+            "雪 café 🦀",
+            "&amp;",
+            "&lt;&gt;&quot;&apos;&custom_name-1.a:b;",
+            "&#0;&#65;&#1234567890;",
+            "&#x0;&#xAf;&#X1F980;",
+            "雪&amp;café&#65;🦀&#x1F980;",
+        ] {
+            let bytes = xml.as_bytes();
+            let repaired = escape_stray_ampersands(bytes);
+            assert_eq!(repaired.as_ref(), bytes, "{xml:?}");
+            assert_eq!(
+                repaired.as_ref(),
+                escape_stray_ampersands_scalar(bytes).as_ref(),
+                "{xml:?}"
+            );
+            assert!(matches!(repaired, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(repaired.as_ptr(), bytes.as_ptr());
+        }
+    }
+
+    #[test]
+    fn ampersand_repair_matches_scalar_bytes() {
+        for (xml, expected) in [
+            ("&start", "&amp;start"),
+            ("middle & text", "middle &amp; text"),
+            ("end&", "end&amp;"),
+            ("&", "&amp;"),
+            ("&&", "&amp;&amp;"),
+            ("&&amp;", "&amp;&amp;"),
+            ("&amp;&&#65;&&#x41;&", "&amp;&amp;&#65;&amp;&#x41;&amp;"),
+            ("text&amp", "text&amp;amp"),
+            ("text&#", "text&amp;#"),
+            ("text&#12", "text&amp;#12"),
+            ("text&#x", "text&amp;#x"),
+            ("text&#xAf", "text&amp;#xAf"),
+            ("&amp;&incomplete", "&amp;&amp;incomplete"),
+            ("&#;&\u{e9};&9name;", "&amp;#;&amp;\u{e9};&amp;9name;"),
+            ("雪&café&&🦀&amp;終&", "雪&amp;café&amp;&amp;🦀&amp;終&amp;"),
+        ] {
+            let repaired = escape_stray_ampersands(xml.as_bytes());
+            assert_eq!(repaired.as_ref(), expected.as_bytes(), "{xml:?}");
+            assert_eq!(
+                repaired.as_ref(),
+                escape_stray_ampersands_scalar(xml.as_bytes()).as_ref(),
+                "{xml:?}"
+            );
+            assert!(matches!(repaired, std::borrow::Cow::Owned(_)));
+        }
+        let bytes = [0xff, b'&', 0xfe, b'&', b'a', b'm', b'p', b';'];
+        assert_eq!(
+            escape_stray_ampersands(&bytes).as_ref(),
+            escape_stray_ampersands_scalar(&bytes).as_ref()
+        );
     }
 
     #[test]

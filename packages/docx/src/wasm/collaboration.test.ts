@@ -126,14 +126,34 @@ describe('docx wasm collaboration', () => {
 
       left.start_update_event_observation();
       right.start_update_event_observation();
+      const localEvents: Array<{ update: Uint8Array; origin: number; version: string }> = [];
+      const remoteEvents: Array<{ update: Uint8Array; origin: number; version: string }> = [];
+      left.set_update_observer((update: Uint8Array, origin: number) => {
+        localEvents.push({ update, origin, version: left.version() });
+      });
+      right.set_update_observer((update: Uint8Array, origin: number) => {
+        remoteEvents.push({ update, origin, version: right.version() });
+      });
+      const localVersion = left.version();
+      const remoteVersion = right.version();
       left.insert_text('body', receipt.body[0], 6, ' local');
       const local = left.drain_update_event();
       expect(local[0]).toBe(0);
       expect(local.byteLength).toBeGreaterThan(1);
+      expect(localEvents).toHaveLength(1);
+      expect([...localEvents[0].update]).toEqual([...local.slice(1)]);
+      expect(localEvents[0].origin).toBe(0);
+      expect(localEvents[0].version).toBe(left.version());
+      expect(left.version()).not.toBe(localVersion);
       right.apply_update(local.slice(1));
       const remote = right.drain_update_event();
       expect(remote[0]).toBe(1);
       expect([...remote.slice(1)]).toEqual([...local.slice(1)]);
+      expect(remoteEvents).toHaveLength(1);
+      expect([...remoteEvents[0].update]).toEqual([...remote.slice(1)]);
+      expect(remoteEvents[0].origin).toBe(1);
+      expect(remoteEvents[0].version).toBe(right.version());
+      expect(right.version()).not.toBe(remoteVersion);
       expect([...left.encode_state_vector()]).toEqual([...right.encode_state_vector()]);
       expect(left.drain_update_event()).toEqual(new Uint8Array());
       left.clear_update_event_observation();

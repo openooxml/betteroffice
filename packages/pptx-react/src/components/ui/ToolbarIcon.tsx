@@ -1,34 +1,70 @@
 import type { CSSProperties } from 'react';
+import { ToolbarSymbol } from '../../../../../shared/react-toolbar/icons';
+import {
+  add,
+  addBox,
+  addPhotoAlternate,
+  arrowDropDown,
+  arrowSelectorTool,
+  borderColor,
+  check,
+  download,
+  flipToBack,
+  flipToFront,
+  formatAlignCenter,
+  formatAlignJustify,
+  formatAlignLeft,
+  formatAlignRight,
+  formatBold,
+  formatColorFill,
+  formatColorText,
+  formatItalic,
+  formatUnderlined,
+  image,
+  insertText,
+  lineWeight,
+  moreVert,
+  moveSelectionDown,
+  moveSelectionUp,
+  redo,
+  remove,
+  shapes,
+  undo,
+} from '../../../../../shared/react-toolbar/symbols';
 
-export type ToolbarIconName =
-  | 'save'
-  | 'image'
-  | 'insertImage'
-  | 'undo'
-  | 'redo'
-  | 'newSlide'
-  | 'select'
-  | 'textBox'
-  | 'shape'
-  | 'bringToFront'
-  | 'sendToBack'
-  | 'bringForward'
-  | 'sendBackward'
-  | 'fillColor'
-  | 'borderColor'
-  | 'borderWidth'
-  | 'bold'
-  | 'italic'
-  | 'underline'
-  | 'textColor'
-  | 'alignLeft'
-  | 'alignCenter'
-  | 'alignRight'
-  | 'alignJustify'
-  | 'more'
-  | 'chevronDown'
-  | 'remove'
-  | 'add';
+const SYMBOLS = {
+  save: download,
+  image,
+  insertImage: addPhotoAlternate,
+  undo,
+  redo,
+  newSlide: addBox,
+  select: arrowSelectorTool,
+  textBox: insertText,
+  shape: shapes,
+  bringToFront: flipToFront,
+  sendToBack: flipToBack,
+  bringForward: moveSelectionUp,
+  sendBackward: moveSelectionDown,
+  fillColor: formatColorFill,
+  borderColor,
+  borderWidth: lineWeight,
+  bold: formatBold,
+  italic: formatItalic,
+  underline: formatUnderlined,
+  textColor: formatColorText,
+  alignLeft: formatAlignLeft,
+  alignCenter: formatAlignCenter,
+  alignRight: formatAlignRight,
+  alignJustify: formatAlignJustify,
+  more: moreVert,
+  chevronDown: arrowDropDown,
+  remove,
+  add,
+  check,
+};
+
+export type ToolbarIconName = keyof typeof SYMBOLS;
 
 export interface ToolbarIconProps {
   name: ToolbarIconName;
@@ -36,129 +72,6 @@ export interface ToolbarIconProps {
   style?: CSSProperties;
 }
 
-export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-      style={{ display: 'inline-flex', flexShrink: 0, ...style }}
-    >
-      {name === 'save' && <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 19h14" />}
-      {name === 'image' && (
-        <>
-          <rect x="3" y="5" width="18" height="14" rx="2" />
-          <circle cx="8.5" cy="9.5" r="1.25" />
-          <path d="m6 17 4.5-4.5 3.25 3.25L16 13.5l2 2" />
-        </>
-      )}
-      {name === 'insertImage' && (
-        <>
-          <rect x="3" y="5" width="14" height="12" rx="2" />
-          <circle cx="7.5" cy="9" r="1" />
-          <path d="m5 15 3.5-3.5 2.5 2.5L13 12l1.5 1.5" />
-          <path d="M18 4v6m-3-3h6" />
-        </>
-      )}
-      {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
-      {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
-      {name === 'newSlide' && (
-        <>
-          <rect x="3" y="5" width="15" height="14" rx="1.5" />
-          <path d="M7 9h7M7 13h5M20 9v6m-3-3h6" />
-        </>
-      )}
-      {name === 'select' && <path d="m6 3 12 9-6 1.5L9 19Z" />}
-      {name === 'textBox' && (
-        <>
-          <rect x="3" y="4" width="18" height="16" rx="1.5" />
-          <path d="M8 8h8m-4 0v8m-3 0h6" />
-        </>
-      )}
-      {name === 'shape' && <rect x="4" y="6" width="16" height="12" rx="3" />}
-      {name === 'bringToFront' && (
-        <>
-          <rect x="2" y="8" width="9" height="9" rx="1.3" opacity="0.4" />
-          <rect x="6" y="4" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
-          <path d="M17 17 20 14 23 17" />
-          <path d="M17 12 20 9 23 12" />
-        </>
-      )}
-      {name === 'sendToBack' && (
-        <>
-          <rect x="6" y="4" width="9" height="9" rx="1.3" opacity="0.4" />
-          <rect x="2" y="8" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
-          <path d="M17 9 20 12 23 9" />
-          <path d="M17 14 20 17 23 14" />
-        </>
-      )}
-      {name === 'bringForward' && (
-        <>
-          <rect x="2" y="8" width="9" height="9" rx="1.3" opacity="0.4" />
-          <rect x="6" y="4" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
-          <path d="M17 15 20 12 23 15" />
-        </>
-      )}
-      {name === 'sendBackward' && (
-        <>
-          <rect x="6" y="4" width="9" height="9" rx="1.3" opacity="0.4" />
-          <rect x="2" y="8" width="9" height="9" rx="1.3" fill="currentColor" fillOpacity="0.15" />
-          <path d="M17 11 20 14 23 11" />
-        </>
-      )}
-      {name === 'fillColor' && (
-        <>
-          <path d="m7 4 10 10-5 5-7-7Z" />
-          <path d="m5 12 7-7m6 12h2" />
-        </>
-      )}
-      {name === 'borderColor' && (
-        <>
-          <path d="M5 18h14M8 15l8-8 2 2-8 8H8Z" />
-        </>
-      )}
-      {name === 'borderWidth' && (
-        <>
-          <path d="M5 7h14" strokeWidth="1" />
-          <path d="M5 12h14" strokeWidth="2" />
-          <path d="M5 18h14" strokeWidth="3" />
-        </>
-      )}
-      {name === 'bold' && <path d="M7 4h6a4 4 0 0 1 0 8H7zm0 8h7a4 4 0 0 1 0 8H7z" />}
-      {name === 'italic' && <path d="M10 4h8M6 20h8M14 4 10 20" />}
-      {name === 'underline' && (
-        <>
-          <path d="M7 4v7a5 5 0 0 0 10 0V4" />
-          <path d="M5 20h14" />
-        </>
-      )}
-      {name === 'textColor' && (
-        <>
-          <path d="m7 16 5-12 5 12M9 11h6" />
-          <path d="M5 20h14" strokeWidth="3" />
-        </>
-      )}
-      {name === 'alignLeft' && <path d="M4 6h16M4 10h10M4 14h16M4 18h10" />}
-      {name === 'alignCenter' && <path d="M4 6h16M7 10h10M4 14h16M7 18h10" />}
-      {name === 'alignRight' && <path d="M4 6h16M10 10h10M4 14h16M10 18h10" />}
-      {name === 'alignJustify' && <path d="M4 6h16M4 10h16M4 14h16M4 18h16" />}
-      {name === 'more' && (
-        <>
-          <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
-          <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
-          <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
-        </>
-      )}
-      {name === 'chevronDown' && <path d="m7 10 5 5 5-5" />}
-      {name === 'remove' && <path d="M5 12h14" />}
-      {name === 'add' && <path d="M12 5v14M5 12h14" />}
-    </svg>
-  );
+export function ToolbarIcon({ name, size, style }: ToolbarIconProps) {
+  return <ToolbarSymbol path={SYMBOLS[name]} size={size} style={style} />;
 }

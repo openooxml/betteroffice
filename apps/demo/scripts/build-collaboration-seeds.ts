@@ -38,7 +38,8 @@ export async function buildCollaborationSeeds(
     await readFile(resolve(demo, "public/betteroffice-demo.docx")),
   );
   const docxSession = await createYrsSession({ clientId: 1 });
-  docxSession.seedFromDocx(docxBytes);
+  // Matches BROWSER_SEED_GENERATION in apps/native-viewer/src/collaboration.rs.
+  docxSession.seedFromDocx(docxBytes, { generation: 'betteroffice-demo' });
   const docxSeed = docxSession.encodeState();
   const docxStateVector = docxSession.encodeStateVector();
   docxSession.destroy();

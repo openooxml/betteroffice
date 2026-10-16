@@ -54,3 +54,19 @@ fn a_substituted_bullet_is_drawn_with_a_glyph_the_face_covers() {
         assert!(glyphs.iter().all(|glyph| glyph.glyph_id != 0), "{id}");
     }
 }
+
+#[test]
+fn an_emulated_symbol_bullet_face_is_not_reported_as_substituted() {
+    let session = DeckSession::open(DECK, 5_318).unwrap();
+    let rendered = renderer()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap();
+    assert!(
+        rendered
+            .font_substitutions
+            .iter()
+            .all(|substitution| !substitution.requested_family.starts_with("Wingdings")),
+        "{:?}",
+        rendered.font_substitutions
+    );
+}

@@ -14,7 +14,7 @@ Cargo changes. On merge to `main`, the Release workflow opens a
 PR publishes to npm and crates.io.
 
 Each format is its own fixed group — `xlsx` and `xlsx-react` version in
-lockstep, independent of `docx`. The eight publishable Rust crates use one
+lockstep, independent of `docx`. The published Rust crates use one
 lockstep version independent from npm. Apps and other private packages are
 never published.
 

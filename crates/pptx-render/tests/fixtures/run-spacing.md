@@ -16,7 +16,3 @@ The title stays centered at x=640 and retains `#008044`. The inherited text reta
 Review: [PR #325](https://github.com/openooxml/betteroffice/pull/325).
 
 Tests cover parsing, tracking, wrapping, hard breaks, ligatures, mixed runs, autofit, editing, and source recovery from the committed main v10 update.
-
-The original green-solutions title (object 29) also grows from 511.27078 to 671.27075 px while retaining its x=640 center and white `#FFFFFF` paint. Only that text primitive changes.
-
-On swot-analysis, only objects 42–49 change. STRENGTH grows from 132 to 160 px with 4 px gaps and retains `#0094C8`; the four body blocks keep their 16 px font and `#595959` colour while wrapping from five to seven lines. All other primitives are identical. These measurements verify tracking, not the remaining reference-renderer differences in shape autosizing or font metrics.

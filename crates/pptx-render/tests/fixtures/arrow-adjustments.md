@@ -28,26 +28,8 @@ The exact EMU head length is 376304.76; the old calculation gives 867273.92235.
 | Long left/right heads, 200 × 50 px, `adj2=150000` | `#FFFFFF` | 75 px heads, previously 200 px |
 | Square up arrow and rectangle | `#70AD47` | Unchanged controls |
 
-The contributor's shaft scaling shrank the four yellow shafts from 80 px to
-20 px. The completed fix preserves them. Unit tests cover that regression,
-the issue arrow, defaults and square geometry, every direction, and head
-adjustments below zero, above one, and above the shape's length.
-
-The screenshots in [PR #339](https://github.com/openooxml/betteroffice/pull/339)
-use the native PPTX raster backend at 96 DPI. Display-list
-isolation registers the tracked Liberation Sans, Liberation Serif, Liberation
-Mono, Carlito, and Caladea faces in the same order on both revisions, including
-their bold and italic variants and common Office aliases. Across all 31
-previously tracked decks plus this fixture, 95 of 97 slides are byte-identical.
-Only the five white arrow heads here and the purple default right arrow in
-`crates/ooxml-drawingml/tests/fixtures/preset-adjustments.pptx`, slide 1, change.
-That 100 × 50 px right arrow's head changes from 50 px to 25 px; its four
-head-base x coordinates change from 0.5 to 0.75 and its fill stays `#663399`.
-Every other display-list field is byte-identical.
-
-No model, writer, or schema change is required. All 32 snapshots serialize
-identically and deserialize across revisions. External Python `zipfile`
-comparison verifies all 537 package parts on each revision's no-edit save;
-ZIP directory entries are not package parts.
+The four yellow shafts stay 80 px. Unit tests cover shaft scaling, the issue
+arrow, defaults and square geometry, every direction, and head adjustments
+below zero, above one, and above the shape's length.
 
 Review: [PR #339](https://github.com/openooxml/betteroffice/pull/339).

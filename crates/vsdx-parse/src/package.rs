@@ -346,6 +346,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         page_contents,
         master_contents,
         parts: package_parts,
+        source_container: ooxml_opc::SourceContainer::new(data.to_vec()),
     })
 }
 
@@ -644,14 +645,13 @@ fn load_reachable_relationships(
 }
 
 pub fn write_vsdx(package: &VsdxPackage) -> Result<Vec<u8>, VsdxError> {
-    ooxml_opc::rezip_parts(
-        &package
-            .parts
-            .iter()
-            .map(|part| (part.path.clone(), part.bytes.clone()))
-            .collect::<Vec<_>>(),
-    )
-    .map_err(VsdxError::Container)
+    let parts = package
+        .parts
+        .iter()
+        .map(|part| (part.path.clone(), part.bytes.clone()))
+        .collect::<Vec<_>>();
+    ooxml_opc::rezip_parts_preserving(&parts, package.source_container.as_bytes())
+        .map_err(VsdxError::Container)
 }
 
 /// Applies Cell@V and Cell@F attribute edits without mutating `package`.

@@ -380,6 +380,10 @@ export interface ParagraphFormatting {
   contextualSpacing?: boolean;
   /** Snap to document grid (w:snapToGrid on pPr). Absent is the OOXML default (on). */
   snapToGrid?: boolean;
+  /** Space between East Asian and Latin text (w:autoSpaceDE). Absent is the OOXML default (on). */
+  autoSpaceDE?: boolean;
+  /** Space between East Asian text and numbers (w:autoSpaceDN). Absent is the OOXML default (on). */
+  autoSpaceDN?: boolean;
 
   // Numbering/List
   /** Numbering properties (w:numPr) */

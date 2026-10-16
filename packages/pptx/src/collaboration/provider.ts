@@ -22,6 +22,7 @@ import {
   type CollaborationErrorCode,
   type CollaborationErrorListener,
   type CollaborationProviderOptions,
+  type AsyncCollaborationReplica,
   type CollaborationReplica,
   type CollaborationStatus,
   type CollaborationStatusChange,
@@ -116,7 +117,7 @@ function encodableCursor(cursor: PptxPresenceCursor): boolean {
 }
 
 export class CollaborationProvider {
-  private readonly replica: CollaborationReplica;
+  private readonly replica: CollaborationReplica | AsyncCollaborationReplica;
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
   private readonly maxMessagesPerFrame: number;
@@ -140,6 +141,11 @@ export class CollaborationProvider {
   private connectAttempt = 0;
   private nextListenerId = 0;
   private queuedBytes = 0;
+  private readonly incoming: { token: number; data: Uint8Array }[] = [];
+  private incomingBytes = 0;
+  private incomingBusy = false;
+  private asyncReplica = false;
+  private incomingGeneration = 0;
   private isFlushing = false;
   private localClock = 0;
   private reportedClockExhaustion = false;
@@ -149,8 +155,10 @@ export class CollaborationProvider {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
+  constructor(replica: CollaborationReplica, transport: CollaborationTransport, options?: CollaborationProviderOptions);
+  constructor(replica: AsyncCollaborationReplica, transport: CollaborationTransport, options?: CollaborationProviderOptions);
   constructor(
-    replica: CollaborationReplica,
+    replica: CollaborationReplica | AsyncCollaborationReplica,
     transport: CollaborationTransport,
     options: CollaborationProviderOptions = {}
   ) {
@@ -424,7 +432,7 @@ export class CollaborationProvider {
         this.handleOpen(token);
         break;
       case 'message':
-        if (this.isOpen) this.handleMessage(token, event.data);
+        if (this.isOpen) this.enqueueMessage(token, event.data);
         break;
       case 'close':
         this.isOpen = false;
@@ -458,35 +466,39 @@ export class CollaborationProvider {
     this.setStatus('connected', false);
     if (!this.isCurrent(token) || !this.isOpen) return;
 
-    let stateVector: Uint8Array;
-    try {
-      stateVector = requireBytes(this.replica.encodeStateVector(), 'encodeStateVector');
-    } catch (cause) {
-      this.failConnection(
-        token,
-        normalizeError('replica', 'Failed to encode replica state vector', cause)
-      );
-      return;
-    }
-
-    try {
-      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
-    } catch (cause) {
-      this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep1', cause));
-      return;
-    }
-    if (!this.isCurrent(token) || !this.isOpen) return;
-    this.startPresenceTimers();
-    this.broadcastLocalPresence(false);
-    if (!this.isCurrent(token) || !this.isOpen) return;
-    try {
-      this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
-    } catch (cause) {
-      this.report(normalizeError('protocol', 'Failed to encode awareness query', cause));
-    }
+    const attempt = this.connectAttempt;
+    this.replicaResult(token, attempt, () => this.replica.encodeStateVector(), (value) => {
+      try {
+        this.sendFrame(encodeSyncStep1(requireBytes(value, 'encodeStateVector'), this.maxFrameBytes));
+        if (!this.isCurrent(token) || !this.isOpen) return;
+        this.startPresenceTimers();
+        this.broadcastLocalPresence(false);
+        if (!this.isCurrent(token) || !this.isOpen) return;
+        this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
+      } catch (cause) {
+        this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause));
+      }
+    });
   }
 
-  private handleMessage(token: number, data: Uint8Array): void {
+  private replicaResult<T>(token: number, attempt: number, operation: () => T | Promise<T>, done: (value: T) => void): void | Promise<void> {
+    const finish = (value: T) => { if (this.isCurrent(token) && this.isOpen && this.connectAttempt === attempt) done(value); };
+    const fail = (cause: unknown) => {
+      if (this.isCurrent(token) && this.isOpen && this.connectAttempt === attempt) {
+        this.failConnection(token, normalizeError('replica', 'Collaboration replica operation failed', cause));
+      }
+    };
+    try {
+      const result = operation();
+      if (result instanceof Promise) {
+        this.asyncReplica = true;
+        return result.then(finish, fail).catch(fail);
+      }
+      finish(result);
+    } catch (cause) { fail(cause); }
+  }
+
+  private handleMessage(token: number, data: Uint8Array): void | Promise<void> {
     let messages: ReturnType<typeof decodeMessages>;
     try {
       messages = decodeMessages(data.slice(), this.maxFrameBytes, this.maxMessagesPerFrame);
@@ -498,79 +510,74 @@ export class CollaborationProvider {
       return;
     }
 
-    for (const message of messages) {
-      if (!this.isCurrent(token) || !this.isOpen) return;
-
-      switch (message.type) {
-        case 'sync-step-1':
-          this.respondToSyncStep1(token, message.stateVector);
-          break;
-        case 'sync-step-2':
-          if (this.applyRemoteUpdate(token, message.update) && this.isCurrent(token)) {
-            this.setStatus('connected', true);
-          }
-          break;
-        case 'update':
-          this.applyRemoteUpdate(token, message.update);
-          break;
-        case 'awareness': {
-          try {
-            const entries = decodeAwarenessUpdate(message.update, this.maxMessagesPerFrame);
-            if (this.remotePresence.apply(entries, Date.now())) this.emitPresence();
-            this.schedulePresenceExpiry();
-          } catch (cause) {
-            this.report(normalizeError('protocol', 'Invalid awareness update', cause));
-          }
-          break;
+    const attempt = this.connectAttempt;
+    const next = (index: number): void | Promise<void> => {
+      for (; index < messages.length; index++) {
+        if (!this.isCurrent(token) || !this.isOpen || this.connectAttempt !== attempt) return;
+        const message = messages[index]!;
+        let pending: void | Promise<void> = undefined;
+        switch (message.type) {
+          case 'sync-step-1':
+            pending = this.replicaResult(token, attempt,
+              () => this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(message.stateVector).slice()),
+              (value) => {
+                try { this.sendFrame(encodeSyncStep2(requireBytes(value, 'encodeStateAsUpdate'), this.maxFrameBytes)); }
+                catch (cause) { this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause)); }
+              });
+            break;
+          case 'sync-step-2': case 'update':
+            pending = this.replicaResult(token, attempt,
+              () => this.replica.applyUpdate(withoutDocumentFingerprint(message.update).slice()),
+              () => { if (message.type === 'sync-step-2') this.setStatus('connected', true); });
+            break;
+          case 'awareness':
+            try {
+              const entries = decodeAwarenessUpdate(message.update, this.maxMessagesPerFrame);
+              if (this.remotePresence.apply(entries, Date.now())) this.emitPresence();
+              this.schedulePresenceExpiry();
+            } catch (cause) { this.report(normalizeError('protocol', 'Invalid awareness update', cause)); }
+            break;
+          case 'auth':
+            this.failConnection(token, new CollaborationError('protocol',
+              message.reason ? `Authentication denied: ${message.reason}` : 'Authentication denied'));
+            return;
+          case 'query-awareness': this.broadcastLocalPresence(false); break;
         }
-        case 'auth':
-          this.failConnection(
-            token,
-            new CollaborationError(
-              'protocol',
-              message.reason ? `Authentication denied: ${message.reason}` : 'Authentication denied'
-            )
-          );
-          return;
-        case 'query-awareness':
-          this.broadcastLocalPresence(false);
-          break;
+        if (pending instanceof Promise) return pending.then(() => next(index + 1));
       }
-    }
+    };
+    return next(0);
   }
 
-  private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
-    let update: Uint8Array;
-    try {
-      update = requireBytes(
-        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
-        'encodeStateAsUpdate'
-      );
-    } catch (cause) {
-      this.failConnection(
-        token,
-        normalizeError('replica', 'Failed to encode replica update', cause)
-      );
+  private enqueueMessage(token: number, data: Uint8Array): void {
+    if (this.asyncReplica && this.incomingBytes + data.byteLength > this.maxPendingBytes) {
+      this.failConnection(token, new CollaborationError('backpressure', 'Incoming collaboration queue is full'));
       return;
     }
-
-    try {
-      this.sendFrame(encodeSyncStep2(update, this.maxFrameBytes));
-    } catch (cause) {
-      this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause));
-    }
+    this.incoming.push({ token, data: data.slice() });
+    this.incomingBytes += data.byteLength;
+    this.drainIncoming();
   }
 
-  private applyRemoteUpdate(token: number, update: Uint8Array): boolean {
-    try {
-      this.replica.applyUpdate(withoutDocumentFingerprint(update).slice());
-      return true;
-    } catch (cause) {
-      this.failConnection(
-        token,
-        normalizeError('replica', 'Failed to apply remote update', cause)
-      );
-      return false;
+  private drainIncoming(): void {
+    if (this.incomingBusy) return;
+    const generation = this.incomingGeneration;
+    while (this.incoming.length) {
+      const item = this.incoming.shift()!;
+      this.incomingBusy = true;
+      const pending = this.handleMessage(item.token, item.data);
+      if (generation !== this.incomingGeneration) return;
+      if (pending instanceof Promise) {
+        void pending.finally(() => {
+          if (generation !== this.incomingGeneration) return;
+          this.incomingBusy = false;
+          this.incomingBytes -= item.data.byteLength;
+          this.drainIncoming();
+        }).catch(() => {});
+        return;
+      }
+      this.incomingBusy = false;
+      this.incomingBytes -= item.data.byteLength;
     }
   }
 
@@ -774,6 +781,10 @@ export class CollaborationProvider {
   }
 
   private clearPending(): void {
+    this.incoming.length = 0;
+    this.incomingBytes = 0;
+    this.incomingBusy = false;
+    this.incomingGeneration += 1;
     this.pendingFrames.length = 0;
     this.queuedBytes = 0;
   }

@@ -69,10 +69,24 @@ impl fmt::Display for OpError {
 
 impl std::error::Error for OpError {}
 
-/// apply one op, mutating `wb` and returning its inverse.
+/// apply one op, returning its inverse; refused structural ops leave `wb`
+/// untouched.
 pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     match op {
+        Op::InsertRows { .. }
+        | Op::DeleteRows { .. }
+        | Op::InsertCols { .. }
+        | Op::DeleteCols { .. } => apply_atomically(wb, |next| apply_in_place(next, op)),
+        _ => apply_in_place(wb, op),
+    }
+}
+
+/// apply one op directly with no rollback clone; only for models the caller
+/// drops on error.
+pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    match op {
         Op::SetCell { sheet, at, cell } => {
+            wb.styles.preserve_style_identity();
             let s = sheet_mut(wb, *sheet)?;
             let old = s.cell(*at).map(CellState::from).unwrap_or_default();
             s.set_cell(*at, cell.clone().into());
@@ -131,6 +145,22 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             Ok(InvertedOp(vec![Op::SetHyperlinks {
                 sheet: *sheet,
                 hyperlinks: old,
+            }]))
+        }
+        Op::RestoreColStyles { sheet, styles } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.col_styles, styles.clone());
+            Ok(InvertedOp(vec![Op::RestoreColStyles {
+                sheet: *sheet,
+                styles: old,
+            }]))
+        }
+        Op::RestoreRowStyles { sheet, styles } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.row_styles, styles.clone());
+            Ok(InvertedOp(vec![Op::RestoreRowStyles {
+                sheet: *sheet,
+                styles: old,
             }]))
         }
         Op::SetCharts { sheet, charts } => {
@@ -211,14 +241,14 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             sheet,
             range,
             patch,
-        } => apply_range_formats(wb, *sheet, *range, |format, row, col| {
+        } => apply_range_formats(wb, *sheet, *range, true, None, |format, row, col| {
             patch_cell_format(format, patch, *range, row, col)
         }),
         Op::SetRangeNumberFormat {
             sheet,
             range,
             format,
-        } => apply_range_formats(wb, *sheet, *range, |cell_format, _, _| {
+        } => apply_range_formats(wb, *sheet, *range, true, None, |cell_format, _, _| {
             mutate_number_format(cell_format, format);
             Ok(())
         }),
@@ -227,21 +257,34 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             range,
             format,
         } => {
+            wb.styles.preserve_style_identity();
             if format.rows == 0
                 || format.columns == 0
                 || format.formats.len() != (format.rows as usize) * (format.columns as usize)
+                || !(format.kept.is_empty() || format.kept.len() == format.formats.len())
             {
                 return Err(OpError::InvalidStyle(
                     "captured format dimensions do not match its cells".into(),
                 ));
             }
-            apply_range_formats(wb, *sheet, *range, |cell_format, row, col| {
-                let source_row = (row - range.start.row) % format.rows;
-                let source_col = (col - range.start.col) % format.columns;
-                let index = (source_row * format.columns + source_col) as usize;
-                *cell_format = format.formats[index].clone();
-                Ok(())
-            })
+            apply_range_formats(
+                wb,
+                *sheet,
+                *range,
+                false,
+                Some(format),
+                |cell_format, row, col| {
+                    let source_row = (row - range.start.row) % format.rows;
+                    let source_col = (col - range.start.col) % format.columns;
+                    let index = (source_row * format.columns + source_col) as usize;
+                    let mut applied = format.formats[index].clone();
+                    if let Some(kept) = format.kept.get(index) {
+                        kept.keep(cell_format, &mut applied);
+                    }
+                    *cell_format = applied;
+                    Ok(())
+                },
+            )
         }
         Op::AddSheet { index, name } => {
             let idx = (*index).min(wb.sheets.len());
@@ -250,6 +293,35 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             Ok(InvertedOp(vec![Op::RemoveSheet { index: idx }]))
         }
         Op::RemoveSheet { index } => remove_sheet(wb, *index),
+        Op::MoveSheet { from, to } => {
+            if *from >= wb.sheets.len() || *to >= wb.sheets.len() {
+                return Err(OpError::SheetIndexOutOfRange((*from).max(*to)));
+            }
+            let sheet = wb.sheets.remove(*from);
+            wb.sheets.insert(*to, sheet);
+            let remap = |old: SheetId| {
+                let index = old.0 as usize;
+                SheetId(if index == *from {
+                    *to
+                } else if from < to && index > *from && index <= *to {
+                    index - 1
+                } else if from > to && index >= *to && index < *from {
+                    index + 1
+                } else {
+                    index
+                } as u32)
+            };
+            for name in &mut wb.defined_names {
+                name.local_sheet = name.local_sheet.map(remap);
+            }
+            for table in wb.tables.iter_mut() {
+                table.sheet = remap(table.sheet);
+            }
+            Ok(InvertedOp(vec![Op::MoveSheet {
+                from: *to,
+                to: *from,
+            }]))
+        }
         Op::RenameSheet { sheet, name } => {
             let old = wb
                 .sheet(*sheet)
@@ -313,18 +385,10 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 defined_names: previous,
             }]))
         }
-        Op::InsertRows { sheet, at, count } => {
-            apply_atomically(wb, |next| insert_rows(next, *sheet, *at, *count, op))
-        }
-        Op::DeleteRows { sheet, at, count } => {
-            apply_atomically(wb, |next| delete_rows(next, *sheet, *at, *count, op))
-        }
-        Op::InsertCols { sheet, at, count } => {
-            apply_atomically(wb, |next| insert_cols(next, *sheet, *at, *count, op))
-        }
-        Op::DeleteCols { sheet, at, count } => {
-            apply_atomically(wb, |next| delete_cols(next, *sheet, *at, *count, op))
-        }
+        Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
+        Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
+        Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
+        Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
     }
 }
 
@@ -342,6 +406,8 @@ fn apply_range_formats(
     wb: &mut Workbook,
     sheet: SheetId,
     range: CellRange,
+    partial: bool,
+    captured: Option<&crate::formatting::CapturedFormat>,
     mut update: impl FnMut(&mut xlsx_model::CellFormat, u32, u32) -> Result<(), OpError>,
 ) -> Result<InvertedOp, OpError> {
     if wb.sheet(sheet).is_none() {
@@ -360,33 +426,114 @@ fn apply_range_formats(
         .map_or(0, |cols| u64::from(cols) + 1);
     let range_cells = rows.saturating_mul(cols);
     let mut staged = Vec::with_capacity(usize::try_from(range_cells).unwrap_or(0));
+    let mut resolved_formats = BTreeMap::new();
     {
         let sheet_ref = &wb.sheets[sheet.0 as usize];
         let styles = &mut wb.styles;
-        let mut occupied = sheet_ref
-            .iter_cells_in_rect(
-                range.start.row..range.end.row.saturating_add(1),
-                range.start.col..range.end.col.saturating_add(1),
-            )
-            .peekable();
+        let plain_default = styles.cell_format(Some(0)) == xlsx_model::CellFormat::default();
+        let mut plain = None;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(sheet_ref);
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let old_style = if occupied
-                    .peek()
-                    .is_some_and(|(candidate, _)| (candidate.row, candidate.col) == (row, col))
-                {
-                    occupied.next().and_then(|(_, cell)| cell.style)
-                } else {
-                    None
+                let stored = sheet_ref.cell(at).map(|cell| cell.style);
+                let old_style = match stored {
+                    Some(style) => style,
+                    None => defaults.inherited_style(at),
                 };
-                let mut format = styles.cell_format(old_style);
+                let before = styles.cell_format(Some(old_style.unwrap_or(0)));
+                let mut format = before.clone();
                 if let Err(error) = update(&mut format, at.row, at.col) {
                     styles.restore_pools(marks);
                     return Err(error);
                 }
-                match styles.intern_cell_format(&format) {
-                    Ok(style) => staged.push(style),
+                if let Some(captured) = captured {
+                    let source_row = (row - range.start.row) % captured.rows;
+                    let source_col = (col - range.start.col) % captured.columns;
+                    let index = (source_row * captured.columns + source_col) as usize;
+                    if let Some(source) = captured.source_formats.get(index) {
+                        let matches = |style| {
+                            crate::formatting::PreservedCellFormat::from_style(styles, style)
+                                == *source
+                        };
+                        let selected = if source.format == format {
+                            resolved_formats.get(&index).copied().or_else(|| {
+                                captured
+                                    .source_styles
+                                    .get(index)
+                                    .copied()
+                                    .filter(|style| {
+                                        style.is_none_or(|index| styles.xf(index).is_some())
+                                            && matches(*style)
+                                    })
+                                    .or_else(|| {
+                                        (0..styles.cell_xfs.len() as u32)
+                                            .find(|&index| matches(Some(index)))
+                                            .map(Some)
+                                    })
+                            })
+                        } else {
+                            None
+                        };
+                        let selected = match selected {
+                            Some(style) => Ok(style),
+                            None if format == xlsx_model::CellFormat::default() => Ok(None),
+                            None => match source.derived_from {
+                                Some(base) if styles.xf(base).is_some() => {
+                                    styles.intern_derived_cell_format(base, &format).map(Some)
+                                }
+                                _ => styles.intern_cell_format(&format),
+                            },
+                        };
+                        match selected {
+                            Ok(style) => {
+                                if source.format == format {
+                                    resolved_formats.insert(index, style);
+                                }
+                                let style = style.or_else(|| {
+                                    if !plain_default {
+                                        Some(*plain.get_or_insert_with(|| styles.plain_edit_xf()))
+                                    } else {
+                                        defaults
+                                            .inherited_style(at)
+                                            .is_some_and(|inherited| inherited != 0)
+                                            .then_some(0)
+                                    }
+                                });
+                                staged.push(style);
+                            }
+                            Err(_) => {
+                                styles.restore_pools(marks);
+                                return Err(OpError::NumFmtTableFull);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                if format == before {
+                    staged.push(stored.flatten());
+                    continue;
+                }
+                let style = if format == xlsx_model::CellFormat::default() {
+                    Ok(None)
+                } else if partial {
+                    styles
+                        .intern_derived_cell_format(old_style.unwrap_or(0), &format)
+                        .map(Some)
+                } else {
+                    styles.intern_cell_format(&format)
+                };
+                match style {
+                    Ok(Some(style)) => staged.push(Some(style)),
+                    Ok(None) if !plain_default => {
+                        staged.push(Some(*plain.get_or_insert_with(|| styles.plain_edit_xf())));
+                    }
+                    Ok(None) => staged.push(
+                        defaults
+                            .inherited_style(at)
+                            .is_some_and(|inherited| inherited != 0)
+                            .then_some(0),
+                    ),
                     Err(_) => {
                         styles.restore_pools(marks);
                         return Err(OpError::NumFmtTableFull);
@@ -437,6 +584,22 @@ fn apply_range_formats(
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    if let [op @ Op::SetCell { .. }] = ops {
+        #[cfg(test)]
+        if FORCE_CLONE_ROLLBACK.get() {
+            return apply_ops_cloned(wb, ops);
+        }
+        return apply_in_place(wb, op).map(|inverse| inverse.0);
+    }
+    apply_ops_cloned(wb, ops)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_CLONE_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn apply_ops_cloned(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut next = wb.clone();
     let inverse = apply_ops_in_place(&mut next, ops)?;
     *wb = next;
@@ -446,7 +609,7 @@ pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
 fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut per_op: Vec<Vec<Op>> = Vec::with_capacity(ops.len());
     for op in ops {
-        per_op.push(apply(wb, op)?.0);
+        per_op.push(apply_in_place(wb, op)?.0);
     }
     let mut inverse = Vec::new();
     for chunk in per_op.into_iter().rev() {
@@ -536,11 +699,44 @@ fn insert_rows(
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
     let dropped = shift_cells(s, op);
+    let old_row_styles = s.row_styles.clone();
+    let inherited = at
+        .checked_sub(1)
+        .and_then(|row| s.row_styles.get(&row))
+        .copied();
+    let retained = s
+        .row_styles
+        .keys()
+        .filter(|&&row| insert_axis(row, at, count, MAX_ROWS).is_some())
+        .count();
+    let added = if inherited.is_some() {
+        count.min(MAX_ROWS.saturating_sub(at)) as usize
+    } else {
+        0
+    };
+    if retained.saturating_add(added) > xlsx_model::workbook::MAX_ROW_STYLES {
+        return Err(OpError::InvalidStyle("row style count exceeded cap".into()));
+    }
+    s.row_styles = std::mem::take(&mut s.row_styles)
+        .into_iter()
+        .filter_map(|(row, style)| insert_axis(row, at, count, MAX_ROWS).map(|row| (row, style)))
+        .collect();
+    if let Some(style) = inherited {
+        for row in at..at.saturating_add(count).min(MAX_ROWS) {
+            s.row_styles.insert(row, style);
+        }
+    }
     shift_row_heights_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteRows { sheet, at, count }];
+    if !old_row_styles.is_empty() {
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: old_row_styles,
+        });
+    }
     for (r, c) in dropped {
         inv.push(Op::SetCell {
             sheet,
@@ -574,11 +770,31 @@ fn delete_rows(
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
     let deleted = shift_cells(s, op);
+    let old_row_styles = s.row_styles.clone();
+    s.row_styles = std::mem::take(&mut s.row_styles)
+        .into_iter()
+        .filter_map(|(row, style)| delete_axis(row, at, count).map(|row| (row, style)))
+        .collect();
     let dropped_heights = shift_row_heights_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
 
-    let mut inv = vec![Op::InsertRows { sheet, at, count }];
+    let mut inv = Vec::new();
+    if !old_row_styles.is_empty() {
+        // the restore after the insert sets the map, so the insert must neither
+        // inherit nor count rows against the cap
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: BTreeMap::new(),
+        });
+    }
+    inv.push(Op::InsertRows { sheet, at, count });
+    if !old_row_styles.is_empty() {
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: old_row_styles,
+        });
+    }
     for (r, c) in deleted {
         inv.push(Op::SetCell {
             sheet,
@@ -621,12 +837,20 @@ fn insert_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let dropped = shift_cells(s, op);
     shift_col_widths_up(s, at, count);
+    shift_col_styles_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in dropped {
         inv.push(Op::SetCell {
             sheet,
@@ -659,12 +883,20 @@ fn delete_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
+    shift_col_styles_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::InsertCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in deleted {
         inv.push(Op::SetCell {
             sheet,
@@ -765,6 +997,56 @@ fn shift_col_widths_down(s: &mut Sheet, at: ColId, count: u32) -> Vec<(ColId, f6
     }
     s.col_widths = kept;
     dropped
+}
+
+fn shift_col_styles_up(s: &mut Sheet, at: ColId, count: u32) {
+    if count == 0 {
+        return;
+    }
+    let inherited = at.checked_sub(1).and_then(|col| s.col_style(col));
+    s.col_styles.retain_mut(|run| {
+        if run.last < at {
+            return true;
+        }
+        if run.first >= at {
+            let Some(first) = insert_axis(run.first, at, count, MAX_COLS) else {
+                return false;
+            };
+            run.first = first;
+        }
+        run.last = run.last.saturating_add(count).min(MAX_COLS - 1);
+        true
+    });
+    if let Some(xf) = inherited
+        && at < MAX_COLS
+        && s.col_style(at) != Some(xf)
+    {
+        s.col_styles.push(xlsx_model::ColStyle {
+            first: at,
+            last: at.saturating_add(count - 1).min(MAX_COLS - 1),
+            xf,
+        });
+    }
+}
+
+fn shift_col_styles_down(s: &mut Sheet, at: ColId, count: u32) {
+    let end = at.saturating_add(count);
+    s.col_styles.retain_mut(|run| {
+        if run.first >= at && run.last < end {
+            return false;
+        }
+        if run.first >= end {
+            run.first -= count;
+        } else if run.first >= at {
+            run.first = at;
+        }
+        if run.last >= end {
+            run.last -= count;
+        } else if run.last >= at {
+            run.last = at - 1;
+        }
+        true
+    });
 }
 
 /// remap merges under an insert (no corner is ever deleted).
@@ -888,6 +1170,18 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             hyperlinks: removed.hyperlinks,
         });
     }
+    if !removed.col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: removed.col_styles,
+        });
+    }
+    if !removed.row_styles.is_empty() {
+        inv.push(Op::RestoreRowStyles {
+            sheet,
+            styles: removed.row_styles,
+        });
+    }
     if !removed.charts.is_empty() {
         inv.push(Op::SetCharts {
             sheet,
@@ -949,7 +1243,7 @@ fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::{CellProvider, CellValue, FreezePane, Hyperlink};
+    use xlsx_model::{CellProvider, CellValue, ColStyle, FreezePane, Hyperlink};
 
     fn r(a1: &str) -> CellRef {
         CellRef::parse_a1(a1).unwrap()
@@ -969,6 +1263,76 @@ mod tests {
     }
 
     #[test]
+    fn singleton_set_cell_matches_clone_rollback() {
+        let states = [
+            CellState::default(),
+            num(123.0),
+            CellState {
+                value: CellValue::Text {
+                    value: "rich text".into(),
+                },
+                style: Some(7),
+                ..Default::default()
+            },
+            CellState {
+                value: CellValue::Number { value: 42.0 },
+                formula: Some("A1+1".into()),
+                style: Some(0),
+            },
+            CellState {
+                style: Some(u32::MAX),
+                ..Default::default()
+            },
+        ];
+        for before in &states {
+            for after in &states {
+                for at in [r("B2"), CellRef::new(MAX_ROWS, MAX_COLS)] {
+                    let mut initial = wb_one_sheet();
+                    initial.sheets.push(Sheet::new("Second"));
+                    initial.sheets[1].set_cell(at, before.clone().into());
+                    initial.sheets[1].set_array_formula(at, CellRange::new(at, at));
+                    let op = Op::SetCell {
+                        sheet: SheetId(1),
+                        at,
+                        cell: after.clone(),
+                    };
+                    let mut fast = initial.clone();
+                    let mut oracle = initial.clone();
+                    let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(true);
+                    let expected = apply_ops(&mut oracle, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(false);
+                    assert_eq!(result, expected);
+                    assert_eq!(fast, oracle);
+                    apply_ops(&mut fast, &result.unwrap()).unwrap();
+                    assert_eq!(fast, initial);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failing_singleton_set_cell_leaves_model_unchanged() {
+        for initial in [Workbook::default(), wb_one_sheet()] {
+            for sheet in [SheetId(initial.sheets.len() as u32), SheetId(u32::MAX)] {
+                let op = Op::SetCell {
+                    sheet,
+                    at: r("B2"),
+                    cell: num(123.0),
+                };
+                let mut fast = initial.clone();
+                let mut oracle = initial.clone();
+                let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op));
+                assert_eq!(result, Err(OpError::SheetNotFound(sheet)));
+                assert_eq!(result, expected);
+                assert_eq!(fast, initial);
+                assert_eq!(oracle, initial);
+            }
+        }
+    }
+
+    #[test]
     fn remap_ref_insert_rows_edges() {
         let op = Op::InsertRows {
             sheet: SheetId(0),
@@ -979,6 +1343,113 @@ mod tests {
         assert_eq!(remap_ref(r("A5"), &op), Some(r("A5")));
         assert_eq!(remap_ref(r("A6"), &op).unwrap().row, 5 + 3);
         assert_eq!(remap_ref(r("A100"), &op).unwrap().row, 99 + 3);
+    }
+
+    #[test]
+    fn zero_height_visibility_tracks_edits_undo_and_redo() {
+        let sheet = SheetId(0);
+        let mut initial = wb_one_sheet();
+        initial.sheets[0].format.zero_height = true;
+        initial.sheets[0].set_cell(CellRef::new(1, 0), num(1.0).into());
+        initial.sheets[0].set_cell(
+            CellRef::new(3, 0),
+            Cell {
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        initial.sheets[0].set_cell(CellRef::new(9, 0), num(9.0).into());
+        initial.sheets[0].row_styles.insert(5, 0);
+        initial.sheets[0].row_heights.extend([(7, 20.0), (9, 0.0)]);
+        let visible = |wb: &Workbook| {
+            (0..16)
+                .filter(|&row| !wb.sheets[0].row_hidden(row))
+                .collect::<Vec<_>>()
+        };
+        for (op, expected) in [
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(0, 0),
+                    cell: num(2.0),
+                },
+                vec![0, 1, 3, 5, 7],
+            ),
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(1, 0),
+                    cell: CellState::default(),
+                },
+                vec![3, 5, 7],
+            ),
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(3, 0),
+                    cell: CellState::default(),
+                },
+                vec![1, 5, 7],
+            ),
+            (
+                Op::InsertRows {
+                    sheet,
+                    at: 1,
+                    count: 2,
+                },
+                vec![3, 5, 7, 9],
+            ),
+            (
+                Op::DeleteRows {
+                    sheet,
+                    at: 1,
+                    count: 2,
+                },
+                vec![1, 3, 5],
+            ),
+            (
+                Op::InsertCols {
+                    sheet,
+                    at: 0,
+                    count: 1,
+                },
+                vec![1, 3, 5, 7],
+            ),
+            (
+                Op::DeleteCols {
+                    sheet,
+                    at: 0,
+                    count: 1,
+                },
+                vec![5, 7],
+            ),
+            (
+                Op::SetRowHeight {
+                    sheet,
+                    row: 1,
+                    height: Some(0.0),
+                },
+                vec![3, 5, 7],
+            ),
+            (
+                Op::RestoreRowStyles {
+                    sheet,
+                    styles: BTreeMap::new(),
+                },
+                vec![1, 3, 7],
+            ),
+        ] {
+            let mut workbook = initial.clone();
+            let inverse = apply_ops(&mut workbook, std::slice::from_ref(&op)).unwrap();
+            let edited = workbook.clone();
+            assert_eq!(visible(&workbook), expected, "{op:?}");
+            let redo = apply_ops(&mut workbook, &inverse).unwrap();
+            assert_eq!(workbook, initial, "undo {op:?}");
+            assert_eq!(visible(&workbook), [1, 3, 5, 7]);
+            apply_ops(&mut workbook, &redo).unwrap();
+            assert_eq!(workbook, edited, "redo {op:?}");
+            assert_eq!(visible(&workbook), expected);
+        }
     }
 
     #[test]
@@ -1294,6 +1765,164 @@ mod tests {
             apply(&mut wb, operation).unwrap();
         }
         assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn column_style_runs_survive_structural_undo_and_redo() {
+        let runs = vec![
+            ColStyle {
+                first: 0,
+                last: 6,
+                xf: 1,
+            },
+            ColStyle {
+                first: 2,
+                last: 3,
+                xf: 2,
+            },
+            ColStyle {
+                first: 3,
+                last: 7,
+                xf: 3,
+            },
+            ColStyle {
+                first: MAX_COLS - 1,
+                last: MAX_COLS - 1,
+                xf: 4,
+            },
+        ];
+        for op in [
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 8,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 2,
+            },
+            Op::RemoveSheet { index: 0 },
+        ] {
+            let mut workbook = wb_one_sheet();
+            workbook.sheets[0].col_styles = runs.clone();
+            let before = workbook.clone();
+            let inverse = apply_ops(&mut workbook, &[op]).unwrap();
+            let edited = workbook.clone();
+            let redo = apply_ops(&mut workbook, &inverse).unwrap();
+            assert_eq!(workbook, before);
+            let undo = apply_ops(&mut workbook, &redo).unwrap();
+            assert_eq!(workbook, edited);
+            apply_ops(&mut workbook, &undo).unwrap();
+            assert_eq!(workbook, before);
+        }
+    }
+
+    #[test]
+    fn column_styles_follow_the_columns_they_format() {
+        let mut wb = wb_one_sheet();
+        let runs = vec![
+            ColStyle {
+                first: 0,
+                last: 1,
+                xf: 7,
+            },
+            ColStyle {
+                first: 3,
+                last: 5,
+                xf: 9,
+            },
+        ];
+        wb.sheet_mut(SheetId(0)).unwrap().col_styles = runs.clone();
+        apply(
+            &mut wb,
+            &Op::InsertCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles,
+            vec![
+                ColStyle {
+                    first: 0,
+                    last: 3,
+                    xf: 7
+                },
+                ColStyle {
+                    first: 5,
+                    last: 7,
+                    xf: 9
+                },
+            ],
+            "the run the insert splits widens; the one to its right shifts"
+        );
+        assert_eq!(wb.sheets[0].col_style(3), Some(7));
+        assert_eq!(wb.sheets[0].col_style(4), None);
+
+        apply(
+            &mut wb,
+            &Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles, runs,
+            "the delete undoes the insert"
+        );
+
+        apply(
+            &mut wb,
+            &Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles,
+            vec![ColStyle {
+                first: 0,
+                last: 1,
+                xf: 7
+            }],
+            "a run the delete consumes whole is dropped, as excel drops it"
+        );
+
+        wb.sheet_mut(SheetId(0)).unwrap().col_styles.push(ColStyle {
+            first: 2,
+            last: 9,
+            xf: 9,
+        });
+        apply(
+            &mut wb,
+            &Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].col_styles,
+            vec![ColStyle {
+                first: 0,
+                last: 5,
+                xf: 9
+            }],
+            "a clipped run keeps the columns that survive"
+        );
     }
 
     #[test]
@@ -1897,6 +2526,59 @@ mod tests {
             CellValue::Number { value: 4.0 }
         );
     }
+
+    #[test]
+    fn number_format_matching_the_base_xf_is_stored_on_an_unstyled_cell() {
+        let mut wb = wb_one_sheet();
+        wb.styles.cell_xfs.push(xlsx_model::Xf {
+            num_fmt_id: Some(10),
+            ..Default::default()
+        });
+        wb.sheets[0].set_cell(r("A1"), num(0.5).into());
+        apply(
+            &mut wb,
+            &Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::new(r("A1"), r("A1")),
+                format: crate::NumberFormatMutation::Percent,
+            },
+        )
+        .unwrap();
+        let style = wb.sheets[0].cell(r("A1")).unwrap().style;
+        assert_eq!(
+            wb.styles
+                .cell_format(Some(style.unwrap_or(0)))
+                .number_format,
+            xlsx_model::NumberFormat::Builtin { id: 10 }
+        );
+    }
+
+    #[test]
+    fn number_format_edit_matching_a_base_xf_differing_only_in_font_keeps_the_cell_unstyled() {
+        let mut wb = wb_one_sheet();
+        wb.styles.fonts.push(xlsx_model::Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(11.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::Xf {
+            font: Some(0),
+            ..Default::default()
+        });
+        wb.sheets[0].set_cell(r("A1"), num(0.5).into());
+        let inverse = apply(
+            &mut wb,
+            &Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::new(r("A1"), r("A2")),
+                format: crate::NumberFormatMutation::Automatic,
+            },
+        )
+        .unwrap();
+        assert!(inverse.0.is_empty());
+        assert_eq!(wb.sheets[0].cell(r("A1")).unwrap().style, None);
+        assert!(wb.sheets[0].cell(r("A2")).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -1904,6 +2586,71 @@ mod range_format_exhaustion_tests {
     use super::*;
     use crate::formatting::CapturedFormat;
     use xlsx_model::{CellFormat, CellRange, NumberFormat, SheetId};
+
+    #[test]
+    fn captured_format_differing_from_provenance_applies_its_format() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        wb.styles.cell_xfs.push(xlsx_model::Xf::default());
+        let original = CellFormat {
+            number_format: NumberFormat::Builtin { id: 1 },
+            ..CellFormat::default()
+        };
+        let source_style = wb.styles.intern_derived_cell_format(0, &original).unwrap();
+        let source =
+            crate::formatting::PreservedCellFormat::from_style(&wb.styles, Some(source_style));
+        let target = CellFormat {
+            quote_prefix: true,
+            ..CellFormat::default()
+        };
+        let target_style = wb.styles.intern_cell_format(&target).unwrap();
+        wb.sheets[0].set_cell(
+            xlsx_model::CellRef::new(0, 1),
+            xlsx_model::Cell {
+                style: target_style,
+                ..Default::default()
+            },
+        );
+        let applied = CellFormat {
+            number_format: NumberFormat::Builtin { id: 2 },
+            ..original
+        };
+        apply(
+            &mut wb,
+            &Op::ApplyRangeFormat {
+                sheet: SheetId(0),
+                range: CellRange::new(
+                    xlsx_model::CellRef::new(0, 0),
+                    xlsx_model::CellRef::new(0, 1),
+                ),
+                format: CapturedFormat {
+                    rows: 1,
+                    columns: 1,
+                    formats: vec![applied.clone()],
+                    kept: vec![crate::formatting::KeptFacets {
+                        quote_prefix: true,
+                        ..Default::default()
+                    }],
+                    source_styles: vec![Some(source_style)],
+                    source_formats: vec![source],
+                },
+            },
+        )
+        .unwrap();
+        for col in 0..2 {
+            let style = wb.sheets[0]
+                .cell(xlsx_model::CellRef::new(0, col))
+                .unwrap()
+                .style;
+            let expected = CellFormat {
+                quote_prefix: col == 1,
+                ..applied.clone()
+            };
+            assert_eq!(wb.styles.cell_format(style), expected);
+            assert_ne!(style, Some(source_style));
+            assert_eq!(wb.styles.format_source(style.unwrap()), (None, Some(0)));
+        }
+    }
 
     #[test]
     fn mid_range_format_exhaustion_leaves_the_workbook_unchanged() {
@@ -1924,6 +2671,8 @@ mod range_format_exhaustion_tests {
                 xlsx_model::CellRef::new(0, 1),
             ),
             format: CapturedFormat {
+                source_styles: Vec::new(),
+                source_formats: Vec::new(),
                 rows: 1,
                 columns: 2,
                 formats: vec![
@@ -1940,6 +2689,7 @@ mod range_format_exhaustion_tests {
                         ..CellFormat::default()
                     },
                 ],
+                kept: Vec::new(),
             },
         };
 
@@ -1970,6 +2720,8 @@ mod range_format_exhaustion_tests {
                 xlsx_model::CellRef::new(0, 1),
             ),
             format: CapturedFormat {
+                source_styles: Vec::new(),
+                source_formats: Vec::new(),
                 rows: 1,
                 columns: 2,
                 formats: vec![
@@ -1986,6 +2738,7 @@ mod range_format_exhaustion_tests {
                         ..CellFormat::default()
                     },
                 ],
+                kept: Vec::new(),
             },
         };
 
@@ -1994,5 +2747,118 @@ mod range_format_exhaustion_tests {
             wb, before,
             "a failed range format must not leave interned entries behind"
         );
+    }
+}
+
+#[cfg(test)]
+mod merge_c1300_tests {
+    use super::*;
+    use crate::{CapturedFormat, NumberFormatMutation, PreservedCellFormat, StylePatch};
+    use xlsx_model::{CellFormat, Color, Fill, NumberFormat, Xf};
+
+    fn workbook() -> Workbook {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+        wb.styles.cell_xfs.push(Xf::default());
+        wb
+    }
+
+    #[test]
+    fn captured_plain_under_a_styled_row_stores_xf_zero() {
+        let mut wb = workbook();
+        let row_format = CellFormat {
+            fill: Fill::Solid(Color::Rgb("#123456".into())),
+            ..CellFormat::default()
+        };
+        let row_style = wb.styles.intern_cell_format(&row_format).unwrap().unwrap();
+        wb.sheets[0].row_styles.insert(0, row_style);
+        let source = PreservedCellFormat::from_style(&wb.styles, None);
+        assert_eq!(source.format, CellFormat::default());
+        assert_eq!(source.source_xf, None);
+        assert_eq!(source.derived_from, None);
+        let inverse = apply(
+            &mut wb,
+            &Op::ApplyRangeFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:B2").unwrap(),
+                format: CapturedFormat {
+                    rows: 1,
+                    columns: 1,
+                    formats: vec![CellFormat::default()],
+                    kept: Vec::new(),
+                    source_styles: vec![None],
+                    source_formats: vec![source],
+                },
+            },
+        )
+        .unwrap();
+        for col in 0..2 {
+            let at = CellRef::new(0, col);
+            assert_eq!(wb.sheets[0].cell(at).map(|cell| cell.style), Some(Some(0)));
+            let displayed = wb.sheets[0].effective_style(at);
+            assert_eq!(wb.styles.cell_format(displayed), CellFormat::default());
+            assert!(wb.sheets[0].cell(CellRef::new(1, col)).is_none());
+        }
+        assert_eq!(inverse.0.len(), 2);
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb.sheets[0].iter_cells().count(), 0);
+        assert_eq!(
+            wb.sheets[0].effective_style(CellRef::new(0, 0)),
+            Some(row_style)
+        );
+    }
+
+    #[test]
+    fn partial_noop_over_a_nonplain_xf_zero_stays_sparse() {
+        let mut wb = workbook();
+        wb.styles.cell_xfs[0].num_fmt_id = Some(10);
+        let before = wb.clone();
+        let inverse = apply(
+            &mut wb,
+            &Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:C3").unwrap(),
+                format: NumberFormatMutation::Percent,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.sheets[0].iter_cells().count(), 0);
+        assert!(inverse.0.is_empty());
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn partial_edit_on_a_missing_cell_derives_from_its_row() {
+        let mut wb = workbook();
+        let row_format = CellFormat {
+            fill: Fill::Solid(Color::Rgb("#123456".into())),
+            number_format: NumberFormat::Builtin { id: 10 },
+            ..CellFormat::default()
+        };
+        let row_style = wb.styles.intern_cell_format(&row_format).unwrap().unwrap();
+        wb.sheets[0].row_styles.insert(0, row_style);
+        let at = CellRef::new(0, 0);
+        let inverse = apply(
+            &mut wb,
+            &Op::PatchRangeStyle {
+                sheet: SheetId(0),
+                range: CellRange::new(at, at),
+                patch: StylePatch {
+                    bold: Some(true),
+                    ..StylePatch::default()
+                },
+            },
+        )
+        .unwrap();
+        let style = wb.sheets[0].cell(at).unwrap().style.unwrap();
+        let actual = wb.styles.cell_format(Some(style));
+        assert_eq!(actual.fill, row_format.fill);
+        assert_eq!(actual.number_format, row_format.number_format);
+        assert!(actual.font.bold);
+        assert_eq!(wb.styles.format_source(style), (None, Some(row_style)));
+        assert_eq!(inverse.0.len(), 1);
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert!(wb.sheets[0].cell(at).is_none());
+        assert_eq!(wb.sheets[0].effective_style(at), Some(row_style));
     }
 }

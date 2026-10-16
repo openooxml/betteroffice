@@ -1,7 +1,7 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use regex::RegexBuilder;
 use serde::Serialize;
 use yrs::{Any, Map, ReadTxn, Transact};
 
@@ -28,6 +28,104 @@ impl fmt::Display for TextSearchError {
 }
 
 impl std::error::Error for TextSearchError {}
+
+/// Literal query with Unicode simple case-insensitive matching.
+struct Needle {
+    folded: String,
+    case_sensitive: bool,
+}
+
+impl Needle {
+    fn new(query: &str, case_sensitive: bool) -> Self {
+        let folded = if case_sensitive {
+            query.to_owned()
+        } else {
+            query.chars().map(fold_char).collect()
+        };
+        Self {
+            folded,
+            case_sensitive,
+        }
+    }
+
+    /// Lazily yields the non-overlapping byte ranges of `text` equal to the query, in order.
+    fn find_all<'a>(&'a self, text: &'a str) -> Matches<'a> {
+        let (haystack, origins) = if self.case_sensitive {
+            (Cow::Borrowed(text), Vec::new())
+        } else {
+            let mut folded = String::with_capacity(text.len());
+            let mut origins = Vec::with_capacity(text.len() + 1);
+            for (offset, ch) in text.char_indices() {
+                origins.push((folded.len(), offset));
+                folded.push(fold_char(ch));
+            }
+            origins.push((folded.len(), text.len()));
+            (Cow::Owned(folded), origins)
+        };
+        Matches {
+            needle: &self.folded,
+            haystack,
+            origins,
+            cursor: 0,
+        }
+    }
+}
+
+fn fold_char(ch: char) -> char {
+    match ch {
+        '\u{0131}' => return ch,
+        '\u{1FD3}' => return '\u{0390}',
+        '\u{1FE3}' => return '\u{03B0}',
+        '\u{FB05}' => return '\u{FB06}',
+        _ => {}
+    }
+    let mut upper = ch.to_uppercase();
+    if let (Some(single), None) = (upper.next(), upper.next()) {
+        let mut lower = single.to_lowercase();
+        if let (Some(single), None) = (lower.next(), lower.next()) {
+            return single;
+        }
+    }
+    let mut lower = ch.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(single), None) => single,
+        _ => ch,
+    }
+}
+
+/// Byte ranges in the original text; empty `origins` means the haystack is that text.
+struct Matches<'a> {
+    needle: &'a str,
+    haystack: Cow<'a, str>,
+    origins: Vec<(usize, usize)>,
+    cursor: usize,
+}
+
+impl Iterator for Matches<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.needle.is_empty() {
+            return None;
+        }
+        let start = self.cursor + self.haystack[self.cursor..].find(self.needle)?;
+        let end = start + self.needle.len();
+        self.cursor = end;
+        Some((self.original(start), self.original(end)))
+    }
+}
+
+impl Matches<'_> {
+    fn original(&self, folded: usize) -> usize {
+        if self.origins.is_empty() {
+            return folded;
+        }
+        match self.origins.binary_search_by_key(&folded, |&(at, _)| at) {
+            Ok(index) => self.origins[index].1,
+            Err(index) => self.origins[index.min(self.origins.len() - 1)].1,
+        }
+    }
+}
 
 enum SearchPart {
     Text { offset: u32, text: String },
@@ -75,15 +173,12 @@ impl EditingDoc {
         if query.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let pattern = RegexBuilder::new(&regex::escape(query))
-            .case_insensitive(!case_sensitive)
-            .build()
-            .map_err(|error| TextSearchError(error.to_string()))?;
+        let needle = Needle::new(query, case_sensitive);
         let txn = self.yrs_doc().transact();
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Ok(Vec::new());
         };
-        let cells = table_cell_stories(&txn);
+        let cells = table_cell_stories(self, &txn);
         let mut ids: Vec<String> = stories.keys(&txn).map(str::to_owned).collect();
         ids.sort_by(|a, b| {
             (a != "body", cells.contains(a), a).cmp(&(b != "body", cells.contains(b), b))
@@ -153,20 +248,21 @@ impl EditingDoc {
                 } => {
                     let mut byte_offset = 0;
                     let mut position = offset;
-                    for found in pattern.find_iter(&text) {
-                        position += text[byte_offset..found.start()].encode_utf16().count() as u32;
-                        let end = position + found.as_str().encode_utf16().count() as u32;
+                    for (from, to) in needle.find_all(&text) {
+                        position += text[byte_offset..from].encode_utf16().count() as u32;
+                        let found = &text[from..to];
+                        let end = position + found.encode_utf16().count() as u32;
                         matches.push(TextSearchMatch {
                             story: story.clone(),
                             para_id: para_id.clone(),
                             start: position,
                             end,
-                            text: found.as_str().to_owned(),
+                            text: found.to_owned(),
                         });
                         if matches.len() == limit {
                             return Ok(matches);
                         }
-                        byte_offset = found.end();
+                        byte_offset = to;
                         position = end;
                     }
                 }
@@ -253,5 +349,21 @@ mod tests {
             matches[..3]
         );
         assert_eq!(matches[matches.len() - 2].start, 0);
+    }
+
+    #[test]
+    fn needle_equates_shared_uppercase_forms_and_keeps_byte_ranges() {
+        let text = "\u{212A}elvin k STRASSE ẞ ß AAA";
+        let ranges = |query, case_sensitive| {
+            Needle::new(query, case_sensitive)
+                .find_all(text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ranges("k", false), [(0, 3), (9, 10)]);
+        assert_eq!(ranges("k", true), [(9, 10)]);
+        assert_eq!(ranges("ß", false), [(19, 22), (23, 25)]);
+        assert_eq!(ranges("ss", false), [(15, 17)]);
+        assert_eq!(ranges("aa", false), [(26, 28)]);
+        assert_eq!(Needle::new("", false).find_all(text).next(), None);
     }
 }

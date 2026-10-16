@@ -1,6 +1,7 @@
 //! Expand shared formulas while preserving their authored text and anchors.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use quick_xml::events::BytesStart;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
@@ -255,6 +256,191 @@ fn address_part(source: &str) -> (&str, &str) {
     }
 }
 
+pub(crate) enum Reference {
+    Cells(CellRange),
+    Rows(Range<u32>),
+    Columns(Range<u32>),
+}
+
+pub(crate) fn sheet_name(source: &str) -> String {
+    source
+        .strip_prefix('\'')
+        .and_then(|name| name.strip_suffix('\''))
+        .map_or_else(|| source.to_owned(), |name| name.replace("''", "'"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReferenceStatus {
+    Unmoved,
+    Moved,
+    Unresolvable,
+}
+
+fn cell_shaped(source: &str) -> bool {
+    let source = source.strip_prefix('$').unwrap_or(source);
+    let letters = source.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let digits = source[letters..]
+        .strip_prefix('$')
+        .unwrap_or(&source[letters..]);
+    letters > 0 && !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn r1c1_shaped(source: &str) -> bool {
+    fn axis(source: &str) -> bool {
+        if let Some(offset) = source.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let digits = offset.strip_prefix(['+', '-']).unwrap_or(offset);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        } else {
+            source.bytes().all(|byte| byte.is_ascii_digit())
+        }
+    }
+
+    let Some(source) = source.strip_prefix(['r', 'R']) else {
+        return false;
+    };
+    let Some((row, col)) = source.split_once(['c', 'C']) else {
+        return false;
+    };
+    axis(row) && axis(col)
+}
+
+pub(crate) fn classify_references(
+    source: &str,
+    defined_names: Option<&[&str]>,
+    mut classify: impl FnMut(Option<&str>, Reference) -> ReferenceStatus,
+) -> ReferenceStatus {
+    let mut index = 0;
+    let mut status = ReferenceStatus::Unmoved;
+    let mut previous_operand = false;
+    while index < source.len() {
+        let start = index;
+        let character = source[index..].chars().next().expect("within source");
+        if character == '"' {
+            index = skip_quoted(source, index, b'"');
+            previous_operand = true;
+            continue;
+        }
+        if character == '#'
+            && let Some(error) = [
+                "#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#NUM!", "#N/A", "#NULL!", "#SPILL!",
+                "#CALC!",
+            ]
+            .into_iter()
+            .find(|error| source[index..].starts_with(*error))
+        {
+            index += error.len();
+            previous_operand = true;
+            continue;
+        }
+        if separator(character) {
+            if character.is_whitespace() {
+                let following = source[index..].trim_start();
+                if previous_operand
+                    && following.starts_with(|c: char| {
+                        !separator(c) || matches!(c, '(' | '"' | '{' | '@' | '#')
+                    })
+                {
+                    return ReferenceStatus::Unresolvable;
+                }
+                index = source.len() - following.len();
+                continue;
+            }
+            previous_operand = matches!(character, ')' | '}')
+                || (previous_operand && matches!(character, '%' | '#'));
+            index += character.len_utf8();
+            continue;
+        }
+        index = operand_end(source, index);
+        if source[start..index].ends_with(['e', 'E'])
+            && source[start..index - 1].parse::<f64>().is_ok()
+            && source[index..].starts_with(['+', '-'])
+        {
+            index = operand_end(source, index + 1);
+        }
+        let operand = &source[start..index];
+        let colons = punctuation(operand, b':');
+        let (prefix, address) = address_part(operand);
+        let followed_by_parenthesis = source[index..].trim_start().starts_with('(');
+        let function = followed_by_parenthesis
+            && prefix.is_empty()
+            && colons.is_empty()
+            && !operand.contains(['[', ']']);
+        if colons
+            .iter()
+            .copied()
+            .chain(std::iter::once(operand.len()))
+            .scan(0, |start, end| {
+                let part = &operand[*start..end];
+                *start = end + 1;
+                Some(address_part(part.trim()).1)
+            })
+            .any(|token| {
+                defined_names
+                    .is_some_and(|names| names.iter().any(|name| name.eq_ignore_ascii_case(token)))
+                    || (defined_names.is_none() && cell_shaped(token))
+            })
+            || (followed_by_parenthesis && (cell_shaped(address) || r1c1_shaped(address)))
+        {
+            return ReferenceStatus::Unresolvable;
+        }
+        previous_operand = !function;
+        if !operand.contains(['[', ']'])
+            && prefix.is_empty()
+            && colons.is_empty()
+            && (function
+                || (operand.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+                    && operand.parse::<f64>().is_ok())
+                || operand.eq_ignore_ascii_case("TRUE")
+                || operand.eq_ignore_ascii_case("FALSE"))
+        {
+            continue;
+        }
+        let reference = if operand.contains(['[', ']']) || colons.len() > 1 {
+            None
+        } else if let Some(&colon) = colons.first() {
+            let (first_prefix, first) = address_part(operand[..colon].trim());
+            let (last_prefix, last) = address_part(operand[colon + 1..].trim());
+            if !last_prefix.is_empty()
+                && (first_prefix.is_empty()
+                    || !sheet_name(first_prefix.strip_suffix('!').unwrap_or(first_prefix))
+                        .eq_ignore_ascii_case(&sheet_name(
+                            last_prefix.strip_suffix('!').unwrap_or(last_prefix),
+                        )))
+            {
+                None
+            } else if let (Some(first), Some(last)) = (column(first), column(last)) {
+                Some((
+                    first_prefix,
+                    Reference::Columns(first.col.min(last.col)..first.col.max(last.col) + 1),
+                ))
+            } else if let (Some(first), Some(last)) = (row(first), row(last)) {
+                Some((
+                    first_prefix,
+                    Reference::Rows(first.row.min(last.row)..first.row.max(last.row) + 1),
+                ))
+            } else {
+                CellRange::parse_a1(&format!("{first}:{last}").to_ascii_uppercase())
+                    .ok()
+                    .map(|range| (first_prefix, Reference::Cells(range)))
+            }
+        } else {
+            CellRef::parse_a1(&address.to_ascii_uppercase())
+                .ok()
+                .map(|cell| (prefix, Reference::Cells(CellRange::new(cell, cell))))
+        };
+        let classified = match reference {
+            Some((prefix, reference)) => classify(prefix.strip_suffix('!'), reference),
+            None => ReferenceStatus::Unresolvable,
+        };
+        match classified {
+            ReferenceStatus::Unresolvable => return ReferenceStatus::Unresolvable,
+            ReferenceStatus::Moved => status = ReferenceStatus::Moved,
+            ReferenceStatus::Unmoved => {}
+        }
+    }
+    status
+}
+
 fn column(source: &str) -> Option<CellRef> {
     let letters = source.strip_prefix('$').unwrap_or(source);
     if letters.is_empty() || !letters.bytes().all(|byte| byte.is_ascii_alphabetic()) {
@@ -359,6 +545,103 @@ fn translate_operand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_formula_intersections_are_unresolvable() {
+        for source in [
+            "SUM($E$5 (E:E))",
+            "SUM(E:E (E:E))",
+            "SUM(E5 E6)",
+            "SUM((E5) (E6))",
+            "SUM(E5\tE6)",
+            "SUM(E5\nE6)",
+            "SUM(E5 @E6)",
+            "SUM({1,2} {3,4})",
+        ] {
+            assert_eq!(
+                classify_references(source, Some(&[]), |_, _| ReferenceStatus::Unmoved),
+                ReferenceStatus::Unresolvable,
+                "{source}"
+            );
+        }
+        for source in [" SUM ( E5 ) ", "SUM(E5 + E6)", r#"SUM("E5 E6",E5)"#] {
+            assert_eq!(
+                classify_references(source, Some(&[]), |_, _| ReferenceStatus::Unmoved),
+                ReferenceStatus::Unmoved,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_formula_reference_shaped_calls_are_unresolvable() {
+        for source in [
+            "E5(E:E)",
+            "$E$5 (E:E)",
+            "Sheet1!E5(E:E)",
+            "LOG10(100)",
+            "R1C1(1)",
+            "r1c1 (1)",
+            "RC(1)",
+            "R[-1]C[2](1)",
+            "R[+1]C(1)",
+        ] {
+            assert_eq!(
+                classify_references(source, Some(&[]), |_, _| ReferenceStatus::Unmoved),
+                ReferenceStatus::Unresolvable,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_formula_defined_names_are_unresolvable() {
+        let names = ["AB1", "Rate", "SUM"];
+        for source in ["AB1", "ab1", "rAtE", "Sheet1!AB1", "A1:AB1", "SUM(100)"] {
+            assert_eq!(
+                classify_references(source, Some(&names), |_, _| ReferenceStatus::Unmoved),
+                ReferenceStatus::Unresolvable,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            classify_references(r#""AB1 Rate SUM""#, Some(&names), |_, _| {
+                ReferenceStatus::Moved
+            }),
+            ReferenceStatus::Unmoved
+        );
+    }
+
+    #[test]
+    fn extension_formula_missing_defined_names_refuses_cell_tokens() {
+        for source in ["E5", "$E$5", "SUM(E5)", "Sheet1!E5", "A1:B2"] {
+            assert_eq!(
+                classify_references(source, None, |_, _| ReferenceStatus::Unmoved),
+                ReferenceStatus::Unresolvable,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            classify_references("SUM(100)", None, |_, _| ReferenceStatus::Moved),
+            ReferenceStatus::Unmoved
+        );
+    }
+
+    #[test]
+    fn extension_formula_classification_distinguishes_moved_references() {
+        assert_eq!(
+            classify_references("SUM(E5)", Some(&[]), |_, _| ReferenceStatus::Unmoved),
+            ReferenceStatus::Unmoved
+        );
+        assert_eq!(
+            classify_references("SUM(E5)", Some(&[]), |_, _| ReferenceStatus::Moved),
+            ReferenceStatus::Moved
+        );
+        assert_eq!(
+            classify_references("E5+Rate", Some(&[]), |_, _| ReferenceStatus::Moved),
+            ReferenceStatus::Unresolvable
+        );
+    }
 
     #[test]
     fn shifts_references_without_rewriting_other_formula_text() {

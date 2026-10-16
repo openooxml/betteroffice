@@ -15,7 +15,7 @@ def fixture():
     output = io.BytesIO()
     with zipfile.ZipFile(output,'w') as archive:
         archive.writestr('xl/workbook.xml','''<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><calcPr calcMode="manual"/></workbook>''')
-        archive.writestr('xl/_rels/workbook.xml.rels','''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>''')
+        archive.writestr('xl/_rels/workbook.xml.rels','''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>''')
         archive.writestr('xl/worksheets/sheet1.xml','''<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac" mc:Ignorable="x14ac"><sheetData><row r="1" x14ac:dyDescent="0.25"><c r="A1"><v>7</v></c><c r="B1"><f>A1*2</f><v>999</v></c><c r="C1"><f>UNSUPPORTED(A1)</f><v>14</v></c><c r="D1" t="str"><f>"new"</f><v>old</v></c><c r="F1"><f t="array" ref="F1:G1">TRANSPOSE(A1:A2)</f><v>111</v></c><c r="G1" t="str"><v>222</v></c></row></sheetData></worksheet>''')
     return output.getvalue()
 

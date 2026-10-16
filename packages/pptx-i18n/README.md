@@ -2,8 +2,7 @@
 
 UI locale strings, types, and runtime helpers for the
 [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react)
-editor. `en` is the source of truth; community locales mirror its shape and fall
-back to English for any untranslated key.
+editor. `en` defines the locale shape; community locales override its strings.
 
 ```bash
 bun add @betteroffice/pptx-i18n
@@ -20,7 +19,7 @@ import { PptxEditor } from '@betteroffice/pptx-react';
 <PptxEditor file={file} fonts={fonts} i18n={de} />;
 ```
 
-Keys set to `null` in any locale fall back to English.
+Keys set to `null` keep the English string.
 
 ## Locales
 

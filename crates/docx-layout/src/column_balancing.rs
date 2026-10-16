@@ -29,6 +29,9 @@ pub trait ColumnBalancePaginator {
     fn pen_y(&mut self) -> f64;
     fn content_limit(&mut self) -> f64;
     fn set_content_limit(&mut self, value: f64);
+    fn has_float_band_in_region(&mut self, _top: f64, _bottom: f64) -> bool {
+        false
+    }
 }
 
 /// Stacked height of the balanced range and the offsets a column may end at,
@@ -128,7 +131,11 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     }
 
     let column_region_top = paginator.pen_y();
-    let max_region_height = paginator.content_limit() - column_region_top;
+    let content_limit = paginator.content_limit();
+    if paginator.has_float_band_in_region(column_region_top, content_limit) {
+        return;
+    }
+    let max_region_height = content_limit - column_region_top;
     if max_region_height <= 0.0 || total_content_height > max_region_height * columns.count {
         return;
     }
@@ -236,6 +243,7 @@ mod tests {
                 lines: (0..line_count)
                     .map(|_| TypesetRow {
                         line_height,
+                        marker_tab_offset: None,
                         ..Default::default()
                     })
                     .collect(),
@@ -335,6 +343,7 @@ mod tests {
             measure: BlockExtent::Paragraph(ParagraphExtent {
                 lines: vec![TypesetRow {
                     line_height: 16.0,
+                    marker_tab_offset: None,
                     ..Default::default()
                 }],
                 total_height: 28.0,

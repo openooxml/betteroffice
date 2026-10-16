@@ -20,6 +20,8 @@ export interface TextStyleSnapshot {
   underline: string | null;
   spacingPt?: number | null;
   baselinePct?: number | null;
+  /** `a:rPr@kern`: the smallest size, in points, the run is kerned at. */
+  kernPt?: number | null;
   /** `a:rPr@cap`: how the run is cased when drawn, never in the stored text. */
   caps?: 'none' | 'small' | 'all' | null;
 }
@@ -53,6 +55,15 @@ export interface PptxTextSearchOptions {
   limit?: number;
 }
 
+/**
+ * A caret position in a story that later edits, undo, redo and remote updates
+ * move along with the text. Plain data; `position` is opaque.
+ */
+export interface PptxCaretAnchor {
+  storyId: string;
+  position: string;
+}
+
 /** Zero-based slide index; story-local UTF-16 offsets. */
 export interface PptxTextMatch {
   slideIndex: number;
@@ -72,19 +83,41 @@ export interface ColorValue {
   themeTint?: string;
   themeShade?: string;
   auto?: boolean;
+  luminanceModulation?: number;
+  luminanceOffset?: number;
+  saturationModulation?: number;
+  alpha?: number;
 }
 
+export interface ShapeGradient {
+  type: string;
+  angle?: number;
+  stops: Array<{ position: number; color: ColorValue }>;
+}
+
+/** An authored fill as the deck stores it. */
 export interface ShapeFill {
   type: string;
   color?: ColorValue;
+  gradient?: ShapeGradient;
 }
 
+export interface ShapeLineEnd {
+  type: string;
+  width: string | null;
+  length: string | null;
+}
+
+/** An authored outline as the deck stores it; `width` is EMU. */
 export interface ShapeOutline {
   width?: number;
   color?: ColorValue;
+  gradient?: ShapeGradient;
   style?: string;
   cap?: string;
   join?: string;
+  headEnd?: ShapeLineEnd;
+  tailEnd?: ShapeLineEnd;
 }
 
 export type BlipEffect =
@@ -106,6 +139,8 @@ export interface ShapeSnapshot {
   rotationDeg: number;
   flipH: boolean;
   flipV: boolean;
+  /** The geometry the shape draws at, present only while it has none of its own. */
+  inherited?: InheritedGeometry | null;
   /** Hides this shape and its descendants; omitted when false. */
   hidden?: boolean;
   geometry: string;
@@ -122,6 +157,17 @@ export interface ShapeSnapshot {
   graphic: unknown | null;
   textStories: StorySnapshot[];
   children: ShapeSnapshot[];
+}
+
+/** The transform a placeholder takes from its layout or master. */
+export interface InheritedGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotationDeg: number;
+  flipH: boolean;
+  flipV: boolean;
 }
 
 export interface SlideSnapshot {
@@ -260,6 +306,36 @@ export interface HistoryResult {
   snapshot: DeckSnapshot;
 }
 
+/** Renderer stage latencies of one profiled slide layout, in ms. */
+export interface LayoutProfile {
+  scopeMs: number;
+  layoutMs: number;
+  serializeMs: number;
+}
+
+export interface ProfiledLayout {
+  layout: SlideDisplayList;
+  profile: LayoutProfile;
+}
+
+/** Boundary stage latencies of one profiled edit, in ms. */
+export interface EditProfile {
+  parseMs: number;
+  applyMs: number;
+  serializeMs: number;
+}
+
+export interface HistoryProfile {
+  undoMs: number;
+  snapshotMs: number;
+  serializeMs: number;
+}
+
+export interface Profiled<T, P = EditProfile> {
+  receipt: T;
+  profile: P;
+}
+
 export interface PptxFontFace {
   family: string;
   bold?: boolean;
@@ -340,7 +416,7 @@ export interface ShapePrimitive extends PrimitiveBase {
   name: string;
   geometry: string;
   path: GeometryPathCommand[];
-  /** An unsupported outline or clip was replaced by a rectangle. */
+  /** A rectangle substitutes for the authored outline or clip. */
   geometryFallback?: boolean;
   clip?: GeometryPathCommand[];
   evenOdd?: boolean;
@@ -354,6 +430,7 @@ export interface ShapePrimitive extends PrimitiveBase {
 export type ImageEffect =
   | { kind: 'biLevel'; threshold: number }
   | { kind: 'grayscale' }
+  | { kind: 'alpha'; amount: number }
   | { kind: 'luminance'; brightness: number; contrast: number }
   | { kind: 'duotone'; shadow: string; highlight: string }
   | { kind: 'colorChange'; from: string; to: string; useAlpha?: boolean };
@@ -372,9 +449,11 @@ export interface ImagePrimitive extends PrimitiveBase {
   effects?: ImageEffect[];
   /** Fraction of the source discarded per edge, from `a:srcRect`. */
   crop?: ImageCrop;
+  /** `a:tile`: repeat the picture at its own size, scaled by these fractions. */
+  tile?: { scaleX: number; scaleY: number };
   /** Outline the picture is masked to, when its `spPr` gives it one. */
   path?: GeometryPathCommand[];
-  /** The authored mask is unsupported and uses a rectangle fallback. */
+  /** A rectangle substitutes for the authored mask. */
   geometryFallback?: boolean;
   stroke?: Stroke;
   shadow?: Shadow;
@@ -443,6 +522,8 @@ export interface TextBoxPrimitive extends PrimitiveBase {
   }>;
   lines: PositionedTextLine[];
   overflow?: boolean;
+  /** `a:rPr/a:effectLst`: the shadow the box's glyphs are drawn with. */
+  textShadow?: Shadow;
 }
 
 export interface PlaceholderPrimitive extends PrimitiveBase {
@@ -492,4 +573,10 @@ export type HitTestResult =
 export interface UpdateEvent {
   origin: 'local' | 'remote';
   update: Uint8Array;
+}
+
+export interface TextParagraphDraft {
+  bullet?: boolean;
+  alignment?: ParagraphAlignment | null;
+  runs: Array<{ text: string; style?: TextStyle }>;
 }

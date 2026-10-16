@@ -1,7 +1,9 @@
 //! PPTX packaging around the shared DrawingML chart part.
 
 use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
-use ooxml_drawingml::{Theme, resolve_color_value_to_hex_with_theme};
+use ooxml_drawingml::{
+    Theme, get_theme_color, resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex,
+};
 
 use crate::drawing::parse_color_container;
 use crate::xml::XmlElement;
@@ -62,10 +64,23 @@ impl ChartXml for ChartElement<'_> {
     }
 
     fn solid_fill_hex(&self) -> Option<String> {
-        resolve_color_value_to_hex_with_theme(
-            parse_color_container(self.element).as_ref(),
-            Some(self.theme),
-        )
+        // A series fill carries `a:alpha` as often as not — a stack of one
+        // colour at falling opacities is how a deck bands its bars. An opaque
+        // fill stays six digits, which is what every other consumer reads.
+        let color = parse_color_container(self.element);
+        let translucent = color
+            .as_ref()
+            .and_then(|color| color.alpha)
+            .is_some_and(|alpha| alpha.is_finite() && alpha < 1.0);
+        if translucent {
+            resolve_color_value_to_rgba_hex(color.as_ref(), Some(self.theme))
+        } else {
+            resolve_color_value_to_hex_with_theme(color.as_ref(), Some(self.theme))
+        }
+    }
+
+    fn theme_color_hex(&self, slot: &str) -> Option<String> {
+        Some(format!("#{}", get_theme_color(Some(self.theme), slot)))
     }
 }
 
@@ -131,6 +146,20 @@ mod tests {
         assert_eq!(prefixed.series[0].values, [7.0]);
         assert_eq!(prefixed.plot_groups[0].grouping.as_deref(), Some("stacked"));
         assert_eq!(prefixed.axis_list.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_series_without_its_own_fill_takes_the_theme_accent_in_turn() {
+        let mut theme = Theme::default();
+        theme.color_scheme.accent1 = "112233".to_owned();
+        theme.color_scheme.accent2 = "445566".to_owned();
+        let xml = r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>
+              <c:ser><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+              <c:ser><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>
+            </c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let parsed = parse(xml, &theme).expect("parses");
+        assert_eq!(parsed.series[0].color, "#112233");
+        assert_eq!(parsed.series[1].color, "#445566");
     }
 
     #[test]

@@ -1,14 +1,53 @@
-//! grid geometry: cumulative pixel offsets for columns and rows. tables cover
-//! only the explicitly-sized prefix; past it, default sizes are extrapolated analytically.
+//! Sparse row and column extents.
 
+#[cfg(feature = "test-counters")]
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use xlsx_model::styles::{Font, Stylesheet};
 use xlsx_model::workbook::Sheet;
-use xlsx_model::{CellRef, ColId, RowId};
+use xlsx_model::{CellRef, ColId, MAX_COLS, MAX_ROWS, RowId};
 
 use crate::Viewport;
+
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static GEOMETRY_CONSTRUCTIONS: Cell<u64> = const { Cell::new(0) };
+    static AUTOFIT_CELL_VISITS: Cell<u64> = const { Cell::new(0) };
+    static ROW_STORAGE_ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    static PREFIX_UPDATES: Cell<u64> = const { Cell::new(0) };
+    static PREFIX_QUERIES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn geometry_counters() -> (u64, u64) {
+    (GEOMETRY_CONSTRUCTIONS.get(), AUTOFIT_CELL_VISITS.get())
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn reset_geometry_counters() {
+    GEOMETRY_CONSTRUCTIONS.set(0);
+    AUTOFIT_CELL_VISITS.set(0);
+    ROW_STORAGE_ALLOCATIONS.set(0);
+    PREFIX_UPDATES.set(0);
+    PREFIX_QUERIES.set(0);
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn geometry_prefix_counters() -> (u64, u64) {
+    (PREFIX_UPDATES.get(), PREFIX_QUERIES.get())
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn geometry_row_storage_allocations() -> u64 {
+    ROW_STORAGE_ALLOCATIONS.get()
+}
 
 /// default column width in characters of max-digit-width (excel default).
 pub const DEFAULT_COL_WIDTH_CHARS: f64 = 8.43;
@@ -58,10 +97,40 @@ fn normal_font(styles: &Stylesheet) -> Option<&Font> {
     styles.font_for(0).or_else(|| styles.fonts.first())
 }
 
+/// the normal font the row grid measures with; on the print path it is the
+/// same value the text falls back to, so the two cannot disagree.
+#[derive(Debug, Clone, Copy)]
+struct NormalFace<'a> {
+    size_pt: f64,
+    family: Option<&'a str>,
+}
+
+impl<'a> NormalFace<'a> {
+    fn from_styles(styles: &'a Stylesheet) -> Self {
+        let font = normal_font(styles);
+        Self {
+            size_pt: font
+                .and_then(|font| font.size_pt)
+                .filter(|pt| pt.is_finite() && *pt > 0.0)
+                .unwrap_or(DEFAULT_FONT_SIZE_PT),
+            family: font.and_then(|font| font.name.as_deref()),
+        }
+    }
+
+    fn from_metrics(metrics: &'a PrintMetrics) -> Self {
+        Self {
+            size_pt: Some(metrics.font_size_pt as f64)
+                .filter(|pt| pt.is_finite() && *pt > 0.0)
+                .unwrap_or(DEFAULT_FONT_SIZE_PT),
+            family: Some(metrics.font_family.as_str()),
+        }
+    }
+}
+
 /// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
 /// cached hint it recomputes; `None` keeps stored heights. gated on calibri
 /// because [`autofit_row_height_pt`] is a calibri measurement.
-fn stored_height_scale(sheet: &Sheet, styles: &Stylesheet) -> Option<f64> {
+fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>) -> Option<f64> {
     if sheet.format.custom_height {
         return None;
     }
@@ -69,18 +138,13 @@ fn stored_height_scale(sheet: &Sheet, styles: &Stylesheet) -> Option<f64> {
         .format
         .default_row_height_pt
         .filter(|pt| pt.is_finite() && *pt > 0.0)?;
-    let normal = normal_font(styles);
     if !normal
-        .and_then(|font| font.name.as_deref())
+        .family
         .is_none_or(|name| name.eq_ignore_ascii_case("calibri"))
     {
         return None;
     }
-    let size = normal
-        .and_then(|font| font.size_pt)
-        .filter(|pt| pt.is_finite() && *pt > 0.0)
-        .unwrap_or(DEFAULT_FONT_SIZE_PT);
-    let fitted = autofit_row_height_pt(size);
+    let fitted = autofit_row_height_pt(normal.size_pt);
     (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
 }
 
@@ -92,11 +156,13 @@ fn autofit_height(
     style: Option<u32>,
     default_pt: f64,
     cached_default: bool,
+    normal: NormalFace<'_>,
 ) -> Option<f64> {
     let size = style
         .and_then(|style| styles.font_for(style))
         .and_then(|font| font.size_pt)
-        .unwrap_or(DEFAULT_FONT_SIZE_PT);
+        .filter(|pt| pt.is_finite() && *pt > 0.0)
+        .unwrap_or(normal.size_pt);
     let height = autofit_row_height_pt(size);
     (cached_default || height > default_pt).then_some(height)
 }
@@ -127,31 +193,50 @@ pub fn autofit_relevant(
         style,
         default_pt,
         sheet.format.default_row_height_pt.is_some(),
+        NormalFace::from_styles(styles),
     )
     .is_some()
 }
+
 /// rows excel auto-fits, with the height each takes: every row that carries no
 /// `ht` and is not pinned by `sheetFormatPr/@customHeight`. a declared
 /// `defaultRowHeight` is a cached hint excel recomputes, so a row with content
 /// takes its fitted height outright; without one the sheet default is already
 /// the normal font's fitted height and only taller content grows a row.
-fn autofit_rows(sheet: &Sheet, styles: &Stylesheet, default_pt: f64) -> BTreeMap<RowId, f64> {
+fn autofit_rows(
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    default_pt: f64,
+    normal: NormalFace<'_>,
+) -> BTreeMap<RowId, f64> {
     let mut fitted = BTreeMap::new();
     if sheet.format.custom_height {
         return fitted;
     }
     let cached_default = sheet.format.default_row_height_pt.is_some();
+    for &row in sheet.row_styles.keys() {
+        if !sheet.row_heights.contains_key(&row)
+            && let Some(style) = missing_row_style(sheet, row)
+            && let Some(height) =
+                autofit_height(styles, Some(style), default_pt, cached_default, normal)
+        {
+            fitted.insert(row, height);
+        }
+    }
     let spanned: HashSet<(RowId, ColId)> = sheet
         .merges
         .iter()
         .filter(|range| range.end.row > range.start.row)
         .map(|range| (range.start.row, range.start.col))
         .collect();
-    for (at, cell) in sheet.iter_cells() {
+    for (at, _) in sheet.iter_cells() {
+        #[cfg(feature = "test-counters")]
+        AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
             continue;
         }
-        if let Some(height) = autofit_height(styles, cell.style, default_pt, cached_default) {
+        let style = sheet.effective_style(at);
+        if let Some(height) = autofit_height(styles, style, default_pt, cached_default, normal) {
             let entry = fitted.entry(at.row).or_insert(height);
             if height > *entry {
                 *entry = height;
@@ -159,6 +244,22 @@ fn autofit_rows(sheet: &Sheet, styles: &Stylesheet, default_pt: f64) -> BTreeMap
         }
     }
     fitted
+}
+
+fn missing_row_style(sheet: &Sheet, row: RowId) -> Option<u32> {
+    if row >= MAX_ROWS || !sheet.row_styles.contains_key(&row) {
+        return None;
+    }
+    let mut col = 0;
+    for (at, _) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
+        if at.col != col {
+            break;
+        }
+        col += 1;
+    }
+    (col < xlsx_model::MAX_COLS)
+        .then(|| sheet.effective_style(CellRef::new(row, col)))
+        .flatten()
 }
 
 /// EMU -> pixels in the renderer's 96dpi coordinate space.
@@ -180,12 +281,15 @@ pub struct PrintMetrics {
 }
 
 impl PrintMetrics {
+    /// a zero default row height is how a sheet declares `zeroHeight="1"`:
+    /// every row without an explicit `ht` collapses, exactly as a zero default
+    /// column width already collapses unsized columns.
     pub fn is_valid(&self) -> bool {
         !self.font_family.is_empty()
             && self.font_family.len() <= 1024
             && (36.0..=600.0).contains(&self.dpi)
             && (1.0..=256.0).contains(&self.max_digit_width)
-            && (1.0..=409.0).contains(&self.default_row_height_pt)
+            && (0.0..=409.0).contains(&self.default_row_height_pt)
             && self
                 .default_column_width
                 .is_none_or(|w| (0.0..=255.0).contains(&w))
@@ -202,17 +306,316 @@ impl PrintMetrics {
     }
 }
 
-/// cumulative left-edge x offsets for columns and top-edge y offsets for rows,
-/// both in pixels from the sheet origin.
+const SIZE_CHUNK_LEN: usize = 256;
+const _: () = assert!(
+    (MAX_ROWS as usize).is_multiple_of(SIZE_CHUNK_LEN)
+        && (MAX_COLS as usize).is_multiple_of(SIZE_CHUNK_LEN)
+);
+
+#[derive(Debug, Clone)]
+struct SizeChunk {
+    sum: f64,
+    count: u32,
+    /// stored values above zero.
+    sized: u32,
+    values: [f32; SIZE_CHUNK_LEN],
+}
+
+impl Default for SizeChunk {
+    fn default() -> Self {
+        Self {
+            sum: 0.0,
+            count: 0,
+            sized: 0,
+            values: [f32::NAN; SIZE_CHUNK_LEN],
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Sizes {
+    chunks: Vec<SizeChunk>,
+    limit: u32,
+    default: f32,
+    end: u32,
+    count: u32,
+}
+
+impl Clone for Sizes {
+    fn clone(&self) -> Self {
+        #[cfg(feature = "test-counters")]
+        if self.limit == xlsx_model::MAX_ROWS && !self.chunks.is_empty() {
+            ROW_STORAGE_ALLOCATIONS.set(ROW_STORAGE_ALLOCATIONS.get().wrapping_add(1));
+        }
+        Self {
+            chunks: self.chunks.clone(),
+            limit: self.limit,
+            default: self.default,
+            end: self.end,
+            count: self.count,
+        }
+    }
+}
+
+impl Sizes {
+    fn from_values(limit: u32, default: f32, values: &[(u32, f32)]) -> Self {
+        let end = values.last().map_or(0, |(index, _)| index + 1);
+        #[cfg(feature = "test-counters")]
+        if limit == xlsx_model::MAX_ROWS && end > 0 {
+            ROW_STORAGE_ALLOCATIONS.set(ROW_STORAGE_ALLOCATIONS.get().wrapping_add(1));
+        }
+        let mut chunks = vec![SizeChunk::default(); (end as usize).div_ceil(SIZE_CHUNK_LEN)];
+        for &(index, value) in values {
+            let chunk = &mut chunks[index as usize / SIZE_CHUNK_LEN];
+            chunk.values[index as usize % SIZE_CHUNK_LEN] = value;
+            chunk.sum += f64::from(value);
+            chunk.count += 1;
+            chunk.sized += u32::from(value > 0.0);
+        }
+        for index in 1..=chunks.len() {
+            let parent = index + index.isolate_lowest_one();
+            if parent <= chunks.len() {
+                chunks[parent - 1].sum += chunks[index - 1].sum;
+                chunks[parent - 1].count += chunks[index - 1].count;
+                chunks[parent - 1].sized += chunks[index - 1].sized;
+            }
+        }
+        Self {
+            chunks,
+            limit,
+            default,
+            end,
+            count: values.len() as u32,
+        }
+    }
+
+    fn prefix(&self, count: usize) -> (f64, u32, u32) {
+        let mut index = count.min(self.chunks.len());
+        let mut sum = 0.0;
+        let mut count = 0;
+        let mut sized = 0;
+        while index > 0 {
+            #[cfg(feature = "test-counters")]
+            PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
+            sum += self.chunks[index - 1].sum;
+            count += self.chunks[index - 1].count;
+            sized += self.chunks[index - 1].sized;
+            index &= index - 1;
+        }
+        (sum, count, sized)
+    }
+
+    fn grow(&mut self, count: usize) {
+        if count <= self.chunks.len() {
+            return;
+        }
+        let old_len = self.chunks.len();
+        let (sum, active, sized) = self.prefix(old_len);
+        let count = count
+            .next_power_of_two()
+            .min((self.limit as usize).div_ceil(SIZE_CHUNK_LEN));
+        #[cfg(feature = "test-counters")]
+        if self.limit == xlsx_model::MAX_ROWS && count > self.chunks.capacity() {
+            ROW_STORAGE_ALLOCATIONS.set(ROW_STORAGE_ALLOCATIONS.get().wrapping_add(1));
+        }
+        self.chunks.resize(count, SizeChunk::default());
+        for index in old_len..count {
+            let start = index & (index + 1);
+            if start < old_len {
+                let (before, preceding, sized_before) = self.prefix(start);
+                self.chunks[index].sum = sum - before;
+                self.chunks[index].count = active - preceding;
+                self.chunks[index].sized = sized - sized_before;
+            }
+        }
+    }
+
+    fn set(&mut self, index: u32, value: Option<f32>) {
+        assert!(index < self.limit);
+        let old = self.value(index);
+        let chunk = index as usize / SIZE_CHUNK_LEN;
+        self.grow(chunk + 1);
+        self.chunks[chunk].values[index as usize % SIZE_CHUNK_LEN] = value.unwrap_or(f32::NAN);
+        let delta = f64::from(value.unwrap_or(0.0)) - f64::from(old.unwrap_or(0.0));
+        let added = u32::from(value.is_some() && old.is_none());
+        let removed = u32::from(value.is_none() && old.is_some());
+        let was_sized = old.is_some_and(|size| size > 0.0);
+        let is_sized = value.is_some_and(|size| size > 0.0);
+        let mut current = chunk + 1;
+        while current <= self.chunks.len() {
+            #[cfg(feature = "test-counters")]
+            PREFIX_UPDATES.set(PREFIX_UPDATES.get().wrapping_add(1));
+            self.chunks[current - 1].sum += delta;
+            self.chunks[current - 1].count += added;
+            self.chunks[current - 1].count -= removed;
+            self.chunks[current - 1].sized += u32::from(is_sized && !was_sized);
+            self.chunks[current - 1].sized -= u32::from(was_sized && !is_sized);
+            current += current.isolate_lowest_one();
+        }
+        self.count += added;
+        self.count -= removed;
+        if value.is_some() {
+            self.end = self.end.max(index + 1);
+        } else if index + 1 == self.end {
+            self.end = self.last();
+        }
+    }
+
+    fn last(&self) -> u32 {
+        if self.count == 0 {
+            return 0;
+        }
+        let mut index = 0;
+        let mut count = 0;
+        let mut step = 1 << self.chunks.len().ilog2();
+        while step > 0 {
+            #[cfg(feature = "test-counters")]
+            PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
+            let next = index + step;
+            if next <= self.chunks.len() && count + self.chunks[next - 1].count < self.count {
+                count += self.chunks[next - 1].count;
+                index = next;
+            }
+            step >>= 1;
+        }
+        let last = self.chunks[index]
+            .values
+            .iter()
+            .rposition(|value| !value.is_nan())
+            .unwrap();
+        (index * SIZE_CHUNK_LEN + last + 1) as u32
+    }
+
+    /// index of the last track with a nonzero size. tracks past the last
+    /// stored value take the default, so they decide unless it is zero.
+    fn last_sized(&self) -> Option<u32> {
+        let implicit = self.default > 0.0;
+        if implicit && self.end < self.limit {
+            return Some(self.limit - 1);
+        }
+        let sized = |node: usize| {
+            let chunk = &self.chunks[node - 1];
+            let unset = (node.isolate_lowest_one() * SIZE_CHUNK_LEN) as u32 - chunk.count;
+            chunk.sized + if implicit { unset } else { 0 }
+        };
+        let mut total = 0;
+        let mut index = self.chunks.len();
+        while index > 0 {
+            total += sized(index);
+            index &= index - 1;
+        }
+        if total == 0 {
+            return None;
+        }
+        let mut index = 0;
+        let mut below = 0;
+        let mut step = 1 << self.chunks.len().ilog2();
+        while step > 0 {
+            let next = index + step;
+            if next <= self.chunks.len() && below + sized(next) < total {
+                below += sized(next);
+                index = next;
+            }
+            step >>= 1;
+        }
+        let within = self.chunks[index]
+            .values
+            .iter()
+            .rposition(|&size| size > 0.0 || (implicit && size.is_nan()))?;
+        Some((index * SIZE_CHUNK_LEN + within) as u32)
+    }
+
+    fn value(&self, index: u32) -> Option<f32> {
+        let chunk = self.chunks.get(index as usize / SIZE_CHUNK_LEN)?;
+        let value = chunk.values[index as usize % SIZE_CHUNK_LEN];
+        (!value.is_nan()).then_some(value)
+    }
+
+    fn offset(&self, index: u32) -> f32 {
+        let chunk = index as usize / SIZE_CHUNK_LEN;
+        let (mut sum, mut count, _) = self.prefix(chunk);
+        if let Some(chunk) = self.chunks.get(chunk) {
+            #[cfg(feature = "test-counters")]
+            PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
+            for &value in &chunk.values[..index as usize % SIZE_CHUNK_LEN] {
+                if !value.is_nan() {
+                    sum += f64::from(value);
+                    count += 1;
+                }
+            }
+        }
+        self.boundary(index, sum, count)
+    }
+
+    fn boundary(&self, index: u32, sum: f64, count: u32) -> f32 {
+        if index == count {
+            sum as f32
+        } else {
+            (sum + f64::from(self.default) * f64::from(index - count)) as f32
+        }
+    }
+
+    fn at(&self, position: f32) -> u32 {
+        if position.is_nan() || position < 0.0 {
+            return 0;
+        }
+        let edge = self.offset(self.end);
+        if position >= edge {
+            if self.default == 0.0 {
+                return self.end;
+            }
+            let (sum, count, _) = self.prefix(self.chunks.len());
+            let mut index = self
+                .end
+                .saturating_add(((position - edge) / self.default) as u32);
+            while index > self.end && position < self.boundary(index, sum, count) {
+                index -= 1;
+            }
+            while index < u32::MAX && position >= self.boundary(index + 1, sum, count) {
+                index += 1;
+            }
+            return index;
+        }
+        let mut index = 0;
+        let mut sum = 0.0;
+        let mut count = 0;
+        let mut step = 1 << self.chunks.len().ilog2();
+        while step > 0 {
+            #[cfg(feature = "test-counters")]
+            PREFIX_QUERIES.set(PREFIX_QUERIES.get().wrapping_add(1));
+            let next = index + step;
+            if next <= self.chunks.len() {
+                let next_sum = sum + self.chunks[next - 1].sum;
+                let next_count = count + self.chunks[next - 1].count;
+                let boundary = self.boundary((next * SIZE_CHUNK_LEN) as u32, next_sum, next_count);
+                if position >= boundary {
+                    sum = next_sum;
+                    count = next_count;
+                    index = next;
+                }
+            }
+            step >>= 1;
+        }
+        let mut offset = sum;
+        let implicit = (index * SIZE_CHUNK_LEN) as u32 - count;
+        if implicit > 0 {
+            offset += f64::from(self.default) * f64::from(implicit);
+        }
+        for (within, &value) in self.chunks[index].values.iter().enumerate() {
+            offset += f64::from(if value.is_nan() { self.default } else { value });
+            if position < offset as f32 {
+                return (index * SIZE_CHUNK_LEN + within) as u32;
+            }
+        }
+        ((index + 1) * SIZE_CHUNK_LEN) as u32
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GridGeometry {
-    /// `col_x[i]` is the left edge of column `i`; len is `n_cols + 1`.
-    col_x: Vec<f32>,
-    row_y: Vec<f32>,
-    n_cols: ColId,
-    n_rows: RowId,
-    default_col_px: f32,
-    default_row_px: f32,
+    columns: Sizes,
+    rows: Sizes,
+    spanned: Arc<HashSet<(RowId, ColId)>>,
 }
 
 impl GridGeometry {
@@ -226,6 +629,7 @@ impl GridGeometry {
                 .format
                 .default_row_height_pt
                 .unwrap_or(DEFAULT_ROW_HEIGHT_PT),
+            NormalFace::from_styles(styles),
             col_chars_to_px,
         )
     }
@@ -240,6 +644,7 @@ impl GridGeometry {
                     metrics.column_pixels(width)
                 }),
             metrics.default_row_height_pt as f64,
+            NormalFace::from_metrics(metrics),
             |width| metrics.column_pixels(width),
         )
     }
@@ -249,112 +654,229 @@ impl GridGeometry {
         styles: &Stylesheet,
         default_col_px: f32,
         default_row_pt: f64,
+        normal: NormalFace<'_>,
         column_pixels: impl Fn(f64) -> f32,
     ) -> Self {
-        let default_row_px = row_pt_to_px(default_row_pt);
-        let fitted = autofit_rows(sheet, styles, default_row_pt);
-        let scale = stored_height_scale(sheet, styles);
-        let n_cols = sheet
+        #[cfg(feature = "test-counters")]
+        GEOMETRY_CONSTRUCTIONS.set(GEOMETRY_CONSTRUCTIONS.get().wrapping_add(1));
+        let default_row_px = if sheet.format.zero_height {
+            0.0
+        } else {
+            row_pt_to_px(default_row_pt)
+        };
+        let fitted = autofit_rows(sheet, styles, default_row_pt, normal);
+        let scale = stored_height_scale(sheet, normal);
+        let columns: Vec<_> = sheet
             .col_widths
-            .keys()
-            .next_back()
-            .map(|&c| c + 1)
-            .unwrap_or(0);
-        let n_rows = sheet
+            .iter()
+            .map(|(&col, &width)| {
+                (
+                    col,
+                    if sheet.col_hidden(col) {
+                        0.0
+                    } else {
+                        column_pixels(width)
+                    },
+                )
+            })
+            .collect();
+        let sized: std::collections::BTreeSet<_> = sheet
             .row_heights
             .keys()
-            .next_back()
+            .chain(fitted.keys())
+            .copied()
+            .chain(
+                sheet
+                    .iter_cells()
+                    .map(|(at, _)| at.row)
+                    .chain(sheet.row_styles.keys().copied())
+                    .take(if sheet.format.zero_height {
+                        usize::MAX
+                    } else {
+                        0
+                    }),
+            )
+            .collect();
+        let rows: Vec<_> = sized
             .into_iter()
-            .chain(fitted.keys().next_back())
-            .max()
-            .map(|&r| r + 1)
-            .unwrap_or(0);
-
-        let mut col_x = Vec::with_capacity(n_cols as usize + 1);
-        col_x.push(0.0);
-        for c in 0..n_cols {
-            let w = sheet
-                .col_widths
-                .get(&c)
-                .map(|&w| column_pixels(w))
-                .unwrap_or(default_col_px);
-            let start = col_x.last().copied().unwrap_or(0.0);
-            col_x.push(start + w);
-        }
-
-        let mut row_y = Vec::with_capacity(n_rows as usize + 1);
-        row_y.push(0.0);
-        for r in 0..n_rows {
-            let h = sheet
-                .row_heights
-                .get(&r)
-                .map(|&h| row_pt_to_px(scale.map_or(h, |s| floor_pt(h * s))))
-                .or_else(|| fitted.get(&r).map(|&h| row_pt_to_px(h)))
-                .unwrap_or(default_row_px);
-            let start = row_y.last().copied().unwrap_or(0.0);
-            row_y.push(start + h);
-        }
-
+            .filter_map(|row| {
+                row_size(sheet, row, fitted.get(&row).copied(), scale, default_row_pt)
+                    .map(|size| (row, size))
+            })
+            .collect();
+        let columns = Sizes::from_values(xlsx_model::MAX_COLS, default_col_px, &columns);
+        let rows = Sizes::from_values(xlsx_model::MAX_ROWS, default_row_px, &rows);
+        let spanned = Arc::new(
+            sheet
+                .merges
+                .iter()
+                .filter(|range| range.end.row > range.start.row)
+                .map(|range| (range.start.row, range.start.col))
+                .collect(),
+        );
         Self {
-            col_x,
-            row_y,
-            n_cols,
-            n_rows,
-            default_col_px,
-            default_row_px,
+            columns,
+            rows,
+            spanned,
         }
     }
 
-    /// left edge of a column in pixels; extrapolates past the sized prefix.
+    #[doc(hidden)]
+    pub fn update_merges(&mut self, sheet: &Sheet) {
+        self.spanned = Arc::new(
+            sheet
+                .merges
+                .iter()
+                .filter(|range| range.end.row > range.start.row)
+                .map(|range| (range.start.row, range.start.col))
+                .collect(),
+        );
+    }
+
+    #[doc(hidden)]
+    pub fn update_rows(
+        &mut self,
+        sheet: &Sheet,
+        styles: &Stylesheet,
+        rows: impl IntoIterator<Item = RowId>,
+    ) {
+        let normal = NormalFace::from_styles(styles);
+        let default_pt = sheet
+            .format
+            .default_row_height_pt
+            .unwrap_or(DEFAULT_ROW_HEIGHT_PT);
+        let scale = stored_height_scale(sheet, normal);
+        for row in rows {
+            let mut fitted: Option<f64> = None;
+            if !sheet.format.custom_height && !sheet.row_heights.contains_key(&row) {
+                fitted = missing_row_style(sheet, row).and_then(|style| {
+                    autofit_height(
+                        styles,
+                        Some(style),
+                        default_pt,
+                        sheet.format.default_row_height_pt.is_some(),
+                        normal,
+                    )
+                });
+                for (at, _) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
+                    #[cfg(feature = "test-counters")]
+                    AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
+                    if self.spanned.contains(&(at.row, at.col)) {
+                        continue;
+                    }
+                    let style = sheet.effective_style(at);
+                    if let Some(height) = autofit_height(
+                        styles,
+                        style,
+                        default_pt,
+                        sheet.format.default_row_height_pt.is_some(),
+                        normal,
+                    ) {
+                        fitted = Some(fitted.map_or(height, |old| old.max(height)));
+                    }
+                }
+            }
+            let size = row_size(sheet, row, fitted, scale, default_pt);
+            if self.rows.value(row) != size {
+                self.rows.set(row, size);
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn update_columns(&mut self, sheet: &Sheet, columns: impl IntoIterator<Item = ColId>) {
+        for col in columns {
+            let size = sheet.col_widths.get(&col).map(|&width| {
+                if sheet.col_hidden(col) {
+                    0.0
+                } else {
+                    col_chars_to_px(width)
+                }
+            });
+            if self.columns.value(col) != size {
+                self.columns.set(col, size);
+            }
+        }
+    }
+
     pub fn col_x(&self, col: ColId) -> f32 {
-        self.col_x.get(col as usize).copied().unwrap_or_else(|| {
-            let last = self.col_x.last().copied().unwrap_or(0.0);
-            last + col.saturating_sub(self.n_cols) as f32 * self.default_col_px
-        })
+        self.columns.offset(col)
     }
 
-    /// top edge of a row in pixels; extrapolates past the sized prefix.
     pub fn row_y(&self, row: RowId) -> f32 {
-        self.row_y.get(row as usize).copied().unwrap_or_else(|| {
-            let last = self.row_y.last().copied().unwrap_or(0.0);
-            last + row.saturating_sub(self.n_rows) as f32 * self.default_row_px
-        })
+        self.rows.offset(row)
     }
 
-    /// column whose span contains `x`; clamps negatives to column 0.
     pub fn col_at_x(&self, x: f32) -> ColId {
-        let last_edge = self.col_x.last().copied().unwrap_or(0.0);
-        if x < last_edge {
-            let idx = self.col_x.partition_point(|&edge| edge <= x);
-            idx.saturating_sub(1) as ColId
-        } else if self.default_col_px == 0.0 {
-            self.n_cols
-        } else {
-            let extra = ((x - last_edge) / self.default_col_px).max(0.0) as ColId;
-            self.n_cols + extra
-        }
+        self.columns.at(x)
     }
 
-    /// row whose span contains `y`; clamps negatives to row 0.
     pub fn row_at_y(&self, y: f32) -> RowId {
-        let last_edge = self.row_y.last().copied().unwrap_or(0.0);
-        if y < last_edge {
-            let idx = self.row_y.partition_point(|&edge| edge <= y);
-            idx.saturating_sub(1) as RowId
-        } else {
-            let extra = ((y - last_edge) / self.default_row_px).max(0.0) as RowId;
-            self.n_rows + extra
-        }
+        self.rows.at(y)
     }
 
-    /// half-open (row, col) ranges of cells intersecting the viewport.
-    pub fn viewport_range(&self, vp: &Viewport) -> (Range<RowId>, Range<ColId>) {
-        let r0 = self.row_at_y(vp.y);
-        let r1 = self.row_at_y(vp.y + vp.height);
-        let c0 = self.col_at_x(vp.x);
-        let c1 = self.col_at_x(vp.x + vp.width);
-        (r0..r1 + 1, c0..c1 + 1)
+    /// last row with a nonzero height; hidden trailing rows end the grid early.
+    pub fn last_row_with_height(&self) -> Option<RowId> {
+        self.rows.last_sized()
     }
+
+    /// last column with a nonzero width; hidden trailing columns end the grid early.
+    pub fn last_col_with_width(&self) -> Option<ColId> {
+        self.columns.last_sized()
+    }
+
+    /// half-open (row, col) ranges of cells intersecting the viewport, ending at
+    /// the last track with extent.
+    pub fn viewport_range(&self, vp: &Viewport) -> (Range<RowId>, Range<ColId>) {
+        let bottom = self.row_y(MAX_ROWS);
+        let right = self.col_x(MAX_COLS);
+        let rows = match self.last_row_with_height() {
+            Some(last) if bottom - vp.y > 0.0 => {
+                let r0 = self.row_at_y(vp.y).min(last);
+                let r1 = self.row_at_y((vp.y + vp.height).min(bottom)).min(last);
+                r0..r1 + 1
+            }
+            _ => MAX_ROWS..MAX_ROWS,
+        };
+        let cols = match self.last_col_with_width() {
+            Some(last) if right - vp.x > 0.0 => {
+                let c0 = self.col_at_x(vp.x).min(last);
+                let c1 = self.col_at_x((vp.x + vp.width).min(right)).min(last);
+                c0..c1 + 1
+            }
+            _ => MAX_COLS..MAX_COLS,
+        };
+        (rows, cols)
+    }
+}
+
+fn row_size(
+    sheet: &Sheet,
+    row: RowId,
+    fitted: Option<f64>,
+    scale: Option<f64>,
+    default_pt: f64,
+) -> Option<f32> {
+    if sheet.format.zero_height {
+        return Some(if sheet.row_hidden(row) {
+            0.0
+        } else {
+            row_pt_to_px(sheet.row_heights.get(&row).copied().unwrap_or(default_pt))
+        });
+    }
+    sheet
+        .row_heights
+        .get(&row)
+        .copied()
+        .map(|height| scale.map_or(height, |scale| floor_pt(height * scale)))
+        .or(fitted)
+        .map(|height| {
+            if sheet.row_hidden(row) {
+                0.0
+            } else {
+                row_pt_to_px(height)
+            }
+        })
 }
 
 #[cfg(test)]
@@ -368,11 +890,121 @@ mod tests {
         Stylesheet::default()
     }
 
+    #[test]
+    fn row_default_fonts_fit_without_materializing_cells() {
+        let mut sheet = Sheet::new("Rows");
+        sheet.row_styles.insert(4, 1);
+        let mut styles = Stylesheet::default();
+        styles.fonts = vec![
+            Font::default(),
+            Font {
+                size_pt: Some(32.0),
+                ..Default::default()
+            },
+        ];
+        styles.cell_xfs = vec![
+            Xf::default(),
+            Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ];
+        let mut grid = GridGeometry::new(&sheet, &styles);
+        assert!(
+            (grid.row_y(5) - grid.row_y(4) - row_pt_to_px(autofit_row_height_pt(32.0))).abs()
+                < 0.001
+        );
+        assert_eq!(sheet.iter_cells().count(), 0);
+        sheet.row_styles.remove(&4);
+        grid.update_rows(&sheet, &styles, [4]);
+        assert_eq!(grid.row_y(5), GridGeometry::new(&sheet, &styles).row_y(5));
+        sheet.row_styles.insert(4, 1);
+        sheet.format.zero_height = true;
+        assert_eq!(
+            GridGeometry::new(&sheet, &styles).row_y(5),
+            row_pt_to_px(DEFAULT_ROW_HEIGHT_PT)
+        );
+    }
+
     fn sheet_with(cols: &[(ColId, f64)], rows: &[(RowId, f64)]) -> Sheet {
         let mut s = Sheet::new("S");
         s.col_widths = cols.iter().copied().collect::<BTreeMap<_, _>>();
         s.row_heights = rows.iter().copied().collect::<BTreeMap<_, _>>();
         s
+    }
+
+    #[test]
+    fn inverse_lookup_matches_fractional_offsets_in_default_tails() {
+        let sheet = sheet_with(&[(0, 13.25)], &[(0, 25.25)]);
+        let grid = GridGeometry::new(&sheet, &styles());
+        for row in [1, 10, 1_000, 100_000, xlsx_model::MAX_ROWS - 1] {
+            assert_eq!(grid.row_at_y(grid.row_y(row)), row);
+        }
+        for col in 1..xlsx_model::MAX_COLS {
+            assert_eq!(grid.col_at_x(grid.col_x(col)), col);
+        }
+    }
+
+    #[test]
+    fn fractional_defaults_round_trip_published_boundaries() {
+        for default_pt in [15.25, 15.5, 12.75, 17.1] {
+            let mut sheet = sheet_with(&[(0, 13.25)], &[(0, 25.25)]);
+            sheet.format.custom_height = true;
+            sheet.format.default_row_height_pt = Some(default_pt);
+            let grid = GridGeometry::new(&sheet, &styles());
+            for row in (0..1_024).chain([100_000, xlsx_model::MAX_ROWS - 1]) {
+                assert_eq!(grid.row_at_y(grid.row_y(row)), row, "default {default_pt}");
+            }
+            let grid = GridGeometry::with_sizes(
+                &sheet,
+                &styles(),
+                row_pt_to_px(default_pt),
+                default_pt,
+                NormalFace::from_styles(&styles()),
+                col_chars_to_px,
+            );
+            for col in 0..xlsx_model::MAX_COLS {
+                assert_eq!(grid.col_at_x(grid.col_x(col)), col, "default {default_pt}");
+            }
+        }
+    }
+
+    #[test]
+    fn dense_sizes_use_one_compact_allocation() {
+        for rows in [100_000, xlsx_model::MAX_ROWS] {
+            let values: Vec<_> = (0..rows).map(|row| (row, 18.0)).collect();
+            let sizes = Sizes::from_values(xlsx_model::MAX_ROWS, 20.0, &values);
+            let bytes = sizes.chunks.capacity() * std::mem::size_of::<SizeChunk>();
+            assert!(bytes <= rows as usize * 5, "allocated {bytes} bytes");
+            assert_eq!(sizes.offset(rows), rows as f32 * 18.0);
+        }
+        let sizes = Sizes::from_values(xlsx_model::MAX_ROWS, 20.0, &[]);
+        assert_eq!(sizes.chunks.capacity(), 0);
+    }
+
+    #[test]
+    fn size_updates_preserve_chunk_sums_and_explicit_bounds() {
+        let mut sizes = Sizes::from_values(xlsx_model::MAX_ROWS, 0.0, &[(0, 3.0)]);
+        for row in [255, 256, 100_000, xlsx_model::MAX_ROWS - 1] {
+            sizes.set(row, Some(7.0));
+            assert_eq!(sizes.end, row + 1);
+            assert_eq!(sizes.at(sizes.offset(row)), row);
+        }
+        assert_eq!(sizes.offset(xlsx_model::MAX_ROWS), 31.0);
+        sizes.set(256, Some(0.0));
+        assert_eq!(sizes.offset(xlsx_model::MAX_ROWS), 24.0);
+        for (row, end) in [
+            (xlsx_model::MAX_ROWS - 1, 100_001),
+            (100_000, 257),
+            (256, 256),
+            (255, 1),
+            (0, 0),
+        ] {
+            sizes.set(row, None);
+            assert_eq!(sizes.end, end);
+            assert_eq!(sizes.at(sizes.offset(end)), end);
+        }
+        assert_eq!(sizes.offset(xlsx_model::MAX_ROWS), 0.0);
     }
 
     #[test]
@@ -461,6 +1093,86 @@ mod tests {
     }
 
     #[test]
+    fn an_unstyled_row_fits_the_normal_size_not_eleven_points() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Font::default()
+        });
+        styles.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("S");
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::new(&sheet, &styles);
+        assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(10.0))).abs() < 0.001);
+        assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(11.0))).abs() > 1.0);
+    }
+
+    #[test]
+    fn printing_ignores_a_non_finite_metric_font_size() {
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: f32::INFINITY,
+            font_family: "Calibri".into(),
+            font_ascent: 14.0,
+            font_descent: 4.0,
+        };
+        let mut sheet = Sheet::new("S");
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                value: xlsx_model::value::CellValue::Number { value: 1.0 },
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::for_print(&sheet, &Stylesheet::default(), &metrics);
+        assert!(grid.row_y(1).is_finite());
+        assert!(
+            (grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(DEFAULT_FONT_SIZE_PT))).abs()
+                < 0.001
+        );
+    }
+
+    #[test]
+    fn printing_fits_an_unstyled_row_to_the_metrics_the_text_falls_back_to() {
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: 16.0,
+            font_family: "Arial".into(),
+            font_ascent: 14.0,
+            font_descent: 4.0,
+        };
+        let mut sheet = Sheet::new("S");
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                value: xlsx_model::value::CellValue::Number { value: 1.0 },
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::for_print(&sheet, &Stylesheet::default(), &metrics);
+        assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(16.0))).abs() < 0.001);
+    }
+
+    #[test]
     fn the_normal_face_comes_from_the_first_cell_format_not_the_font_table() {
         let mut styles = Stylesheet::default();
         styles.fonts.push(Font {
@@ -512,6 +1224,98 @@ mod tests {
         sheet.format.default_row_height_pt = Some(20.0);
         let grid = GridGeometry::new(&sheet, &styles);
         assert!((grid.row_y(1) - row_pt_to_px(63.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn zero_height_content_rows_use_default_height_and_hit_testing() {
+        let parts = vec![
+            (
+                "xl/workbook.xml".into(),
+                br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels".into(),
+                br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "xl/worksheets/sheet1.xml".into(),
+                br#"<worksheet><sheetFormatPr defaultRowHeight="12.75" zeroHeight="1"/><sheetData><row r="1" ht="15"/><row r="2"><c r="A2" t="inlineStr"><is><t>visible</t></is></c></row><row r="4" hidden="1"/><row r="5"/></sheetData></worksheet>"#.to_vec(),
+            ),
+        ];
+        let workbook = xlsx_parse::parse_workbook(&parts).unwrap();
+        let sheet = &workbook.sheets[0];
+        let mut grid = GridGeometry::new(sheet, &workbook.styles);
+        assert_eq!(grid.row_y(1), 20.0);
+        assert_eq!(grid.row_y(2) - grid.row_y(1), 17.0);
+        assert_eq!(grid.row_y(3) - grid.row_y(2), 0.0);
+        assert_eq!(grid.row_y(4) - grid.row_y(3), 0.0);
+        assert_eq!(grid.row_y(5) - grid.row_y(4), 0.0);
+        assert_eq!(grid.row_at_y(21.0), 1);
+        grid.update_rows(sheet, &workbook.styles, [1, 2, 3, 4]);
+        assert_eq!(grid.row_y(2), 37.0);
+        assert_eq!(grid.row_y(5), 37.0);
+    }
+
+    #[test]
+    fn zero_height_geometry_tracks_style_only_cells_and_row_styles() {
+        let styles = Stylesheet::default();
+        let mut sheet = Sheet::new("Rows");
+        sheet.format.zero_height = true;
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::Cell {
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        sheet.row_styles.insert(1, 0);
+        sheet.row_heights.insert(2, 0.0);
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            xlsx_model::Cell {
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        let mut grid = GridGeometry::new(&sheet, &styles);
+        assert_eq!(grid.row_y(1), 17.0);
+        assert_eq!(grid.row_y(2), 34.0);
+        assert_eq!(grid.row_y(3), 34.0);
+        sheet.set_cell(CellRef::new(0, 0), Default::default());
+        sheet.row_styles.clear();
+        grid.update_rows(&sheet, &styles, [0, 1]);
+        assert_eq!(grid.row_y(3), 0.0);
+        sheet.row_styles.insert(3, 0);
+        grid.update_rows(&sheet, &styles, [3]);
+        assert_eq!(grid.row_y(4), 17.0);
+        assert_eq!(grid.row_at_y(1.0), 3);
+    }
+
+    #[test]
+    fn zero_height_collapses_only_the_unsized_rows() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            size_pt: Some(30.0),
+            ..Font::default()
+        });
+        styles.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        let mut sheet = sheet_with(&[], &[(1, 24.0)]);
+        sheet.format.zero_height = true;
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::new(&sheet, &styles);
+        assert_eq!(grid.row_y(1), row_pt_to_px(DEFAULT_ROW_HEIGHT_PT));
+        assert!((grid.row_y(2) - grid.row_y(1) - row_pt_to_px(24.0)).abs() < 0.001);
+        assert_eq!(grid.row_y(3), grid.row_y(2));
     }
 
     #[test]
@@ -579,6 +1383,7 @@ mod tests {
             &styles(),
             0.0,
             DEFAULT_ROW_HEIGHT_PT,
+            NormalFace::from_styles(&styles()),
             col_chars_to_px,
         );
         let first_width = col_chars_to_px(12.0);
@@ -601,7 +1406,103 @@ mod tests {
                 height: 20.0,
             })
             .1,
-            1..6
+            1..4
+        );
+    }
+
+    #[test]
+    fn last_sized_tracks_mutations() {
+        const LIMIT: u32 = 4 * SIZE_CHUNK_LEN as u32;
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for default in [0.0_f32, 20.0] {
+            for round in 0..48 {
+                let mut values = BTreeMap::new();
+                for _ in 0..next() % 12 {
+                    let index = next() % LIMIT;
+                    values.insert(index, if next() % 3 == 0 { 0.0 } else { 7.0 });
+                }
+                if round % 2 == 0 {
+                    for index in next() % LIMIT..LIMIT {
+                        values.insert(index, 0.0);
+                    }
+                }
+                let pairs: Vec<_> = values.iter().map(|(&index, &size)| (index, size)).collect();
+                let mut sizes = Sizes::from_values(LIMIT, default, &pairs);
+                let mut model: Vec<_> = (0..LIMIT)
+                    .map(|index| values.get(&index).copied())
+                    .collect();
+                let expected = |model: &[Option<f32>]| {
+                    model
+                        .iter()
+                        .rposition(|size| size.unwrap_or(default) > 0.0)
+                        .map(|index| index as u32)
+                };
+                assert_eq!(sizes.last_sized(), expected(&model), "round {round}");
+                for step in 0..32 {
+                    let index = if next() % 2 == 0 {
+                        next() % LIMIT
+                    } else {
+                        (expected(&model).unwrap_or(0) + next() % 5)
+                            .saturating_sub(2)
+                            .min(LIMIT - 1)
+                    };
+                    let size = match next() % 3 {
+                        0 => None,
+                        1 => Some(0.0),
+                        _ => Some(5.0),
+                    };
+                    sizes.set(index, size);
+                    model[index as usize] = size;
+                    assert_eq!(
+                        sizes.last_sized(),
+                        expected(&model),
+                        "default {default} round {round} step {step}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn viewport_range_ends_at_the_last_track_with_extent() {
+        let mut sheet = Sheet::new("S");
+        for col in 8..MAX_COLS {
+            sheet.col_widths.insert(col, 0.0);
+        }
+        for row in 20..MAX_ROWS {
+            sheet.row_heights.insert(row, 0.0);
+        }
+        let g = GridGeometry::new(&sheet, &styles());
+        let right = g.col_x(MAX_COLS);
+        let bottom = g.row_y(MAX_ROWS);
+        let screen = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1600.0,
+            height: 1000.0,
+        };
+        assert_eq!(g.viewport_range(&screen), (0..20, 0..8));
+        let corner = Viewport {
+            x: right - 1.0,
+            y: bottom - 1.0,
+            width: 500.0,
+            height: 500.0,
+        };
+        assert_eq!(g.viewport_range(&corner), (19..20, 7..8));
+        let beyond = Viewport {
+            x: right,
+            y: bottom,
+            ..screen
+        };
+        assert_eq!(
+            g.viewport_range(&beyond),
+            (MAX_ROWS..MAX_ROWS, MAX_COLS..MAX_COLS)
         );
     }
 }

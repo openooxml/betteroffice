@@ -60,9 +60,21 @@ impl AxisMap {
 
     /// Current spans of a source span, in order; gaps stay split.
     pub fn current_ranges(&self, source: Range<u32>) -> Vec<Range<u32>> {
+        Self::ranges(&self.segments, source)
+    }
+
+    pub(crate) fn current_ranges_bounded(&self, source: Range<u32>) -> Vec<Range<u32>> {
+        let first = self
+            .segments
+            .partition_point(|segment| segment.source + segment.len <= source.start);
+        let count = self.segments[first..].partition_point(|segment| segment.source < source.end);
+        Self::ranges(&self.segments[first..first + count], source)
+    }
+
+    fn ranges(segments: &[Segment], source: Range<u32>) -> Vec<Range<u32>> {
         let mut ranges: Vec<Range<u32>> = Vec::new();
         let mut cursor = source.start;
-        for segment in &self.segments {
+        for segment in segments {
             let start = segment.source.max(source.start);
             let end = (segment.source + segment.len).min(source.end);
             if start >= end {
@@ -258,5 +270,30 @@ mod tests {
         map.insert(4, 3);
         assert_eq!(map.current_ranges(0..10), vec![0..4, 7..13]);
         assert_eq!(map.current_ranges(20..20), Vec::<Range<u32>>::new());
+    }
+
+    #[test]
+    fn bounded_current_ranges_match_full_scan_after_axis_edits() {
+        let mut map = AxisMap::identity(100);
+        let mut maps = vec![map.clone()];
+        map.insert(4, 3);
+        maps.push(map.clone());
+        map.delete(20, 2);
+        maps.push(map.clone());
+        map.insert(20, 2);
+        maps.push(map.clone());
+        map.delete(4, 3);
+        maps.push(map.clone());
+        for map in maps {
+            for start in 0..=105 {
+                for end in 0..=105 {
+                    assert_eq!(
+                        map.current_ranges_bounded(start..end),
+                        map.current_ranges(start..end),
+                        "{start}..{end}, {map:?}"
+                    );
+                }
+            }
+        }
     }
 }

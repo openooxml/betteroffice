@@ -29,15 +29,19 @@ concurrency:
 jobs:
   prepare:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
+      runner-image: ${{ steps.runner.outputs.image }}
       formats: ${{ steps.plan.outputs.formats }}
+      roundtrip-builds: ${{ steps.plan.outputs.roundtrip-builds }}
+      roundtrip-shards: ${{ steps.plan.outputs.roundtrip-shards }}
       docx-shards: ${{ steps.plan.outputs.docx-shards }}
       docx-published-source: ${{ steps.plan.outputs.docx-published-source }}
       pptx-published-source: ${{ steps.plan.outputs.pptx-published-source }}
       xlsx-shards: ${{ steps.plan.outputs.xlsx-shards }}
+      xlsx-fidelity-shards: ${{ steps.plan.outputs.xlsx-fidelity-shards }}
       xlsx-published-source: ${{ steps.plan.outputs.xlsx-published-source }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -57,6 +61,10 @@ jobs:
           test "$source_sha" = "$remote_sha"
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
+      - name: Record the runner image
+        id: runner
+        run: echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24"
@@ -71,11 +79,18 @@ jobs:
           node --input-type=module - <<'JS'
           import { appendFile, readFile } from 'node:fs/promises';
           import { docxShards } from './scripts/office-quality/docx-benchmark.mjs';
+          import { roundtripShards } from './scripts/office-quality/roundtrip.mjs';
+          import { xlsxFidelityShards } from './scripts/office-quality/xlsx-fidelity.mjs';
           import { xlsxShards } from './scripts/office-quality/xlsx-benchmark.mjs';
           const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
+          const builds = plan.formats.flatMap(format => ['published', 'commit'].map(channel =>
+            ({ format, channel, source: channel === 'commit' ? plan.source_sha : plan[`${format}_published_source_sha`] })));
+          await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-shards=${JSON.stringify(roundtripShards(plan).map(({ format, shard }) => ({ format, shard })))}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-builds=${JSON.stringify(builds)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `formats=${JSON.stringify(plan.formats)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-shards=${JSON.stringify(docxShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-published-source=${plan.docx_published_source_sha ?? ''}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `xlsx-fidelity-shards=${JSON.stringify(xlsxFidelityShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `xlsx-shards=${JSON.stringify(xlsxShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `xlsx-published-source=${plan.xlsx_published_source_sha ?? ''}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `pptx-published-source=${plan.pptx_published_source_sha ?? ''}\n`);
@@ -97,6 +112,15 @@ jobs:
       matrix:
         format: ${{ fromJSON(needs.prepare.outputs.formats) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -119,7 +143,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.3"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -144,6 +168,7 @@ jobs:
           tool: wasm-pack@0.15.0
 
       - name: Build the format renderer and install comparison tools
+        timeout-minutes: 30
         env:
           QUALITY_FORMAT: ${{ matrix.format }}
         run: |
@@ -252,7 +277,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: matrix.channel == 'commit'
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.3"
 
       - name: Freeze the shared native font bundle
         if: matrix.channel == 'commit'
@@ -267,6 +292,54 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  docx-large-synthetic:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/docx-large-synthetic
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.branch }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docx-large-synthetic
+          workspaces: . -> target/docx-large-synthetic
+
+      - name: Compile the synthetic DOCX benchmark
+        run: cargo test --locked --release -p betteroffice-docx-edit --test large_document_scaling --no-run --message-format=json > "${RUNNER_TEMP}/docx-large-synthetic-build.jsonl"
+
+      - name: Measure synthetic DOCX pagination and peak process memory
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import resource
+          import subprocess
+          from pathlib import Path
+
+          messages = (Path(os.environ['RUNNER_TEMP']) / 'docx-large-synthetic-build.jsonl').read_text().splitlines()
+          executables = [message['executable'] for line in messages
+                         if (message := json.loads(line)).get('reason') == 'compiler-artifact'
+                         and message['target']['name'] == 'large_document_scaling'
+                         and message.get('executable')]
+          if len(executables) != 1:
+              raise SystemExit('Expected one synthetic DOCX test executable')
+          result = subprocess.run([executables[0], '--ignored', '--nocapture'])
+          peak_rss_kib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+          ceiling_kib = 2 * 1024 * 1024
+          print(f'peak_rss_kib={peak_rss_kib} ceiling_kib={ceiling_kib}', flush=True)
+          if result.returncode:
+              raise SystemExit(result.returncode)
+          if peak_rss_kib > ceiling_kib:
+              raise SystemExit('Synthetic DOCX process exceeded the 2 GiB memory ceiling')
+          PY
+
   docx-benchmark:
     needs: [prepare, native-build]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
@@ -279,6 +352,15 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.docx-shards) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -313,6 +395,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
         run: |
           bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
@@ -415,6 +498,15 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -438,6 +530,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
         run: |
           bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
@@ -519,6 +612,15 @@ jobs:
     env:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -543,8 +645,9 @@ jobs:
           python-version: "3.13"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.3"
       - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
         run: |
           bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
@@ -581,14 +684,213 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  xlsx-fidelity:
+    needs: prepare
+    if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SOFFICE: /opt/libreoffice26.2/program/soffice
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.xlsx-fidelity-shards) }}
+    steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.4.3"
+      - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
+        run: |
+          bash scripts/office-quality/install-libreoffice.sh
+          python -m pip install -r scripts/office-quality/requirements.txt
+          bun scripts/office-quality/native-fonts.ts "${RUNNER_TEMP}/native-fonts"
+      - name: Download verified workbooks and Excel range references
+        env:
+          QUALITY_SHARD: ${{ matrix.shard }}
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-fidelity
+          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
+        run: node scripts/office-quality/xlsx-fidelity.mjs
+      - name: Measure LibreOffice XLSX range fidelity
+        env:
+          QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-fidelity
+          QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
+        run: python scripts/office-quality/xlsx_fidelity.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: xlsx-fidelity-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/xlsx-fidelity/report.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload XLSX LibreOffice diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: xlsx-fidelity-diagnostics-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/xlsx-fidelity/report.json
+            ${{ runner.temp }}/xlsx-fidelity/*/libreoffice/**
+            ${{ runner.temp }}/xlsx-fidelity/*/lo-comparison/score.json
+          compression-level: 0
+          retention-days: 7
+
+  roundtrip-build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.roundtrip-builds) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.source }}
+          path: .source/roundtrip-source
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: roundtrip-${{ matrix.format }}-${{ matrix.channel }}
+          workspaces: . -> target/roundtrip
+      - name: Compile the native edit/save probe
+        env:
+          FORMAT: ${{ matrix.format }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/roundtrip
+        run: node scripts/office-quality/build-roundtrip.mjs "$FORMAT" .source/roundtrip-source "${RUNNER_TEMP}/roundtrip-native"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: roundtrip-native-${{ matrix.format }}-${{ matrix.channel }}
+          path: |
+            ${{ runner.temp }}/roundtrip-native/${{ matrix.format }}-roundtrip-bench
+            ${{ runner.temp }}/roundtrip-native/build.json
+          if-no-files-found: error
+          retention-days: 7
+
+  roundtrip:
+    needs: [prepare, roundtrip-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SOFFICE: /opt/libreoffice26.2/program/soffice
+      LO_PYTHON: /opt/libreoffice26.2/program/python
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards) }}
+    steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: roundtrip-native-${{ matrix.format }}-published
+          path: ${{ runner.temp }}/roundtrip-native/published
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: roundtrip-native-${{ matrix.format }}-commit
+          path: ${{ runner.temp }}/roundtrip-native/commit
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - name: Install the pinned LibreOffice release
+        timeout-minutes: 15
+        run: bash scripts/office-quality/install-libreoffice.sh
+      - name: Download the frozen originals
+        env:
+          QUALITY_FORMAT: ${{ matrix.format }}
+          QUALITY_SHARD: ${{ matrix.shard }}
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_OUTPUT: ${{ runner.temp }}/roundtrip
+          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
+        run: node scripts/office-quality/roundtrip.mjs
+      - name: Measure parsing and preservation after an edit
+        env:
+          FORMAT: ${{ matrix.format }}
+          QUALITY_OUTPUT: ${{ runner.temp }}/roundtrip
+          QUALITY_NATIVE: ${{ runner.temp }}/roundtrip-native
+        run: |
+          chmod +x "${QUALITY_NATIVE}/published/${FORMAT}-roundtrip-bench" "${QUALITY_NATIVE}/commit/${FORMAT}-roundtrip-bench"
+          python scripts/office-quality/roundtrip.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: roundtrip-report-${{ matrix.format }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/roundtrip/report.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload edit/save diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: roundtrip-diagnostics-${{ matrix.format }}-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/roundtrip/report.json
+            ${{ runner.temp }}/roundtrip/*/probe.json
+            ${{ runner.temp }}/roundtrip/*/published/*
+            ${{ runner.temp }}/roundtrip/*/commit/*
+            ${{ runner.temp }}/roundtrip/*/libreoffice/source.*
+            ${{ runner.temp }}/roundtrip/*/libreoffice/*.json
+            ${{ runner.temp }}/roundtrip/*/libreoffice/*.log
+          compression-level: 0
+          retention-days: 7
+
   publish:
-    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark]
+    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' &&
-      needs.prepare.result == 'success' && needs.measure.result == 'success' &&
+      needs.prepare.result == 'success' && needs.measure.result == 'success' && needs.roundtrip.result == 'success' &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success') &&
       (needs.prepare.outputs.xlsx-shards == '[]' || needs.xlsx-benchmark.result == 'success') &&
-      (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success')
+      (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success') &&
+      (!contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') || needs.xlsx-fidelity.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -665,6 +967,17 @@ jobs:
           name: pptx-benchmark-report
           path: ${{ runner.temp }}/fidelity-parts/pptx-benchmark-report
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
+        with:
+          pattern: xlsx-fidelity-report-*
+          path: ${{ runner.temp }}/fidelity-parts
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: roundtrip-report-*
+          path: ${{ runner.temp }}/fidelity-parts
+
       - name: Reconcile the format reports
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
@@ -674,6 +987,8 @@ jobs:
           QUALITY_REQUIRE_DOCX_BENCHMARK: 'true'
           QUALITY_REQUIRE_PPTX_BENCHMARK: 'true'
           QUALITY_REQUIRE_XLSX_BENCHMARK: 'true'
+          QUALITY_REQUIRE_XLSX_FIDELITY: 'true'
+          QUALITY_REQUIRE_ROUNDTRIP: 'true'
         run: |
           node scripts/office-quality/merge.mjs
           cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
@@ -690,7 +1005,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
         with:
-          bun-version: "1.3.14"
+          bun-version: "1.4.3"
 
       - name: Publish the reconciled commit renders
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'

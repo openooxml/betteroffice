@@ -28,9 +28,7 @@ describe('useImageActions', () => {
       useImageActions({
         document: probe,
         pmImageContext: null,
-        displayListQueries: null,
-        pagedEditorRef: { current: null },
-        focusActiveEditor: () => {},
+        applyGeometry: () => {},
         pushDocument: (doc) => {
           pushed.push(doc);
         },
@@ -46,5 +44,30 @@ describe('useImageActions', () => {
       ...notes,
       headerReferences: [{ type: 'default', rId: 'rId3' }],
     });
+  });
+
+  test('image properties replace the imported outline colour with the dialog border', () => {
+    const patches: Record<string, unknown>[] = [];
+    const { result } = renderHook(() =>
+      useImageActions({
+        document: probe,
+        pmImageContext: { pos: 1 },
+        applyGeometry: (patch) => {
+          patches.push({ ...patch });
+        },
+        pushDocument: () => {},
+      })
+    );
+    act(() =>
+      result.current.handleApplyImageProperties({
+        borderWidth: 2,
+        borderColor: '#0000FF',
+        borderStyle: 'solid',
+      })
+    );
+    act(() => result.current.handleApplyImageProperties({}));
+    expect(patches).toHaveLength(2);
+    expect(patches[0]).toMatchObject({ borderColor: '#0000FF', borderColorValue: null });
+    expect(patches[1]).toMatchObject({ borderWidth: null, borderColorValue: null });
   });
 });

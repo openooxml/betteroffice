@@ -46,6 +46,9 @@ pub struct TextStyle {
     pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
+    /// `a:rPr@kern`: the smallest size, in points, the run is kerned at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kern_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<TextCaps>,
 }
@@ -76,6 +79,8 @@ pub struct TextRunSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSnapshot {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_xml: Option<String>,
     pub alignment: Option<String>,
     pub level: u32,
     pub bullet_json: Option<String>,
@@ -120,6 +125,10 @@ pub struct ShapeSnapshot {
     pub rotation_deg: f64,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// The geometry the shape draws at, present only while it has none of
+    /// its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<InheritedGeometry>,
     /// Hides this shape and its descendants.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
@@ -139,6 +148,19 @@ pub struct ShapeSnapshot {
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,
+}
+
+/// The transform a placeholder takes from its layout or master.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InheritedGeometry {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub rotation_deg: f64,
+    pub flip_h: bool,
+    pub flip_v: bool,
 }
 
 /// Image data shared by editing peers.
@@ -410,4 +432,21 @@ fn legal_xml_character(character: char) -> bool {
         || ('\u{20}'..='\u{d7ff}').contains(&character)
         || ('\u{e000}'..='\u{fffd}').contains(&character)
         || ('\u{10000}'..='\u{10ffff}').contains(&character)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextParagraphDraft {
+    pub alignment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet: Option<bool>,
+    pub runs: Vec<TextRunDraft>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextRunDraft {
+    pub text: String,
+    #[serde(default)]
+    pub style: TextStyle,
 }

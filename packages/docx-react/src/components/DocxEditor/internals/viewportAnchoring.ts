@@ -63,9 +63,15 @@ export function computeViewportAnchoredScrollTop(
   return Math.min(Math.max(0, requested), Math.max(0, maxScrollTop));
 }
 
+/**
+ * A read-only editor's layout passes never move its caret, so only a
+ * selection change reveals it there: scrolling back to it on every frame
+ * would undo the host's and the reader's navigation.
+ */
 export function shouldScrollCaretIntoView(
   layoutUpdateOrigin: LayoutUpdateOrigin,
-  selectionChanged: boolean
+  selectionChanged: boolean,
+  readOnly = false
 ): boolean {
-  return layoutUpdateOrigin === 'local' || selectionChanged;
+  return (layoutUpdateOrigin === 'local' && !readOnly) || selectionChanged;
 }

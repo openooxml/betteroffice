@@ -1,5 +1,5 @@
 ---
-'@betteroffice/vsdx-react': patch
+'@betteroffice/vsdx-react': minor
 ---
 
-Bind rows of an imported table onto a shape's data. Columns match shape-data rows by header, each bind is one undo entry through the engine's `setShapeData`, and a row the engine refuses — a date, duration or currency row, or a non-numeric value in a number row — leaves the whole bind unwritten and reports which row refused.
+Adds `DataBindingPanel`, `matchColumnsToRows` and `bindRowToShape`, which write an imported table row onto a shape's data rows by column header in one undo step. A row the engine refuses leaves the shape unchanged and is named back. Opt-in; the host supplies the table.

@@ -7,8 +7,9 @@ use std::io::Write;
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, ImageMap, ImageScope, MAX_IMAGE_BYTES, MAX_PAGE_DIM, MAX_PAGE_IMAGE_PIXELS,
-    MAX_PAGE_PIXELS, RenderResources, render_page, render_png, scoped_image_key,
+    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, MAX_IMAGE_BYTES, MAX_PAGE_DIM,
+    MAX_PAGE_IMAGE_PIXELS, MAX_PAGE_PIXELS, RenderResources, render_page, render_page_cached,
+    render_png, scoped_image_key,
 };
 use ooxml_text::FontStore;
 use serde_json::{Value, json};
@@ -626,6 +627,35 @@ fn an_oversized_data_url_is_refused_before_its_base64_is_decoded() {
     assert!(
         allocated < MIB,
         "an oversized data URL allocated {allocated} bytes decoding base64 on a 1x1 page"
+    );
+}
+
+/// A decoded image one page leaves in a shared cache is free for the next
+/// page: resolving it again allocates nothing near what one decode spends.
+#[test]
+fn a_shared_image_cache_decodes_once_across_pages() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdBig"),
+        solid_png(256, 256),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = |y: u32| {
+        serde_json::from_value::<DisplayList>(json!({
+            "pages": [{"pageIndex": 0, "width": 64.0, "height": 64.0,
+                "primitives": [{"kind":"image","relId":"rIdBig","x":0,"y":y,"w":64,"h":64}]}]
+        }))
+        .expect("display list")
+    };
+    let mut glyphs = GlyphCache::default();
+    let mut cache = ImageCache::default();
+    render_page_cached(&scene(0), 0, &resources, &mut glyphs, &mut cache).expect("page one");
+    let ((), replay) = allocated_by(|| {
+        render_page_cached(&scene(8), 0, &resources, &mut glyphs, &mut cache).expect("page two");
+    });
+    assert!(
+        replay < 64 * 1024,
+        "a warm second page allocated {replay} bytes"
     );
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/docx",
-  "version": "0.2.1",
+  "version": "0.4.3",
   "sideEffects": [
     "**/residentEngineWorker.*"
   ],
@@ -116,6 +116,10 @@
     "./editor": {
       "types": "./dist/editor/index.d.mts",
       "import": "./dist/editor/index.mjs"
+    },
+    "./peerless": {
+      "types": "./dist/peerless.d.mts",
+      "import": "./dist/peerless.mjs"
     }
   },
   "typesVersions": {
@@ -197,6 +201,9 @@
       ],
       "editor": [
         "./dist/editor/index.d.mts"
+      ],
+      "peerless": [
+        "./dist/peerless.d.mts"
       ]
     }
   },

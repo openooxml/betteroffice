@@ -5,11 +5,14 @@ pub mod chart;
 pub mod display_list;
 pub mod geometry;
 pub mod hit;
+pub mod number_format;
 pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
+pub use xlsx_model::PatternType;
 
+use hashbrown::HashMap;
 use ooxml_drawingml::chart::ChartSpace;
 use std::collections::BTreeMap;
 use std::ops::{Range, RangeInclusive};
@@ -17,9 +20,9 @@ use std::ops::{Range, RangeInclusive};
 use serde::{Deserialize, Serialize};
 
 use xlsx_model::numfmt::{builtin_format_code, format_value};
-use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet};
+use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
-use xlsx_model::workbook::{Hyperlink, Sheet};
+use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
     CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
 };
@@ -30,10 +33,11 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, scaled,
+    PathStroke, Rect, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
+pub use number_format::{NumberFormatLayout, paint_number_format};
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
@@ -82,7 +86,7 @@ pub struct GhostEdit {
 
 struct GhostFont {
     size: f32,
-    family: Option<String>,
+    family: Option<Arc<str>>,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -117,6 +121,7 @@ struct AxisSpan {
 impl AxisLayout {
     fn new(
         limit: u32,
+        last_sized: Option<u32>,
         frozen: u32,
         scroll: f32,
         extent: f32,
@@ -143,11 +148,19 @@ impl AxisLayout {
             }
         }
 
-        if frozen < limit && frozen_extent < extent {
+        let sheet_extent = edge(limit);
+        if let Some(last_sized) = last_sized
+            && frozen < limit
+            && frozen_extent < extent
+            && sheet_extent - scroll > frozen_extent
+        {
             let body_extent = extent - frozen_extent;
             let origin = frozen_extent + scroll;
-            let first = at(origin).max(frozen).min(limit - 1);
-            let last = at(origin + body_extent).max(first).min(limit - 1);
+            let end = last_sized.max(frozen);
+            let first = at(origin).max(frozen).min(end);
+            let last = at((origin + body_extent).min(sheet_extent))
+                .max(first)
+                .min(end);
             for index in first..=last {
                 let raw_start = edge(index) - scroll;
                 let raw_end = edge(index + 1) - scroll;
@@ -251,6 +264,246 @@ impl AxisLayout {
     }
 }
 
+fn merge_grid_intervals(
+    axis: &AxisLayout,
+    start: u32,
+    end: u32,
+    edge: impl Fn(u32) -> f32,
+) -> Vec<(f32, f32)> {
+    let split = axis.tracks.partition_point(|track| track.pinned);
+    [&axis.tracks[..split], &axis.tracks[split..]]
+        .into_iter()
+        .filter_map(|tracks| {
+            let first = tracks.first()?;
+            let last = tracks.last()?;
+            if start > last.index || end < first.index {
+                return None;
+            }
+            let scroll = if first.pinned { 0.0 } else { axis.scroll };
+            let lower = (edge(start.max(first.index)) - scroll).max(first.start);
+            let upper = (edge(end.saturating_add(1).min(last.index + 1)) - scroll).min(last.end);
+            (upper > lower).then_some((lower, upper))
+        })
+        .collect()
+}
+
+fn emit_grid_segments(
+    merges: &[CellRange],
+    geometry: &GridGeometry,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+    print: Option<&PrintMetrics>,
+    color: Arc<str>,
+) -> Vec<DrawCmd> {
+    if (rows.tracks.is_empty()
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen))
+        || (cols.tracks.is_empty()
+            && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen))
+    {
+        return Vec::new();
+    }
+    let merges: Vec<_> = merges
+        .iter()
+        .filter(|range| {
+            rows.intersects(range.start.row, range.end.row)
+                && cols.intersects(range.start.col, range.end.col)
+        })
+        .collect();
+    let offset = print.map_or(0.0, |metrics| 48.0 / metrics.dpi);
+    let width = print.map_or(GRIDLINE_WIDTH, |metrics| 96.0 / metrics.dpi);
+    let mut commands = Vec::new();
+    for vertical in [true, false] {
+        let (axis, across) = if vertical { (cols, rows) } else { (rows, cols) };
+        let axis_edge = |index| {
+            if vertical {
+                geometry.col_x(index)
+            } else {
+                geometry.row_y(index)
+            }
+        };
+        let across_edge = |index| {
+            if vertical {
+                geometry.row_y(index)
+            } else {
+                geometry.col_x(index)
+            }
+        };
+        let Some(first) = axis.tracks.first() else {
+            continue;
+        };
+        let boundaries: Vec<_> = std::iter::once((first.index, first.start, first.pinned))
+            .chain(
+                axis.tracks
+                    .iter()
+                    .map(|track| (track.index + 1, track.end, track.pinned)),
+            )
+            .collect();
+        let mut blocked: HashMap<u32, Vec<(f32, f32)>> = HashMap::new();
+        for range in &merges {
+            let (start, end, across_start, across_end) = if vertical {
+                (
+                    range.start.col,
+                    range.end.col,
+                    range.start.row,
+                    range.end.row,
+                )
+            } else {
+                (
+                    range.start.row,
+                    range.end.row,
+                    range.start.col,
+                    range.end.col,
+                )
+            };
+            let intervals = merge_grid_intervals(across, across_start, across_end, across_edge);
+            if intervals.is_empty() {
+                continue;
+            }
+            let first = boundaries.partition_point(|&(index, _, _)| index <= start);
+            let last = boundaries.partition_point(|&(index, _, _)| index <= end);
+            if first >= last {
+                continue;
+            }
+            let lower = axis_edge(start);
+            let upper = axis_edge(end.saturating_add(1));
+            for &(index, position, pinned) in &boundaries[first..last] {
+                let scroll = if pinned { 0.0 } else { axis.scroll };
+                let position = position + offset;
+                let lower = lower - scroll + offset;
+                let upper = upper - scroll + offset;
+                if !(lower < position && position < upper) {
+                    continue;
+                }
+                blocked
+                    .entry(index)
+                    .or_default()
+                    .extend_from_slice(&intervals);
+            }
+        }
+        for intervals in blocked.values_mut() {
+            intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            let mut merged: Vec<(f32, f32)> = Vec::new();
+            for &(lower, upper) in intervals.iter() {
+                if let Some(last) = merged.last_mut()
+                    && lower <= last.1
+                {
+                    last.1 = last.1.max(upper);
+                } else {
+                    merged.push((lower, upper));
+                }
+            }
+            *intervals = merged;
+        }
+        let start = across.tracks.first().map_or(0.0, |track| track.start);
+        let end = across.tracks.last().map_or(0.0, |track| track.end);
+        for (index, position, _) in boundaries {
+            let mut emit = |start: f32, end: f32| {
+                let (x1, y1, x2, y2) = if vertical {
+                    (position, start, position, end)
+                } else {
+                    (start, position, end, position)
+                };
+                commands.push(DrawCmd::Line {
+                    x1: x1 + offset,
+                    y1: y1 + offset,
+                    x2: x2 + offset,
+                    y2: y2 + offset,
+                    width,
+                    color: color.clone(),
+                    style: None,
+                    rail: None,
+                    clip: None,
+                });
+            };
+            let Some(intervals) = blocked.get(&index) else {
+                emit(start, end);
+                continue;
+            };
+            let mut cursor = start;
+            for &(lower, upper) in intervals {
+                if lower >= end {
+                    break;
+                }
+                if upper > cursor {
+                    if lower > cursor {
+                        emit(cursor, lower);
+                    }
+                    cursor = cursor.max(upper);
+                }
+            }
+            if cursor < end {
+                emit(cursor, end);
+            }
+        }
+    }
+    commands
+}
+
+fn viewport_axes(
+    sheet: &Sheet,
+    viewport: &Viewport,
+    geometry: &GridGeometry,
+    print: bool,
+) -> (AxisLayout, AxisLayout, u32, u32) {
+    let (frozen_rows, frozen_cols) = if print {
+        (0, 0)
+    } else {
+        sheet
+            .freeze_pane
+            .map_or((0, 0), |pane| (pane.rows, pane.cols))
+    };
+    let cols_axis = |extent: f32| {
+        AxisLayout::new(
+            MAX_COLS,
+            geometry.last_col_with_width(),
+            frozen_cols,
+            viewport.x,
+            extent,
+            |col| geometry.col_x(col),
+            |x| geometry.col_at_x(x),
+        )
+    };
+    let mut cols = cols_axis(viewport.width);
+    let cols_off_grid = cols.tracks.is_empty()
+        && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen);
+    let mut rows = AxisLayout::new(
+        MAX_ROWS,
+        geometry.last_row_with_height(),
+        frozen_rows,
+        viewport.y,
+        if cols_off_grid { 0.0 } else { viewport.height },
+        |row| geometry.row_y(row),
+        |y| geometry.row_at_y(y),
+    );
+    if rows.tracks.is_empty()
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen)
+    {
+        cols = cols_axis(0.0);
+    }
+    if print {
+        rows.print_extent = Some(viewport.height);
+        cols.print_extent = Some(viewport.width);
+    }
+    (rows, cols, frozen_rows, frozen_cols)
+}
+
+pub fn visible_merged_ranges_with_geometry(
+    sheet: &Sheet,
+    viewport: &Viewport,
+    geometry: &GridGeometry,
+) -> Vec<CellRange> {
+    let (rows, cols, _, _) = viewport_axes(sheet, viewport, geometry, false);
+    sheet
+        .merges
+        .iter()
+        .copied()
+        .filter(|range| {
+            rows.intersects(range.start.row, range.end.row)
+                && cols.intersects(range.start.col, range.end.col)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 struct CellBox {
     x: f32,
@@ -313,6 +566,22 @@ where
     build_frame(wb, sheet, viewport, ghosts, resolver, None)
 }
 
+#[doc(hidden)]
+pub fn build_display_list_with_geometry<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_frame_with_geometry(wb, sheet, viewport, ghosts, resolver, None, Some(geometry))
+}
+
 pub fn build_print_display_list_with_charts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
@@ -340,13 +609,44 @@ fn build_frame<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
-    mut resolver: F,
+    resolver: F,
     print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
+    let geometry = wb.sheet(sheet).map(|sheet| {
+        print.map_or_else(
+            || GridGeometry::new(sheet, &wb.styles),
+            |(metrics, _)| GridGeometry::for_print(sheet, &wb.styles, metrics),
+        )
+    });
+    build_frame_with_geometry(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        resolver,
+        print,
+        geometry.as_ref(),
+    )
+}
+
+fn build_frame_with_geometry<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    mut resolver: F,
+    print: Option<(&PrintMetrics, bool)>,
+    geometry: Option<&GridGeometry>,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    let background_color: Arc<str> = BACKGROUND_COLOR.into();
     let mut commands = Vec::new();
 
     commands.push(DrawCmd::FillRect {
@@ -354,7 +654,7 @@ where
         y: 0.0,
         w: viewport.width,
         h: viewport.height,
-        color: BACKGROUND_COLOR.to_string(),
+        color: background_color.clone(),
         clip: None,
     });
 
@@ -371,38 +671,20 @@ where
 
     let styles = &wb.styles;
     let theme = &styles.theme;
-    let hyperlink_color = theme.slot(10).unwrap_or(HYPERLINK_COLOR);
-    let geom = print.map_or_else(
-        || GridGeometry::new(sheet_ref, styles),
-        |(metrics, _)| GridGeometry::for_print(sheet_ref, styles, metrics),
-    );
-    let (frozen_rows, frozen_cols) = if print.is_some() {
-        (0, 0)
+    let hyperlink_color: Arc<str> = theme.slot(10).unwrap_or(HYPERLINK_COLOR).into();
+    let text_color: Arc<str> = TEXT_COLOR.into();
+    let gridline_color: Arc<str> = if print.is_some() {
+        TEXT_COLOR
     } else {
-        sheet_ref
-            .freeze_pane
-            .map_or((0, 0), |pane| (pane.rows, pane.cols))
-    };
-    let mut rows = AxisLayout::new(
-        MAX_ROWS,
-        frozen_rows,
-        viewport.y,
-        viewport.height,
-        |row| geom.row_y(row),
-        |y| geom.row_at_y(y),
-    );
-    let mut cols = AxisLayout::new(
-        MAX_COLS,
-        frozen_cols,
-        viewport.x,
-        viewport.width,
-        |col| geom.col_x(col),
-        |x| geom.col_at_x(x),
-    );
-    if print.is_some() {
-        rows.print_extent = Some(viewport.height);
-        cols.print_extent = Some(viewport.width);
+        GRIDLINE_COLOR
     }
+    .into();
+    let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
+    let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
+    let mut fx = FrameStyles::new(styles, sheet_ref);
+    let geom = geometry.expect("sheet geometry initialized");
+    let (rows, cols, frozen_rows, frozen_cols) =
+        viewport_axes(sheet_ref, viewport, geom, print.is_some());
 
     let grid = GridMeta {
         start_row: rows.start(),
@@ -458,88 +740,69 @@ where
         .map(|g| (g.row, g.col))
         .collect();
 
-    let mut grid_commands = Vec::new();
-    let grid_offset = print.map_or(0.0, |(m, _)| 48.0 / m.dpi);
-    let row_offsets = rows.offsets();
-    let col_offsets = cols.offsets();
-    let top = row_offsets.first().copied().unwrap_or(0.0);
-    let bottom = row_offsets.last().copied().unwrap_or(0.0);
-    let left = col_offsets.first().copied().unwrap_or(0.0);
-    let right = col_offsets.last().copied().unwrap_or(0.0);
-    for &x in &col_offsets {
-        grid_commands.push(DrawCmd::Line {
-            x1: x + grid_offset,
-            y1: top + grid_offset,
-            x2: x + grid_offset,
-            y2: bottom + grid_offset,
-            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
-            color: if print.is_some() {
-                TEXT_COLOR
-            } else {
-                GRIDLINE_COLOR
-            }
-            .to_string(),
-            style: None,
-            clip: None,
-        });
-    }
-    for &y in &row_offsets {
-        grid_commands.push(DrawCmd::Line {
-            x1: left + grid_offset,
-            y1: y + grid_offset,
-            x2: right + grid_offset,
-            y2: y + grid_offset,
-            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
-            color: if print.is_some() {
-                TEXT_COLOR
-            } else {
-                GRIDLINE_COLOR
-            }
-            .to_string(),
-            style: None,
-            clip: None,
-        });
-    }
+    let grid_commands = if print.is_some_and(|(_, gridlines)| !gridlines) {
+        Vec::new()
+    } else {
+        emit_grid_segments(
+            &sheet_ref.merges,
+            geom,
+            &rows,
+            &cols,
+            print.map(|(metrics, _)| metrics),
+            gridline_color,
+        )
+    };
 
     if let Some((metrics, gridlines)) = print {
         if gridlines {
             commands.extend(grid_commands.iter().cloned());
         }
         for merge in &sheet_ref.merges {
-            if let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, merge.start) {
+            if let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, merge.start) {
                 let inset = 96.0 / metrics.dpi / 2.0;
                 commands.push(DrawCmd::FillRect {
                     x: cell_box.x + inset,
                     y: cell_box.y + inset,
                     w: (cell_box.w - 2.0 * inset).max(0.0),
                     h: (cell_box.h - 2.0 * inset).max(0.0),
-                    color: BACKGROUND_COLOR.to_string(),
+                    color: background_color.clone(),
                     clip: Some(cell_box.clip),
                 });
             }
         }
     }
 
-    for &(at, cell) in &anchors {
-        let Some(style) = cell.style else { continue };
-        let Some(Fill::Solid(color)) = styles.fill_for(style) else {
+    emit_inherited_fills(
+        &mut commands,
+        sheet_ref,
+        &mut fx,
+        &rows,
+        &cols,
+        &merge_index,
+        geom,
+    );
+
+    for &(at, _) in &anchors {
+        let Some(fill) = &fx.xf_at(at).fill else {
             continue;
         };
-        let Some(hex) = styles.resolve_color(color) else {
-            continue;
-        };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let clip = cell_box.clip;
-        commands.push(DrawCmd::FillRect {
-            x: clip.x,
-            y: clip.y,
-            w: clip.w,
-            h: clip.h,
-            color: hex,
-            clip: None,
-        });
+        let origin = (
+            if at.col < cols.frozen {
+                0.0
+            } else {
+                -cols.scroll
+            },
+            if at.row < rows.frozen {
+                0.0
+            } else {
+                -rows.scroll
+            },
+        );
+        commands.push(fill.command(clip, origin));
     }
 
     if print.is_none() {
@@ -570,26 +833,35 @@ where
                 x2,
                 y2,
                 width,
-                color: TEXT_COLOR.to_string(),
+                color: text_color.clone(),
                 style: None,
+                rail: None,
                 clip: None,
             });
         }
     }
 
-    for &(at, cell) in &anchors {
-        let Some(style) = cell.style else { continue };
-        let Some(border) = styles.border_for(style) else {
+    emit_inherited_borders(
+        &mut commands,
+        sheet_ref,
+        &mut fx,
+        &rows,
+        &cols,
+        &merge_index,
+        geom,
+    );
+    for &(at, _) in &anchors {
+        let xf = fx.xf_at(at).clone();
+        let Some(border) = &xf.border else {
             continue;
         };
         emit_borders(
             &mut commands,
-            &geom,
+            geom,
             &rows,
             &cols,
-            sheet_ref,
             &merge_index,
-            styles,
+            &mut fx,
             at,
             border,
         );
@@ -600,34 +872,41 @@ where
             continue;
         }
         let hyperlink = link_index.at(at);
-        let Some((text, color)) = cell_display_text(styles, wb.date_system, cell).or_else(|| {
-            hyperlink
-                .filter(|link| link.range.start == at)
-                .and_then(|link| link.display.clone())
-                .filter(|display| !display.is_empty())
-                .map(|display| (display, hyperlink_color.to_string()))
-        }) else {
+        let xf = &**fx.xf_at(at);
+        let Some((text, color, parts)) = cell_display_text(xf, wb.date_system, cell, &text_color)
+            .or_else(|| {
+                hyperlink
+                    .filter(|link| link.range.start == at)
+                    .and_then(|link| link.display.clone())
+                    .filter(|display| !display.is_empty())
+                    .map(|display| (display.into(), hyperlink_color.clone(), Vec::new()))
+            })
+        else {
             continue;
         };
         let color = if hyperlink.is_some() {
-            hyperlink_color.to_string()
+            hyperlink_color.clone()
         } else {
             color
         };
 
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
-        let font = cell.style.and_then(|s| styles.font_for(s));
+        let font = xf.font.as_ref();
         let size = font
             .and_then(|f| f.size_pt)
             .map(|p| p as f32)
             .unwrap_or_else(|| print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt));
-        let align = resolve_align(styles, cell);
-        let valign = cell
-            .style
-            .and_then(|s| styles.alignment_for(s))
-            .and_then(|a| a.v);
+        let align = resolve_align(xf.h, &cell.value);
+        let valign = xf.v;
+        let bold = font.is_some_and(|f| f.bold);
+        let italic = font.is_some_and(|f| f.italic);
+        let underline = font.is_some_and(|f| f.underline);
+        let strike = font.is_some_and(|f| f.strike);
+        let font_family = font
+            .and_then(|f| f.family.clone())
+            .or_else(|| print_font_family.clone());
 
         let tx = match align {
             Align::Left => cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
@@ -637,18 +916,36 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
+        let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
+            .then(|| NumberFormatLayout {
+                left: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
+                width: (cell_box.w - print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi))
+                    .max(0.0),
+                parts,
+                general: match cell.value {
+                    CellValue::Number { value }
+                        if value.is_finite()
+                            && xlsx_model::numfmt::is_general(&cell.value, &xf.format_code) =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                },
+                overflow: matches!(cell.value, CellValue::Number { .. }),
+            });
         let clip = spill_clip(
-            &geom,
+            geom,
             &cols,
             sheet_ref,
             &link_index,
             &merge_index,
-            styles,
+            &mut fx,
             wb.date_system,
             at,
             cell,
             align,
             cell_box,
+            &text_color,
         );
 
         commands.push(DrawCmd::Text {
@@ -659,15 +956,14 @@ where
             color,
             clip,
             align,
-            bold: font.is_some_and(|f| f.bold),
-            italic: font.is_some_and(|f| f.italic),
-            underline: hyperlink.is_some() || font.is_some_and(|f| f.underline),
-            strike: font.is_some_and(|f| f.strike),
+            bold,
+            italic,
+            underline: hyperlink.is_some() || underline,
+            strike,
             highlight: None,
             dashed_underline: false,
-            font_family: font
-                .and_then(|f| f.name.clone())
-                .or_else(|| print.map(|(m, _)| m.font_family.clone())),
+            font_family,
+            number_format,
             ghost: false,
             chart: false,
         });
@@ -683,16 +979,16 @@ where
         let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let size = print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt);
         commands.push(DrawCmd::Text {
             x: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
             y: text_baseline(cell_box, size, None, print.map(|(m, _)| m)),
-            text: text.clone(),
+            text: text.as_str().into(),
             font_size: size,
-            color: hyperlink_color.to_string(),
+            color: hyperlink_color.clone(),
             clip: cell_box.clip,
             align: Align::Left,
             bold: false,
@@ -701,7 +997,8 @@ where
             strike: false,
             highlight: None,
             dashed_underline: false,
-            font_family: print.map(|(m, _)| m.font_family.clone()),
+            font_family: print_font_family.clone(),
+            number_format: None,
             ghost: false,
             chart: false,
         });
@@ -712,29 +1009,29 @@ where
             continue;
         }
         let at = CellRef::new(ghost.row, ghost.col);
-        let cell = sheet_ref.cell(at);
-        let font = cell.and_then(|c| c.style).and_then(|s| styles.font_for(s));
+        let xf = fx.xf_at(at).clone();
+        let font = xf.font.as_ref();
         let font = GhostFont {
             size: font
                 .and_then(|font| font.size_pt)
                 .map(|size| size as f32)
                 .unwrap_or(FONT_SIZE_PT),
-            family: font.and_then(|font| font.name.clone()),
+            family: font.and_then(|font| font.family.clone()),
             bold: font.is_some_and(|font| font.bold),
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
         };
-        let Some(bx) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(bx) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
-        let align = resolve_align_with_value(styles, cell, &ghost.alignment_value);
+        let align = resolve_align(xf.h, &ghost.alignment_value);
         emit_ghost(&mut commands, ghost, bx, font, align);
     }
 
     let mut charts = Vec::new();
     chart::render_charts(
         sheet_ref,
-        &geom,
+        geom,
         viewport,
         frozen_rows,
         frozen_cols,
@@ -750,8 +1047,9 @@ where
             x2: x,
             y2: viewport.height,
             width: PANE_DIVIDER_WIDTH,
-            color: PANE_DIVIDER_COLOR.to_string(),
+            color: pane_divider_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -762,8 +1060,9 @@ where
             x2: viewport.width,
             y2: y,
             width: PANE_DIVIDER_WIDTH,
-            color: PANE_DIVIDER_COLOR.to_string(),
+            color: pane_divider_color.clone(),
             style: None,
+            rail: None,
             clip: None,
         });
     }
@@ -809,9 +1108,9 @@ fn emit_ghost(
         commands.push(DrawCmd::Text {
             x,
             y,
-            text,
+            text: text.into(),
             font_size: size,
-            color: color.to_string(),
+            color: color.into(),
             clip,
             align,
             bold: font.bold,
@@ -824,10 +1123,11 @@ fn emit_ghost(
                 } else {
                     GHOST_DEL_HIGHLIGHT
                 }
-                .to_string(),
+                .into(),
             ),
             dashed_underline: preview,
             font_family: font.family.clone(),
+            number_format: None,
             ghost: preview,
             chart: false,
         });
@@ -928,6 +1228,187 @@ fn ellipsize(text: &str, budget: f32, size: f32) -> String {
     let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
     let prefix: String = text.chars().take(keep).collect();
     format!("{prefix}…")
+}
+
+fn emit_inherited_fills(
+    commands: &mut Vec<DrawCmd>,
+    sheet: &Sheet,
+    fx: &mut FrameStyles,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+    merges: &MergeIndex,
+    geom: &GridGeometry,
+) {
+    if sheet.col_styles.is_empty() && sheet.row_styles.is_empty() && fx.xf(None).fill.is_none() {
+        return;
+    }
+    for col in &cols.tracks {
+        let origin_x = if col.pinned { 0.0 } else { -cols.scroll };
+        let mut run: Option<(f32, f32, u32, ResolvedFill, f32)> = None;
+        for row in &rows.tracks {
+            let at = CellRef::new(row.index, col.index);
+            let merge = merges.covering(at);
+            let fill = if sheet.cell(at).is_some() || merge.is_some_and(|merge| merge.start != at) {
+                None
+            } else {
+                fx.xf_at(at).fill.clone()
+            };
+            let origin_y = if row.pinned { 0.0 } else { -rows.scroll };
+            if let Some((_, end, last, previous, origin)) = &mut run
+                && fill.as_ref() == Some(previous)
+                && row.index == *last + 1
+                && merge.is_none()
+                && (matches!(previous, ResolvedFill::Solid(_)) || *origin == origin_y)
+            {
+                *end = row.end;
+                *last = row.index;
+                continue;
+            }
+            if let Some((start, end, _, fill, origin)) = run.take() {
+                commands.push(fill.command(
+                    Rect {
+                        x: col.start,
+                        y: start,
+                        w: col.end - col.start,
+                        h: end - start,
+                    },
+                    (origin_x, origin),
+                ));
+            }
+            if let Some(fill) = fill {
+                if merge.is_some() {
+                    if let Some(bx) = cell_box(geom, rows, cols, merges, at) {
+                        commands.push(fill.command(bx.clip, (origin_x, origin_y)));
+                    }
+                } else {
+                    run = Some((row.start, row.end, row.index, fill, origin_y));
+                }
+            }
+        }
+        if let Some((start, end, _, fill, origin_y)) = run
+            && end > start
+        {
+            commands.push(fill.command(
+                Rect {
+                    x: col.start,
+                    y: start,
+                    w: (col.end - col.start).max(0.0),
+                    h: end - start,
+                },
+                (origin_x, origin_y),
+            ));
+        }
+    }
+    for merge in &sheet.merges {
+        let at = merge.start;
+        if sheet.cell(at).is_none()
+            && (!rows.contains(at.row) || !cols.contains(at.col))
+            && let Some(bx) = cell_box(geom, rows, cols, merges, at)
+            && let Some(fill) = &fx.xf_at(at).fill
+        {
+            let origin = (
+                if at.col < cols.frozen {
+                    0.0
+                } else {
+                    -cols.scroll
+                },
+                if at.row < rows.frozen {
+                    0.0
+                } else {
+                    -rows.scroll
+                },
+            );
+            commands.push(fill.command(bx.clip, origin));
+        }
+    }
+}
+
+fn emit_inherited_borders(
+    commands: &mut Vec<DrawCmd>,
+    sheet: &Sheet,
+    fx: &mut FrameStyles,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+    merges: &MergeIndex,
+    geom: &GridGeometry,
+) {
+    if sheet.row_styles.is_empty() && sheet.col_styles.is_empty() && fx.xf(None).border.is_none() {
+        return;
+    }
+    for row in &rows.tracks {
+        for col in &cols.tracks {
+            let at = CellRef::new(row.index, col.index);
+            if merges.covering(at).is_some_and(|merge| merge.start != at) {
+                continue;
+            }
+            let xf = fx.xf_at(at).clone();
+            if sheet.cell(at).is_none()
+                && let Some(border) = &xf.border
+            {
+                emit_borders(commands, geom, rows, cols, merges, fx, at, border);
+            }
+            let above = at.row.checked_sub(1).filter(|row| !rows.contains(*row));
+            let left = at.col.checked_sub(1).filter(|col| !cols.contains(*col));
+            if above.is_none() && left.is_none() {
+                continue;
+            }
+            let Some(bx) = cell_box(geom, rows, cols, merges, at) else {
+                continue;
+            };
+            if let Some(row) = above
+                && xf.border.as_ref().is_none_or(|border| border.top.is_none())
+                && bx.y >= bx.clip.y
+                && bx.y <= bx.clip.y + bx.clip.h
+            {
+                let neighbor = fx.xf_at(CellRef::new(row, at.col));
+                if let Some(edge) = neighbor
+                    .border
+                    .as_ref()
+                    .and_then(|border| border.bottom.as_ref())
+                {
+                    commands.push(border_line(
+                        bx.clip.x,
+                        bx.y,
+                        bx.clip.x + bx.clip.w,
+                        bx.y,
+                        edge,
+                    ));
+                }
+            }
+            if let Some(col) = left
+                && xf
+                    .border
+                    .as_ref()
+                    .is_none_or(|border| border.left.is_none())
+                && bx.x >= bx.clip.x
+                && bx.x <= bx.clip.x + bx.clip.w
+            {
+                let neighbor = fx.xf_at(CellRef::new(at.row, col));
+                if let Some(edge) = neighbor
+                    .border
+                    .as_ref()
+                    .and_then(|border| border.right.as_ref())
+                {
+                    commands.push(border_line(
+                        bx.x,
+                        bx.clip.y,
+                        bx.x,
+                        bx.clip.y + bx.clip.h,
+                        edge,
+                    ));
+                }
+            }
+        }
+    }
+    for merge in &sheet.merges {
+        let at = merge.start;
+        if sheet.cell(at).is_none() && (!rows.contains(at.row) || !cols.contains(at.col)) {
+            let xf = fx.xf_at(at).clone();
+            if let Some(border) = &xf.border {
+                emit_borders(commands, geom, rows, cols, merges, fx, at, border);
+            }
+        }
+    }
 }
 
 /// visible cells that draw: inside the range and not a covered merge cell
@@ -1078,19 +1559,17 @@ fn spill_clip(
     sheet: &Sheet,
     links: &HyperlinkIndex,
     merges: &MergeIndex,
-    styles: &Stylesheet,
+    fx: &mut FrameStyles,
     date_system: xlsx_model::DateSystem,
     at: CellRef,
     cell: &xlsx_model::Cell,
     align: Align,
     cell_box: CellBox,
+    default_color: &Arc<str>,
 ) -> Rect {
     if !matches!(cell.value, CellValue::Text { .. })
         || merges.covering(at).is_some()
-        || cell
-            .style
-            .and_then(|style| styles.alignment_for(style))
-            .is_some_and(|a| a.wrap_text || a.shrink_to_fit)
+        || fx.xf(cell.style).wrap_or_shrink
     {
         return cell_box.clip;
     }
@@ -1100,12 +1579,12 @@ fn spill_clip(
     else {
         return cell_box.clip;
     };
-    let blank = |col: u32| {
+    let mut blank = |col: u32| {
         let neighbour = CellRef::new(at.row, col);
         merges.covering(neighbour).is_none()
-            && sheet
-                .cell(neighbour)
-                .is_none_or(|cell| cell_display_text(styles, date_system, cell).is_none())
+            && sheet.cell(neighbour).is_none_or(|cell| {
+                cell_display_text(fx.xf(cell.style), date_system, cell, default_color).is_none()
+            })
             && !draws_hyperlink_label(links, neighbour)
     };
     let pane = cols.tracks[anchor].pinned;
@@ -1277,44 +1756,244 @@ fn cell_box(
     })
 }
 
+/// everything the frame resolves once per xf id instead of once per cell.
+struct ResolvedXf {
+    format_code: Arc<str>,
+    font: Option<ResolvedFont>,
+    fill: Option<ResolvedFill>,
+    border: Option<ResolvedBorder>,
+    h: Option<HAlign>,
+    v: Option<VAlign>,
+    /// wrap_text or shrink_to_fit — both suppress text spill.
+    wrap_or_shrink: bool,
+}
+
+#[derive(Clone, PartialEq)]
+enum ResolvedFill {
+    Solid(Arc<str>),
+    Pattern {
+        pattern: PatternType,
+        fg: Arc<str>,
+        bg: Arc<str>,
+    },
+}
+
+impl ResolvedFill {
+    fn resolve(styles: &Stylesheet, fill: &Fill) -> Option<Self> {
+        match fill {
+            Fill::None => None,
+            Fill::Solid(color) => styles
+                .resolve_color(color)
+                .map(|color| Self::Solid(color.into())),
+            Fill::Pattern { pattern, fg, bg } => Some(Self::Pattern {
+                pattern: *pattern,
+                fg: fg
+                    .as_ref()
+                    .and_then(|color| styles.resolve_color(color))
+                    .unwrap_or_else(|| "#000000".into())
+                    .into(),
+                bg: bg
+                    .as_ref()
+                    .and_then(|color| styles.resolve_color(color))
+                    .unwrap_or_else(|| "#ffffff".into())
+                    .into(),
+            }),
+        }
+    }
+
+    fn command(&self, rect: Rect, (origin_x, origin_y): (f32, f32)) -> DrawCmd {
+        let Rect { x, y, w, h } = rect;
+        match self {
+            Self::Solid(color) => DrawCmd::FillRect {
+                x,
+                y,
+                w,
+                h,
+                color: color.clone(),
+                clip: None,
+            },
+            Self::Pattern { pattern, fg, bg } => DrawCmd::PatternFill {
+                x,
+                y,
+                w,
+                h,
+                pattern: *pattern,
+                fg: fg.clone(),
+                bg: bg.clone(),
+                origin_x,
+                origin_y,
+                clip: None,
+            },
+        }
+    }
+}
+
+struct ResolvedFont {
+    size_pt: Option<f64>,
+    family: Option<Arc<str>>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    color: Option<Arc<str>>,
+}
+
+struct ResolvedBorder {
+    top: Option<ResolvedBorderEdge>,
+    left: Option<ResolvedBorderEdge>,
+    bottom: Option<ResolvedBorderEdge>,
+    right: Option<ResolvedBorderEdge>,
+}
+
+struct ResolvedBorderEdge {
+    width: f32,
+    style: Option<Arc<str>>,
+    color: Arc<str>,
+}
+
+/// per-frame xf cache: each style id resolves once. sparse map — cell style
+/// ids are workbook-controlled `u32`s, so indexing a vec by them is unsafe.
+struct FrameStyles<'a> {
+    styles: &'a Stylesheet,
+    xfs: HashMap<u32, Arc<ResolvedXf>>,
+    defaults: ColumnDefaults<'a>,
+}
+
+impl<'a> FrameStyles<'a> {
+    fn new(styles: &'a Stylesheet, sheet: &'a Sheet) -> Self {
+        FrameStyles {
+            styles,
+            xfs: HashMap::new(),
+            defaults: ColumnDefaults::new(sheet),
+        }
+    }
+
+    /// The xf a cell renders with: its own, or its row's or column's default.
+    fn xf_at(&mut self, at: CellRef) -> &Arc<ResolvedXf> {
+        let style = self.defaults.effective_style(at);
+        self.xf(style)
+    }
+
+    fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
+        let styles = self.styles;
+        let style = style.unwrap_or(0);
+        self.xfs
+            .entry(style)
+            .or_insert_with(|| Arc::new(Self::resolve(styles, Some(style))))
+    }
+
+    fn resolve(styles: &Stylesheet, style: Option<u32>) -> ResolvedXf {
+        let format_code = match style.map(|s| styles.format_code_for(s)) {
+            Some(FormatCode::Custom(code)) => Arc::from(code),
+            Some(FormatCode::Builtin(id)) => {
+                Arc::from(builtin_format_code(id).unwrap_or("General"))
+            }
+            None => Arc::from("General"),
+        };
+        let font = style
+            .and_then(|s| styles.font_for(s))
+            .map(|font| ResolvedFont {
+                size_pt: font.size_pt,
+                family: font.name.as_deref().map(Arc::from),
+                bold: font.bold,
+                italic: font.italic,
+                underline: font.underline,
+                strike: font.strike,
+                color: font
+                    .color
+                    .as_ref()
+                    .and_then(|c| styles.resolve_color(c))
+                    .map(Arc::from),
+            });
+        let fill = style
+            .and_then(|s| styles.fill_for(s))
+            .and_then(|fill| ResolvedFill::resolve(styles, fill));
+        let border = style
+            .and_then(|s| styles.border_for(s))
+            .map(|border| ResolvedBorder {
+                top: border
+                    .top
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
+                left: border
+                    .left
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
+                bottom: border
+                    .bottom
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
+                right: border
+                    .right
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
+            });
+        let (h, v, wrap_or_shrink) = style
+            .and_then(|s| styles.alignment_for(s))
+            .map_or((None, None, false), |a| {
+                (a.h, a.v, a.wrap_text || a.shrink_to_fit)
+            });
+        ResolvedXf {
+            format_code,
+            font,
+            fill,
+            border,
+            h,
+            v,
+            wrap_or_shrink,
+        }
+    }
+
+    fn resolve_edge(styles: &Stylesheet, edge: &BorderEdge) -> ResolvedBorderEdge {
+        let (width, style) = border_stroke(edge.style);
+        ResolvedBorderEdge {
+            width,
+            style: style.map(Arc::from),
+            color: edge
+                .color
+                .as_ref()
+                .and_then(|c| styles.resolve_color(c))
+                .map_or_else(|| Arc::from(BORDER_COLOR), Arc::from),
+        }
+    }
+}
+
 /// display string and resolved font color for a cell, or `None` when it renders
 /// nothing. a `[Red]`-style number-format color overrides the font color.
 fn cell_display_text(
-    styles: &Stylesheet,
+    xf: &ResolvedXf,
     date_system: xlsx_model::DateSystem,
     cell: &xlsx_model::Cell,
-) -> Option<(String, String)> {
+    default_color: &Arc<str>,
+) -> Option<(Arc<str>, Arc<str>, Vec<xlsx_model::numfmt::FormatPart>)> {
     if matches!(cell.value, CellValue::Empty) {
         return None;
     }
-    let code = format_code_for_cell(styles, cell);
-    let formatted = format_value(&cell.value, &code, date_system);
-    if formatted.text.is_empty() {
+    let formatted = format_value(&cell.value, &xf.format_code, date_system);
+    if formatted.text.is_empty() && formatted.layout.is_empty() {
         return None;
     }
-    let font = cell.style.and_then(|s| styles.font_for(s));
-    let color = formatted
-        .color
-        .or_else(|| {
-            font.and_then(|f| f.color.as_ref())
-                .and_then(|c| styles.resolve_color(c))
-        })
-        .unwrap_or_else(|| TEXT_COLOR.to_string());
-    Some((formatted.text, color))
+    let color = formatted.color.map_or_else(
+        || {
+            xf.font
+                .as_ref()
+                .and_then(|font| font.color.clone())
+                .unwrap_or_else(|| default_color.clone())
+        },
+        Arc::from,
+    );
+    Some((formatted.text.into(), color, formatted.layout))
 }
 
-/// the number-format code a cell's xf resolves to; general when unset or when
-/// a builtin id is not modeled.
-fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
-    match cell.style.map(|s| styles.format_code_for(s)) {
-        Some(FormatCode::Custom(c)) => c.to_string(),
-        Some(FormatCode::Builtin(id)) => builtin_format_code(id).unwrap_or("General").to_string(),
-        None => "General".to_string(),
+/// The cell's number-format code; absent `s` uses xf 0.
+pub fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
+    match styles.format_code_for(cell.style.unwrap_or(0)) {
+        FormatCode::Custom(c) => c.to_string(),
+        FormatCode::Builtin(id) => builtin_format_code(id).unwrap_or("General").to_string(),
     }
 }
 
-/// the exact string the grid would paint for `cell`, number-format aware.
-/// empty cells and formats that yield nothing render as "".
+/// Width-free formatted text for exports and clipboard.
 pub fn display_text(
     styles: &Stylesheet,
     date_system: xlsx_model::DateSystem,
@@ -1329,24 +2008,12 @@ pub fn display_text(
 
 /// horizontal anchor for a cell: an explicit xf alignment wins, otherwise the
 /// value type decides (numbers right, booleans center, text/errors left).
-fn resolve_align(styles: &Stylesheet, cell: &xlsx_model::Cell) -> Align {
-    resolve_align_with_value(styles, Some(cell), &cell.value)
-}
-
-fn resolve_align_with_value(
-    styles: &Stylesheet,
-    cell: Option<&xlsx_model::Cell>,
-    value: &CellValue,
-) -> Align {
+fn resolve_align(h: Option<HAlign>, value: &CellValue) -> Align {
     let type_default = match value {
         CellValue::Number { .. } => Align::Right,
         CellValue::Bool { .. } => Align::Center,
         _ => Align::Left,
     };
-    let h = cell
-        .and_then(|cell| cell.style)
-        .and_then(|s| styles.alignment_for(s))
-        .and_then(|a| a.h);
     match h {
         Some(HAlign::Left) | Some(HAlign::Fill) | Some(HAlign::Justify) => Align::Left,
         Some(HAlign::Right) => Align::Right,
@@ -1398,18 +2065,17 @@ fn emit_borders(
     geom: &GridGeometry,
     rows: &AxisLayout,
     cols: &AxisLayout,
-    sheet: &Sheet,
     merges: &MergeIndex,
-    styles: &Stylesheet,
+    fx: &mut FrameStyles,
     at: CellRef,
-    border: &Border,
+    border: &ResolvedBorder,
 ) {
-    let Some(cell_box) = cell_box(geom, rows, cols, merges, at) else {
+    let Some(bx) = cell_box(geom, rows, cols, merges, at) else {
         return;
     };
-    let (x, y) = (cell_box.x, cell_box.y);
-    let (x2, y2) = (x + cell_box.w, y + cell_box.h);
-    let clip = cell_box.clip;
+    let (x, y) = (bx.x, bx.y);
+    let (x2, y2) = (x + bx.w, y + bx.h);
+    let clip = bx.clip;
     let (clip_x2, clip_y2) = (clip.x + clip.w, clip.y + clip.h);
     let (end_col, end_row) = match merges.covering(at) {
         Some(m) => (m.end.col, m.end.row),
@@ -1420,88 +2086,236 @@ fn emit_borders(
         && y >= clip.y
         && y <= clip_y2
     {
-        commands.push(border_line(clip.x, y, clip_x2, y, edge, styles));
+        commands.push(border_line(clip.x, y, clip_x2, y, edge));
     }
     if let Some(edge) = &border.left
         && x >= clip.x
         && x <= clip_x2
     {
-        commands.push(border_line(x, clip.y, x, clip_y2, edge, styles));
+        commands.push(border_line(x, clip.y, x, clip_y2, edge));
     }
     if let Some(edge) = &border.bottom
         && y2 >= clip.y
         && y2 <= clip_y2
-        && !neighbor_edge(sheet, styles, end_row + 1, at.col, |b| b.top.is_some())
+        && !(cell_box(geom, rows, cols, merges, CellRef::new(end_row + 1, at.col)).is_some()
+            && neighbor_edge(merges, fx, end_row + 1, at.col, |b| b.top.is_some()))
     {
-        commands.push(border_line(clip.x, y2, clip_x2, y2, edge, styles));
+        commands.push(border_line(clip.x, y2, clip_x2, y2, edge));
     }
     if let Some(edge) = &border.right
         && x2 >= clip.x
         && x2 <= clip_x2
-        && !neighbor_edge(sheet, styles, at.row, end_col + 1, |b| b.left.is_some())
+        && !(cell_box(geom, rows, cols, merges, CellRef::new(at.row, end_col + 1)).is_some()
+            && neighbor_edge(merges, fx, at.row, end_col + 1, |b| b.left.is_some()))
     {
-        commands.push(border_line(x2, clip.y, x2, clip_y2, edge, styles));
+        commands.push(border_line(x2, clip.y, x2, clip_y2, edge));
     }
 }
 
 /// true when the cell at `(row, col)` has a border satisfying `pick`.
 fn neighbor_edge(
-    sheet: &Sheet,
-    styles: &Stylesheet,
+    merges: &MergeIndex,
+    fx: &mut FrameStyles,
     row: u32,
     col: u32,
-    pick: impl Fn(&Border) -> bool,
+    pick: impl Fn(&ResolvedBorder) -> bool,
 ) -> bool {
-    sheet
-        .cell(CellRef::new(row, col))
-        .and_then(|c| c.style)
-        .and_then(|s| styles.border_for(s))
-        .is_some_and(pick)
+    if row >= xlsx_model::MAX_ROWS || col >= xlsx_model::MAX_COLS {
+        return false;
+    }
+    let at = CellRef::new(row, col);
+    let at = merges.covering(at).map_or(at, |merge| merge.start);
+    fx.xf_at(at).border.as_ref().is_some_and(pick)
 }
 
-/// one border edge as a `Line`, mapping the weight to a stroke width and dash
-/// style; an unset edge color resolves to black, matching excel's automatic color.
-fn border_line(
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-    edge: &BorderEdge,
-    styles: &Stylesheet,
-) -> DrawCmd {
-    let (width, style) = border_stroke(edge.style);
-    let color = edge
-        .color
-        .as_ref()
-        .and_then(|c| styles.resolve_color(c))
-        .unwrap_or_else(|| BORDER_COLOR.to_string());
+/// one border edge as a `Line`, carrying the resolved width, dash and color.
+fn border_line(x1: f32, y1: f32, x2: f32, y2: f32, edge: &ResolvedBorderEdge) -> DrawCmd {
     DrawCmd::Line {
         x1,
         y1,
         x2,
         y2,
-        width,
-        color,
-        style,
+        width: edge.width,
+        color: edge.color.clone(),
+        style: edge.style.clone(),
+        rail: (edge.style.as_deref() == Some("double")).then_some(edge.width / 3.0),
         clip: None,
     }
 }
 
 /// map a border weight to a `(stroke width, dash style)`.
-fn border_stroke(style: BorderStyle) -> (f32, Option<String>) {
+fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
     match style {
-        BorderStyle::Hair => (1.0, Some("dotted".to_string())),
+        BorderStyle::Hair => (1.0, Some("dotted")),
         BorderStyle::Thin => (1.0, None),
         BorderStyle::Medium => (2.0, None),
         BorderStyle::Thick => (3.0, None),
-        BorderStyle::Dashed => (1.0, Some("dashed".to_string())),
-        BorderStyle::Dotted => (1.0, Some("dotted".to_string())),
-        BorderStyle::Double => (1.0, Some("double".to_string())),
+        BorderStyle::Dashed => (1.0, Some("dashed")),
+        BorderStyle::Dotted => (1.0, Some("dotted")),
+        BorderStyle::Double => (3.0, Some("double")),
+        BorderStyle::MediumDashed => (2.0, Some("mediumDashed")),
+        BorderStyle::DashDot => (1.0, Some("dashDot")),
+        BorderStyle::MediumDashDot => (2.0, Some("mediumDashDot")),
+        BorderStyle::DashDotDot => (1.0, Some("dashDotDot")),
+        BorderStyle::MediumDashDotDot => (2.0, Some("mediumDashDotDot")),
+        BorderStyle::SlantDashDot => (1.0, Some("slantDashDot")),
     }
 }
 
 #[cfg(test)]
+mod merged_grid_tests;
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn pattern_border_display_list_preserves_pattern_and_dash_styles() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        for (col, token) in [
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut format = wb.styles.cell_format(None);
+            format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+                "pattern": "lightUp", "fg": {"Rgb": "#123456"}, "bg": {"Rgb": "#fedcba"}
+            }}))
+            .unwrap();
+            format.border.top = Some(xlsx_model::BorderEdge {
+                style: BorderStyle::from_sml(token),
+                color: Some(xlsx_model::Color::Rgb("#654321".into())),
+            });
+            let style = wb.styles.intern_cell_format(&format).unwrap();
+            sheet.set_cell(
+                CellRef::new(1, col as u32),
+                Cell {
+                    style,
+                    ..Cell::default()
+                },
+            );
+        }
+        let mut format = wb.styles.cell_format(None);
+        format.fill = serde_json::from_value(serde_json::json!({"Pattern": {
+            "pattern": "gray125", "fg": "Auto", "bg": null
+        }}))
+        .unwrap();
+        let style = wb.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            CellRef::new(1, 6),
+            Cell {
+                style,
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 3.0,
+                y: 2.0,
+                width: 500.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+        let zoomed = serde_json::to_value(scaled(dl.clone(), 2.0)).unwrap();
+        let zoomed_fill = zoomed["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|cmd| cmd["op"] == "patternFill")
+            .unwrap();
+        assert_eq!(zoomed_fill["originX"], -6.0);
+        assert_eq!(zoomed_fill["pattern"], "lightUp");
+        let json = serde_json::to_value(dl).unwrap();
+        let cmds = json["commands"].as_array().unwrap();
+        let fills: Vec<_> = cmds
+            .iter()
+            .filter(|cmd| cmd["op"] == "patternFill")
+            .collect();
+        assert_eq!(fills.len(), 7);
+        assert_eq!(fills[0]["pattern"], "lightUp");
+        assert_eq!(fills[0]["fg"], "#123456");
+        assert_eq!(fills[0]["bg"], "#fedcba");
+        assert_eq!(fills[0]["originX"], -3.0);
+        assert_eq!(fills[0]["originY"], -2.0);
+        assert_eq!(fills[6]["fg"], "#000000");
+        assert_eq!(fills[6]["bg"], "#ffffff");
+        let lines: Vec<_> = cmds
+            .iter()
+            .filter(|cmd| cmd["color"] == "#654321")
+            .collect();
+        assert_eq!(lines.len(), 6);
+        for (line, token) in lines.iter().zip([
+            "mediumDashed",
+            "dashDot",
+            "mediumDashDot",
+            "dashDotDot",
+            "mediumDashDotDot",
+            "slantDashDot",
+        ]) {
+            assert_eq!(line["style"], token);
+            assert_eq!(
+                line["width"],
+                if token.starts_with("medium") {
+                    2.0
+                } else {
+                    1.0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn double_border_carries_its_rail_width() {
+        let mut wb = Workbook::default();
+        let mut sheet = Sheet::new("Sheet1");
+        let mut format = wb.styles.cell_format(None);
+        format.border.bottom = Some(xlsx_model::BorderEdge {
+            style: BorderStyle::Double,
+            color: Some(xlsx_model::Color::Rgb("#654321".into())),
+        });
+        let style = wb.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                style,
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 60.0,
+            },
+        )
+        .unwrap();
+        for (factor, width, rail) in [(1.0, 3.0, 1.0), (2.0, 6.0, 2.0)] {
+            let json = serde_json::to_value(scaled(dl.clone(), factor)).unwrap();
+            let line = json["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|cmd| cmd["style"] == "double")
+                .unwrap();
+            assert_eq!(
+                (line["width"].as_f64(), line["rail"].as_f64()),
+                (Some(width), Some(rail))
+            );
+        }
+    }
     use super::*;
     use xlsx_model::Hyperlink;
     use xlsx_model::styles::{Alignment, HAlign, Xf};
@@ -1517,6 +2331,155 @@ mod tests {
         Cell {
             value: CellValue::Number { value: n },
             ..Cell::default()
+        }
+    }
+
+    #[test]
+    fn accounting_display_list_keeps_layout_at_column_widths() {
+        for width in [12.0, 24.0] {
+            let mut wb = Workbook::default();
+            wb.styles.num_fmts.push((164, "_(€* #,##0_)".into()));
+            wb.styles.cell_xfs.push(Xf {
+                num_fmt_id: Some(164),
+                ..Xf::default()
+            });
+            let mut sheet = Sheet::new("Sheet1");
+            sheet.col_widths.insert(0, width);
+            let mut cell = num_cell(12.0);
+            cell.style = Some(0);
+            sheet.set_cell(CellRef::new(0, 0), cell);
+            wb.sheets.push(sheet);
+            let viewport = Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 100.0,
+            };
+            let dl = build_display_list(&wb, SheetId(0), &viewport).unwrap();
+            let command = dl
+                .commands
+                .iter()
+                .find(|c| matches!(c, DrawCmd::Text { .. }))
+                .unwrap();
+            let json = serde_json::to_value(command).unwrap();
+            assert_eq!(json["numberFormat"]["left"], 2.0);
+            assert_eq!(
+                json["numberFormat"]["width"],
+                geometry::col_chars_to_px(width) - 4.0
+            );
+            assert_eq!(json["numberFormat"]["parts"][1]["kind"], "fill");
+        }
+    }
+
+    #[test]
+    fn narrow_date_display_list_enables_numeric_overflow() {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            num_fmt_id: Some(14),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 3.0);
+        let mut cell = num_cell(43831.0);
+        cell.style = Some(0);
+        assert_eq!(display_text(&wb.styles, wb.date_system, &cell), "1/1/20");
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let command = dl
+            .commands
+            .iter()
+            .find(|c| matches!(c, DrawCmd::Text { .. }))
+            .unwrap();
+        let DrawCmd::Text {
+            text,
+            number_format: Some(layout),
+            align,
+            ..
+        } = command
+        else {
+            panic!("missing numeric layout")
+        };
+        assert!(layout.overflow);
+        let mut displayed = String::new();
+        paint_number_format(
+            text,
+            layout,
+            *align,
+            |s| s.len() as f32 * 10.0,
+            |run, _| displayed.push_str(run),
+        );
+        assert!(!displayed.is_empty() && displayed.chars().all(|c| c == '#'));
+    }
+
+    #[test]
+    fn fill_only_sections_reach_the_painter() {
+        let mut wb = Workbook::default();
+        wb.styles.num_fmts.push((164, "*x".into()));
+        wb.styles.cell_xfs.push(Xf {
+            num_fmt_id: Some(164),
+            ..Xf::default()
+        });
+        let mut cell = num_cell(12.0);
+        cell.style = Some(0);
+        assert_eq!(display_text(&wb.styles, wb.date_system, &cell), "");
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), cell);
+        wb.sheets.push(sheet);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        assert!(
+            dl.commands
+                .iter()
+                .any(|cmd| matches!(cmd, DrawCmd::Text { .. }))
+        );
+    }
+
+    #[test]
+    fn fractions_beyond_integer_range_paint_general_text() {
+        for (value, code, expected) in [
+            (1e18, "?/32", "1E+18"),
+            (1_000_000_000_000.75, "?/?????????", "1E+12"),
+        ] {
+            let mut wb = Workbook::default();
+            wb.styles.num_fmts.push((164, code.into()));
+            wb.styles.cell_xfs.push(Xf {
+                num_fmt_id: Some(164),
+                ..Xf::default()
+            });
+            let mut cell = num_cell(value);
+            cell.style = Some(0);
+            assert_eq!(display_text(&wb.styles, wb.date_system, &cell), expected);
+            let mut sheet = Sheet::new("Sheet1");
+            sheet.set_cell(CellRef::new(0, 0), cell);
+            wb.sheets.push(sheet);
+            let vp = Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 100.0,
+            };
+            let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+            let texts: Vec<&str> = dl
+                .commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    DrawCmd::Text { text, .. } => Some(&**text),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, [expected]);
         }
     }
 
@@ -1562,7 +2525,7 @@ mod tests {
         let long_text = texts
             .iter()
             .find_map(|c| match c {
-                DrawCmd::Text { text, clip, .. } if text == long => Some(clip),
+                DrawCmd::Text { text, clip, .. } if &**text == long => Some(clip),
                 _ => None,
             })
             .unwrap();
@@ -1591,7 +2554,7 @@ mod tests {
                 .commands
                 .iter()
                 .find_map(|command| match command {
-                    DrawCmd::Text { text, clip, .. } if text == long => Some(clip.w),
+                    DrawCmd::Text { text, clip, .. } if &**text == long => Some(clip.w),
                     _ => None,
                 })
                 .unwrap()
@@ -1647,7 +2610,7 @@ mod tests {
             .commands
             .iter()
             .find_map(|command| match command {
-                DrawCmd::Text { text, clip, .. } if text == long => Some(*clip),
+                DrawCmd::Text { text, clip, .. } if &**text == long => Some(*clip),
                 _ => None,
             })
             .unwrap();
@@ -1673,7 +2636,7 @@ mod tests {
                 .commands
                 .iter()
                 .find_map(|command| match command {
-                    DrawCmd::Text { text, clip, .. } if text == long => Some(*clip),
+                    DrawCmd::Text { text, clip, .. } if &**text == long => Some(*clip),
                     _ => None,
                 })
                 .unwrap();
@@ -1773,7 +2736,7 @@ mod tests {
                     color,
                     underline,
                     ..
-                } => Some((text.as_str(), color.as_str(), *underline)),
+                } => Some((&**text, &**color, *underline)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1845,7 +2808,7 @@ mod tests {
             .commands
             .iter()
             .filter_map(|command| match command {
-                DrawCmd::Text { text, clip, .. } => Some((text.as_str(), *clip)),
+                DrawCmd::Text { text, clip, .. } => Some((&**text, *clip)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1877,13 +2840,13 @@ mod tests {
             command,
             DrawCmd::Line { x1, x2, width, color, .. }
                 if *x1 == dc && *x2 == dc && *width == PANE_DIVIDER_WIDTH
-                    && color == PANE_DIVIDER_COLOR
+                    && &**color == PANE_DIVIDER_COLOR
         )));
         assert!(dl.commands.iter().any(|command| matches!(
             command,
             DrawCmd::Line { y1, y2, width, color, .. }
                 if *y1 == dr && *y2 == dr && *width == PANE_DIVIDER_WIDTH
-                    && color == PANE_DIVIDER_COLOR
+                    && &**color == PANE_DIVIDER_COLOR
         )));
     }
 
@@ -1925,7 +2888,7 @@ mod tests {
                     strike,
                     align,
                     ..
-                } => Some((text.as_str(), color.as_str(), *strike, *align)),
+                } => Some((&**text, &**color, *strike, *align)),
                 _ => None,
             })
             .collect()
@@ -2252,7 +3215,7 @@ mod tests {
             })
             .collect();
         assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0].0, "merged");
+        assert_eq!(&*texts[0].0, "merged");
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert!((texts[0].1.w - dc * 2.0).abs() < 0.01);
     }

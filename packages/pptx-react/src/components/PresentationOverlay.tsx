@@ -1,4 +1,4 @@
-import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
+import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
 import type { CanvasImageResolver, PresentationHandle } from '@betteroffice/pptx';
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';

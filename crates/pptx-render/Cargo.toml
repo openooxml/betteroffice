@@ -19,6 +19,7 @@ fuzzing = []
 
 [dependencies]
 ooxml-drawingml.workspace = true
+ooxml-metafile.workspace = true
 ooxml-text.workspace = true
 pptx-edit.workspace = true
 pptx-parse.workspace = true

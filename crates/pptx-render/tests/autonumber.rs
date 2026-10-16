@@ -92,13 +92,29 @@ fn automatic_numbers_keep_styles_and_story_geometry() {
     for node in &mut plain_package.slides[0].shapes {
         if let ShapeNode::Shape(shape) = node {
             let body = shape.text.as_mut().unwrap();
-            for properties in body
+            let levels: Vec<bool> = body
                 .list_style
-                .iter_mut()
-                .chain(body.paragraphs.iter_mut().map(|p| &mut p.properties))
-            {
+                .iter()
+                .map(|properties| matches!(properties.bullet, Some(Bullet::AutoNumber { .. })))
+                .collect();
+            for properties in body.list_style.iter_mut() {
                 if matches!(properties.bullet, Some(Bullet::AutoNumber { .. })) {
                     properties.bullet = Some(Bullet::None);
+                    // The marker stands in the hanging indent, so a paragraph
+                    // that loses it would start its first line there instead.
+                    properties.indent = Some(0);
+                }
+            }
+            for paragraph in body.paragraphs.iter_mut() {
+                let level = paragraph.properties.level as usize;
+                let numbered = match paragraph.properties.bullet {
+                    Some(Bullet::AutoNumber { .. }) => true,
+                    Some(_) => false,
+                    None => levels.get(level).copied().unwrap_or(false),
+                };
+                if numbered {
+                    paragraph.properties.bullet = Some(Bullet::None);
+                    paragraph.properties.indent = Some(0);
                 }
             }
         }
@@ -137,6 +153,40 @@ fn automatic_numbers_keep_styles_and_story_geometry() {
                 rendered.hit_test(x, line.baseline),
                 plain.hit_test(x, line.baseline)
             );
+        }
+    }
+}
+
+#[test]
+fn empty_paragraphs_have_no_marker_and_do_not_advance_numbering() {
+    let session = DeckSession::open(DECK, 302).unwrap();
+    let renderer = renderer();
+    for keep_empty_runs in [false, true] {
+        let mut snapshot = session.snapshot().unwrap();
+        let story = &mut snapshot.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.source_id == 11)
+            .unwrap()
+            .text_stories[0];
+        for paragraph in story.paragraphs.iter_mut().skip(1).step_by(2) {
+            if keep_empty_runs {
+                for run in &mut paragraph.runs {
+                    run.text.clear();
+                }
+            } else {
+                paragraph.runs.clear();
+            }
+        }
+        let list = renderer
+            .layout_slide(session.package(), &snapshot, 0)
+            .unwrap()
+            .display_list;
+        assert_eq!(markers(&list, 11), ["1.", "2.", "3.", "4.", "5."]);
+        let lines = lines(&list, 11);
+        assert_eq!(lines.len(), 10);
+        for line in lines.iter().skip(1).step_by(2) {
+            assert!(line.runs.is_empty());
         }
     }
 }

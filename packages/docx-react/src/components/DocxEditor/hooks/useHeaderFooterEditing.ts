@@ -1,4 +1,8 @@
-import { useCallback, useMemo } from 'react';
+import { useSyncExternalStore } from 'react';
+import type { DocxCommandPayloads, DocxSelectionPointIntent } from '@betteroffice/docx/yrs';
+type DocxPartTarget = DocxCommandPayloads['openPart'];
+import type { createPeerlessShellController } from '../peerless/shellController';
+import { useCallback, useEffect, useMemo } from 'react';
 import type { Document, HeaderFooter } from '@betteroffice/docx/types/document';
 import {
   resolvedFinalSectionProperties,
@@ -29,6 +33,7 @@ export function useHeaderFooterEditing({
   pushDocument,
   partEditTarget,
   setPartEditTarget,
+  readOnly = false,
 }: {
   document: Document | null;
   pushDocument: (doc: Document) => void;
@@ -36,7 +41,12 @@ export function useHeaderFooterEditing({
   // route to the open part's story.
   partEditTarget: PartEditTarget | null;
   setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
+  readOnly?: boolean;
 }) {
+  useEffect(() => {
+    if (readOnly) setPartEditTarget(null);
+  }, [readOnly, setPartEditTarget]);
+
   const finalSectionProperties = useMemo(
     () => resolvedFinalSectionProperties(document?.package.document),
     [document]
@@ -204,4 +214,51 @@ export function useHeaderFooterEditing({
     handleBodyClick,
     handleRemoveHeaderFooter,
   };
+}
+
+export function useWorkerHeaderFooterEditing(controller: ReturnType<typeof createPeerlessShellController>, onError?: (error: Error) => void) {
+  const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const activePart = state.view?.editState?.activePart ?? null;
+  const run = useCallback(async (kind: 'openPart' | 'ensurePart' | 'removePart', target: Omit<DocxPartTarget, 'expectVersion'>, sectionIndex?: number) => {
+    try {
+      const query = await controller.query({ kind: 'partSnapshot' });
+      const sections = query.value.metadata.body.sections ?? [];
+      const section = sectionIndex === undefined ? target.section : sectionIndex < sections.length - 1 ? sections[sectionIndex]?.id ?? 'final' : 'final';
+      const result = await controller.applyQuery(query, { kind, payload: { ...target, section, expectVersion: query.version } });
+      if (!result.ok) throw new Error(result.failure.message);
+      controller.ref.focus();
+    } catch (error) { onError?.(error instanceof Error ? error : new Error(String(error))); }
+  }, [controller, onError]);
+  const close = useCallback(async () => {
+    try {
+      const query = await controller.query({ kind: 'paragraphIdentities' });
+      const paragraph = query.value.paragraphs.find(paragraph => paragraph.session?.story === 'body')?.session;
+      if (!paragraph) throw new Error('Body caret target is unavailable');
+      const at = { story: 'body', paraId: paragraph.paraId, offset: 0 };
+      const result = await controller.applyQuery(query, { kind: 'select', payload: { selection: { anchor: at, focus: at } } });
+      if (!result.ok) throw new Error(result.failure.message);
+      controller.ref.focus();
+    } catch (error) { onError?.(error instanceof Error ? error : new Error(String(error))); }
+  }, [controller, onError]);
+  const openAtPoint = useCallback(async (point: DocxSelectionPointIntent, section: string) => {
+    try {
+      const selected = await controller.submit({ kind: 'selectPoint', payload: point });
+      if (!selected.ok) throw new Error(selected.failure.message);
+      const query = await controller.query({ kind: 'partSnapshot' });
+      const selection = query.selection;
+      const match = selection?.focus.story.match(/^(fn|en):(\d+)(?::|$)/u);
+      if (!match) return;
+      const opened = await controller.applyQuery(query, { kind: 'openPart', payload: {
+        kind: match[1] === 'fn' ? 'footnote' : 'endnote', noteId: Number(match[2]), section,
+        page: point.page.pageIndex, expectVersion: query.version,
+      } });
+      if (!opened.ok) throw new Error(opened.failure.message);
+      const restored = await controller.applyQuery(query, { kind: 'select', payload: { selection: selection! } });
+      if (!restored.ok) throw new Error(restored.failure.message);
+      controller.ref.focus();
+    } catch (error) { onError?.(error instanceof Error ? error : new Error(String(error))); }
+  }, [controller, onError]);
+  return { activePart, open: (target: Omit<DocxPartTarget, 'expectVersion'>, sectionIndex?: number) => run('openPart', target, sectionIndex),
+    ensure: (target: Omit<DocxPartTarget, 'expectVersion'>, sectionIndex?: number) => run('ensurePart', target, sectionIndex),
+    remove: () => activePart ? run('removePart', { kind: activePart.kind, section: activePart.section, page: activePart.page, variant: activePart.variant, noteId: activePart.noteId }) : Promise.resolve(), close, openAtPoint };
 }

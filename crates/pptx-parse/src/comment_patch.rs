@@ -6,7 +6,7 @@ use quick_xml::{Reader, events::Event};
 use crate::PptxError;
 use crate::comments::{
     CommentFlavor, CommentWrite, CommentsWrite, NS_A, NS_P, NS_P188, NS_PC, authors_xml,
-    legacy_comment_element, modern_body_element, modern_comment_element, text_body,
+    emu_to_master, legacy_comment_element, modern_body_element, modern_comment_element, text_body,
 };
 use crate::xml::{ParseBudget, XmlElement, parse_xml, serialize_xml_fragment};
 
@@ -204,6 +204,54 @@ fn patch_list(
             source.replace(child_span.range.clone(), Vec::new());
             continue;
         };
+        if slide_id.is_some() {
+            let (x, y) = match flavor {
+                CommentFlavor::Legacy => {
+                    (emu_to_master(comment.x_emu), emu_to_master(comment.y_emu))
+                }
+                CommentFlavor::Modern => (comment.x_emu, comment.y_emu),
+            };
+            if let Some((position, position_span)) = element
+                .child_elements()
+                .zip(&child_span.children)
+                .find(|(child, _)| child.local_name() == "pos")
+            {
+                for (axis, value) in [("x", x), ("y", y)] {
+                    if position
+                        .attribute(axis)
+                        .and_then(|text| text.parse::<i64>().ok())
+                        .unwrap_or(0)
+                        != value
+                    {
+                        source.attribute(position, position_span, axis, &value.to_string());
+                    }
+                }
+            } else if x != 0 || y != 0 {
+                let (prefix, namespace) = match flavor {
+                    CommentFlavor::Legacy => ("p", NS_P),
+                    CommentFlavor::Modern => ("p188", NS_P188),
+                };
+                let position = XmlElement::new(format!("{prefix}:pos"))
+                    .with_attribute(format!("xmlns:{prefix}"), namespace)
+                    .with_attribute("x", x.to_string())
+                    .with_attribute("y", y.to_string());
+                let bytes = serialize_xml_fragment(&position);
+                if let Some((_, following)) = element
+                    .child_elements()
+                    .zip(&child_span.children)
+                    .find(|(child, _)| {
+                        matches!(
+                            child.local_name(),
+                            "replyLst" | "txBody" | "text" | "extLst"
+                        )
+                    })
+                {
+                    source.replace(following.range.start..following.range.start, bytes);
+                } else {
+                    source.append(element, child_span, bytes);
+                }
+            }
+        }
         if let Some(status) = &comment.status {
             source.attribute(element, child_span, "status", status);
         }

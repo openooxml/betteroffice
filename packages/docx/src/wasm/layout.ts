@@ -68,6 +68,21 @@ export function rangeRectsJson(displayList: string, from: number, to: number): s
   return range_rects_json(displayList, from, to);
 }
 
+/** @internal */
+export function rangeRectsOnPagesJson(
+  displayList: string,
+  from: number,
+  to: number,
+  firstPage: number,
+  lastPage: number
+): string {
+  state.ensure();
+  const query = glueExport<RangeRectsOnPagesExport<string>>('range_rects_on_pages_json');
+  if (!query)
+    throw new Error('range_rects_on_pages_json is not available in the embedded layout wasm');
+  return query(displayList, from, to, firstPage, lastPage);
+}
+
 // ---------------------------------------------------------------------------
 // session-handle query surface
 //
@@ -105,6 +120,13 @@ type VerticalMoveByHandleExport = (
   goalX: number
 ) => string;
 type RangeRectsByHandleExport = (handle: number, from: number, to: number) => string;
+type RangeRectsOnPagesExport<T> = (
+  source: T,
+  from: number,
+  to: number,
+  firstPage: number,
+  lastPage: number
+) => string;
 type RangeRectsRegionJsonExport = (
   displayList: string,
   region: string,
@@ -132,6 +154,15 @@ function glueExport<T>(name: string): T | undefined {
 export function hasDisplayListSession(): boolean {
   state.ensure();
   return glueExport<OpenDisplayListExport>('open_display_list') !== undefined;
+}
+
+/** @internal */
+export function hasRangeRectsOnPages(): boolean {
+  state.ensure();
+  return (
+    glueExport<RangeRectsOnPagesExport<string>>('range_rects_on_pages_json') !== undefined &&
+    glueExport<RangeRectsOnPagesExport<number>>('range_rects_on_pages_by_handle') !== undefined
+  );
 }
 
 /**
@@ -245,6 +276,21 @@ export function rangeRectsByHandle(handle: number, from: number, to: number): st
   if (!query)
     throw new Error('range_rects_by_handle is not available in the embedded layout wasm yet');
   return query(handle, from, to);
+}
+
+/** @internal */
+export function rangeRectsOnPagesByHandle(
+  handle: number,
+  from: number,
+  to: number,
+  firstPage: number,
+  lastPage: number
+): string {
+  state.ensure();
+  const query = glueExport<RangeRectsOnPagesExport<number>>('range_rects_on_pages_by_handle');
+  if (!query)
+    throw new Error('range_rects_on_pages_by_handle is not available in the embedded layout wasm');
+  return query(handle, from, to, firstPage, lastPage);
 }
 
 /**

@@ -18,9 +18,8 @@ edge `(0,90)` is `#292929`, and its corner `(0,0)` is `#262626`.
 
 Review: [PR #306](https://github.com/openooxml/betteroffice/pull/306).
 
-Slide 3's display list and PNG remain byte-identical. Only
-`background.stops` changes on slides 1 and 2; saving without edits preserves
-every original ZIP part and its XML stop order.
+Saving without edits preserves every original ZIP part and its XML stop
+order.
 
 The renderer regression test covers all four gradient kinds, alpha,
 equal-position stops, and source-model preservation. The raster regression

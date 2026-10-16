@@ -60,8 +60,15 @@ describe('canvas hover cursor', () => {
     expect(canvasHoverCursor(mode, hit({ region: 'body', target: 'text' }))).toBe('default');
   });
 
-  test('read-only and off-page points never type', () => {
-    expect(canvasHoverCursor({ readOnly: true }, hit({ target: 'text' }))).toBe('default');
+  test('read-only selects body text only, and off-page points never type', () => {
+    expect(canvasHoverCursor({ readOnly: true }, hit({ target: 'text' }))).toBe('text');
+    expect(canvasHoverCursor({ readOnly: true }, hit({ target: 'image' }))).toBe('default');
+    expect(
+      canvasHoverCursor({ readOnly: true }, hit({ region: 'header', rId: 'rId7', target: 'text' }))
+    ).toBe('default');
+    expect(
+      canvasHoverCursor({ readOnly: true }, hit({ region: 'footnote', noteId: 2, target: 'text' }))
+    ).toBe('default');
     expect(
       canvasHoverCursor(
         { readOnly: true, partEdit: { kind: 'footer', rId: 'rId8' } },

@@ -1,6 +1,5 @@
 `run-gradfill.pptx` is a generated regression deck licensed with this repository.
-It provides a public reproduction for PR #299; the contributor's original corpus
-is private and was not available for review.
+It provides a public reproduction for PR #299.
 
 The deck has two slides at 960 × 720 CSS pixels. Slide 1 contains these labels
 on `#A81020` bands; slide 2 repeats only the three controls.
@@ -25,24 +24,7 @@ by a soft line break, and replaces the fill when the resolved color changes.
 
 Review: [PR #299](https://github.com/openooxml/betteroffice/pull/299).
 
-The comparison in that PR uses `origin/main` at `1d0f41d9`. Both renders use the tracked
-`LiberationSans-Regular.ttf`, registered as Arial. The font's SHA-256 is
-`76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8`.
-
-Isolation against that main revision used the repository's locked dependency
-versions and the same font registrations for all 16 PPTX fixtures, including both
-demo copies and the new repro. Of 45 slides, 44 display lists are byte-identical.
-The only differences are the five target run colors, each repeated in the
-paragraph and positioned-line records: 10 JSON scalar changes. Every other
-primitive, glyph position, and control is unchanged.
-
-All 15 pre-existing package and snapshot JSON payloads are byte-identical.
-Snapshots and collaboration updates for all 16 decks load in both revisions with
-identical snapshot data. Fresh no-edit saves preserve all 273 OOXML ZIP part
-payloads on each revision, checked independently with Python's `zipfile`.
-
 Regression tests cover exact stop selection, invalid and empty stop lists, solid
 fill priority, rendering, and saves after bold formatting, ASCII/Unicode text
-insertion, and recoloring. Eight production mutations produce ten failing test
-runs; restoring each change returns those tests to green, including the soft-line
-break case. Multicolor ramps remain in the saved XML after non-color edits.
+insertion, and recoloring. Multicolor ramps remain in the saved XML after
+non-color edits.

@@ -1,0 +1,83 @@
+name: Native packages
+
+on:
+  pull_request:
+    paths:
+      - 'bindings/*-native/**'
+      - 'scripts/native-bindings.mjs'
+      - 'scripts/native-bindings-smoke.mjs'
+      - 'scripts/version-packages.mjs'
+      - '.github/workflows/native-packages.yml'
+      - '.github/workflows/native-dist.yml'
+      - '.github/workflows/publish-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dist:
+    strategy:
+      matrix:
+        binding: [docx, pptx, xlsx]
+    uses: ./.github/workflows/native-dist.yml
+    with:
+      binding: ${{ matrix.binding }}
+      sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  assemble:
+    name: Assemble ${{ matrix.binding }}-native
+    needs: dist
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        binding: [docx, pptx, xlsx]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ matrix.binding }}-native.*
+          path: bindings/${{ matrix.binding }}-native/artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.binding }}-native-loader
+          path: bindings/${{ matrix.binding }}-native
+
+      - name: Assemble packages
+        run: bunx napi artifacts --cwd bindings/${{ matrix.binding }}-native
+
+      - name: Make the root publishable
+        working-directory: bindings/${{ matrix.binding }}-native
+        run: npm pkg delete private
+
+      - name: Validate packages
+        run: bunx napi pre-publish --cwd bindings/${{ matrix.binding }}-native --tag-style npm --dry-run --no-gh-release
+
+      - name: Check package contents
+        working-directory: bindings/${{ matrix.binding }}-native
+        run: |
+          npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'
+          npm pack --dry-run
+          for package in npm/*; do
+            (cd "$package" && npm pack --dry-run)
+          done

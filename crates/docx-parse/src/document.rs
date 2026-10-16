@@ -1,8 +1,13 @@
 //! Body-level document assembly, sections, and read-only paragraph queries.
 
+use std::collections::HashSet;
+
+use indexmap::IndexMap;
+use quick_xml::Reader;
+use quick_xml::events::{BytesDecl, Event};
 use serde::{Deserialize, Serialize};
 
-use crate::block::{BlockContent, StoryParser};
+use crate::block::{BlockContent, LegacyBodyCut, StoryParser, transparent_children};
 use crate::comments::Comment;
 use crate::inline::{InlineNode, RunContent};
 use crate::paragraph::RawAttribute;
@@ -40,36 +45,727 @@ pub struct DocumentBody {
     pub comments: Option<Vec<Comment>>,
 }
 
+/// Whether `document` holds what the layout may apply to the body's first
+/// pages from anywhere in it, so that no cut of the body lays out like the
+/// whole: a float placed from outside the text (a drawing anchored to the page
+/// or margin, a table or frame not anchored to the text, VML positioned from
+/// the page or margin), or a section with columns, whose settings sections
+/// without their own may take.
+pub(crate) fn refuses_a_body_cut(document: &XmlElement) -> bool {
+    let mut pending = vec![document];
+    while let Some(element) = pending.pop() {
+        let refused = match element.local_name() {
+            "anchor" => {
+                element.attribute(None, "simplePos") == Some("1")
+                    || element
+                        .child_by_local_name("positionV")
+                        .and_then(|position| position.attribute(None, "relativeFrom"))
+                        .is_some_and(|from| !matches!(from, "paragraph" | "line"))
+            }
+            "tblpPr" => element.attribute(Some("w"), "vertAnchor") != Some("text"),
+            "framePr" => element.attribute(Some("w"), "vAnchor") != Some("text"),
+            "cols" => {
+                element
+                    .attribute(Some("w"), "num")
+                    .is_some_and(|count| !matches!(count.trim(), "" | "0" | "1"))
+                    || element.children_named("w", "col").nth(1).is_some()
+            }
+            _ => crate::vml::placed_off_the_text(element),
+        };
+        if refused {
+            return true;
+        }
+        pending.extend(element.child_elements());
+    }
+    false
+}
+
+#[derive(Default)]
+struct CutFrame {
+    anchor: bool,
+    position_seen: bool,
+    columns: bool,
+    column_seen: bool,
+    namespace_declarations: Vec<(String, String)>,
+    drawing: bool,
+}
+
+struct StreamingLegacyBodyCut {
+    cut: LegacyBodyCut,
+    stack: Vec<bool>,
+    document: bool,
+    body_seen: bool,
+    block_depth: Option<usize>,
+    unmatched_fields: usize,
+    external_ends: usize,
+}
+
+impl StreamingLegacyBodyCut {
+    fn new(limit: usize) -> Self {
+        Self {
+            cut: LegacyBodyCut::new(limit),
+            stack: Vec::new(),
+            document: false,
+            body_seen: false,
+            block_depth: None,
+            unmatched_fields: 0,
+            external_ends: 0,
+        }
+    }
+
+    fn start(&mut self, name: &str, field_type: Option<&str>, empty: bool) {
+        if self.cut.is_partial() {
+            return;
+        }
+        let local = crate::xml::local_name(name);
+        if self.stack.is_empty() {
+            self.document = local == "document";
+        }
+        let body = self.document && self.stack.len() == 1 && local == "body" && !self.body_seen;
+        self.body_seen |= body;
+        let story_child = self.stack.last() == Some(&true);
+        let wrapper = story_child && matches!(local, "customXml" | "smartTag");
+        if story_child && !wrapper {
+            self.cut.read_child(name);
+            if crate::block::typed_block_name(name) {
+                self.block_depth = Some(self.stack.len() + 1);
+                self.unmatched_fields = 0;
+                self.external_ends = 0;
+            }
+        }
+        if self.block_depth.is_some() && local == "fldChar" {
+            match field_type {
+                Some("begin") => self.unmatched_fields += 1,
+                Some("end") if self.unmatched_fields == 0 => self.external_ends += 1,
+                Some("end") => self.unmatched_fields -= 1,
+                _ => {}
+            }
+        }
+        self.stack.push(body || wrapper);
+        if empty {
+            self.end();
+        }
+    }
+
+    fn end(&mut self) {
+        if self.cut.is_partial() {
+            return;
+        }
+        if self.block_depth == Some(self.stack.len()) {
+            self.cut
+                .finish_block(self.external_ends, self.unmatched_fields);
+            self.block_depth = None;
+        }
+        self.stack.pop();
+    }
+}
+
+#[derive(Default)]
+struct CutDrawing {
+    bindings: IndexMap<String, String>,
+    used_prefixes: HashSet<String>,
+    attribute_names: HashSet<String>,
+    attribute_bytes: usize,
+}
+
+impl CutDrawing {
+    fn use_attribute(&mut self, name: &str, value: &str) {
+        if matches!(
+            crate::xml::local_name(name),
+            "Ignorable"
+                | "MustUnderstand"
+                | "Requires"
+                | "ProcessContent"
+                | "PreserveElements"
+                | "PreserveAttributes"
+        ) {
+            for token in value.split_whitespace() {
+                self.used_prefixes.insert(
+                    token
+                        .split_once(':')
+                        .map_or(token, |(prefix, _)| prefix)
+                        .to_owned(),
+                );
+            }
+        }
+        if let Some((prefix, _)) = name.split_once(':')
+            && prefix != "xmlns"
+        {
+            self.used_prefixes.insert(prefix.to_owned());
+        }
+    }
+}
+
+fn finish_cut_drawing(
+    drawings: &mut Vec<CutDrawing>,
+    part: &str,
+    budget: &mut crate::xml::ParseBudget<'_>,
+) -> Result<(), ParseError> {
+    let mut drawing = drawings.pop().unwrap();
+    for (name, value) in drawing.bindings {
+        let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+        if !drawing.used_prefixes.contains(prefix) || drawing.attribute_names.contains(&name) {
+            continue;
+        }
+        drawing.attribute_bytes += name.len() + value.len();
+        if drawing.attribute_names.len() >= budget.limits().max_attributes_per_element
+            || drawing.attribute_bytes > budget.limits().max_attribute_bytes
+        {
+            return Err(ParseError::ResourceLimit {
+                kind: "drawingNamespaceAliases",
+                part: part.to_owned(),
+            });
+        }
+        budget.charge_text(name.len() + value.len(), part)?;
+        for ancestor in drawings.iter_mut() {
+            ancestor.use_attribute(&name, &value);
+        }
+        drawing.attribute_names.insert(name);
+    }
+    Ok(())
+}
+
+pub(crate) fn streaming_refuses_a_body_cut(xml: &[u8]) -> Result<bool, ParseError> {
+    let limits = crate::xml::ParseLimits::default();
+    streaming_body_cut(xml, &mut crate::xml::ParseBudget::new(&limits))
+}
+
+pub(crate) fn streaming_body_cut(
+    xml: &[u8],
+    budget: &mut crate::xml::ParseBudget<'_>,
+) -> Result<bool, ParseError> {
+    streaming_body_cut_with_limit(xml, budget, None).map(|(refused, _)| refused)
+}
+
+pub(crate) fn streaming_body_cut_with_limit(
+    xml: &[u8],
+    budget: &mut crate::xml::ParseBudget<'_>,
+    block_limit: Option<usize>,
+) -> Result<(bool, bool), ParseError> {
+    let repaired = crate::xml::escape_stray_ampersands(xml);
+    let xml = repaired.as_ref();
+    let part = "word/document.xml";
+    let error = |offset, message: String| ParseError::MalformedXml {
+        part: part.to_owned(),
+        offset,
+        message,
+    };
+    if starts_with_a_byte_order_mark(xml) {
+        return Err(error(0, "byte order mark".to_owned()));
+    }
+    budget.charge_xml_bytes(xml.len(), part)?;
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    let mut stack: Vec<CutFrame> = Vec::new();
+    let mut drawings: Vec<CutDrawing> = Vec::new();
+    let mut roots = 0;
+    let mut refused = false;
+    let mut legacy_cut = block_limit.map(StreamingLegacyBodyCut::new);
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+        budget.charge_event(part)?;
+        match event {
+            Event::Start(ref start) | Event::Empty(ref start) => {
+                if stack.len() + 1 > budget.limits().max_xml_depth {
+                    return Err(ParseError::ResourceLimit {
+                        kind: "xmlDepth",
+                        part: part.to_owned(),
+                    });
+                }
+                if stack.is_empty() {
+                    roots += 1;
+                    if roots > 1 {
+                        return Err(error(0, "multiple root elements".to_owned()));
+                    }
+                }
+                let name = start.name();
+                let name = reader
+                    .decoder()
+                    .decode(name.as_ref())
+                    .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                budget.charge_text(name.len(), part)?;
+                let local = crate::xml::local_name(&name);
+                let mut bindings = IndexMap::new();
+                if matches!(local, "pict" | "object") {
+                    for ancestor in &stack {
+                        for (name, value) in &ancestor.namespace_declarations {
+                            let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+                            if crate::xml::canonical_namespace(prefix) == Some(value.as_str()) {
+                                bindings.shift_remove(name.as_str());
+                            } else {
+                                bindings.insert(name.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
+                let mut frame = CutFrame {
+                    anchor: local == "anchor",
+                    columns: local == "cols",
+                    drawing: !bindings.is_empty(),
+                    ..CutFrame::default()
+                };
+                if frame.drawing {
+                    drawings.push(CutDrawing {
+                        bindings,
+                        ..CutDrawing::default()
+                    });
+                }
+                for drawing in &mut drawings {
+                    drawing
+                        .used_prefixes
+                        .insert(crate::xml::namespace_prefix(&name).unwrap_or("").to_owned());
+                }
+                let position = stack.last_mut().is_some_and(|parent| {
+                    if parent.anchor && !parent.position_seen && local == "positionV" {
+                        parent.position_seen = true;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if let Some(parent) = stack.last_mut()
+                    && parent.columns
+                    && local == "col"
+                {
+                    refused |= parent.column_seen;
+                    parent.column_seen = true;
+                }
+                let mut unprefixed = None;
+                let mut prefixed = None;
+                let mut field_type = None;
+                let mut prefixed_field_type = None;
+                let mut attribute_bytes = 0usize;
+                for (index, attribute) in start.attributes().enumerate() {
+                    if index >= budget.limits().max_attributes_per_element {
+                        return Err(ParseError::ResourceLimit {
+                            kind: "attributesPerElement",
+                            part: part.to_owned(),
+                        });
+                    }
+                    let attribute = attribute
+                        .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                    if attribute.value.contains(&b'<') {
+                        return Err(error(
+                            reader.buffer_position(),
+                            "unescaped '<' in attribute value".to_owned(),
+                        ));
+                    }
+                    let key = reader
+                        .decoder()
+                        .decode(attribute.key.as_ref())
+                        .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                    #[allow(deprecated)]
+                    let value = attribute
+                        .decode_and_unescape_value(reader.decoder())
+                        .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                    attribute_bytes = attribute_bytes
+                        .checked_add(key.len() + value.len())
+                        .ok_or_else(|| ParseError::ResourceLimit {
+                            kind: "attributeBytes",
+                            part: part.to_owned(),
+                        })?;
+                    if attribute_bytes > budget.limits().max_attribute_bytes {
+                        return Err(ParseError::ResourceLimit {
+                            kind: "attributeBytes",
+                            part: part.to_owned(),
+                        });
+                    }
+                    budget.charge_text(key.len() + value.len(), part)?;
+                    if legacy_cut.is_some() && local == "fldChar" {
+                        let kind = match value.as_ref() {
+                            "begin" => "begin",
+                            "end" => "end",
+                            _ => "",
+                        };
+                        match key.as_ref() {
+                            "fldCharType" => field_type = Some(kind),
+                            "w:fldCharType" => prefixed_field_type = Some(kind),
+                            _ => {}
+                        }
+                    }
+                    if key == "xmlns" || key.starts_with("xmlns:") {
+                        frame
+                            .namespace_declarations
+                            .push((key.to_string(), value.to_string()));
+                    }
+                    for drawing in &mut drawings {
+                        drawing.use_attribute(&key, &value);
+                    }
+                    if frame.drawing {
+                        let drawing = drawings.last_mut().unwrap();
+                        drawing.attribute_names.insert(key.to_string());
+                        drawing.attribute_bytes = attribute_bytes;
+                    }
+                    if local == "anchor" && key == "simplePos" {
+                        refused |= value == "1";
+                    }
+                    if position && key == "relativeFrom" {
+                        refused |= !matches!(value.as_ref(), "paragraph" | "line");
+                    }
+                    let wanted = match local {
+                        "tblpPr" => "vertAnchor",
+                        "framePr" => "vAnchor",
+                        "cols" => "num",
+                        _ => "",
+                    };
+                    let test = || {
+                        if local == "cols" {
+                            !matches!(value.trim(), "" | "0" | "1")
+                        } else {
+                            value != "text"
+                        }
+                    };
+                    if !wanted.is_empty() {
+                        if key == wanted {
+                            unprefixed = Some(test());
+                        } else if key.strip_prefix("w:") == Some(wanted) {
+                            prefixed = Some(test());
+                        }
+                    } else if !matches!(local, "anchor") && key == "style" {
+                        refused |= crate::vml::style_placed_off_the_text(Some(&value));
+                    }
+                }
+                match local {
+                    "tblpPr" | "framePr" => refused |= prefixed.or(unprefixed).unwrap_or(true),
+                    "cols" => refused |= prefixed.or(unprefixed).unwrap_or(false),
+                    _ => {}
+                }
+                if let Some(cut) = &mut legacy_cut {
+                    cut.start(
+                        &name,
+                        prefixed_field_type.or(field_type),
+                        matches!(event, Event::Empty(_)),
+                    );
+                }
+                if matches!(event, Event::Start(_)) {
+                    stack.push(frame);
+                } else if frame.drawing {
+                    finish_cut_drawing(&mut drawings, part, budget)?;
+                }
+            }
+            Event::End(_) => {
+                if let Some(cut) = &mut legacy_cut {
+                    cut.end();
+                }
+                let frame = stack.pop().ok_or_else(|| {
+                    error(
+                        reader.buffer_position(),
+                        "unexpected closing element".to_owned(),
+                    )
+                })?;
+                if frame.drawing {
+                    finish_cut_drawing(&mut drawings, part, budget)?;
+                }
+            }
+            Event::Text(text) => {
+                let decoded = text
+                    .decode()
+                    .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                let value = quick_xml::escape::unescape(&decoded)
+                    .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                budget.charge_text(value.len(), part)?;
+                if stack.is_empty() && !value.trim().is_empty() {
+                    return Err(error(
+                        reader.buffer_position(),
+                        "text outside the root element".to_owned(),
+                    ));
+                }
+            }
+            Event::CData(text) => {
+                let value = text
+                    .decode()
+                    .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                budget.charge_text(value.len(), part)?;
+                if stack.is_empty() && !value.trim().is_empty() {
+                    return Err(error(
+                        reader.buffer_position(),
+                        "text outside the root element".to_owned(),
+                    ));
+                }
+            }
+            Event::GeneralRef(reference) => {
+                let decoded = reference
+                    .decode()
+                    .map_err(|err| error(reader.buffer_position(), err.to_string()))?;
+                let character = if reference.is_char_ref() {
+                    reference
+                        .resolve_char_ref()
+                        .map_err(|err| error(reader.buffer_position(), err.to_string()))?
+                        .filter(|character| crate::xml::is_legal_xml_character(*character))
+                } else {
+                    quick_xml::escape::resolve_predefined_entity(&decoded)
+                        .and_then(|value| value.chars().next())
+                };
+                let Some(character) = character else {
+                    return Err(ParseError::UnsafeXml {
+                        kind: "non-predefined or illegal entity reference",
+                        part: part.to_owned(),
+                    });
+                };
+                budget.charge_text(character.len_utf8(), part)?;
+                if stack.is_empty() && !character.is_whitespace() {
+                    return Err(error(
+                        reader.buffer_position(),
+                        "entity outside the root element".to_owned(),
+                    ));
+                }
+            }
+            Event::DocType(_) => {
+                return Err(ParseError::UnsafeXml {
+                    kind: "DTD/entity declarations are forbidden",
+                    part: part.to_owned(),
+                });
+            }
+            Event::Decl(ref declaration) if declares_an_encoding_other_than_utf8(declaration) => {
+                return Err(error(0, "declared encoding other than UTF-8".to_owned()));
+            }
+            Event::Decl(_) | Event::PI(_) | Event::Comment(_) => {}
+            Event::Eof => break,
+        }
+    }
+    if !stack.is_empty() {
+        return Err(error(
+            reader.buffer_position(),
+            "unclosed element".to_owned(),
+        ));
+    }
+    Ok((refused, legacy_cut.is_some_and(|cut| cut.cut.is_partial())))
+}
+
+// Reader offsets index the input and raw attribute names are the decoded ones only for
+// UTF-8 without a byte order mark.
+fn starts_with_a_byte_order_mark(xml: &[u8]) -> bool {
+    [&b"\xEF\xBB\xBF"[..], b"\xFE\xFF", b"\xFF\xFE"]
+        .iter()
+        .any(|bom| xml.starts_with(bom))
+}
+
+fn declares_an_encoding_other_than_utf8(declaration: &BytesDecl<'_>) -> bool {
+    match declaration.encoding() {
+        Some(Ok(encoding)) => !encoding.eq_ignore_ascii_case(b"utf-8"),
+        Some(Err(_)) => true,
+        None => false,
+    }
+}
+
+pub(crate) fn body_prefix(xml: &[u8], keep: usize) -> Option<Vec<u8>> {
+    if starts_with_a_byte_order_mark(xml) {
+        return None;
+    }
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    reader.config_mut().allow_dangling_amp = true;
+    let mut stack = Vec::new();
+    let mut body_start = None;
+    let mut body_end = None;
+    let mut children = 0;
+    let mut child_start = 0;
+    let mut kept_end = 0;
+    let mut top_section = None;
+    let mut final_section = None;
+    let mut section_in_child = false;
+    let mut ppr_seen = false;
+    let mut ppr_depth = None;
+    let mut wrapped_section = false;
+    let mut child_is_wrapper = false;
+    loop {
+        let begin = reader.buffer_position() as usize;
+        let event = reader.read_event().ok()?;
+        let end = reader.buffer_position() as usize;
+        match event {
+            Event::Start(ref start) | Event::Empty(ref start) => {
+                let name = start.name();
+                let name = std::str::from_utf8(name.as_ref()).ok()?;
+                let local = crate::xml::local_name(name);
+                if stack.is_empty() && local != "document" {
+                    return None;
+                }
+                if stack.len() == 1 && local == "body" {
+                    if body_start.is_some() || matches!(event, Event::Empty(_)) {
+                        return None;
+                    }
+                    body_start = Some(end);
+                    kept_end = end;
+                }
+                if body_start.is_some() && body_end.is_none() {
+                    if stack.len() == 2 {
+                        children += 1;
+                        child_start = begin;
+                        section_in_child = false;
+                        ppr_seen = false;
+                        ppr_depth = None;
+                        child_is_wrapper = matches!(local, "sdt" | "customXml" | "smartTag");
+                    }
+                    if stack.len() == 3 && stack.last() == Some(&"p") && local == "pPr" && !ppr_seen
+                    {
+                        ppr_seen = true;
+                        if matches!(event, Event::Start(_)) {
+                            ppr_depth = Some(4);
+                        }
+                    }
+                    if local == "sectPr" {
+                        if stack.len() == 4 && ppr_depth == Some(4) {
+                            section_in_child = true;
+                        }
+                        if children > keep
+                            && top_section.is_none()
+                            && child_is_wrapper
+                            && stack.last() == Some(&"pPr")
+                            && stack.get(stack.len().saturating_sub(2)) == Some(&"p")
+                        {
+                            wrapped_section = true;
+                        }
+                    }
+                    if matches!(event, Event::Empty(_)) && stack.len() == 2 {
+                        if children <= keep {
+                            kept_end = end;
+                        }
+                        if local == "sectPr" && final_section.is_none() {
+                            final_section = Some(begin..end);
+                        }
+                    }
+                }
+                if matches!(event, Event::Start(_)) {
+                    stack.push(match local {
+                        "document" => "document",
+                        "body" => "body",
+                        "p" => "p",
+                        "pPr" => "pPr",
+                        "sectPr" => "sectPr",
+                        _ => "",
+                    });
+                }
+            }
+            Event::End(_) => {
+                if stack.len() == 3 && body_end.is_none() {
+                    let local = *stack.last()?;
+                    if children <= keep {
+                        kept_end = end;
+                    } else if local == "p" && section_in_child && top_section.is_none() {
+                        top_section = Some(child_start..end);
+                    }
+                    if local == "sectPr" && final_section.is_none() {
+                        final_section = Some(child_start..end);
+                    }
+                }
+                if stack.len() == 4 && ppr_depth == Some(4) {
+                    ppr_depth = None;
+                }
+                if stack.len() == 2 && stack.last() == Some(&"body") {
+                    body_end = Some(begin);
+                }
+                stack.pop()?;
+            }
+            Event::Decl(ref declaration) if declares_an_encoding_other_than_utf8(declaration) => {
+                return None;
+            }
+            Event::DocType(_) => return None,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if !stack.is_empty() || children <= keep || wrapped_section {
+        return None;
+    }
+    let mut prefix = xml[..kept_end].to_vec();
+    if let Some(section) = top_section {
+        prefix.extend_from_slice(&xml[section]);
+    }
+    if let Some(section) = final_section
+        && section.start >= kept_end
+    {
+        prefix.extend_from_slice(&xml[section]);
+    }
+    prefix.extend_from_slice(&xml[body_end?..]);
+    streaming_refuses_a_body_cut(&prefix).ok()?;
+    Some(prefix)
+}
+
 /// Assemble the body below an already safe-parsed `w:document` root.
 pub fn parse_document_body(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
 ) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, true)
+    parse_document_body_impl(document, parser, true, None, None, None, None)
+        .map(|(body, _, _)| body)
 }
 
 /// Parses a body without cloning blocks into section content.
 pub(crate) fn parse_document_body_compact(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
-) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, false)
+    body_blocks: Option<usize>,
+    paragraph_budget: Option<usize>,
+    legacy_partial: Option<bool>,
+) -> Result<(DocumentBody, bool), ParseError> {
+    parse_document_body_impl(
+        document,
+        parser,
+        false,
+        body_blocks,
+        None,
+        paragraph_budget,
+        legacy_partial,
+    )
+    .map(|(body, _, budget_stopped)| (body, budget_stopped))
+}
+
+pub(crate) fn parse_document_body_compact_with_read(
+    document: &XmlElement,
+    parser: &mut StoryParser<'_, '_>,
+    body_blocks: Option<usize>,
+    kept_children: usize,
+    paragraph_budget: Option<usize>,
+    legacy_partial: Option<bool>,
+) -> Result<(DocumentBody, usize, bool), ParseError> {
+    parse_document_body_impl(
+        document,
+        parser,
+        false,
+        body_blocks,
+        Some(kept_children),
+        paragraph_budget,
+        legacy_partial,
+    )
 }
 
 fn parse_document_body_impl(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
     clone_section_content: bool,
-) -> Result<DocumentBody, ParseError> {
+    body_blocks: Option<usize>,
+    read_limit: Option<usize>,
+    paragraph_budget: Option<usize>,
+    legacy_partial: Option<bool>,
+) -> Result<(DocumentBody, usize, bool), ParseError> {
     if document.local_name() != "document" {
-        return Ok(DocumentBody::default());
+        return Ok((DocumentBody::default(), 0, false));
     }
     let Some(body) = document.child("w", "body") else {
-        return Ok(DocumentBody::default());
+        return Ok((DocumentBody::default(), 0, false));
     };
-    let content = parser.parse_blocks(body, 0, false)?;
-    let final_section_properties = body
-        .child("w", "sectPr")
+    let (content, read, budget_stopped) = parser.parse_blocks_until_with_read_limit(
+        body,
+        0,
+        false,
+        body_blocks,
+        read_limit,
+        paragraph_budget,
+        legacy_partial,
+    )?;
+    // A body cut short ends inside the section whose properties the next
+    // section-ending paragraph carries.
+    let cut_section = body_blocks.and_then(|_| {
+        transparent_children(body, false)
+            .into_iter()
+            .skip(read)
+            .filter(|child| child.matches_name("w", "p"))
+            .find_map(|paragraph| paragraph.child("w", "pPr")?.child("w", "sectPr"))
+    });
+    let final_section_properties = cut_section
+        .or_else(|| body.child("w", "sectPr"))
         .map(|element| parse_section_properties(Some(element)));
     let mut sections = build_sections(
         &content,
@@ -84,13 +780,17 @@ fn parse_document_body_impl(
     for (section, properties) in sections.iter_mut().zip(properties) {
         section.properties = properties;
     }
-    Ok(DocumentBody {
-        content,
-        sections: Some(sections),
-        final_section_properties,
-        custom_root_bindings: custom_root_bindings(document),
-        comments: None,
-    })
+    Ok((
+        DocumentBody {
+            content,
+            sections: Some(sections),
+            final_section_properties,
+            custom_root_bindings: custom_root_bindings(document),
+            comments: None,
+        },
+        read,
+        budget_stopped,
+    ))
 }
 
 /// Root bindings and attributes not regenerated by the standard boilerplate.
@@ -304,6 +1004,9 @@ mod tests {
     use crate::chart::ChartPartsMap;
     use crate::media::MediaMap;
     use crate::paragraph::HexIdAllocator;
+    use crate::s9::{
+        S9ParseOptions, parse_docx_s9_preview_from_parts, parse_docx_s9_preview_from_parts_full_dom,
+    };
     use crate::smart_art::SmartArtContext;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
 
@@ -357,6 +1060,418 @@ mod tests {
             extract_all_template_variables(&body.content),
             ["first", "second-name"]
         );
+    }
+
+    #[test]
+    fn refuses_a_cut_of_a_body_with_floats_off_the_text_or_columns() {
+        let refused = |body: &str| {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(
+                r#"<w:document xmlns:w="w" xmlns:wp="wp" xmlns:v="v"><w:body>{body}</w:body></w:document>"#
+            );
+            let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+            let refused = refuses_a_body_cut(document.root().unwrap());
+            assert_eq!(
+                streaming_refuses_a_body_cut(xml.as_bytes()).unwrap(),
+                refused,
+                "{body}"
+            );
+            refused
+        };
+        let anchor = |attributes: &str, vertical: &str| {
+            format!(
+                "<w:p><w:r><w:drawing><wp:anchor {attributes}>{vertical}</wp:anchor></w:drawing></w:r></w:p>"
+            )
+        };
+        let table = |attributes: &str| {
+            format!("<w:tbl><w:tblPr><w:tblpPr {attributes}/></w:tblPr></w:tbl>")
+        };
+        let frame =
+            |attributes: &str| format!("<w:p><w:pPr><w:framePr {attributes}/></w:pPr></w:p>");
+        let section =
+            |columns: &str| format!("<w:p><w:pPr><w:sectPr>{columns}</w:sectPr></w:pPr></w:p>");
+        let vml = |style: &str| {
+            format!(r#"<w:p><w:r><w:pict><v:shape style="{style}"/></w:pict></w:r></w:p>"#)
+        };
+        for body in [
+            anchor("", r#"<wp:positionV relativeFrom="margin"/>"#),
+            anchor("", r#"<wp:positionV relativeFrom="page"/>"#),
+            anchor("", r#"<wp:positionV relativeFrom="pag&#101;"/>"#),
+            anchor(
+                "",
+                r#"<wp:positionV relativeFrom="margin"/><wp:positionV relativeFrom="line"/>"#,
+            ),
+            anchor("", r#"<wp:positionV relativeFrom="topMargin"/>"#),
+            anchor(
+                r#"simplePos="1""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
+            table(r#"w:vertAnchor="margin""#),
+            table(r#"w:tblpY="60""#),
+            frame(r#"w:vAnchor="page""#),
+            frame(r#"w:w="2000""#),
+            vml("position:absolute;mso-position-vertical-relative:margin"),
+            vml("position:absolute;mso-position-vertical-relative:page"),
+            section(r#"<w:cols w:num="2"/>"#),
+            section(r#"<w:cols w:num="1"/><w:cols w:num="2"/>"#),
+            section(r#"<w:cols><x:col xmlns:x="x"/><x:col xmlns:x="x"/></w:cols>"#),
+            section(r#"<w:cols num="2" w:num="1"/><w:cols num="1" w:num="2"/>"#),
+            section(r#"<w:cols><w:col w:w="3000"/><w:col w:w="3000"/></w:cols>"#),
+        ] {
+            assert!(refused(&body), "{body}");
+        }
+        for body in [
+            anchor("", r#"<wp:positionV relativeFrom="paragraph"/>"#),
+            anchor("", r#"<wp:positionV relativeFrom="line"/>"#),
+            anchor(
+                "",
+                r#"<wp:wrap><wp:positionV relativeFrom="page"/></wp:wrap>"#,
+            ),
+            anchor("", r#"<wp:positionV/><wp:positionV relativeFrom="page"/>"#),
+            anchor(
+                "",
+                r#"<wp:positionV relativeFrom="line"/><wp:positionV relativeFrom="page"/>"#,
+            ),
+            section(r#"<w:cols num="2" w:num="1"/>"#),
+            vml("POSITION:absolute;mso-position-vertical-relative:page;position:static"),
+            vml(
+                "position:absolute;mso-position-vertical-relative:page;mso-position-vertical-relative:text",
+            ),
+            anchor("", ""),
+            table(r#"w:vertAnchor="text""#),
+            frame(r#"w:dropCap="drop" w:vAnchor="text""#),
+            vml("position:absolute;mso-position-vertical-relative:text"),
+            vml("width:300pt;height:165pt"),
+            section(r#"<w:cols w:num="1" w:space="720"/>"#),
+            section(r#"<w:cols w:space="720"/>"#),
+        ] {
+            assert!(!refused(&body), "{body}");
+        }
+    }
+
+    #[test]
+    fn streaming_cut_rejects_malformed_xml_even_after_a_refusal() {
+        for xml in [
+            "<w:document><w:body><w:p>",
+            "<w:document><w:body></w:document>",
+            "<w:document><w:body><wp:anchor simplePos=\"1\"/>",
+            "<w:document a=\"1\" a=\"2\"/>",
+            "<w:document a=\"<\"/>",
+            "<w:document/><other/>",
+            "<w:document>&unknown;</w:document>",
+            "<!DOCTYPE document><w:document/>",
+        ] {
+            let limits = ParseLimits::default();
+            assert!(
+                parse_xml(
+                    xml.as_bytes(),
+                    "word/document.xml",
+                    &mut ParseBudget::new(&limits)
+                )
+                .is_err(),
+                "{xml}"
+            );
+            assert!(
+                streaming_refuses_a_body_cut(xml.as_bytes()).is_err(),
+                "{xml}"
+            );
+            assert!(body_prefix(xml.as_bytes(), 0).is_none(), "{xml}");
+        }
+    }
+
+    fn drawing_preview_xml(off_text: bool) -> Vec<u8> {
+        let body: String = (0..620)
+            .map(|index| {
+                let drawing = match index {
+                    0 => r#"<w:pict><legacy:shape style="position:absolute;mso-position-vertical-relative:text;width:12pt;height:12pt"/></w:pict>"#,
+                    1 => r#"<w:object><legacy:shape style="width:12pt;height:12pt"/><office:OLEObject Type="Embed" ProgID="Word.Document.12"/></w:object>"#,
+                    550 if off_text => r#"<w:pict><legacy:shape style="position:absolute;mso-position-vertical-relative:page"/></w:pict>"#,
+                    _ => "",
+                };
+                format!("<w:p><w:r>{drawing}<w:t>paragraph {index}</w:t></w:r></w:p>")
+            })
+            .collect();
+        format!(
+            r#"<w:document xmlns:w="{}" xmlns:legacy="{}" xmlns:office="{}"><w:body>{body}</w:body></w:document>"#,
+            crate::xml::namespaces::W,
+            crate::xml::namespaces::V,
+            crate::xml::namespaces::O,
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn drawing_aliases_use_the_prefix_preview_and_match_the_full_dom() {
+        let xml = drawing_preview_xml(false);
+        let limits = ParseLimits::default();
+        assert!(!streaming_body_cut(&xml, &mut ParseBudget::new(&limits)).unwrap());
+        let parts = vec![("word/document.xml".to_owned(), xml.clone())];
+        for blocks in [1usize, 50, 200] {
+            let keep = blocks.saturating_mul(2).max(blocks.saturating_add(64));
+            let prefix = body_prefix(&xml, keep).unwrap();
+            assert!(prefix.len() < xml.len());
+            let parsed =
+                parse_xml(&prefix, "word/document.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let root = parsed.root().unwrap();
+            assert_eq!(
+                root.child("w", "body").unwrap().child_elements().count(),
+                keep
+            );
+            assert_eq!(
+                root.find_deep("w", "pict")
+                    .unwrap()
+                    .attributes
+                    .get("xmlns:legacy")
+                    .map(String::as_str),
+                Some(crate::xml::namespaces::V)
+            );
+            assert_eq!(
+                root.find_deep("w", "object")
+                    .unwrap()
+                    .attributes
+                    .get("xmlns:office")
+                    .map(String::as_str),
+                Some(crate::xml::namespaces::O)
+            );
+            for source_ordinals in [false, true] {
+                let options = S9ParseOptions {
+                    determinism_seed: Some("7".repeat(64)),
+                    source_ordinals,
+                    ..S9ParseOptions::default()
+                };
+                let actual =
+                    parse_docx_s9_preview_from_parts(&parts, blocks, options.clone(), &limits)
+                        .unwrap();
+                let expected =
+                    parse_docx_s9_preview_from_parts_full_dom(&parts, blocks, options, &limits)
+                        .unwrap();
+                assert!(actual.is_some());
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap(),
+                    "blocks={blocks}, source_ordinals={source_ordinals}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drawing_alias_attribute_bytes_match_the_full_dom_error() {
+        let max_attribute_bytes = format!(
+            "xmlns:w{}xmlns:legacy{}",
+            crate::xml::namespaces::W,
+            crate::xml::namespaces::V,
+        )
+        .len();
+        let limits = ParseLimits {
+            max_attribute_bytes,
+            ..ParseLimits::default()
+        };
+        let padding = "x".repeat(max_attribute_bytes - "id".len());
+        let xml = format!(
+            r#"<w:document xmlns:w="{}" xmlns:legacy="{}"><w:body><w:p><w:r><w:pict id="{padding}"><legacy:shape/></w:pict></w:r></w:p></w:body></w:document>"#,
+            crate::xml::namespaces::W,
+            crate::xml::namespaces::V,
+        );
+        let expected = ParseError::ResourceLimit {
+            kind: "drawingNamespaceAliases",
+            part: "word/document.xml".to_owned(),
+        };
+        assert_eq!(
+            streaming_body_cut(xml.as_bytes(), &mut ParseBudget::new(&limits)).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            parse_xml(
+                xml.as_bytes(),
+                "word/document.xml",
+                &mut ParseBudget::new(&limits)
+            )
+            .unwrap_err(),
+            expected
+        );
+        let parts = vec![("word/document.xml".to_owned(), xml.into_bytes())];
+        let options = S9ParseOptions {
+            determinism_seed: Some("7".repeat(64)),
+            ..S9ParseOptions::default()
+        };
+        assert_eq!(
+            parse_docx_s9_preview_from_parts(&parts, 1, options.clone(), &limits).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            parse_docx_s9_preview_from_parts_full_dom(&parts, 1, options, &limits).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_vml_shape_off_the_text_after_the_cut_refuses_both_preview_paths() {
+        let xml = drawing_preview_xml(true);
+        let limits = ParseLimits::default();
+        assert!(streaming_body_cut(&xml, &mut ParseBudget::new(&limits)).unwrap());
+        let parts = vec![("word/document.xml".to_owned(), xml.clone())];
+        for blocks in [1usize, 50, 200] {
+            let keep = blocks.saturating_mul(2).max(blocks.saturating_add(64));
+            let prefix = body_prefix(&xml, keep).unwrap();
+            assert!(!streaming_refuses_a_body_cut(&prefix).unwrap());
+            let options = S9ParseOptions {
+                determinism_seed: Some("7".repeat(64)),
+                ..S9ParseOptions::default()
+            };
+            assert!(
+                parse_docx_s9_preview_from_parts(&parts, blocks, options.clone(), &limits)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                parse_docx_s9_preview_from_parts_full_dom(&parts, blocks, options, &limits)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn nested_drawing_alias_budgets_match_the_full_dom() {
+        let xml = format!(
+            r#"<w:document xmlns:w="{}" xmlns:v="urn:old-v" xmlns:mc="{}" xmlns="urn:default" xmlns:ext="urn:outer" xmlns:extra="urn:extra" xmlns:Requires="extra" xmlns:a="urn:a" xmlns:unused="urn:unused"><w:body xmlns:v="{}" xmlns:ext="urn:inner"><w:pict xmlns:ext="urn:own" mc:Ignorable="ext" mc:MustUnderstand="a" mc:Requires="a:item" mc:ProcessContent="ext:item" mc:PreserveElements="a:*" mc:PreserveAttributes="ext:*"><w:object><Requires:marker ext:value="x"><leaf/></Requires:marker><w:pict xmlns:a="urn:own-a" a:value="x"><v:shape/></w:pict><w:object ext:value="x"/></w:object></w:pict></w:body></w:document>"#,
+            crate::xml::namespaces::W,
+            crate::xml::namespaces::MC,
+            crate::xml::namespaces::V,
+        );
+        let defaults = ParseLimits::default();
+        let document = parse_xml(
+            xml.as_bytes(),
+            "word/document.xml",
+            &mut ParseBudget::new(&defaults),
+        )
+        .unwrap();
+        let outer = document.root().unwrap().find_deep("w", "pict").unwrap();
+        assert_eq!(
+            outer.attributes.get("xmlns:extra").map(String::as_str),
+            Some("urn:extra")
+        );
+        assert!(!outer.attributes.contains_key("xmlns:v"));
+        assert!(!outer.attributes.contains_key("xmlns:unused"));
+        assert!(
+            !outer
+                .child("w", "object")
+                .unwrap()
+                .attributes
+                .contains_key("xmlns:extra")
+        );
+        let mut text_bytes = 0usize;
+        let mut pending = vec![document.root().unwrap()];
+        while let Some(element) = pending.pop() {
+            text_bytes += element.name.len();
+            text_bytes += element
+                .attributes
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>();
+            for node in &element.children {
+                match node {
+                    crate::xml::XmlNode::Element(child) => pending.push(child),
+                    crate::xml::XmlNode::Text(value) | crate::xml::XmlNode::CData(value) => {
+                        text_bytes += value.len();
+                    }
+                }
+            }
+        }
+        let mut cases = Vec::new();
+        for max_attributes_per_element in 0..=16 {
+            cases.push(ParseLimits {
+                max_attributes_per_element,
+                ..ParseLimits::default()
+            });
+        }
+        for max_attribute_bytes in [80, 160, 240, 320, 500, 1000] {
+            cases.push(ParseLimits {
+                max_attribute_bytes,
+                ..ParseLimits::default()
+            });
+        }
+        for max_xml_text_bytes in [text_bytes - 1, text_bytes, text_bytes + 1] {
+            cases.push(ParseLimits {
+                max_xml_text_bytes,
+                ..ParseLimits::default()
+            });
+        }
+        for limits in cases {
+            let mut streaming_budget = ParseBudget::new(&limits);
+            let mut dom_budget = ParseBudget::new(&limits);
+            let actual = streaming_body_cut(xml.as_bytes(), &mut streaming_budget);
+            let expected = parse_xml(xml.as_bytes(), "word/document.xml", &mut dom_budget)
+                .map(|document| refuses_a_body_cut(document.root().unwrap()));
+            assert_eq!(actual, expected, "{limits:?}");
+            assert_eq!(streaming_budget.xml_events(), dom_budget.xml_events());
+            if actual.is_ok() {
+                assert_eq!(
+                    streaming_budget
+                        .charge_text(limits.max_xml_text_bytes - text_bytes, "word/document.xml"),
+                    dom_budget
+                        .charge_text(limits.max_xml_text_bytes - text_bytes, "word/document.xml")
+                );
+                assert!(
+                    streaming_budget
+                        .charge_text(1, "word/document.xml")
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn body_prefix_keeps_the_next_section_and_the_authored_final_section() {
+        let xml = br#"<?xml version="1.0"?><w:document xmlns:w="w"><w:body a="&amp;">
+            <w:p><w:r><w:t>first & stray</w:t></w:r></w:p><w:customXml><w:p/></w:customXml>
+            <w:p/><w:p><w:pPr><w:sectPr><w:pgSz w:w="10000"/></w:sectPr></w:pPr></w:p>
+            <w:p/><w:sectPr><w:pgSz w:w="20000"/></w:sectPr>
+            </w:body></w:document>"#;
+        let prefix = body_prefix(xml, 2).unwrap();
+        let limits = ParseLimits::default();
+        let document =
+            parse_xml(&prefix, "word/document.xml", &mut ParseBudget::new(&limits)).unwrap();
+        let body = document.root().unwrap().child("w", "body").unwrap();
+        assert_eq!(body.child_elements().count(), 4);
+        assert_eq!(body.children_named("w", "p").count(), 2);
+        assert!(String::from_utf8(prefix).unwrap().contains("first & stray"));
+        assert!(body_prefix(xml, 6).is_none());
+        assert!(body_prefix(xml, 7).is_none());
+    }
+
+    #[test]
+    fn the_streaming_cut_falls_back_for_a_bom_or_a_declared_encoding_other_than_utf8() {
+        let body = "<w:body><w:p/><w:p/><w:p/><w:sectPr/></w:body></w:document>";
+        let plain = format!("<w:document xmlns:w=\"w\">{body}");
+        assert!(body_prefix(plain.as_bytes(), 1).is_some());
+        assert!(!streaming_refuses_a_body_cut(plain.as_bytes()).unwrap());
+        let declared = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{plain}");
+        assert!(body_prefix(declared.as_bytes(), 1).is_some());
+        assert!(!streaming_refuses_a_body_cut(declared.as_bytes()).unwrap());
+        let bom = [b"\xEF\xBB\xBF".as_slice(), plain.as_bytes()].concat();
+        assert!(body_prefix(&bom, 1).is_none());
+        assert!(streaming_refuses_a_body_cut(&bom).is_err());
+        let other = format!("<?xml version=\"1.0\" encoding=\"ISO-2022-JP\"?>{plain}");
+        assert!(body_prefix(other.as_bytes(), 1).is_none());
+        assert!(streaming_refuses_a_body_cut(other.as_bytes()).is_err());
+        let refusing = "<?xml version='1.0' encoding='ISO-2022-JP'?><w:document xmlns:w='w' \
+            xmlns:wp='wp'><w:body><wp:anchor simplePos='1'/></w:body></w:document>";
+        assert!(streaming_refuses_a_body_cut(refusing.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn body_prefix_falls_back_for_wrapped_section_breaks_before_the_next_top_level_break() {
+        for wrapper in ["sdt", "customXml", "smartTag"] {
+            let xml = format!(
+                "<w:document><w:body><w:p/><w:{wrapper}><w:sdtContent><w:p><w:pPr><w:sectPr/></w:pPr></w:p></w:sdtContent></w:{wrapper}><w:p><w:pPr><w:sectPr/></w:pPr></w:p></w:body></w:document>"
+            );
+            assert!(body_prefix(xml.as_bytes(), 1).is_none(), "{wrapper}");
+        }
+        let xml = b"<w:document><w:body><w:p/><w:p><w:pPr><w:sectPr/></w:pPr></w:p><w:sdt><w:sdtContent><w:p><w:pPr><w:sectPr/></w:pPr></w:p></w:sdtContent></w:sdt></w:body></w:document>";
+        assert!(body_prefix(xml, 1).is_some());
     }
 
     #[test]

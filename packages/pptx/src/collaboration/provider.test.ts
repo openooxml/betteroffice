@@ -199,6 +199,41 @@ function open(replica = new FakeReplica(), transport = new FakeTransport()) {
 }
 
 describe('CollaborationProvider sync', () => {
+  it('applies incoming Step2 when the outgoing queue limit is zero and sends are accepted', () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, { maxPendingBytes: 0 });
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => { errors.push(error); });
+    try {
+      provider.connect();
+      transport.emit({ type: 'open' });
+      transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+      expect(replica.applied).toEqual([Uint8Array.of(4)]);
+      expect(provider.status).toBe('connected');
+      expect(provider.synced).toBe(true);
+      expect(errors).toEqual([]);
+    } finally { provider.destroy(); }
+  });
+
+  it('accepts reentrant synchronous incoming traffic with a zero outgoing queue limit', () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, { maxPendingBytes: 0 });
+    const apply = replica.applyUpdate.bind(replica);
+    replica.applyUpdate = (update) => {
+      apply(update);
+      if (update[0] === 4) transport.emit({ type: 'message', data: encodeUpdate(Uint8Array.of(5)) });
+    };
+    try {
+      provider.connect();
+      transport.emit({ type: 'open' });
+      transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+      expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
+      expect(provider.synced).toBe(true);
+    } finally { provider.destroy(); }
+  });
+
   it('starts unsynced and sends an exact Step1 frame on open', () => {
     const replica = new FakeReplica();
     replica.stateVector = Uint8Array.of(1, 2);

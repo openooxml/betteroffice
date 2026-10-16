@@ -2,8 +2,7 @@
 
 UI locale strings, types, and runtime helpers for the
 [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react)
-editor. `en` is the source of truth; community locales mirror its shape and fall
-back to English for any untranslated key.
+editor. `en` defines the locale shape; community locales override its strings.
 
 ```bash
 bun add @betteroffice/docx-i18n
@@ -26,7 +25,7 @@ Override individual strings by spreading a locale:
 const myLocale = { ...de, formattingBar: { ...de.formattingBar, bold: 'Fettdruck' } };
 ```
 
-Keys set to `null` in any locale fall back to English.
+Keys set to `null` keep the English string.
 
 ## Locales
 
