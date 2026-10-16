@@ -5,7 +5,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from '../yrs';
 import { createAsyncCollaborationReplica } from './asyncReplica';
 import { CollaborationProvider } from './provider';
-import { decodeMessages, encodeVarUint, stateVectorDominates } from './protocol';
+import { CHUNKED_SYNC_CLIENT, decodeMessages, encodeVarUint, stateVectorDominates } from './protocol';
 import type { CollaborationError, CollaborationTransport, CollaborationTransportEvent } from './types';
 
 type Kind = 'sync' | 'async';
@@ -102,7 +102,11 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
     .filter((frame) => frame.from === from)
     .flatMap((frame) => decodeMessages(frame.data))
     .filter((message) => message.type === type).length;
-  return { transports, setOnline, reopen, flush, sent, missing, count };
+  const vectors = (from: number, since: number) => sent.slice(since)
+    .filter((frame) => frame.from === from)
+    .flatMap((frame) => decodeMessages(frame.data))
+    .flatMap((message) => message.type === 'sync-step-1' ? [clocks(message.stateVector)] : []);
+  return { transports, setOnline, reopen, flush, sent, missing, count, vectors };
 }
 
 function clocks(vector: Uint8Array): Map<bigint, bigint> {
@@ -247,11 +251,7 @@ for (const kind of ['sync', 'async'] as const) {
         const mark = net.sent.length;
         net.setOnline(0, true);
         await net.flush();
-        const advertised = net.sent.slice(mark)
-          .filter((frame) => frame.from === 0)
-          .flatMap((frame) => decodeMessages(frame.data))
-          .flatMap((message) => message.type === 'sync-step-1' ? [clocks(message.stateVector).get(BigInt(own))] : []);
-        expect(advertised).toEqual([0xffff_ffffn]);
+        expect(net.vectors(0, mark).map((vector) => vector.get(BigInt(own)))).toEqual([0xffff_ffffn]);
         expect(errors).toEqual([]);
         expect(right.text()).toEqual(left.text());
         expect(right.text()[0]).toBe('beta');
@@ -315,3 +315,38 @@ for (const kind of ['sync', 'async'] as const) {
     });
   });
 }
+
+describe('a replica holding its initial sync', () => {
+  const sorted = (vector: Map<bigint, bigint>) => [...vector].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+
+  it('opens with the chunked sync marker next to the local clock ahead, or the real clock at the native limit', async () => {
+    const { peers: [left, right], net, errors, close } = await network('sync', 2);
+    try {
+      const own = BigInt(left.session.clientId);
+      const marker: [bigint, bigint] = [BigInt(CHUNKED_SYNC_CLIENT), 0n];
+      const reopen = async () => {
+        net.setOnline(0, false);
+        const before = clocks(left.session.encodeStateVector());
+        const mark = net.sent.length;
+        net.setOnline(0, true);
+        await net.flush();
+        return { before, opened: net.vectors(0, mark)[0], updates: net.count(0, 'update', mark) };
+      };
+
+      const ahead = await reopen();
+      expect(sorted(ahead.opened))
+        .toEqual(sorted(new Map([...ahead.before, [own, (ahead.before.get(own) ?? 0n) + 1n], marker])));
+      expect(ahead.updates).toBe(0);
+
+      const filler = phantomClockTo(Number(own), Number(ahead.before.get(own) ?? 0n), 0xffff_ffff);
+      for (const peer of [left, right]) peer.session.applyUpdate(filler.slice());
+      await net.flush();
+      const limit = await reopen();
+      expect(limit.before.get(own)).toBe(0xffff_ffffn);
+      expect(sorted(limit.opened)).toEqual(sorted(new Map([...limit.before, marker])));
+      expect(limit.updates).toBe(1);
+      expect(errors).toEqual([]);
+      expect(right.text()).toEqual(left.text());
+    } finally { close(); }
+  });
+});
