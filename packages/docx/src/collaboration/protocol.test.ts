@@ -17,6 +17,7 @@ import {
   encodeUpdate,
   CHUNKED_SYNC_CLIENT,
   encodeVarUint,
+  holdsOpenSyncClient,
   OPEN_SYNC_CLIENT,
   parseSyncRequest,
   ProtocolError,
@@ -329,6 +330,13 @@ describe('sync request entries', () => {
     expect(parseSyncRequest(plain)).toEqual({ stateVector: plain, open: false, chunked: false });
     const ahead = stateVector([BigInt(OPEN_SYNC_CLIENT), 3n]);
     expect(parseSyncRequest(ahead)).toEqual({ stateVector: ahead, open: false, chunked: false });
+  });
+
+  it('tells a history that holds the open request client from a marked or plain vector', () => {
+    expect(holdsOpenSyncClient(stateVector([5n, 9n], [BigInt(OPEN_SYNC_CLIENT), 3n]))).toBe(true);
+    for (const vector of [stateVector([5n, 9n]), stateVector([5n, 9n], OPEN), Uint8Array.of(7)]) {
+      expect(holdsOpenSyncClient(vector)).toBe(false);
+    }
   });
 
   it('marks a local clock at the native limit without changing it', () => {

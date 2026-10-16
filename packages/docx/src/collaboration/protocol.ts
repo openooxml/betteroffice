@@ -257,6 +257,12 @@ export function withSyncRequest(
   ], Number.MAX_SAFE_INTEGER);
 }
 
+/** Whether the history behind `stateVector` already holds the open request client, which then cannot carry the mark. */
+export function holdsOpenSyncClient(stateVector: Uint8Array): boolean {
+  return stateVectorEntries(stateVector)?.entries
+    .some((entry) => entry.client === BigInt(OPEN_SYNC_CLIENT) && entry.clock !== 0n) ?? false;
+}
+
 /** The state vector of a SyncStep1 without its request entries, and which requests it carried. */
 export function parseSyncRequest(
   stateVector: Uint8Array
