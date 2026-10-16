@@ -838,6 +838,25 @@ fn an_edit_beside_a_macrosheet_requests_a_full_calc_on_load() {
     assert!(xml.contains(FULL_CALC_PR), "{xml}");
 }
 
+/// The model keeps the Fallback's literal, so the Choice's formula goes unseen.
+#[test]
+fn an_edit_beside_an_alternate_content_formula_requests_a_full_calc_on_load() {
+    let mut parts = two_sheet_package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        r#"<sheetData><row r="1"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x14"><c r="A1"><f>Sheet1!A1*2</f><v>2</v></c></mc:Choice><mc:Fallback><c r="A1"><v>2</v></c></mc:Fallback></mc:AlternateContent></row></sheetData>"#,
+    );
+    parts[0].1 = String::from_utf8(parts[0].1.clone())
+        .unwrap()
+        .replace("</workbook>", &format!("{CALC_PR}</workbook>"))
+        .into_bytes();
+    let precedent = Cell {
+        value: CellValue::Number { value: 5.0 },
+        ..Cell::default()
+    };
+    let xml = workbook_xml_after_edit(&parts, "A1", precedent);
+    assert!(xml.contains(FULL_CALC_PR), "{xml}");
+}
+
 #[test]
 fn shared_formulas_resolve_late_masters_and_leave_unshared_cells_alone() {
     let body = r#"<sheetData>

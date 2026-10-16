@@ -2135,13 +2135,16 @@ fn workbook_xml_with_template(
 }
 
 /// Whether the saved workbook holds a formula. Only worksheet cells are
-/// modeled, so a macrosheet or an unknown sheet kind counts as holding one.
+/// modeled, and an `mc:AlternateContent` branch can hide one from the model,
+/// so a macrosheet, an unknown sheet kind or such a source sheet counts too.
 fn holds_formulas(wb: &Workbook, package: &PreservedPackage, sheets: &[PlannedSheet]) -> bool {
     sheets.iter().filter_map(|plan| plan.origin).any(|origin| {
         matches!(
             package.source_sheet_kind(origin),
             Some(SourceSheetKind::Macrosheet | SourceSheetKind::Other)
-        )
+        ) || package
+            .source_cell_facts(origin)
+            .is_some_and(|facts| facts.alternate_formulas)
     }) || wb
         .sheets
         .iter()
