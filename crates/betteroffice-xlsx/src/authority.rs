@@ -24,10 +24,10 @@ use yrs::sync::time::Clock;
 use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
 use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
-use yrs::updates::encoder::{Encoder, EncoderV1};
+use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
-    Any, Array, ArrayRef, BranchID, Doc, ID, IdSet, Map, MapPrelim, MapRef, Options, Origin, Out,
-    ReadTxn, StateVector, Transact, TransactionMut, Update, WriteTxn,
+    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Options, Origin, Out, ReadTxn,
+    StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
 #[cfg(test)]
@@ -1392,15 +1392,20 @@ impl WorkbookAuthority {
                 "no updates were provided".to_string(),
             ));
         }
-        let decoded = updates
-            .iter()
-            .map(|update| decode_update_v1(update).map_err(AuthorityError::InvalidUpdate))
-            .collect::<Result<Vec<_>, _>>()?;
-        let incoming = if updates.len() == 1 {
-            decoded.into_iter().next().unwrap()
-        } else {
-            Update::merge_updates(decoded)
+        let merged;
+        let (bytes, local) = match updates {
+            [update] => (*update, false),
+            _ => {
+                let decoded = updates
+                    .iter()
+                    .map(|update| decode_update_v1(update).map_err(AuthorityError::InvalidUpdate))
+                    .collect::<Result<Vec<_>, _>>()?;
+                merged = Update::merge_updates(decoded).encode_v1();
+                (merged.as_slice(), true)
+            }
         };
+        let (incoming, layout) =
+            decode_update_layout_v1(bytes, local).map_err(AuthorityError::InvalidUpdate)?;
         let before_vector = self.doc.transact().state_vector();
         let owned;
         let before = match baseline {
@@ -1410,23 +1415,20 @@ impl WorkbookAuthority {
                 &owned
             }
         };
-        let inserted = incoming.insertions(true);
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, before).map_err(AuthorityError::InvalidState)?;
-        apply_remote(&staged_doc, incoming)?;
-        let held_back = !covers(&staged_doc.transact().state_vector(), &inserted);
-        // Yrs integrates a block whose own predecessors are missing behind a
-        // skip that no state vector reaches, so no diff can commit it: stage
-        // only what the commit carries and keep the update pending.
-        let staged_doc = if held_back {
-            let diff = staged_doc.transact().encode_diff_v1(&before_vector);
-            let carried = decode_local_update_v1(&diff).map_err(AuthorityError::InvalidUpdate)?;
-            let committed = Doc::with_client_id(self.client_id());
-            hydrate_local_doc(&committed, before).map_err(AuthorityError::InvalidState)?;
-            apply_remote(&committed, carried)?;
-            committed
-        } else {
-            staged_doc
+        let known = staged_doc.transact().state_vector();
+        let held_back = match hold_back_unreachable_v1(bytes, &layout, &known) {
+            Some(reachable) => {
+                let reachable =
+                    decode_local_update_v1(&reachable).map_err(AuthorityError::InvalidUpdate)?;
+                apply_remote(&staged_doc, reachable)?;
+                true
+            }
+            None => {
+                apply_remote(&staged_doc, incoming)?;
+                false
+            }
         };
 
         let staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
@@ -2525,9 +2527,60 @@ fn apply_remote(doc: &Doc, update: Update) -> Result<(), AuthorityError> {
         .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
 }
 
-fn covers(vector: &StateVector, ids: &IdSet) -> bool {
-    ids.iter()
-        .all(|(client, ranges)| ranges.iter().all(|range| range.end <= vector.get(client)))
+/// Re-encodes `bytes` without each client's blocks from the first one past
+/// what `known` and the update's own earlier blocks reach, as Yjs holds them,
+/// keeping the whole delete set; `None` when every block is reachable.
+fn hold_back_unreachable_v1(
+    bytes: &[u8],
+    layout: &UpdateLayout,
+    known: &StateVector,
+) -> Option<Vec<u8>> {
+    let mut frontiers = HashMap::new();
+    let kept = layout
+        .clients
+        .iter()
+        .map(|section| {
+            let frontier = frontiers
+                .entry(section.client)
+                .or_insert_with(|| Some(known.get(&section.client)));
+            let mut kept = 0;
+            for (index, block) in section.blocks.iter().enumerate() {
+                match *frontier {
+                    Some(_) if block.skip => {}
+                    Some(clock) if block.clock <= clock => {
+                        *frontier = Some(clock.max(block.end_clock));
+                        kept = index + 1;
+                    }
+                    _ => {
+                        *frontier = None;
+                        break;
+                    }
+                }
+            }
+            kept
+        })
+        .collect::<Vec<_>>();
+    let held = layout
+        .clients
+        .iter()
+        .zip(&kept)
+        .any(|(section, &kept)| section.blocks[kept..].iter().any(|block| !block.skip));
+    if !held {
+        return None;
+    }
+    let mut encoder = EncoderV1::new();
+    encoder.write_var(kept.iter().filter(|&&kept| kept > 0).count() as u32);
+    for (section, &kept) in layout.clients.iter().zip(&kept) {
+        if kept == 0 {
+            continue;
+        }
+        encoder.write_var(kept as u32);
+        encoder.write_client(section.client);
+        encoder.write_var(section.blocks[0].clock);
+        encoder.write_all(&bytes[section.blocks[0].start..section.blocks[kept - 1].end]);
+    }
+    encoder.write_all(&bytes[layout.deletes..]);
+    Some(encoder.to_vec())
 }
 
 fn has_pending(doc: &Doc) -> bool {
@@ -2608,7 +2661,21 @@ fn decode_state_vector_v1(bytes: &[u8]) -> Result<StateVector, String> {
 }
 
 fn decode_update_v1(bytes: &[u8]) -> Result<Update, String> {
-    decode_checked_update(CheckedDecoderV1::new_update(bytes))
+    decode_checked_update(&mut CheckedDecoderV1::new_update(bytes))
+}
+
+/// Decodes an update along with where each block sits; `local` bounds counts
+/// by the encoded size, for bytes merged from already-validated updates.
+fn decode_update_layout_v1(bytes: &[u8], local: bool) -> Result<(Update, UpdateLayout), String> {
+    let mut decoder = CheckedDecoderV1::new_update(bytes);
+    if local {
+        decoder.max_blocks = bytes.len();
+        decoder.max_values = bytes.len();
+        decoder.max_delete_ranges = bytes.len();
+    }
+    decoder.layout = Some(UpdateLayout::default());
+    let update = decode_checked_update(&mut decoder)?;
+    Ok((update, decoder.layout.unwrap_or_default()))
 }
 
 /// Decodes authority-generated bytes with counts bounded by their encoded size.
@@ -2617,12 +2684,12 @@ fn decode_local_update_v1(bytes: &[u8]) -> Result<Update, String> {
     decoder.max_blocks = bytes.len();
     decoder.max_values = bytes.len();
     decoder.max_delete_ranges = bytes.len();
-    decode_checked_update(decoder)
+    decode_checked_update(&mut decoder)
 }
 
-fn decode_checked_update(mut decoder: CheckedDecoderV1<'_>) -> Result<Update, String> {
+fn decode_checked_update(decoder: &mut CheckedDecoderV1<'_>) -> Result<Update, String> {
     catch_unwind(AssertUnwindSafe(|| {
-        let update = Update::decode(&mut decoder).map_err(|error| error.to_string())?;
+        let update = Update::decode(&mut *decoder).map_err(|error| error.to_string())?;
         if !decoder
             .read_to_end()
             .map_err(|error| error.to_string())?
@@ -2672,9 +2739,30 @@ enum PendingLength {
     Type,
 }
 
+#[derive(Default)]
+struct UpdateLayout {
+    clients: Vec<ClientLayout>,
+    deletes: usize,
+}
+
+struct ClientLayout {
+    client: ClientID,
+    blocks: Vec<BlockLayout>,
+}
+
+struct BlockLayout {
+    start: usize,
+    end: usize,
+    clock: u32,
+    end_clock: u32,
+    skip: bool,
+}
+
 struct CheckedDecoderV1<'a> {
     inner: DecoderV1<'a>,
+    len: usize,
     remaining: usize,
+    layout: Option<UpdateLayout>,
     max_blocks: usize,
     max_values: usize,
     max_delete_ranges: usize,
@@ -2699,7 +2787,9 @@ impl<'a> CheckedDecoderV1<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self {
             inner: DecoderV1::from(bytes),
+            len: bytes.len(),
             remaining: bytes.len(),
+            layout: None,
             max_blocks: MAX_UPDATE_BLOCKS,
             max_values: MAX_UPDATE_VALUES,
             max_delete_ranges: MAX_UPDATE_DELETE_RANGES,
@@ -2728,9 +2818,19 @@ impl<'a> CheckedDecoderV1<'a> {
         decoder
     }
 
+    fn offset(&self) -> usize {
+        self.len - self.remaining
+    }
+
     fn begin_capture(&mut self, kind: CaptureKind) -> Result<(), DecodeError> {
         if self.capture.is_some() {
             return Err(decode_error("overlapping update varints"));
+        }
+        let offset = self.offset();
+        if let CaptureKind::DeleteClientCount = kind
+            && let Some(layout) = &mut self.layout
+        {
+            layout.deletes = offset;
         }
         self.capture = Some(VarCapture::new(kind));
         Ok(())
@@ -2851,6 +2951,16 @@ impl<'a> CheckedDecoderV1<'a> {
     fn finish_block(&mut self) -> Result<(), DecodeError> {
         if self.blocks_remaining == 0 {
             return Err(decode_error("update contains more blocks than declared"));
+        }
+        let (end, end_clock) = (self.offset(), self.clock.unwrap_or_default());
+        if let Some(block) = self
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.clients.last_mut())
+            .and_then(|section| section.blocks.last_mut())
+        {
+            block.end = end;
+            block.end_clock = end_clock;
         }
         self.blocks_remaining -= 1;
         if self.blocks_remaining == 0 {
@@ -3087,6 +3197,12 @@ impl Decoder for CheckedDecoderV1<'_> {
             return Err(decode_error("update client is missing its block count"));
         }
         let client = checked_client_id(self.read_var_u64_checked()?)?;
+        if let Some(layout) = &mut self.layout {
+            layout.clients.push(ClientLayout {
+                client,
+                blocks: Vec::new(),
+            });
+        }
         self.begin_capture(CaptureKind::BlockClock)?;
         Ok(client)
     }
@@ -3095,7 +3211,21 @@ impl Decoder for CheckedDecoderV1<'_> {
         if self.pending_length.is_some() {
             return Err(decode_error("update block is missing its content length"));
         }
+        let (start, clock) = (self.offset(), self.clock.unwrap_or_default());
         let info = self.read_u8()?;
+        if let Some(section) = self
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.clients.last_mut())
+        {
+            section.blocks.push(BlockLayout {
+                start,
+                end: start,
+                clock,
+                end_clock: clock,
+                skip: info == BLOCK_SKIP_REF_NUMBER,
+            });
+        }
         if info == BLOCK_SKIP_REF_NUMBER {
             self.begin_capture(CaptureKind::SkipLength)?;
         } else if info == BLOCK_GC_REF_NUMBER {
