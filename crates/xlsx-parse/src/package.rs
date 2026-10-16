@@ -196,6 +196,21 @@ impl PreservedPackage {
     }
 
     #[doc(hidden)]
+    pub fn legacy_style_readings(&self) -> Result<crate::LegacyStyleReadings, ParseError> {
+        let parsed = crate::read::parse_workbook_indexed(&self.parts)?;
+        let styles = crate::read::legacy_style_readings(
+            &self.parts,
+            &parsed.workbook,
+            parsed.legacy_styles.as_ref(),
+        )?;
+        Ok(crate::LegacyStyleReadings {
+            workbook: parsed.workbook,
+            dimensions: parsed.legacy_dimensions,
+            styles,
+        })
+    }
+
+    #[doc(hidden)]
     pub fn source_sheet_count(&self) -> usize {
         self.sheets.len()
     }

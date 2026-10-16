@@ -10,12 +10,23 @@ use xlsx_model::styles::{
 use crate::xml::{attr, local_name, next_event, reader, xml_err};
 use crate::{MAX_STYLE_ENTRIES, ParseError};
 
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static LEGACY_STYLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn legacy_style_reads() -> u64 {
+    LEGACY_STYLE_READS.get()
+}
+
 /// build the stylesheet from the optional style and theme parts; either falls
 /// back to the model defaults.
 pub(crate) fn parse_stylesheet(
     styles: Option<&[u8]>,
     theme: Option<&[u8]>,
-) -> Result<(Stylesheet, Option<Stylesheet>, Vec<Stylesheet>), ParseError> {
+) -> Result<(Stylesheet, Option<Stylesheet>), ParseError> {
     let theme = match theme {
         Some(bytes) => parse_theme(bytes)?,
         None => Theme::default(),
@@ -30,20 +41,31 @@ pub(crate) fn parse_stylesheet(
         legacy.cell_xfs = legacy_xfs;
         legacy
     });
+    Ok((sheet, legacy))
+}
+
+pub(crate) fn legacy_style_readings(
+    styles: Option<&[u8]>,
+    sheet: &Stylesheet,
+    legacy: Option<&Stylesheet>,
+    references_zero_style: bool,
+) -> Result<Vec<Stylesheet>, ParseError> {
     let mut readings = Vec::new();
     if let Some(bytes) = styles {
         let (mut unfiltered, xfs) = parse_style_pools(bytes, true)?;
         unfiltered.theme = sheet.theme.clone();
         let mut held = unfiltered.clone();
         held.cell_xfs = xfs;
-        for reading in [unfiltered, held] {
-            if reading != sheet && legacy.as_ref() != Some(&reading) && !readings.contains(&reading)
-            {
+        for mut reading in [unfiltered, held] {
+            if reading.cell_xfs.is_empty() && references_zero_style {
+                reading.cell_xfs.push(Xf::default());
+            }
+            if &reading != sheet && legacy != Some(&reading) && !readings.contains(&reading) {
                 readings.push(reading);
             }
         }
     }
-    Ok((sheet, legacy, readings))
+    Ok(readings)
 }
 
 /// A stylesheet pool selected by logical parentage.
@@ -73,6 +95,10 @@ struct Scope {
 }
 
 fn parse_style_pools(data: &[u8], unfiltered: bool) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    #[cfg(feature = "test-counters")]
+    if unfiltered {
+        LEGACY_STYLE_READS.set(LEGACY_STYLE_READS.get() + 1);
+    }
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut physical_depth = 0;

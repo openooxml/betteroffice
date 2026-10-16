@@ -1207,7 +1207,16 @@ impl WorkbookAuthority {
     /// an untouched bootstrap of the same workbook whatever schema it was
     /// written at, and where the bootstraps do agree the two are the same
     /// document, so adopting is never worse than merging.
+    #[cfg(test)]
     pub(crate) fn snapshot_replacement(&self, update: &[u8]) -> SnapshotAdoption {
+        self.snapshot_replacement_with_legacy_styles(update, || None)
+    }
+
+    pub(crate) fn snapshot_replacement_with_legacy_styles(
+        &self,
+        update: &[u8],
+        legacy_styles: impl FnOnce() -> Option<xlsx_parse::LegacyStyleReadings>,
+    ) -> SnapshotAdoption {
         if !self.is_pristine() {
             return SnapshotAdoption::NotApplicable;
         }
@@ -1215,9 +1224,32 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return SnapshotAdoption::NotApplicable;
         }
-        let candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
+        let mut candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
+        }
+        let accepted = candidate
+            .schema_version()
+            .ok()
+            .zip(candidate.state_fingerprint())
+            .is_some_and(|(version, fingerprint)| {
+                self.base.accepts_fingerprint(version, &fingerprint)
+            });
+        if !accepted
+            && let Some(legacy) = legacy_styles()
+            && let Ok(base) = WorkbookBase::from_model_with_style_readings(
+                &legacy.workbook,
+                &legacy.dimensions,
+                None,
+                &legacy.styles,
+            )
+        {
+            let target = Arc::make_mut(&mut candidate.base);
+            for (version, accepted) in base.fingerprints {
+                for fingerprint in accepted {
+                    append_fingerprint(&mut target.fingerprints, version, fingerprint);
+                }
+            }
         }
         let released = candidate.holds_released_reading();
         if let Err(error) = candidate.upgrade_schema_from(Some(&self.doc)) {

@@ -588,7 +588,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            (parsed.legacy_styles.as_ref(), &parsed.legacy_style_readings),
+            (parsed.legacy_styles.as_ref(), &[]),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -889,7 +889,16 @@ impl Workbook {
             return Ok(false);
         };
         let frozen = frozen.clone();
-        let candidate = match self.authority.snapshot_replacement(update) {
+        let candidate = match self
+            .authority
+            .snapshot_replacement_with_legacy_styles(update, || {
+                self.source_package
+                    .as_ref()?
+                    .materialize()
+                    .ok()?
+                    .legacy_style_readings()
+                    .ok()
+            }) {
             SnapshotAdoption::NotApplicable => return Ok(false),
             SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
             SnapshotAdoption::Replacement(candidate) => *candidate,
@@ -5076,7 +5085,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            (parsed.legacy_styles.as_ref(), &parsed.legacy_style_readings),
+            (parsed.legacy_styles.as_ref(), &[]),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)

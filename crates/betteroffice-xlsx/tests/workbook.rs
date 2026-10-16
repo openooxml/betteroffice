@@ -1481,6 +1481,63 @@ fn saving_rejects_invalid_palette_colors_from_model_json() {
 }
 
 #[test]
+fn dxf_plain_open_save_and_current_state_skip_legacy_style_reading() {
+    let source = dxf_count_source(1);
+    let before = xlsx_parse::legacy_style_reads();
+    let plain = Workbook::open(&source).unwrap();
+    let saved = plain.save().unwrap();
+    Workbook::open_for_read(&saved).unwrap();
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+    let peer = Workbook::open_collaborative(&source, 903).unwrap();
+    replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+}
+
+fn dxf_count_source(count: usize) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let dxfs = r#"<dxf><numFmt numFmtId="14" formatCode="0%"/></dxf>"#.repeat(count);
+    let styles = format!("<styleSheet><dxfs>{dxfs}</dxfs></styleSheet>");
+    set_test_part(&mut parts, "xl/styles.xml", styles.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn dxf_entries_over_legacy_style_cap_still_open() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    Workbook::open(&source).unwrap();
+    Workbook::open_collaborative(&source, 902).unwrap();
+}
+
+#[test]
+fn dxf_legacy_style_cap_preserves_fingerprint_mismatch() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    let mut other = WorkbookModel::default();
+    other.sheets.push(Sheet::new("Different"));
+    let peer = Workbook::from_model_collaborative(other, 903).unwrap();
+    let before = replica.model().clone();
+    let reads = xlsx_parse::legacy_style_reads();
+    let error = replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("base fingerprint"), "{error}");
+    assert_eq!(xlsx_parse::legacy_style_reads(), reads + 1);
+    assert_eq!(replica.model(), &before);
+}
+
+#[test]
 fn persisted_dxf_base_fingerprints_keep_pre_filter_pool_readings() {
     for flags in [
         "",
