@@ -201,6 +201,7 @@ export class CollaborationProvider {
   private readonly maxSyncBytes: number;
   private syncHeld: Uint8Array[] | null = null;
   private syncHeldBytes = 0;
+  private syncRequestOwed = false;
   private readonly localUser: CollaborationResolvedUser | null;
   private readonly statusListeners = new Map<number, CollaborationStatusListener>();
   private readonly errorListeners = new Map<number, CollaborationErrorListener>();
@@ -548,6 +549,7 @@ export class CollaborationProvider {
     this.syncHeld =
       typeof (this.asyncReplica ?? this.replica).applyUpdateChunks === 'function' ? [] : null;
     this.syncHeldBytes = 0;
+    this.syncRequestOwed = false;
     this.isOpen = true;
     this.clearPending();
     this.setStatus('connected', false);
@@ -689,7 +691,9 @@ export class CollaborationProvider {
           }
           frame.remaining += 1;
           const held = message.type === 'sync-step-2' ? this.takeSyncHeld() : [];
-          this.enqueueReplicaMessages(token, frame, [message], held);
+          const owed = message.type === 'sync-step-1' && this.syncHeld !== null;
+          if (owed) this.syncRequestOwed = true;
+          this.enqueueReplicaMessages(token, frame, [message], held, owed);
         } else {
           this.handleMessage(token, new Uint8Array(), [message]);
         }
@@ -716,6 +720,7 @@ export class CollaborationProvider {
                 );
               }
             }
+            this.sendOwedSyncRequest(token, connection);
           }
           break;
         case 'update':
@@ -776,6 +781,7 @@ export class CollaborationProvider {
     this.replicaBytes = 0;
     this.syncHeld = null;
     this.syncHeldBytes = 0;
+    this.syncRequestOwed = false;
     this.arrivalsInFlight.clear();
     this.awarenessGenerations.clear();
   }
@@ -784,7 +790,8 @@ export class CollaborationProvider {
     token: number,
     frame: { connection: number; bytes: number; remaining: number },
     messages: ReturnType<typeof decodeMessages>,
-    held: readonly Uint8Array[] = []
+    held: readonly Uint8Array[] = [],
+    owed = false
   ): void {
     const connection = frame.connection;
     if (!this.isCurrentOpen(token, connection)) return;
@@ -804,7 +811,7 @@ export class CollaborationProvider {
               : [requireBytes(await replica.encodeStateAsUpdate(message.stateVector.slice()), 'encodeStateAsUpdate')];
             if (!this.isCurrentOpen(token, connection)) return;
             this.sendSyncAnswer(token, updates, () => this.isCurrentOpen(token, connection));
-            if (!this.isCurrentOpen(token, connection)) return;
+            if (!this.isCurrentOpen(token, connection) || owed) return;
             this.requestMissingStateFromWorker(token, connection, message.stateVector);
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             const applied = message.type === 'sync-step-2'
@@ -823,6 +830,7 @@ export class CollaborationProvider {
                   );
                 }
               }
+              this.sendOwedSyncRequest(token, connection);
             } else {
               this.applyTypingInference(applied, awarenessAtArrival);
             }
@@ -870,7 +878,22 @@ export class CollaborationProvider {
     }
     this.sendSyncAnswer(token, updates, () => this.isCurrentOpen(token, connection));
     if (!this.isCurrentOpen(token, connection)) return;
+    if (this.syncHeld) this.syncRequestOwed = true;
+    else this.requestMissingStateFromReplica(token, remoteStateVector);
+  }
 
+  /**
+   * Once the join merges, sends the SyncStep1 put off while it was held: the answer carries only what the join missed,
+   * not a second, unchunked copy of the joined state.
+   */
+  private sendOwedSyncRequest(token: number, connection: number): void {
+    if (!this.syncRequestOwed || !this.isCurrentOpen(token, connection)) return;
+    this.syncRequestOwed = false;
+    if (this.asyncReplica) this.requestMissingStateFromWorker(token, connection);
+    else this.requestMissingStateFromReplica(token);
+  }
+
+  private requestMissingStateFromReplica(token: number, remoteStateVector?: Uint8Array): void {
     let stateVector: Uint8Array;
     try {
       stateVector = requireBytes(this.replica.encodeStateVector(), 'encodeStateVector');
@@ -887,7 +910,7 @@ export class CollaborationProvider {
   private requestMissingStateFromWorker(
     token: number,
     connection: number,
-    remoteStateVector: Uint8Array
+    remoteStateVector?: Uint8Array
   ): void {
     void this.asyncReplica!.encodeStateVector().then((vector) => {
       if (this.isCurrentOpen(token, connection)) {
@@ -906,11 +929,11 @@ export class CollaborationProvider {
   private requestMissingState(
     token: number,
     stateVector: Uint8Array,
-    remoteStateVector: Uint8Array
+    remoteStateVector?: Uint8Array
   ): void {
     let missing: boolean;
     try {
-      missing = !stateVectorDominates(stateVector, remoteStateVector);
+      missing = !remoteStateVector || !stateVectorDominates(stateVector, remoteStateVector);
     } catch (cause) {
       this.report(normalizeError('protocol', 'Invalid state vector', cause));
       return;

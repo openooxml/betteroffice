@@ -349,4 +349,14 @@ describe('a replica holding its initial sync', () => {
       expect(right.text()).toEqual(left.text());
     } finally { close(); }
   });
+
+  it.todo('first joiner in a two-peer relay leaves the chunked hold (deferred: no peer answers its open, and its request waits for that answer)', async () => {
+    const { peers: [first, second], net, errors, close } = await network('sync', 2);
+    try {
+      second.edit(0, 'live ');
+      await net.flush();
+      expect(errors).toEqual([]);
+      expect(first.text()).toEqual(second.text());
+    } finally { close(); }
+  });
 });
