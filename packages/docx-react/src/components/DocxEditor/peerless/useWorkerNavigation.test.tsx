@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { useRef } from 'react';
 import { createPeerlessShellController } from './shellController';
 import { createPeerlessViewStore } from './viewStore';
@@ -13,6 +13,36 @@ afterEach(cleanup);
 afterAll(async () => {
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
   if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+test('worker bookmark target selects and scrolls', async () => {
+  const identity = { session: 'bookmark', incarnation: 1, epoch: 1 };
+  const loc = { story: 'body:t0:r0c0', paraId: 'target', offset: 1 };
+  const viewStore = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+    workerSelection: null, anchors: null, editState: undefined, geometry: { identity, frameEpoch: 1, layoutRevision: 1,
+      coversThroughSeq: 0, caret: { x: 10, y: 1200, width: 1, height: 14 }, selectionRects: [], pages: [] } });
+  const submit = mock(() => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }), presented: Promise.resolve('presented') } }));
+  const binding = { viewStore, admission: {}, session: { flush: async () => {} }, commands: { submit } } as unknown as PeerlessEditSessionBinding;
+  const read = mock(async () => ({ status: 'ok', version: 'native', value: { loc, position: 50 } }));
+  const controller = createPeerlessShellController({ zoom: 1, focus() {}, read: read as never });
+  controller.attach(binding);
+  let navigation!: ReturnType<typeof useWorkerNavigation>;
+  function Harness() {
+    const scroller = useRef<HTMLDivElement>(null);
+    const host = useRef<HTMLDivElement>(null);
+    navigation = useWorkerNavigation(controller, () => binding, scroller, host, 1, {});
+    return <div ref={scroller} data-testid="scroll"><div ref={host} /></div>;
+  }
+  try {
+    const view = render(<Harness />);
+    await act(async () => { expect(await navigation.scrollToBookmark('target')).toBe(true); });
+    expect(read).toHaveBeenCalledWith({ kind: 'bookmarkTarget', story: 'body', name: 'target' });
+    expect(submit).toHaveBeenCalledWith({ kind: 'select', payload: { selection: { anchor: loc, focus: loc } } }, { source: 'selection', fence: true });
+    expect(view.getByTestId('scroll').scrollTop).toBe(1176);
+    read.mockImplementation(async () => ({ status: 'ok', version: 'native', value: null } as never));
+    await act(async () => { expect(await navigation.scrollToBookmark('missing')).toBe(false); });
+    expect(submit).toHaveBeenCalledTimes(1);
+  } finally { cleanup(); controller.dispose(); viewStore.dispose(); }
 });
 
 test('zoom updates the page indicator without requiring a scroll event', async () => {

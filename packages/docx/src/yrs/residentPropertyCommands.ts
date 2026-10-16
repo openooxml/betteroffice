@@ -4,7 +4,7 @@ import { patchSection, readResidentProperties, resolvePropertyImage, sectionProp
 
 export const PROPERTY_COMMANDS = ['setHyperlink', 'setObjectProperties', 'setSectionProperties', 'setNoteProperties', 'setWatermark'] as const;
 const keys: Record<(typeof PROPERTY_COMMANDS)[number], string[]> = {
-  setHyperlink: ['selection', 'hyperlink', 'expectVersion'],
+  setHyperlink: ['selection', 'hyperlink', 'displayText', 'expectVersion'],
   setObjectProperties: ['handle', 'patch', 'expectVersion'],
   setSectionProperties: ['section', 'patch', 'expectVersion'],
   setNoteProperties: ['section', 'footnotePr', 'endnotePr', 'expectVersion'],
@@ -90,7 +90,7 @@ export function validPropertyCommand(command: DocxCommandEnvelope): boolean {
   const allowed = keys[command.kind];
   if (!text(payload.expectVersion) || Object.keys(payload).some(key => !allowed.includes(key))) return false;
   switch (command.kind) {
-    case 'setHyperlink': return record(payload.selection) && (payload.hyperlink === null ||
+    case 'setHyperlink': return record(payload.selection) && (payload.displayText === undefined || text(payload.displayText)) && (payload.hyperlink === null ||
       record(payload.hyperlink) && text(payload.hyperlink.href) && Object.entries(payload.hyperlink).every(([key, entry]) => ['href', 'tooltip', 'rId'].includes(key) && text(entry)));
     case 'setObjectProperties': return text(payload.handle) && imagePatch(payload.patch);
     case 'setSectionProperties': return text(payload.section) && sectionPatch(payload.patch);
@@ -103,6 +103,8 @@ export function propertyCommandTarget(engine: ResidentDocxCommandEngine, command
   switch (command.kind) {
     case 'setHyperlink': {
       const range = commandSelectionRange(engine, command.payload.selection);
+      if (command.payload.displayText && range?.start.paraId !== range?.end.paraId) return 'invalid-range';
+      if (range && command.payload.displayText) return null;
       return range && (range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset) ? null : 'invalid-range';
     }
     case 'setObjectProperties': return resolvePropertyImage(engine, command.payload.handle) ? null : 'stale-object';
@@ -116,7 +118,18 @@ export function applyPropertyCommand(engine: ResidentDocxCommandEngine, command:
   engine.beginUndoCapture();
   engine.addUndoBoundary();
   switch (command.kind) {
-    case 'setHyperlink': engine.setHyperlink(commandSelectionRange(engine, command.payload.selection)!, command.payload.hyperlink); break;
+    case 'setHyperlink': {
+      let range = commandSelectionRange(engine, command.payload.selection)!;
+      if (command.payload.displayText) {
+        const receipt = range.start.paraId === range.end.paraId && range.start.offset === range.end.offset
+          ? engine.insertText({ story: range.story, ...range.start }, command.payload.displayText)
+          : engine.replaceRange(range, command.payload.displayText);
+        if (!receipt.range) throw new Error('Text receipt lacks range');
+        range = receipt.range;
+      }
+      engine.setHyperlink(range, command.payload.hyperlink);
+      break;
+    }
     case 'setObjectProperties': {
       const at = resolvePropertyImage(engine, command.payload.handle)!;
       const read = readResidentProperties(engine, { kind: 'object', at });
