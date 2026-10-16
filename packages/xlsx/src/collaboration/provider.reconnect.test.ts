@@ -12,7 +12,7 @@ interface Peer {
   replica: CollaborationReplica;
   edit(col: number, input: string): Promise<void>;
   undo(): Promise<void>;
-  read(): Promise<string[]>;
+  read(from?: number): Promise<string[]>;
   vector(): Promise<Uint8Array>;
   dispose(): unknown;
 }
@@ -27,7 +27,7 @@ async function openPeer(kind: Kind, clientId: number): Promise<Peer> {
       replica: handle,
       edit: async (col, input) => { expect(handle.editCell(0, 2, col + 1, input).applied).toBe(true); },
       undo: async () => { expect(handle.undo().applied).toBe(true); },
-      read: async () => [1, 2].map((col) => handle.cell(0, 2, col).input),
+      read: async (from = 0) => [1, 2].map((col) => handle.cell(0, 2, from + col).input),
       vector: async () => handle.encodeStateVector(),
       dispose: () => handle.dispose(),
     };
@@ -40,7 +40,10 @@ async function openPeer(kind: Kind, clientId: number): Promise<Peer> {
     replica: session.replica!,
     edit: (col, input) => applied(session.editSession!.submit('editCell', { payload: { args: [0, 2, col + 1, input] } })),
     undo: () => applied(session.editSession!.submit('undo', { payload: { args: [] } })),
-    read: async () => (await session.call.cellInputs(0, 'B3:C3')).cells[0].map((cell) => cell.input),
+    read: async (from = 0) => {
+      const range = `${String.fromCharCode(66 + from)}3:${String.fromCharCode(67 + from)}3`;
+      return (await session.call.cellInputs(0, range)).cells[0].map((cell) => cell.input);
+    },
     vector: () => asyncReplicaFor(session.replica!)!.encodeStateVector(),
     dispose: () => session.dispose(),
   };
@@ -241,19 +244,19 @@ for (const kind of ['sync', 'async'] as const) {
     it('publish offline deletions to a peer that saw no open', async () => {
       const { peers: [left, right], net, close } = await network(kind, 2);
       try {
-        await left.edit(0, 'cleared');
-        await left.edit(1, 'undone');
+        await left.edit(4, 'cleared');
+        await left.edit(5, 'undone');
         await net.flush();
-        expect(await right.read()).toEqual(['cleared', 'undone']);
+        expect(await right.read(4)).toEqual(['cleared', 'undone']);
         net.setOnline(0, false);
         const vector = await left.vector();
         await left.undo();
         expect(await left.vector()).toEqual(vector);
-        await left.edit(0, '');
+        await left.edit(4, '');
         expect(await left.vector()).toEqual(vector);
         net.setOnline(0, true);
         await net.flush();
-        const cells = await Promise.all([left.read(), right.read()]);
+        const cells = await Promise.all([left.read(4), right.read(4)]);
         expect(cells[1]).toEqual(cells[0]);
         expect(cells[0].filter(Boolean)).toEqual([]);
       } finally { await close(); }
@@ -262,15 +265,15 @@ for (const kind of ['sync', 'async'] as const) {
     it('publish offline deletions to every replica on a relay', async () => {
       const { peers, net, close } = await network(kind, 3);
       try {
-        await peers[2].edit(0, 'cleared');
-        await peers[2].edit(1, 'undone');
+        await peers[2].edit(4, 'cleared');
+        await peers[2].edit(5, 'undone');
         await net.flush();
         net.setOnline(2, false);
         await peers[2].undo();
-        await peers[2].edit(0, '');
+        await peers[2].edit(4, '');
         net.setOnline(2, true);
         await net.flush();
-        const cells = await Promise.all(peers.map((peer) => peer.read()));
+        const cells = await Promise.all(peers.map((peer) => peer.read(4)));
         expect(cells[1]).toEqual(cells[0]);
         expect(cells[2]).toEqual(cells[0]);
         expect(cells[0].filter(Boolean)).toEqual([]);
