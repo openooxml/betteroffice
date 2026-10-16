@@ -16,7 +16,7 @@ export interface WorkerPreviewJob {
   client: ResidentEngineWorkerClient;
   frame: ResidentEngineWorkerFrame;
   pages: WorkerPreviewPages;
-  signal: AbortSignal;
+  live(): boolean;
   resolve(): void;
   reject(error: unknown): void;
 }
@@ -63,7 +63,7 @@ export function WorkerDocumentPreview({ job, zoom, onPresented }: {
       });
       void job.client.attachCanvases(surfaces, surfaces.map(({ pageId }) => pageId), globalThis.devicePixelRatio || 1, 1,
         { color: '#000', width: 2 }).then(() => {
-        if (!current || job.signal.aborted) return;
+        if (!current || !job.live()) return;
         onPresented(job.frame);
         job.resolve();
       }, job.reject);

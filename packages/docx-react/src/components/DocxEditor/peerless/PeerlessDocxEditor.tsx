@@ -394,7 +394,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           const settle = (operation: () => void) => { signal.removeEventListener('abort', cancel); operation(); };
           const cancel = () => settle(() => reject(signal.reason));
           signal.addEventListener('abort', cancel, { once: true });
-          setPreviewJob({ client, frame: preview, pages, signal,
+          setPreviewJob({ client, frame: preview, pages, live: () => live() && !signal.aborted,
             resolve: () => settle(() => { painted = true; resolve(true); }), reject: (error) => settle(() => reject(error)) });
         });
       };
@@ -407,6 +407,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         } finally {
           live = false;
           clearTimeout(timer);
+          if (!painted) setPreviewJob(job => job?.client === client ? null : job);
         }
       };
       const previewFailed = (error: unknown) => {

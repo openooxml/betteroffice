@@ -601,6 +601,28 @@ test('a buffer load whose whole source fails after the cut painted rejects, and 
   await pending;
 });
 
+test('a preview that paints after its budget expired presents nothing', async () => {
+  holdInitial = true;
+  holdPreviewPaint = true;
+  const budget = peerlessPreviewPaint.timeoutMs;
+  peerlessPreviewPaint.timeoutMs = 4_321;
+  const schedule = globalThis.setTimeout;
+  const expiries: (() => void)[] = [];
+  globalThis.setTimeout = ((callback: () => void, delay?: number, ...rest: unknown[]) =>
+    delay === 4_321 ? (expiries.push(callback), schedule(() => {}, 0)) : schedule(callback, delay, ...rest)) as typeof setTimeout;
+  restorers.push(() => { peerlessPreviewPaint.timeoutMs = budget; globalThis.setTimeout = schedule; });
+  const painted = mock(() => {});
+  const view = render(<DocxEditor {...peerlessProps} previewFirstPage showToolbar={false} onFirstPagePainted={painted}
+    loadingIndicator={<span>Opening source</span>} />);
+  await waitFor(() => expect(requests.some(request => request.type === 'attachCanvases')).toBe(true));
+  act(() => expiries[0]!());
+  await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
+  await act(async () => workers[0].onmessage?.({ data: workers[0].pendingReplies.shift()! } as MessageEvent<ResidentEngineWorkerResponse>));
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  expect(painted).not.toHaveBeenCalled();
+  expect(view.getByText('Opening source')).toBeTruthy();
+});
+
 for (const failure of ['layout', 'paint'] as const) {
   test(`a preview ${failure} failure still opens the document`, async () => {
     const errors: Error[] = [];
