@@ -79,11 +79,13 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     const isCurrent = () => current === binding() && identity.session === current.viewStore.getSnapshot().identity.session &&
       identity.incarnation === current.viewStore.getSnapshot().identity.incarnation && identity.epoch === current.viewStore.getSnapshot().identity.epoch;
     const select = async (value: DocxCommandSelection) => {
+      const throughSeq = current.viewStore.getSnapshot().throughSeq;
       const result = current.commands.submit({ kind: 'select', payload: { selection: value } }, { source: 'selection', fence: true });
       if (result.status !== 'submitted') return false;
-      const outcome = await result.ticket.ack;
+      const [outcome, presented] = await Promise.all([result.ticket.ack, result.ticket.presented]);
       if (!isCurrent() || (outcome.status !== 'applied' && outcome.status !== 'noop')) return false;
-      return await result.ticket.presented === 'presented' && isCurrent() && current.viewStore.getSnapshot().throughSeq <= result.ticket.seq;
+      const seq = outcome.seq ?? result.ticket.seq ?? throughSeq;
+      return presented === 'presented' && current.viewStore.getSnapshot().throughSeq <= seq;
     };
     if (!await select({ anchor: selection.anchor, focus: selection.anchor })) return false;
     const shown = current.viewStore.getSnapshot().geometry?.caret;
