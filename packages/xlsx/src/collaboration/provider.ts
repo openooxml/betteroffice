@@ -9,9 +9,9 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
-  isEmptyUpdate,
   isStateVector,
   stateVectorDominates,
+  withClientClockAhead,
   withoutDocumentFingerprint,
   type ProtocolError,
 } from './protocol';
@@ -530,7 +530,10 @@ export class CollaborationProvider {
   private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
     if (!this.isCurrentOpen(token, connection)) return;
     try {
-      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+      const advertised = isStateVector(stateVector)
+        ? withClientClockAhead(stateVector, this.replica.clientId)
+        : stateVector;
+      this.sendFrame(encodeSyncStep1(advertised, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(
         token,
@@ -538,8 +541,6 @@ export class CollaborationProvider {
       );
       return;
     }
-    if (!this.isCurrentOpen(token, connection)) return;
-    this.publishDeleteSet(token, connection, stateVector);
     if (!this.isCurrentOpen(token, connection)) return;
 
     try {
@@ -660,40 +661,6 @@ export class CollaborationProvider {
     this.openEpoch += 1;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
-  }
-
-  private publishDeleteSet(token: number, connection: number, stateVector: Uint8Array): void {
-    if (!isStateVector(stateVector)) return;
-    const vector = withoutDocumentFingerprint(stateVector).slice();
-    if (this.asyncReplica) {
-      const operation = this.replicaTail.then(async () => {
-        if (!this.isCurrentOpen(token, connection)) return;
-        const update = await this.asyncReplica!.encodeStateAsUpdate(vector);
-        if (this.isCurrentOpen(token, connection)) this.sendDeleteSet(token, requireBytes(update, 'encodeStateAsUpdate'));
-      }).catch((cause) => {
-        if (this.isCurrentOpen(token, connection)) this.failConnection(token,
-          normalizeError('replica', 'Async replica operation failed', cause));
-      });
-      this.replicaTail = operation;
-      return;
-    }
-    let update: Uint8Array;
-    try {
-      update = requireBytes(this.replica.encodeStateAsUpdate(vector), 'encodeStateAsUpdate');
-    } catch (cause) {
-      this.failConnection(token, normalizeError('replica', 'Failed to encode replica update', cause));
-      return;
-    }
-    this.sendDeleteSet(token, update);
-  }
-
-  private sendDeleteSet(token: number, update: Uint8Array): void {
-    if (isEmptyUpdate(update)) return;
-    try {
-      this.sendFrame(encodeUpdate(update, this.maxFrameBytes));
-    } catch (cause) {
-      this.failConnection(token, normalizeError('protocol', 'Failed to encode update', cause));
-    }
   }
 
   private enqueueReplicaMessages(token: number, bytes: number, messages: ReturnType<typeof decodeMessages>): void {

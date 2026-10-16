@@ -142,8 +142,9 @@ test('worker replicas exchange a fresh handshake and converge after disconnected
     for (const provider of providers) provider.connect();
     await synced;
     await Promise.all([left.call.version(), right.call.version()]);
+    await quiet();
     const handshakes = frames.map((_, index) => [count(index, 'sync-step-1'), count(index, 'sync-step-2')]);
-    expect(handshakes).toEqual([[1, 1], [1, 1]]);
+    expect(handshakes).toEqual([[2, 2], [2, 2]]);
     connection(0, false);
     connection(1, false);
     expect(providers.every((provider) => provider.status === 'disconnected' && !provider.synced)).toBe(true);

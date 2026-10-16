@@ -213,7 +213,7 @@ for (const kind of ['sync', 'async'] as const) {
         net.setOnline(0, false);
         net.setOnline(0, true);
         await net.flush();
-        expect([net.count(0, 'sync-step-1', mark), net.count(1, 'sync-step-1', mark)]).toEqual([1, 0]);
+        expect([net.count(0, 'sync-step-1', mark), net.count(1, 'sync-step-1', mark)]).toEqual([1, 1]);
 
         mark = net.sent.length;
         net.setOnline(0, false);

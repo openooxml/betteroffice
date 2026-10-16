@@ -395,21 +395,6 @@ export function isStateVector(payload: Uint8Array): boolean {
   }
 }
 
-/** Whether `update` is a v1 update with no structs and no deleted ranges. */
-export function isEmptyUpdate(update: Uint8Array): boolean {
-  const reader = varUintReader(withoutDocumentFingerprint(update), 'Update');
-  try {
-    if (reader.read() !== 0n) return false;
-    for (let clients = reader.read(); clients > 0n; clients -= 1n) {
-      reader.read();
-      if (reader.read() !== 0n) return false;
-    }
-    return reader.done();
-  } catch {
-    return false;
-  }
-}
-
 /** Whether `vector` has every client clock of `other`; both are v1 state vectors, optionally fingerprinted. */
 export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boolean {
   const own = withoutDocumentFingerprint(vector);
@@ -422,6 +407,27 @@ export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boo
     if (clock > (clocks.get(client) ?? 0n)) return false;
   }
   return true;
+}
+
+/** `vector` with `clientId`'s clock one past its own (1 when absent), keeping any document fingerprint. */
+export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array {
+  if (!Number.isSafeInteger(clientId) || clientId < 0) {
+    throw new ProtocolError('Client id must be a non-negative safe integer');
+  }
+  const body = withoutDocumentFingerprint(vector);
+  const clocks = decodeStateVector(body);
+  const client = BigInt(clientId);
+  clocks.set(client, (clocks.get(client) ?? 0n) + 1n);
+  const bytes: number[] = [];
+  for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  }
+  const suffix = vector.subarray(body.byteLength);
+  const result = new Uint8Array(bytes.length + suffix.byteLength);
+  result.set(bytes);
+  result.set(suffix, bytes.length);
+  return result;
 }
 
 export function decodeMessages(
