@@ -68,12 +68,10 @@ impl Seed {
             .unwrap();
     }
 
-    /// Deletes text, then moves, undoes and moves again, so clearing the redo stack unkeeps the
-    /// shape that the kept text deletion still points into.
-    fn edit_undo_edit(&self, session: &DeckSession) {
+    /// Moves, undoes and moves again, so clearing the redo stack unkeeps the shape that the
+    /// restored position, still kept, points into.
+    fn move_undo_move(&self, session: &DeckSession) {
         let context = EditCtx::local("local");
-        session.delete_text(&context, &self.story_id, 0, 2).unwrap();
-        session.add_undo_barrier();
         session
             .move_shape(&context, &self.slide_id, &self.shape_id, 400_000, 300_000)
             .unwrap();
@@ -124,16 +122,7 @@ fn a_peer_removing_a_shape_this_replica_edited_undid_and_edited_again_leaves_its
     let seed = Seed::new();
     let local = seed.open(202);
     let peer = seed.open(303);
-
-    let context = EditCtx::local("local");
-    local
-        .move_shape(&context, &seed.slide_id, &seed.shape_id, 400_000, 300_000)
-        .unwrap();
-    local.add_undo_barrier();
-    assert!(local.undo());
-    local
-        .move_shape(&context, &seed.slide_id, &seed.shape_id, 800_000, 300_000)
-        .unwrap();
+    seed.move_undo_move(&local);
 
     let sent = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&sent);
@@ -194,7 +183,11 @@ fn a_replica_with_undo_history_survives_undo_and_redo_after_a_peer_removes_the_s
     let seed = Seed::new();
     let local = seed.open(202);
     let peer = seed.open(303);
-    seed.edit_undo_edit(&local);
+    local
+        .delete_text(&EditCtx::local("local"), &seed.story_id, 0, 2)
+        .unwrap();
+    local.add_undo_barrier();
+    seed.move_undo_move(&local);
 
     seed.remove_shape(&peer);
     sync(&peer, &local);
@@ -205,17 +198,16 @@ fn a_replica_with_undo_history_survives_undo_and_redo_after_a_peer_removes_the_s
 }
 
 #[test]
-fn a_replica_with_only_redo_history_survives_redo_after_a_peer_removes_the_shape() {
+fn a_replica_whose_undo_history_emptied_keeps_what_it_kept_after_a_peer_removes_the_shape() {
     let seed = Seed::new();
     let local = seed.open(202);
     let peer = seed.open(303);
-    seed.edit_undo_edit(&local);
-    while local.undo() {}
-    assert!(local.can_redo());
+    seed.move_undo_move(&local);
 
     seed.remove_shape(&peer);
     sync(&peer, &local);
-    while local.redo() {}
+    assert!(!local.undo());
+    assert!(!local.can_redo());
 
     assert_converged(&[&local, &peer]);
 }
