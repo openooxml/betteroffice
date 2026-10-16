@@ -128,7 +128,9 @@ export function resolveCommandSelection(
   }
   const payload = command.payload as { selection?: DocxCommandSelection };
   const dependent = payload.selection === undefined && command.afterSeq !== undefined;
-  if (stale && payload.selection === undefined && !dependent) return { ok: false, reason: 'stale-anchor' };
+  const merges = state.remoteMerges;
+  const behindMerges = merges?.to === context.currentVersion && merges.from <= command.basis.version;
+  if (stale && payload.selection === undefined && !dependent && !behindMerges) return { ok: false, reason: 'stale-anchor' };
   if (dependent && (!Number.isSafeInteger(command.afterSeq) || command.afterSeq! <= 0 ||
     command.afterSeq! >= command.seq || !context.predecessorSelection)) {
     return { ok: false, reason: 'stale-anchor' };

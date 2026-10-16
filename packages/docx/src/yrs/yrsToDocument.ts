@@ -151,6 +151,8 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   snapToGrid: null,
   autoSpaceDE: null,
   autoSpaceDN: null,
+  adjustRightInd: null,
+  cnfStyle: null,
   defaultTextFormatting: null,
   sectionBreakType: null,
   bidi: null,
@@ -3004,21 +3006,30 @@ class SaveContext {
 
   private inheritedFormatting(storyId: string, properties: Attrs): ParagraphFormatting | undefined {
     const cell = this.cellParagraphs.has(storyId);
-    if (
-      (NESTED_STORY_ID.test(storyId) && !cell) ||
-      (this.syntheticDefaults && !cell) || properties.numPr != null
-    ) {
+    const nested = !cell && NESTED_STORY_ID.test(storyId);
+    if (this.syntheticDefaults && !cell && !nested) {
       return undefined;
     }
+    const numbered = properties.numPr != null;
     const style = typeof properties.pStyle === 'string' ? properties.pStyle : '';
     const tableFormatting = this.cellParagraphs.get(storyId);
-    const key = cell ? JSON.stringify([style, tableFormatting]) : style;
+    const key = cell
+      ? JSON.stringify([style, tableFormatting, numbered])
+      : JSON.stringify([style, numbered, nested]);
     if (!this.inherited.has(key)) {
       const resolved = cell
         ? this.inheritance().paragraphFormatting(style || null, tableFormatting)
         : this.styles.resolveParagraphStyle(style || null).paragraphFormatting;
-      if (resolved === undefined || resolved.numPr != null) {
+      if (resolved === undefined || (!numbered && resolved.numPr != null)) {
         this.inherited.set(key, undefined);
+      } else if (numbered || nested) {
+        const formatting: ParagraphFormatting = {};
+        if (resolved.autoSpaceDE !== undefined) formatting.autoSpaceDE = resolved.autoSpaceDE;
+        if (resolved.autoSpaceDN !== undefined) formatting.autoSpaceDN = resolved.autoSpaceDN;
+        if (resolved.adjustRightInd !== undefined) {
+          formatting.adjustRightInd = resolved.adjustRightInd;
+        }
+        this.inherited.set(key, formatting);
       } else {
         const formatting = { ...resolved };
         delete formatting.indentLeft;

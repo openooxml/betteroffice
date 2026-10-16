@@ -375,6 +375,9 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   }
   if (['applyOps', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'propose', 'acceptProposal'].includes(method ?? '') &&
     error.message === 'number format table is full') return new WorkbookCommandRefusal('limit-exceeded');
+  if (method === 'applyOps' && error.message === 'invalid collaborative workbook state: too many sheet merge edits') {
+    return new WorkbookCommandRefusal('limit-exceeded');
+  }
   if (method === 'applyOps' && (
     /^formula at sheet \d+, [A-Z]+[1-9]\d* cannot be safely rewritten$/.test(error.message) ||
     /^(?:defined name|chart reference in) .+ cannot be safely rewritten$/.test(error.message) ||

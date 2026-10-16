@@ -748,7 +748,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         return;
       }
       try {
-        void record.connection.client.call.edit(cloneData(envelope)).then(
+        void record.connection.client.call.edit(options.copyCommandForDispatch?.(envelope) ?? cloneData(envelope)).then(
           (ack) => {
             if (settled) discardFrame(ack?.frame);
             else finish(() => resolve(ack));
@@ -1058,7 +1058,8 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       const bytes = options.commandBytes?.(logged.envelope) ?? 0;
       logged.bytes = Number.isFinite(bytes) && bytes >= 0 ? bytes : 0;
       retainedBytes += logged.bytes;
-      void record.connection.client.call.edit(cloneData(logged.envelope)).then((ack) => {
+      const outgoing = options.copyCommandForDispatch?.(envelope) ?? cloneData(logged.envelope);
+      void record.connection.client.call.edit(outgoing).then((ack) => {
         try {
           acceptAck(record, ack);
         } finally { settleRpc(logged); }
