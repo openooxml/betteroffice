@@ -154,8 +154,7 @@ for (const transition of ['edit', 'not-ready', 'unchanged'] as const) {
         const rendered = render(createElement(Harness));
         const geometry = createWorkerPluginGeometry(controller, () => null, () => null, () => {}, async (target: { paraId: string; story: string }, focus: boolean, expectVersion?: string) => {
           if (at === 'reveal') await change();
-          const reveal = navigation.revealParagraph as (paraId: string, story: string, focus: boolean, expectVersion?: string) => Promise<boolean>;
-          return reveal(target.paraId, target.story, focus, expectVersion);
+          return navigation.revealParagraph(target.paraId, target.story, focus, expectVersion);
         });
         const errors: unknown[] = [];
         let context!: import('./types').DocxPluginContext<null>;

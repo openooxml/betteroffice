@@ -146,7 +146,7 @@ export function createPeerlessShellController(initial: Options) {
     const selected = snapshot.view?.workerSelection;
     fontRevision = 0; fontFamilies = []; metadata = null; firstPainted = false; workerMemory = null;
     unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
-    batchResults.clear(); commentResults.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
+    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
   const publish = () => { snapshot = { ...snapshot, mode: mode() }; updateAuthor(); commands.refresh(); for (const listener of listeners) listener();
@@ -917,7 +917,7 @@ export function createPeerlessShellController(initial: Options) {
       replace();
       reset('empty');
     },
-    dispose() { unsubscribe?.(); binding = null; closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
+    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
   };
 }
 

@@ -221,7 +221,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const [geometryRevision, redrawGeometry] = useState(0);
   const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
-    (target, focus) => navigation.revealParagraph(target.paraId, target.story, focus), () => sentReservationsRef.current()));
+    (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current()));
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
   const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
   const [pluginHost] = useState<DocxPluginHost>(() => createDocxPluginHost({
