@@ -10,7 +10,7 @@ import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import { MAX_UPDATE_BYTES } from './residentCommandActions';
-import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
+import { MAX_COLLABORATION_FRAME_BYTES, stateVectorClock } from '../collaboration/protocol';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import type { Document } from '../types/document';
 import type { DocxProposalInput } from './proposals';
@@ -54,8 +54,7 @@ async function parsedDocument(): Promise<Document> {
   } finally { parser.destroy(); }
 }
 
-async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes()) {
-  const worker = start(clientId);
+async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
   const client = new ResidentSourceWorkerClient(worker);
   await client.openSource({ ...(document ? { document } : { bytes }), collaboration: { clientId, initialUpdate } });
   const engine = worker.sessions[0]!;
@@ -70,8 +69,8 @@ async function openCommands(clientId: number, initialUpdate?: Uint8Array, docume
   return { worker, client, engine, initial };
 }
 
-async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes()) {
-  const { worker, client, engine, initial } = await openCommands(clientId, initialUpdate, document, bytes);
+async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
+  const { client, engine, initial } = await openCommands(clientId, initialUpdate, document, bytes, worker);
   const session = createDocxWorkerEditSession({ source: bytes,
     connection: await createResidentCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
@@ -100,6 +99,37 @@ for (const input of ['bytes', 'document'] as const) {
     } finally { off(); a.session.dispose(); b.session.dispose(); }
   }, TIMEOUT);
 }
+
+test('reserved protocol client ids are refused', async () => {
+  for (const clientId of [Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]) await expect(createYrsSession({ clientId })).rejects.toThrow(RangeError);
+  const session = await createYrsSession({ clientId: Number.MAX_SAFE_INTEGER - 2 });
+  expect(session.clientId).toBe(Number.MAX_SAFE_INTEGER - 2);
+  session.destroy();
+}, TIMEOUT);
+
+test('a pinned id opens under a fresh id when the opened state lags the clock it emitted', async () => {
+  const bytes = documentBytes();
+  const a = await open(9501, undefined, undefined, bytes, start());
+  const before = a.engine.encodeState();
+  const clocks: number[] = [];
+  const off = a.client.onCollabUpdates(event => { if (event.clock !== undefined) clocks.push(event.clock); });
+  try {
+    expect(a.engine.clientId).toBe(9501);
+    expect((await a.session.submit('insertText', { text: ' typed while pinned' }).ack).status).toBe('applied');
+    const clock = clocks.at(-1)!;
+    expect(clock).toBeGreaterThan(0);
+    expect(clock).toBe(stateVectorClock(a.engine.encodeStateVector(), 9501));
+    for (const [initialUpdate, kept] of [[before, false], [a.engine.encodeState(), true]] as const) {
+      const worker = start();
+      const client = new ResidentSourceWorkerClient(worker);
+      try {
+        const opened = await client.openSource({ bytes, collaboration: { clientId: 9501, initialUpdate, clientClock: clock } });
+        expect(opened.clientId === 9501).toBe(kept);
+        expect(worker.sessions.map(session => session.clientId)).toEqual(kept ? [9501] : [9501, opened.clientId!]);
+      } finally { client.destroy(); }
+    }
+  } finally { off(); a.session.dispose(); }
+}, TIMEOUT);
 
 test('two worker command sessions converge with reordered and duplicated updates', async () => {
   const a = await open(9201);

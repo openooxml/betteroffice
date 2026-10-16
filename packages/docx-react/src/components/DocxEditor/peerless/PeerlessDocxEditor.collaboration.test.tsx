@@ -59,7 +59,7 @@ test('replica is published only after ready, rebinds handlers, and retires befor
   const view = render(<Harness options={{ clientId: 41, initialUpdate: source, onReplica: first }} />);
   expect(first).not.toHaveBeenCalled();
   expect(lifecycle!.openOptions).toEqual({ clientId: 41, initialUpdate: source });
-  await act(async () => { lifecycle!.begin(s.client); lifecycle!.ready(s.client, s.binding); });
+  await act(async () => { expect(lifecycle!.begin(s.client)).toEqual({ clientId: 41, initialUpdate: source }); lifecycle!.ready(s.client, s.binding); });
   const adapter = first.mock.calls[0]![0]!;
   view.rerender(<Harness options={{ clientId: 41, initialUpdate: source, onReplica: next }} />);
   expect(first.mock.calls.at(-1)![0]).toBeNull();
@@ -212,7 +212,8 @@ function mockWorkerEditor() {
     postMessage() {} terminate() {}
   } });
   restores.push(() => { if (worker) Object.defineProperty(globalThis, 'Worker', worker); else Reflect.deleteProperty(globalThis, 'Worker'); });
-  const open = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'openSource').mockResolvedValue({ document: hostDocument(), stateVector: source });
+  const open = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'openSource').mockImplementation(async request => ({
+    document: hostDocument(), stateVector: source, clientId: request.collaboration?.clientId }));
   const prewarm = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'prewarm').mockResolvedValue();
   const requirements = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'fontRequirements').mockResolvedValue('[]');
   const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
@@ -294,6 +295,49 @@ test('a parsed document reopens its worker on a room change', async () => {
   expect(open.mock.calls[1]![0]?.collaboration?.clientId).toBe(42);
   view.unmount();
   expect(onReplica.mock.calls.at(-1)![0]).toBeNull();
+});
+
+test('an unpinned room opens every worker under a fresh client id and publishes it', async () => {
+  const open = mockWorkerEditor();
+  const onReplica = mock<(replica: CollaborationReplica | null) => void>(() => {});
+  const view = render(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ onReplica }} />);
+  await waitFor(() => expect(onReplica.mock.calls.at(-1)?.[0]).toBeTruthy());
+  const first = onReplica.mock.calls.at(-1)![0]!;
+  view.rerender(<DocxEditor experimentalPeerless documentBuffer={new Uint8Array([2])} showToolbar={false} collaboration={{ onReplica }} />);
+  await waitFor(() => expect([undefined, null, first]).not.toContain(onReplica.mock.calls.at(-1)?.[0]));
+  const ids = open.mock.calls.map(([request]) => request.collaboration?.clientId);
+  expect(ids).toHaveLength(2);
+  expect(ids[0]).not.toBe(ids[1]);
+  expect(ids).toEqual([first.clientId, onReplica.mock.calls.at(-1)![0]!.clientId]);
+  view.unmount();
+});
+
+test('a pinned id reopened behind its emitted clock publishes the fresh worker id and warns once', async () => {
+  const open = mockWorkerEditor();
+  const listeners = new Set<(event: CollaborationUpdateEvent) => void>();
+  const subscribe = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'onCollabUpdates').mockImplementation(listener => {
+    listeners.add(listener); return () => { listeners.delete(listener); };
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  restores.push(() => subscribe.mockRestore(), () => warn.mockRestore());
+  const reopened = () => warn.mock.calls.map(([message]) => String(message)).filter(message => message.includes('collaboration.clientId'));
+  const onReplica = mock<(replica: CollaborationReplica | null) => void>(() => {});
+  const published = () => onReplica.mock.calls.at(-1)?.[0]?.clientId;
+  const view = render(<DocxEditor experimentalPeerless documentBuffer={source} showToolbar={false} collaboration={{ clientId: 41, onReplica }} />);
+  await waitFor(() => expect(published()).toBe(41));
+  for (const listener of [...listeners]) listener({ updates: [new Uint8Array([1])], inferences: [], clock: 5 });
+  open.mockImplementationOnce(async () => ({ document: hostDocument(), stateVector: source, clientId: 9 }));
+  view.rerender(<DocxEditor experimentalPeerless documentBuffer={new Uint8Array([2])} showToolbar={false} collaboration={{ clientId: 41, onReplica }} />);
+  await waitFor(() => expect(published()).toBe(9));
+  expect(open.mock.calls[1]![0].collaboration).toMatchObject({ clientId: 41, clientClock: 5 });
+  expect(reopened()).toHaveLength(1);
+  expect(reopened()[0]).toContain('collaboration.clientId 41 ');
+  view.rerender(<DocxEditor experimentalPeerless documentBuffer={new Uint8Array([3])} showToolbar={false} collaboration={{ clientId: 41, onReplica }} />);
+  await waitFor(() => expect(open).toHaveBeenCalledTimes(3));
+  await waitFor(() => expect(published()).toBe(41));
+  expect(open.mock.calls[2]![0].collaboration?.clientClock).toBe(5);
+  expect(reopened()).toHaveLength(1);
+  view.unmount();
 });
 
 test('the default editor publishes an async replica whose sync reads name the async API and legacySyncApi', async () => {

@@ -48,6 +48,7 @@ import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 import { decodeDocxHostJson, wrapSession } from './yrsSessionFacade';
+import { requireUnreservedClientId } from '../collaboration/protocol';
 import { documentToYrs } from './documentToYrs';
 import { tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
@@ -69,6 +70,7 @@ export interface ResidentExactPrefixLayout {
 
 export type ResidentEngineSession = Pick<
   YrsSession,
+  | 'clientId'
   | 'applyDelete'
   | 'applyDeleteProfiled'
   | 'applyInput'
@@ -256,7 +258,7 @@ export async function createResidentEngineSession(
 ): Promise<ResidentEngineSession> {
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
-  const session = createEditSession(clientId);
+  const session = createEditSession(requireUnreservedClientId(clientId));
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
   let partsTouched = false;
@@ -553,6 +555,7 @@ export async function createResidentEngineSession(
   };
 
   const resident: ResidentEngineSession = {
+    clientId,
     splitSection: (at, properties, start) => {
       const paragraphs = resident.paragraphs(at.story);
       const index = paragraphs.findIndex(paragraph => paragraph.paraId === at.paraId);

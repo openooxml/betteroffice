@@ -206,7 +206,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
-  private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }> }) => void>();
+  private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
   constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
@@ -240,7 +240,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       if (collaboration && !this.terminalError && !this.commandReplacementPending &&
         (collaboration.session === undefined || (identity && collaboration.session === identity.session &&
           collaboration.incarnation === identity.incarnation && collaboration.epoch === identity.epoch))) {
-        const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences };
+        const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences, clock: collaboration.clock };
         for (const listener of [...this.collabListeners]) { try { listener(event); } catch {} }
       }
       if (response.ok && response.caret) {
@@ -379,7 +379,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return () => { this.frameListeners.delete(listener); };
   }
 
-  onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }> }) => void): () => void {
+  onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void): () => void {
     this.collabListeners.add(listener);
     return () => { this.collabListeners.delete(listener); };
   }

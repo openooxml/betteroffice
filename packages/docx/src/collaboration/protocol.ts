@@ -197,6 +197,13 @@ export function syncFrameBytes(payloadBytes: number): number {
  * that do not know it read an empty client, which changes no diff.
  */
 export const CHUNKED_SYNC_CLIENT = Number.MAX_SAFE_INTEGER;
+export const OPEN_SYNC_CLIENT = Number.MAX_SAFE_INTEGER - 1;
+
+/** `clientId`, or a RangeError for an id the sync protocol reserves. */
+export function requireUnreservedClientId(clientId: number): number {
+  if (clientId >= OPEN_SYNC_CLIENT) throw new RangeError('clientId must be below Number.MAX_SAFE_INTEGER - 1');
+  return clientId;
+}
 
 function stateVectorEntries(stateVector: Uint8Array): Array<[number, number]> | null {
   try {
@@ -226,6 +233,11 @@ export function requestsChunkedSync(stateVector: Uint8Array): boolean {
   return stateVectorEntries(stateVector)?.some(
     ([client, clock]) => client === CHUNKED_SYNC_CLIENT && clock === 0
   ) ?? false;
+}
+
+/** The clock of `clientId` in a state vector; 0 when the client is absent or the vector is malformed. */
+export function stateVectorClock(stateVector: Uint8Array, clientId: number): number {
+  return stateVectorEntries(stateVector)?.find(([client]) => client === clientId)?.[1] ?? 0;
 }
 
 export function encodeSyncStep1(

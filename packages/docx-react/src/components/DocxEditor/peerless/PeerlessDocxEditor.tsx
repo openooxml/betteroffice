@@ -304,7 +304,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     signal.throwIfAborted();
     active.current = null;
     const client = takePreloadedResidentEngineWorker() ?? new ResidentEngineWorkerClient();
-    workerCollaboration.begin(client);
+    const collaboration = workerCollaboration.begin(client);
     worker.current = client;
     const stopFonts = client.onFontEnvironment(event => {
       if (worker.current === client && !signal.aborted) controller.fontEnvironment(event);
@@ -439,7 +439,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       try {
         opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
           heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true,
-          collaboration: workerCollaboration.openOptions });
+          collaboration });
       } catch (error) {
         if (!painted) throw error;
         signal.throwIfAborted();
@@ -449,6 +449,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         return await new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
       }
       signal.throwIfAborted();
+      if (collaboration) workerCollaboration.opened(client, opened.clientId);
       const metadata = opened.document;
       sourceComments.current = metadata.package.document.comments ?? [];
       const opening = await measured(metadata);
@@ -493,7 +494,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally {
       disposeFonts();
     }
-  }, [controller, workerCollaboration.openOptions, workerCollaboration.begin]);
+  }, [controller, workerCollaboration.openOptions, workerCollaboration.begin, workerCollaboration.opened]);
 
   const updateReadOnly = useCallback((): void => {
     const current = active.current;

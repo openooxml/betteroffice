@@ -17,6 +17,7 @@ import {
   encodeUpdate,
   encodeVarUint,
   ProtocolError,
+  stateVectorClock,
 } from './protocol';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -276,5 +277,15 @@ describe('collaboration protocol decoding', () => {
     expect(() => decodeMessages(Uint8Array.of(3), 1024, 0)).toThrow(
       'Message limit must be a positive integer'
     );
+  });
+});
+
+describe('stateVectorClock', () => {
+  it('reads one client clock and 0 for an absent client or a malformed vector', () => {
+    const vector = Uint8Array.of(2, 5, 9, ...encodeVarUint(300), 7);
+    expect(stateVectorClock(vector, 5)).toBe(9);
+    expect(stateVectorClock(vector, 300)).toBe(7);
+    expect(stateVectorClock(vector, 6)).toBe(0);
+    for (const malformed of [Uint8Array.of(4), Uint8Array.of(1, 5), new Uint8Array()]) expect(stateVectorClock(malformed, 5)).toBe(0);
   });
 });

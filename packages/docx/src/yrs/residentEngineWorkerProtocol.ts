@@ -435,6 +435,8 @@ export type ResidentEngineWorkerResponse = (
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
       sourceDocument?: Document;
+      /** An `openSource` reply: the client id the opened replica writes with. */
+      clientId?: number;
       /** An `open` reply: the package cannot open as a preview; nothing was opened. */
       previewRefused?: boolean;
       /** A `fontRequirements` reply. */

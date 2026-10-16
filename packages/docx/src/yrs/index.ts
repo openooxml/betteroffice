@@ -74,6 +74,7 @@ import type {
   DocxSnapshotLayoutMap,
 } from './pagedExport';
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
+import { requireUnreservedClientId } from '../collaboration/protocol';
 export { decodeDocxHostJson } from './yrsSessionFacade';
 
 /** @internal */
@@ -1649,7 +1650,7 @@ export interface CreateYrsSessionOptions {
  * it lazily so non-editor consumers avoid the wasm startup cost.
  */
 export async function createYrsSession(options?: CreateYrsSessionOptions): Promise<YrsSession> {
-  const clientId = options?.clientId ?? randomClientId();
+  const clientId = requireUnreservedClientId(options?.clientId ?? randomClientId());
   const wasm = await import('./wasm/index');
   await wasm.preloadEditWasm();
   return wrapSession(wasm.createEditSession(clientId), clientId);

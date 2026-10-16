@@ -26,7 +26,7 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
 const STUBS: Record<string, string> = {
   '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
   './residentEngineSession':
-    'export const createResidentEngineSession = (heapLimitBytes) => testHarness.createSession(heapLimitBytes);',
+    'export const createResidentEngineSession = (heapLimitBytes, clientId) => testHarness.createSession(heapLimitBytes, clientId);',
   './wasm/index': `
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
@@ -215,8 +215,8 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
       },
       {
         encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
-        createSession: async (heapLimitBytes?: number) => {
-          const session = await createResidentEngineSession(heapLimitBytes, clientId);
+        createSession: async (heapLimitBytes?: number, requested?: number) => {
+          const session = await createResidentEngineSession(heapLimitBytes, clientId ?? requested);
           worker.sessions.push(session);
           if (terminated) session.destroy();
           return session;

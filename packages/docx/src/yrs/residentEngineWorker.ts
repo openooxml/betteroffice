@@ -4,6 +4,7 @@ import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
 import { readResidentReviewSnapshot } from './residentReview';
 import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
+import { stateVectorClock } from '../collaboration/protocol';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -1482,7 +1483,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     let opening: ResidentEngineSession | undefined;
     try {
       opening = await createResidentEngineSession(source.heapLimitBytes, source.collaboration?.clientId);
-      const opened = adoptResidentSource(opening, source);
+      let opened = adoptResidentSource(opening, source);
+      const clientClock = source.collaboration?.clientClock;
+      if (opened && clientClock !== undefined && stateVectorClock(opening.encodeStateVector(), opening.clientId) < clientClock) {
+        destroySession(true);
+        opening = await createResidentEngineSession(source.heapLimitBytes);
+        opened = adoptResidentSource(opening, source);
+      }
       if (!opened) {
         opening.destroy();
         reply({ id: request.id, ok: true, previewRefused: true });
@@ -1493,10 +1500,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       const metadata = residentSourceMetadata(document);
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, clientId: opening.clientId });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, clientId: opening.clientId }, [stateVector]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -3181,7 +3188,7 @@ async function replySourcePreview(
   preview: ResidentSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
@@ -3222,7 +3229,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
