@@ -742,6 +742,15 @@ fn protected_sheets_take_content_in_unlocked_cells_only() {
         assert_eq!(value(&workbook, 0, "M40"), number(7.0));
         assert_eq!(value(&workbook, 0, "A20"), number(84.0));
         assert_eq!(value(&workbook, 1, "C8"), number(3.0));
+        applied(
+            &mut workbook,
+            json!([
+                { "op": "setFormulas", "target": target("sheet:0", "M40"), "formulas": [["K13+1"]] },
+                { "op": "setCellValues", "target": target("sheet:0", "A20"), "values": [[{ "kind": "number", "value": 5 }]] },
+            ]),
+        );
+        assert_eq!(value(&workbook, 0, "M40"), number(43.0));
+        assert_eq!(value(&workbook, 0, "A20"), number(5.0));
 
         let refusal = refused(
             &mut workbook,
@@ -813,15 +822,67 @@ fn protected_sheets_take_content_in_unlocked_cells_only() {
         );
         let mut reopened = Workbook::open(&saved).unwrap();
         assert_eq!(value(&reopened, 0, "K13"), number(42.0));
+        for address in ["M40", "A20"] {
+            let sheet = reopened.sheet(SheetId(0)).unwrap();
+            assert_eq!(
+                sheet.cell(cell(address)).unwrap().style,
+                Some(1),
+                "{address}"
+            );
+        }
         applied(
             &mut reopened,
-            json!([inputs("sheet:0", "K13", json!([["43"]]))]),
+            json!([
+                inputs("sheet:0", "K13", json!([["43"]])),
+                { "op": "setCellValues", "target": target("sheet:0", "M40"), "values": [[{ "kind": "number", "value": 8 }]] },
+                { "op": "setFormulas", "target": target("sheet:0", "A20"), "formulas": [["M40*2"]] },
+            ]),
         );
         let refusal = refused(
             &mut reopened,
             json!([inputs("sheet:0", "B13", json!([["x"]]))]),
         );
         assert_eq!(refusal.failure.code, EditFailureCode::LockedTarget);
+    }
+}
+
+#[test]
+fn values_and_formulas_take_the_row_or_column_style_of_a_missing_cell() {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    model.styles.cell_xfs.push(Xf {
+        num_fmt_id: Some(2),
+        ..Xf::default()
+    });
+    let mut sheet = Sheet::new("Plain");
+    sheet.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: 1,
+    });
+    sheet.row_styles.insert(9, 1);
+    model.sheets.push(sheet);
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    for mut workbook in [
+        Workbook::open(&source).unwrap(),
+        Workbook::open_collaborative(&source, 14).unwrap(),
+    ] {
+        applied(
+            &mut workbook,
+            json!([
+                { "op": "setCellValues", "target": target("sheet:0", "B5:C5"), "values": [[{ "kind": "number", "value": 1.5 }, { "kind": "number", "value": 4 }]] },
+                { "op": "setFormulas", "target": target("sheet:0", "A10"), "formulas": [["B5*2"]] },
+            ]),
+        );
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        for copy in [&workbook, &reopened] {
+            let sheet = copy.sheet(SheetId(0)).unwrap();
+            assert_eq!(sheet.cell(cell("B5")).unwrap().style, Some(1));
+            assert_eq!(sheet.cell(cell("A10")).unwrap().style, Some(1));
+            assert_eq!(sheet.cell(cell("C5")).unwrap().style, None);
+            assert_eq!(display(copy, "sheet:0", "B5"), "1.50");
+            assert_eq!(display(copy, "sheet:0", "A10"), "3.00");
+        }
     }
 }
 
