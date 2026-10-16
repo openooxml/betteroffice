@@ -24,6 +24,7 @@ interface CellPrefill {
   identity: string;
   navigation: number;
   operations: CellInputOperation[];
+  nativeSelection?: { anchor: number; focus: number };
   cancelled: boolean;
   sealed: boolean;
   value?: string;
@@ -35,6 +36,7 @@ interface CellPrefill {
 interface DraftControllerOptions {
   generation(): number;
   identity(): string;
+  valueRevision?(): string;
   navigation(): number;
   selection(): Selection | null;
   sheet(): number;
@@ -73,6 +75,7 @@ export class WorkerDraftController {
   private cellSelection: { revision: number; anchor: number; focus: number } | null = null;
   cellInput: HTMLInputElement | null = null;
   formulaInput: HTMLInputElement | null = null;
+  focusedCellInput: { identity: string; value: string } | null = null;
 
   constructor(private readonly options: DraftControllerOptions) {}
 
@@ -85,6 +88,11 @@ export class WorkerDraftController {
   get compositionId(): string | undefined { return this.composing?.id; }
   get loadingCell(): boolean { return this.loading !== null; }
   get prefillIdentity(): string { return `${this.revision}:${this.compositionRevision}`; }
+  get focusedCellIdentity(): string {
+    const cell = this.options.selection()?.focus;
+    return JSON.stringify([this.options.identity(), this.options.navigation(), this.options.sheet(),
+      cell?.row, cell?.col, this.options.valueRevision?.()]);
+  }
   isComposing(source: InputDraft['source']): boolean { return this.composing?.source === source; }
   get ownsFocus(): boolean { return this.draft !== null || this.snapshot.cell !== null || this.composing !== null; }
 
@@ -111,7 +119,9 @@ export class WorkerDraftController {
     if (!this.coordinator || !this.options.editable() || !selected || this.composing || this.snapshot.cell) return;
     this.commit('formula');
     this.trailing = null;
-    const draft = this.create('cell', selected.focus, seed ?? '', seed !== undefined);
+    const cached = this.focusedCellInput?.identity === this.focusedCellIdentity ? this.focusedCellInput.value : undefined;
+    const preview = this.coordinator.pending ? undefined : cached;
+    const draft = this.create('cell', selected.focus, seed ?? preview ?? '', seed !== undefined);
     let settle!: (value: boolean) => void;
     const ready = new Promise<boolean>((done) => { settle = done; });
     const loading: CellPrefill | null = seed === undefined ? {
@@ -139,6 +149,7 @@ export class WorkerDraftController {
       return;
     }
     if (loading.completed || loading.value === undefined || this.composing?.loading === loading) return;
+    if (this.loading === loading) this.captureCellSelection();
     const replay = replayCellInput(loading.value, loading.operations);
     const modified = replay.value !== loading.value || loading.operations.some((operation) => operation.kind === 'insert' || operation.kind === 'delete');
     const draft = Object.freeze({ ...loading.draft, value: replay.value, modified, reserved: loading.sealed,
@@ -202,8 +213,9 @@ export class WorkerDraftController {
   }
 
   private writeCellSelection(draft: WorkerNativeDraft, replay: CellInputState): void {
-    this.cellSelection = { revision: draft.revision, anchor: replay.anchor, focus: replay.focus };
     const input = this.cellInput;
+    this.cellSelection = input && input.ownerDocument.activeElement === input ? null :
+      { revision: draft.revision, anchor: replay.anchor, focus: replay.focus };
     if (input) {
       input.value = replay.value;
       input.setSelectionRange(Math.min(replay.anchor, replay.focus), Math.max(replay.anchor, replay.focus),
@@ -227,20 +239,58 @@ export class WorkerDraftController {
     return true;
   }
 
-  holdCellBeforeInput(event: Pick<InputEvent, 'inputType' | 'data' | 'dataTransfer' | 'isComposing'>): boolean {
+  captureCellSelection(): void {
+    const loading = this.loading;
+    const input = this.cellInput;
+    if (!loading || !input || this.composing?.loading === loading || !input.value.length) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const selection = input.selectionDirection === 'backward' ? { anchor: end, focus: start } : { anchor: start, focus: end };
+    const previous = loading.nativeSelection;
+    if (previous?.anchor === selection.anchor && previous.focus === selection.focus) return;
+    loading.nativeSelection = selection;
+    if (start === 0 && end === input.value.length) this.holdCellEdit({ kind: 'selectAll' });
+    else if (start === end && end === input.value.length) {
+      if (previous) this.holdCellEdit({ kind: 'move', direction: 'end' });
+    } else this.holdCellEdit({ kind: 'select', ...selection });
+  }
+
+  holdCellBeforeInput(event: Pick<InputEvent, 'inputType' | 'data' | 'dataTransfer' | 'isComposing'> &
+    Partial<Pick<InputEvent, 'getTargetRanges'>>): boolean {
     if (this.trailing?.prefill && !this.composing &&
       ['insertText', 'insertFromComposition', 'insertCompositionText'].includes(event.inputType) && event.data === this.trailing.data) {
       return this.trailing.data !== '';
     }
     if (!this.loading || this.composing?.loading === this.loading) return false;
+    this.captureCellSelection();
+    const input = this.cellInput;
+    if (event.inputType === 'insertReplacementText' && input?.value.length) {
+      const range = event.getTargetRanges?.()[0];
+      if (range) this.holdCellEdit(range.startOffset === 0 && range.endOffset === input.value.length
+        ? { kind: 'selectAll' } : { kind: 'select', anchor: range.startOffset, focus: range.endOffset });
+    }
     const operation = cellInputOperation(event, isMacPlatform());
     return operation ? this.holdCellEdit(operation) : false;
   }
 
   holdCellKey(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): boolean {
-    if (!this.loading) return false;
+    const loading = this.loading;
+    if (!loading) return false;
+    this.captureCellSelection();
     const operation = cellInputOperation(event, isMacPlatform());
-    return operation && operation.kind !== 'insert' ? this.holdCellEdit(operation) : false;
+    if (!operation || operation.kind === 'insert') return false;
+    this.holdCellEdit(operation);
+    const input = this.cellInput;
+    if (input) {
+      const replay = replayCellInput(input.value, [operation], {
+        anchor: input.selectionDirection === 'backward' ? input.selectionEnd ?? 0 : input.selectionStart ?? 0,
+        focus: input.selectionDirection === 'backward' ? input.selectionStart ?? 0 : input.selectionEnd ?? 0,
+      });
+      input.setSelectionRange(Math.min(replay.anchor, replay.focus), Math.max(replay.anchor, replay.focus),
+        replay.anchor > replay.focus ? 'backward' : 'forward');
+      loading.nativeSelection = { anchor: replay.anchor, focus: replay.focus };
+    }
+    return true;
   }
 
   cellKey(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): boolean {
@@ -354,6 +404,7 @@ export class WorkerDraftController {
 
   start(source: InputDraft['source']): void {
     if (!this.options.editable() || this.composing) return;
+    if (source === 'cell') this.captureCellSelection();
     const selected = this.options.selection();
     if (!selected) return;
     if (this.draft && this.draft.source !== source) this.commit(this.draft.source);

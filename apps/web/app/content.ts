@@ -1,5 +1,5 @@
 import { CRATES, DOCS, NPM, PYPI, REPO } from "../../../shared/sites";
-export { BENCHMARKS, BENCHMARKS_SITE, CRATES, DEMO, DOCS, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
+export { BENCHMARKS, BENCHMARKS_SITE, CRATES, DEMO, DOCS, EVALS_SITE, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
 
 export const SITE_TITLE = "BetterOffice — DOCX, XLSX and PPTX editors";
 export const SITE_DESCRIPTION =

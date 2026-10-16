@@ -175,14 +175,10 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
     geometry: { identity, coversThroughSeq: 0, frameEpoch: frame.frameEpoch, layoutRevision: 1, pages, caret: null, selectionRects: [] } };
   const version = engine.geometryReader.version();
   const review = { version, previewVersion: 0 };
-  const reads: Promise<unknown>[] = [];
   const controller = { getSnapshot: () => ({ status: 'ready', view }),
     review: async () => review, reviewSnapshot: () => review,
-    readAt(request: { targets: Parameters<typeof computeAnchorTargetGeometry>[1] }) {
-      const read = Promise.resolve(computeAnchorTargetGeometry(engine.geometryReader, request.targets).map(answer));
-      reads.push(read);
-      return read;
-    },
+    readAt: async (request: { targets: Parameters<typeof computeAnchorTargetGeometry>[1] }) =>
+      computeAnchorTargetGeometry(engine.geometryReader, request.targets).map(answer),
     ref: { getZoom: () => zoom, readParagraphs: async () => ({ ok: true, version, paragraphs: [] }) } };
   const plugin = createWorkerPluginGeometry(controller as never, () => container, () => layer, () => {});
   if (window) plugin.setDisplayWindow(window);
@@ -192,9 +188,7 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
     version,
     bounds: pages.map(({ bounds }) => bounds),
     async anchor(target: DocxGeometryTarget) {
-      plugin.geometry()!.getAnchorGeometry(target);
-      await Promise.all(reads);
-      return plugin.geometry()!.getAnchorGeometry(target);
+      return (await plugin.geometry()!.readAnchorGeometries([target]))[0]!;
     },
   };
 }
@@ -216,6 +210,7 @@ test('a header target has rects on every built page that paints it and its ancho
   const shell = await shellOf(laid);
   const odd = ok(await shell.anchor(range(laid, shell.version, 'hf:rIdH1', '10000001', '{{odd}}')));
   expect(pageIndices(odd)).toEqual([2, 4]);
+  expect(odd.unbuiltPages).toBeUndefined();
   expect(odd.anchor).toMatchObject({ pageIndex: 2, width: 0 });
   expect(odd.anchor.x).toBeCloseTo(odd.rects[0]!.x + odd.rects[0]!.width, 6);
   expect(pageIndices(await shell.anchor(range(laid, shell.version, 'hf:rIdH2', '10000011', '{{even}}')))).toEqual([1, 3, 5]);
@@ -226,6 +221,25 @@ test('a header target has rects on every built page that paints it and its ancho
   const built = ok(await early.anchor(range(partial, early.version, 'hf:rIdH1', '10000001', '{{odd}}')));
   expect(pageIndices(built)).toEqual([2]);
   expect(built.anchor.pageIndex).toBe(2);
+  expect(built.unbuiltPages).toEqual([4]);
+  const even = ok(await early.anchor(range(partial, early.version, 'hf:rIdH2', '10000011', '{{even}}')));
+  expect(pageIndices(even)).toEqual([1]);
+  expect(even.unbuiltPages).toEqual([3, 5]);
+});
+
+test('a body table cell target has its own rects, anchored at its end', async () => {
+  const laid = await laidOut();
+  const shell = await shellOf(laid);
+  const intro = ok(await shell.anchor(range(laid, shell.version, 'body', '00000001', 'Intro')));
+  const cell = ok(await shell.anchor(range(laid, shell.version, 'body:t0:r0c0', '00000002', '{{cell}}')));
+  expect(cell.rects).toHaveLength(1);
+  const [rect] = cell.rects;
+  expect(rect).toMatchObject({ pageIndex: 0 });
+  expect(rect!.x).toBeGreaterThan(intro.rects[0]!.x);
+  expect(rect!.y).toBeGreaterThan(intro.rects[0]!.y);
+  expect(cell.anchor).toMatchObject({ pageIndex: 0, y: rect!.y, width: 0 });
+  expect(cell.anchor.x).toBeCloseTo(rect!.x + rect!.width, 6);
+  expect(cell.unbuiltPages).toBeUndefined();
 });
 
 test('hidden ranges of a header target are left out of its rects', async () => {

@@ -222,6 +222,29 @@ preview the pixels show.
 A target in a header or footer has fragments on every built page that paints it
 and its anchor on the first; one that no laid-out page paints, built or not, is
 `missing-target` once the layout is complete.
+`geometry.readAnchorGeometries(targets)` answers every target in order and never
+rejects or answers `pending`. Only the worker-only editor awaits reads: targets
+asked in one tick share one worker read, and `getAnchorGeometry` answers
+`pending` while a target's read is in flight. The hybrid editor, removed in
+0.6.0, answers right away, and still `layout-unavailable` while its own reads
+are in flight. A read the worker fails answers `read-failed` on both methods and
+renders overlays again once; only `readAnchorGeometries` reads that target
+again, so retry it with backoff. Answers come from the layout current when the
+reads land, so results can carry a newer `layoutId` or `stale-version`, or
+`layout-unavailable` while the latest edit, zoom or preview is not painted yet
+or once the document is replaced; ask again on `layout-change`. A comment
+sidebar, say, places all of its cards from one read:
+
+```ts
+const answers = await geometry.readAnchorGeometries(cards.map((card) => card.target));
+const tops = answers.map((answer) => (answer.ok ? answer.anchor.y : null));
+```
+
+An answer that reaches pages not built yet lists them in `unbuiltPages` and is
+provisional. `geometry.getPageRect(pageIndex)` returns a page box in
+overlay-layer pixels with `built`, and `geometry.isPageBuilt(pageIndex)` says
+whether a page is laid out without measuring the DOM; once their layout is no
+longer shown they answer `null` and `false`.
 `geometry.dom` is experimental
 and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards

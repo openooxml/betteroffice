@@ -911,16 +911,19 @@ pub(crate) fn replay(
     }
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, "body").ok()?;
-    let with_media;
-    let env = if env.media_tokens && env.media.is_empty() {
-        with_media = RenderEnv {
-            media: doc.media_sources(),
-            ..env.clone()
-        };
-        &with_media
-    } else {
-        env
+    let with_sources = RenderEnv {
+        media: if env.media_tokens && env.media.is_empty() {
+            doc.media_sources()
+        } else {
+            env.media.clone()
+        },
+        group_pictures: doc
+            .source_index()
+            .map(|index| index.group_picture_sources())
+            .unwrap_or_else(|| env.group_pictures.clone()),
+        ..env.clone()
     };
+    let env = &with_sources;
     let mut replays = Vec::new();
     for (index, record) in units.records.iter().enumerate() {
         if record.ids.is_disjoint(changed) {

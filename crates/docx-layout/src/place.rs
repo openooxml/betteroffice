@@ -1459,7 +1459,10 @@ fn move_run_slice(
             (run.pm_start, run.pm_end),
         ),
         (Run::Image(slice), Run::Image(run))
-            if slice.inline_shape.is_none() && run.inline_shape.is_none() =>
+            if slice.inline_shape.is_none()
+                && run.inline_shape.is_none()
+                && slice.inline_chart.is_none()
+                && run.inline_chart.is_none() =>
         {
             (
                 &mut slice.pm_start,

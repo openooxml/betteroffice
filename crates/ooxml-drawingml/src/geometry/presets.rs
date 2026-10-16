@@ -75,11 +75,14 @@ pub(super) fn paths(
         "accentCallout1" => callout1(frame, adjustments, false, true),
         "accentCallout2" => accent_callout2(frame, adjustments),
         "upArrowCallout" => normal(up_arrow_callout(frame, adjustments)),
+        "downArrowCallout" => normal(down_arrow_callout(frame, adjustments)),
+        "quadArrow" => normal(quad_arrow(frame, adjustments)),
         "cloud" => cloud(),
         "leftCircularArrow" => left_circular_arrow(frame, adjustments),
         "curvedLeftArrow" => curved_left_arrow(frame, adjustments),
         "curvedRightArrow" => curved_right_arrow(frame, adjustments),
         "curvedUpArrow" => curved_up_arrow(frame, adjustments),
+        "curvedDownArrow" => curved_down_arrow(frame, adjustments),
         "flowChartOnlineStorage" => normal(
             Outline::new(Frame { w: 6.0, h: 6.0 })
                 .move_to(1.0, 0.0)
@@ -90,11 +93,59 @@ pub(super) fn paths(
                 .close()
                 .finish(),
         ),
+        "flowChartDocument" => normal(
+            Outline::new(Frame {
+                w: 21600.0,
+                h: 21600.0,
+            })
+            .move_to(0.0, 0.0)
+            .line_to(21600.0, 0.0)
+            .line_to(21600.0, 17322.0)
+            .cubic_to(10800.0, 17322.0, 10800.0, 23922.0, 0.0, 20172.0)
+            .close()
+            .finish(),
+        ),
         "gear6" => normal(gear6(frame, adjustments)),
         "gear9" => normal(gear9(frame, adjustments)),
         "uturnArrow" => normal(uturn_arrow(frame, adjustments)),
+        "verticalScroll" => vertical_scroll(frame, adjustments),
+        "horizontalScroll" => horizontal_scroll(frame, adjustments),
+        "wave" => normal(wave(frame, adjustments)),
+        "doubleWave" => normal(double_wave(frame, adjustments)),
         "moon" => normal(moon(frame, adjustments)),
         "heart" => normal(heart(frame)),
+        "irregularSeal1" => normal(
+            Outline::new(Frame {
+                w: 21600.0,
+                h: 21600.0,
+            })
+            .move_to(10800.0, 5800.0)
+            .line_to(14522.0, 0.0)
+            .line_to(14155.0, 5325.0)
+            .line_to(18380.0, 4457.0)
+            .line_to(16702.0, 7315.0)
+            .line_to(21097.0, 8137.0)
+            .line_to(17607.0, 10475.0)
+            .line_to(21600.0, 13290.0)
+            .line_to(16837.0, 12942.0)
+            .line_to(18145.0, 18095.0)
+            .line_to(14020.0, 14457.0)
+            .line_to(13247.0, 19737.0)
+            .line_to(10532.0, 14935.0)
+            .line_to(8485.0, 21600.0)
+            .line_to(7715.0, 15627.0)
+            .line_to(4762.0, 17617.0)
+            .line_to(5667.0, 13937.0)
+            .line_to(135.0, 14587.0)
+            .line_to(3722.0, 11775.0)
+            .line_to(0.0, 8615.0)
+            .line_to(4627.0, 7617.0)
+            .line_to(370.0, 2295.0)
+            .line_to(7312.0, 6320.0)
+            .line_to(8352.0, 2295.0)
+            .close()
+            .finish(),
+        ),
         _ => return None,
     };
     let mut paths: Vec<PresetGeometryPath> = Vec::new();
@@ -148,7 +199,8 @@ pub(super) fn defaults(kind: &str) -> &'static [(&'static str, f64)] {
         "chord" => &[("adj1", 27.0), ("adj2", 162.0)],
         "blockArc" => &[("adj1", 108.0), ("adj2", 0.0), ("adj3", 0.25)],
         "bentUpArrow" => &[("adj1", 0.25), ("adj2", 0.25), ("adj3", 0.25)],
-        "curvedLeftArrow" | "curvedRightArrow" | "curvedUpArrow" => {
+        "quadArrow" => &[("adj1", 0.225), ("adj2", 0.225), ("adj3", 0.225)],
+        "curvedLeftArrow" | "curvedRightArrow" | "curvedUpArrow" | "curvedDownArrow" => {
             &[("adj1", 0.25), ("adj2", 0.5), ("adj3", 0.25)]
         }
         "notchedRightArrow" | "stripedRightArrow" => &[("adj1", 0.5), ("adj2", 0.5)],
@@ -169,7 +221,7 @@ pub(super) fn defaults(kind: &str) -> &'static [(&'static str, f64)] {
             ("adj5", 1.125),
             ("adj6", -0.46667),
         ],
-        "upArrowCallout" => &[
+        "upArrowCallout" | "downArrowCallout" => &[
             ("adj1", 0.25),
             ("adj2", 0.25),
             ("adj3", 0.25),
@@ -184,6 +236,9 @@ pub(super) fn defaults(kind: &str) -> &'static [(&'static str, f64)] {
             ("adj4", 0.4375),
             ("adj5", 0.75),
         ],
+        "verticalScroll" | "horizontalScroll" => &[("adj", 0.125)],
+        "wave" => &[("adj1", 0.125), ("adj2", 0.0)],
+        "doubleWave" => &[("adj1", 0.0625), ("adj2", 0.0)],
         "moon" => &[("adj", 0.5)],
         _ => &[],
     }
@@ -1715,6 +1770,102 @@ fn up_arrow_callout(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Geo
         .finish()
 }
 
+fn down_arrow_callout(
+    frame: Frame,
+    adjustments: &HashMap<String, f64>,
+) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let adj1 = adjustment(adjustments, "adj1", 0.25);
+    let adj2 = adjustment(adjustments, "adj2", 0.25);
+    let adj3 = adjustment(adjustments, "adj3", 0.25);
+    let adj4 = adjustment(adjustments, "adj4", 0.64977);
+    let max_adj2 = divide(50000.0 * w, 100000.0);
+    let a2 = adj2.clamp(0.0, max_adj2.max(0.0));
+    let max_adj1 = a2 * 2.0;
+    let a1 = adj1.clamp(0.0, max_adj1.max(0.0));
+    let max_adj3 = divide(100000.0 * h, 100000.0);
+    let a3 = adj3.clamp(0.0, max_adj3.max(0.0));
+    let q2 = divide(a3 * 100000.0, h);
+    let max_adj4 = 100000.0 - q2;
+    let a4 = adj4.clamp(0.0, max_adj4.max(0.0));
+    let dx1 = a2;
+    let dx2 = a1 / 2.0;
+    let x1 = w / 2.0 - dx1;
+    let x2 = w / 2.0 - dx2;
+    let x3 = w / 2.0 + dx2;
+    let x4 = w / 2.0 + dx1;
+    let y1 = divide(h * a4, 100000.0);
+    let y2 = h - a3;
+    Outline::new(frame)
+        .move_to(0.0, 0.0)
+        .line_to(w, 0.0)
+        .line_to(w, y1)
+        .line_to(x3, y1)
+        .line_to(x3, y2)
+        .line_to(x4, y2)
+        .line_to(w / 2.0, h)
+        .line_to(x1, y2)
+        .line_to(x2, y2)
+        .line_to(x2, y1)
+        .line_to(0.0, y1)
+        .close()
+        .finish()
+}
+
+fn quad_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let adj1 = adjustment(adjustments, "adj1", 0.225);
+    let adj2 = adjustment(adjustments, "adj2", 0.225);
+    let adj3 = adjustment(adjustments, "adj3", 0.225);
+    let a2 = adj2.clamp(0.0, 50000.0);
+    let max_adj1 = a2 * 2.0;
+    let a1 = adj1.clamp(0.0, max_adj1.max(0.0));
+    let q1 = 100000.0 - max_adj1;
+    let max_adj3 = q1 / 2.0;
+    let a3 = adj3.clamp(0.0, max_adj3.max(0.0));
+    let x1 = a3;
+    let dx2 = a2;
+    let x2 = w / 2.0 - dx2;
+    let x5 = w / 2.0 + dx2;
+    let dx3 = a1 / 2.0;
+    let x3 = w / 2.0 - dx3;
+    let x4 = w / 2.0 + dx3;
+    let x6 = w - x1;
+    let y1 = x1;
+    let y2 = h / 2.0 - dx2;
+    let y5 = h / 2.0 + dx2;
+    let y3 = h / 2.0 - dx3;
+    let y4 = h / 2.0 + dx3;
+    let y6 = h - y1;
+    Outline::new(frame)
+        .move_to(0.0, h / 2.0)
+        .line_to(x1, y2)
+        .line_to(x1, y3)
+        .line_to(x3, y3)
+        .line_to(x3, y1)
+        .line_to(x2, y1)
+        .line_to(w / 2.0, 0.0)
+        .line_to(x5, y1)
+        .line_to(x4, y1)
+        .line_to(x4, y3)
+        .line_to(x6, y3)
+        .line_to(x6, y2)
+        .line_to(w, h / 2.0)
+        .line_to(x6, y5)
+        .line_to(x6, y4)
+        .line_to(x4, y4)
+        .line_to(x4, y6)
+        .line_to(x5, y6)
+        .line_to(w / 2.0, h)
+        .line_to(x2, y6)
+        .line_to(x3, y6)
+        .line_to(x3, y4)
+        .line_to(x1, y4)
+        .line_to(x1, y5)
+        .close()
+        .finish()
+}
+
 fn left_circular_arrow(
     frame: Frame,
     adjustments: &HashMap<String, f64>,
@@ -2132,6 +2283,90 @@ fn curved_up_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Pres
     ]
 }
 
+fn curved_down_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<PresetGeometryPath> {
+    let (w, h) = (frame.w, frame.h);
+    let adj1 = adjustment(adjustments, "adj1", 0.25);
+    let adj2 = adjustment(adjustments, "adj2", 0.5);
+    let adj3 = adjustment(adjustments, "adj3", 0.25);
+    let max_adj2 = divide(50000.0 * w, 100000.0);
+    let a2 = adj2.clamp(0.0, max_adj2.max(0.0));
+    let a1 = adj1.clamp(0.0, 100000.0);
+    let th = a1;
+    let aw = a2;
+    let q1 = (th + aw) / 4.0;
+    let w_r = w / 2.0 - q1;
+    let q7 = w_r * 2.0;
+    let q10 = q7 * q7 - th * th;
+    let q11 = q10.max(0.0).sqrt();
+    let idy = divide(q11 * h, q7);
+    let ah = adj3;
+    let x3 = w_r + th;
+    let q4 = h * h - ah * ah;
+    let q5 = q4.max(0.0).sqrt();
+    let dx = divide(q5 * w_r, h);
+    let x5 = w_r + dx;
+    let x7 = x3 + dx;
+    let dh = (aw - th) / 2.0;
+    let x4 = x5 - dh;
+    let x8 = x7 + dh;
+    let x6 = w - aw / 2.0;
+    let y1 = h - ah;
+    let sw_ang = f64::atan2(dx, ah).to_degrees() * 60000.0;
+    let st_ang = 16200000.0 + sw_ang;
+    let q12 = th / 2.0;
+    let dang2 = f64::atan2(q12, idy).to_degrees() * 60000.0;
+    let msw_ang = -sw_ang;
+    let iy = h - idy;
+    let ix = (w_r + x3) / 2.0;
+    let st_ang2 = 16200000.0 - dang2;
+    let sw_ang2 = dang2 - 5400000.0;
+    let sw_ang3 = 5400000.0 + dang2;
+    vec![
+        PresetGeometryPath {
+            fill: PresetPathFill::Normal,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(x6, h)
+                .line_to(x4, y1)
+                .line_to(x5, y1)
+                .arc_to(w_r, h, ooxml_angle(st_ang), ooxml_angle(msw_ang))
+                .line_to(x3, 0.0)
+                .arc_to(w_r, h, ooxml_angle(16200000.0), ooxml_angle(sw_ang))
+                .line_to(x8, y1)
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::DarkenLess,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(ix, iy)
+                .arc_to(w_r, h, ooxml_angle(st_ang2), ooxml_angle(sw_ang2))
+                .line_to(0.0, h)
+                .arc_to(w_r, h, ooxml_angle(10800000.0), ooxml_angle(sw_ang3))
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::None,
+            stroke: true,
+            commands: Outline::new(frame)
+                .move_to(ix, iy)
+                .arc_to(w_r, h, ooxml_angle(st_ang2), ooxml_angle(sw_ang2))
+                .line_to(0.0, h)
+                .arc_to(w_r, h, ooxml_angle(10800000.0), ooxml_angle(5400000.0))
+                .line_to(x3, 0.0)
+                .arc_to(w_r, h, ooxml_angle(16200000.0), ooxml_angle(sw_ang))
+                .line_to(x8, y1)
+                .line_to(x6, h)
+                .line_to(x4, y1)
+                .line_to(x5, y1)
+                .arc_to(w_r, h, ooxml_angle(st_ang), ooxml_angle(msw_ang))
+                .finish(),
+        },
+    ]
+}
+
 struct GearTooth {
     b_a: f64,
     b_d: f64,
@@ -2425,6 +2660,242 @@ fn heart(frame: Frame) -> Vec<GeometryPathCommand> {
         .move_to(w / 2.0, h / 4.0)
         .cubic_to(x3, y1, x4, h / 4.0, w / 2.0, h)
         .cubic_to(x1, h / 4.0, x2, y1, w / 2.0, h / 4.0)
+        .close()
+        .finish()
+}
+
+fn vertical_scroll(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<PresetGeometryPath> {
+    let (w, h) = (frame.w, frame.h);
+    let ch = adjustment(adjustments, "adj", 0.125).clamp(0.0, 25000.0);
+    let ch2 = ch / 2.0;
+    let ch4 = ch / 4.0;
+    let x3 = ch + ch2;
+    let x4 = ch + ch;
+    let x6 = w - ch;
+    let x7 = w - ch2;
+    let y3 = h - ch;
+    let y4 = h - ch2;
+    vec![
+        PresetGeometryPath {
+            fill: PresetPathFill::Normal,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(ch2, h)
+                .arc_to(ch2, ch2, FRAC_PI_2, -FRAC_PI_2)
+                .line_to(ch2, y4)
+                .arc_to(ch4, ch4, FRAC_PI_2, -PI)
+                .line_to(ch, y3)
+                .line_to(ch, ch2)
+                .arc_to(ch2, ch2, PI, FRAC_PI_2)
+                .line_to(x7, 0.0)
+                .arc_to(ch2, ch2, 3.0 * FRAC_PI_2, PI)
+                .line_to(x6, ch)
+                .line_to(x6, y4)
+                .arc_to(ch2, ch2, 0.0, FRAC_PI_2)
+                .close()
+                .move_to(x4, ch2)
+                .arc_to(ch2, ch2, 0.0, FRAC_PI_2)
+                .arc_to(ch4, ch4, FRAC_PI_2, PI)
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::DarkenLess,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(x4, ch2)
+                .arc_to(ch2, ch2, 0.0, FRAC_PI_2)
+                .arc_to(ch4, ch4, FRAC_PI_2, PI)
+                .close()
+                .move_to(ch, y4)
+                .arc_to(ch2, ch2, 0.0, 3.0 * FRAC_PI_2)
+                .arc_to(ch4, ch4, 3.0 * FRAC_PI_2, PI)
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::None,
+            stroke: true,
+            commands: Outline::new(frame)
+                .move_to(ch, y3)
+                .line_to(ch, ch2)
+                .arc_to(ch2, ch2, PI, FRAC_PI_2)
+                .line_to(x7, 0.0)
+                .arc_to(ch2, ch2, 3.0 * FRAC_PI_2, PI)
+                .line_to(x6, ch)
+                .line_to(x6, y4)
+                .arc_to(ch2, ch2, 0.0, FRAC_PI_2)
+                .line_to(ch2, h)
+                .arc_to(ch2, ch2, FRAC_PI_2, PI)
+                .close()
+                .move_to(x3, 0.0)
+                .arc_to(ch2, ch2, 3.0 * FRAC_PI_2, PI)
+                .arc_to(ch4, ch4, FRAC_PI_2, PI)
+                .line_to(x4, ch2)
+                .move_to(x6, ch)
+                .line_to(x3, ch)
+                .move_to(ch2, y3)
+                .arc_to(ch4, ch4, 3.0 * FRAC_PI_2, PI)
+                .line_to(ch, y4)
+                .move_to(ch2, h)
+                .arc_to(ch2, ch2, FRAC_PI_2, -FRAC_PI_2)
+                .line_to(ch, y3)
+                .finish(),
+        },
+    ]
+}
+
+fn horizontal_scroll(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<PresetGeometryPath> {
+    let (w, h) = (frame.w, frame.h);
+    let ch = adjustment(adjustments, "adj", 0.125).clamp(0.0, 25000.0);
+    let ch2 = ch / 2.0;
+    let ch4 = ch / 4.0;
+    let y3 = ch + ch2;
+    let y4 = ch + ch;
+    let y6 = h - ch;
+    let y7 = h - ch2;
+    let y5 = y6 - ch2;
+    let x3 = w - ch;
+    let x4 = w - ch2;
+    vec![
+        PresetGeometryPath {
+            fill: PresetPathFill::Normal,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(w, ch2)
+                .arc_to(ch2, ch2, 0.0, FRAC_PI_2)
+                .line_to(x4, ch2)
+                .arc_to(ch4, ch4, 0.0, PI)
+                .line_to(x3, ch)
+                .line_to(ch2, ch)
+                .arc_to(ch2, ch2, 3.0 * FRAC_PI_2, -FRAC_PI_2)
+                .line_to(0.0, y7)
+                .arc_to(ch2, ch2, PI, -PI)
+                .line_to(ch, y6)
+                .line_to(x4, y6)
+                .arc_to(ch2, ch2, FRAC_PI_2, -FRAC_PI_2)
+                .close()
+                .move_to(ch2, y4)
+                .arc_to(ch2, ch2, FRAC_PI_2, -FRAC_PI_2)
+                .arc_to(ch4, ch4, 0.0, -PI)
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::DarkenLess,
+            stroke: false,
+            commands: Outline::new(frame)
+                .move_to(ch2, y4)
+                .arc_to(ch2, ch2, FRAC_PI_2, -FRAC_PI_2)
+                .arc_to(ch4, ch4, 0.0, -PI)
+                .close()
+                .move_to(x4, ch)
+                .arc_to(ch2, ch2, FRAC_PI_2, -3.0 * FRAC_PI_2)
+                .arc_to(ch4, ch4, PI, -PI)
+                .close()
+                .finish(),
+        },
+        PresetGeometryPath {
+            fill: PresetPathFill::None,
+            stroke: true,
+            commands: Outline::new(frame)
+                .move_to(0.0, y3)
+                .arc_to(ch2, ch2, PI, FRAC_PI_2)
+                .line_to(x3, ch)
+                .line_to(x3, ch2)
+                .arc_to(ch2, ch2, PI, PI)
+                .line_to(w, y5)
+                .arc_to(ch2, ch2, 0.0, FRAC_PI_2)
+                .line_to(ch, y6)
+                .line_to(ch, y7)
+                .arc_to(ch2, ch2, 0.0, PI)
+                .close()
+                .move_to(x3, ch)
+                .line_to(x4, ch)
+                .arc_to(ch2, ch2, FRAC_PI_2, -FRAC_PI_2)
+                .move_to(x4, ch)
+                .line_to(x4, ch2)
+                .arc_to(ch4, ch4, 0.0, PI)
+                .move_to(ch2, y4)
+                .line_to(ch2, y3)
+                .arc_to(ch4, ch4, PI, PI)
+                .arc_to(ch2, ch2, 0.0, PI)
+                .move_to(ch, y3)
+                .line_to(ch, y6)
+                .finish(),
+        },
+    ]
+}
+
+fn wave(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = adjustment(adjustments, "adj1", 0.125).clamp(0.0, 20000.0);
+    let a2 = adjustment(adjustments, "adj2", 0.0).clamp(-10000.0, 10000.0);
+    let y1 = divide(h * a1, 100000.0);
+    let dy2 = y1 * 10.0 / 3.0;
+    let y2 = y1 - dy2;
+    let y3 = y1 + dy2;
+    let y4 = h - y1;
+    let y5 = y4 - dy2;
+    let y6 = y4 + dy2;
+    let of2 = divide(w * a2, 50000.0);
+    let dx2 = if of2 > 0.0 { 0.0 } else { of2 };
+    let x2 = -dx2;
+    let dx5 = if of2 > 0.0 { of2 } else { 0.0 };
+    let x5 = w - dx5;
+    let dx3 = (dx2 + x5) / 3.0;
+    let x3 = x2 + dx3;
+    let x4 = (x3 + x5) / 2.0;
+    let x6 = dx5;
+    let x10 = w + dx2;
+    let x7 = x6 + dx3;
+    let x8 = (x7 + x10) / 2.0;
+    Outline::new(frame)
+        .move_to(x2, y1)
+        .cubic_to(x3, y2, x4, y3, x5, y1)
+        .line_to(x10, y4)
+        .cubic_to(x8, y6, x7, y5, x6, y4)
+        .close()
+        .finish()
+}
+
+fn double_wave(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = adjustment(adjustments, "adj1", 0.0625).clamp(0.0, 12500.0);
+    let a2 = adjustment(adjustments, "adj2", 0.0).clamp(-10000.0, 10000.0);
+    let y1 = divide(h * a1, 100000.0);
+    let dy2 = y1 * 10.0 / 3.0;
+    let y2 = y1 - dy2;
+    let y3 = y1 + dy2;
+    let y4 = h - y1;
+    let y5 = y4 - dy2;
+    let y6 = y4 + dy2;
+    let of2 = divide(w * a2, 50000.0);
+    let dx2 = if of2 > 0.0 { 0.0 } else { of2 };
+    let x2 = -dx2;
+    let dx8 = if of2 > 0.0 { of2 } else { 0.0 };
+    let x8 = w - dx8;
+    let dx3 = (dx2 + x8) / 6.0;
+    let x3 = x2 + dx3;
+    let dx4 = (dx2 + x8) / 3.0;
+    let x4 = x2 + dx4;
+    let x5 = (x2 + x8) / 2.0;
+    let x6 = x5 + dx3;
+    let x7 = (x6 + x8) / 2.0;
+    let x9 = dx8;
+    let x15 = w + dx2;
+    let x10 = x9 + dx3;
+    let x11 = x9 + dx4;
+    let x12 = (x9 + x15) / 2.0;
+    let x13 = x12 + dx3;
+    let x14 = (x13 + x15) / 2.0;
+    Outline::new(frame)
+        .move_to(x2, y1)
+        .cubic_to(x3, y2, x4, y3, x5, y1)
+        .cubic_to(x6, y2, x7, y3, x8, y1)
+        .line_to(x15, y4)
+        .cubic_to(x14, y6, x13, y5, x12, y4)
+        .cubic_to(x11, y6, x10, y5, x9, y4)
         .close()
         .finish()
 }

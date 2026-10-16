@@ -120,6 +120,7 @@ export type {
   DocxPluginLayout,
   DocxPluginNavigation,
   DocxPluginNavigationFailureCode,
+  DocxPluginPageRect,
   DocxPluginPanel,
   DocxPluginPointPosition,
   DocxPluginReadClient,

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::chart::ChartPartsMap;
 use crate::inline::{
     ComplexField, InlineNode, MathEquation, MathType, RunContent, SdtProperties,
-    StructuredFieldContent, StructuredFieldTree, parse_sdt_properties,
+    StructuredFieldContent, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
@@ -715,6 +715,9 @@ fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<Field
         else {
             continue;
         };
+        if code.is_empty() && result.is_empty() {
+            continue;
+        }
         if !code.is_empty() {
             let structured = field
                 .structured_code
@@ -730,7 +733,6 @@ fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<Field
                     blocks: None,
                 });
             structured.blocks.get_or_insert_with(Vec::new).extend(code);
-            field.field_tree.get_or_insert_with(default_field_tree).code = Some(structured.clone());
         }
         if !result.is_empty() {
             let structured =
@@ -751,12 +753,28 @@ fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<Field
                 .blocks
                 .get_or_insert_with(Vec::new)
                 .extend(result);
-            field
-                .field_tree
-                .get_or_insert_with(default_field_tree)
-                .result = Some(structured.clone());
         }
+        field.project_leaf_tree();
     }
+}
+
+pub(crate) fn blocks_hold_field(blocks: &[BlockContent]) -> bool {
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => {
+            paragraph.content.iter().any(|content| match content {
+                ParagraphContent::Inline(node) => inline_holds_field(std::slice::from_ref(node)),
+                ParagraphContent::Tracked(change) => inline_holds_field(&change.content),
+                _ => false,
+            })
+        }
+        BlockContent::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .any(|cell| blocks_hold_field(&cell.content)),
+        BlockContent::BlockSdt(sdt) => blocks_hold_field(&sdt.content),
+        BlockContent::RawXml(_) => false,
+    })
 }
 
 fn complex_field_mut(
@@ -773,16 +791,6 @@ fn complex_field_mut(
         return None;
     };
     Some(field)
-}
-
-fn default_field_tree() -> StructuredFieldTree {
-    StructuredFieldTree {
-        version: Some(1.0),
-        code: None,
-        result: None,
-        children: None,
-        display_mode: Some("result".to_owned()),
-    }
 }
 
 fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {

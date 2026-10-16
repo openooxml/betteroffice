@@ -3445,6 +3445,479 @@ fn semantic_noop_preserves_redo_history() {
 }
 
 #[test]
+fn range_move_rewrites_formulas_and_converges_as_one_undoable_edit() {
+    let mut data = Sheet::new("Data");
+    data.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("B1"),
+        Cell {
+            formula: Some("A1*2".into()),
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("C1"),
+        Cell {
+            formula: Some("SUM(A1:B1)".into()),
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("D3"),
+        Cell {
+            value: CellValue::Number { value: 99.0 },
+            ..Cell::default()
+        },
+    );
+    let mut other = Sheet::new("Other");
+    other.set_cell(
+        cell("A1"),
+        Cell {
+            formula: Some("Data!$A$1".into()),
+            ..Cell::default()
+        },
+    );
+    let original = Workbook::from_model(WorkbookModel {
+        sheets: vec![data, other],
+        ..Default::default()
+    })
+    .unwrap()
+    .save()
+    .unwrap();
+    let mut left = Workbook::open_collaborative(&original, 801).unwrap();
+    let mut right = Workbook::open_collaborative(&original, 802).unwrap();
+    assert!(
+        left.move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            cell("D3"),
+            CalculationOptions::default(),
+        )
+        .unwrap()
+        .applied
+    );
+    assert_eq!(left.history_state().undo_depth, 1);
+    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(left.cell(SheetId(0), cell("B1")).unwrap().input, "");
+    assert_eq!(left.cell(SheetId(0), cell("D3")).unwrap().input, "10");
+    assert_eq!(left.cell(SheetId(0), cell("E3")).unwrap().input, "=D3*2");
+    assert_eq!(
+        left.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=SUM(D3:E3)"
+    );
+    assert_eq!(
+        left.cell(SheetId(1), cell("A1")).unwrap().input,
+        "=Data!$D$3"
+    );
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+    let reopened = Workbook::open(&right.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("E3")).unwrap().input,
+        "=D3*2"
+    );
+    assert_eq!(
+        reopened.cell(SheetId(1), cell("A1")).unwrap().input,
+        "=Data!$D$3"
+    );
+    assert!(left.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "10");
+    assert_eq!(left.cell(SheetId(0), cell("D3")).unwrap().input, "99");
+    assert_eq!(
+        left.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=SUM(A1:B1)"
+    );
+    let undo = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&undo, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+}
+
+#[test]
+fn range_move_rejects_partial_formula_span_without_mutation() {
+    let mut data = Sheet::new("Data");
+    data.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("C1"),
+        Cell {
+            formula: Some("SUM(A1:B1)".into()),
+            ..Cell::default()
+        },
+    );
+    let bytes = Workbook::from_model(WorkbookModel {
+        sheets: vec![data],
+        ..Default::default()
+    })
+    .unwrap()
+    .save()
+    .unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 803).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let result = workbook.move_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("D3"),
+        CalculationOptions::default(),
+    );
+    assert!(matches!(result, Err(Error::InvalidOperation(_))));
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert!(!workbook.can_undo());
+}
+
+#[test]
+fn range_move_refuses_preserved_validation_even_outside_source() {
+    let mut parts = sample_parts();
+    let worksheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    let xml = String::from_utf8(worksheet.1.clone()).unwrap();
+    worksheet.1 = xml
+        .replace(
+            "</worksheet>",
+            r#"<dataValidations count="1"><dataValidation type="whole" sqref="D9"><formula1>1</formula1></dataValidation></dataValidations></worksheet>"#,
+        )
+        .into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 804).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let result = workbook.move_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("D3"),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidOperation(reason)) if reason.contains("worksheet features"))
+    );
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+}
+
+fn assert_move_range_refused(bytes: &[u8], source: CellRange, destination: CellRef) {
+    let mut workbook = Workbook::open_collaborative(bytes, 805).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let saved = workbook.save().unwrap();
+    assert_eq!(saved, bytes);
+    let model = workbook.model().clone();
+    let result = workbook.move_range(
+        SheetId(0),
+        source,
+        destination,
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidOperation(ref reason)) if reason.contains("cannot safely preserve")),
+        "{result:?}"
+    );
+    assert!(!workbook.can_undo());
+    assert_eq!(workbook.history_state().undo_depth, 0);
+    assert_eq!(workbook.model(), &model);
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert_eq!(workbook.save().unwrap(), saved);
+}
+
+#[test]
+fn move_range_refuses_inline_rich_text_without_mutation() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><r><rPr><b/></rPr><t>rich</t></r><r><t> text</t></r></is></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    assert_move_range_refused(
+        &ooxml_opc::rezip_parts(&parts).unwrap(),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("B1"),
+    );
+}
+
+#[test]
+fn move_range_refuses_related_table_formulas_without_mutation() {
+    for tag in ["calculatedColumnFormula", "totalsRowFormula"] {
+        for (owner, formula) in [
+            (1, "A1"),
+            (1, "$B$1"),
+            (1, "Data!A1"),
+            (1, "SUM(A1:B1)"),
+            (2, "Data!A1"),
+            (2, "Data!$B$1"),
+        ] {
+            let mut parts = sample_parts();
+            set_test_part(
+                &mut parts,
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+            );
+            if owner == 2 {
+                set_test_part(
+                    &mut parts,
+                    "xl/worksheets/sheet1.xml",
+                    br#"<worksheet><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+                );
+                set_test_part(
+                    &mut parts,
+                    "xl/worksheets/sheet2.xml",
+                    br#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+                );
+            }
+            parts.push((
+                format!("xl/worksheets/_rels/sheet{owner}.xml.rels"),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>"#.to_vec(),
+            ));
+            parts.push((
+                "xl/tables/table1.xml".into(),
+                format!(r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Sales" displayName="Sales" ref="D10:D12"><tableColumns count="1"><tableColumn id="1" name="Amount"><{tag}>{formula}</{tag}></tableColumn></tableColumns></table>"#).into_bytes(),
+            ));
+            assert_move_range_refused(
+                &ooxml_opc::rezip_parts(&parts).unwrap(),
+                CellRange::new(cell("A1"), cell("A1")),
+                cell("B1"),
+            );
+        }
+    }
+}
+
+#[test]
+fn move_range_refuses_dynamic_ranges_without_mutation() {
+    for formula in [
+        "SUM(A1:INDEX(A10:A20,1))",
+        "SUM(A1:CHOOSE(1,A10,A20))",
+        "SUM(A1:CUSTOM(A10))",
+        "SUM(A1:OFFSET(A10,0,0))",
+        "SUM(A1:INDIRECT(\"A10\"))",
+        "SUM(INDEX(A1:A20,1):INDEX(A1:A20,10))",
+        "SUM(OFFSET(A10,-5,0))",
+        "SUM(INDIRECT(\"A5\"))",
+    ] {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            cell("A5"),
+            Cell {
+                value: CellValue::Number { value: 10.0 },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            cell("D1"),
+            Cell {
+                formula: Some(formula.into()),
+                ..Cell::default()
+            },
+        );
+        let bytes = Workbook::from_model(WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        })
+        .unwrap()
+        .save()
+        .unwrap();
+        assert_move_range_refused(&bytes, CellRange::new(cell("A5"), cell("A5")), cell("C5"));
+    }
+}
+
+#[test]
+fn move_range_materializes_missing_cell_styles_in_one_transaction() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    for row_style in [false, true] {
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs.push(Default::default());
+        let style = model
+            .styles
+            .intern_cell_format(&CellFormat {
+                fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+        let mut sheet = Sheet::new("Data");
+        if row_style {
+            sheet.row_styles.insert(0, style);
+        } else {
+            sheet.col_styles.push(ColStyle {
+                first: 0,
+                last: 0,
+                xf: style,
+            });
+        }
+        sheet.col_styles.push(ColStyle {
+            first: 4,
+            last: 4,
+            xf: style,
+        });
+        sheet.set_cell(
+            cell("B1"),
+            Cell {
+                value: CellValue::Number { value: 42.0 },
+                ..Cell::default()
+            },
+        );
+        model.sheets.push(sheet);
+        let bytes = Workbook::from_model(model).unwrap().save().unwrap();
+        let mut left = Workbook::open_collaborative(&bytes, 806).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, 807).unwrap();
+        assert!(left.model().sheets[0].cell(cell("A1")).is_none());
+        assert_eq!(cascade_fill(&left, "A1").as_deref(), Some("#00ff00"));
+        left.move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            cell("D2"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(left.history_state().undo_depth, 1);
+        let update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        right
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap();
+        assert_eq!(right.model(), left.model());
+        let reopened = Workbook::open(&left.save().unwrap()).unwrap();
+        for workbook in [&left, &right, &reopened] {
+            assert_eq!(cascade_fill(workbook, "D2").as_deref(), Some("#00ff00"));
+            for address in ["A1", "B1", "E2"] {
+                assert_ne!(cascade_fill(workbook, address).as_deref(), Some("#00ff00"));
+            }
+            assert_eq!(workbook.cell(SheetId(0), cell("E2")).unwrap().input, "42");
+        }
+        left.undo(CalculationOptions::default()).unwrap();
+        assert!(!left.can_undo());
+        assert!(left.model().sheets[0].cell(cell("A1")).is_none());
+        assert_eq!(cascade_fill(&left, "A1").as_deref(), Some("#00ff00"));
+        assert_eq!(left.cell(SheetId(0), cell("B1")).unwrap().input, "42");
+        assert!(left.model().sheets[0].cell(cell("D2")).is_none());
+        assert!(left.model().sheets[0].cell(cell("E2")).is_none());
+        left.redo(CalculationOptions::default()).unwrap();
+        assert_eq!(cascade_fill(&left, "D2").as_deref(), Some("#00ff00"));
+        assert_ne!(cascade_fill(&left, "A1").as_deref(), Some("#00ff00"));
+    }
+}
+
+#[test]
+fn move_range_refuses_related_comment_anchors_without_mutation() {
+    for anchor in ["A1", "B1"] {
+        for relationship_type in ["comments", "threadedComment"] {
+            let mut parts = sample_parts();
+            set_test_part(
+                &mut parts,
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+            );
+            parts.push((
+                "xl/worksheets/_rels/sheet1.xml.rels".into(),
+                format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{relationship_type}" Target="../comments/comment1.xml"/></Relationships>"#).into_bytes(),
+            ));
+            let xml = if relationship_type == "comments" {
+                format!(
+                    r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="{anchor}" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#
+                )
+            } else {
+                format!(
+                    r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment ref="{anchor}" personId="person" id="comment"><text>Note</text></threadedComment></ThreadedComments>"#
+                )
+            };
+            parts.push(("xl/comments/comment1.xml".into(), xml.into_bytes()));
+            assert_move_range_refused(
+                &ooxml_opc::rezip_parts(&parts).unwrap(),
+                CellRange::new(cell("A1"), cell("A1")),
+                cell("B1"),
+            );
+        }
+    }
+}
+
+#[test]
+fn move_range_allows_disjoint_rich_text_table_formulas_and_comments() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>10</v></c><c r="C1" t="inlineStr"><is><r><rPr><b/></rPr><t>rich</t></r></is></c></row></sheetData><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/tables/table1.xml".into(),
+        br#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" displayName="Sales" ref="D10:D12"><tableColumns count="1"><tableColumn id="1" name="Amount"><calculatedColumnFormula>SUM(A20:B20)</calculatedColumnFormula><totalsRowFormula>Empty!A1</totalsRowFormula></tableColumn></tableColumns></table>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/comments1.xml".into(),
+        br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="F20" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#.to_vec(),
+    ));
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 808).unwrap();
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            cell("B1"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.history_state().undo_depth, 1);
+    let saved = package_map(&workbook.save().unwrap());
+    let original = package_map(&bytes);
+    for path in ["xl/tables/table1.xml", "xl/comments1.xml"] {
+        assert_eq!(saved[path], original[path]);
+    }
+    let sheet = String::from_utf8(saved["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(sheet.contains("<rPr><b/></rPr>"));
+    assert_eq!(workbook.cell(SheetId(0), cell("B1")).unwrap().input, "10");
+}
+
+#[test]
+fn range_move_handles_overlapping_source_and_destination() {
+    let mut data = Sheet::new("Data");
+    for (address, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0)] {
+        data.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![data],
+        ..Default::default()
+    })
+    .unwrap();
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A2")),
+            cell("A2"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(workbook.cell(SheetId(0), cell("A2")).unwrap().input, "1");
+    assert_eq!(workbook.cell(SheetId(0), cell("A3")).unwrap().input, "2");
+}
+
+#[test]
 fn rejects_insertions_that_discard_boundary_content() {
     let mut sheet = Sheet::new("Data");
     let last_row = CellRef::new(betteroffice_xlsx::MAX_ROWS - 1, 0);

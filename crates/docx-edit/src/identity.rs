@@ -414,6 +414,8 @@ pub(crate) struct SourceIndex {
     comment_references: BTreeSet<u32>,
     #[serde(skip)]
     seed_states: OnceLock<HashMap<String, StoryState>>,
+    #[serde(skip)]
+    group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
 }
 
 fn empty_package_bytes() -> PackageBytes {
@@ -486,6 +488,12 @@ impl SourceIndex {
         self.seed_states.get().is_some()
     }
 
+    pub(crate) fn group_picture_sources(&self) -> crate::bridge::GroupPictureSources {
+        self.group_pictures
+            .get_or_init(|| crate::bridge::group_pictures::source_shapes(self.bytes(), &self.roots))
+            .clone()
+    }
+
     pub(crate) fn bytes(&self) -> PackageBytes {
         self.bytes.clone()
     }
@@ -556,6 +564,7 @@ impl SourceIndex {
             seeded,
             comment_references,
             seed_states: OnceLock::new(),
+            group_pictures: OnceLock::new(),
         }
     }
 

@@ -27,6 +27,8 @@ import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot }
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
+export class WorkerReadSupersededError extends Error {}
+
 const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor',
   'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'setLtr', 'setRtl',
   'bulletList', 'numberedList', 'indent', 'outdent', 'paragraphStyle']);
@@ -158,15 +160,15 @@ export function createPeerlessShellController(initial: Options) {
   const flush = async () => {
     const current = ready();
     await flushAdmittedInput(current);
-    if (current !== binding) throw new Error('Document was replaced');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
     return current;
   };
   const read = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<ResidentDocumentReadValues[K]> => {
     const current = await flush();
     const version = current.viewStore.getSnapshot().version;
     const result = await options.read<K>(request);
-    if (current !== binding) throw new Error('Document was replaced');
-    if (version !== current.viewStore.getSnapshot().version) throw new Error('Worker read was superseded');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    if (version !== current.viewStore.getSnapshot().version) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const readAt = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }, token: string): Promise<ResidentDocumentReadValues[K]> => {
@@ -175,8 +177,8 @@ export function createPeerlessShellController(initial: Options) {
     if (!options.readAt) throw new Error('Versioned worker reads are unavailable');
     const result = await options.readAt<K>(request, token);
     const latest = current.viewStore.getSnapshot();
-    if (current !== binding) throw new Error('Document was replaced');
-    if (result.status !== 'ok' || result.version !== token || latest.version !== view.version || !sameIdentity(latest.identity, view.identity)) throw new Error('Worker read was superseded');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    if (result.status !== 'ok' || result.version !== token || latest.version !== view.version || !sameIdentity(latest.identity, view.identity)) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
