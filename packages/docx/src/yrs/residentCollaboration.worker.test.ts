@@ -119,6 +119,55 @@ test('two worker command sessions converge with reordered and duplicated updates
   } finally { offA(); offB(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
 
+const ROOM_BODY = ['ALPHA BETA', 'GAMMA DELTA', 'EPSILON ZETA', 'ETA THETA']
+  .map(text => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`).join('');
+
+test('a worker replica survives a remote update that arrives before the update it depends on and converges once it does', async () => {
+  const failures: string[] = [];
+  for (const steps of [['split', 'undo'], ['deleteAcross', 'split', 'undo'], ['section', 'split', 'undo'],
+    ['section', 'deleteAcross', 'split', 'undo'], ['table', 'deleteAcross', 'split', 'undo']]) {
+    const bytes = documentBytes(undefined, ROOM_BODY);
+    const a = await open(9201, undefined, undefined, bytes);
+    const b = await open(9202, a.engine.encodeState(), undefined, bytes);
+    let sent: ArrayBuffer[] = [];
+    const back: ArrayBuffer[] = [];
+    const offA = a.client.onCollabUpdates(event => sent.push(...event.updates.map(u => u.slice().buffer)));
+    const offB = b.client.onCollabUpdates(event => back.push(...event.updates.map(u => u.slice().buffer)));
+    const point = (index: number, offset: number) => ({ story: 'body', paraId: a.engine.paragraphs('body')[index]!.paraId, offset });
+    const caret = (index: number, offset: number) => ({ selection: { anchor: point(index, offset), focus: point(index, offset) } });
+    const label = steps.join('+');
+    try {
+      const groups: ArrayBuffer[][] = [];
+      for (const step of steps) {
+        sent = [];
+        const [kind, payload] = step === 'split' ? ['paragraphBreak', caret(0, 3)]
+          : step === 'deleteAcross' ? ['deleteBackward', { selection: { anchor: point(0, 3), focus: point(1, 4) } }]
+            : step === 'section' ? ['insertSectionBreak', { ...caret(1, 2), type: 'continuous' }]
+              : step === 'table' ? ['insertTable', { ...caret(1, 0), rows: 2, columns: 2 }] : ['undo', {}];
+        const status = (await a.session.submit(kind as 'undo', payload as Record<string, never>).ack).status;
+        if (status !== 'applied') failures.push(`${label}: ${step} ${status}`);
+        groups.push(sent);
+      }
+      const late = groups.at(-2)!, early = groups.at(-1)!;
+      for (const update of groups.slice(0, -2).flat()) await b.session.submit('applyRemoteUpdate', { update }, merge).ack;
+      const vector = b.engine.encodeStateVector().slice();
+      for (const update of [...early, ...late]) {
+        const outcome = await b.session.submit('applyRemoteUpdate', { update }, merge).ack.then(ack => ack.status, (error: unknown) => String(error));
+        if (outcome !== 'applied' && outcome !== 'noop') {
+          const held = early.includes(update) && Buffer.compare(vector, b.engine.encodeStateVector()) === 0;
+          failures.push(`${label}: ${outcome} (structs held after the early update: ${held}, failed: ${b.client.hasFailed()})`);
+          break;
+        }
+      }
+      if (b.client.hasFailed()) continue;
+      for (const update of back) await a.session.submit('applyRemoteUpdate', { update }, merge).ack;
+      expect(b.engine.paragraphs('body').map(p => p.text)).toEqual(a.engine.paragraphs('body').map(p => p.text));
+      const at = { story: 'body', paraId: b.engine.paragraphs('body')[0]!.paraId, offset: 0 };
+      expect((await b.session.submit('insertText', { selection: { anchor: at, focus: at }, text: 'x' }).ack).status).toBe('applied');
+    } finally { offA(); offB(); a.session.dispose(); b.session.dispose(); }
+  }
+  expect(failures).toEqual([]);
+}, TIMEOUT * 3);
 test('update push precedes command ack and queued typing survives a merge', async () => {
   const a = await open(9201);
   const b = await open(9202, a.engine.encodeState());
