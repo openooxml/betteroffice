@@ -94,7 +94,7 @@ export type DocxProposalResult =
   | { ok: true; snapshot: DocxProposalSnapshot }
   | { ok: false; version: string; failure: DocxProposalFailure };
 
-/** Ids that name no proposal are ignored, so a retried withdrawal changes nothing. */
+/** Missing or remotely settled ids withdraw as a no-op, preserving accepted text. */
 export interface DocxProposalWithdrawRequest {
   expectVersion: string;
   ids: readonly string[];
@@ -130,6 +130,8 @@ export interface DocxProposalRegistry {
   setStates(request: DocxProposalStateRequest): DocxProposalResult;
   withdraw(request: DocxProposalWithdrawRequest): DocxProposalResult;
   snapshot(): DocxProposalSnapshot;
+  /** @internal */
+  reconcile(): void;
   /** @internal */
   exportState(): DocxProposalRegistryState;
   /** @internal */
@@ -826,6 +828,22 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     setStates,
     withdraw,
     snapshot,
+    reconcile() {
+      if (mirrored || records.size === 0) return;
+      const pending = new Set(session.listRevisions().map(({ revisionId }) => revisionId));
+      let changed = false;
+      let decided = false;
+      for (const [id, entry] of records) {
+        const revisionIds = entry.record.revisionIds.filter(revisionId => pending.has(revisionId));
+        if (revisionIds.length === entry.record.revisionIds.length) continue;
+        changed = true;
+        decided ||= entry.record.state !== 'proposed';
+        if (revisionIds.length === 0) records.delete(id);
+        else entry.record = { ...entry.record, revisionIds };
+      }
+      if (decided) previewVersion += 1;
+      if (changed) notify();
+    },
     exportState() {
       return structuredClone(
         mirrored?.proposals ?? { previewVersion, entries: [...records.values()] }
