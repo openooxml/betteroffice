@@ -197,3 +197,28 @@ test('getComments invalidates an old version and accepts a lower version in a ne
   await controller.query({ kind: 'reviewSnapshot' });
   expect(controller.ref.getComments()).toEqual([{ ...host[0]!, done: true }]);
 });
+
+
+test('a review refresh from the previous incarnation cannot overwrite getComments', async () => {
+  const { controller, read, viewStore, host } = reviewFixture();
+  const original = read.getMockImplementation()!;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let reading!: () => void;
+  const started = new Promise<void>(resolve => { reading = resolve; });
+  read.mockImplementation(async request => {
+    const result = await original(request);
+    if (request.kind === 'reviewSnapshot') { reading(); await held; }
+    return result;
+  });
+  const pending = controller.query({ kind: 'reviewSnapshot' });
+  await started;
+  const identity = { session: 's', incarnation: 2, epoch: 2 };
+  viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, selection: null, editState });
+  viewStore.installFrameGeometry({ identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
+  release();
+  await expect(pending).rejects.toThrow('Worker read was superseded');
+  expect(controller.ref.getComments()).toEqual(host);
+  await controller.query({ kind: 'reviewSnapshot' });
+  expect(controller.ref.getComments()).toEqual([{ id: 7, author: 'A', content: [] }]);
+});
