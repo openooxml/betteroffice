@@ -1,6 +1,11 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
-import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
+import {
+  buildImageTransformPatch,
+  buildImageWrapPatch,
+  imageWrapTargetFromAttrs,
+  useWorkerPropertyDialogs,
+} from './useWorkerPropertyDialogs';
 import type { WorkerShellController } from './workerProperties';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -112,4 +117,56 @@ test('image position floats an inline image with the wrap property the worker ac
   await act(async () => { await dialog.props.onApply(placement); });
   expect(applyQuery.mock.calls[0]![1]).toEqual({ kind: 'setObjectProperties', payload: { handle: 'physical-first', expectVersion: 'captured-native',
     patch: { position: { horizontal: placement.horizontal, vertical: placement.vertical }, distTop: 0, distBottom: 0, distLeft: 0, distRight: 0, wrap: 'square' } } });
+});
+
+test('computes imageState.wrap and submits setObjectProperties patches for applyImageWrap and applyImageTransform', async () => {
+  expect(imageWrapTargetFromAttrs({ wrapType: 'inline' })).toBe('inline');
+  expect(imageWrapTargetFromAttrs({ wrapType: 'square', displayMode: 'float', cssFloat: 'left' })).toBe('squareLeft');
+  expect(imageWrapTargetFromAttrs({ wrapType: 'square', displayMode: 'float', cssFloat: 'right' })).toBe('squareRight');
+  expect(imageWrapTargetFromAttrs({ wrapType: 'behind', displayMode: 'float', cssFloat: 'none' })).toBe('behind');
+  expect(buildImageTransformPatch({}, 'rotateCW')).toEqual({ transform: 'rotate(90deg)' });
+  expect(buildImageTransformPatch({ transform: 'rotate(90deg)' }, 'flipH')).toEqual({ transform: 'rotate(90deg) scaleX(-1)' });
+  expect(buildImageTransformPatch({ transform: 'rotate(90deg)' }, 'rotateCCW')).toEqual({ transform: null });
+
+  const { applyQuery, controller, selection } = fixture();
+  let currentProps: Record<string, unknown> = { width: 80, height: 40, wrapType: 'square', displayMode: 'float', cssFloat: 'left' };
+  controller.query = (async () => ({
+    version: 'captured-native',
+    selection,
+    value: { kind: 'object', handle: 'physical-first', properties: currentProps },
+  })) as never;
+  const hook = renderHook(() => useWorkerPropertyDialogs(controller, {}));
+  await act(async () => {});
+  expect(hook.result.current.imageState).toEqual({ wrap: 'squareLeft' });
+
+  await act(async () => { await hook.result.current.applyImageWrap('behind'); });
+  expect(applyQuery.mock.calls[0]![1]).toEqual({
+    kind: 'setObjectProperties',
+    payload: {
+      handle: 'physical-first',
+      expectVersion: 'captured-native',
+      patch: buildImageWrapPatch(currentProps, 'behind'),
+    },
+  });
+
+  currentProps = { ...currentProps, transform: 'rotate(90deg)' };
+  await act(async () => { await hook.result.current.applyImageTransform('flipH'); });
+  expect(applyQuery.mock.calls[1]![1]).toEqual({
+    kind: 'setObjectProperties',
+    payload: {
+      handle: 'physical-first',
+      expectVersion: 'captured-native',
+      patch: { transform: 'rotate(90deg) scaleX(-1)' },
+    },
+  });
+
+  await act(async () => { await hook.result.current.applyImageWrap('inline', 'context-menu-handle'); });
+  expect(applyQuery.mock.calls[2]![1]).toEqual({
+    kind: 'setObjectProperties',
+    payload: {
+      handle: 'context-menu-handle',
+      expectVersion: 'captured-native',
+      patch: buildImageWrapPatch(currentProps, 'inline'),
+    },
+  });
 });

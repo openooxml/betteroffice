@@ -71,3 +71,53 @@ test('worker image position applies to the same captured image', async ({ page }
   const kinds = await page.evaluate(xml => [...new DOMParser().parseFromString(xml, 'application/xml').getElementsByTagNameNS('*', 'drawing')].map(node => node.firstElementChild?.localName), xml);
   expect(kinds).toEqual(['anchor', 'inline']);
 });
+
+async function selectImageWrap(page: Page, optionTestId: string, label: string) {
+  const inline = page.getByTestId('toolbar-image-wrap');
+  const more = page.getByRole('button', { name: 'More actions', exact: true });
+  await expect.poll(async () => await inline.isVisible() || await more.isVisible()).toBe(true);
+  if (await inline.isVisible()) {
+    await expect(inline).not.toHaveAttribute('aria-disabled', 'true');
+    await inline.click();
+    await page.getByTestId(`toolbar-image-wrap-${optionTestId}`).click();
+  } else {
+    await more.click();
+    const submenu = page.getByRole('menuitem', { name: 'Text wrapping', exact: true });
+    await expect(submenu).not.toHaveAttribute('aria-disabled', 'true');
+    await submenu.hover();
+    await page.getByRole('menuitemradio', { name: label, exact: true }).click();
+  }
+}
+
+async function selectImageTransform(page: Page, action: string, label: string) {
+  const inline = page.getByTestId('toolbar-image-transform');
+  const more = page.getByRole('button', { name: 'More actions', exact: true });
+  await expect.poll(async () => await inline.isVisible() || await more.isVisible()).toBe(true);
+  if (await inline.isVisible()) {
+    await expect(inline).not.toHaveAttribute('aria-disabled', 'true');
+    await inline.click();
+    await page.getByTestId(`toolbar-image-transform-${action}`).click();
+  } else {
+    await more.click();
+    const submenu = page.getByRole('menuitem', { name: 'Transform', exact: true });
+    await expect(submenu).not.toHaveAttribute('aria-disabled', 'true');
+    await submenu.hover();
+    await page.getByRole('menuitem', { name: label, exact: true }).click();
+  }
+}
+
+test('worker image wrap and transform round-trip through saved OOXML', async ({ page }, info) => {
+  const input = await open(page);
+  await input.press('Shift+ArrowRight');
+  await selectImageWrap(page, 'wrapRight', 'Square Left');
+  await selectImageWrap(page, 'behind', 'Behind Text');
+  await selectImageTransform(page, 'rotateCW', 'Rotate clockwise');
+  await selectImageTransform(page, 'flipH', 'Flip horizontal');
+  const xml = await savedXml(page, info);
+  expect(xml).toContain('<wp:anchor');
+  expect(xml).toContain('behindDoc="1"');
+  expect(xml).toContain('<wp:wrapNone/>');
+  expect(xml).toContain('<a:xfrm');
+  expect(xml).toContain('rot="5400000"');
+  expect(xml).toContain('flipH="1"');
+});
