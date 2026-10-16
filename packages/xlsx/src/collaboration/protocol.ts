@@ -21,6 +21,10 @@ const SYNC_UPDATE = 2;
 
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
+const MAX_STATE_VECTOR_VAR_UINT_BYTES = 10;
+const DOCUMENT_FINGERPRINT_TAG = new TextEncoder().encode(
+  '\0betteroffice-document-fingerprint-v1\0'
+);
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -344,6 +348,91 @@ export function decodeAwarenessUpdate(
     reportDiscard(error);
   }
   return updates;
+}
+
+export function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
+  const suffixLength = DOCUMENT_FINGERPRINT_TAG.byteLength + 32;
+  const tagOffset = payload.byteLength - suffixLength;
+  if (tagOffset < 0) return payload;
+  for (let index = 0; index < DOCUMENT_FINGERPRINT_TAG.byteLength; index += 1) {
+    if (payload[tagOffset + index] !== DOCUMENT_FINGERPRINT_TAG[index]) return payload;
+  }
+  return payload.subarray(0, tagOffset);
+}
+
+function varUintReader(payload: Uint8Array, label: string): { read(): bigint; done(): boolean } {
+  let offset = 0;
+  return {
+    read() {
+      let value = 0n;
+      for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES; index += 1) {
+        if (offset >= payload.byteLength) throw new ProtocolError(`Truncated ${label.toLowerCase()}`);
+        const byte = payload[offset++];
+        value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+        if (byte < 0x80) return value;
+      }
+      throw new ProtocolError(`${label} varUint exceeds 64 bits`);
+    },
+    done: () => offset === payload.byteLength,
+  };
+}
+
+function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
+  const reader = varUintReader(payload, 'State vector');
+  const clocks = new Map<bigint, bigint>();
+  for (let count = reader.read(); count > 0n; count -= 1n) clocks.set(reader.read(), reader.read());
+  if (!reader.done()) throw new ProtocolError('Trailing state vector bytes');
+  return clocks;
+}
+
+/** Whether `payload` decodes as one v1 state vector, optionally fingerprinted. */
+export function isStateVector(payload: Uint8Array): boolean {
+  try {
+    decodeStateVector(withoutDocumentFingerprint(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `vector` has every client clock of `other`; both are v1 state vectors, optionally fingerprinted. */
+export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boolean {
+  const own = withoutDocumentFingerprint(vector);
+  const remote = withoutDocumentFingerprint(other);
+  if (own.byteLength === remote.byteLength && own.every((byte, index) => byte === remote[index])) {
+    return true;
+  }
+  const clocks = decodeStateVector(own);
+  for (const [client, clock] of decodeStateVector(remote)) {
+    if (clock > (clocks.get(client) ?? 0n)) return false;
+  }
+  return true;
+}
+
+const MAX_STATE_VECTOR_ENTRIES = 65_536;
+const MAX_SAFE_CLOCK = 2_147_483_647n;
+
+/** `vector` with `clientId`'s clock one past its own (1 when absent), keeping any document fingerprint; undefined past a native limit. */
+export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array | undefined {
+  if (!Number.isSafeInteger(clientId) || clientId < 0) {
+    throw new ProtocolError('Client id must be a non-negative safe integer');
+  }
+  const body = withoutDocumentFingerprint(vector);
+  const clocks = decodeStateVector(body);
+  const client = BigInt(clientId);
+  const clock = (clocks.get(client) ?? 0n) + 1n;
+  clocks.set(client, clock);
+  if (clocks.size > MAX_STATE_VECTOR_ENTRIES || clock > MAX_SAFE_CLOCK) return undefined;
+  const bytes: number[] = [];
+  for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  }
+  const suffix = vector.subarray(body.byteLength);
+  const result = new Uint8Array(bytes.length + suffix.byteLength);
+  result.set(bytes);
+  result.set(suffix, bytes.length);
+  return result;
 }
 
 export function decodeMessages(

@@ -126,6 +126,14 @@ test('worker replicas exchange a fresh handshake and converge after disconnected
   };
   const count = (index: number, type: string) => frames[index].flatMap((frame) => decodeMessages(frame))
     .filter((message) => message.type === type).length;
+  const quiet = async () => {
+    for (let idle = 0, seen = -1; idle < 64;) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const moved = frames[0].length + frames[1].length;
+      idle = moved === seen ? idle + 1 : 0;
+      seen = moved;
+    }
+  };
   try {
     right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 202 });
     providers.push(new CollaborationProvider(left.replica!, transports[0]),
@@ -134,8 +142,9 @@ test('worker replicas exchange a fresh handshake and converge after disconnected
     for (const provider of providers) provider.connect();
     await synced;
     await Promise.all([left.call.version(), right.call.version()]);
+    await quiet();
     const handshakes = frames.map((_, index) => [count(index, 'sync-step-1'), count(index, 'sync-step-2')]);
-    expect(handshakes).toEqual([[1, 1], [1, 1]]);
+    expect(handshakes).toEqual([[2, 2], [2, 2]]);
     connection(0, false);
     connection(1, false);
     expect(providers.every((provider) => provider.status === 'disconnected' && !provider.synced)).toBe(true);
@@ -149,9 +158,10 @@ test('worker replicas exchange a fresh handshake and converge after disconnected
     connection(1, true);
     await synced;
     await Promise.all([left.call.version(), right.call.version()]);
+    await quiet();
     expect(providers.every((provider) => provider.synced)).toBe(true);
     expect(frames.map((_, index) => [count(index, 'sync-step-1'), count(index, 'sync-step-2')]))
-      .toEqual(handshakes.map(([step1, step2]) => [step1 + 1, step2 + 1]));
+      .toEqual(handshakes.map(([step1, step2]) => [step1 + 2, step2 + 2]));
     const cells = await Promise.all([left.call.cellInputs(0, 'B3:C3'), right.call.cellInputs(0, 'B3:C3')]);
     expect(cells[0].cells).toEqual(cells[1].cells);
     expect(cells[0].cells[0].map((cell) => cell.input)).toEqual(['left offline', 'right offline']);
