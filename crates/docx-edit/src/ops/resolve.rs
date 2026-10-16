@@ -39,7 +39,7 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::table::resolve_table_row_revisions;
-use crate::ops::{Chunk, ChunkKind, inherit_block_revisions, remove_units, snapshot};
+use crate::ops::{After, Chunk, ChunkKind, inherit_block_revisions, remove_units, snapshot};
 use crate::queries::revision_parts;
 use crate::{
     DEL, EditCtx, EditingDoc, INS, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId, StoryRange,
@@ -331,7 +331,7 @@ fn resolve_story(
                             record(resolved, attr_ins.as_ref());
                         }
                     }
-                    remove_units(txn, story, chunk.start, 1, &chunks);
+                    remove_units(txn, story, chunk.start, 1, &chunks, After::Changed);
                     removed += 1;
                     continue;
                 }
@@ -376,6 +376,7 @@ fn resolve_story(
                         overlap_start,
                         overlap_end - overlap_start,
                         &chunks,
+                        After::Changed,
                     );
                     removed += overlap_end - overlap_start;
                     if overlap_start > chunk.start || overlap_end < chunk.end() {
