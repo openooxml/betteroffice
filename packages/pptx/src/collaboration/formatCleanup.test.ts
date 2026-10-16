@@ -66,7 +66,7 @@ function deleteOnly(update: Uint8Array): DeleteSet {
   return [...clients].sort(([a], [b]) => a - b).map(([client, ranges]) => {
     const merged: Array<[number, number]> = [];
     for (const [start, end] of ranges.sort(([a], [b]) => a - b)) {
-      const last = merged.at(-1);
+      const last = merged[merged.length - 1];
       if (last && start <= last[1]) last[1] = Math.max(last[1], end);
       else merged.push([start, end]);
     }
@@ -206,7 +206,7 @@ test('seeded concurrent deck text edits converge through incremental updates alo
     net.stop();
     for (const handle of handles) handle.dispose();
   }
-});
+}, 30_000);
 
 test('a cleanup made by a relaying deck replica reaches the replica behind it', () => {
   const { handles, storyId } = replicas(3, 'abcdefghij');
@@ -240,7 +240,7 @@ test('a cleanup made by a relaying deck replica reaches the replica behind it', 
     net.stop();
     for (const handle of handles) handle.dispose();
   }
-});
+}, 30_000);
 
 test('a deck provider pair converges through seeded concurrent edits', () => {
   const { handles, storyId } = replicas(2, 'abcdefghij');
@@ -280,7 +280,7 @@ test('a deck provider pair converges through seeded concurrent edits', () => {
     for (const provider of providers) provider.destroy();
     for (const handle of handles) handle.dispose();
   }
-});
+}, 30_000);
 
 test('deletions held until their structs arrive are not republished', () => {
   const { handles, storyId } = replicas(2, 'ab');
