@@ -691,6 +691,12 @@ impl Workbook {
             validate_collaboration_state_entries(authority.state_vector_entries())?;
         }
         retain_array_formulas(&model, &mut projected);
+        if client_id.is_none() {
+            for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
+                target.hidden_col_widths = source.hidden_col_widths.clone();
+                target.hidden_row_heights = source.hidden_row_heights.clone();
+            }
+        }
         let model = projected;
         validate_model(&model)?;
         let opened_anchors = model
@@ -847,7 +853,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let staged = self.stage_remote_updates(&[update], None)?;
-        if staged.structure != structure {
+        if !staged.structure.same_except_freeze_panes(&structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -888,7 +894,9 @@ impl Workbook {
             SnapshotAdoption::Replacement(candidate) => *candidate,
         };
         let structure = candidate.structure().map_err(authority_error)?;
-        if !structure.describes_same_workbook(&frozen) {
+        if !structure.describes_same_workbook(&frozen)
+            && !structure.snapshot_same_except_freeze_panes(&frozen)
+        {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
@@ -997,7 +1005,7 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged) if &staged.structure != structure => {
+                Ok(staged) if !staged.structure.same_except_freeze_panes(structure) => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -1056,6 +1064,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
 
+        let new_structure = staged.structure;
         let commit_update = staged.commit_update;
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
@@ -1068,6 +1077,9 @@ impl Workbook {
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: new_structure,
+        };
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
@@ -1840,7 +1852,11 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative() && ops.iter().any(is_structural_op) {
+        if self.is_collaborative()
+            && ops
+                .iter()
+                .any(|op| is_structural_op(op) && !matches!(op, Op::SetFreezePane { .. }))
+        {
             return Err(Error::CollaborativeStructureOperation);
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
@@ -2131,14 +2147,18 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if &history.structure != structure {
+        if !history.structure.same_except_freeze_panes(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
+        let new_structure = history.structure;
         let active_sheet = self.active_sheet;
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
         self.install_model(restored)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: new_structure,
+        };
         self.invalidate_sheet_info();
         self.edited_since_open = true;
         self.restore_active_sheet(Some(active_sheet));
@@ -2773,6 +2793,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(ops);
         let update = if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
+            let new_structure = staged.structure.clone();
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
@@ -2780,6 +2801,9 @@ impl Workbook {
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
             self.install_model_with_ops(model, ops)?;
+            self.mode = WorkbookMode::Collaborative {
+                structure: new_structure,
+            };
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
         } else {
@@ -2849,7 +2873,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin, &self.model.styles)
             .map_err(authority_error)?;
-        if &staged.structure != structure {
+        if !staged.structure.same_except_freeze_panes(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
@@ -2941,7 +2965,11 @@ impl Workbook {
                 | Op::InsertCols { sheet, .. }
                 | Op::DeleteCols { sheet, .. }
                 | Op::SetColWidth { sheet, .. }
+                | Op::SetColVisibility { sheet, .. }
+                | Op::RestoreColDimension { sheet, .. }
                 | Op::SetRowHeight { sheet, .. }
+                | Op::SetRowVisibility { sheet, .. }
+                | Op::RestoreRowDimension { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
@@ -3604,6 +3632,30 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
                 ));
             }
         }
+        for (&column, &width) in &sheet.hidden_col_widths {
+            if column >= MAX_COLS
+                || !width.is_finite()
+                || !(0.0..=MAX_COL_WIDTH).contains(&width)
+                || width == 0.0
+                || sheet.col_widths.get(&column) != Some(&0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains an invalid hidden column width".to_string(),
+                ));
+            }
+        }
+        for (&row, &height) in &sheet.hidden_row_heights {
+            if row >= MAX_ROWS
+                || !height.is_finite()
+                || !(0.0..=MAX_ROW_HEIGHT).contains(&height)
+                || height == 0.0
+                || sheet.row_heights.get(&row) != Some(&0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains an invalid hidden row height".to_string(),
+                ));
+            }
+        }
         for (index, range) in sheet.merges.iter().enumerate() {
             validate_range(*range)?;
             if sheet.merges[index + 1..]
@@ -3657,7 +3709,11 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::InsertCols { sheet, .. }
         | Op::DeleteCols { sheet, .. }
         | Op::SetColWidth { sheet, .. }
+        | Op::SetColVisibility { sheet, .. }
+        | Op::RestoreColDimension { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
+        | Op::SetRowVisibility { sheet, .. }
+        | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
@@ -3718,6 +3774,36 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 )));
             }
         }
+        Op::SetColVisibility { sheet, col, .. } => {
+            require_sheet(model, *sheet)?;
+            if *col >= MAX_COLS {
+                return Err(Error::InvalidOperation(format!(
+                    "column {} is out of range",
+                    u64::from(*col) + 1
+                )));
+            }
+        }
+        Op::RestoreColDimension {
+            sheet,
+            col,
+            width,
+            hidden_width,
+        } => {
+            require_sheet(model, *sheet)?;
+            if *col >= MAX_COLS
+                || width.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_COL_WIDTH).contains(&value)
+                })
+                || hidden_width.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_COL_WIDTH).contains(&value) || value == 0.0
+                })
+                || hidden_width.is_some() && *width != Some(0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "invalid column dimension restore".to_string(),
+                ));
+            }
+        }
         Op::SetRowHeight { sheet, row, height } => {
             require_sheet(model, *sheet)?;
             if *row >= MAX_ROWS {
@@ -3732,6 +3818,36 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 return Err(Error::InvalidOperation(format!(
                     "row height must be between 0 and {MAX_ROW_HEIGHT}"
                 )));
+            }
+        }
+        Op::SetRowVisibility { sheet, row, .. } => {
+            require_sheet(model, *sheet)?;
+            if *row >= MAX_ROWS {
+                return Err(Error::InvalidOperation(format!(
+                    "row {} is out of range",
+                    u64::from(*row) + 1
+                )));
+            }
+        }
+        Op::RestoreRowDimension {
+            sheet,
+            row,
+            height,
+            hidden_height,
+        } => {
+            require_sheet(model, *sheet)?;
+            if *row >= MAX_ROWS
+                || height.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_ROW_HEIGHT).contains(&value)
+                })
+                || hidden_height.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_ROW_HEIGHT).contains(&value) || value == 0.0
+                })
+                || hidden_height.is_some() && *height != Some(0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "invalid row dimension restore".to_string(),
+                ));
             }
         }
         Op::SetFreezePane { sheet, pane } => {
@@ -4216,16 +4332,36 @@ fn validate_cell_state(state: &CellState) -> Result<()> {
     Ok(())
 }
 
+/// The style a write leaves on `cell`: its own, or for a missing cell its row's or column's
+/// default. A clear leaves a missing cell missing and pins an unstyled cell to the default
+/// style where a row or column default would otherwise take over.
+fn written_cell_style(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    clears: bool,
+) -> Option<u32> {
+    let sheet = workbook.sheet(sheet);
+    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
+    match sheet.and_then(|sheet| sheet.cell(cell)) {
+        None if clears => None,
+        None => inherited,
+        Some(existing) if clears && existing.style.is_none() => inherited
+            .is_some_and(|inherited| inherited != 0)
+            .then_some(0),
+        Some(existing) => existing.style,
+    }
+}
+
 fn edit_cell_state(
     workbook: &WorkbookModel,
     sheet: SheetId,
     cell: CellRef,
     input: &str,
 ) -> CellState {
-    let sheet = workbook.sheet(sheet);
-    let existing = sheet.and_then(|sheet| sheet.cell(cell));
-    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
-    let style = existing.map_or(inherited, |existing| existing.style);
+    let style = workbook
+        .sheet(sheet)
+        .and_then(|sheet| sheet.effective_style(cell));
     let number_format = workbook
         .styles
         .resolved_format(Some(style.unwrap_or(0)))
@@ -4244,13 +4380,7 @@ fn edit_cell_state(
     } else {
         cell_state_for_input_no_eval(input)
     };
-    state.style = match existing {
-        None if input.is_empty() => None,
-        Some(_) if input.is_empty() && style.is_none() => inherited
-            .is_some_and(|inherited| inherited != 0)
-            .then_some(0),
-        _ => style,
-    };
+    state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     state
 }
 
@@ -4284,6 +4414,8 @@ fn models_semantically_equal(left: &WorkbookModel, right: &WorkbookModel) -> boo
             || left.merges != right.merges
             || left.col_widths != right.col_widths
             || left.row_heights != right.row_heights
+            || left.hidden_col_widths != right.hidden_col_widths
+            || left.hidden_row_heights != right.hidden_row_heights
         {
             return false;
         }
@@ -4697,7 +4829,12 @@ impl CalculationScope {
             // history may have changed in more than their sheet names
             Op::RestoreSheet { .. } => Self::Full,
             // a zero size hides a row or column, which hidden-aware functions read
-            Op::SetColWidth { .. } | Op::SetRowHeight { .. } => Self::Full,
+            Op::SetColWidth { .. }
+            | Op::SetColVisibility { .. }
+            | Op::RestoreColDimension { .. }
+            | Op::SetRowHeight { .. }
+            | Op::SetRowVisibility { .. }
+            | Op::RestoreRowDimension { .. } => Self::Full,
             Op::SetDefinedNames { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
@@ -4976,6 +5113,12 @@ impl Workbook {
         }
         let mut projected = authority.materialize_oracle().map_err(authority_error)?;
         retain_array_formulas(&model, &mut projected);
+        if client_id.is_none() {
+            for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
+                target.hidden_col_widths = source.hidden_col_widths.clone();
+                target.hidden_row_heights = source.hidden_row_heights.clone();
+            }
+        }
         let model = projected;
         validate_model(&model)?;
         let opened_anchors = model

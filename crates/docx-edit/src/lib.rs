@@ -113,6 +113,7 @@ mod stories;
 pub mod structured;
 mod target;
 mod undo;
+mod update_chunks;
 
 pub mod canonical;
 pub mod engine;
@@ -1646,9 +1647,43 @@ impl EditingDoc {
         ))
     }
 
+    /// [`Self::encode_diff_v1`] as ordered updates for a sync that must travel in bounded
+    /// frames: the whole diff when it fits `max_chunk_bytes`, otherwise causally ordered struct
+    /// updates followed by the delete set alone. Each fits the limit except one that carries a
+    /// single larger struct.
+    pub fn encode_diff_chunks_v1(
+        &self,
+        remote_state_vector: &[u8],
+        max_chunk_bytes: usize,
+    ) -> EditResult<Vec<Vec<u8>>> {
+        if max_chunk_bytes == 0 {
+            return Err(EditError::InvalidUpdate(
+                "chunk limit must be positive".to_owned(),
+            ));
+        }
+        let state_vector = StateVector::decode_v1(remote_state_vector)
+            .map_err(|error| EditError::InvalidStateVector(error.to_string()))?;
+        Ok(update_chunks::encode_diff_chunks_v1(
+            &self.doc.transact(),
+            &state_vector,
+            max_chunk_bytes,
+        ))
+    }
+
     /// Applies a peer's update, refusing one over [`MAX_UPDATE_BYTES`].
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
         self.integrate_update(decode_peer_update_v1(bytes)?, UpdateOrigin::Remote)
+    }
+
+    /// Applies one sync's ordered updates in a single remote transaction, so identity and
+    /// comment repair run once on the complete state. Each update is refused over
+    /// [`MAX_UPDATE_BYTES`] before any is applied.
+    pub fn apply_update_chunks_v1<B: AsRef<[u8]>>(&self, chunks: &[B]) -> EditResult<()> {
+        let updates = chunks
+            .iter()
+            .map(|chunk| decode_peer_update_v1(chunk.as_ref()))
+            .collect::<EditResult<Vec<_>>>()?;
+        self.integrate_updates(updates, UpdateOrigin::Remote)
     }
 
     /// Loads a whole document state, which the peer update cap does not cover.
@@ -1660,21 +1695,25 @@ impl EditingDoc {
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, origin: UpdateOrigin) -> EditResult<()> {
+        self.integrate_updates(vec![update], origin)
+    }
+
+    /// Applies updates in order in one transaction, then repairs any paragraph identities
+    /// they duplicated.
+    fn integrate_updates(&self, updates: Vec<Update>, origin: UpdateOrigin) -> EditResult<()> {
         let _host_edit = matches!(origin, UpdateOrigin::Host)
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
-        let result = match origin {
-            UpdateOrigin::Remote => self.doc.transact_mut().apply_update(update),
-            UpdateOrigin::Local => self
-                .doc
-                .transact_mut_with(self.client_id)
-                .apply_update(update),
-            UpdateOrigin::Host => self
-                .doc
-                .transact_mut_with(batch::HOST_ORIGIN)
-                .apply_update(update),
+        let mut txn = match origin {
+            UpdateOrigin::Remote => self.doc.transact_mut(),
+            UpdateOrigin::Local => self.doc.transact_mut_with(self.client_id),
+            UpdateOrigin::Host => self.doc.transact_mut_with(batch::HOST_ORIGIN),
         };
+        let result = updates
+            .into_iter()
+            .try_for_each(|update| txn.apply_update(update));
+        drop(txn);
         result.map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         if watch.changed() {
             drop(watch);

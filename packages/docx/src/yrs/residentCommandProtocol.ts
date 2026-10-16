@@ -108,6 +108,11 @@ export interface DocxEditState {
   tableContext: DocxCommandTableContext | null;
 }
 
+/** Set by a host allowed to propose on a read-only document (`allowHostProposals`). */
+export interface DocxHostProposalGrant {
+  hostProposal?: boolean;
+}
+
 export interface DocxSelectionIntent {
   selection?: DocxCommandSelection;
   suggesting?: YrsAuthor;
@@ -308,9 +313,9 @@ export interface DocxCommandPayloads {
   removeComment: { id: string; expectVersion: string };
   acceptRevision: { revisionId: string; expectVersion: string };
   rejectRevision: { revisionId: string; expectVersion: string };
-  propose: DocxProposalRequest;
-  setProposalStates: DocxProposalStateRequest;
-  withdrawProposals: DocxProposalWithdrawRequest;
+  propose: DocxProposalRequest & DocxHostProposalGrant;
+  setProposalStates: DocxProposalStateRequest & DocxHostProposalGrant;
+  withdrawProposals: DocxProposalWithdrawRequest & DocxHostProposalGrant;
   navigateCell: DocxSelectionIntent & { direction: 'forward' | 'backward'; extend: boolean; createLastRow: boolean };
   selectTableCells: DocxSelectionIntent & { target: 'table' | 'row' | 'column' };
   select: { selection: DocxCommandSelection };

@@ -57,7 +57,7 @@ impl Workbook {
         .map_err(authority_error)?;
         let model = match &self.mode {
             WorkbookMode::Collaborative { structure } => {
-                if &authority.structure != structure {
+                if !authority.structure.same_except_freeze_panes(structure) {
                     return Err(crate::Error::CollaborativeStructureChanged);
                 }
                 validate_collaboration_size(&authority.update)?;
@@ -93,6 +93,7 @@ impl Workbook {
             history,
         } = prepared;
         let collaborative = self.is_collaborative();
+        let new_structure = collaborative.then(|| authority.structure.clone());
         let recorded = history == CommitHistory::Separate;
         let preserved_before = (!collaborative && recorded).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
@@ -107,6 +108,9 @@ impl Workbook {
             .adopt_local_update(authority, local_history)
             .map_err(authority_error)?;
         self.install_model_with_ops(model, &ops)?;
+        if let Some(structure) = new_structure {
+            self.mode = WorkbookMode::Collaborative { structure };
+        }
         self.update_sheet_info_cache(&ops, &prior_styles);
         if !collaborative && recorded {
             self.undo.record(inverse);

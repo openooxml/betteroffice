@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -190,7 +191,7 @@ test('search inside a rejected peer-local insertion anchors after Hello when wor
   const provider = { resolve: () => () => Promise.resolve(font.buffer.slice(
     font.byteOffset, font.byteOffset + font.byteLength
   ) as ArrayBuffer) };
-  render(<DocxEditor
+  render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
     ref={ref} documentBuffer={documentBuffer('Hello world')} allowHostProposals experimentalWorkerOpen
     measurementFontProvider={provider} plugins={[plugin]} onPluginError={(error) => errors.push(error)}
   />, { container: host });
@@ -324,7 +325,7 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
   const provider = { resolve: () => () => Promise.resolve(font.buffer.slice(
     font.byteOffset, font.byteOffset + font.byteLength
   ) as ArrayBuffer) };
-  render(<DocxEditor
+  render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
     ref={ref} documentBuffer={documentBuffer()} allowHostProposals experimentalWorkerOpen
     measurementFontProvider={provider} plugins={[plugin]} onPluginError={(error) => errors.push(error)}
   />, { container: host });
