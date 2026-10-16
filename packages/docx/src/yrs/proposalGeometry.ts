@@ -203,6 +203,11 @@ function viewsAt(session: AnchorReader, version: string, story: string, view: Do
   return once(views, view, () => indexViewParagraphs(segmentsAt(session, version, story), view));
 }
 
+/** @internal The block embeds `paraId` opens with, which its Loc offsets count before its first inline unit. */
+export function paragraphInlineStart(session: AnchorReader, version: string, story: string, paraId: string): number {
+  return viewsAt(session, version, story, 'accepted').byId.get(paraId)?.inlineStart ?? 0;
+}
+
 function rawRange(
   paragraphs: ViewParagraphIndex,
   range: DocxTextRange

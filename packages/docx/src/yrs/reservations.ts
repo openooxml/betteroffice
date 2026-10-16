@@ -1,7 +1,7 @@
 import type { DocxTextRange } from './edits';
 import type { DocxParagraphAnchor } from './paragraphIdentity';
 import type { DocxOccurrence } from './proposals';
-import { resolveAnchorTarget, type AnchorReader, type RawAnchorRange } from './proposalGeometry';
+import { paragraphInlineStart, resolveAnchorTarget, type AnchorReader, type RawAnchorRange } from './proposalGeometry';
 
 /** Text a reservation anchors to: a range read at `version`, or matches of `text` in a paragraph. */
 export type DocxReservationAnchor =
@@ -48,7 +48,10 @@ export interface DocxReservationsPayload {
   sets: readonly { owner: string; version?: string; items: readonly DocxReservation[] }[];
 }
 
-/** @internal One reservation resolved to paragraph-local units, the mark at the text's length. */
+/**
+ * @internal One reservation resolved to units counted from its paragraph's first inline unit, the
+ * mark at the inline length.
+ */
 export interface DocxResolvedReservation {
   owner: string;
   id: string;
@@ -254,7 +257,11 @@ export function resolveReservations(
       if (!result.ok || !result.ranges.length) continue;
       const mark = item.anchor.kind === 'paragraph';
       const parts = (item.kind === 'inline' ? result.ranges.slice(0, 1) : result.ranges)
-        .flatMap((range) => segments(indexFor, range, mark));
+        .flatMap((range) => segments(indexFor, range, mark))
+        .map((part) => {
+          const lead = paragraphInlineStart(cachedReader, readerVersion, part.story, part.paraId);
+          return { ...part, start: Math.max(0, part.start - lead), end: part.end - lead };
+        });
       const first = parts[0];
       if (!first) continue;
       const key = (index: number) => JSON.stringify(index ? [owner, item.id, index] : [owner, item.id]);

@@ -517,8 +517,8 @@ test.each(['another owner', 'the document'] as const)('a hidden reservation afte
     { owner: 'probe', items: [{ id: 'gone', kind: 'hide' as const, anchor: span(version, '00000005', 6, 11) }] },
     ...(hider === 'another owner' ? [{ owner: 'other', items: [{ id: 'cut', kind: 'hide' as const, anchor: span(version, '00000005', 3, 6) }] }] : []),
   ], hider === 'the document' ? (main) => {
-    const { start } = main.locateParagraph('body', '00000005');
-    main.applyRawOps('body', [{ op: 'format', index: start + 3, len: 3, attrs: { hidden: true } }]);
+    const { end } = main.locateParagraph('body', '00000005');
+    main.applyRawOps('body', [{ op: 'format', index: end - 'er split'.length, len: 'er '.length, attrs: { hidden: true } }]);
   } : undefined);
   const [gone, kept] = await scopePluginGeometry(shell.plugin.geometry()!, 'probe').readAnchorGeometries([
     reservation('gone'), range(laid, shell.version, 'body', '00000005', 'Aft')]);

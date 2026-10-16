@@ -11,12 +11,12 @@ beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
 )))));
 
-async function sessionWithParagraphs(count: number) {
+async function sessionWithParagraphs(count: number, before = '') {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   const body = Array.from({ length: count }, (_, index) => `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:r><w:t>Paragraph ${index}</w:t></w:r></w:p>`).join('');
-  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`);
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${before}${body}<w:sectPr/></w:body></w:document>`);
   const session = await createYrsSession();
   session.openDocx(await zip.generateAsync({ type: 'uint8array' }), true);
   return session;
@@ -88,5 +88,24 @@ test('reservation range resolution builds story views and spans once for a thous
       countingReader(session).reader, { ...small, sets: [{ owner: 'a', items: [item] }] }
     )));
     expect(resolveReservations(countingReader(session).reader, small)).toEqual(unmemoized);
+  } finally { session.destroy(); }
+});
+
+test('a paragraph opening after a table resolves from its first inline unit, as layout counts it', async () => {
+  const table = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+  const session = await sessionWithParagraphs(1, table);
+  try {
+    const version = session.version();
+    const { paraId, text } = session.paragraphs('body')[0]!;
+    const paragraph = { kind: 'session' as const, sessionId: session.paragraphIdentities().sessionId, story: 'body', paraId };
+    const at = (offset: number) => ({ paraId, offset });
+    const resolved = resolveReservations(session, { version, sets: [{ owner: 'a', items: [
+      { id: 'cut', kind: 'hide', anchor: { kind: 'range', version, range: { story: 'body', view: 'accepted', start: at(1), end: at(3) } } },
+      { id: 'gone', kind: 'hide', anchor: { kind: 'paragraph', paragraph } },
+    ] }] });
+    expect(resolved).toEqual({
+      [JSON.stringify(['a', 'cut'])]: { owner: 'a', id: 'cut', story: 'body', paraId, start: 1, end: 3, kind: 'hide' },
+      [JSON.stringify(['a', 'gone'])]: { owner: 'a', id: 'gone', story: 'body', paraId, start: 0, end: text.length + 1, kind: 'hide' },
+    });
   } finally { session.destroy(); }
 });

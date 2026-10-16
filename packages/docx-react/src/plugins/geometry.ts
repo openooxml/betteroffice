@@ -8,6 +8,7 @@ import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/Rendere
 import {
   anchorDisplayRoot,
   headerFooterDisplayRIds,
+  paragraphInlineStart,
   proposalSetIdentity,
   resolvedTargetGeometry,
   type AnchorGeometryTarget,
@@ -735,12 +736,13 @@ export function createPluginGeometry(
     if (!entry && !item) return anchorFailure('missing-target', 'The reservation did not resolve');
     if (item?.kind === 'hide') return anchorGeometry(item.anchor, undefined, true, true);
     if (entry?.kind === 'hide') {
-      const at = (offset: number): YrsLoc => ({ story: entry.story, paraId: entry.paraId, offset });
+      const lead = paragraphInlineStart(live.session, layout.version, entry.story, entry.paraId);
+      const at = (offset: number): YrsLoc => ({ story: entry.story, paraId: entry.paraId, offset: lead + offset });
       const span = live.session.paragraphSpans(entry.story).find((span) => span.paraId === entry.paraId);
-      if (!span || entry.start > span.length || entry.end > span.length + 1) {
+      if (!span || lead + entry.start > span.length || lead + entry.end > span.length + 1) {
         return anchorFailure('missing-target', 'The reservation did not resolve');
       }
-      const length = span.length;
+      const length = span.length - lead;
       return anchorGeometry(null, {
         ok: true,
         ranges: [{ start: at(entry.start), end: at(Math.min(entry.end, length)) }],
