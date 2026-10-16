@@ -988,7 +988,7 @@ fn editor_only_paragraphs_are_not_persisted_until_authored() {
 
     let touched = seeded(&bytes);
     let tail_mark = touched.paragraph_mark_position(&tail).unwrap();
-    let before_tables = Position::new("body", tail_mark.index - 1);
+    let before_tables = Position::new("body", tail_mark.index - 2);
     touched
         .insert_text(&ctx(), before_tables, "early", FormatPolicy::Plain)
         .unwrap();
