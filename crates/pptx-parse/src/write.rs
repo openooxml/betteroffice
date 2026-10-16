@@ -3945,6 +3945,105 @@ mod tests {
     }
 
     #[test]
+    fn an_alpha_change_on_an_unchanged_theme_colour_is_written() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"><a:alpha val="50000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        theme_color: Some("text1".to_owned()),
+                        alpha: Some(1.0),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(r#"<a:schemeClr val="tx1"><a:alpha val="100000"/></a:schemeClr>"#),
+            "{xml}"
+        );
+        assert!(!xml.contains(r#"val="50000""#), "{xml}");
+    }
+
+    #[test]
+    fn switching_theme_slots_with_the_same_rgb_writes_the_new_slot() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        theme_color: Some("dk1".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(xml.contains(r#"<a:schemeClr val="dk1"/>"#), "{xml}");
+        assert!(!xml.contains(r#"<a:schemeClr val="tx1"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn an_unchanged_transformed_theme_colour_survives_byte_identical() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        rgb: Some("8FAADC".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill>"#
+            ),
+            "{xml}"
+        );
+        assert!(!xml.contains("8FAADC"), "{xml}");
+    }
+
+    #[test]
+    fn an_edit_spanning_a_styled_line_break_keeps_the_break_properties() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"/><a:t>First line</a:t></a:r><a:br><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/><a:ea typeface="MS Gothic"/><a:cs typeface="Arial"/></a:rPr></a:br><a:r><a:rPr lang="en-US"/><a:t>Second line</a:t></a:r></a:p>"#,
+            &[(
+                "First line changed\nSecond line changed",
+                RunProperties {
+                    color: Some(ColorValue {
+                        rgb: Some("8FAADC".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    font_family: Some("Arial".to_owned()),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:br><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/><a:ea typeface="MS Gothic"/><a:cs typeface="Arial"/></a:rPr></a:br>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn an_inserted_line_break_does_not_inherit_a_neighbouring_run_properties() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:r><a:rPr lang="en-US" strike="sngStrike"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:hlinkClick r:id="rId2"/></a:rPr><a:t>HelloWorld</a:t></a:r></a:p>"#,
+            &[("Hello\nWorld", RunProperties::default())],
+        );
+        assert!(xml.contains("<a:br/>"), "{xml}");
+    }
+
+    #[test]
     fn a_field_survives_an_edit_around_it_and_degrades_once_its_text_changes() {
         let xml = rebuilt_paragraph(
             FIELD_PARAGRAPH,
