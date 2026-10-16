@@ -6,7 +6,7 @@ import type {
 } from '@betteroffice/docx/peerless';
 import type { YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
-import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessTextIntent } from './inputEvents';
+import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessRevisionIntent, type PeerlessTextIntent } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 
 /** @internal */
@@ -125,6 +125,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   };
   const readOnly = () => requestedReadOnly ?? viewStore.getSnapshot().editState?.readOnly ?? session.state.editState?.readOnly ?? false;
   const workerSelection = () => latestSelection(session, viewStore);
+  const documentVersion = () => (session.state.throughSeq >= viewStore.getSnapshot().throughSeq ? session.state.editState : undefined)?.documentVersion ??
+    viewStore.getSnapshot().editState?.documentVersion ?? '';
   const track = (ticket: CommandTicket) => {
     const prefix = tail ? prefixes.get(tail) ?? Promise.resolve(true) : Promise.resolve(true);
     prefixes.set(ticket, Promise.all([prefix, ticket.ack]).then(([ok, outcome]) =>
@@ -269,6 +271,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         } else verticalGoal = undefined;
         const payload = intent.kind === 'formatRange'
           ? { ...intent.payload, selection: requireSelection(selection) }
+          : isRevision(intent) ? { ...intent.payload, expectVersion: documentVersion() }
           : vertical && intent.kind === 'navigate' && goalX !== undefined
             ? { ...intent.payload, goalX }
             : target?.kind === 'worker-selection' && target.snapshot.workerSelection && isText(intent)
@@ -283,7 +286,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         }
         return ticket;
       };
-      const waitForSelection = intent.kind === 'formatRange' || deletionExtension || vertical !== undefined;
+      const waitForSelection = intent.kind === 'formatRange' || isRevision(intent) || deletionExtension || vertical !== undefined;
       const ticket = deletionExtension || vertical || (after && (waitForSelection || deferred.has(after))) ||
         (intent.kind === 'formatRange' && !workerSelection())
         ? defer(after, waitForSelection, send, vertical) : send(after)!;
@@ -478,6 +481,10 @@ function requireSelection(selection: DocxCommandSelection | null | undefined): D
 
 function isProposal(intent: AdmissionIntent): intent is PeerlessProposalIntent {
   return intent.kind === 'propose' || intent.kind === 'setProposalStates' || intent.kind === 'withdrawProposals';
+}
+
+function isRevision(intent: AdmissionIntent): intent is PeerlessRevisionIntent {
+  return intent.kind === 'acceptRevision' || intent.kind === 'rejectRevision';
 }
 
 function isSelection(intent: AdmissionIntent): boolean {

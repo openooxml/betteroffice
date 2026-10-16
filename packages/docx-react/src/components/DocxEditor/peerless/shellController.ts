@@ -98,7 +98,6 @@ export function createPeerlessShellController(initial: Options) {
   let reviewBinding: PeerlessEditSessionBinding | null = null;
   let reviewIdentity: PeerlessViewSnapshot['identity'] | null = null;
   let proposalTail: Promise<unknown> = Promise.resolve();
-  let reviewTail: Promise<unknown> = Promise.resolve();
   let revisions: { binding: PeerlessEditSessionBinding; key: string; value: WorkerRevisionState } | null = null;
   let documentKey: unknown;
   let generation = 0;
@@ -326,19 +325,6 @@ export function createPeerlessShellController(initial: Options) {
     const current = ready();
     return settleCommand(current, current.commands.format(intent, { fence: true }));
   };
-  const review = (kind: 'acceptRevision' | 'rejectRevision', revisionId: string): Promise<DocxCommandResult> => {
-    const current = ready();
-    const pending = reviewTail.then(async () => {
-      if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } } as const;
-      await flushAdmittedInput(current);
-      const expectVersion = current.viewStore.getSnapshot().editState?.documentVersion;
-      if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } } as const;
-      if (!expectVersion) return { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } } as const;
-      return settleCommand(current, current.commands.submit({ kind, payload: { revisionId, expectVersion } }, { fence: true }));
-    });
-    reviewTail = pending.catch(() => {});
-    return pending;
-  };
   const query = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
@@ -366,7 +352,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'open', 'print', 'insertTable'].includes(id),
+    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'open', 'print', 'insertTable', 'reviewAccept', 'reviewReject'].includes(id),
     admit: async (operation) => {
       const current = binding;
       if (current && snapshot.status === 'ready') {
@@ -385,7 +371,7 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'undo' || id === 'redo') return submit({ kind: id, payload: {} });
       if (id === 'reviewAccept' || id === 'reviewReject') {
         const revisionId = (args as DocxCommandArgs['reviewAccept'])?.revisionId ?? env.currentRevisionId;
-        return revisionId ? review(id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', revisionId) : { ok: true, status: 'noop' };
+        return revisionId ? submit({ kind: id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', payload: { revisionId } }) : { ok: true, status: 'noop' };
       }
       if (id === 'reviewNext' || id === 'reviewPrevious') {
         const revisionId = adjacentWorkerRevision(env.revisions, env.currentRevisionId, id === 'reviewNext' ? 1 : -1);

@@ -26,7 +26,7 @@ export type PeerlessInputIntent = PeerlessProposalIntent | PeerlessRevisionInten
 
 type PeerlessProposalKind = 'propose' | 'setProposalStates' | 'withdrawProposals';
 export type PeerlessProposalIntent = { [K in PeerlessProposalKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessProposalKind];
-export type PeerlessRevisionIntent = { [K in 'acceptRevision' | 'rejectRevision']: { kind: K; payload: DocxCommandPayloads[K] } }['acceptRevision' | 'rejectRevision'];
+export type PeerlessRevisionIntent = { [K in 'acceptRevision' | 'rejectRevision']: { kind: K; payload: Omit<DocxCommandPayloads[K], 'expectVersion'> } }['acceptRevision' | 'rejectRevision'];
 
 const implicitVerticalGoals = new WeakSet<PeerlessInputIntent>();
 
