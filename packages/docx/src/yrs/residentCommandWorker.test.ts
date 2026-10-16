@@ -325,7 +325,7 @@ test('render environment reservations lay out at their command version and never
 
 test('stale render environment reservations retain listed owners and clear removed owners after an edit', async () => {
   const { client, engine, initial, point } = await openWorker();
-  const layouts = spyOn(engine, 'layoutDocumentWithRegionsRetained');
+  const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
   try {
     const inline = (id: string, width: number, hideAnchor = false) => ({
       id, kind: 'inline', width, height: 20, hideAnchor,
