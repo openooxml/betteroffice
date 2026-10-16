@@ -87,21 +87,24 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   memoryBudget,
   measurementFontProvider,
   } = props;
-  const [replacement, setReplacement] = useState<{ input: DocxInput; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
+  type ParsedDocument = NonNullable<DocxEditorProps['document']>;
+  const [replacement, setReplacement] = useState<{ input: DocxInput | null; parsed: ParsedDocument | null; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
   const replaced = replacement && replacement.prop === props.documentBuffer && replacement.document === props.document;
   const documentBuffer = replaced ? replacement.input : props.documentBuffer;
-  const parsedDocument = documentBuffer ? null : props.document;
+  const parsedDocument = documentBuffer ? null : replaced ? replacement.parsed : props.document;
   const hasSource = !!(documentBuffer || parsedDocument);
   const sourceKey = useMemo(() => crypto.randomUUID(), [documentBuffer, parsedDocument]);
   const openedSource = useRef(sourceKey);
-  const loadRequest = useRef<{ input: DocxInput; resolve(): void; reject(error: Error): void } | null>(null);
-  const loadBuffer = useCallback((input: DocxInput) => {
+  const loadRequest = useRef<{ input: DocxInput | ParsedDocument; resolve(): void; reject(error: Error): void } | null>(null);
+  const load = useCallback((input: DocxInput | null, parsed: ParsedDocument | null) => {
     loadRequest.current?.reject(new Error('Document was replaced'));
     return new Promise<void>((resolve, reject) => {
-      loadRequest.current = { input, resolve, reject };
-      setReplacement({ input, prop: props.documentBuffer, document: props.document });
+      loadRequest.current = { input: (input ?? parsed)!, resolve, reject };
+      setReplacement({ input, parsed, prop: props.documentBuffer, document: props.document });
     });
   }, [props.documentBuffer, props.document]);
+  const loadBuffer = useCallback((input: DocxInput) => load(input, null), [load]);
+  const loadDocument = useCallback((document: ParsedDocument) => load(null, document), [load]);
   const host = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -157,7 +160,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, reportRecoverableError]);
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
-  const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, print, onZoom: setZoom, isDark,
+  const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
+    comments: () => props.comments ?? sourceComments.current,
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
@@ -198,10 +202,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useEffect(() => {
     const request = loadRequest.current;
     if (!request) return;
-    if (request.input !== documentBuffer) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
+    if (request.input !== (documentBuffer ?? parsedDocument)) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
     else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
     else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
-  }, [shellState, documentBuffer, controller]);
+  }, [shellState, documentBuffer, parsedDocument, controller]);
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);

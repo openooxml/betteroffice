@@ -86,10 +86,10 @@ export type DocxEffectiveFormatting = Pick<
   | 'fontFamily' | 'color' | 'highlight' | 'styleId' | 'alignment'
 > & { fontSizePt: number | null };
 
-/** The comment an `addComment` command added, under the ID saves and the host use, with every comment after it. */
+/** Every comment after a comment command, with the ID saves and the host use for the one an `addComment` added. */
 export interface DocxCommentResult {
   seq: number;
-  id: number;
+  id?: number;
   comments: Comment[];
 }
 
@@ -314,7 +314,7 @@ export interface DocxCommandPayloads {
   replaceMatches: { targets: DocxTextRange[]; text: string; expectVersion: string; suggesting?: YrsAuthor };
   undo: Record<string, never>;
   redo: Record<string, never>;
-  addComment: { ranges: YrsStoryRange[]; author: string; date: string; body: unknown; expectVersion: string };
+  addComment: { ranges: YrsStoryRange[]; author: string; date: string; body: unknown; expectVersion: string; parentId?: string };
   updateComment: { id: string; patch: DocxCommentPatch; expectVersion: string };
   setCommentRanges: { id: string; ranges: YrsStoryRange[]; expectVersion: string };
   removeComment: { id: string; expectVersion: string };

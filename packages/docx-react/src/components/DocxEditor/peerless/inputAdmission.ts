@@ -439,7 +439,7 @@ const SUGGESTED = {
   insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
   deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true,
   selectTableCells: false,
-  addComment: false, resizeObject: false, moveObject: false,
+  addComment: false, updateComment: false, removeComment: false, resizeObject: false, moveObject: false,
   setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
   setSectionMargins: false, setTabStops: false, removeTabStop: false,
   setContentControlValue: false, addRepeatingItem: false, removeRepeatingItem: false,

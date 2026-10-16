@@ -3,7 +3,7 @@ import type { DocxCommandIntent, DocxCommentResult, ResidentDocxCommandEngine, R
 import type { DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 
 export const reviewCommandKeys = {
-  addComment: ['ranges', 'author', 'date', 'body', 'expectVersion'],
+  addComment: ['ranges', 'author', 'date', 'body', 'expectVersion', 'parentId'],
   updateComment: ['id', 'patch', 'expectVersion'],
   setCommentRanges: ['id', 'ranges', 'expectVersion'],
   removeComment: ['id', 'expectVersion'],
@@ -41,6 +41,8 @@ export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state:
     }
   }
   if ('id' in payload && !engine.listComments().some(comment => comment.id === payload.id)) return 'unknown-comment';
+  if (command.kind === 'addComment' && command.payload.parentId !== undefined &&
+    !engine.listComments().some(comment => comment.id === command.payload.parentId)) return 'unknown-comment';
   if ('revisionId' in payload && state.proposals?.snapshot().proposals.some(proposal => proposal.revisionIds.includes(payload.revisionId))) return 'tracked-revision-conflict';
   if ('revisionId' in payload && !engine.geometryReader.listRevisions().some(revision => revision.revisionId === payload.revisionId)) return 'unknown-revision';
   return null;
@@ -63,7 +65,10 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   engine.addUndoBoundary();
   let added: string | undefined;
   switch (command.kind) {
-    case 'addComment': added = engine.addComment(command.payload.ranges, command.payload.author, command.payload.date, command.payload.body).commentId; break;
+    case 'addComment':
+      added = engine.addComment(command.payload.ranges, command.payload.author, command.payload.date, command.payload.body).commentId;
+      if (command.payload.parentId !== undefined) engine.updateComment(added, { parentId: command.payload.parentId });
+      break;
     case 'updateComment': engine.updateComment(command.payload.id, command.payload.patch); break;
     case 'setCommentRanges': engine.setCommentRanges(command.payload.id, command.payload.ranges); break;
     case 'removeComment': engine.applyRawOps('body', [{ op: 'removeComment', id: command.payload.id }]); break;
@@ -73,7 +78,9 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   engine.addUndoBoundary();
   engine.markProjectionStories(engine.geometryReader.storyIds());
   const status = engine.proposalEngine.version() === version ? 'noop' : 'applied';
-  const projection = added === undefined ? null : engine.commentProjection();
+  const commented = command.kind === 'addComment' || command.kind === 'updateComment' || command.kind === 'setCommentRanges' || command.kind === 'removeComment';
+  const projection = commented ? engine.commentProjection() : null;
   const id = added === undefined ? undefined : projection?.ids[added];
-  return projection && id !== undefined ? { status, comment: { id, comments: projection.comments } } : { status };
+  if (!projection || (added !== undefined && id === undefined)) return { status };
+  return { status, comment: { ...(id === undefined ? {} : { id }), comments: projection.comments } };
 }
