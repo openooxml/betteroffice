@@ -539,3 +539,49 @@ test('two opens that both seed from one source merge by story last-writer-wins l
     expect(texts(a.engine)).toEqual(texts(left));
   } finally { left.destroy(); right.destroy(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
+
+const presenceRead = (replica: Replica, expectVersion = replica.engine.proposalEngine.version()) => replica.client.documentRead({ kind: 'collabPresence', pages: [0, 1], expectVersion,
+  expectFrameEpoch: replica.initial.frame!.revision, expectLayoutRevision: replica.initial.frame!.payload.layoutRevision, peers: [] });
+const die = (replica: Replica) => replica.worker.onerror?.({ message: 'injected worker death' } as ErrorEvent);
+const outcomes = async (pending: Promise<unknown>[]) => (await Promise.allSettled(pending))
+  .map(result => result.status === 'rejected' ? 'rejected' : [(result.value as { status?: string }).status ?? 'fulfilled', (result.value as { reason?: string }).reason].filter(Boolean).join(':'));
+
+test('worker death during a collaboration read settles the read and every pending ticket with a failure', async () => {
+  const a = await open(9201);
+  try {
+    const pending = [presenceRead(a), a.session.submit('insertText', { text: '!' }).ack];
+    die(a);
+    expect(await outcomes(pending)).toEqual(['rejected', 'rejected']);
+  } finally { a.session.dispose(); }
+}, TIMEOUT);
+
+for (const failure of ['a thrown merge', 'worker death in a merge'] as const) {
+  test(`${failure} settles every pending ticket and later collaboration read with a failure`, async () => {
+    const a = await open(9201);
+    const remote = await createYrsSession({ clientId: 9203 });
+    try {
+      remote.loadState(a.engine.encodeState());
+      remote.insertText({ story: 'body', paraId: a.engine.paragraphs('body')[0]!.paraId, offset: 4 }, ' remote');
+      const version = a.engine.proposalEngine.version();
+      const before = a.engine.encodeState();
+      let stateAtFailure: Uint8Array | undefined;
+      const destroy = a.engine.destroy;
+      a.engine.destroy = () => {
+        stateAtFailure ??= a.engine.encodeState();
+        destroy();
+      };
+      a.engine.applyUpdate = () => {
+        if (failure === 'worker death in a merge') die(a);
+        throw new WebAssembly.RuntimeError('injected merge failure');
+      };
+      expect(await outcomes([a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, remote) }, merge).ack,
+        a.session.submit('insertText', { text: '!' }).ack])).toEqual([
+          failure === 'a thrown merge' ? 'refused:unknown-outcome' : 'rejected', 'rejected',
+        ]);
+      expect(stateAtFailure ?? a.engine.encodeState()).toEqual(before);
+      expect(await outcomes([presenceRead(a, version)])).toEqual(['rejected']);
+      expect(await outcomes([a.session.submit('insertText', { text: 'later' }).ack])).toEqual(['rejected']);
+      expect(await outcomes([a.session.submit('insertText', { text: 'again' }).ack])).toEqual(['rejected']);
+    } finally { remote.destroy(); a.session.dispose(); }
+  }, TIMEOUT);
+}
