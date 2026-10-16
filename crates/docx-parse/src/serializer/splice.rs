@@ -621,6 +621,7 @@ fn placed<'r>(
 struct RowSpan {
     span: Range<usize>,
     table: usize,
+    cells: usize,
     paragraphs: Vec<usize>,
 }
 
@@ -639,9 +640,10 @@ fn row_spans(xml: &str) -> Option<Vec<RowSpan>> {
             ("w:tbl", true, _) => {
                 tables.pop()?;
             }
-            ("w:tr", false, false) => opened.push((tag.range.start, *tables.last()?)),
+            ("w:tr", false, false) => opened.push((tag.range.start, *tables.last()?, 0)),
+            ("w:tc", false, _) => opened.last_mut()?.2 += 1,
             ("w:tr", true, _) => {
-                let (start, table) = opened.pop()?;
+                let (start, table, cells) = opened.pop()?;
                 let span = start..tag.range.end;
                 rows.push(RowSpan {
                     paragraphs: paragraphs
@@ -653,6 +655,7 @@ fn row_spans(xml: &str) -> Option<Vec<RowSpan>> {
                         .collect(),
                     span,
                     table,
+                    cells,
                 });
             }
             _ => {}
@@ -694,6 +697,79 @@ fn recorded_entries(serialized: &str, recorded: &RecordedParagraphs) -> Option<V
     Some(entries)
 }
 
+fn unchanged_placeholder_tables(
+    source_rows: &[RowSpan],
+    target_rows: &[RowSpan],
+    entries: &[Option<usize>],
+    recorded: &RecordedParagraphs,
+    removed: &BTreeSet<u32>,
+) -> Option<()> {
+    let tables: BTreeSet<usize> = target_rows
+        .iter()
+        .filter(|row| {
+            !row.paragraphs.is_empty() && row.paragraphs.iter().all(|at| entries[*at].is_none())
+        })
+        .map(|row| row.table)
+        .chain(
+            source_rows
+                .iter()
+                .filter(|row| {
+                    !row.paragraphs.is_empty()
+                        && row.paragraphs.iter().all(|at| {
+                            !recorded.written.contains_key(&(*at as u32))
+                                && !removed.contains(&(*at as u32))
+                        })
+                })
+                .map(|row| row.table),
+        )
+        .collect();
+    for table in tables {
+        let source: Vec<_> = source_rows
+            .iter()
+            .filter(|row| row.table == table)
+            .collect();
+        let target: Vec<_> = target_rows
+            .iter()
+            .filter(|row| row.table == table)
+            .collect();
+        if source.len() != target.len() {
+            return None;
+        }
+        let mut identified = false;
+        for (source, target) in source.iter().zip(&target) {
+            if source.cells != target.cells
+                || source.paragraphs.len() != target.paragraphs.len()
+                || source
+                    .paragraphs
+                    .iter()
+                    .any(|at| removed.contains(&(*at as u32)))
+            {
+                return None;
+            }
+            let expected: Vec<_> = source
+                .paragraphs
+                .iter()
+                .map(|at| *at as u32)
+                .filter(|ordinal| recorded.written.contains_key(ordinal))
+                .collect();
+            let actual = target
+                .paragraphs
+                .iter()
+                .filter_map(|at| entries[*at])
+                .map(|at| recorded.order[at])
+                .collect::<Option<Vec<_>>>()?;
+            if actual != expected {
+                return None;
+            }
+            identified |= !expected.is_empty();
+        }
+        if !identified {
+            return None;
+        }
+    }
+    Some(())
+}
+
 #[derive(Default)]
 struct RowEdits<'a> {
     edits: Vec<(Range<usize>, u8, &'a str)>,
@@ -718,16 +794,13 @@ fn row_edits<'a>(
         return Some(edits);
     }
     let entries = recorded_entries(serialized, recorded)?;
+    unchanged_placeholder_tables(&source_rows, &target_rows, &entries, recorded, removed)?;
     for row in &mut target_rows {
-        let paragraphs: Vec<usize> = row
+        row.paragraphs = row
             .paragraphs
             .iter()
             .filter_map(|at| entries[*at])
             .collect();
-        if paragraphs.is_empty() && !row.paragraphs.is_empty() {
-            return None;
-        }
-        row.paragraphs = paragraphs;
     }
     let mut insertion_at = 0;
     let insertion_indices: Vec<Option<usize>> = recorded
@@ -1449,6 +1522,127 @@ mod tests {
         paragraph["paraId"] = json!(id);
         *paragraph.pointer_mut("/content/0/content/0/text").unwrap() = json!(text);
         paragraph
+    }
+
+    fn single_column_merged_table_body() -> String {
+        body(concat!(
+            "<w:p w14:paraId=\"0000000A\"><w:r><w:t>first</w:t></w:r></w:p>",
+            "<w:tbl><w:tblGrid><w:gridCol w:w=\"10\"/></w:tblGrid>",
+            "<w:tr><w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr>",
+            "<w:p w14:paraId=\"0000000B\"><w:r><w:t>merged</w:t></w:r></w:p>",
+            "</w:tc></w:tr>",
+            "<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr>",
+            "<w:p w14:paraId=\"0000000C\"/></w:tc></w:tr></w:tbl>",
+            "<w:p w14:paraId=\"0000000D\"><w:r><w:t>last</w:t></w:r></w:p>",
+        ))
+    }
+
+    #[test]
+    fn body_insertion_keeps_a_placeholder_only_row_byte_identical() {
+        let source = single_column_merged_table_body();
+        let saved = saved_document(
+            &source,
+            |content| {
+                without_continued_content(content);
+                let new = new_paragraph(&content[0], "00000010", "new");
+                content.insert(1, new);
+            },
+            Some(json!({
+                "paragraphs": [0, 1, 3],
+                "inserted": [S13SpliceAnchor::After(0)],
+            })),
+        );
+        let (head, tail) = source.split_at(source.find("<w:tbl>").unwrap());
+        assert!(saved.starts_with(head) && saved.ends_with(tail), "{saved}");
+        let new = &saved[head.len()..saved.len() - tail.len()];
+        assert!(new.starts_with("<w:p ") && new.ends_with("</w:p>"), "{new}");
+        assert!(new.contains("<w:t>new</w:t>"), "{new}");
+    }
+
+    #[test]
+    fn row_edits_next_to_placeholder_only_rows_write_the_whole_part() {
+        let source = single_column_merged_table_body();
+        for insert in [true, false] {
+            let edit = |content: &mut Vec<serde_json::Value>| {
+                without_continued_content(content);
+                if insert {
+                    let mut row = content[1]["rows"][0].clone();
+                    row["cells"][0]["content"][0] =
+                        new_paragraph(&row["cells"][0]["content"][0], "00000010", "added");
+                    content[1]["rows"].as_array_mut().unwrap().insert(1, row);
+                } else {
+                    content[1]["rows"].as_array_mut().unwrap().remove(0);
+                }
+            };
+            let part = if insert {
+                json!({"paragraphs": [0, 1, 3], "inserted": [S13SpliceAnchor::After(1)]})
+            } else {
+                json!({"paragraphs": [0, 3], "removed": [1]})
+            };
+            let saved = saved_document(&source, edit, Some(part));
+            assert_eq!(saved, saved_document(&source, edit, None));
+            assert_eq!(saved.contains("<w:t>added</w:t>"), insert);
+        }
+    }
+
+    #[test]
+    fn adding_or_removing_placeholder_only_rows_writes_the_whole_part() {
+        let source = single_column_merged_table_body();
+        for insert in [true, false] {
+            let edit = |content: &mut Vec<serde_json::Value>| {
+                without_continued_content(content);
+                let rows = content[1]["rows"].as_array_mut().unwrap();
+                if insert {
+                    rows.push(rows[1].clone());
+                } else {
+                    rows.remove(1);
+                }
+                let new = new_paragraph(&content[0], "00000010", "new");
+                content.insert(1, new);
+            };
+            let saved = saved_document(
+                &source,
+                edit,
+                Some(json!({
+                    "paragraphs": [0, 1, 3],
+                    "inserted": [S13SpliceAnchor::After(0)],
+                })),
+            );
+            assert_eq!(saved, saved_document(&source, edit, None));
+            assert_eq!(saved.matches("<w:tr>").count(), if insert { 3 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn placeholder_only_row_cell_or_paragraph_count_changes_write_the_whole_part() {
+        let source = single_column_merged_table_body().replace(
+            "<w:p w14:paraId=\"0000000C\"/>",
+            "<w:p w14:paraId=\"0000000C\"/><w:p w14:paraId=\"0000000E\"/>",
+        );
+        for add_cell in [false, true] {
+            let edit = |content: &mut Vec<serde_json::Value>| {
+                without_continued_content(content);
+                if add_cell {
+                    let cells = content[1]["rows"][1]["cells"].as_array_mut().unwrap();
+                    cells.push(cells[0].clone());
+                }
+                let new = new_paragraph(&content[0], "00000010", "new");
+                content.insert(1, new);
+            };
+            let saved = saved_document(
+                &source,
+                edit,
+                Some(json!({
+                    "paragraphs": [0, 1, 4],
+                    "inserted": [S13SpliceAnchor::After(0)],
+                })),
+            );
+            assert_eq!(saved, saved_document(&source, edit, None));
+            assert_eq!(
+                saved.matches("<w:tc>").count(),
+                if add_cell { 3 } else { 2 }
+            );
+        }
     }
 
     #[test]
