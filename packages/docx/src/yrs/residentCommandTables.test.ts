@@ -4,6 +4,7 @@ import {
   type CommandArm,
 } from './residentCommandTestSupport';
 import type { DocxCommandEnvelope } from './residentCommandProtocol';
+import type { YrsCellBorders } from './index';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 
 const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
@@ -305,7 +306,7 @@ test('table_formatting_targets_live_rect_and_preserves_selection', async () => {
   expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line, right: line } })).status).toBe('applied');
   expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.borders).toMatchObject({ top: line, right: line });
   expect(payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders).toMatchObject({ left: line });
-  expect(payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders?.top).toBeUndefined();
+  expect((payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders as YrsCellBorders | undefined)?.top).toBeUndefined();
   expect(payload(arm)!.rows[1]!.cells[0]!.tcPr?.borders).toBeUndefined();
   expect(payload(arm)!.rows[1]!.cells[1]!.tcPr?.borders).toBeUndefined();
   expect(undo(arm).status).toBe('applied');

@@ -553,7 +553,7 @@ test('table properties open waits for admitted input', async () => {
   expect(order).toEqual(['insertText', 'replaceSelection', 'insertText', 'read', 'readAt']);
   expect(openTableProperties).toHaveBeenCalledTimes(1);
   expect(captured!.initial).toEqual({ width: 2500, widthType: 'pct', justification: 'center' });
-  expect(readAt).toHaveBeenCalledWith({ kind: 'properties', target: { kind: 'tableSelection', selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } } });
+  expect(readAt).toHaveBeenCalledWith({ kind: 'properties', target: { kind: 'tableSelection', selection: { anchor: { story: 'body', paraId: 'p1', offset: 0 }, focus: { story: 'body', paraId: 'p1', offset: 0 } } } }, 'native');
   expect(submit).not.toHaveBeenCalled();
   expect(await captured!.apply({ width: null, widthType: 'auto', justification: 'left' })).toMatchObject({ ok: true });
   expect((submit.mock.calls as unknown as Array<[unknown, unknown]>).map(([intent, options]) => ({ intent, options }))).toEqual([{

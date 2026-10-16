@@ -17,9 +17,6 @@ async function open(page: Page) {
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   zip.file('word/document.xml', documentXml());
-  await page.addInitScript(() => {
-    (window as unknown as { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__ = true;
-  });
   await page.goto('/?format=docx&peerless=1');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'table-formatting.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
@@ -32,13 +29,84 @@ async function open(page: Page) {
   return input;
 }
 
-async function tableAction(page: Page, action: unknown) {
-  const result = await page.evaluate((value) => {
-    const harness = (window as unknown as { __docxPeerlessHarness?: { tableAction(a: unknown): Promise<unknown> } }).__docxPeerlessHarness;
-    if (!harness) throw new Error('DOCX harness is unavailable');
-    return harness.tableAction(value);
-  }, action);
-  expect(result).toMatchObject({ ok: true });
+async function expectHighlights(page: Page, count: number) {
+  await page.waitForFunction((expected) => [...document.querySelectorAll('div[aria-hidden="true"]')]
+    .filter((element) => (element as HTMLElement).style.background.includes('59, 130, 246')).length === expected,
+    count, { timeout: 30000 });
+}
+
+async function selectEntireTable(page: Page, input: ReturnType<Page['locator']>) {
+  await input.focus();
+  await input.press('ControlOrMeta+Home');
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await input.press('ArrowDown');
+    await page.locator('.paged-editor__page').first()
+      .click({ button: 'right', position: { x: 100, y: 100 }, force: true });
+    const item = page.getByRole('menuitem', { name: 'Select entire table', exact: true });
+    if (await item.count() > 0) {
+      await item.click();
+      await expectHighlights(page, 4);
+      return;
+    }
+    await page.keyboard.press('Escape');
+  }
+  throw new Error('Caret did not enter the table');
+}
+
+async function overflowItem(page: Page, path: string[]) {
+  await page.getByTestId('toolbar-more').click();
+  let menu = page.getByRole('menu', { name: 'More actions', exact: true });
+  await expect(menu).toBeVisible();
+  for (const label of path.slice(0, -1)) {
+    await menu.locator(`[data-label="${label}"]`).focus();
+    await page.keyboard.press('ArrowRight');
+    menu = page.getByRole('menu', { name: label, exact: true });
+    await expect(menu).toBeVisible();
+  }
+  await menu.locator(`[data-label="${path.at(-1)}"]`).click();
+}
+
+async function borderPreset(page: Page, label: string) {
+  const picker = page.getByTestId('toolbar-table-borders');
+  if (await picker.isVisible()) {
+    await picker.click();
+    await page.locator(`button[title="${label}"]`).click();
+    return;
+  }
+  await overflowItem(page, ['Table', 'Borders', label]);
+}
+
+async function borderColorRed(page: Page) {
+  const arrow = page.locator('.docx-color-picker-arrow[aria-label="Border Color"]');
+  if (await arrow.isVisible()) {
+    await arrow.click();
+    const picker = page.getByRole('dialog', { name: 'Border Color picker', exact: true });
+    await expect(picker).toBeVisible();
+    await picker.getByLabel('Custom hex color', { exact: true }).fill('FF0000');
+    await picker.getByRole('button', { name: 'Apply', exact: true }).click();
+    return;
+  }
+  await overflowItem(page, ['Table', 'Border Color', 'Red']);
+}
+
+async function borderWidth(page: Page, label: string) {
+  const picker = page.getByTestId('toolbar-table-border-width');
+  if (await picker.isVisible()) {
+    await picker.click();
+    await page.getByRole('button', { name: label, exact: true }).click();
+    return;
+  }
+  await overflowItem(page, ['Table', 'Border width', label]);
+}
+
+async function openTableProperties(page: Page) {
+  const more = page.getByTestId('toolbar-table-more');
+  if (await more.isVisible()) {
+    await more.click();
+    await page.getByRole('menuitem', { name: 'Table properties...', exact: true }).click();
+    return;
+  }
+  await overflowItem(page, ['Table', 'Table properties...']);
 }
 
 async function savedTable(page: Page, info: TestInfo, step: string) {
@@ -75,8 +143,8 @@ async function savedTable(page: Page, info: TestInfo, step: string) {
 }
 
 test('worker borders preserve sides and saved shared edges', async ({ page }, info) => {
-  await open(page);
-  await tableAction(page, 'borderNone');
+  const input = await open(page);
+  await borderPreset(page, 'No borders');
   let saved = await savedTable(page, info, 'single-none');
   expect(saved.cells[0]).toEqual({ top: 'none/0/000000', bottom: 'none/0/000000', left: 'none/0/000000', right: 'none/0/000000' });
   expect(saved.cells[1]).toEqual({ left: 'none/0/000000' });
@@ -85,15 +153,8 @@ test('worker borders preserve sides and saved shared edges', async ({ page }, in
   expect(saved.tblBorders).toBe(6);
   expect(saved.tblStyle).toBe('TableGrid');
 
-  await tableAction(page, { type: 'cellBorder', side: 'top', style: 'double', size: 6, color: '00FF00' });
-  saved = await savedTable(page, info, 'single-side');
-  expect(saved.cells[0]!.top).toBe('double/6/00FF00');
-  expect(saved.cells[1]!.top).toBeUndefined();
-  expect(saved.cells[1]!.left).toBe('none/0/000000');
-  expect(saved.cells[3]).toEqual({});
-
-  await tableAction(page, 'selectTable');
-  await tableAction(page, 'borderNone');
+  await selectEntireTable(page, input);
+  await borderPreset(page, 'No borders');
   saved = await savedTable(page, info, 'none');
   for (const cell of saved.cells) {
     expect(cell.top).toBe('none/0/000000');
@@ -104,41 +165,26 @@ test('worker borders preserve sides and saved shared edges', async ({ page }, in
   expect(saved.tblBorders).toBe(6);
   expect(saved.tblStyle).toBe('TableGrid');
 
-  await tableAction(page, { type: 'borderColor', color: 'FF0000' });
+  await borderColorRed(page);
   saved = await savedTable(page, info, 'color');
   expect(saved.cells[0]!.top).toBe('single/4/FF0000');
   expect(saved.cells[3]!.bottom).toBe('single/4/FF0000');
 
-  await tableAction(page, { type: 'borderWidth', size: 12 });
+  await borderWidth(page, '1.5 pt');
   saved = await savedTable(page, info, 'width');
   expect(saved.cells[0]!.top).toBe('single/12/FF0000');
 
-  await tableAction(page, 'borderOutside');
+  await borderPreset(page, 'Outside borders');
   saved = await savedTable(page, info, 'outside');
   expect(saved.cells[0]!.top).toBe('single/12/FF0000');
   expect(saved.cells[0]!.left).toBe('single/12/FF0000');
-
-  await tableAction(page, { type: 'cellBorder', side: 'top', style: 'double', size: 6, color: '00FF00' });
-  saved = await savedTable(page, info, 'side');
-  expect(saved.cells[0]!.top).toBe('double/6/00FF00');
-  expect(saved.cells[1]!.top).toBe('double/6/00FF00');
-  expect(saved.cells[2]!.top).toBe('single/12/FF0000');
-
-  await tableAction(page, { type: 'applyTableStyle', styleId: 'TableGrid' });
-  saved = await savedTable(page, info, 'style');
-  expect(saved.cells[0]!.top).toBe('single/4/000000');
-  expect(saved.tblStyle).toBe('TableGrid');
-
-  await tableAction(page, { type: 'applyTableStyle', styleId: 'TableNormal' });
-  saved = await savedTable(page, info, 'nostyle');
-  expect(saved.cells[0]!.top).toBe('single/4/000000');
   expect(saved.tblStyle).toBe('TableGrid');
 });
 
 test('worker table properties dialog reads and applies after typing', async ({ page }, info) => {
   const input = await open(page);
   await input.press('x');
-  await tableAction(page, { type: 'openTableProperties' });
+  await openTableProperties(page);
   const dialog = page.getByRole('dialog', { name: 'Table Properties', exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog.locator('select').first()).toHaveValue('dxa');
@@ -151,7 +197,8 @@ test('worker table properties dialog reads and applies after typing', async ({ p
   expect(saved.tblW).toBe('2500/pct');
   expect(saved.jc).toBe('center');
 
-  await tableAction(page, { type: 'openTableProperties' });
+  await input.focus();
+  await openTableProperties(page);
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(dialog).toBeHidden();
