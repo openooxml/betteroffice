@@ -267,6 +267,7 @@ export interface DocxCommandStagedPresentation {
 }
 
 export interface DocxCommandPayloads {
+  applyRemoteUpdate: { update: ArrayBuffer };
   applyEdits: { request: DocxEditRequest; suggesting?: YrsAuthor };
   setRenderEnvironment: { themeColors: Record<string, string>; showHiddenText: boolean };
   setFontEnvironment: ResidentFontEnvironment;
@@ -431,6 +432,8 @@ export interface ResidentCommandHooks {
 export interface ResidentCommandHooksEnvironment {
   supportsFontEnvironment?: boolean;
   proposals?: DocxProposalRegistry;
+  /** The session merges remote updates; its collaboration wrap applies them. */
+  collaboration?: boolean;
   readSelectionLayout(): DocxCommandSelectionLayout;
   setRenderEnvironment?(environment: DocxCommandPayloads['setRenderEnvironment']): void;
 }

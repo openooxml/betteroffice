@@ -63,6 +63,7 @@ import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from '.
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import { useWorkerCollaboration } from './useWorkerCollaboration';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
@@ -85,6 +86,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const documentBuffer = replaced ? replacement.input : props.documentBuffer;
   const parsedDocument = documentBuffer ? null : props.document;
   const hasSource = !!(documentBuffer || parsedDocument);
+  const workerCollaboration = useWorkerCollaboration(props.collaboration, documentBuffer ?? parsedDocument);
   const loadRequest = useRef<{ input: DocxInput; resolve(): void; reject(error: Error): void } | null>(null);
   const loadBuffer = useCallback((input: DocxInput) => {
     loadRequest.current?.reject(new Error('Document was replaced'));
@@ -273,18 +275,18 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const [loaded, setLoaded] = useState<{ input: DocxInput; source: Uint8Array } | null>(null);
   const errorHandler = useRef(onError);
   errorHandler.current = onError;
-  const reportError = useCallback((error: Error) => { controller.fail(error); errorHandler.current?.(error); }, [controller]);
+  const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
     controller.previewPresented(frame);
     if (applyFrameDelta(null, decodeFrameDelta(frame.frame)).pages.some(({ page }) => !page.unbuilt)) controller.painted();
   }, [controller]);
   const source = useMemo(() => {
-    if (parsedDocument) return parsedDocument;
+    if (parsedDocument) return { ...parsedDocument };
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
-    return loaded && loaded.input === documentBuffer ? loaded.source : null;
-  }, [documentBuffer, parsedDocument, loaded]);
+    return loaded && loaded.input === documentBuffer ? new Uint8Array(loaded.source) : null;
+  }, [documentBuffer, parsedDocument, loaded, workerCollaboration.reopenKey]);
 
   useEffect(() => {
     if (!documentBuffer || documentBuffer instanceof Uint8Array || documentBuffer instanceof ArrayBuffer) return;
@@ -301,6 +303,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     signal.throwIfAborted();
     active.current = null;
     const client = takePreloadedResidentEngineWorker() ?? new ResidentEngineWorkerClient();
+    workerCollaboration.begin(client);
     worker.current = client;
     const stopFonts = client.onFontEnvironment(event => {
       if (worker.current === client && !signal.aborted) controller.fontEnvironment(event);
@@ -413,7 +416,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         errorHandler.current?.(error instanceof Error ? error : new Error(String(error)));
       };
       let previewed = false;
-      if (settings.current.previewFirstPage === true && input instanceof Uint8Array && settings.current.mediaTokens !== true) {
+      if (settings.current.previewFirstPage === true && input instanceof Uint8Array && settings.current.mediaTokens !== true &&
+        !workerCollaboration.openOptions?.initialUpdate) {
         try {
           previewed = await withinPreviewBudget(async (live) => {
             const cut = await client.openSourceCut({ bytes: input, cut: PREVIEW_CUT, heapLimitBytes: settings.current.workerLimitBytes });
@@ -425,7 +429,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       let opened: Awaited<ReturnType<typeof client.openSource>>;
       try {
         opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
-          heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true });
+          heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true,
+          collaboration: workerCollaboration.openOptions });
       } catch (error) {
         if (!painted) throw error;
         signal.throwIfAborted();
@@ -479,7 +484,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally {
       disposeFonts();
     }
-  }, [controller]);
+  }, [controller, workerCollaboration.openOptions, workerCollaboration.begin]);
 
   const updateReadOnly = useCallback((): void => {
     const current = active.current;
@@ -601,6 +606,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   };
   const onReady = useCallback((binding: PeerlessEditSessionBinding) => {
     controller.attach(binding);
+    workerCollaboration.ready(worker.current, binding);
     if (active.current?.binding !== binding) {
       active.current = {
         binding, requestedReadOnly: binding.session.state.editState?.readOnly ?? settings.current.readOnly,
@@ -610,7 +616,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     updateReadOnly();
     updateRenderEnvironment();
     updateFontEnvironment();
-  }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller]);
+  }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller, workerCollaboration.ready]);
   useLayoutEffect(updateReadOnly, [effectiveReadOnly, updateReadOnly]);
   useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, updateRenderEnvironment]);
   useLayoutEffect(updateFontEnvironment, [props.fonts, measurementFontProvider, props.onFontsLoaded, updateFontEnvironment]);
@@ -855,6 +861,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         <WorkerDocumentPreview job={previewJob} zoom={zoom} onPresented={onPreviewPresented} />}
       {shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
+          overlay={workerCollaboration.overlay(displayWindow)}
           displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}
           pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={props.onError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
