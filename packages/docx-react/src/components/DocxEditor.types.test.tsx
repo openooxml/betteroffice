@@ -1,0 +1,35 @@
+import { expect, test } from 'bun:test';
+import { memo, type ComponentProps } from 'react';
+import { DocxEditor } from './DocxEditor';
+import type { DocxAsyncEditorProps, DocxEditorBaseProps, DocxEditorProps, DocxInThreadEditorProps, DocxLegacyEditorProps } from '../index';
+import { LEGACY_SYNC_API_PROP } from './DocxEditor/peerless/contracts';
+
+test('Document callbacks require a literal sync opt-in', () => {
+  const onChange: NonNullable<DocxEditorBaseProps['onChange']> = () => {};
+  const check = (flag: boolean) => [
+    <DocxEditor />,
+    <DocxEditor onDocumentChange={() => {}} />,
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} onChange={onChange} />,
+    <DocxEditor experimentalWorkerOpen={false} onChange={onChange} />,
+    // @ts-expect-error
+    <DocxEditor onChange={onChange} />,
+    // @ts-expect-error
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: flag }} onChange={onChange} />,
+    // @ts-expect-error
+    { onChange } satisfies DocxEditorProps,
+    // @ts-expect-error
+    { experimentalWorkerOpen: true, onChange } satisfies DocxEditorProps,
+  ];
+  const asyncProps: DocxAsyncEditorProps = { onDocumentChange() {} };
+  const legacy: DocxLegacyEditorProps = { [LEGACY_SYNC_API_PROP]: true, onChange };
+  const inThread: DocxInThreadEditorProps = { experimentalWorkerOpen: false, onChange };
+  expect([asyncProps, legacy, inThread]).toHaveLength(3);
+  expect(check).toBeFunction();
+});
+
+test('the exported props union forwards through React wrappers', () => {
+  const Wrapped = memo(DocxEditor);
+  function Forward(props: DocxEditorProps) { return <DocxEditor {...props} />; }
+  const check = (props: ComponentProps<typeof DocxEditor>) => [<Wrapped {...props} />, <Forward {...props} />];
+  expect(check).toBeFunction();
+});

@@ -24,7 +24,7 @@ use yrs::sync::time::Clock;
 use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
 use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
-use yrs::updates::encoder::{Encoder, EncoderV1};
+use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
     Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Options, Origin, Out, ReadTxn,
     StateVector, Transact, TransactionMut, Update, WriteTxn,
@@ -550,6 +550,26 @@ pub(crate) struct WorkbookStructure {
 }
 
 impl WorkbookStructure {
+    /// Permit pane changes while keeping every other structural identity pinned.
+    pub(crate) fn same_except_freeze_panes(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.sheet_keys == other.sheet_keys
+            && self.sheet_names == other.sheet_names
+            && self.hyperlinks == other.hyperlinks
+            && self.charts == other.charts
+            && self.merges == other.merges
+            && self.shared_types == other.shared_types
+    }
+
+    pub(crate) fn snapshot_same_except_freeze_panes(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.sheet_keys == other.sheet_keys
+            && self.sheet_names == other.sheet_names
+            && self.hyperlinks == other.hyperlinks
+            && self.charts == other.charts
+            && self.merges == other.merges
+    }
+
     /// Whether two structures describe the same workbook, disregarding the Yrs
     /// branch identities. Replacing a bootstrap rebuilds every shared type, so
     /// those always differ and cannot say whether the structure itself did.
@@ -1392,15 +1412,20 @@ impl WorkbookAuthority {
                 "no updates were provided".to_string(),
             ));
         }
-        let decoded = updates
-            .iter()
-            .map(|update| decode_update_v1(update).map_err(AuthorityError::InvalidUpdate))
-            .collect::<Result<Vec<_>, _>>()?;
-        let incoming = if updates.len() == 1 {
-            decoded.into_iter().next().unwrap()
-        } else {
-            Update::merge_updates(decoded)
+        let merged;
+        let (bytes, local) = match updates {
+            [update] => (*update, false),
+            _ => {
+                let decoded = updates
+                    .iter()
+                    .map(|update| decode_update_v1(update).map_err(AuthorityError::InvalidUpdate))
+                    .collect::<Result<Vec<_>, _>>()?;
+                merged = Update::merge_updates(decoded).encode_v1();
+                (merged.as_slice(), true)
+            }
         };
+        let (incoming, layout) =
+            decode_update_layout_v1(bytes, local).map_err(AuthorityError::InvalidUpdate)?;
         let before_vector = self.doc.transact().state_vector();
         let owned;
         let before = match baseline {
@@ -1412,16 +1437,22 @@ impl WorkbookAuthority {
         };
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, before).map_err(AuthorityError::InvalidState)?;
-        staged_doc
-            .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
-            .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
+        let known = staged_doc.transact().state_vector();
+        let held_back = match hold_back_unreachable_v1(bytes, &layout, &known) {
+            Some(reachable) => {
+                let reachable =
+                    decode_local_update_v1(&reachable).map_err(AuthorityError::InvalidUpdate)?;
+                apply_remote(&staged_doc, reachable)?;
+                true
+            }
+            None => {
+                apply_remote(&staged_doc, incoming)?;
+                false
+            }
+        };
 
         let staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
-        let pending = {
-            let txn = staged.doc.transact();
-            txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
-        };
+        let pending = held_back || has_pending(&staged.doc);
         if let Err(error) = staged.upgrade_schema_from(Some(&self.doc))
             && !pending
         {
@@ -2097,12 +2128,17 @@ impl WorkbookAuthority {
         let full_sync = ops.iter().any(requires_full_semantic_sync)
             || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
                 && ops.iter().any(|op| matches!(op, Op::SetCell { .. })));
-        let structure_delta = i64::try_from(ops.iter().filter(|op| is_structural_op(op)).count())
-            .map_err(|_| "too many structural operations".to_string())?;
+        let structure_delta = i64::try_from(
+            ops.iter()
+                .filter(|op| is_structural_op(op) && !matches!(op, Op::SetFreezePane { .. }))
+                .count(),
+        )
+        .map_err(|_| "too many structural operations".to_string())?;
         let mut authored_cells = HashSet::new();
         let mut formatted_cells = HashSet::new();
         let mut col_widths = HashSet::new();
         let mut row_heights = HashSet::new();
+        let mut freeze_panes = HashSet::new();
         let mut merges = HashSet::new();
         if !full_sync {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
@@ -2115,11 +2151,24 @@ impl WorkbookAuthority {
                         }
                         authored_cells.insert((key, *at));
                     }
-                    (Op::SetColWidth { col, .. }, Some(key)) => {
+                    (
+                        Op::SetColWidth { col, .. }
+                        | Op::SetColVisibility { col, .. }
+                        | Op::RestoreColDimension { col, .. },
+                        Some(key),
+                    ) => {
                         col_widths.insert((key, *col));
                     }
-                    (Op::SetRowHeight { row, .. }, Some(key)) => {
+                    (
+                        Op::SetRowHeight { row, .. }
+                        | Op::SetRowVisibility { row, .. }
+                        | Op::RestoreRowDimension { row, .. },
+                        Some(key),
+                    ) => {
                         row_heights.insert((key, *row));
+                    }
+                    (Op::SetFreezePane { .. }, Some(key)) => {
+                        freeze_panes.insert(key);
                     }
                     (Op::MergeCells { .. } | Op::UnmergeCells { .. }, Some(key)) => {
                         merges.insert(key);
@@ -2158,6 +2207,7 @@ impl WorkbookAuthority {
             && formatted_cells.is_empty()
             && col_widths.is_empty()
             && row_heights.is_empty()
+            && freeze_panes.is_empty()
             && merges.is_empty()
         {
             self.apply_history(history);
@@ -2248,6 +2298,15 @@ impl WorkbookAuthority {
                     &mut txn,
                     row,
                     sheet_model.row_heights.get(&row).copied(),
+                );
+            }
+            for key in freeze_panes {
+                let (sheet_map, sheet_model) =
+                    sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                sheet_map.try_update(
+                    &mut txn,
+                    FREEZE_PANE,
+                    freeze_pane_to_any(sheet_model.freeze_pane),
                 );
             }
             for key in merges {
@@ -2510,6 +2569,68 @@ pub(crate) fn hydrate_snapshot_part(doc: &Doc, update: &[u8]) -> Result<(), Stri
     hydrate_local_doc(doc, update)
 }
 
+fn apply_remote(doc: &Doc, update: Update) -> Result<(), AuthorityError> {
+    doc.transact_mut_with(REMOTE_ORIGIN)
+        .apply_update(update)
+        .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
+}
+
+/// Re-encodes `bytes` without each client's blocks from the first one past
+/// what `known` and the update's own earlier blocks reach, as Yjs holds them,
+/// keeping the whole delete set; `None` when every block is reachable.
+fn hold_back_unreachable_v1(
+    bytes: &[u8],
+    layout: &UpdateLayout,
+    known: &StateVector,
+) -> Option<Vec<u8>> {
+    let mut frontiers = HashMap::new();
+    let kept = layout
+        .clients
+        .iter()
+        .map(|section| {
+            let frontier = frontiers
+                .entry(section.client)
+                .or_insert_with(|| Some(known.get(&section.client)));
+            let mut kept = 0;
+            for (index, block) in section.blocks.iter().enumerate() {
+                match *frontier {
+                    Some(_) if block.skip => {}
+                    Some(clock) if block.clock <= clock => {
+                        *frontier = Some(clock.max(block.end_clock));
+                        kept = index + 1;
+                    }
+                    _ => {
+                        *frontier = None;
+                        break;
+                    }
+                }
+            }
+            kept
+        })
+        .collect::<Vec<_>>();
+    let held = layout
+        .clients
+        .iter()
+        .zip(&kept)
+        .any(|(section, &kept)| section.blocks[kept..].iter().any(|block| !block.skip));
+    if !held {
+        return None;
+    }
+    let mut encoder = EncoderV1::new();
+    encoder.write_var(kept.iter().filter(|&&kept| kept > 0).count() as u32);
+    for (section, &kept) in layout.clients.iter().zip(&kept) {
+        if kept == 0 {
+            continue;
+        }
+        encoder.write_var(kept as u32);
+        encoder.write_client(section.client);
+        encoder.write_var(section.blocks[0].clock);
+        encoder.write_all(&bytes[section.blocks[0].start..section.blocks[kept - 1].end]);
+    }
+    encoder.write_all(&bytes[layout.deletes..]);
+    Some(encoder.to_vec())
+}
+
 fn has_pending(doc: &Doc) -> bool {
     let txn = doc.transact();
     txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
@@ -2588,7 +2709,21 @@ fn decode_state_vector_v1(bytes: &[u8]) -> Result<StateVector, String> {
 }
 
 fn decode_update_v1(bytes: &[u8]) -> Result<Update, String> {
-    decode_checked_update(CheckedDecoderV1::new_update(bytes))
+    decode_checked_update(&mut CheckedDecoderV1::new_update(bytes))
+}
+
+/// Decodes an update along with where each block sits; `local` bounds counts
+/// by the encoded size, for bytes merged from already-validated updates.
+fn decode_update_layout_v1(bytes: &[u8], local: bool) -> Result<(Update, UpdateLayout), String> {
+    let mut decoder = CheckedDecoderV1::new_update(bytes);
+    if local {
+        decoder.max_blocks = bytes.len();
+        decoder.max_values = bytes.len();
+        decoder.max_delete_ranges = bytes.len();
+    }
+    decoder.layout = Some(UpdateLayout::default());
+    let update = decode_checked_update(&mut decoder)?;
+    Ok((update, decoder.layout.unwrap_or_default()))
 }
 
 /// Decodes authority-generated bytes with counts bounded by their encoded size.
@@ -2597,12 +2732,12 @@ fn decode_local_update_v1(bytes: &[u8]) -> Result<Update, String> {
     decoder.max_blocks = bytes.len();
     decoder.max_values = bytes.len();
     decoder.max_delete_ranges = bytes.len();
-    decode_checked_update(decoder)
+    decode_checked_update(&mut decoder)
 }
 
-fn decode_checked_update(mut decoder: CheckedDecoderV1<'_>) -> Result<Update, String> {
+fn decode_checked_update(decoder: &mut CheckedDecoderV1<'_>) -> Result<Update, String> {
     catch_unwind(AssertUnwindSafe(|| {
-        let update = Update::decode(&mut decoder).map_err(|error| error.to_string())?;
+        let update = Update::decode(&mut *decoder).map_err(|error| error.to_string())?;
         if !decoder
             .read_to_end()
             .map_err(|error| error.to_string())?
@@ -2652,9 +2787,30 @@ enum PendingLength {
     Type,
 }
 
+#[derive(Default)]
+struct UpdateLayout {
+    clients: Vec<ClientLayout>,
+    deletes: usize,
+}
+
+struct ClientLayout {
+    client: ClientID,
+    blocks: Vec<BlockLayout>,
+}
+
+struct BlockLayout {
+    start: usize,
+    end: usize,
+    clock: u32,
+    end_clock: u32,
+    skip: bool,
+}
+
 struct CheckedDecoderV1<'a> {
     inner: DecoderV1<'a>,
+    len: usize,
     remaining: usize,
+    layout: Option<UpdateLayout>,
     max_blocks: usize,
     max_values: usize,
     max_delete_ranges: usize,
@@ -2679,7 +2835,9 @@ impl<'a> CheckedDecoderV1<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self {
             inner: DecoderV1::from(bytes),
+            len: bytes.len(),
             remaining: bytes.len(),
+            layout: None,
             max_blocks: MAX_UPDATE_BLOCKS,
             max_values: MAX_UPDATE_VALUES,
             max_delete_ranges: MAX_UPDATE_DELETE_RANGES,
@@ -2708,9 +2866,19 @@ impl<'a> CheckedDecoderV1<'a> {
         decoder
     }
 
+    fn offset(&self) -> usize {
+        self.len - self.remaining
+    }
+
     fn begin_capture(&mut self, kind: CaptureKind) -> Result<(), DecodeError> {
         if self.capture.is_some() {
             return Err(decode_error("overlapping update varints"));
+        }
+        let offset = self.offset();
+        if let CaptureKind::DeleteClientCount = kind
+            && let Some(layout) = &mut self.layout
+        {
+            layout.deletes = offset;
         }
         self.capture = Some(VarCapture::new(kind));
         Ok(())
@@ -2831,6 +2999,16 @@ impl<'a> CheckedDecoderV1<'a> {
     fn finish_block(&mut self) -> Result<(), DecodeError> {
         if self.blocks_remaining == 0 {
             return Err(decode_error("update contains more blocks than declared"));
+        }
+        let (end, end_clock) = (self.offset(), self.clock.unwrap_or_default());
+        if let Some(block) = self
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.clients.last_mut())
+            .and_then(|section| section.blocks.last_mut())
+        {
+            block.end = end;
+            block.end_clock = end_clock;
         }
         self.blocks_remaining -= 1;
         if self.blocks_remaining == 0 {
@@ -3067,6 +3245,12 @@ impl Decoder for CheckedDecoderV1<'_> {
             return Err(decode_error("update client is missing its block count"));
         }
         let client = checked_client_id(self.read_var_u64_checked()?)?;
+        if let Some(layout) = &mut self.layout {
+            layout.clients.push(ClientLayout {
+                client,
+                blocks: Vec::new(),
+            });
+        }
         self.begin_capture(CaptureKind::BlockClock)?;
         Ok(client)
     }
@@ -3075,7 +3259,21 @@ impl Decoder for CheckedDecoderV1<'_> {
         if self.pending_length.is_some() {
             return Err(decode_error("update block is missing its content length"));
         }
+        let (start, clock) = (self.offset(), self.clock.unwrap_or_default());
         let info = self.read_u8()?;
+        if let Some(section) = self
+            .layout
+            .as_mut()
+            .and_then(|layout| layout.clients.last_mut())
+        {
+            section.blocks.push(BlockLayout {
+                start,
+                end: start,
+                clock,
+                end_clock: clock,
+                skip: info == BLOCK_SKIP_REF_NUMBER,
+            });
+        }
         if info == BLOCK_SKIP_REF_NUMBER {
             self.begin_capture(CaptureKind::SkipLength)?;
         } else if info == BLOCK_GC_REF_NUMBER {
@@ -3257,7 +3455,6 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
-            | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
@@ -3357,7 +3554,11 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::InsertCols { sheet, .. }
         | Op::DeleteCols { sheet, .. }
         | Op::SetColWidth { sheet, .. }
+        | Op::SetColVisibility { sheet, .. }
+        | Op::RestoreColDimension { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
+        | Op::SetRowVisibility { sheet, .. }
+        | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }

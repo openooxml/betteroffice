@@ -32,7 +32,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   };
   const valid = (layout: DocxPluginLayout, frame: PeerlessFrameGeometry) => {
     const view = controller.getSnapshot().view;
-    const review = controller.reviewSnapshot();
+    const review = controller.describedReview();
     return current?.layout === layout && view?.geometry === frame && view.presentedThroughSeq >= view.throughSeq && view.version === current.version && controller.ref.getZoom() === layout.zoom &&
       review?.version === layout.version && review.previewVersion === layout.previewVersion;
   };
@@ -81,7 +81,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     if (current?.frame === frame && current.layout.zoom === zoom) return;
     const native = await loadRustDisplayListQueryEngine();
     if (request !== generation || controller.getSnapshot().view?.geometry !== frame) return;
-    const review = await controller.review();
+    const review = controller.describedReview() ?? await controller.review();
     if (request !== generation || controller.getSnapshot().view?.geometry !== frame) return;
     const queries = createDisplayListQueries({ pages: frame.pages.map(page => page.displayPage!).filter(Boolean) }, native);
     const layout: DocxPluginLayout = { id: `${view.identity.session}:${view.version}:${frame.frameEpoch}`, version: review.version, previewVersion: review.previewVersion, zoom, pageCount: frame.pages.length };
@@ -137,7 +137,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
         return resolved.rIds ? placeRepeated(repeatedOf(measured), resolved.rIds, [...resolved.ranges], resolved.hidden ?? [], resolved.paragraph)
           : { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
       }
-      const raw = target.kind === 'proposal' ? review.proposalHighlights[target.id] ?? [] : resolved.ranges.flatMap(range => queries.rangeRects(range.from, range.to));
+      const raw = resolved.ranges.flatMap(range => queries.rangeRects(range.from, range.to));
       const rects = raw.map(measured.project).filter(value => value !== null);
       const end = raw.at(-1);
       const anchorRect = end ? { ...end, x: end.x + end.width, width: 0 } : (resolved.paragraph === null ? null : queries.anchorRect(resolved.paragraph));

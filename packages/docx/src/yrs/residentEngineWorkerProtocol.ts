@@ -80,7 +80,7 @@ import type {
 } from './proposalGeometry';
 import type { DocxPageExportOptions } from './pagedExport';
 import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
-import type { ResidentSourceOpenRequest } from './residentSource';
+import type { ResidentSourceOpenRequest, ResidentSourcePreviewOptions } from './residentSource';
 import type { ResidentFontEnvironmentEvent, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
 
 /** @internal */
@@ -206,6 +206,7 @@ export type ResidentEngineWorkerHostModule = {
 export type ResidentEngineWorkerRequest =
   | { id: number; type: 'warm'; hostModule?: true }
   | { id: number; type: 'openSource'; source: ResidentSourceOpenRequest }
+  | { id: number; type: 'previewSource'; preview: ResidentSourcePreviewOptions & { layoutInput: string } }
   | { id: number; type: 'commandInit'; request: ResidentCommandInitRequest }
   | { id: number; type: 'edit'; command: DocxCommandEnvelope }
   | { id: number; type: 'checkpoint' }
@@ -454,7 +455,7 @@ export type ResidentEngineWorkerResponse = (
       commandError?: ReplyError;
       failureCode?: SessionFailureCode;
       /** @internal */
-      code?: 'save-unavailable';
+      code?: 'save-unavailable' | 'cut-kept';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;

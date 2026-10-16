@@ -27,6 +27,9 @@ async function open(page: Page, format: Format, file?: string, query = '') {
   await expect(page.locator('[data-testid$="-error"]')).toHaveCount(0);
 }
 
+const docxInput = (page: Page) =>
+  page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+
 async function save(page: Page, format: Format, info: TestInfo, label: string) {
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save', exact: true }).first().click();
@@ -61,7 +64,7 @@ async function save(page: Page, format: Format, info: TestInfo, label: string) {
 
 for (const [label, format, query] of [
   ['docx', 'docx', ''],
-  ['docx peer-less', 'docx', '&peerless=1'],
+  ['docx legacySyncApi', 'docx', '&peerless=0'],
   ['xlsx', 'xlsx', ''],
   ['pptx', 'pptx', ''],
 ] as const) {
@@ -94,16 +97,14 @@ for (const [label, format, query] of [
       const original = await save(page, format, info, 'original');
       expect(original.text).not.toContain(marker);
 
-      const docxInput = query
-        ? page.locator('.paged-editor__peerless-input')
-        : page.getByTestId('yrs-input');
       if (format === 'docx') {
         await page
           .locator('.canvas-page canvas')
           .first()
           .click({ position: { x: 150, y: 150 } });
-        await expect(docxInput).toBeEditable();
-        await docxInput.press('ControlOrMeta+Home');
+        const input = docxInput(page);
+        await expect(input).toBeEditable();
+        await input.press('ControlOrMeta+Home');
         await page.keyboard.insertText(marker);
         await expect(page.locator('.canvas-page-mirror').first()).toContainText(
           marker
@@ -142,10 +143,12 @@ for (const [label, format, query] of [
 
       const edited = await save(page, format, info, 'edited');
       expect(edited.text).toContain(marker);
-      if (format === 'docx') await docxInput.press('ControlOrMeta+z');
+      if (format === 'docx')
+        await docxInput(page).press('ControlOrMeta+z');
       else await page.getByTestId(format + '-undo').click();
       expect((await save(page, format, info, 'undone')).text).toBe(original.text);
-      if (format === 'docx') await docxInput.press('ControlOrMeta+Shift+z');
+      if (format === 'docx')
+        await docxInput(page).press('ControlOrMeta+Shift+z');
       else await page.getByTestId(format + '-redo').click();
       const redone = await save(page, format, info, 'redone');
       expect(redone.text).toBe(edited.text);

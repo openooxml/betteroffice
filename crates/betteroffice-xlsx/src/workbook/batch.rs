@@ -22,6 +22,7 @@ use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved,
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
     current_cell_state, edit_cell_state, validate_cell_state, validate_model_sheets, validate_op,
+    written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{CalculationOptions, Error, Result};
@@ -608,7 +609,7 @@ impl Workbook {
                 format!("a batch addresses at most {MAX_CELL_VISITS} target and guard cells"),
             ));
         }
-        if let Some((code, message)) = self.sheet_write_refusal(resolved.sheet) {
+        if let Some((code, message)) = self.step_write_refusal(&step.operation, resolved) {
             return Err(at(code, message));
         }
         let mut text = step
@@ -769,7 +770,12 @@ impl Workbook {
                     let state = CellState {
                         value: value.clone(),
                         formula: None,
-                        style: current.style,
+                        style: written_cell_style(
+                            &self.model,
+                            resolved.sheet,
+                            cell,
+                            matches!(value, CellValue::Empty),
+                        ),
                     };
                     validate_cell_state(&state).map_err(|error| {
                         at(
@@ -790,7 +796,7 @@ impl Workbook {
                     let state = CellState {
                         value: CellValue::Empty,
                         formula: Some(source.clone()),
-                        style: current.style,
+                        style: written_cell_style(&self.model, resolved.sheet, cell, false),
                     };
                     if !cell_states_semantically_equal(&current, &state) {
                         states.push((cell, state));

@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Plugin `getAnchorGeometry` now supports paragraph, search, range and revision targets while a worker viewer serves host proposals. Worker mode is on by default; the first request can return `layout-unavailable` until geometry arrives.
+Plugin `getAnchorGeometry` now supports paragraph, search, range and revision targets in the default worker-only editor and in read-only `legacySyncApi` worker viewers that serve host proposals; the first request can return `layout-unavailable` until geometry arrives.

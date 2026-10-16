@@ -318,3 +318,35 @@ test('XLSX column-width receipts report changes outside the first selected colum
     expect(book.formatRanges({ version: changed.version, edits: [{ sheet: 'sheet:0', range: 'B100:C100', columnWidth: 20 }] }).items[0].changed).toBe(false);
   } finally { book.close(); }
 });
+
+function protectedWorkbook() {
+  const zip = new JSZip();
+  const relationships = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relationships}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+  zip.file('xl/workbook.xml', `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${relationships}"><bookViews><workbookView/></bookViews><sheets><sheet name="Instructions" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relationships}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${relationships}/styles" Target="styles.xml"/></Relationships>`);
+  zip.file('xl/styles.xml', '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>');
+  zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="13"><c r="B13" t="inlineStr"><is><t>Name</t></is></c><c r="J13" s="1"/><c r="K13" s="1"/></row></sheetData><sheetProtection sheet="1" objects="1" scenarios="1"/></worksheet>');
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+test('XLSX writes fill unlocked cells of a protected sheet and explain locked ones', async () => {
+  const book = await openXlsx(await protectedWorkbook());
+  try {
+    const written = book.writeRanges({ version: book.overview().version, edits: [{ sheet: 'sheet:0', range: 'J13:K13', values: [['Ada', 42]] }] });
+    expect(written.applied).toBe(true);
+    expect(written.items[0].cells.map(cell => cell.value)).toEqual([{ kind: 'text', value: 'Ada' }, { kind: 'number', value: 42 }]);
+    let refusal: unknown;
+    try { book.writeRanges({ version: written.version, edits: [{ sheet: 'sheet:0', range: 'B13', values: [['x']] }] }); }
+    catch (error) { refusal = error; }
+    expect(refusal).toMatchObject({ code: 'locked-target' });
+    const message = (refusal as Error).message;
+    expect(message).toContain('B13 is locked on protected sheet "Instructions"');
+    expect(message).toContain('unprotect the sheet');
+    expect(message).not.toContain('merged followers');
+    expect(book.handle.version()).toBe(written.version);
+    const zip = await JSZip.loadAsync(await book.export());
+    expect(await zip.file('xl/worksheets/sheet1.xml')!.async('string')).toContain('<sheetProtection sheet="1" objects="1" scenarios="1"/>');
+  } finally { book.close(); }
+});

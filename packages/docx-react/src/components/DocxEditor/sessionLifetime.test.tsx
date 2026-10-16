@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -177,7 +178,7 @@ test('loading another document frees the worker document it replaced', async () 
   const ref = createRef<Editor>();
   const errors: Error[] = [];
   const editor = (buffer: ArrayBuffer) => (
-    <DocxEditor ref={ref} documentBuffer={buffer} onError={(error) => errors.push(error)} />
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={buffer} onError={(error) => errors.push(error)} />
   );
   const view = render(editor(await commentedDocx(3)));
   await waitFor(() => expect(ref.current?.getTotalPages()).toBe(3), { timeout: 20_000 });
@@ -208,7 +209,7 @@ test('a load that fails frees the worker document it replaced', async () => {
   const ref = createRef<Editor>();
   const errors: Error[] = [];
   const editor = (buffer: ArrayBuffer) => (
-    <DocxEditor ref={ref} documentBuffer={buffer} onError={(error) => errors.push(error)} />
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={buffer} onError={(error) => errors.push(error)} />
   );
   const view = render(editor(await commentedDocx(2)));
   await waitFor(() => expect(ref.current?.getTotalPages()).toBe(2), { timeout: 20_000 });
@@ -249,7 +250,7 @@ test('unmounting the editor closes every display-list store handle it opened', a
   });
   const ref = createRef<Editor>();
   try {
-    const view = render(<DocxEditor ref={ref} documentBuffer={await commentedDocx(3)} />);
+    const view = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={await commentedDocx(3)} />);
     await waitFor(() => expect(ref.current?.getTotalPages()).toBe(3), { timeout: 20_000 });
     await waitFor(() => expect(open.size).toBeGreaterThan(0), { timeout: 20_000 });
     view.unmount();
