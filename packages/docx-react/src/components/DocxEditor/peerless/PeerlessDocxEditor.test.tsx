@@ -59,6 +59,7 @@ let failPreview = false;
 let refuseCut = false;
 let holdCut = false;
 let failWholeOpen = false;
+let recoverSurface = false;
 /** Per source preview, in order: whether its first page is built or missing. */
 let previewPages: ('built' | 'none')[] = [];
 const PREVIEW_EPOCHS = { built: 90, none: 1 } as const;
@@ -94,6 +95,8 @@ class FakeWorker {
   refused = new Set<number>();
   fontRevision = 0;
   pendingReplies: ResidentEngineWorkerResponse[] = [];
+  outOfMemory = false;
+  checkpoints: { state: Uint8Array; epoch: number; version: number; throughSeq: number }[] = [];
 
   constructor() {
     workers.push(this);
@@ -103,7 +106,14 @@ class FakeWorker {
     if (!('id' in message)) return;
     requests.push(message);
     let response: ResidentEngineWorkerResponse;
-    if (message.type === 'openSource' && message.source.cut && refuseCut) {
+    if (this.outOfMemory) {
+      response = { id: message.id, ok: false, error: 'Worker heap limit exceeded', terminal: true, outOfMemory: true };
+    } else if (message.type === 'checkpoint' && this.initial) {
+      const { epoch, version, throughSeq } = this.initial;
+      const checkpoint = { state: Uint8Array.of(9, this.checkpoints.length), epoch, version, throughSeq };
+      this.checkpoints.push(checkpoint);
+      response = { id: message.id, ok: true, checkpoint: { ...checkpoint, state: checkpoint.state.slice() } };
+    } else if (message.type === 'openSource' && message.source.cut && refuseCut) {
       response = { id: message.id, ok: true, previewRefused: true };
     } else if (message.type === 'openSource' && !message.source.cut && failWholeOpen) {
       response = { id: message.id, ok: false, error: 'Whole source failed to open' };
@@ -134,9 +144,9 @@ class FakeWorker {
         : message.read.kind === 'readStories' ? { ok: true, version: 'worker-version', view: 'accepted', stories: [{ story: 'hf:rId3', ok: true, paragraphs: [] }], truncated: false }
         : { ok: true, view: 'accepted', version: 'worker-version', paragraphs: [] } } };
     } else if (message.type === 'commandInit') {
-      const { session, incarnation, epoch, readOnly, layoutRevision } = message.request;
+      const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision } = message.request;
       const initial: ResidentCommandInitReply = {
-        session, incarnation, epoch, version: 0, throughSeq: 0, outcomes: [], selection: null,
+        session, incarnation, epoch, version, throughSeq, outcomes: [], selection: null,
         editState: {
           readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
           canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
@@ -285,7 +295,9 @@ function installSurface() {
             source: sessionOptions.source,
             connection: value,
             echo: { paint() {}, drop() {}, present() {} },
-            recovery: { reopen: () => Promise.reject(new Error('unexpected recovery')) },
+            recovery: recoverSurface && sessionOptions.recovery ? sessionOptions.recovery
+              : { reopen: () => Promise.reject(new Error('unexpected recovery')) },
+            ...(recoverSurface ? { maxRecoveryAttempts: 1, checkpointPolicy: () => true } : {}),
           });
           binding = fakeBinding(session, value.initial);
           onReady?.(binding);
@@ -311,6 +323,7 @@ beforeEach(() => {
   refuseCut = false;
   holdCut = false;
   failWholeOpen = false;
+  recoverSurface = false;
   previewPages = [];
   restorers.push(installPreviewPages());
   setMissingWorkerCapabilitiesForTests([]);
@@ -2174,3 +2187,50 @@ for (const readOnly of [false, true]) {
     expect(coreSession).not.toHaveBeenCalled();
   });
 }
+
+test('an out-of-memory worker reopens in a fresh worker from its checkpoint and replays the later edits', async () => {
+  recoverSurface = true;
+  const listening = new Set<unknown>();
+  const onMemory = peerless.ResidentSourceWorkerClient.prototype.onMemory;
+  const memory = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'onMemory').mockImplementation(function (
+    this: peerless.ResidentSourceWorkerClient, listener) {
+    const stop = onMemory.call(this, listener);
+    listening.add(this);
+    return () => { listening.delete(this); stop(); };
+  });
+  restorers.push(() => memory.mockRestore());
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const current = binding!;
+  const [first] = workers;
+  const kept = current.commands.submit({ kind: 'insertText', payload: { text: 'kept' } });
+  if (kept.status !== 'submitted') throw new Error('edit not submitted');
+  expect((await kept.ticket.ack).status).toBe('applied');
+  await waitFor(() => expect(first!.checkpoints.at(-1)?.version).toBe(1));
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  const checkpoint = first!.checkpoints.at(-1)!;
+  first!.outOfMemory = true;
+  const replayed = current.commands.submit({ kind: 'insertText', payload: { text: ' replayed' } });
+  if (replayed.status !== 'submitted') throw new Error('edit not submitted');
+  expect((await replayed.ticket.ack).status).toBe('applied');
+  expect(workers).toHaveLength(2);
+  expect(workers[1]!.text).toBe(' replayed');
+  expect(current.session.state.version).toBe(2);
+  const opens = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'openSource' }> =>
+    request.type === 'openSource');
+  expect(opens.map(({ source }) => source.state)).toEqual([undefined, checkpoint.state]);
+  const inits = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'commandInit' }> =>
+    request.type === 'commandInit').map(({ request }) => request);
+  expect(inits).toHaveLength(2);
+  expect(inits[1]).toMatchObject({ session: inits[0]!.session, incarnation: 2, epoch: 1,
+    version: checkpoint.version, throughSeq: checkpoint.throughSeq });
+  expect(first!.terminate).toHaveBeenCalled();
+  expect(listening.size).toBe(1);
+  const options = surface.mock.calls.at(-1)![0].sessionOptions;
+  expect(options.prepareGeometry(commandFrame(1))?.identity).toEqual({ session: inits[0]!.session, incarnation: 2, epoch: 1 });
+  expect(onError).not.toHaveBeenCalled();
+  view.unmount();
+  expect(listening.size).toBe(0);
+
+});

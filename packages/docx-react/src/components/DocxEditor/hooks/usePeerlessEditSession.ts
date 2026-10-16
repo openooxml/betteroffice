@@ -66,6 +66,9 @@ export function usePeerlessEditSession(
     let unsubscribe: (() => void) | undefined;
     let incarnation = 0;
     let sessionCreated = false;
+    let respawned = false;
+    let recovering = false;
+    let crash: Error | undefined;
     let receiveRequestedFrame: ((frame: DocxCommandFrame) => void) | undefined;
     const connect = (resident: ResidentCommandConnection): ResidentCommandConnection => ({
       ...resident,
@@ -131,7 +134,7 @@ export function usePeerlessEditSession(
             else discardCommandPresentation(ack.frame);
           }).catch((error: unknown) => {
             settled();
-            if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+            if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
           });
         };
         const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame });
@@ -142,21 +145,45 @@ export function usePeerlessEditSession(
           onError: (error) => { if (!controller.signal.aborted) callbacks.current.onRecoverableError?.(error); },
         });
         cleanups.push(() => presentation.dispose());
+        let displayWindow = { start: 0, end: 3 };
+        let viewport: Omit<ResidentCommandViewportRequest, 'frameEpoch'> | undefined;
+        let viewportPending = false;
+        const requestViewport = async () => {
+          if (viewportPending || !connection?.requestViewport || controller.signal.aborted) return;
+          viewportPending = true;
+          try {
+            while (viewport && !controller.signal.aborted) {
+              const request = viewport;
+              viewport = undefined;
+              await connection.requestViewport?.({ ...request, frameEpoch: viewStore.getSnapshot().geometry?.frameEpoch ?? 0 });
+            }
+          } catch (error) {
+            if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+          } finally { viewportPending = false; }
+        };
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
           source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
           transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
-          maxRecoveryAttempts: callbacks.current.recovery ? undefined : 0,
+          maxRecoveryAttempts: callbacks.current.recovery ? 1 : 0,
           recovery: {
             checkpoint: callbacks.current.recovery?.checkpoint
               ? (resident) => callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint() : undefined,
             onRecovery(event) {
               if (controller.signal.aborted) return;
+              if (event.phase !== 'diverged') recovering = event.phase === 'recovering';
+              if (event.phase === 'recovering') crash = event.failure;
+              if (event.phase === 'recovered') {
+                viewport = { ...displayWindow, ...viewport };
+                void requestViewport();
+              }
               if (event.phase === 'failed') fail(event.failure ?? new Error('Peerless session failed'));
               callbacks.current.recovery?.onRecovery?.(event);
             },
             async reopen(input) {
               const recovery = callbacks.current.recovery;
               if (!recovery) throw new Error('Peerless recovery is unavailable');
+              if (respawned) throw crash ?? new Error('Peerless session failed');
+              respawned = true;
               const reopened = await recovery.reopen(input);
               if (controller.signal.aborted) {
                 discardCommandPresentation(reopened.initial.frame);
@@ -181,22 +208,6 @@ export function usePeerlessEditSession(
         }
         const admission = createInputAdmission({ session, viewStore, echoPainter });
         cleanups.push(() => admission.dispose());
-        let displayWindow = { start: 0, end: 3 };
-        let viewport: Omit<ResidentCommandViewportRequest, 'frameEpoch'> | undefined;
-        let viewportPending = false;
-        const requestViewport = async () => {
-          if (viewportPending || !connection?.requestViewport || controller.signal.aborted) return;
-          viewportPending = true;
-          try {
-            while (viewport && !controller.signal.aborted) {
-              const request = viewport;
-              viewport = undefined;
-              await connection.requestViewport?.({ ...request, frameEpoch: viewStore.getSnapshot().geometry?.frameEpoch ?? 0 });
-            }
-          } catch (error) {
-            if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
-          } finally { viewportPending = false; }
-        };
         binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission), echoPainter, presentation,
           setDisplayWindow(start, end) {
             displayWindow = { start, end };
