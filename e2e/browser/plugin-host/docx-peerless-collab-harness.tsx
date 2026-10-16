@@ -1,15 +1,16 @@
 import { createRoot } from 'react-dom/client';
 import { createRef } from 'react';
 import JSZip from 'jszip';
-import { DocxEditor, type DocxEditorProps, type DocxEditorRef } from '@betteroffice/docx-react';
+import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
 import { CollaborationProvider, type AsyncReplicaAdapter, type CollaborationReplica, type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import type { DocxPeerlessCollaborationProbe } from './docx-peerless-collab-probe';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '@betteroffice/docx-react/styles.css';
 
-const workerOnly = (): Partial<DocxEditorProps> => ({ experimentalPeerless: true });
-const mixed = new URLSearchParams(location.search).has('mixed');
+const query = new URLSearchParams(location.search);
+const mixed = query.has('mixed');
+const pinned = !query.has('unpinned');
 setGoogleFontsEnabled(false);
 const fonts = { resolve: () => async () => (await fetch(fontUrl)).arrayBuffer() };
 
@@ -23,21 +24,25 @@ async function syntheticDocument(text: string) {
 
 const endpoints = [0, 1].map(() => ({ connected: false, held: false, queued: [] as Uint8Array[], listeners: new Set<(event: CollaborationTransportEvent) => void>() }));
 const emit = (index: number, event: CollaborationTransportEvent) => { for (const listener of endpoints[index]!.listeners) listener(event); };
+// A held endpoint still answers handshakes; only data frames wait for release.
+const syncRequest = (data: Uint8Array) => data[0] === 0 && data[1] === 0;
 function transport(index: number): CollaborationTransport {
   const endpoint = endpoints[index]!;
+  let joined = false;
   return {
     connect() {
       endpoint.connected = true;
-      const peer = endpoints[1 - index]!;
-      if (peer.connected) emit(1 - index, { type: 'close' });
+      const join = !joined && endpoints[1 - index]!.connected;
+      joined = true;
+      if (join) emit(1 - index, { type: 'close' });
       emit(index, { type: 'open' });
-      if (peer.connected) emit(1 - index, { type: 'open' });
+      if (join) emit(1 - index, { type: 'open' });
     },
     disconnect() { endpoint.connected = false; endpoint.queued.length = 0; emit(index, { type: 'close' }); },
     send(data) {
       const target = endpoints[1 - index]!;
       if (!target.connected) return true;
-      if (target.held) target.queued.push(data.slice());
+      if (target.held && !syncRequest(data)) target.queued.push(data.slice());
       else queueMicrotask(() => { if (target.connected) emit(1 - index, { type: 'message', data: data.slice() }); });
       return true;
     },
@@ -47,6 +52,7 @@ function transport(index: number): CollaborationTransport {
 
 const file = await syntheticDocument('Seed');
 const errors: string[] = [];
+const checkpoints: Uint8Array[] = [];
 const slots = [0, 1].map(index => ({ ref: createRef<DocxEditorRef>(), file, clientId: 4300 + index,
   initialUpdate: undefined as Uint8Array | undefined, replica: null as CollaborationReplica | null,
   provider: undefined as CollaborationProvider | undefined, generation: 0 }));
@@ -67,9 +73,9 @@ const onReplica = slots.map((slot, index) => (replica: CollaborationReplica | nu
 function render() {
   root.render(<div style={{ display: 'flex', height: '100%' }}>{slots.slice(0, count).map((slot, index) =>
     <div key={index} data-editor={index} style={{ width: '50%', height: '100%', minWidth: 0 }}>
-      <DocxEditor ref={slot.ref} documentBuffer={slot.file} {...(mixed && index === 1 ? { legacySyncApi: true } : workerOnly())}
+      <DocxEditor ref={slot.ref} documentBuffer={slot.file} {...(mixed && index === 1 ? { legacySyncApi: true } : {})}
         showToolbar={false} showRuler={false} showOutlineButton={false} measurementFontProvider={fonts}
-        collaboration={{ clientId: slot.clientId, initialUpdate: slot.initialUpdate, onReplica: onReplica[index], presence: slot.provider }}
+        collaboration={{ clientId: pinned ? slot.clientId : undefined, initialUpdate: slot.initialUpdate, onReplica: onReplica[index], presence: slot.provider }}
         onError={error => errors.push(error.message)} />
     </div>)}</div>);
 }
@@ -81,6 +87,15 @@ const asyncSide = (index: number) => {
 const waitReplica = async (index: number, previous = 0) => {
   for (let attempt = 0; attempt < 600 && slots[index]!.generation <= previous; attempt++) await new Promise(resolve => setTimeout(resolve, 100));
   if (!slots[index]!.replica || slots[index]!.generation <= previous) throw new Error('Replica open timed out');
+};
+const stateVectorEntries = (bytes: Uint8Array) => {
+  let at = 0;
+  const next = () => { let value = 0; for (let scale = 1; ; scale *= 128) { const byte = bytes[at++]!; value += (byte & 127) * scale; if (byte < 128) return value; } };
+  return Array.from({ length: next() }, () => [next(), next()] as [number, number]).sort((a, b) => a[0] - b[0]);
+};
+const proposalResult = <T extends { ok: boolean }>(result: T) => {
+  if (!result.ok) throw new Error(JSON.stringify(result));
+  return result as Extract<T, { ok: true }>;
 };
 const reopen = async (text?: string) => {
   const generations = slots.map(slot => slot.generation);
@@ -99,10 +114,10 @@ const reopen = async (text?: string) => {
 export const probe: DocxPeerlessCollaborationProbe = {
   errors,
   ready: Promise.resolve(),
-  async text(index: number) {
+  async text(index: number, view: 'accepted' | 'original' = 'accepted') {
     for (let attempt = 0; attempt < 20; attempt++) {
       try {
-        const read = await slots[index]!.ref.current!.readParagraphs({ story: 'body', view: 'accepted' });
+        const read = await slots[index]!.ref.current!.readParagraphs({ story: 'body', view });
         if (!read.ok) throw new Error(read.failure.message);
         return read.paragraphs.map(paragraph => paragraph.text).join('\n');
       } catch (error) {
@@ -115,6 +130,8 @@ export const probe: DocxPeerlessCollaborationProbe = {
   painted(index: number) { return Array.from(document.querySelectorAll(`[data-editor="${index}"] .canvas-page-mirror`))
     .map(host => host.textContent ?? '').join(''); },
   generation(index: number) { return slots[index]!.generation; },
+  clientId(index: number) { return slots[index]!.replica?.clientId ?? null; },
+  async stateVector(index: number) { return stateVectorEntries(await asyncSide(index).encodeStateVector()); },
   synced(index: number) { return slots[index]!.provider?.synced ?? false; },
   hold(index: number) { endpoints[index]!.held = true; },
   release(index: number) {
@@ -122,8 +139,35 @@ export const probe: DocxPeerlessCollaborationProbe = {
     for (const data of endpoint.queued.splice(0).reverse()) { emit(index, { type: 'message', data }); emit(index, { type: 'message', data: data.slice() }); }
   },
   drop(index: number) { endpoints[index]!.queued.length = 0; },
+  heldUpdates(index: number) { return endpoints[index]!.queued.filter(data => data[0] === 0 && data[1] === 2).length; },
   disconnect(index: number) { slots[index]!.provider!.disconnect(); },
   reconnect(index: number) { slots[index]!.provider!.connect(); },
+  restart() {
+    const open = [0, 1].filter(index => endpoints[index]!.connected);
+    for (const index of open) emit(index, { type: 'close' });
+    for (const index of open) emit(index, { type: 'open' });
+  },
+  async checkpoint(index: number) { checkpoints[index] = await asyncSide(index).encodeStateAsUpdate(); },
+  async rejoin(index: number) {
+    const slot = slots[index]!; const generation = slot.generation;
+    slot.initialUpdate = checkpoints[index]!.slice(); render();
+    await waitReplica(index, generation);
+  },
+  async propose(index: number, text: string) {
+    const editor = slots[index]!.ref.current!;
+    const paragraph = (await editor.getParagraphIdentities()).paragraphs.find(identity => identity.session?.story === 'body')!.session!;
+    const { version } = await editor.resolveParagraphAnchors([paragraph]);
+    proposalResult(await editor.proposeChanges({ expectVersion: version, proposals: [{ id: 'proposal', paragraph, op: 'insertText', at: 'end', text,
+      suggest: { author: 'Writer A', date: '2026-10-01T00:00:00Z' } }] }));
+  },
+  async settle(index: number, state: 'accepted' | 'rejected') {
+    const editor = slots[index]!.ref.current!;
+    const current = await editor.getProposals();
+    const ids = current.proposals.map(proposal => proposal.id);
+    const decided = proposalResult(await editor.setProposalStates({ expectVersion: current.version,
+      expectPreviewVersion: current.previewVersion, changes: ids.map(id => ({ id, state })) }));
+    proposalResult(await editor.withdrawProposals({ expectVersion: decided.snapshot.version, ids }));
+  },
   room: () => reopen(),
   swap: () => reopen('Replacement'),
 };

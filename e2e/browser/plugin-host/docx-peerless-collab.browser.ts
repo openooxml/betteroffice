@@ -6,9 +6,11 @@ const input = (page: Page, index: number) => {
   const worker = editor(page, index).locator('textarea.paged-editor__peerless-input');
   return index === 1 ? worker.or(page.locator('textarea[data-testid="yrs-input"]')).last() : worker;
 };
-const text = (page: Page, index: number) => page.evaluate(index => window.__docxPeerlessCollab.text(index), index);
-async function open(page: Page, mixed = false) {
-  await page.goto(`/docx-peerless-collab.html${mixed ? '?mixed=1' : ''}`);
+const text = (page: Page, index: number, view: 'accepted' | 'original' = 'accepted') =>
+  page.evaluate(([index, view]) => window.__docxPeerlessCollab.text(index, view), [index, view] as const);
+const stateVectors = (page: Page) => page.evaluate(() => Promise.all([0, 1].map(index => window.__docxPeerlessCollab.stateVector(index))));
+async function open(page: Page, query = '') {
+  await page.goto(`/docx-peerless-collab.html${query}`);
   await page.waitForFunction(() => '__docxPeerlessCollab' in window);
   await page.evaluate(() => window.__docxPeerlessCollab.ready);
   await expect.poll(() => page.evaluate(() => [0, 1].every(index => window.__docxPeerlessCollab.synced(index)))).toBe(true);
@@ -55,12 +57,56 @@ test('remote caret paints at the typed position and rebases after an insertion b
   await expect.poll(async () => (await caret.boundingBox())?.x ?? 0).toBeGreaterThan(before!.x);
 });
 
-test('disconnected edits converge after reconnect', async ({ page }) => {
+test('offline edits on both sides converge after both re-handshake', async ({ page }) => {
   await open(page); await page.evaluate(() => window.__docxPeerlessCollab.disconnect(1));
   await type(await select(page, 0), 'A'); await type(await select(page, 1), 'B');
   await expect.poll(() => text(page, 0)).toBe('SeedA'); await expect.poll(() => text(page, 1)).toBe('SeedB');
-  await page.evaluate(() => window.__docxPeerlessCollab.reconnect(1));
+  await page.evaluate(() => { window.__docxPeerlessCollab.reconnect(1); window.__docxPeerlessCollab.restart(); });
   await expect.poll(async () => (await text(page, 0)).length).toBe(6); await converged(page);
+});
+
+test('a relay peer that drops mid-merge catches up from the persistent peer', async ({ page }) => {
+  await open(page); await page.evaluate(() => window.__docxPeerlessCollab.hold(1));
+  await type(await select(page, 0), 'A');
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessCollab.heldUpdates(1))).toBeGreaterThan(0);
+  await page.evaluate(() => { window.__docxPeerlessCollab.release(1); window.__docxPeerlessCollab.disconnect(1); });
+  await type(await select(page, 0), 'C'); await expect.poll(() => text(page, 0)).toBe('SeedAC');
+  await page.evaluate(() => window.__docxPeerlessCollab.reconnect(1));
+  await converged(page, 'SeedAC');
+  await expect.poll(async () => { const [a, b] = await stateVectors(page); return JSON.stringify(a) === JSON.stringify(b); }).toBe(true);
+});
+
+test.fixme('offline edits reach a persistent relay peer', async ({ page }) => {
+  await open(page); await page.evaluate(() => window.__docxPeerlessCollab.disconnect(1));
+  await type(await select(page, 1), 'B'); await expect.poll(() => text(page, 1)).toBe('SeedB');
+  await page.evaluate(() => window.__docxPeerlessCollab.reconnect(1));
+  await converged(page, 'SeedB');
+});
+
+for (const query of ['', '?unpinned=1']) {
+  test(`a ${query ? 'fresh' : 'pinned'} client id reopened from a stale state does not reuse clocks`, async ({ page }) => {
+    await open(page, query); await page.evaluate(() => window.__docxPeerlessCollab.checkpoint(0));
+    await type(await select(page, 0), 'X'); await converged(page, 'SeedX');
+    const before = await page.evaluate(() => window.__docxPeerlessCollab.clientId(0));
+    await page.evaluate(async () => { window.__docxPeerlessCollab.hold(0); await window.__docxPeerlessCollab.rejoin(0); });
+    await expect.poll(() => text(page, 0)).toBe('Seed');
+    await type(await select(page, 0), 'Y');
+    await expect.poll(() => text(page, 1)).toMatch(/^Seed(XY|YX)$/);
+    await page.evaluate(() => window.__docxPeerlessCollab.release(0));
+    await converged(page, await text(page, 1));
+    expect(await page.evaluate(() => window.__docxPeerlessCollab.clientId(0))).not.toBe(before);
+  });
+}
+
+test('proposal revisions reach the peer and settle on both sides', async ({ page }) => {
+  await open(page); await page.evaluate(() => window.__docxPeerlessCollab.propose(0, 'Proposed'));
+  for (const index of [0, 1]) {
+    await expect.poll(() => text(page, index)).toBe('SeedProposed');
+    await expect.poll(() => text(page, index, 'original')).toBe('Seed');
+  }
+  await page.evaluate(() => window.__docxPeerlessCollab.settle(0, 'accepted'));
+  for (const index of [0, 1]) await expect.poll(() => text(page, index, 'original')).toBe('SeedProposed');
+  await converged(page, 'SeedProposed');
 });
 
 test('room change reopens with the shared state and document swap stays consistent', async ({ page }) => {
@@ -89,7 +135,7 @@ test('composition survives a remote merge and commits at its rebased position', 
 });
 
 test('worker and hybrid replicas converge and paint each other cursors', async ({ page }) => {
-  await open(page, true);
+  await open(page, '?mixed=1');
   await type(await select(page, 0), 'A'); await converged(page, 'SeedA');
   await expect(editor(page, 1).getByTestId('remote-presence-overlay').locator(':scope > div').first()).toBeVisible();
   await type(await select(page, 1), 'B'); await converged(page, 'SeedAB');
