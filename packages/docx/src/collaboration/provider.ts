@@ -199,6 +199,7 @@ export class CollaborationProvider {
   private readonly maxSyncBytes: number;
   private syncHeld: Uint8Array[] | null = null;
   private syncHeldBytes = 0;
+  private syncJoinPending = false;
   private syncRequestOwed = false;
   private readonly localUser: CollaborationResolvedUser | null;
   private readonly statusListeners = new Map<number, CollaborationStatusListener>();
@@ -547,6 +548,7 @@ export class CollaborationProvider {
     this.syncHeld =
       typeof (this.asyncReplica ?? this.replica).applyUpdateChunks === 'function' ? [] : null;
     this.syncHeldBytes = 0;
+    this.syncJoinPending = false;
     this.syncRequestOwed = false;
     this.isOpen = true;
     this.clearPending();
@@ -683,6 +685,7 @@ export class CollaborationProvider {
             charged = true;
           }
           frame.remaining += 1;
+          if (message.type === 'sync-step-2' && this.syncHeld) this.syncJoinPending = true;
           const held = message.type === 'sync-step-2' ? this.takeSyncHeld() : [];
           const owed = message.type === 'sync-step-1' && this.defersSyncRequest() &&
             parseSyncRequest(message.stateVector).open;
@@ -775,6 +778,7 @@ export class CollaborationProvider {
     this.replicaBytes = 0;
     this.syncHeld = null;
     this.syncHeldBytes = 0;
+    this.syncJoinPending = false;
     this.syncRequestOwed = false;
     this.arrivalsInFlight.clear();
     this.awarenessGenerations.clear();
@@ -815,6 +819,7 @@ export class CollaborationProvider {
               : await this.asyncReplica!.applyUpdate(message.update.slice());
             if (!this.isCurrentOpen(token, connection)) return;
             if (message.type === 'sync-step-2') {
+              this.syncJoinPending = false;
               this.setStatus('connected', true);
               if (!this.isCurrentOpen(token, connection)) return;
               if (this.localUser) {
@@ -908,9 +913,12 @@ export class CollaborationProvider {
     }
   }
 
-  /** A SyncStep1 sent while holding asks for chunks: the held join takes them with its SyncStep2 as one change. */
+  /**
+   * A SyncStep1 sent before the held join merges asks for chunks: its state vector predates the join, so the answer can
+   * be as large as the join.
+   */
   private syncRequestVector(stateVector: Uint8Array): Uint8Array {
-    return this.syncHeld ? withSyncRequest(stateVector, { chunked: true }) : stateVector;
+    return this.syncHeld || this.syncJoinPending ? withSyncRequest(stateVector, { chunked: true }) : stateVector;
   }
 
   private sendSyncRequest(token: number): void {
