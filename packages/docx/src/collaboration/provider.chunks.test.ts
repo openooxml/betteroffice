@@ -177,8 +177,8 @@ describe('chunked sync requests in the state vector', () => {
       return sent(transport)[0];
     });
     expect(handshakes).toEqual([
-      { type: 'sync-step-1', stateVector: withChunkedSyncRequest(Uint8Array.of(0)) },
-      { type: 'sync-step-1', stateVector: Uint8Array.of(0) },
+      { type: 'sync-step-1', stateVector: withChunkedSyncRequest(Uint8Array.of(1, 1, 1)) },
+      { type: 'sync-step-1', stateVector: Uint8Array.of(1, 1, 1) },
     ]);
   });
 });
@@ -256,7 +256,7 @@ describe('CollaborationProvider chunked sync answers', () => {
 
     expect(sent(transport)).toEqual([
       { type: 'update', update: Uint8Array.of(1) },
-      { type: 'sync-step-1', stateVector: withChunkedSyncRequest(Uint8Array.of(0)) },
+      { type: 'sync-step-1', stateVector: withChunkedSyncRequest(Uint8Array.of(1, 1, 1)) },
     ]);
     expect(errors).toEqual([]);
   });
@@ -344,10 +344,12 @@ describe('CollaborationProvider chunked sync answers by transport', () => {
     const b = syncedPeer(source);
     const provider = joinRoom(joiner, a.transport, b.transport);
 
-    expect(shape(b.transport)).toEqual([['sync-step-2', whole.byteLength]]);
+    expect(shape(b.transport)).toEqual([['sync-step-2', whole.byteLength], ['sync-step-1'], ['sync-step-2', whole.byteLength]]);
     expect(source.limits).toEqual([]);
-    expect(sizes(stepwise.applied)).toEqual([whole.byteLength]);
-    expect(sizes(joiner.applied)).toEqual([stepwise.whole.byteLength, whole.byteLength]);
+    expect(sizes(stepwise.applied))
+      .toEqual([whole.byteLength, whole.byteLength, joiner.whole.byteLength, joiner.whole.byteLength]);
+    expect(sizes(joiner.applied))
+      .toEqual([stepwise.whole.byteLength, whole.byteLength, whole.byteLength, stepwise.whole.byteLength]);
     expect(joiner.syncs).toEqual([]);
     expect(provider.synced).toBe(true);
     expect([...a.errors, ...b.errors]).toEqual([]);
@@ -359,7 +361,7 @@ describe('CollaborationProvider chunked sync answers by transport', () => {
     const b = syncedPeer(source, { syncChunkBytes: MiB });
     const provider = joinRoom(joiner, b.transport);
 
-    expect(shape(b.transport)).toEqual([['update', MiB], ['sync-step-2', 4096]]);
+    expect(shape(b.transport)).toEqual([['update', MiB], ['sync-step-2', 4096], ['sync-step-1']]);
     expect(source.limits).toEqual([MiB]);
     expect(joiner.syncs.map(sizes)).toEqual([[MiB, 4096]]);
     expect(joiner.applied).toEqual([]);
@@ -489,7 +491,7 @@ class AsyncChunkReplica implements AsyncCollaborationReplica {
   readonly syncs: { updates: Uint8Array[]; result: ReturnType<typeof deferred<unknown>> }[] = [];
 
   encodeStateVector(): Promise<Uint8Array> {
-    return Promise.resolve(Uint8Array.of(7));
+    return Promise.resolve(Uint8Array.of(0));
   }
 
   encodeStateAsUpdate(): Promise<Uint8Array> {
