@@ -3583,7 +3583,11 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    pub fn set_table_properties(&self, table_json: &str, patch_json: &str) -> Result<String, JsValue> {
+    pub fn set_table_properties(
+        &self,
+        table_json: &str,
+        patch_json: &str,
+    ) -> Result<String, JsValue> {
         let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
         let patch = parse_any_object(patch_json, "table properties patch")?;
         let receipt = self
