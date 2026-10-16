@@ -58,7 +58,7 @@ import { DEFAULT_PAGE_WIDTH } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
-import { peerlessPreviewPaint, WorkerDocumentPreview, workerPreviewPages, type WorkerPreviewJob } from './WorkerDocumentPreview';
+import { peerlessPreviewPaint, releaseWorkerPreview, WorkerDocumentPreview, workerPreviewPages, type WorkerPreviewJob } from './WorkerDocumentPreview';
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
@@ -382,6 +382,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         return turn;
       };
       let painted = false;
+      let dropPreview = () => {};
       const showPreview = async ({ layout, config }: Awaited<ReturnType<typeof measure>>, live: () => boolean) => {
         if (!live()) return false;
         const preview = await client.previewSource({ fonts: fonts.slice(), fontRegistrationSlots: { fontChains: config.fontChains },
@@ -394,8 +395,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           const settle = (operation: () => void) => { signal.removeEventListener('abort', cancel); operation(); };
           const cancel = () => settle(() => reject(signal.reason));
           signal.addEventListener('abort', cancel, { once: true });
-          setPreviewJob({ client, frame: preview, pages, live: () => live() && !signal.aborted,
-            resolve: () => settle(() => { painted = true; resolve(true); }), reject: (error) => settle(() => reject(error)) });
+          const job: WorkerPreviewJob = { client, frame: preview, pages, live: () => live() && !signal.aborted,
+            resolve: () => settle(() => { painted = true; resolve(true); }), reject: (error) => settle(() => reject(error)) };
+          dropPreview = () => settle(() => {
+            setPreviewJob(current => current === job ? null : current);
+            releaseWorkerPreview(client);
+            resolve(false);
+          });
+          setPreviewJob(job);
         });
       };
       const withinPreviewBudget = async (attempt: (live: () => boolean) => Promise<boolean>): Promise<boolean | null> => {
@@ -407,7 +414,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         } finally {
           live = false;
           clearTimeout(timer);
-          if (!painted) setPreviewJob(job => job?.client === client ? null : job);
+          if (!painted) dropPreview();
         }
       };
       const previewFailed = (error: unknown) => {
@@ -676,7 +683,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useEffect(() => {
     if (shellState.status !== 'ready' || !previewJob) return;
     setPreviewJob(null);
-    void previewJob.client.attachCanvases([], [], globalThis.devicePixelRatio || 1, 1, { color: '#000', width: 2 }).catch(() => {});
+    releaseWorkerPreview(previewJob.client);
   }, [shellState.status, previewJob]);
   const onClipboard = useCallback(async (cut: boolean) => {
     const current = active.current;
