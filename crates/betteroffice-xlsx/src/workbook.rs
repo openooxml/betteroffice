@@ -4332,16 +4332,36 @@ fn validate_cell_state(state: &CellState) -> Result<()> {
     Ok(())
 }
 
+/// The style a write leaves on `cell`: its own, or for a missing cell its row's or column's
+/// default. A clear leaves a missing cell missing and pins an unstyled cell to the default
+/// style where a row or column default would otherwise take over.
+fn written_cell_style(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    clears: bool,
+) -> Option<u32> {
+    let sheet = workbook.sheet(sheet);
+    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
+    match sheet.and_then(|sheet| sheet.cell(cell)) {
+        None if clears => None,
+        None => inherited,
+        Some(existing) if clears && existing.style.is_none() => inherited
+            .is_some_and(|inherited| inherited != 0)
+            .then_some(0),
+        Some(existing) => existing.style,
+    }
+}
+
 fn edit_cell_state(
     workbook: &WorkbookModel,
     sheet: SheetId,
     cell: CellRef,
     input: &str,
 ) -> CellState {
-    let sheet = workbook.sheet(sheet);
-    let existing = sheet.and_then(|sheet| sheet.cell(cell));
-    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
-    let style = existing.map_or(inherited, |existing| existing.style);
+    let style = workbook
+        .sheet(sheet)
+        .and_then(|sheet| sheet.effective_style(cell));
     let number_format = workbook
         .styles
         .resolved_format(Some(style.unwrap_or(0)))
@@ -4360,13 +4380,7 @@ fn edit_cell_state(
     } else {
         cell_state_for_input_no_eval(input)
     };
-    state.style = match existing {
-        None if input.is_empty() => None,
-        Some(_) if input.is_empty() && style.is_none() => inherited
-            .is_some_and(|inherited| inherited != 0)
-            .then_some(0),
-        _ => style,
-    };
+    state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     state
 }
 

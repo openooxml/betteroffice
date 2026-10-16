@@ -539,6 +539,9 @@ pub struct SourceCellFacts {
     pub uncached_formulas: BTreeSet<(u32, u32)>,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
+    /// Whether a formula cell sits inside `mc:AlternateContent`, where another
+    /// branch's cell can stand in for it in the model.
+    pub alternate_formulas: bool,
 }
 
 /// in-progress cell state accumulated between a `<c>` start and its end.
@@ -576,6 +579,7 @@ fn parse_worksheet(
     let mut row_style_count: usize = 0;
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
+    let mut alternate_depth: usize = 0;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -648,8 +652,10 @@ fn parse_worksheet(
                             }
                         }
                         c.formula = Some(text);
+                        facts.alternate_formulas |= alternate_depth > 0;
                     }
                 }
+                b"AlternateContent" => alternate_depth += 1,
                 b"is" => {
                     let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
                     if let Some(c) = cur.as_mut() {
@@ -709,6 +715,7 @@ fn parse_worksheet(
                         col_cursor += 1;
                     }
                     b"row" => cur_row = None,
+                    b"AlternateContent" => alternate_depth = alternate_depth.saturating_sub(1),
                     _ => {}
                 }
             }
