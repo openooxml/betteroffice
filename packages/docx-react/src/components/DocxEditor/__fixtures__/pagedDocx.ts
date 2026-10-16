@@ -8,8 +8,9 @@ const FONT = '<w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation San
 export async function pagedDocx(
   pages: number,
   paragraphsPerPage = 1,
-  options: { trackedInsertion?: boolean; pageTotal?: boolean; headerFooter?: boolean } = {}
+  options: { trackedInsertion?: boolean | number; pageTotal?: boolean; headerFooter?: boolean } = {}
 ): Promise<ArrayBuffer> {
+  const insertions = Number(options.trackedInsertion ?? 0);
   const body = Array.from({ length: pages }, (_, page) =>
     Array.from({ length: paragraphsPerPage }, (_, paragraph) => {
       const id = (page * paragraphsPerPage + paragraph + 1).toString(16).padStart(8, '0');
@@ -25,8 +26,8 @@ export async function pagedDocx(
           ? ''
           : '<w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/></w:rPr>';
       const insertion =
-        options.trackedInsertion && page === pages - 1 && paragraph === paragraphsPerPage - 1
-          ? '<w:ins w:id="1" w:author="Document reviewer" w:date="2026-09-29T00:00:00Z">' +
+        page >= pages - insertions && paragraph === paragraphsPerPage - 1
+          ? `<w:ins w:id="${pages - page}" w:author="Document reviewer" w:date="2026-09-29T00:00:00Z">` +
             `<w:r>${font}<w:t xml:space="preserve"> Existing insertion.</w:t></w:r></w:ins>`
           : '';
       const total = options.pageTotal && page === 0 && paragraph === 0

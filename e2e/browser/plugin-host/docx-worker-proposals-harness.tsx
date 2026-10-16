@@ -29,7 +29,7 @@ interface ViewState {
 const options = new URLSearchParams(window.location.search);
 const hybrid = options.get('arm') === 'hybrid';
 const readOnly = options.get('readOnly') !== 'false';
-const revisions = options.get('revisions') === '1';
+const revisions = Number(options.get('revisions') ?? 0);
 const keepSidebarClosed = options.get('sidebar') === 'closed';
 const reportChanges = options.get('onChange') === '1';
 setGoogleFontsEnabled(false);
