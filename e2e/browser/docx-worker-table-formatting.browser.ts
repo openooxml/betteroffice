@@ -7,7 +7,7 @@ function documentXml(): string {
   const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
   const rows = [0, 1].map((row) => `<w:tr>${[0, 1].map((column) => cell(`R${row}C${column}`)).join('')}</w:tr>`).join('');
   return '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
-    `<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="4680" w:type="dxa"/><w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(border).join('')}</w:tblBorders></w:tblPr>` +
+    `<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="4680" w:type="dxa"/><w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(border).join('')}</w:tblBorders></w:tblPr>` +
     `<w:tblGrid>${'<w:gridCol w:w="2340"/>'.repeat(2)}</w:tblGrid>${rows}</w:tbl><w:p/>` +
     '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>';
 }
@@ -61,12 +61,13 @@ async function savedTable(page: Page, info: TestInfo, step: string) {
       return sides;
     });
     const tblBorders = table.getElementsByTagNameNS('*', 'tblBorders')[0];
+    const tblStyle = table.getElementsByTagNameNS('*', 'tblStyle')[0];
     const tblW = table.getElementsByTagNameNS('*', 'tblW')[0];
     const jc = table.getElementsByTagNameNS('*', 'jc')[0];
     return {
       cells,
       tblBorders: tblBorders ? tblBorders.children.length : 0,
-      tblStyle: table.getElementsByTagNameNS('*', 'tblStyle').length,
+      tblStyle: tblStyle?.getAttributeNS(w, 'val') ?? null,
       tblW: tblW ? `${tblW.getAttributeNS(w, 'w')}/${tblW.getAttributeNS(w, 'type')}` : null,
       jc: jc?.getAttributeNS(w, 'val') ?? null,
     };
@@ -76,7 +77,24 @@ async function savedTable(page: Page, info: TestInfo, step: string) {
 test('worker borders preserve sides and saved shared edges', async ({ page }, info) => {
   await open(page);
   await tableAction(page, 'borderNone');
-  let saved = await savedTable(page, info, 'none');
+  let saved = await savedTable(page, info, 'single-none');
+  expect(saved.cells[0]).toEqual({ top: 'none/0/000000', bottom: 'none/0/000000', left: 'none/0/000000', right: 'none/0/000000' });
+  expect(saved.cells[1]).toEqual({ left: 'none/0/000000' });
+  expect(saved.cells[2]).toEqual({ top: 'none/0/000000' });
+  expect(saved.cells[3]).toEqual({});
+  expect(saved.tblBorders).toBe(6);
+  expect(saved.tblStyle).toBe('TableGrid');
+
+  await tableAction(page, { type: 'cellBorder', side: 'top', style: 'double', size: 6, color: '00FF00' });
+  saved = await savedTable(page, info, 'single-side');
+  expect(saved.cells[0]!.top).toBe('double/6/00FF00');
+  expect(saved.cells[1]!.top).toBeUndefined();
+  expect(saved.cells[1]!.left).toBe('none/0/000000');
+  expect(saved.cells[3]).toEqual({});
+
+  await tableAction(page, 'selectTable');
+  await tableAction(page, 'borderNone');
+  saved = await savedTable(page, info, 'none');
   for (const cell of saved.cells) {
     expect(cell.top).toBe('none/0/000000');
     expect(cell.bottom).toBe('none/0/000000');
@@ -84,11 +102,12 @@ test('worker borders preserve sides and saved shared edges', async ({ page }, in
     expect(cell.right).toBe('none/0/000000');
   }
   expect(saved.tblBorders).toBe(6);
-  expect(saved.tblStyle).toBe(0);
+  expect(saved.tblStyle).toBe('TableGrid');
 
   await tableAction(page, { type: 'borderColor', color: 'FF0000' });
   saved = await savedTable(page, info, 'color');
   expect(saved.cells[0]!.top).toBe('single/4/FF0000');
+  expect(saved.cells[3]!.bottom).toBe('single/4/FF0000');
 
   await tableAction(page, { type: 'borderWidth', size: 12 });
   saved = await savedTable(page, info, 'width');
@@ -103,16 +122,17 @@ test('worker borders preserve sides and saved shared edges', async ({ page }, in
   saved = await savedTable(page, info, 'side');
   expect(saved.cells[0]!.top).toBe('double/6/00FF00');
   expect(saved.cells[1]!.top).toBe('double/6/00FF00');
+  expect(saved.cells[2]!.top).toBe('single/12/FF0000');
 
   await tableAction(page, { type: 'applyTableStyle', styleId: 'TableGrid' });
   saved = await savedTable(page, info, 'style');
   expect(saved.cells[0]!.top).toBe('single/4/000000');
-  expect(saved.tblStyle).toBe(0);
+  expect(saved.tblStyle).toBe('TableGrid');
 
   await tableAction(page, { type: 'applyTableStyle', styleId: 'TableNormal' });
   saved = await savedTable(page, info, 'nostyle');
   expect(saved.cells[0]!.top).toBe('single/4/000000');
-  expect(saved.tblStyle).toBe(0);
+  expect(saved.tblStyle).toBe('TableGrid');
 });
 
 test('worker table properties dialog reads and applies after typing', async ({ page }, info) => {

@@ -301,6 +301,15 @@ test('table_formatting_targets_live_rect_and_preserves_selection', async () => {
   const arm = await inCell();
   const kept = arm.state.selection!.focus;
   const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+  selectCells(arm, [0, 0], [0, 0]);
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line, right: line } })).status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.borders).toMatchObject({ top: line, right: line });
+  expect(payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders).toMatchObject({ left: line });
+  expect(payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders?.top).toBeUndefined();
+  expect(payload(arm)!.rows[1]!.cells[0]!.tcPr?.borders).toBeUndefined();
+  expect(payload(arm)!.rows[1]!.cells[1]!.tcPr?.borders).toBeUndefined();
+  expect(undo(arm).status).toBe('applied');
+  expect(JSON.stringify(payload(arm))).not.toContain('single');
   selectCells(arm, [0, 0], [1, 1]);
   const applied = execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line } }));
   expect(applied.status).toBe('applied');
@@ -366,14 +375,28 @@ test('set_table_properties_patches_tblpr_and_refuses_stale_versions', async () =
   expect(cleared.status).toBe('applied');
   expect(payload(arm)!.tblPr?.width).toBeUndefined();
   expect(payload(arm)!.tblPr?.widthType).toBe('auto');
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { width: 3000, widthType: 'dxa' },
+  })).status).toBe('applied');
+  expect(payload(arm)!.tblPr?.width).toBe(3000);
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { widthType: 'auto' },
+  })).status).toBe('applied');
+  expect(payload(arm)!.tblPr?.width).toBeUndefined();
+  expect(payload(arm)!.tblPr?.widthType).toBe('auto');
   const version = arm.engine.proposalEngine.version();
   const before = JSON.stringify(payload(arm));
   expect(execute(arm, tableCommand(arm, 'setTableProperties', {
     op: 'patch', patch: { justification: 'right' }, expectVersion: 'stale',
   }))).toMatchObject({ status: 'refused', reason: 'stale-version' });
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { justification: 'right' }, expectVersion: 'stale',
+    selection: selection('missing', 0, 0, 'body'),
+  }))).toMatchObject({ status: 'refused', reason: 'stale-version' });
   expect(arm.engine.proposalEngine.version()).toBe(version);
   expect(JSON.stringify(payload(arm))).toBe(before);
   for (const extra of [{ op: 'patch', patch: { widthType: 'wide' } }, { op: 'patch', patch: { width: -5 } },
+    { op: 'patch', patch: { width: 2500.5 } },
     { op: 'rowHeight', patch: {} }, { op: 'patch', patch: { tableLayout: 'fixed' } }] as Record<string, unknown>[]) {
     expect(execute(arm, tableCommand(arm, 'setTableProperties', extra)))
       .toMatchObject({ status: 'refused', reason: 'invalid-payload' });

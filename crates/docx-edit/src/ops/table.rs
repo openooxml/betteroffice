@@ -2762,7 +2762,7 @@ impl EditingDoc {
         for (key, value) in patch {
             let valid = match key.as_str() {
                 "width" => matches!(value, Any::Null | Any::Undefined) ||
-                    any_number(Some(value)).is_some_and(|width| width >= 0.0),
+                    any_number(Some(value)).is_some_and(|width| width >= 0.0 && width.fract() == 0.0),
                 "widthType" => matches!(value, Any::Null | Any::Undefined) ||
                     matches!(value, Any::String(kind) if ["auto", "dxa", "pct", "nil"].contains(&&**kind)),
                 "justification" => matches!(value, Any::Null | Any::Undefined) ||
@@ -2782,6 +2782,9 @@ impl EditingDoc {
             } else {
                 data.tbl_pr.insert(key.clone(), value.clone());
             }
+        }
+        if matches!(data.tbl_pr.get("widthType"), Some(Any::String(kind)) if &**kind == "auto") {
+            data.tbl_pr.remove("width");
         }
         write_table(&mut txn, &table, &data);
         receipt(locator.clone(), Some(&data), Vec::new(), Vec::new(), Vec::new())
@@ -3363,6 +3366,21 @@ mod tests {
         assert!(doc.set_table_properties(&direct(), &at, &HashMap::from([
             ("width".to_owned(), Any::Number(-1.0)),
         ])).is_err());
+        assert!(doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("width".to_owned(), Any::Number(2500.5)),
+        ])).is_err());
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("width".to_owned(), Any::Number(3000.0)),
+            ("widthType".to_owned(), Any::from("dxa")),
+        ])).unwrap();
+        doc.set_table_properties(&direct(), &at, &HashMap::from([
+            ("widthType".to_owned(), Any::from("auto")),
+        ])).unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        assert_eq!(tbl_pr["widthType"], "auto");
         assert!(doc.set_table_properties(&direct(), &at, &HashMap::from([
             ("tableLayout".to_owned(), Any::from("fixed")),
         ])).is_err());

@@ -103,6 +103,11 @@ export function createPeerlessShellController(initial: Options) {
   let documentKey: unknown;
   let generation = 0;
   let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
+  const syncBorderPen = () => {
+    const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
+    const resolved = cellColor ? resolveColorToHex(cellColor, options.theme ?? undefined) : undefined;
+    if (resolved) borderPen = { ...borderPen, color: { rgb: resolved } };
+  };
   const waiting = new Set<(error: Error) => void>();
   const reviewReads = new WeakMap<PeerlessEditSessionBinding, Promise<ResidentReviewSnapshot>>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
@@ -399,9 +404,6 @@ export function createPeerlessShellController(initial: Options) {
           }
           case 'borderAll': case 'borderOutside': case 'borderInside': case 'borderNone':
           case 'borderTop': case 'borderBottom': case 'borderLeft': case 'borderRight': {
-            const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
-            const resolved = cellColor ? resolveColorToHex(cellColor, options.theme ?? undefined) : undefined;
-            if (resolved) borderPen = { ...borderPen, color: { rgb: resolved } };
             const pen = borderPen;
             const all = (border: typeof pen): YrsCellBorders => ({ top: border, bottom: border, left: border, right: border, insideH: border, insideV: border });
             const borders: YrsCellBorders = key === 'borderAll' ? all(pen)
@@ -452,7 +454,13 @@ export function createPeerlessShellController(initial: Options) {
             const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
             const selected = snapshot.view?.workerSelection;
             if (!selected) return { ok: false, failure: { code: 'command-failed', message: 'Table selection is unavailable.' } };
+            const originBinding = binding;
+            const originMode = mode();
             const opened = await query({ kind: 'properties', target: { kind: 'tableSelection', selection: selected } });
+            if (binding !== originBinding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+            if (mode() !== originMode || !sameSelection(selected, snapshot.view?.workerSelection)) {
+              return { ok: false, failure: { code: 'target-changed', message: 'Table selection changed.' } };
+            }
             if (opened.value?.kind !== 'table') return { ok: false, failure: { code: 'command-failed', message: 'Table properties are unavailable.' } };
             const captured = opened.selection ?? selected;
             options.openTableProperties(opened.value.properties, (props) =>
@@ -660,7 +668,7 @@ export function createPeerlessShellController(initial: Options) {
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
-    update(next: Options) { options = next; translate = translation(next);
+    update(next: Options) { options = next; translate = translation(next); syncBorderPen();
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
       reportMemory();
     },
@@ -720,6 +728,7 @@ export function createPeerlessShellController(initial: Options) {
         const ready = view.presentedThroughSeq >= 0;
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
           preview: ready ? null : snapshot.preview };
+        syncBorderPen();
         publish();
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {

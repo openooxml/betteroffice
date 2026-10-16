@@ -119,7 +119,7 @@ function validBorders(value: unknown): boolean {
 function validTablePatch(value: unknown): boolean {
   if (!object(value)) return false;
   return fields(value, {
-    width: nullable((entry) => number(entry) && (entry as number) >= 0),
+    width: nullable((entry) => number(entry) && (entry as number) >= 0 && Number.isInteger(entry as number)),
     widthType: nullable(oneOf('auto', 'dxa', 'pct', 'nil')),
     justification: nullable(oneOf('left', 'center', 'right')),
   });
@@ -523,6 +523,8 @@ export function preflightDocxCommand(
   if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
   if (isTableCommandKind(command.kind)) {
     if (state.readOnly) return refuse('read-only');
+    if (command.kind === 'setTableProperties' && command.payload.expectVersion !== undefined &&
+      command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const tableResolved = resolveCommandSelection(engine, state, command, context);
     if (!tableResolved.ok) return refuse(tableResolved.reason);
     const tabled = preflightTableCommand(engine, command as TableCommandIntent, tableResolved.selection);

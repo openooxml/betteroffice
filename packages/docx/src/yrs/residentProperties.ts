@@ -107,7 +107,9 @@ export function resolvePropertyImage(engine: ResidentEngineSession, handle: stri
 
 export function readResidentProperties(engine: ResidentEngineSession, target: ResidentPropertyTarget): ResidentPropertySnapshot | null {
   if (target.kind === 'tableSelection') {
-    const cell = resolveTableCell(engine, target.selection.focus.story);
+    const range = commandSelectionRange(engine, target.selection);
+    if (!range) return null;
+    const cell = resolveTableCell(engine, range.story);
     if (!cell) return null;
     const payload = engine.tablePayload(cell.story, cell.tableIndex) as { tblPr?: Record<string, unknown> } | null;
     if (!payload) return null;

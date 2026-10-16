@@ -34,7 +34,7 @@ test('worker table selection follows the shell table allowlist', () => {
   }
 });
 
-test('worker_table_formatting_gates_match_hybrid', () => {
+test('worker table formatting gates match hybrid', () => {
   const { controller, viewStore, selection } = toolbarFixture();
   const state = viewStore.getSnapshot();
   viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection,
