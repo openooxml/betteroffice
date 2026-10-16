@@ -1098,7 +1098,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     const id = this.nextId++;
     const message: ResidentEngineWorkerRequest = { id, type: 'destroy' };
     this.worker.postMessage(message);
-    this.fail(new ResidentWorkerFailureError('Resident engine worker was destroyed'), false);
+    this.fail(Object.assign(new ResidentWorkerFailureError('Resident engine worker was destroyed'), { code: 'disposed' }), false);
   }
 
   protected request(
