@@ -9,7 +9,10 @@ import {
   encodeSyncStep2,
   encodeUpdate,
   encodeVarUint,
+  isStateVector,
   ProtocolError,
+  stateVectorDominates,
+  withClientClockAhead,
 } from './protocol';
 import { presenceColorForClientId } from './presence';
 
@@ -186,5 +189,121 @@ describe('collaboration protocol decoding', () => {
     expect(() => decodeMessages(Uint8Array.of(3), 1024, 0)).toThrow(
       'Message limit must be a positive integer'
     );
+  });
+});
+
+function stateVector(...entries: [bigint, bigint][]): Uint8Array {
+  return stateVectorOf(entries);
+}
+
+function stateVectorOf(entries: readonly [bigint, bigint][]): Uint8Array {
+  const bytes: number[] = [];
+  const write = (value: bigint) => {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  };
+  write(BigInt(entries.length));
+  for (const [client, clock] of entries) {
+    write(client);
+    write(clock);
+  }
+  return Uint8Array.from(bytes);
+}
+
+describe('state vector dominance', () => {
+  it('compares clocks per client regardless of encoding order', () => {
+    expect(stateVectorDominates(stateVector(), stateVector())).toBe(true);
+    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector())).toBe(true);
+    expect(stateVectorDominates(stateVector(), stateVector([1n, 5n]))).toBe(false);
+    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([1n, 6n]))).toBe(false);
+    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([2n, 1n]))).toBe(false);
+    expect(stateVectorDominates(
+      stateVector([1n, 5n], [2n, 3n]),
+      stateVector([2n, 3n], [1n, 4n])
+    )).toBe(true);
+  });
+
+  it('keeps 64-bit client ids distinct', () => {
+    const max = (1n << 64n) - 1n;
+    expect(stateVectorDominates(stateVector([1n << 53n, 9n]), stateVector([(1n << 53n) + 1n, 1n]))).toBe(false);
+    expect(stateVectorDominates(stateVector([max, 3n]), stateVector([max, 2n]))).toBe(true);
+    expect(stateVectorDominates(stateVector([max - 1n, 3n]), stateVector([max, 2n]))).toBe(false);
+  });
+
+  it('ignores a document fingerprint suffix', () => {
+    const fingerprinted = (payload: Uint8Array) => concat(
+      payload,
+      new TextEncoder().encode('\0betteroffice-document-fingerprint-v1\0'),
+      new Uint8Array(32).fill(0x5a)
+    );
+    expect(stateVectorDominates(fingerprinted(stateVector([1n, 5n])), stateVector([1n, 5n]))).toBe(true);
+    expect(stateVectorDominates(stateVector([1n, 5n]), fingerprinted(stateVector([1n, 6n])))).toBe(false);
+  });
+
+  it('rejects vectors that do not decode', () => {
+    expect(() => stateVectorDominates(stateVector([1n, 5n]), Uint8Array.of(2, 1, 5))).toThrow(ProtocolError);
+    expect(() => stateVectorDominates(Uint8Array.of(), stateVector([1n, 5n]))).toThrow(ProtocolError);
+    expect(() => stateVectorDominates(
+      stateVector(),
+      Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1)
+    )).toThrow('State vector varUint exceeds 64 bits');
+  });
+});
+
+describe('state vector shapes', () => {
+  it('accepts only whole v1 state vectors', () => {
+    expect(isStateVector(stateVector())).toBe(true);
+    expect(isStateVector(stateVector([1n << 60n, 5n], [2n, 3n]))).toBe(true);
+    expect(isStateVector(Uint8Array.of())).toBe(false);
+    expect(isStateVector(Uint8Array.of(7))).toBe(false);
+    expect(isStateVector(Uint8Array.of(0, 1))).toBe(false);
+    expect(() => stateVectorDominates(stateVector(), Uint8Array.of(0, 1))).toThrow('Trailing state vector bytes');
+  });
+});
+
+describe('state vector with the local clock ahead', () => {
+  const fingerprinted = (payload: Uint8Array) => concat(
+    payload,
+    new TextEncoder().encode('\0betteroffice-document-fingerprint-v1\0'),
+    new Uint8Array(32).fill(0x5a)
+  );
+
+  it('advances only the given client, adding it at clock 1 when absent', () => {
+    expect(withClientClockAhead(stateVector(), 7)).toEqual(stateVector([7n, 1n]));
+    expect(withClientClockAhead(stateVector([5n, 3n]), 7)).toEqual(stateVector([5n, 3n], [7n, 1n]));
+    expect(withClientClockAhead(stateVector([7n, 4n], [5n, 3n]), 7)).toEqual(stateVector([7n, 5n], [5n, 3n]));
+    expect(withClientClockAhead(stateVector([300n, 127n]), 300)).toEqual(stateVector([300n, 128n]));
+    const max = Number.MAX_SAFE_INTEGER;
+    expect(withClientClockAhead(stateVector([BigInt(max), 9n]), max)).toEqual(stateVector([BigInt(max), 10n]));
+  });
+
+  it('is never dominated by the vector it came from, and dominates it', () => {
+    const vector = stateVector([1n, 5n], [2n, 3n]);
+    for (const client of [1, 2, 9]) {
+      const ahead = withClientClockAhead(vector, client)!;
+      expect(stateVectorDominates(vector, ahead)).toBe(false);
+      expect(stateVectorDominates(ahead, vector)).toBe(true);
+    }
+  });
+
+  it('keeps a document fingerprint suffix', () => {
+    expect(withClientClockAhead(fingerprinted(stateVector([7n, 4n])), 7))
+      .toEqual(fingerprinted(stateVector([7n, 5n])));
+  });
+
+  it('crosses no native entry limit', () => {
+    const others = Array.from({ length: 65_535 }, (_, index): [bigint, bigint] => [BigInt(index + 1), 1n]);
+    const full = stateVectorOf([...others, [70_000n, 4n]]);
+    expect(withClientClockAhead(full, 80_000)).toBeUndefined();
+    expect(withClientClockAhead(full, 70_000)).toEqual(stateVectorOf([...others, [70_000n, 5n]]));
+    expect(withClientClockAhead(stateVectorOf(others), 80_000)).toEqual(stateVectorOf([...others, [80_000n, 1n]]));
+  });
+
+  it('rejects vectors that do not decode and invalid client ids', () => {
+    expect(() => withClientClockAhead(Uint8Array.of(7), 1)).toThrow(ProtocolError);
+    expect(() => withClientClockAhead(Uint8Array.of(0, 1), 1)).toThrow('Trailing state vector bytes');
+    for (const client of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => withClientClockAhead(stateVector(), client)).toThrow(ProtocolError);
+    }
   });
 });

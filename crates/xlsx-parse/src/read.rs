@@ -132,13 +132,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
-    if styles.cell_xfs.is_empty()
-        && sheets.iter().any(|sheet| {
-            sheet.row_styles.values().any(|&style| style == 0)
-                || sheet.col_styles.iter().any(|run| run.xf == 0)
-                || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
-        })
-    {
+    if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
     Ok(IndexedWorkbook {
@@ -157,6 +151,29 @@ pub(crate) fn parse_workbook_indexed(
         legacy_styles,
         declined_parts,
         rich_shared_strings,
+    })
+}
+
+pub(crate) fn legacy_style_readings(
+    parts: &[(String, Vec<u8>)],
+    model: &Workbook,
+    legacy: Option<&Stylesheet>,
+) -> Result<Vec<Stylesheet>, ParseError> {
+    let rels = find_part(parts, "xl/_rels/workbook.xml.rels");
+    let styles = typed_part(parts, rels, "styles", "xl/styles.xml")?;
+    crate::styles::legacy_style_readings(
+        styles,
+        &model.styles,
+        legacy,
+        references_zero_style(&model.sheets),
+    )
+}
+
+fn references_zero_style(sheets: &[Sheet]) -> bool {
+    sheets.iter().any(|sheet| {
+        sheet.row_styles.values().any(|&style| style == 0)
+            || sheet.col_styles.iter().any(|run| run.xf == 0)
+            || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
     })
 }
 

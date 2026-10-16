@@ -18,8 +18,8 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 use super::*;
 use crate::comments::{comment_keys, snapshot_comment};
 use crate::deck::{
-    ShapeParts, SlideParts, graphic_json, map_bool, map_string, required_map, required_order,
-    shape_base, shape_parts, slide_notes, slide_parts, slide_ref, string_array_ref,
+    ShapeParts, SlideParts, graphic_json, live_slide_ids, map_bool, map_string, required_map,
+    shape_base, shape_parts, slide_notes, slide_parts, slide_ref,
 };
 use crate::paragraph::{
     ListCounters, ListMarker, ParagraphCascade, SlideParents, find_placeholder,
@@ -237,16 +237,11 @@ fn walk(
 ) -> EditResult<(PptxStructuredContent, usize)> {
     let package = session.package();
     let txn = session.doc.transact();
-    let order = required_order(&txn)?;
     let slides = required_map(&txn, SLIDES)?;
     let meta = required_map(&txn, META)?;
-    let mut seen = HashSet::new();
     let mut entries = Vec::new();
     let mut has_notes = false;
-    for id in string_array_ref(&order, &txn) {
-        if !seen.insert(id.clone()) {
-            continue;
-        }
+    for id in live_slide_ids(&txn)? {
         let Some(slide) = slides
             .get(&txn, &id)
             .and_then(|value| value.cast::<MapRef>().ok())

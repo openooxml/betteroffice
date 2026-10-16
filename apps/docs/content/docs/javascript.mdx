@@ -23,6 +23,7 @@ import "@betteroffice/docx-react/styles.css";
 ```
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
+`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` currently uses the hybrid runtime until worker-only collaboration is available.
 Without `onSave`, File > Save downloads the edited bytes. Configure
 [fonts](./packages#fonts) before mounting the DOCX editor for consistent text
 measurement and pagination.
@@ -194,8 +195,8 @@ whether or not a page shows it. `read.readStories({ stories, byRoot, view })`
 reads `'all'` stories, or listed kinds and story ids in their order without
 repeats, in one call. An entry naming a kind is a kind, matching each story's
 own kind unless `byRoot` matches its root's, so `['body']` with `byRoot` selects
-everything under the body. Worker viewers, the default for read-only editors without
-`collaboration`, answer each with one worker read. A story that cannot be read
+everything under the body. The default worker-only editor and read-only `legacySyncApi`
+editors without `collaboration` answer each with one worker read. A story that cannot be read
 reports its own failure, the read limits stop the read with `truncated`, a story
 larger than the limits on its own reports `limit-exceeded` (page it with
 `readParagraphs` and `paraIds`), and

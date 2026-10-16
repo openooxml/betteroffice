@@ -11,17 +11,34 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 interface DocxProps {
+  documentBuffer: Uint8Array;
+  onFirstPagePainted(): void;
   onSave(buffer: ArrayBuffer): void;
   onError(error: Error, info?: DocxErrorInfo): void;
   mode?: "editing" | "viewing";
   readOnly?: boolean;
-  experimentalPeerless?: boolean;
+  legacySyncApi?: boolean;
   onChange?: () => void;
   onDocumentChange?: () => void;
 }
 let docxProps: DocxProps;
+const parseDocx = mock(async () => ({}));
+const flushDocxInput = mock(async () => {});
 let save: (props: DocxProps) => Promise<ArrayBuffer | null> = async () =>
   null;
+const workerOpens: Uint8Array[] = [];
+let workerOpenFailure: Error | null = null;
+let workersDestroyed = 0;
+class ResidentEngineWorkerClient {
+  async openSource({ bytes }: { bytes: Uint8Array }) {
+    workerOpens.push(bytes);
+    if (workerOpenFailure) throw workerOpenFailure;
+    return {};
+  }
+  destroy() {
+    workersDestroyed += 1;
+  }
+}
 let workbookProps: XlsxAsyncEditorProps;
 let workbookSave: (props: XlsxAsyncEditorProps) => Promise<XlsxCommandResult>;
 let deferWorkbookReady = false;
@@ -93,13 +110,24 @@ class Provider {
 mock.module("@betteroffice/docx-react", () => ({
   DocxEditor: forwardRef<unknown, DocxProps>(function DocxEditor(props, ref) {
     docxProps = props;
-    useImperativeHandle(ref, () => ({ save: () => save(props) }));
+    useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
+    useEffect(() => {
+      if (props.legacySyncApi) return;
+      const client = new ResidentEngineWorkerClient();
+      let current = true;
+      void client.openSource({ bytes: props.documentBuffer }).then(() => {
+        if (current) props.onFirstPagePainted();
+      }, (cause: Error) => { if (current) props.onError(cause); });
+      return () => { current = false; client.destroy(); };
+    }, [props.documentBuffer]);
     return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
   }),
 }));
 for (const [specifier, exports] of Object.entries({
   "@betteroffice/docx-react/peerless-harness": { registerBrowserHarness: () => () => {} },
   "@betteroffice/docx-react/styles.css": {},
+  "@betteroffice/docx/docx": { parseDocx },
+  "@betteroffice/docx/yrs": { ResidentEngineWorkerClient },
   "@betteroffice/docx/layout": { configureDefaultFonts: () => {} },
   "@betteroffice/docx/utils": { setGoogleFontsEnabled: () => {} },
   "@betteroffice/docx/collaboration": { CollaborationProvider: Provider },
@@ -113,8 +141,9 @@ for (const [specifier, exports] of Object.entries({
 }))
   mock.module(specifier, () => exports);
 
-const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
 const { default: Editor, prepareFile } = await import("./Editor");
+const { App } = await import("./App");
 
 afterEach(() => {
   cleanup();
@@ -135,7 +164,7 @@ test("peerless harness mode controls commit the editor read-only prop", async ()
   const previousUrl = location.href;
   scope.__DOCX_PEERLESS_HARNESS__ = true;
   const browser = window as unknown as GlobalWindow;
-  browser.happyDOM.setURL("http://localhost/?format=docx&peerless=1");
+  browser.happyDOM.setURL("http://localhost/?format=docx");
   try {
     const view = render(<Editor
       file={{ bytes: new Uint8Array(), format: "docx" }} name="input.docx" room={null}
@@ -216,6 +245,35 @@ function readinessClock() {
   };
 }
 
+test("docx input flush reaches the mounted editor barrier", async () => {
+  flushDocxInput.mockClear();
+  const { api } = await mount();
+  expect(api.flushPendingInput).toBeDefined();
+  await api.flushPendingInput!();
+  expect(flushDocxInput).toHaveBeenCalledTimes(1);
+});
+
+test.each(["xlsx", "pptx"] as const)("%s does not provide an input flush barrier", async (format) => {
+  const { api } = await mount(format);
+  expect(api.flushPendingInput).toBeUndefined();
+});
+
+test.each(["", "&peerless=1", "&peerless=0"])("docx %s reports dirty state through document events", async (query) => {
+  const previousUrl = location.href;
+  const browser = window as unknown as GlobalWindow;
+  browser.happyDOM.setURL(`http://localhost/?format=docx${query}`);
+  try {
+    const changed = mock(() => {});
+    await mount("docx", false, changed);
+    expect(docxProps!.legacySyncApi).toBe(query === "&peerless=0");
+    expect(docxProps!.onChange).toBeUndefined();
+    docxProps!.onDocumentChange?.();
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    browser.happyDOM.setURL(previousUrl);
+  }
+});
+
 test("peerless preview reports dirty state through worker document events", async () => {
   const previousUrl = location.href;
   const browser = window as unknown as GlobalWindow;
@@ -223,11 +281,60 @@ test("peerless preview reports dirty state through worker document events", asyn
   try {
     const changed = mock(() => {});
     await mount("docx", false, changed);
-    expect(docxProps!.experimentalPeerless).toBe(true);
+    expect(docxProps!.legacySyncApi).toBe(false);
     expect(docxProps!.onChange).toBeUndefined();
     docxProps!.onDocumentChange?.();
     expect(changed).toHaveBeenCalledTimes(1);
   } finally {
+    browser.happyDOM.setURL(previousUrl);
+  }
+});
+
+test.each(["", "&peerless=1", "&peerless=0"])("docx %s prepares bytes for its selected runtime", async (query) => {
+  const previousUrl = location.href;
+  const browser = window as unknown as GlobalWindow;
+  browser.happyDOM.setURL(`http://localhost/?format=docx${query}`);
+  parseDocx.mockClear();
+  workerOpens.length = 0;
+  workersDestroyed = 0;
+  try {
+    const bytes = Uint8Array.of(1, 2);
+    expect(await prepareFile(bytes, "docx")).toEqual({ bytes, format: "docx" });
+    expect(parseDocx).toHaveBeenCalledTimes(query === "&peerless=0" ? 1 : 0);
+    expect(workerOpens).toEqual([]);
+    expect(workersDestroyed).toBe(0);
+  } finally {
+    browser.happyDOM.setURL(previousUrl);
+  }
+});
+
+test("a docx the worker cannot open is refused before it replaces the open file", async () => {
+  const previousUrl = location.href;
+  const browser = window as unknown as GlobalWindow;
+  browser.happyDOM.setURL("http://localhost/?format=docx");
+  parseDocx.mockClear();
+  workerOpens.length = 0;
+  workersDestroyed = 0;
+  const fetching = mock(async () => new Response(Uint8Array.of(1, 2)));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(fetching, { preconnect: originalFetch.preconnect });
+  try {
+    const view = render(<App />);
+    await waitFor(() => expect(window.desktop).toBeDefined());
+    act(() => { void window.desktop!.open({ id: "old", name: "old.docx", url: "http://localhost/old" }); });
+    await waitFor(() => expect(view.container.querySelector(".document-name")?.textContent).toBe("old.docx"));
+    const old = view.getByTestId("docx-mode");
+    workerOpenFailure = new Error("Failed to parse DOCX: not a zip archive");
+    act(() => { void window.desktop!.open({ id: "bad", name: "bad.docx", url: "http://localhost/bad" }); });
+    expect((await view.findByRole("alert")).textContent).toContain("Failed to parse DOCX");
+    expect(view.getByTestId("docx-mode")).toBe(old);
+    expect(view.container.querySelector(".document-name")?.textContent).toBe("old.docx");
+    expect(workerOpens).toHaveLength(2);
+    await waitFor(() => expect(workersDestroyed).toBe(1));
+    expect(parseDocx).not.toHaveBeenCalled();
+  } finally {
+    workerOpenFailure = null;
+    globalThis.fetch = originalFetch;
     browser.happyDOM.setURL(previousUrl);
   }
 });

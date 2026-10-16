@@ -293,7 +293,7 @@ pub(crate) struct StyledParagraph {
 }
 
 /// Pilcrow keys seeded from direct formatting with a paragraph-style fallback.
-const STYLE_FALLBACK_KEYS: [&str; 23] = [
+const STYLE_FALLBACK_KEYS: [&str; 24] = [
     "alignment",
     "spaceBefore",
     "spaceAfter",
@@ -315,6 +315,7 @@ const STYLE_FALLBACK_KEYS: [&str; 23] = [
     "snapToGrid",
     "autoSpaceDE",
     "autoSpaceDN",
+    "adjustRightInd",
     "outlineLevel",
     "bidi",
 ];
@@ -3089,6 +3090,7 @@ fn paragraph_attrs(
         ("listAbstractNumId", field(list, "abstractNumId")),
         ("listStartOverride", field(list, "startOverride")),
         ("_originalFormatting", formatting),
+        ("cnfStyle", field(formatting, "cnfStyle")),
     ] {
         if let Some(value) = value.filter(|value| !value.is_null()) {
             attrs.insert(key.to_owned(), drop_nulls(value.clone()));
@@ -3202,6 +3204,7 @@ fn paragraph_attrs(
             "snapToGrid",
             "autoSpaceDE",
             "autoSpaceDN",
+            "adjustRightInd",
             "outlineLevel",
             "bidi",
         ] {
@@ -8825,6 +8828,7 @@ mod tests {
             "snapToGrid": null,
             "autoSpaceDE": null,
             "autoSpaceDN": null,
+            "adjustRightInd": null,
             "outlineLevel": null,
             "bidi": null,
             "spacingExplicit": null,

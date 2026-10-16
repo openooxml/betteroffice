@@ -49,7 +49,7 @@ async function shell(built: [boolean, boolean] = [true, true]) {
     const from = idOf(asked) === 'late' ? 150 : 10;
     return { ok: true, ranges: [{ from, to: from + 5 }], paragraph: from } as ProposalGeometryTarget;
   };
-  const controller = { getSnapshot: () => ({ status: 'ready', view }), review: async () => review, reviewSnapshot: () => review,
+  const controller = { getSnapshot: () => ({ status: 'ready', view }), review: async () => review, describedReview: () => review,
     readAt: (request: { targets: DocxGeometryTarget[] }) => new Promise((resolve, reject) => {
       reads.push({ targets: request.targets, resolve: () => resolve(request.targets.map(answerOf)), reject: (error = new Error('worker gone')) => reject(error) });
     }),

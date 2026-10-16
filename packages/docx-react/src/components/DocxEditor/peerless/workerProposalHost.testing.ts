@@ -1,5 +1,6 @@
 import { mock, type Mock } from 'bun:test';
 import type { DocxProposalInput, DocxProposalSnapshot, DocxWorkerEditSession, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { createInputAdmission } from './inputAdmission';
@@ -22,12 +23,16 @@ interface ProposalHost {
   assignIdentities(): void;
 }
 
+export const source = Uint8Array.of(1);
+
 export const inputs: DocxProposalInput[] = Array.from({ length: 4 }, (_, index) => ({
   id: `change-${index}`, paragraph: { kind: 'session', sessionId: 's', story: 'body', paraId: `p${index}` },
   op: 'insertText', at: 'end', text: `Added ${index}`, suggest: { author: 'Reviewer', date: '2026-10-01T00:00:00Z' },
 }));
 
-export function proposalHost(options: { readOnly?: boolean; automatic?: boolean } = {}): ProposalHost {
+export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorProps['mode']; allowHostProposals?: boolean;
+  automatic?: boolean; opening?: boolean } = {}): ProposalHost {
+  const workerReadOnly = options.readOnly === true || options.mode === 'viewing';
   const identity = { session: 's', incarnation: 1, epoch: 1 };
   let snapshot: DocxProposalSnapshot = { version: 'native-0', previewVersion: 0, proposals: [] };
   let seq = 0;
@@ -36,7 +41,7 @@ export function proposalHost(options: { readOnly?: boolean; automatic?: boolean 
   let nullReads = 0;
   const viewStore = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
     workerSelection: null, anchors: null, geometry: null, editState: {
-      documentVersion: snapshot.version, review: { version: snapshot.version, previewVersion: 0 }, readOnly: options.readOnly ?? false,
+      documentVersion: snapshot.version, review: { version: snapshot.version, previewVersion: 0 }, readOnly: workerReadOnly,
       toolbar: null, effectiveFormatting: null, storedMarks: null, canUndo: true, canRedo: false, hyperlink: null, tableContext: null,
     } });
   const present = () => {
@@ -47,9 +52,10 @@ export function proposalHost(options: { readOnly?: boolean; automatic?: boolean 
   };
   present();
   const submit = mock((kind: string, payload: unknown, _metadata: unknown): ProposalTicket => {
-    const request = payload as { proposals: DocxProposalInput[]; changes: { id: string; state: 'proposed' | 'accepted' | 'rejected' }[]; ids: string[] };
+    const request = payload as { proposals: DocxProposalInput[]; changes: { id: string; state: 'proposed' | 'accepted' | 'rejected' }[]; ids: string[]; hostProposal?: boolean };
     const currentSeq = ++seq;
-    const reason = refuse ?? (options.readOnly ? 'read-only' : undefined);
+    const permitted = request.hostProposal === true || ['setReadOnly', 'setRenderEnvironment', 'setFontEnvironment'].includes(kind);
+    const reason = refuse ?? (workerReadOnly && !permitted ? 'read-only' : undefined);
     refuse = undefined;
     const ack = Promise.resolve().then(() => {
       if (!reason) {
@@ -94,9 +100,11 @@ export function proposalHost(options: { readOnly?: boolean; automatic?: boolean 
     return { status: 'ok' as const, version, value };
   });
   const read = mock(async () => ({ version: snapshot.version, value: { ok: true, view: 'accepted', version: snapshot.version, paragraphs: [] } }));
-  const settings = { read: read as never, readAt: readAt as never, focus() {}, zoom: 1, readOnly: options.readOnly, allowHostProposals: true };
+  const settings = { read: read as never, readAt: readAt as never, focus() {}, zoom: 1, readOnly: options.readOnly, mode: options.mode,
+    allowHostProposals: options.allowHostProposals ?? true };
   const controller = createPeerlessShellController(settings);
-  controller.attach(binding);
+  if (options.opening) controller.opening(source);
+  else controller.attach(binding);
   return { controller, binding, submit, readAt, present, settings, snapshot: () => snapshot, nullReads: () => nullReads,
     refuse: (reason: string) => { refuse = reason; }, assignIdentities: () => { snapshot = { ...snapshot, version: `${snapshot.version}+ids` }; } };
 }

@@ -56,7 +56,8 @@ use xlsx_render::{
 
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
-    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
+    is_collaborative_local_layout_op, is_structural_op,
 };
 use crate::move_range::{move_range_ops, preserved_move_unsupported_part};
 use crate::sheet_json::{
@@ -588,7 +589,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            parsed.legacy_styles.as_ref(),
+            (parsed.legacy_styles.as_ref(), &[]),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -656,7 +657,7 @@ impl Workbook {
             build_graph,
             client_id,
             &[],
-            None,
+            (None, &[]),
         )
     }
 
@@ -667,7 +668,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-        legacy_styles: Option<&Stylesheet>,
+        legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -683,7 +684,8 @@ impl Workbook {
             &model,
             client_id,
             legacy_dimensions,
-            legacy_styles,
+            legacy_styles.0,
+            legacy_styles.1,
         )
         .map_err(authority_error)?;
         if client_id.is_some() {
@@ -810,6 +812,11 @@ impl Workbook {
         matches!(self.mode, WorkbookMode::Collaborative { .. })
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_pending_updates_for_test(&self) -> bool {
+        !self.pending_remote_updates.is_empty() || self.authority.has_pending_updates()
+    }
+
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
         self.authority.encode_state_vector_v1()
     }
@@ -853,7 +860,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let staged = self.stage_remote_updates(&[update], None)?;
-        if !staged.structure.same_except_freeze_panes(&structure) {
+        if !staged.structure.same_except_local_layout(&structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -888,14 +895,23 @@ impl Workbook {
             return Ok(false);
         };
         let frozen = frozen.clone();
-        let candidate = match self.authority.snapshot_replacement(update) {
+        let candidate = match self
+            .authority
+            .snapshot_replacement_with_legacy_styles(update, || {
+                self.source_package
+                    .as_ref()?
+                    .materialize()
+                    .ok()?
+                    .legacy_style_readings()
+                    .ok()
+            }) {
             SnapshotAdoption::NotApplicable => return Ok(false),
             SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
             SnapshotAdoption::Replacement(candidate) => *candidate,
         };
         let structure = candidate.structure().map_err(authority_error)?;
         if !structure.describes_same_workbook(&frozen)
-            && !structure.snapshot_same_except_freeze_panes(&frozen)
+            && !structure.snapshot_same_except_local_layout(&frozen)
         {
             return Err(Error::CollaborativeStructureChanged);
         }
@@ -1005,7 +1021,7 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged) if !staged.structure.same_except_freeze_panes(structure) => {
+                Ok(staged) if !staged.structure.same_except_local_layout(structure) => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -1855,7 +1871,7 @@ impl Workbook {
         if self.is_collaborative()
             && ops
                 .iter()
-                .any(|op| is_structural_op(op) && !matches!(op, Op::SetFreezePane { .. }))
+                .any(|op| is_structural_op(op) && !is_collaborative_local_layout_op(op))
         {
             return Err(Error::CollaborativeStructureOperation);
         }
@@ -2147,7 +2163,7 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if !history.structure.same_except_freeze_panes(structure) {
+        if !history.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         let new_structure = history.structure;
@@ -2873,7 +2889,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin, &self.model.styles)
             .map_err(authority_error)?;
-        if !staged.structure.same_except_freeze_panes(structure) {
+        if !staged.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
@@ -3896,6 +3912,14 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
             validate_range(*range)?;
+            if matches!(op, Op::MergeCells { .. })
+                && range.start.row == range.end.row
+                && range.start.col == range.end.col
+            {
+                return Err(Error::InvalidOperation(
+                    "merged range must contain at least two cells".to_string(),
+                ));
+            }
         }
         Op::PatchRangeStyle { sheet, range, .. }
         | Op::SetRangeNumberFormat { sheet, range, .. }
@@ -5075,7 +5099,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            parsed.legacy_styles.as_ref(),
+            (parsed.legacy_styles.as_ref(), &[]),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -5088,7 +5112,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-        legacy_styles: Option<&Stylesheet>,
+        legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -5104,7 +5128,8 @@ impl Workbook {
             &model,
             client_id,
             legacy_dimensions,
-            legacy_styles,
+            legacy_styles.0,
+            legacy_styles.1,
         )
         .map_err(authority_error)?;
         if client_id.is_some() {
@@ -5335,7 +5360,7 @@ mod tests {
                     true,
                     client_id,
                     &case.legacy_dimensions,
-                    case.legacy_styles.as_ref(),
+                    (case.legacy_styles.as_ref(), &[]),
                 )
                 .unwrap();
                 assert_eq!(
@@ -5351,7 +5376,7 @@ mod tests {
                     true,
                     client_id,
                     &case.legacy_dimensions,
-                    case.legacy_styles.as_ref(),
+                    (case.legacy_styles.as_ref(), &[]),
                 )
                 .unwrap();
                 assert!(assert_open_paths_equal(
@@ -5373,7 +5398,7 @@ mod tests {
                             false,
                             client_id,
                             &case.legacy_dimensions,
-                            case.legacy_styles.as_ref(),
+                            (case.legacy_styles.as_ref(), &[]),
                         ),
                         Workbook::from_source_oracle(
                             case.model.clone(),
@@ -5382,7 +5407,7 @@ mod tests {
                             false,
                             client_id,
                             &case.legacy_dimensions,
-                            case.legacy_styles.as_ref(),
+                            (case.legacy_styles.as_ref(), &[]),
                         ),
                         &case.label,
                     ));

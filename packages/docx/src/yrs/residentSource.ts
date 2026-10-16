@@ -11,8 +11,8 @@ export type ResidentSourceOpenRequest = (
   | { bytes: Uint8Array; document?: never }
 ) & {
   preview?: boolean | ResidentSourcePreviewOptions;
-  /** @internal No preview here: the first command frame shows the font-ready first pages instead. */
-  deferPreview?: boolean;
+  /** Opens a display-only cut of the first body blocks of `bytes`; a later whole open replaces it. */
+  cut?: { blocks: number; paragraphBudget?: number };
   mediaTokens?: boolean;
   heapLimitBytes?: number;
   generation?: string;
@@ -28,6 +28,10 @@ export function validateResidentSource(source: ResidentSourceOpenRequest): void 
   }
   if (source.document !== undefined && !Array.isArray(source.document?.package?.document?.content)) {
     throw new TypeError('DOCX source document must contain a document body');
+  }
+  if (source.cut !== undefined && (source.bytes === undefined || !Number.isSafeInteger(source.cut?.blocks) || source.cut.blocks < 1 ||
+    (source.cut.paragraphBudget !== undefined && (!Number.isSafeInteger(source.cut.paragraphBudget) || source.cut.paragraphBudget < 1)))) {
+    throw new TypeError('Invalid DOCX source cut');
   }
   if (source.preview !== undefined && typeof source.preview !== 'boolean') {
     if (!source.preview || typeof source.preview !== 'object') throw new TypeError('Invalid DOCX preview options');
