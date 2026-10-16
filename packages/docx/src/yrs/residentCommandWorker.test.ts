@@ -2922,6 +2922,9 @@ test('reopening an imported resolved comment updates the projection and saved ex
     expect(comments.find(comment => comment.id === 0)?.done ?? false).toBe(false);
     const parts = unzipContainer(new Uint8Array(bytes));
     expect(new TextDecoder().decode(parts['word/commentsExtended.xml'])).toMatch(/w15:paraId="0C000001"[^>]*w15:done="0"/);
+    expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 0)?.done).toBe(true);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -2942,5 +2945,8 @@ test('an imported reply without range markers inherits its ancestor anchor and s
     expect(removed.outcomes[0]?.status).toBe('applied');
     expect(removed.editState?.commentChange?.comments.some(comment => comment.id === 1)).toBe(false);
     expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.some(comment => comment.id === 1)).toBe(false);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect((await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value).toEqual(reply);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 1)).toMatchObject({ parentId: 0, done: false });
   } finally { client.destroy(); }
 }, TIMEOUT);

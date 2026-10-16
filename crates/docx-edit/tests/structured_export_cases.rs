@@ -2088,7 +2088,7 @@ fn removing_a_materialized_unanchored_source_comment_removes_its_export() {
         "body",
         vec![RawOp::SetComment {
             id: "1".to_owned(),
-            ranges: Vec::new(),
+            ranges: vec![(0, 1)],
             author: "Ann".to_owned(),
             date: String::new(),
             body: yrs::Any::Null,
