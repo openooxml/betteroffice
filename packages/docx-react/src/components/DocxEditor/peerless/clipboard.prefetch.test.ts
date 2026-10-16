@@ -99,6 +99,17 @@ test('collapsed selections are never read ahead', async () => {
   prefetch.dispose();
 });
 
+test('copying cells selected under a collapsed selection reads their slice on demand', async () => {
+  const { binding, publish, readClipboardSlice, readSelection, prefetch } = fixture();
+  publish({ workerSelection: { anchor: range.anchor, focus: range.anchor } });
+  const writeSlice = mock(async (_text: string, _html: string) => {});
+  expect(await copyWorkerSelection({ binding, readSelection, readClipboardSlice, isCurrent: () => true, write: denied, writeSlice,
+    data: transfer().transfer, prefetched: prefetch.take(), readCapture: () => prefetch.read() })).toBe(true);
+  expect(writeSlice.mock.calls[0]?.[0]).toBe('bcd');
+  expect(writeSlice.mock.calls[0]?.[1]).toContain('<table');
+  prefetch.dispose();
+});
+
 
 test('prefetch starts without a quiet timer and coalesces selection changes during a read', async () => {
   const f = fixture();

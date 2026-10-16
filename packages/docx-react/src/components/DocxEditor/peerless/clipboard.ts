@@ -117,6 +117,7 @@ export function createClipboardPrefetch(options: SelectionRead & {
     async read(): Promise<ClipboardCapture | null> {
       await flushAdmittedInput(binding);
       const key = snapshotKey(binding);
+      if (!key) return readWorkerClipboardSlice(options);
       const identity = { ...binding.viewStore.getSnapshot().identity };
       schedule();
       while (!disposed && options.isCurrent()) {
