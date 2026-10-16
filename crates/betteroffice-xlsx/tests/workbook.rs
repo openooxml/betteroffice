@@ -4996,13 +4996,16 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
     let _remote_subscription = target
         .observe_update_v1(move |event| observed.lock().unwrap().push(event))
         .unwrap();
+    let state_vector = target.encode_state_vector_v1();
     assert!(
         target
             .apply_update_v1(&updates[1], CalculationOptions::default())
             .unwrap()
             .applied
     );
-    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "9");
+    assert_eq!(target.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "");
+    assert_eq!(target.encode_state_vector_v1(), state_vector);
     assert_eq!(remote_events.lock().unwrap().len(), 1);
     assert!(
         target
@@ -5011,7 +5014,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .applied
     );
     assert_eq!(target.model(), source.model());
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
     assert_eq!(
         remote_events.lock().unwrap()[0].origin,
         UpdateOrigin::Remote
@@ -5028,7 +5031,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .unwrap()
             .applied
     );
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
 }
 
 #[test]
