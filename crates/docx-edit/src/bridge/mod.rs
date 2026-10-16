@@ -2136,6 +2136,7 @@ fn image_outline(
             }
             .to_owned(),
         ),
+        ooxml_style: None,
     })
 }
 
@@ -2916,6 +2917,7 @@ fn lower_cell_borders(
                     width: Some(0.0),
                     color: None,
                     style: Some("none".to_owned()),
+                    ooxml_style: None,
                 })
             })
     };
@@ -2967,6 +2969,7 @@ fn lower_cell_border(
         width: Some(width),
         color: Some(color),
         style: Some(css_style.to_owned()),
+        ooxml_style: Some(style),
     })
 }
 

@@ -779,7 +779,8 @@ write one property twice. `findText` searches display text exactly and
 case-sensitively. Volatile functions see only `calculation.nowSerial`. Versions
 and sheet ids belong to one session. Batches do not insert or delete rows,
 columns or sheets, merge cells or move charts, and refuse writes to merged-cell
-followers, array-formula cells and protected sheets. The React editor's
+followers, array-formula cells and locked cells of protected sheets. Formats on
+a protected sheet need its protection to allow formatting cells. The React editor's
 `onReady` API exposes the same operations, committing pending drafts, nudges and
 pastes first, and rejecting with `XlsxCommandAdmissionError` when that input
 cannot be written or the workbook is replaced meanwhile.

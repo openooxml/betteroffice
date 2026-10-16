@@ -746,6 +746,12 @@ pub struct CellBorderSpec {
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
+    #[serde(
+        rename = "ooxmlStyle",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ooxml_style: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
