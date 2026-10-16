@@ -4,7 +4,7 @@ import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession
 import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection } from '@betteroffice/docx/yrs';
 
 const range: DocxCommandSelection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
-const fragment = { paragraphs: [{ text: 'bcd', segments: [] }] } as unknown as DocxClipboardFragment;
+const fragment = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'bcd', rPr: {} }, { kind: 'pilcrow' }] }] }] }] }] } as DocxClipboardFragment;
 
 function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }) {
   const listeners = new Set<() => void>();
@@ -48,7 +48,7 @@ test('a settled range fills the copy event synchronously when the async clipboar
     write: denied, writeSlice: denied, data: clipboardData, prefetched: prefetch.take() });
   expect(data.get('text/plain')).toBe('bcd');
   expect(data.get('text/html')).toContain('data-betteroffice-docx');
-  expect(data.get('text/html')).toContain('<p>bcd</p>');
+  expect(data.get('text/html')).toContain('<table');
   expect(await copied).toBe(true);
   expect(readClipboardSlice).toHaveBeenCalledTimes(1);
 });
@@ -134,5 +134,39 @@ test('an incarnation change invalidates a capture with the same version and sele
   expect(f.prefetch.take()).toBeNull();
   expect(await settled(f.prefetch)).not.toBeNull();
   expect(f.readClipboardSlice).toHaveBeenCalledTimes(2);
+  f.prefetch.dispose();
+});
+
+
+test('a pending cut shares the prefetch read and deletes only after the fresh event writes', async () => {
+  const f = fixture();
+  let finish!: (slice: DocxClipboardSlice) => void;
+  f.readClipboardSlice.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  f.publish({ workerSelection: range });
+  const { data, transfer: clipboardData } = transfer();
+  const replay = mock((capture: NonNullable<ReturnType<typeof f.prefetch.take>>) => {
+    expect(f.submit).not.toHaveBeenCalled();
+    data.set('text/plain', capture.slice.text);
+    return true;
+  });
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true, cut: true, data: clipboardData,
+    readCapture: () => f.prefetch.read(), writeNative: replay, write: denied, writeSlice: denied });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  expect(replay).not.toHaveBeenCalled();
+  expect(f.submit).not.toHaveBeenCalled();
+  finish({ text: 'bcd', fragment: null });
+  expect(await copied).toBe(true);
+  expect(data.get('text/plain')).toBe('bcd');
+  expect(f.submit).toHaveBeenCalledTimes(1);
+  f.prefetch.dispose();
+});
+
+test('a missed cut with unavailable activation and denied async writes preserves the document', async () => {
+  const f = fixture();
+  f.publish({ workerSelection: range });
+  await expect(copyWorkerSelection({ ...f, isCurrent: () => true, cut: true,
+    readCapture: () => f.prefetch.read(), writeNative: () => false, write: denied, writeSlice: denied })).rejects.toThrow('Write permission denied.');
+  expect(f.submit).not.toHaveBeenCalled();
   f.prefetch.dispose();
 });

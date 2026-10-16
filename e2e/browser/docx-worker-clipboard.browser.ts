@@ -22,6 +22,14 @@ async function open(page: Page, deny = true): Promise<Locator> {
     Object.defineProperty(Navigator.prototype, 'clipboard', { configurable: true,
       get: () => ({ write: denied, writeText: denied, read: denied, readText: denied }) });
   });
+  await page.addInitScript(() => {
+    const record = (event: ClipboardEvent) => {
+      const text = event.clipboardData?.getData('text/plain');
+      if (text) (window as unknown as { nativeClipboardText: string }).nativeClipboardText = text;
+    };
+    document.addEventListener('copy', record);
+    document.addEventListener('cut', record);
+  });
   await page.goto('/?format=docx&peerless=1');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'worker-clipboard.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await documentBytes() });
@@ -63,6 +71,7 @@ test('copy and cut fill the native clipboard when the async Clipboard API is den
   const input = await open(page);
   await input.press('ControlOrMeta+a');
   await input.press('ControlOrMeta+c');
+  await expect.poll(() => page.evaluate(() => (window as unknown as { nativeClipboardText?: string }).nativeClipboardText)).toContain('RIGHT');
   const copied = await pasteIntoSink(page);
   expect(copied.text).toContain('Before');
   expect(copied.text).toContain('RIGHT');
@@ -70,7 +79,9 @@ test('copy and cut fill the native clipboard when the async Clipboard API is den
   expect(copied.html).toContain('font-weight:bold');
   await input.focus();
   await input.press('ControlOrMeta+a');
+  await page.evaluate(() => { (window as unknown as { nativeClipboardText: string }).nativeClipboardText = ''; });
   await input.press('ControlOrMeta+x');
+  await expect.poll(() => page.evaluate(() => (window as unknown as { nativeClipboardText?: string }).nativeClipboardText)).toContain('RIGHT');
   const cut = await pasteIntoSink(page);
   expect(cut.text).toBe(copied.text);
   await expect.poll(async () => (await savedXml(page, info, 'cut')).includes('RIGHT')).toBe(false);
@@ -107,6 +118,7 @@ for (const cut of [false, true]) test(`immediate native ${cut ? 'cut' : 'copy'} 
   await page.evaluate(() => { const sink = document.createElement('textarea'); sink.id = 'plain-sink'; document.body.append(sink); });
   await input.press('ControlOrMeta+a');
   await input.press(cut ? 'ControlOrMeta+x' : 'ControlOrMeta+c');
+  await expect.poll(() => page.evaluate(() => (window as unknown as { nativeClipboardText?: string }).nativeClipboardText)).toContain('RIGHT');
   await expect.poll(async () => (await savedXml(page, info, 'immediate')).includes('RIGHT')).toBe(!cut);
   await page.locator('#plain-sink').focus();
   await page.keyboard.press('ControlOrMeta+v');
@@ -118,6 +130,7 @@ test('native copy retains table HTML with the async Clipboard API granted', asyn
   const input = await open(page, false);
   await input.press('ControlOrMeta+a');
   await input.press('ControlOrMeta+c');
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('RIGHT');
   const copied = await pasteIntoSink(page);
   expect(copied.text).toContain('Before');
   expect(copied.text).toContain('RIGHT');
