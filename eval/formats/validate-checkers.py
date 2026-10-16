@@ -3050,10 +3050,17 @@ def complex_mutants(task, original):
                 formula.text = '999999'
             add(f'conditional-{index}-wrong-formula', wrong_formula)
         for index, change in enumerate(spec.get('chart', [])):
-            def old_range(p, change=change):
-                node = next(p.xml(change['part']).iter(tag('c', 'f')))
-                node.text = next(original.xml(change['part']).iter(tag('c', 'f'))).text
-            add(f'chart-{index}-old-range', old_range)
+            def wrong_range(p, change=change):
+                series = p.xml(change['part']).find('.//c:ser', NS)
+                before = original.xml(change['part']).find('.//c:ser', NS)
+                field = 'cat' if series.find('c:cat', NS) is not None else 'xVal'
+                node = series.find('c:' + field + '//c:f', NS)
+                node.text = before.find('c:' + field + '//c:f', NS).text
+                wanted = checker.chart_range_state(change['series'][0]['categories'])
+                if checker.chart_range_state(node.text) == wanted:
+                    node.text = node.text.rsplit('!', 1)[0] + '!$XFD$1:$XFD$2'
+                assert checker.chart_range_state(node.text) != wanted
+            add(f'chart-{index}-wrong-range', wrong_range)
             def wrong_name(p, change=change):
                 p.xml(change['part']).find('.//c:ser/c:tx/c:v', NS).text = 'Wrong series'
             add(f'chart-{index}-wrong-series-name', wrong_name)
@@ -3199,8 +3206,30 @@ def complex_mutants(task, original):
     return result
 
 
-def complex_allowances(task):
+def complex_allowances(task, original):
     result = []
+    if any(name.startswith('[trash]/') for name in original.parts):
+        def drop_trash(p):
+            for name in list(p.parts):
+                if name.startswith('[trash]/'):
+                    del p.parts[name]
+                    p.xml_parts.pop(name, None)
+            types = p.xml('[Content_Types].xml')
+            types[:] = [n for n in types if not n.get('PartName', '').lstrip('/').startswith('[trash]/')]
+        result.append(('ignorable-trash-removed', drop_trash))
+    if task['format'] == 'xlsx' and task['expected'].get('chart'):
+        def chart_ranges(p):
+            for change in task['expected']['chart']:
+                for series in p.xml(change['part']).findall('.//c:ser', NS):
+                    for field in ('cat', 'val', 'xVal', 'yVal'):
+                        target = series.find('c:' + field, NS)
+                        if target is None:
+                            continue
+                        node = target.find('.//c:f', NS)
+                        sheet, cells = node.text.rsplit('!', 1)
+                        sheet = sheet[1:-1].replace("''", "'") if sheet.startswith("'") else sheet
+                        node.text = "'" + sheet.replace("'", "''") + "'!" + cells.replace('$', '')
+        result.append(('relative-quoted-chart-ranges', chart_ranges))
     if task['format'] == 'docx':
         def point_comment(p):
             for change in task['expected'].get('comments', []):
@@ -3317,7 +3346,7 @@ def validate_complex(directory):
             failures.append(f'{task["id"]} partial construction: {error}')
             counts[task['format']]['mutants_rejected'][1] += 1
         mutations = v3_mutants(correct, task, original) + complex_mutants(task, original)
-        for name, mutate in mutations + complex_allowances(task):
+        for name, mutate in mutations + complex_allowances(task, original):
             accept = (name, mutate) not in mutations
             kind = 'accepted' if accept else 'mutants_rejected'
             try:

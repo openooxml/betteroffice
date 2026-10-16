@@ -266,11 +266,13 @@ def expected_workbook_state(state, spec):
             tuple(expected_workbook_state(child, spec) for child in children))
 
 
-def validate_package(archive):
+def validate_package(archive, ignore_trash=False):
     names = archive.namelist()
     require(len(names) == len(set(names)), 'duplicate ZIP members')
     require(archive.testzip() is None, 'invalid ZIP checksum')
     for name in names:
+        if ignore_trash and name.startswith('[trash]/'):
+            continue
         if name.endswith(('.xml', '.rels')):
             xml(archive, name)
         if name.endswith('.rels'):
@@ -281,6 +283,8 @@ def validate_package(archive):
                         f'missing relationship target: {name} -> {rel["target"]}')
     for item in xml(archive, '[Content_Types].xml'):
         if item.tag.endswith('Override'):
+            if ignore_trash and item.attrib['PartName'].lstrip('/').startswith('[trash]/'):
+                continue
             require(item.attrib['PartName'].lstrip('/') in names, f'missing content type part: {item.attrib["PartName"]}')
 
 
@@ -3041,7 +3045,15 @@ def normalize_complex_xlsx(package, spec):
                     require(target.find('c:numRef', NS) is not None, 'numeric chart data must use numRef')
                 formula = unique(target.findall('.//c:f', NS), 'chart data must have one range reference').text
                 target[:] = []
-                target.text = formula
+                target.text = chart_range_state(formula)
+
+
+def chart_range_state(formula):
+    match = re.fullmatch(r"('(?:[^']|'')+'|[^!]+)!(\$?[A-Za-z]+\$?[1-9][0-9]*)(?::(\$?[A-Za-z]+\$?[1-9][0-9]*))?", formula or '')
+    require(match is not None, 'chart data must reference a workbook cell range')
+    sheet, first, last = match.groups()
+    sheet = sheet[1:-1].replace("''", "'") if sheet.startswith("'") else sheet
+    return json.dumps((sheet.casefold(), first.replace('$', '').upper(), (last or first).replace('$', '').upper()))
 
 
 def chart_reference_text(package, formula):
@@ -3138,6 +3150,8 @@ def complex_slide_metadata(original, package, spec):
         count = variants[index + 1][0]
         size = int(count.text)
         if variants[index][0].text == 'Slide Titles':
+            if size == 0:
+                return
             items = list(vector)
             group = items[offset:offset + size]
             for change in spec['duplicate_slide']:
@@ -3169,6 +3183,12 @@ def complex_slide_metadata(original, package, spec):
 def check_complex(task, source, revised):
     original, expected, actual = RealPackage(source), RealPackage(source), RealPackage(revised)
     spec, fmt = task['expected'], task['format']
+    for package in (original, expected, actual):
+        for name in package.namelist():
+            if name.startswith('[trash]/'):
+                del package.parts[name]
+        types = package.root('[Content_Types].xml')
+        types[:] = [n for n in types if not n.get('PartName', '').lstrip('/').startswith('[trash]/')]
     complex_integrity(actual, original)
     complex_expected_package(expected, spec, fmt)
     complex_xml_order(expected)
@@ -3218,7 +3238,7 @@ def check(task, output):
         return 'exact answer verified'
     require(output.is_file(), f'missing output file: {output.name}')
     with ZipFile(fixture(task)) as source, ZipFile(output) as revised:
-        validate_package(revised)
+        validate_package(revised, ignore_trash=task.get('tier') == 'complex')
         if task.get('tier') == 'complex':
             require(task.get('suite') == 'v3', 'complex tier requires v3')
             check_complex(task, source, revised)
