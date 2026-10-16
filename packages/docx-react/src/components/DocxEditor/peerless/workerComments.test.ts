@@ -78,7 +78,7 @@ function reviewFixture(options: { readOnly?: boolean; mode?: 'viewing' } = {}) {
     request.kind === 'readParagraphs' ? { ok: true, version: 'native', paragraphs: [] } :
     request.kind === 'reviewTarget' ? request.target?.id === 7 ? { id: 'native-7', ranges } : null :
     request.kind === 'reviewSnapshot' ? { comments: [], uiComments: structuredClone(comments), commentIds: { 'native-7': 7 } } : null }));
-  const submit = mock((intent: { kind: string; payload: { author?: string; patch?: { done: boolean } } }) => {
+  const submit = mock((intent: { kind: string; payload: Record<string, unknown> & { author?: string; patch?: { done: boolean } } }) => {
     seq += 1;
     if (intent.kind === 'addComment') comments = [...comments, { id: 8, author: intent.payload.author!, content: [], parentId: 7 }];
     if (intent.kind === 'updateComment') comments = comments.map(comment => comment.id === 7 ? { ...comment, done: intent.payload.patch!.done } : comment);
@@ -129,15 +129,17 @@ test('comment changes for an unknown comment refuse as values without admission'
   expect(changes).toEqual([]);
 });
 
-test.each([[{ readOnly: true }, 'read-only'], [{ mode: 'viewing' as const }, 'viewing-mode']] as const)('a %o editor refuses comment changes as values and still reads comments', async (options, code) => {
-  const { controller, submit, host } = reviewFixture(options);
-  expect(await controller.ref.insertCommentReply(7, 'Reply', 'B')).toBeNull();
-  expect(await controller.setCommentDone(7, true)).toMatchObject({ ok: false, failure: { code } });
-  expect(await controller.removeComment(7)).toMatchObject({ ok: false, failure: { code } });
-  expect(() => controller.ref.resolveComment(7)).not.toThrow();
-  expect(submit).not.toHaveBeenCalled();
-  expect(controller.ref.getComments()).toEqual(host);
-});
+for (const [options, code] of [[{ readOnly: true }, 'read-only'], [{ mode: 'viewing' }, 'viewing-mode']] as const) {
+  test(`a ${code} editor refuses comment changes as values and still reads comments`, async () => {
+    const { controller, submit, host } = reviewFixture(options);
+    expect(await controller.ref.insertCommentReply(7, 'Reply', 'B')).toBeNull();
+    expect(await controller.setCommentDone(7, true)).toMatchObject({ ok: false, failure: { code } });
+    expect(await controller.removeComment(7)).toMatchObject({ ok: false, failure: { code } });
+    expect(() => controller.ref.resolveComment(7)).not.toThrow();
+    expect(submit).not.toHaveBeenCalled();
+    expect(controller.ref.getComments()).toEqual(host);
+  });
+}
 
 test('getComments follows the latest review read of the worker document', async () => {
   const { controller, host } = reviewFixture();
