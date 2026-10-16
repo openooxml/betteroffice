@@ -23,6 +23,7 @@ const SYNC_UPDATE = 2;
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
 const MAX_STATE_VECTOR_VAR_UINT_BYTES = 10;
+const MAX_NATIVE_CLOCK = 0xffff_ffffn;
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -425,14 +426,16 @@ export function stateVectorDominates(vector: Uint8Array, other: Uint8Array): boo
   return true;
 }
 
-/** `vector` with `clientId`'s clock one past its own (1 when absent). */
-export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array {
+/** `vector` with `clientId`'s clock one past its own (1 when absent); undefined past the native clock limit. */
+export function withClientClockAhead(vector: Uint8Array, clientId: number): Uint8Array | undefined {
   if (!Number.isSafeInteger(clientId) || clientId < 0) {
     throw new ProtocolError('Client id must be a non-negative safe integer');
   }
   const clocks = decodeStateVector(vector);
   const client = BigInt(clientId);
-  clocks.set(client, (clocks.get(client) ?? 0n) + 1n);
+  const clock = (clocks.get(client) ?? 0n) + 1n;
+  if (clock > MAX_NATIVE_CLOCK) return undefined;
+  clocks.set(client, clock);
   const bytes: number[] = [];
   for (let value of [BigInt(clocks.size), ...[...clocks].flat()]) {
     for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);

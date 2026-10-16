@@ -536,11 +536,12 @@ export class CollaborationProvider {
 
   private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
     if (!this.isCurrentOpen(token, connection)) return;
+    let ahead: Uint8Array | undefined;
     try {
-      const advertised = isStateVector(stateVector)
+      ahead = isStateVector(stateVector)
         ? withClientClockAhead(stateVector, this.replica.clientId)
         : stateVector;
-      this.sendFrame(encodeSyncStep1(advertised, this.maxFrameBytes));
+      this.sendFrame(encodeSyncStep1(ahead ?? stateVector, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(
         token,
@@ -548,6 +549,7 @@ export class CollaborationProvider {
       );
       return;
     }
+    if (!ahead && this.isCurrentOpen(token, connection)) this.sendFullUpdate(token, connection);
     if (!this.localUser || !this.isCurrentOpen(token, connection)) return;
 
     try {
@@ -559,6 +561,39 @@ export class CollaborationProvider {
     this.broadcastLocalAwareness();
     if (!this.isCurrentOpen(token, connection)) return;
     this.startPresence();
+  }
+
+  private sendFullUpdate(token: number, connection: number): void {
+    const send = (update: Uint8Array) => {
+      if (!this.isCurrentOpen(token, connection)) return;
+      try {
+        this.sendFrame(encodeUpdate(update, this.maxFrameBytes));
+      } catch (cause) {
+        this.failConnection(
+          token,
+          normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
+        );
+      }
+    };
+    const fail = (cause: unknown) => {
+      if (this.isCurrentOpen(token, connection)) {
+        this.failConnection(token, normalizeError('replica', 'Failed to encode replica update', cause));
+      }
+    };
+    if (this.asyncReplica) {
+      void this.asyncReplica.encodeStateAsUpdate()
+        .then((update) => requireBytes(update, 'encodeStateAsUpdate'))
+        .then(send, fail);
+      return;
+    }
+    let update: Uint8Array;
+    try {
+      update = requireBytes(this.replica.encodeStateAsUpdate(), 'encodeStateAsUpdate');
+    } catch (cause) {
+      fail(cause);
+      return;
+    }
+    send(update);
   }
 
   private handleMessage(
