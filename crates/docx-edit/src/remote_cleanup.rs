@@ -278,4 +278,101 @@ mod tests {
         main.apply_update_chunks_v1(&chunks).unwrap();
         assert_eq!(updates.lock().unwrap().len(), 2);
     }
+
+    #[test]
+    fn batched_and_sequential_remote_applies_forward_the_same_deletions() {
+        for delete_first in [true, false] {
+            let origin = replica(7);
+            let insert = edit(&origin, |txn, text| text.insert(txn, 0, "abcd"));
+            let worker = replica(8);
+            worker
+                .transact_mut()
+                .apply_update(Update::decode_v1(&insert).unwrap())
+                .unwrap();
+            let local = edit(&worker, |txn, text| text.remove_range(txn, 1, 1));
+            let remote = edit(&origin, |txn, text| text.remove_range(txn, 3, 1));
+            let expected = Update::decode_v1(&local).unwrap().delete_set().clone();
+            let batch = crate::EditingDoc::new(9);
+            let sequential = crate::EditingDoc::new(10);
+            let mut subscriptions = Vec::new();
+            let mut publications = Vec::new();
+            for doc in [&batch, &sequential] {
+                doc.integrate_update(
+                    Update::decode_v1(&local).unwrap(),
+                    crate::UpdateOrigin::Local,
+                )
+                .unwrap();
+                assert!(ReadTxn::store(&doc.doc.transact()).pending_ds() == Some(&expected));
+
+                let updates = Arc::new(Mutex::new(Vec::new()));
+                let published = Arc::clone(&updates);
+                subscriptions.push(
+                    doc.observe_update_v1(move |update, remote| {
+                        if !remote {
+                            published.lock().unwrap().push(update.to_vec());
+                        }
+                    })
+                    .unwrap(),
+                );
+                publications.push(updates);
+            }
+
+            let chunks = if delete_first {
+                [remote, insert]
+            } else {
+                [insert, remote]
+            };
+            batch.apply_update_chunks_v1(&chunks).unwrap();
+            sequential.apply_update_v1(&chunks[0]).unwrap();
+            if delete_first {
+                let carried = Update::decode_v1(&chunks[0]).unwrap();
+                let mut pending = expected.clone();
+                pending.merge_with(carried.delete_set().clone());
+                assert!(ReadTxn::store(&sequential.doc.transact()).pending_ds() == Some(&pending));
+                assert!(publications[1].lock().unwrap().is_empty());
+            }
+            sequential.apply_update_v1(&chunks[1]).unwrap();
+
+            assert_eq!(text(&batch.doc), "ac");
+            assert_eq!(text(&batch.doc), text(&sequential.doc));
+            let batch_txn = batch.doc.transact();
+            let sequential_txn = sequential.doc.transact();
+            let batch_pending = ReadTxn::store(&batch_txn).pending_ds();
+            let sequential_pending = ReadTxn::store(&sequential_txn).pending_ds();
+            assert!(batch_pending == sequential_pending);
+            assert!(batch_pending.is_none());
+            drop((batch_txn, sequential_txn));
+
+            batch.apply_update_chunks_v1(&chunks).unwrap();
+            for chunk in &chunks {
+                sequential.apply_update_v1(chunk).unwrap();
+            }
+
+            let mut unions = Vec::new();
+            for updates in publications {
+                let updates = updates.lock().unwrap();
+                let mut union = IdSet::new();
+                for update in updates.iter() {
+                    assert_eq!(update[0], 0, "a local publication carries no structs");
+                    let update = Update::decode_v1(update).unwrap();
+                    let deletions = update.delete_set();
+                    assert!(!deletions.is_empty());
+                    assert!(
+                        union.intersect(deletions).is_empty(),
+                        "a deletion was published twice"
+                    );
+                    union.merge_with(deletions.clone());
+                }
+                assert!(
+                    union == expected,
+                    "only the unblocked local deletion is published"
+                );
+                unions.push(union);
+            }
+            assert!(
+                unions[0] == unions[1],
+                "batch and sequential publications differ"
+            );
+        }
+    }
 }
