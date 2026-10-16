@@ -26,6 +26,7 @@ async function open(page: Page) {
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   await input.press('ArrowDown');
+  await expect(page.getByTestId('toolbar-table-borders')).toBeEnabled();
   return input;
 }
 
