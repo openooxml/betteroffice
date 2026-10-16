@@ -57,7 +57,11 @@ function reviewNavigation(targets: Record<string, unknown>, shown: Shown = { car
       coversThroughSeq: 0, ...shown, pages: [] } });
   const read = mock(async (request: { kind: string; target?: { kind: string; id?: number; revisionId?: string } }) => ({ status: 'ok', version: 'native',
     value: request.kind === 'reviewTarget' ? targets[JSON.stringify(request.target)] ?? null : null }));
-  const submit = mock((_intent: unknown, _options?: unknown) => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }), presented: Promise.resolve('presented') } }));
+  const submit = mock((_intent: unknown, _options?: unknown) => {
+    const geometry = viewStore.getSnapshot().geometry!;
+    if (!geometry.caret && geometry.selectionRects[0]) geometry.caret = geometry.selectionRects[0];
+    return { status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }), presented: Promise.resolve('presented') } };
+  });
   const binding = { session: { flush: async () => {} }, admission: {}, commands: { submit }, viewStore } as unknown as PeerlessEditSessionBinding;
   const controller = createPeerlessShellController({ zoom: 2, focus() {}, read: read as never, readAt: read as never });
   controller.attach(binding);
@@ -82,15 +86,17 @@ test('review navigation selects the first anchored range of a comment or revisio
     expect(await controller.ref.scrollToComment(7)).toBe(true);
     expect(read).toHaveBeenCalledWith({ kind: 'reviewTarget', target: { kind: 'comment', id: 7 } });
     expect(submit.mock.calls[0]).toEqual([{ kind: 'select', payload: { selection: {
-      anchor: { story: 'body', paraId: 'p', offset: 3 }, focus: { story: 'body', paraId: 'q', offset: 2 } } } }, { source: 'selection', fence: true }]);
+      anchor: { story: 'body', paraId: 'p', offset: 3 }, focus: { story: 'body', paraId: 'p', offset: 3 } } } }, { source: 'selection', fence: true }]);
+    expect(submit.mock.calls[1]).toEqual([{ kind: 'select', payload: { selection: {
+      anchor: { story: 'body', paraId: 'q', offset: 2 }, focus: { story: 'body', paraId: 'p', offset: 3 } } } }, { source: 'selection', fence: true }]);
     expect(scroller.scrollTop).toBe(400 * 2 - 24);
     expect(await controller.revealReviewTarget({ kind: 'revision', revisionId: '12' })).toBe(true);
     expect(await controller.ref.scrollToChange(12)).toBe(true);
-    expect(submit).toHaveBeenCalledTimes(3);
+    expect(submit).toHaveBeenCalledTimes(6);
   } finally { dispose(); }
 });
 
-test('review navigation scrolls a selected range without a caret to its first selection rect', async () => {
+test('review navigation builds a start caret when a selected range initially has no caret', async () => {
   const range = { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 9 } };
   const { controller, scroller, dispose } = reviewNavigation({ [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native', ranges: [range] } },
     { caret: null, selectionRects: [{ x: 10, y: 900, width: 40, height: 12 }, { x: 10, y: 914, width: 20, height: 12 }] });
@@ -121,7 +127,7 @@ for (const member of ['scrollToComment', 'scrollToChange'] as const) {
     const { controller, read, viewStore, dispose } = reviewNavigation(reviewTargets);
     const id = member === 'scrollToComment' ? 7 : 12;
     try {
-      read.mockImplementationOnce(async () => { viewStore.getSnapshot().version += 1; return { status: 'ok', version: 'native', value: reviewTargets[JSON.stringify({ kind: 'comment', id: 7 })] }; });
+      read.mockImplementationOnce(async () => { const view = viewStore.getSnapshot(); viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version + 1, throughSeq: 0, selection: null }); return { status: 'ok', version: 'native', value: reviewTargets[JSON.stringify({ kind: 'comment', id: 7 })] }; });
       expect(await controller.ref[member](id)).toBe(false);
       read.mockImplementationOnce(async () => { controller.opening({}); return { status: 'ok', version: 'native', value: null }; });
       expect(await controller.ref[member](id)).toBe(false);
