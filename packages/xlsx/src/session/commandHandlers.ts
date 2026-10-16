@@ -297,10 +297,11 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
       case 'setNumberFormat':
       case 'applyFormat': op.args[0] = target.sheet; op.args[1] = target.range; break;
       case 'setActiveSheet': op.args[0] = target.sheet; break;
-      case 'moveChart': op.args[0] = target.sheet; break;
+      case 'moveChart':
+      case 'moveRange': op.args[0] = target.sheet; break;
       default: throw new WorkbookCommandRefusal('invalid-command');
     }
-  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart'].includes(op.method)) numericSheet();
+  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart', 'moveRange'].includes(op.method)) numericSheet();
   return op;
 }
 
@@ -355,7 +356,8 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
       }
       break;
     case 'setActiveSheet':
-    case 'moveChart': sheetTarget(handle, op.args[0], { kind: 'a1', a1: 'A1' }); break;
+    case 'moveChart':
+    case 'moveRange': sheetTarget(handle, op.args[0], { kind: 'a1', a1: 'A1' }); break;
   }
 }
 
@@ -382,11 +384,16 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^chart .+ cannot be resized: a one-cell extent is not written back$/.test(error.message) ||
     /^chart .+ cannot change its anchor kind$/.test(error.message)
   )) return new WorkbookCommandRefusal('unsupported');
+  if (method === 'moveRange' && (
+    /^range move cannot safely preserve .+$/.test(error.message) ||
+    /^.+ contains worksheet features a cell move cannot safely preserve$/.test(error.message) ||
+    /^.+ references cells this move would relocate, and it cannot be rewritten$/.test(error.message)
+  )) return new WorkbookCommandRefusal('unsupported');
   if (method === 'applyOps' &&
     /^chart frame .+ does not hold the chart part and anchor this op was recorded against; its drawing has changed$/.test(error.message)) {
     return new WorkbookCommandRefusal('stale-target');
   }
-  if ((method === 'editCell' || method === 'editCells' || method === 'propose' || method === 'acceptProposal') &&
+  if ((method === 'editCell' || method === 'editCells' || method === 'propose' || method === 'acceptProposal' || method === 'moveRange') &&
     /^(?:cell number must be finite|cell text exceeds Excel's length limit|formula exceeds the length limit)$/.test(error.message)) {
     return new WorkbookCommandRefusal('invalid-step');
   }
@@ -406,10 +413,11 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   }
   if ((method === 'applyOps' && /^bad ops: /.test(error.message)) ||
     (method === 'applyFormat' && /^bad format args: /.test(error.message)) ||
+    (method === 'moveRange' && /^bad (?:move range args|range|move destination): /.test(error.message)) ||
     (method === 'applyEdits' && /^malformed request: /.test(error.message))) {
     return new WorkbookCommandRefusal('invalid-command');
   }
-  if ((method === 'applyOps' || method === 'moveChart') && (
+  if ((method === 'applyOps' || method === 'moveChart' || method === 'moveRange') && (
     /^(?:sheet(?: index)?|row|column) \d+ (?:is )?out of range$/.test(error.message) ||
     /^cell row \d+, column \d+ is out of range$/.test(error.message) ||
     /^sheet \d+ is not an editable worksheet$/.test(error.message) ||
@@ -629,7 +637,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       state.mergesDirty = movesCells || types.some((type) => ['mergeCells', 'unmergeCells'].includes(type));
       state.catalogDirty = types.some((type) => ['addSheet', 'removeSheet', 'moveSheet', 'renameSheet'].includes(type));
     } else if (op.method === 'patchRangeStyle' || op.method === 'setNumberFormat' ||
-      op.method === 'applyFormat' || op.method === 'acceptProposal' ||
+      op.method === 'applyFormat' || op.method === 'acceptProposal' || op.method === 'moveRange' ||
       op.method === 'applyEdits' && op.args[0].steps.some((step) => step.op === 'patchStyle' || step.op === 'setNumberFormat')) {
       state.formattingDirty = true;
     }

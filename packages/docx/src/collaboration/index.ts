@@ -1,5 +1,7 @@
 export { CollaborationProvider } from './provider';
 export { resolvePresenceColor } from './awareness';
+/** @experimental */
+export { createAsyncCollaborationReplica, type AsyncReplicaAdapter } from './asyncReplica';
 export {
   createDirectCollaborationReplica,
   createWorkerCollaborationReplica,
@@ -7,6 +9,7 @@ export {
 } from './replica';
 export {
   CollaborationError,
+  type AsyncCollaborationReplica,
   type CollaborationAwarenessState,
   type CollaborationCursor,
   type CollaborationErrorCode,

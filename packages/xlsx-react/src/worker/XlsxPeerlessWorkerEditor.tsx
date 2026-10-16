@@ -264,6 +264,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const draftController = useMemo(() => new WorkerDraftController({
     generation: () => run?.generation ?? 0,
     identity: () => `${run?.generation}:${run?.session.commandIdentity.session}:${run?.session.commandIdentity.incarnation}:${run?.session.confirmedBasis.epoch}`,
+    valueRevision: () => run?.session.confirmedBasis.version ?? '',
     navigation: () => navigation.current, selection: () => selectionRef.current, sheet: () => activeRef.current,
     target: (sheet, row, col) => rangeTarget(sheet, selectionAt({ row, col })),
     resolveSheet: (sheetId) => (run?.session.editState.sheets ?? run?.session.state.sheets)?.find((sheet) => sheet.id === sheetId)?.index,

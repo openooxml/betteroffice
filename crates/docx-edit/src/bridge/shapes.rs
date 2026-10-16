@@ -475,6 +475,13 @@ fn shape_paragraph(
         .flatten()
         .flat_map(|content| shape_content_runs(content, 0, nested_sequences, env))
         .collect();
+    for (index, run) in runs.iter_mut().enumerate() {
+        if let Run::Image(image) = run
+            && let Some(chart) = image.inline_chart.as_mut()
+        {
+            chart.id = BlockId::Str(format!("{block_id}:chart:{index}"));
+        }
+    }
     runs.retain_mut(|run| {
         let formatting = match run {
             Run::Text(run) => &mut run.fmt,
@@ -739,6 +746,18 @@ fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
                     &formatting,
                     env,
                 )))
+            }
+            Some("chart") => {
+                let chart = field(content, "chart")?;
+                let payload = crate::seed::chart_payload(chart, &Default::default());
+                let values = crate::seed::payload(payload).ok()?;
+                let values = values.into_iter().collect();
+                let chart = super::lower_chart_block(&values, None, env)?;
+                let mut image = super::lower_image_values(&values, &formatting, env);
+                image.width = chart.width;
+                image.height = chart.height;
+                image.inline_chart = Some(Box::new(chart));
+                Some(Run::Image(image))
             }
             _ => None,
         })
@@ -1270,6 +1289,10 @@ fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
 #[cfg(test)]
 #[path = "textbox_pictures_tests.rs"]
 mod textbox_pictures_tests;
+
+#[cfg(test)]
+#[path = "textbox_charts_tests.rs"]
+mod textbox_charts_tests;
 
 #[cfg(test)]
 mod tests {

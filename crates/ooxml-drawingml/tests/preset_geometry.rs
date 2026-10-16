@@ -123,8 +123,17 @@ const PRESETS: &[&str] = &[
     "gear9",
     "callout1",
     "upArrowCallout",
+    "downArrowCallout",
+    "quadArrow",
     "curvedUpArrow",
+    "curvedDownArrow",
+    "flowChartDocument",
+    "verticalScroll",
+    "horizontalScroll",
+    "wave",
+    "doubleWave",
     "heart",
+    "irregularSeal1",
 ];
 
 /// Presets added here whose ECMA-376 definition curves rather than only turning corners.
@@ -151,7 +160,13 @@ const CALLOUTS: &[&str] = &[
 ];
 
 /// Presets whose ECMA-376 curve stays inside the frame while a control point of it does not.
-const HULL_OUTSIDE_FRAME: &[&str] = &["ellipseRibbon", "noSmoking"];
+const HULL_OUTSIDE_FRAME: &[&str] = &[
+    "ellipseRibbon",
+    "noSmoking",
+    "flowChartDocument",
+    "wave",
+    "doubleWave",
+];
 
 /// Points sampled along each curve when a test needs the outline rather than its hull.
 const CURVE_SAMPLES: usize = 24;
@@ -168,6 +183,7 @@ const SPEC_OVERRUNS_FRAME: &[&str] = &[
     "callout1",
     "cloud",
     "heart",
+    "curvedDownArrow",
 ];
 
 /// `cloudCallout`'s body overruns the 43200 frame its own path declares by about 1%.
@@ -740,6 +756,12 @@ proptest! {
             "moon",
             "gear9",
             "curvedUpArrow",
+            "curvedDownArrow",
+            "flowChartDocument",
+            "verticalScroll",
+            "horizontalScroll",
+            "wave",
+            "doubleWave",
             "heart",
         ];
         for shape in curved {
@@ -1213,6 +1235,32 @@ fn callouts_follow_ecma_vertices_and_keep_leader_lines_stroke_only() {
             (0.0, 1.0),
         ],
     );
+
+    assert_eq!(
+        preset_geometry_default_adjustments("downArrowCallout"),
+        named(&[
+            ("adj1", 0.25),
+            ("adj2", 0.25),
+            ("adj3", 0.25),
+            ("adj4", 0.64977),
+        ])
+    );
+    assert_points(
+        &vertices(&draw("downArrowCallout", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 0.64977),
+            (0.5625, 0.64977),
+            (0.5625, 0.75),
+            (0.625, 0.75),
+            (0.5, 1.0),
+            (0.375, 0.75),
+            (0.4375, 0.75),
+            (0.4375, 0.64977),
+            (0.0, 0.64977),
+        ],
+    );
 }
 
 #[test]
@@ -1247,10 +1295,45 @@ fn uturn_arrow_follows_ecma_endpoints() {
             (0.125, 1.0),
         ],
     );
+
+    assert_eq!(
+        preset_geometry_default_adjustments("quadArrow"),
+        named(&[("adj1", 0.225), ("adj2", 0.225), ("adj3", 0.225)])
+    );
+    assert_points(
+        &vertices(&draw("quadArrow", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.1125, 0.275),
+            (0.1125, 0.3875),
+            (0.44375, 0.3875),
+            (0.44375, 0.225),
+            (0.3875, 0.225),
+            (0.5, 0.0),
+            (0.6125, 0.225),
+            (0.55625, 0.225),
+            (0.55625, 0.3875),
+            (0.8875, 0.3875),
+            (0.8875, 0.275),
+            (1.0, 0.5),
+            (0.8875, 0.725),
+            (0.8875, 0.6125),
+            (0.55625, 0.6125),
+            (0.55625, 0.775),
+            (0.6125, 0.775),
+            (0.5, 1.0),
+            (0.3875, 0.775),
+            (0.44375, 0.775),
+            (0.44375, 0.6125),
+            (0.1125, 0.6125),
+            (0.1125, 0.725),
+        ],
+    );
 }
 
 #[test]
 fn flowchart_online_storage_and_moon_follow_ecma_endpoints() {
+    assert!(preset_geometry_default_adjustments("flowChartDocument").is_empty());
     for aspect in [0.5, 2.0] {
         assert_ecma_endpoints(
             &endpoints(&draw("flowChartOnlineStorage", &HashMap::new(), aspect)),
@@ -1262,6 +1345,17 @@ fn flowchart_online_storage_and_moon_follow_ecma_endpoints() {
                 (1.0 / 6.0, 1.0),
                 (0.0, 0.5),
                 (1.0 / 6.0, 0.0),
+            ],
+        );
+        assert_points(
+            &coordinates(&draw("flowChartDocument", &HashMap::new(), aspect)),
+            &[
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 17322.0 / 21600.0),
+                (0.5, 17322.0 / 21600.0),
+                (0.5, 23922.0 / 21600.0),
+                (0.0, 20172.0 / 21600.0),
             ],
         );
     }
@@ -1281,7 +1375,12 @@ fn flowchart_online_storage_and_moon_follow_ecma_endpoints() {
 fn curved_arrows_follow_ecma_endpoints() {
     use ooxml_drawingml::PresetPathFill;
     let defaults = named(&[("adj1", 0.25), ("adj2", 0.5), ("adj3", 0.25)]);
-    for shape in ["curvedLeftArrow", "curvedRightArrow", "curvedUpArrow"] {
+    for shape in [
+        "curvedLeftArrow",
+        "curvedRightArrow",
+        "curvedUpArrow",
+        "curvedDownArrow",
+    ] {
         assert_eq!(preset_geometry_default_adjustments(shape), defaults);
         let layers = preset_geometry_layers(shape, &HashMap::new(), 1.0).unwrap();
         assert_eq!(layers.len(), 3);
@@ -1553,6 +1652,86 @@ fn curved_arrows_follow_ecma_endpoints() {
             (0.5625, 1.0),
         ],
     );
+
+    let down_default = preset_geometry_layers("curvedDownArrow", &HashMap::new(), 1.0).unwrap();
+    assert_ecma_endpoints(
+        &endpoints(&down_default[0].commands),
+        &[
+            (0.75, 1.0),
+            (0.4900768239224544, 0.75),
+            (0.6150768239224544, 0.75),
+            (0.3125, 0.0),
+            (0.5625, 0.0),
+            (0.8650768239224544, 0.75),
+            (0.9900768239224544, 0.75),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&down_default[1].commands),
+        &[
+            (0.4375, 0.08348486100883202),
+            (0.25, 1.0),
+            (0.0, 1.0),
+            (0.3125, 0.0),
+            (0.4375, 0.08348486100883202),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&down_default[2].commands),
+        &[
+            (0.4375, 0.08348486100883202),
+            (0.25, 1.0),
+            (0.0, 1.0),
+            (0.3125, 0.0),
+            (0.5625, 0.0),
+            (0.8650768239224544, 0.75),
+            (0.9900768239224544, 0.75),
+            (0.75, 1.0),
+            (0.4900768239224544, 0.75),
+            (0.6150768239224544, 0.75),
+            (0.3125, 0.0),
+        ],
+    );
+
+    let down_custom = preset_geometry_layers("curvedDownArrow", &custom, 1.0).unwrap();
+    assert_ecma_endpoints(
+        &endpoints(&down_custom[0].commands),
+        &[
+            (0.78, 1.0),
+            (0.5, 0.4),
+            (0.54, 0.4),
+            (0.3, 0.0),
+            (0.66, 0.0),
+            (0.9, 0.4),
+            (0.94, 0.4),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&down_custom[1].commands),
+        &[
+            (0.48, 0.2),
+            (0.36, 1.0),
+            (0.0, 1.0),
+            (0.3, 0.0),
+            (0.48, 0.2),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&down_custom[2].commands),
+        &[
+            (0.48, 0.2),
+            (0.36, 1.0),
+            (0.0, 1.0),
+            (0.3, 0.0),
+            (0.66, 0.0),
+            (0.9, 0.4),
+            (0.94, 0.4),
+            (0.78, 1.0),
+            (0.5, 0.4),
+            (0.54, 0.4),
+            (0.3, 0.0),
+        ],
+    );
 }
 
 #[test]
@@ -1763,6 +1942,9 @@ fn single_path_consumers_do_not_receive_partial_layered_presets() {
         "curvedLeftArrow",
         "curvedRightArrow",
         "curvedUpArrow",
+        "curvedDownArrow",
+        "verticalScroll",
+        "horizontalScroll",
     ] {
         assert!(preset_geometry_to_path(shape, &HashMap::new(), 1.0).is_none());
         assert!(
@@ -1822,5 +2004,359 @@ fn a_near_zero_adjust_stays_inside_its_frame() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn scrolls_follow_ecma_endpoints() {
+    use ooxml_drawingml::PresetPathFill;
+    for shape in ["verticalScroll", "horizontalScroll"] {
+        assert_eq!(
+            preset_geometry_default_adjustments(shape),
+            named(&[("adj", 0.125)])
+        );
+        let layers = preset_geometry_layers(shape, &HashMap::new(), 1.0).unwrap();
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0].fill, PresetPathFill::Normal);
+        assert_eq!(layers[1].fill, PresetPathFill::DarkenLess);
+        assert_eq!(layers[2].fill, PresetPathFill::None);
+        assert!(!layers[0].stroke && !layers[1].stroke && layers[2].stroke);
+        for layer in &layers[..2] {
+            let parts = subpaths(&layer.commands);
+            assert_eq!(parts.len(), 2);
+            assert!(
+                parts
+                    .iter()
+                    .all(|part| matches!(part.last(), Some(GeometryPathCommand::Close)))
+            );
+        }
+        assert_eq!(subpaths(&layers[2].commands).len(), 5);
+    }
+    let vertical = preset_geometry_layers("verticalScroll", &HashMap::new(), 1.0).unwrap();
+    assert_points(
+        &endpoints(&vertical[0].commands),
+        &[
+            (0.0625, 1.0),
+            (0.125, 0.9375),
+            (0.0625, 0.9375),
+            (0.09375, 0.90625),
+            (0.0625, 0.875),
+            (0.125, 0.875),
+            (0.125, 0.0625),
+            (0.1875, 0.0),
+            (0.9375, 0.0),
+            (1.0, 0.0625),
+            (0.9375, 0.125),
+            (0.875, 0.125),
+            (0.875, 0.9375),
+            (0.8125, 1.0),
+            (0.25, 0.0625),
+            (0.1875, 0.125),
+            (0.15625, 0.09375),
+            (0.1875, 0.0625),
+        ],
+    );
+    assert_points(
+        &endpoints(&vertical[1].commands),
+        &[
+            (0.25, 0.0625),
+            (0.1875, 0.125),
+            (0.15625, 0.09375),
+            (0.1875, 0.0625),
+            (0.125, 0.9375),
+            (0.0625, 1.0),
+            (0.0, 0.9375),
+            (0.0625, 0.875),
+            (0.09375, 0.90625),
+            (0.0625, 0.9375),
+        ],
+    );
+    assert_points(
+        &endpoints(&vertical[2].commands),
+        &[
+            (0.125, 0.875),
+            (0.125, 0.0625),
+            (0.1875, 0.0),
+            (0.9375, 0.0),
+            (1.0, 0.0625),
+            (0.9375, 0.125),
+            (0.875, 0.125),
+            (0.875, 0.9375),
+            (0.8125, 1.0),
+            (0.0625, 1.0),
+            (0.0, 0.9375),
+            (0.0625, 0.875),
+            (0.1875, 0.0),
+            (0.25, 0.0625),
+            (0.1875, 0.125),
+            (0.15625, 0.09375),
+            (0.1875, 0.0625),
+            (0.25, 0.0625),
+            (0.875, 0.125),
+            (0.1875, 0.125),
+            (0.0625, 0.875),
+            (0.09375, 0.90625),
+            (0.0625, 0.9375),
+            (0.125, 0.9375),
+            (0.0625, 1.0),
+            (0.125, 0.9375),
+            (0.125, 0.875),
+        ],
+    );
+
+    let horizontal = preset_geometry_layers("horizontalScroll", &HashMap::new(), 1.0).unwrap();
+    assert_points(
+        &endpoints(&horizontal[0].commands),
+        &[
+            (1.0, 0.0625),
+            (0.9375, 0.125),
+            (0.9375, 0.0625),
+            (0.90625, 0.09375),
+            (0.875, 0.0625),
+            (0.875, 0.125),
+            (0.0625, 0.125),
+            (0.0, 0.1875),
+            (0.0, 0.9375),
+            (0.0625, 1.0),
+            (0.125, 0.9375),
+            (0.125, 0.875),
+            (0.9375, 0.875),
+            (1.0, 0.8125),
+            (0.0625, 0.25),
+            (0.125, 0.1875),
+            (0.09375, 0.15625),
+            (0.0625, 0.1875),
+        ],
+    );
+    assert_points(
+        &endpoints(&horizontal[1].commands),
+        &[
+            (0.0625, 0.25),
+            (0.125, 0.1875),
+            (0.09375, 0.15625),
+            (0.0625, 0.1875),
+            (0.9375, 0.125),
+            (1.0, 0.0625),
+            (0.9375, 0.0),
+            (0.875, 0.0625),
+            (0.90625, 0.09375),
+            (0.9375, 0.0625),
+        ],
+    );
+    assert_points(
+        &endpoints(&horizontal[2].commands),
+        &[
+            (0.0, 0.1875),
+            (0.0625, 0.125),
+            (0.875, 0.125),
+            (0.875, 0.0625),
+            (0.9375, 0.0),
+            (1.0, 0.0625),
+            (1.0, 0.8125),
+            (0.9375, 0.875),
+            (0.125, 0.875),
+            (0.125, 0.9375),
+            (0.0625, 1.0),
+            (0.0, 0.9375),
+            (0.875, 0.125),
+            (0.9375, 0.125),
+            (1.0, 0.0625),
+            (0.9375, 0.125),
+            (0.9375, 0.0625),
+            (0.90625, 0.09375),
+            (0.875, 0.0625),
+            (0.0625, 0.25),
+            (0.0625, 0.1875),
+            (0.09375, 0.15625),
+            (0.125, 0.1875),
+            (0.0625, 0.25),
+            (0.0, 0.1875),
+            (0.125, 0.1875),
+            (0.125, 0.875),
+        ],
+    );
+}
+
+#[test]
+fn waves_follow_ecma_coordinates() {
+    assert_eq!(
+        preset_geometry_default_adjustments("wave"),
+        named(&[("adj1", 0.125), ("adj2", 0.0)])
+    );
+    assert_points(
+        &coordinates(&draw("wave", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.125),
+            (1.0 / 3.0, -7.0 / 24.0),
+            (2.0 / 3.0, 13.0 / 24.0),
+            (1.0, 0.125),
+            (1.0, 0.875),
+            (2.0 / 3.0, 31.0 / 24.0),
+            (1.0 / 3.0, 11.0 / 24.0),
+            (0.0, 0.875),
+        ],
+    );
+    assert_points(
+        &coordinates(&draw("wave", &named(&[("adj1", 0.2), ("adj2", 0.1)]), 0.5)),
+        &[
+            (0.0, 0.2),
+            (4.0 / 15.0, -7.0 / 15.0),
+            (8.0 / 15.0, 13.0 / 15.0),
+            (0.8, 0.2),
+            (1.0, 0.8),
+            (11.0 / 15.0, 22.0 / 15.0),
+            (7.0 / 15.0, 2.0 / 15.0),
+            (0.2, 0.8),
+        ],
+    );
+    assert_points(
+        &coordinates(&draw("wave", &named(&[("adj1", 0.2), ("adj2", -0.1)]), 2.0)),
+        &[
+            (0.2, 0.2),
+            (7.0 / 15.0, -7.0 / 15.0),
+            (11.0 / 15.0, 13.0 / 15.0),
+            (1.0, 0.2),
+            (0.8, 0.8),
+            (8.0 / 15.0, 22.0 / 15.0),
+            (4.0 / 15.0, 2.0 / 15.0),
+            (0.0, 0.8),
+        ],
+    );
+}
+
+#[test]
+fn double_wave_follows_ecma_coordinates() {
+    assert_eq!(
+        preset_geometry_default_adjustments("doubleWave"),
+        named(&[("adj1", 0.0625), ("adj2", 0.0)])
+    );
+    assert_points(
+        &coordinates(&draw("doubleWave", &HashMap::new(), 0.5)),
+        &[
+            (0.0, 0.0625),
+            (1.0 / 6.0, -7.0 / 48.0),
+            (1.0 / 3.0, 13.0 / 48.0),
+            (0.5, 0.0625),
+            (2.0 / 3.0, -7.0 / 48.0),
+            (5.0 / 6.0, 13.0 / 48.0),
+            (1.0, 0.0625),
+            (1.0, 0.9375),
+            (5.0 / 6.0, 55.0 / 48.0),
+            (2.0 / 3.0, 35.0 / 48.0),
+            (0.5, 0.9375),
+            (1.0 / 3.0, 55.0 / 48.0),
+            (1.0 / 6.0, 35.0 / 48.0),
+            (0.0, 0.9375),
+        ],
+    );
+    for (adj2, top, bottom) in [(0.1, 0.0, 0.2), (-0.1, 0.2, 0.0)] {
+        assert_points(
+            &coordinates(&draw(
+                "doubleWave",
+                &named(&[("adj1", 0.125), ("adj2", adj2)]),
+                2.0,
+            )),
+            &[
+                (top, 0.125),
+                (top + 2.0 / 15.0, -7.0 / 24.0),
+                (top + 4.0 / 15.0, 13.0 / 24.0),
+                (top + 0.4, 0.125),
+                (top + 8.0 / 15.0, -7.0 / 24.0),
+                (top + 2.0 / 3.0, 13.0 / 24.0),
+                (top + 0.8, 0.125),
+                (bottom + 0.8, 0.875),
+                (bottom + 2.0 / 3.0, 31.0 / 24.0),
+                (bottom + 8.0 / 15.0, 11.0 / 24.0),
+                (bottom + 0.4, 0.875),
+                (bottom + 4.0 / 15.0, 31.0 / 24.0),
+                (bottom + 2.0 / 15.0, 11.0 / 24.0),
+                (bottom, 0.875),
+            ],
+        );
+    }
+}
+
+#[test]
+fn wave_adjustments_use_ecma_limits() {
+    for (shape, max_adj1) in [("wave", 0.2), ("doubleWave", 0.125)] {
+        for aspect in [0.5, 1.0, 2.0] {
+            for (adj1, pinned_adj1) in [(-1.0, 0.0), (1.0, max_adj1)] {
+                for (adj2, pinned_adj2) in [(-1.0, -0.1), (1.0, 0.1)] {
+                    assert_points(
+                        &coordinates(&draw(
+                            shape,
+                            &named(&[("adj1", adj1), ("adj2", adj2)]),
+                            aspect,
+                        )),
+                        &coordinates(&draw(
+                            shape,
+                            &named(&[("adj1", pinned_adj1), ("adj2", pinned_adj2)]),
+                            aspect,
+                        )),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn curved_down_arrow_uses_reference_thickness_and_head_guides() {
+    let layers = preset_geometry_layers(
+        "curvedDownArrow",
+        &named(&[("adj1", 0.36), ("adj2", 0.04), ("adj3", 0.96)]),
+        1.0,
+    )
+    .unwrap();
+    assert_points(
+        &vertices(&layers[0].commands),
+        &[
+            (0.98, 1.0),
+            (0.672, 0.04),
+            (0.512, 0.04),
+            (0.76, 0.0),
+            (0.712, 0.04),
+        ],
+    );
+}
+
+#[test]
+fn irregular_seal1_follows_ecma_vertices() {
+    use ooxml_drawingml::PresetPathFill;
+    assert!(preset_geometry_default_adjustments("irregularSeal1").is_empty());
+    let expected = [
+        (10800.0 / 21600.0, 5800.0 / 21600.0),
+        (14522.0 / 21600.0, 0.0),
+        (14155.0 / 21600.0, 5325.0 / 21600.0),
+        (18380.0 / 21600.0, 4457.0 / 21600.0),
+        (16702.0 / 21600.0, 7315.0 / 21600.0),
+        (21097.0 / 21600.0, 8137.0 / 21600.0),
+        (17607.0 / 21600.0, 10475.0 / 21600.0),
+        (1.0, 13290.0 / 21600.0),
+        (16837.0 / 21600.0, 12942.0 / 21600.0),
+        (18145.0 / 21600.0, 18095.0 / 21600.0),
+        (14020.0 / 21600.0, 14457.0 / 21600.0),
+        (13247.0 / 21600.0, 19737.0 / 21600.0),
+        (10532.0 / 21600.0, 14935.0 / 21600.0),
+        (8485.0 / 21600.0, 1.0),
+        (7715.0 / 21600.0, 15627.0 / 21600.0),
+        (4762.0 / 21600.0, 17617.0 / 21600.0),
+        (5667.0 / 21600.0, 13937.0 / 21600.0),
+        (135.0 / 21600.0, 14587.0 / 21600.0),
+        (3722.0 / 21600.0, 11775.0 / 21600.0),
+        (0.0, 8615.0 / 21600.0),
+        (4627.0 / 21600.0, 7617.0 / 21600.0),
+        (370.0 / 21600.0, 2295.0 / 21600.0),
+        (7312.0 / 21600.0, 6320.0 / 21600.0),
+        (8352.0 / 21600.0, 2295.0 / 21600.0),
+    ];
+    for aspect in [0.5, 1.0, 2.0] {
+        let layers = preset_geometry_layers("irregularSeal1", &HashMap::new(), aspect).unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].fill, PresetPathFill::Normal);
+        assert!(layers[0].stroke);
+        let path = draw("irregularSeal1", &HashMap::new(), aspect);
+        assert_points(&coordinates(&path), &expected);
+        assert!(matches!(path.last(), Some(GeometryPathCommand::Close)));
     }
 }
