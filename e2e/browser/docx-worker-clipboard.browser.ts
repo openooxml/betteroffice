@@ -1,5 +1,4 @@
 import { expect, test, type Locator, type Page, type TestInfo } from 'playwright/test';
-import { pinnedEvaluate } from './pinned-evaluate';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 
@@ -17,8 +16,8 @@ async function documentBytes(): Promise<Buffer> {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-async function open(page: Page): Promise<Locator> {
-  await page.addInitScript(() => {
+async function open(page: Page, deny = true): Promise<Locator> {
+  if (deny) await page.addInitScript(() => {
     const denied = () => Promise.reject(new DOMException('Write permission denied.', 'NotAllowedError'));
     Object.defineProperty(Navigator.prototype, 'clipboard', { configurable: true,
       get: () => ({ write: denied, writeText: denied, read: denied, readText: denied }) });
@@ -44,15 +43,6 @@ async function open(page: Page): Promise<Locator> {
   return input;
 }
 
-async function selectAllSettled(page: Page, input: Locator) {
-  await input.press('ControlOrMeta+a');
-  await expect.poll(() => pinnedEvaluate(page, () => {
-    const data = new DataTransfer();
-    document.querySelector('.paged-editor__peerless-input')!.dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true }));
-    return data.getData('text/plain');
-  })).toContain('RIGHT');
-}
-
 async function pasteIntoSink(page: Page): Promise<{ text: string; html: string }> {
   await page.evaluate(() => { (window as unknown as { pasted?: unknown }).pasted = undefined; });
   await page.locator('#paste-sink').focus();
@@ -71,7 +61,7 @@ async function savedXml(page: Page, info: TestInfo, name: string): Promise<strin
 
 test('copy and cut fill the native clipboard when the async Clipboard API is denied', async ({ page }, info) => {
   const input = await open(page);
-  await selectAllSettled(page, input);
+  await input.press('ControlOrMeta+a');
   await input.press('ControlOrMeta+c');
   const copied = await pasteIntoSink(page);
   expect(copied.text).toContain('Before');
@@ -79,9 +69,57 @@ test('copy and cut fill the native clipboard when the async Clipboard API is den
   expect(copied.html).toContain('<table');
   expect(copied.html).toContain('font-weight:bold');
   await input.focus();
-  await selectAllSettled(page, input);
+  await input.press('ControlOrMeta+a');
   await input.press('ControlOrMeta+x');
   const cut = await pasteIntoSink(page);
   expect(cut.text).toBe(copied.text);
   await expect.poll(async () => (await savedXml(page, info, 'cut')).includes('RIGHT')).toBe(false);
+});
+
+
+for (const cut of [false, true]) test(`immediate native ${cut ? 'cut' : 'copy'} completes a cache miss with the async Clipboard API denied`, async ({ page }, info) => {
+  await page.addInitScript(() => {
+    let waiting = true;
+    const held: (() => void)[] = [];
+    const OriginalWorker = window.Worker;
+    window.Worker = class extends OriginalWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        const reads = new Set<number>();
+        const send = this.postMessage.bind(this);
+        this.postMessage = ((message: { id?: number; type?: string; read?: { kind?: string } }, ...args: unknown[]) => {
+          if (message.type === 'documentRead' && message.read?.kind === 'clipboardSlice' && message.id !== undefined) reads.add(message.id);
+          Reflect.apply(send, this, [message, ...args]);
+        }) as typeof this.postMessage;
+        const replayed = new WeakSet<Event>();
+        this.addEventListener('message', event => {
+          if (!waiting || replayed.has(event) || !reads.has(event.data.id)) return;
+          event.stopImmediatePropagation();
+          held.push(() => { const replay = new MessageEvent('message', { data: event.data }); replayed.add(replay); this.dispatchEvent(replay); });
+        });
+      }
+    };
+    const release = () => { waiting = false; for (const send of held.splice(0)) queueMicrotask(send); };
+    document.addEventListener('copy', release, { capture: true, once: true });
+    document.addEventListener('cut', release, { capture: true, once: true });
+  });
+  const input = await open(page);
+  await page.evaluate(() => { const sink = document.createElement('textarea'); sink.id = 'plain-sink'; document.body.append(sink); });
+  await input.press('ControlOrMeta+a');
+  await input.press(cut ? 'ControlOrMeta+x' : 'ControlOrMeta+c');
+  await expect.poll(async () => (await savedXml(page, info, 'immediate')).includes('RIGHT')).toBe(!cut);
+  await page.locator('#plain-sink').focus();
+  await page.keyboard.press('ControlOrMeta+v');
+  await expect(page.locator('#plain-sink')).toHaveValue('Before\nRIGHT\tINDEX\n');
+});
+
+test('native copy retains table HTML with the async Clipboard API granted', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const input = await open(page, false);
+  await input.press('ControlOrMeta+a');
+  await input.press('ControlOrMeta+c');
+  const copied = await pasteIntoSink(page);
+  expect(copied.text).toContain('Before');
+  expect(copied.text).toContain('RIGHT');
+  expect(copied.html).toContain('<table');
 });

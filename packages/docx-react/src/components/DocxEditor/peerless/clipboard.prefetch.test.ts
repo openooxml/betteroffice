@@ -8,7 +8,7 @@ const fragment = { paragraphs: [{ text: 'bcd', segments: [] }] } as unknown as D
 
 function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }) {
   const listeners = new Set<() => void>();
-  let state = { version: 1, workerSelection: null as DocxCommandSelection | null, editState: { readOnly: false } };
+  let state = { identity: { session: 'clipboard', incarnation: 1, epoch: 1 }, version: 1, workerSelection: null as DocxCommandSelection | null, editState: { readOnly: false } };
   let tail: unknown;
   const submit = mock((_intent: unknown) => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }) } }));
   const binding = {
@@ -94,4 +94,45 @@ test('collapsed selections are never read ahead', async () => {
   expect(readClipboardSlice).not.toHaveBeenCalled();
   expect(prefetch.take()).toBeNull();
   prefetch.dispose();
+});
+
+
+test('prefetch starts without a quiet timer and coalesces selection changes during a read', async () => {
+  const f = fixture();
+  let finish!: (slice: DocxClipboardSlice) => void;
+  f.readClipboardSlice.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.publish({ workerSelection: range });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  for (let offset = 5; offset < 20; offset++) f.publish({ workerSelection: { ...range, focus: { ...range.focus, offset } } });
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  finish({ text: 'old', fragment: null });
+  for (let i = 0; i < 40; i++) await Promise.resolve();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(2);
+  expect(f.prefetch.take()?.selection.focus.offset).toBe(19);
+  f.prefetch.dispose();
+});
+
+for (const failed of [false, true]) test(`prefetch memoizes ${failed ? 'failed' : 'empty'} reads until the key changes`, async () => {
+  const f = fixture({ text: '', fragment: null });
+  if (failed) f.readClipboardSlice.mockRejectedValue(new Error('unavailable'));
+  f.publish({ workerSelection: range });
+  await new Promise(resolve => setTimeout(resolve, 350));
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  expect(f.prefetch.take()).toBeNull();
+  f.publish({ version: 2 });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(2);
+  f.prefetch.dispose();
+});
+
+test('an incarnation change invalidates a capture with the same version and selection', async () => {
+  const f = fixture();
+  f.publish({ workerSelection: range });
+  expect(await settled(f.prefetch)).not.toBeNull();
+  f.publish({ identity: { session: 'clipboard', incarnation: 2, epoch: 1 } });
+  expect(f.prefetch.take()).toBeNull();
+  expect(await settled(f.prefetch)).not.toBeNull();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(2);
+  f.prefetch.dispose();
 });

@@ -120,7 +120,8 @@ class FakeWorker {
     } else if (message.type === 'save') {
       response = { id: message.id, ok: true, saved: Uint8Array.of(4, 5).buffer, updates: [], version: 'saved' };
     } else if (message.type === 'documentRead') {
-      response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'headings'
+      response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'clipboardSlice' ? { text: 'Selected text', fragment: null }
+        : message.read.kind === 'headings'
         ? [{ story: 'body', paraId: 'heading', text: 'Worker heading', level: 0, position: 1 }]
         : message.read.kind === 'sectionProperties' ? { version: 'worker-version', sections: [{ section: 'final', properties: { marginLeft: 2160 } }], paragraphs: [] }
         : message.read.kind === 'searchText' ? { matches: [], carried: -1 }
@@ -168,6 +169,7 @@ class FakeWorker {
             cancelled ? { reason: 'dependency-refused' } : {}),
         }],
         editState: { ...state.editState, readOnly },
+        ...(command.kind === 'select' ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
       };
       this.initial = { ...state, ...ack };
       response = { id: message.id, ok: true, commandAck: ack };
@@ -1853,4 +1855,25 @@ test('worker-only opens request the font-ready certified initial display window'
   expect(request?.type === 'commandInit' && request.request).toMatchObject({
     provisionalPages: 3, displayWindow: [0, 3], layoutWithRegions: true,
   });
+});
+
+
+test('the real worker editor serves one native copy from its prefetched selection without the async API', async () => {
+  surface.mockRestore();
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  restorers.push(() => { if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor); else Reflect.deleteProperty(navigator, 'clipboard'); });
+  const onCopy = mock(() => {});
+  const onError = mock(() => {});
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} onCopy={onCopy} onError={onError} />);
+  const input = await view.findByRole('textbox', { name: 'Document input' });
+  await act(async () => { fireEvent.keyDown(input, { key: 'a', ctrlKey: true }); });
+  await waitFor(() => expect(requests.filter(r => r.type === 'documentRead' && r.read.kind === 'clipboardSlice')).toHaveLength(1));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  const data = new DataTransfer();
+  fireEvent.copy(input, { clipboardData: data });
+  expect(data.getData('text/plain')).toBe('Selected text');
+  expect(data.getData('text/html')).toBe('');
+  await waitFor(() => expect(onCopy).toHaveBeenCalledTimes(1));
+  expect(onError).not.toHaveBeenCalled();
 });
