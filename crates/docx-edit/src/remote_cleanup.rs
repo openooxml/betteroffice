@@ -228,4 +228,54 @@ mod tests {
         assert_eq!(residuals.len(), 1);
         assert!(Update::decode_v1(&residuals[0]).unwrap().delete_set() == &expected);
     }
+
+    #[test]
+    fn a_batch_publishes_only_local_deletions_unblocked_by_its_second_update_once() {
+        let origin = replica(7);
+        let insert = edit(&origin, |txn, text| text.insert(txn, 0, "abcd"));
+        let worker = replica(8);
+        worker
+            .transact_mut()
+            .apply_update(Update::decode_v1(&insert).unwrap())
+            .unwrap();
+        let local = edit(&worker, |txn, text| text.remove_range(txn, 1, 1));
+        let remote = edit(&origin, |txn, text| text.remove_range(txn, 3, 1));
+        let main = crate::EditingDoc::new(9);
+        let local = Update::decode_v1(&local).unwrap();
+        let expected = local.delete_set().clone();
+        main.integrate_update(local, crate::UpdateOrigin::Local)
+            .unwrap();
+        assert!(ReadTxn::store(&main.doc.transact()).pending_ds().is_some());
+
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let published = Arc::clone(&updates);
+        let _subscription = main
+            .observe_update_v1(move |update, remote| {
+                published.lock().unwrap().push((update.to_vec(), remote));
+            })
+            .unwrap();
+        let chunks = [remote, insert];
+        main.apply_update_chunks_v1(&chunks).unwrap();
+
+        assert_eq!(text(&main.doc), "ac");
+        assert!(ReadTxn::store(&main.doc.transact()).pending_ds().is_none());
+        {
+            let updates = updates.lock().unwrap();
+            assert_eq!(updates.len(), 2);
+            assert!(updates[0].1);
+            assert!(!updates[1].1);
+            assert_eq!(updates[1].0[0], 0);
+            let residual = Update::decode_v1(&updates[1].0).unwrap();
+            assert!(residual.delete_set() == &expected);
+            worker
+                .transact_mut()
+                .apply_update(Update::decode_v1(&chunks[0]).unwrap())
+                .unwrap();
+            worker.transact_mut().apply_update(residual).unwrap();
+            assert_eq!(text(&worker), "ac");
+        }
+
+        main.apply_update_chunks_v1(&chunks).unwrap();
+        assert_eq!(updates.lock().unwrap().len(), 2);
+    }
 }
