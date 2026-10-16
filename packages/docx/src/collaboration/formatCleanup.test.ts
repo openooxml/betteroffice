@@ -1,7 +1,7 @@
 import { beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { preloadEditWasm } from '../wasm/edit';
+import { createEditSession, preloadEditWasm, type EditSession } from '../wasm/edit';
 import { createYrsSession, type YrsInlineFormatDelta, type YrsSession } from '../yrs';
 import { CollaborationProvider } from './provider';
 import type { CollaborationTransportEvent } from './types';
@@ -9,6 +9,53 @@ import type { CollaborationTransportEvent } from './types';
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
   resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
 ))));
+
+type DeleteSet = Array<[client: number, ranges: Array<[start: number, end: number]>]>;
+
+/** Decodes a v1 update that must hold no structs into its delete set, ranges merged. */
+function deleteOnly(update: Uint8Array): DeleteSet {
+  let at = 0;
+  const read = () => {
+    let value = 0;
+    for (let scale = 1; ; scale *= 128) {
+      if (at >= update.length) throw new Error('truncated update');
+      const byte = update[at++];
+      value += (byte & 0x7f) * scale;
+      if (byte < 0x80) return value;
+    }
+  };
+  expect(read()).toBe(0);
+  const clients = new Map<number, Array<[number, number]>>();
+  for (let count = read(); count > 0; count -= 1) {
+    const client = read();
+    const ranges = clients.get(client) ?? [];
+    for (let length = read(); length > 0; length -= 1) {
+      const start = read();
+      ranges.push([start, start + read()]);
+    }
+    clients.set(client, ranges);
+  }
+  expect(at).toBe(update.length);
+  return [...clients].sort(([a], [b]) => a - b).map(([client, ranges]) => {
+    const merged: Array<[number, number]> = [];
+    for (const [start, end] of ranges.sort(([a], [b]) => a - b)) {
+      const last = merged.at(-1);
+      if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+      else merged.push([start, end]);
+    }
+    return [client, merged];
+  });
+}
+
+/** A replica's whole delete set: a diff against its own state vector holds nothing else. */
+function deleteSet(session: YrsSession): DeleteSet {
+  return deleteOnly(session.encodeStateAsUpdate(session.encodeStateVector()));
+}
+
+function clocks(set: DeleteSet): string[] {
+  return set.flatMap(([client, ranges]) => ranges.flatMap(([start, end]) =>
+    Array.from({ length: end - start }, (_, offset) => `${client}:${start + offset}`)));
+}
 
 async function replicas(count: number, text: string): Promise<YrsSession[]> {
   const seed = await createYrsSession({ clientId: 1001 });
@@ -66,6 +113,7 @@ function expectConverged(sessions: YrsSession[]) {
     expect(paragraph(session).text).toBe(paragraph(first).text);
     expect(session.storySegments('body')).toEqual(first.storySegments('body'));
     expect(session.storyChecksum('body')).toBe(first.storyChecksum('body'));
+    expect(deleteSet(session)).toEqual(deleteSet(first));
   }
 }
 
@@ -225,6 +273,135 @@ test('a provider pair converges after a formatting cleanup', async () => {
     expectConverged(sessions);
   } finally {
     for (const provider of providers) provider.destroy();
+    for (const session of sessions) session.destroy();
+  }
+});
+
+test('a remote apply publishes exactly the deletions it made beyond the update', async () => {
+  const sessions = await replicas(2, 'a');
+  const [a, b] = sessions;
+  const local = sessions.map(() => [] as Uint8Array[]);
+  const stops = sessions.map((session, index) => session.onUpdate((update, origin) => {
+    if (origin === 'local') local[index].push(update.slice());
+  }));
+  type Sent = { updates: Uint8Array[]; deleted: Set<string> };
+  const edit = (index: number, change: () => void): Sent => {
+    const before = new Set(clocks(deleteSet(sessions[index])));
+    change();
+    const deleted = clocks(deleteSet(sessions[index])).filter((id) => !before.has(id));
+    return { updates: local[index].splice(0), deleted: new Set(deleted) };
+  };
+  const deliver = (sent: Sent, to: number): Sent => {
+    const before = new Set(clocks(deleteSet(sessions[to])));
+    for (const update of sent.updates) sessions[to].applyUpdate(update);
+    const updates = local[to].splice(0);
+    const published = updates.flatMap((update) => clocks(deleteOnly(update)));
+    const expected = clocks(deleteSet(sessions[to]))
+      .filter((id) => !before.has(id) && !sent.deleted.has(id));
+    expect(published.sort()).toEqual(expected.sort());
+    return { updates, deleted: new Set(published) };
+  };
+  try {
+    let queue: Array<[Sent, number]> = [
+      [edit(1, () => format(b, 0, 1, { bold: true })), 0],
+      [edit(1, () => format(b, 0, 1, { bold: null })), 0],
+      [edit(0, () => format(a, 0, 1, { bold: true })), 1],
+    ];
+    let published = 0;
+    for (let rounds = 0; queue.length > 0; rounds += 1) {
+      if (rounds > 8) throw new Error('replicas kept publishing updates');
+      queue = queue.flatMap(([sent, to]): Array<[Sent, number]> => {
+        const reply = deliver(sent, to);
+        published += reply.updates.length;
+        return reply.updates.length > 0 ? [[reply, 1 - to]] : [];
+      });
+    }
+    expect(published).toBeGreaterThan(0);
+    expectConverged(sessions);
+  } finally {
+    for (const stop of stops) stop();
+    for (const session of sessions) session.destroy();
+  }
+});
+
+test('the polling observer queues the cleanup as a local delete-only event', () => {
+  const [a, b] = [createEditSession(1101), createEditSession(1102)];
+  try {
+    const receipt = JSON.parse(a.load_json(JSON.stringify([
+      { storyId: 'body', paragraphs: [{ text: 'a' }] },
+    ]))) as { body: string[] };
+    const [paraId] = receipt.body;
+    b.load(a.encode_state());
+    a.start_update_event_observation();
+    b.start_update_event_observation();
+    const bold = (session: EditSession, value: true | null) =>
+      session.format_range('body', paraId, 0, paraId, 1, JSON.stringify({ bold: value }));
+    const outboxes = new Map<EditSession, Uint8Array[]>([[a, []], [b, []]]);
+    const drain = (session: EditSession): Uint8Array[] => {
+      const local: Uint8Array[] = [];
+      for (let event = session.drain_update_event(); event.length > 0;) {
+        if (event[0] === 0) local.push(event.slice(1));
+        event = session.drain_update_event();
+      }
+      return local;
+    };
+    bold(b, true);
+    bold(b, null);
+    bold(a, true);
+    for (const session of [a, b]) outboxes.get(session)!.push(...drain(session));
+    let published = 0;
+    for (let rounds = 0; [...outboxes.values()].some((outbox) => outbox.length > 0); rounds += 1) {
+      if (rounds > 8) throw new Error('replicas kept publishing updates');
+      for (const [from, to] of [[a, b], [b, a]] as Array<[EditSession, EditSession]>) {
+        for (const update of outboxes.get(from)!.splice(0)) {
+          to.apply_update(update);
+          const cleanup = drain(to);
+          for (const deletion of cleanup) deleteOnly(deletion);
+          published += cleanup.length;
+          outboxes.get(to)!.push(...cleanup);
+        }
+      }
+    }
+    expect(published).toBeGreaterThan(0);
+    expect([...b.encode_state_vector()]).toEqual([...a.encode_state_vector()]);
+    expect(deleteOnly(b.encode_diff(b.encode_state_vector())))
+      .toEqual(deleteOnly(a.encode_diff(a.encode_state_vector())));
+    expect(b.story_checksum('body')).toBe(a.story_checksum('body'));
+  } finally {
+    a.free();
+    b.free();
+  }
+});
+
+test('deletions held until their structs arrive are not republished', async () => {
+  const sessions = await replicas(2, 'ab');
+  const [a, b] = sessions;
+  const sent: Uint8Array[][] = [];
+  let published = 0;
+  const stops = [
+    a.onUpdate((update, origin) => { if (origin === 'local') sent.at(-1)?.push(update.slice()); }),
+    b.onUpdate((_update, origin) => { if (origin === 'local') published += 1; }),
+  ];
+  const edit = (change: () => void) => {
+    sent.push([]);
+    change();
+  };
+  try {
+    const { paraId } = paragraph(a);
+    edit(() => a.insertText({ story: 'body', paraId, offset: 1 }, 'xy'));
+    edit(() => a.insertText({ story: 'body', paraId, offset: 3 }, 'z'));
+    edit(() => a.deleteRange({
+      story: 'body',
+      start: { paraId, offset: 1 },
+      end: { paraId, offset: 2 },
+    }));
+    const [inserted, dependent, removal] = sent;
+    for (const update of [...removal, ...dependent, ...inserted]) b.applyUpdate(update);
+    expect(paragraph(b).text).toBe('ayzb');
+    expect(published).toBe(0);
+    expectConverged(sessions);
+  } finally {
+    for (const stop of stops) stop();
     for (const session of sessions) session.destroy();
   }
 });

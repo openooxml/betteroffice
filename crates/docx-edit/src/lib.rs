@@ -1708,23 +1708,25 @@ impl EditingDoc {
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
-        let carried = matches!(origin, UpdateOrigin::Remote).then(|| {
-            let mut carried = yrs::IdSet::new();
-            for update in &updates {
-                carried.merge_with(update.delete_set().clone());
+        let result = match origin {
+            UpdateOrigin::Remote => {
+                let mut integration = self.remote_deletions.integrate(self.doc.transact_mut());
+                updates.into_iter().try_for_each(|update| {
+                    integration.carry(update.delete_set());
+                    integration.apply_update(update)
+                })
             }
-            self.remote_deletions.carry(&carried)
-        });
-        let mut txn = match origin {
-            UpdateOrigin::Remote => self.doc.transact_mut(),
-            UpdateOrigin::Local => self.doc.transact_mut_with(self.client_id),
-            UpdateOrigin::Host => self.doc.transact_mut_with(batch::HOST_ORIGIN),
+            UpdateOrigin::Local | UpdateOrigin::Host => {
+                let mut txn = match origin {
+                    UpdateOrigin::Local => self.doc.transact_mut_with(self.client_id),
+                    UpdateOrigin::Host => self.doc.transact_mut_with(batch::HOST_ORIGIN),
+                    UpdateOrigin::Remote => unreachable!(),
+                };
+                updates
+                    .into_iter()
+                    .try_for_each(|update| txn.apply_update(update))
+            }
         };
-        let result = updates
-            .into_iter()
-            .try_for_each(|update| txn.apply_update(update));
-        drop(txn);
-        drop(carried);
         result.map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         if watch.changed() {
             drop(watch);
