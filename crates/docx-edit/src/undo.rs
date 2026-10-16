@@ -136,7 +136,8 @@ pub(crate) fn default_clock() -> Arc<dyn Clock> {
 }
 
 impl EditingDoc {
-    /// Local-origin undo manager over every story, on the default clock.
+    /// Local-origin undo manager over every story, on the default clock. A replica a manager
+    /// attaches to comes from [`EditingDoc::with_undo`].
     pub fn undo_manager(&self) -> DocUndoManager {
         DocUndoManager::new(self, default_clock())
     }
@@ -146,6 +147,9 @@ impl DocUndoManager {
     /// Tracks the local client id only, so agent, remote and system transactions (string
     /// origins) never enter the history; groups edits within [`UNDO_CAPTURE_TIMEOUT_MS`].
     fn new(doc: &EditingDoc, clock: Arc<dyn Clock>) -> Self {
+        if doc.doc.skip_gc() {
+            doc.doc.transact_mut().gc(None);
+        }
         let clock = Arc::new(CaptureClock::new(clock));
         let options = yrs::undo::Options {
             capture_timeout_millis: UNDO_CAPTURE_TIMEOUT_MS,
@@ -481,7 +485,8 @@ impl UndoSession {
         }
     }
 
-    /// Starts tracking local edits in every story; later calls keep the history.
+    /// Starts tracking local edits in every story of a replica from [`EditingDoc::with_undo`];
+    /// later calls keep the history.
     pub fn track(&self, doc: &EditingDoc) {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {

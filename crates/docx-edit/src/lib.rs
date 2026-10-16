@@ -658,8 +658,20 @@ pub struct EditingDoc {
 impl EditingDoc {
     /// Creates a browser-compatible replica. All public positions use UTF-16 offsets.
     pub fn new(client_id: u64) -> Self {
+        Self::build(client_id, false)
+    }
+
+    /// A replica an undo manager attaches to. Clearing the redo stack unkeeps the parents of
+    /// deleted items the undo stack still keeps, so collecting such a parent would free what they
+    /// point to; these replicas collect only before the manager attaches.
+    pub fn with_undo(client_id: u64) -> Self {
+        Self::build(client_id, true)
+    }
+
+    fn build(client_id: u64, skip_gc: bool) -> Self {
         let mut options = Options::with_client_id(ClientID::new(client_id));
         options.offset_kind = OffsetKind::Utf16;
+        options.skip_gc = skip_gc;
         let doc = Doc::with_options(options);
         // Root shared types are schema declarations; their contents are still changed only in the
         // explicit transactions below.

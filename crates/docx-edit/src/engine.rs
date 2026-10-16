@@ -4057,7 +4057,7 @@ struct PreviewLocality {
 
 impl EngineSession {
     pub fn new(client_id: u64) -> Self {
-        let doc = EditingDoc::new(client_id);
+        let doc = EditingDoc::with_undo(client_id);
         let doc_epoch = Rc::new(Cell::new(0_u64));
         let measurement_patch_invalidated = Rc::new(Cell::new(false));
         let relayout_trigger = Rc::new(Cell::new(RelayoutTrigger::Open));
