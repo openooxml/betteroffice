@@ -987,12 +987,20 @@ fn editor_only_paragraphs_are_not_persisted_until_authored() {
     assert!(retyped.ooxml_para_id.is_some());
 
     let touched = seeded(&bytes);
-    let paragraphs = touched.paragraphs("body").unwrap();
-    let before_tables = touched
-        .paragraph_mark_position(&paragraphs[paragraphs.len() - 2].para_id)
+    let peer = EditingDoc::new(42);
+    peer.apply_update_v1(&touched.encode_state_as_update_v1())
         .unwrap();
+    let tail_mark = peer.paragraph_mark_position(&tail).unwrap();
+    {
+        let stories = peer.yrs_doc().transact().get_map("stories").unwrap();
+        let mut txn = peer.yrs_doc().transact_mut();
+        let Some(yrs::Out::YText(body)) = yrs::Map::get(&stories, &txn, "body") else {
+            panic!("body");
+        };
+        yrs::Text::insert(&body, &mut txn, tail_mark.index, "early");
+    }
     touched
-        .insert_text(&ctx(), before_tables, "early", FormatPolicy::Plain)
+        .apply_update_v1(&peer.encode_state_as_update_v1())
         .unwrap();
     assert_eq!(identity(&touched, &tail).origin, ParagraphOrigin::Synthetic);
     let report = touched.persist_paragraph_ids().unwrap();
