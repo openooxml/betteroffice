@@ -77,6 +77,7 @@ export type ResidentEngineSession = Pick<
   | 'applyInputProfiled'
   | 'applyRawOps'
   | 'applyUpdate'
+  | 'applyUpdateChunks'
   | 'paragraphs'
   | 'selectionContext'
   | 'storySegments'
@@ -128,6 +129,7 @@ export type ResidentEngineSession = Pick<
   | 'destroy'
   | 'encodeSelection'
   | 'encodeStateAsUpdate'
+  | 'encodeStateAsUpdateChunks'
   | 'encodeStateVector'
   | 'findContentControls'
   | 'listContentControls'
@@ -289,6 +291,13 @@ export async function createResidentEngineSession(
       } } };
     }
     return Object.keys(margins).length ? withSectionSnapshot(document, readSectionSnapshot(resident, document, margins, seededSectionMarks)) : document;
+  };
+  const mergeRemote = <T>(apply: () => T): T => {
+    sectionLayout = null;
+    const before = session.resident_section_revision().split(':')[1];
+    const result = apply();
+    if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
+    return result;
   };
   const hostDocument = (): Document => withSectionNames(partDocument(), sectionNames.host);
   const partLayoutInput = (input: string): string => {
@@ -919,6 +928,12 @@ export async function createResidentEngineSession(
       remoteStateVector === undefined
         ? session.encode_state()
         : session.encode_diff(remoteStateVector.slice()),
+    encodeStateAsUpdateChunks: (remoteStateVector, maxChunkBytes) => {
+      if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1 || maxChunkBytes > 0xffffffff) {
+        throw new RangeError('maxChunkBytes must be a positive 32-bit integer');
+      }
+      return session.encode_diff_chunks(remoteStateVector.slice(), maxChunkBytes) as Uint8Array[];
+    },
     save: async (source, hostJson, host, comments, record, stories) => {
       const { saveResidentDocument } = await import('./residentSave');
       let projectedHost = partsTouched || session.part_metadata_json() !== '{}'
@@ -1027,13 +1042,8 @@ export async function createResidentEngineSession(
       sectionLayout = null;
       session.load(update);
     },
-    applyUpdate: (update) => {
-      sectionLayout = null;
-      const before = session.resident_section_revision().split(':')[1];
-      const raw = session.apply_update_with_inference(update);
-      if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
-      return JSON.parse(raw) as CollaborationTextInsertion | null;
-    },
+    applyUpdate: (update) => mergeRemote(() => JSON.parse(session.apply_update_with_inference(update)) as CollaborationTextInsertion | null),
+    applyUpdateChunks: (updates) => mergeRemote(() => session.apply_update_chunks([...updates])),
     onUpdate: (listener) => {
       listeners.add(listener);
       ensureObserver();

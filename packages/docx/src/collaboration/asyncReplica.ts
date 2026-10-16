@@ -4,7 +4,7 @@ import type { AsyncCollaborationReplica, CollaborationReplica } from './types';
  * @experimental A `CollaborationReplica` whose state lives in a worker. `CollaborationProvider` reads it
  * through `async`. The synchronous `encodeStateVector` and `encodeStateAsUpdate` throw; use
  * `async.encodeStateVector()` and `async.encodeStateAsUpdate()`, or open the editor with `legacySyncApi`
- * for a synchronous replica.
+ * for a synchronous replica. `applyUpdate` and `async`'s apply methods copy the caller's updates, which stay usable.
  */
 export interface AsyncReplicaAdapter extends CollaborationReplica {
   readonly async: AsyncCollaborationReplica;
@@ -26,12 +26,26 @@ function unavailable(method: 'encodeStateVector' | 'encodeStateAsUpdate'): () =>
 
 /** @experimental Wraps a worker replica so `CollaborationProvider` and `onReplica` accept it unchanged. */
 export function createAsyncCollaborationReplica(replica: AsyncCollaborationReplica): AsyncReplicaAdapter {
+  const hosted: AsyncCollaborationReplica = {
+    clientId: replica.clientId,
+    encodeStateVector: () => replica.encodeStateVector(),
+    encodeStateAsUpdate: (remoteStateVector) => replica.encodeStateAsUpdate(remoteStateVector),
+    ...(replica.encodeStateAsUpdateChunks && {
+      encodeStateAsUpdateChunks: (remoteStateVector: Uint8Array, maxChunkBytes: number) =>
+        replica.encodeStateAsUpdateChunks!(remoteStateVector, maxChunkBytes),
+    }),
+    applyUpdate: (update) => replica.applyUpdate(update.slice()),
+    ...(replica.applyUpdateChunks && {
+      applyUpdateChunks: (updates: readonly Uint8Array[]) => replica.applyUpdateChunks!(updates.map((update) => update.slice())),
+    }),
+    onUpdate: (listener) => replica.onUpdate(listener),
+  };
   const adapter: AsyncReplicaAdapter = {
-    clientId: replica.clientId, async: replica,
+    clientId: replica.clientId, async: hosted,
     encodeStateVector: unavailable('encodeStateVector'),
     encodeStateAsUpdate: unavailable('encodeStateAsUpdate'),
-    applyUpdate: (update) => replica.applyUpdate(update.slice()),
-    onUpdate: (listener) => replica.onUpdate(listener),
+    applyUpdate: hosted.applyUpdate,
+    onUpdate: hosted.onUpdate,
   };
   adapters.set(adapter, replica);
   return adapter;

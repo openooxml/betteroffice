@@ -55,15 +55,17 @@ export function createResidentCollaboration(engine: ResidentEngineSession) {
       return {
         ...hooks,
         apply(prepared, context) {
-          if (prepared.command.kind !== 'applyRemoteUpdate') return hooks.apply(prepared, context);
+          const { command } = prepared;
+          if (command.kind !== 'applyRemoteUpdate' && command.kind !== 'applyRemoteUpdateChunks') return hooks.apply(prepared, context);
           if (disposed) return { status: 'refused', reason: 'unsupported-command', ...state() };
           const before = engine.proposalEngine.version();
           const since = engine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
           try {
-            const insertion = engine.applyUpdate(new Uint8Array(prepared.command.payload.update));
+            if (command.kind === 'applyRemoteUpdateChunks') engine.applyUpdateChunks(command.payload.updates.map(update => new Uint8Array(update)));
+            const insertion = command.kind === 'applyRemoteUpdate' ? engine.applyUpdate(new Uint8Array(command.payload.update)) : null;
             if (engine.proposalEngine.version() !== before) engine.markProjectionStories(engine.storiesChangedSince(since).stories);
             if (insertion) {
-              inferences.push({ seq: prepared.command.seq, insertion });
+              inferences.push({ seq: command.seq, insertion });
               const loc = { story: insertion.story, paraId: insertion.paraId, offset: insertion.endOffset };
               try { anchors.set(insertion.clientId, { key: inferenceKey(loc), sticky: engine.encodeStickyPosition(loc) }); } catch {}
               if (anchors.size > 64) anchors.delete(anchors.keys().next().value!);

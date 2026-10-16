@@ -115,6 +115,7 @@ export interface ResidentProposalResponse {
 export type ResidentDocumentRead =
   | { kind: 'collabStateVector' }
   | { kind: 'collabDiff'; stateVector?: Uint8Array }
+  | { kind: 'collabDiffChunks'; stateVector: Uint8Array; maxChunkBytes: number }
   | { kind: 'collabPresence'; peers: ResidentPresencePeer[]; pages: [number, number]; expectVersion: string; expectFrameEpoch: number; expectLayoutRevision: number }
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
@@ -163,6 +164,7 @@ export type ResidentDocumentRead =
 export interface ResidentDocumentReadValues {
   collabStateVector: Uint8Array;
   collabDiff: Uint8Array;
+  collabDiffChunks: Uint8Array[];
   collabPresence: ResidentPresenceGeometry | null;
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;

@@ -9,7 +9,7 @@ import { createResidentCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
-import { MAX_UPDATE_BYTES } from './residentCommandActions';
+import { MAX_SYNC_CHUNKS_BYTES, MAX_UPDATE_BYTES } from './residentCommandActions';
 import { MAX_COLLABORATION_FRAME_BYTES, stateVectorClock } from '../collaboration/protocol';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import type { Document } from '../types/document';
@@ -440,6 +440,30 @@ test('a remote update past the relay frame cap applies and one past the engine c
       .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
     expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
     expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed!');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('chunked remote updates merge as one change and malformed or oversized chunk sets are refused', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const paraId = a.engine.paragraphs('body')[0]!.paraId;
+    for (const word of ['one', 'two', 'three', 'four', 'five', 'six']) remote.insertText({ story: 'body', paraId, offset: 0 }, `${word} `);
+    const chunks = remote.encodeStateAsUpdateChunks(a.engine.encodeStateVector(), 24).map(chunk => chunk.slice().buffer);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect((await a.session.submit('applyRemoteUpdateChunks', { updates: chunks }, merge).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('six five four three two one Seed');
+    expect(a.engine.encodeStateVector()).toEqual(remote.encodeStateVector());
+    const state = a.engine.encodeState();
+    const large = new ArrayBuffer(MAX_UPDATE_BYTES);
+    for (const updates of [[], [new ArrayBuffer(0)], [new ArrayBuffer(MAX_UPDATE_BYTES + 1)], [chunks[0]!, new ArrayBuffer(0)],
+      [...Array.from({ length: MAX_SYNC_CHUNKS_BYTES / MAX_UPDATE_BYTES }, () => large), new ArrayBuffer(1)]]) {
+      expect(await a.session.submit('applyRemoteUpdateChunks', { updates }, merge).ack).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(a.engine.encodeState()).toEqual(state);
+    expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('six five four three two one Seed!');
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
 

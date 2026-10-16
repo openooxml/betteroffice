@@ -1876,6 +1876,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       return;
     }
     let value: unknown;
+    let transfer: Transferable[] = [];
     switch (request.read.kind) {
       case 'commentInsertionRange':
         value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
@@ -1886,6 +1887,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'collabDiff':
         value = readResidentCollaborationState(session, request.read.stateVector);
         break;
+      case 'collabDiffChunks': {
+        const chunks = session.encodeStateAsUpdateChunks(request.read.stateVector, request.read.maxChunkBytes);
+        transfer = chunks.map(chunk => chunk.buffer as ArrayBuffer);
+        value = chunks;
+        break;
+      }
       case 'collabPresence':
         value = !retainedFrame || engine.version() !== request.read.expectVersion || retainedLayoutVersion !== engine.version() ||
           request.read.expectFrameEpoch !== retainedFrame.frameEpoch || request.read.expectLayoutRevision !== layoutRevision
@@ -2122,7 +2129,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
     }
-    reply({ id: request.id, ok: true, read: { version: engine.version(), value } });
+    reply({ id: request.id, ok: true, read: { version: engine.version(), value } }, transfer);
     return;
   }
   if (request.type === 'layoutJson') {

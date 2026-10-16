@@ -347,12 +347,19 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }
 
   async edit(command: DocxCommandEnvelope): Promise<DocxCommandAck> {
-    let transfer: Transferable[] = [];
+    const transfer: ArrayBuffer[] = [];
+    const owned = (update: ArrayBuffer) => {
+      const copy = update.slice(0);
+      transfer.push(copy);
+      return copy;
+    };
     if (command.kind === 'applyRemoteUpdate' && command.payload && typeof command.payload === 'object' &&
       'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
-      const update = command.payload.update.slice(0);
-      command = { ...command, payload: { ...command.payload, update } };
-      transfer = [update];
+      command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
+    } else if (command.kind === 'applyRemoteUpdateChunks' && command.payload && typeof command.payload === 'object' &&
+      'updates' in command.payload && Array.isArray(command.payload.updates) &&
+      command.payload.updates.every(update => update instanceof ArrayBuffer)) {
+      command = { ...command, payload: { ...command.payload, updates: command.payload.updates.map(owned) } };
     }
     const response = await this.request({ type: 'edit', command }, transfer);
     return this.commandAck(response);
