@@ -4,7 +4,7 @@ import type { ResidentControlSnapshot } from './residentControls';
 import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residentProperties';
 import type { ResidentSectionSnapshot } from './residentSections';
 import type { YrsStoryRange } from './index';
-import type { ResidentReviewSnapshot } from './residentReview';
+import type { ResidentReviewSnapshot, ResidentReviewTarget, ResidentReviewTargetRanges } from './residentReview';
 import type { ResidentCommentInsertionRange } from './residentCommentProjection';
 import type { ResidentToolbarMetadata } from './residentToolbarMetadata';
 import type { LayoutMetaV1 } from './layoutMeta';
@@ -137,6 +137,7 @@ export type ResidentDocumentRead =
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
   | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] }
+  | { kind: 'reviewTarget'; target: ResidentReviewTarget }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string; nativePoint?: DocxSelectionPointIntent }
   | {
       kind: 'selectionUnit';
@@ -179,6 +180,7 @@ export interface ResidentDocumentReadValues {
   findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   anchorTargets: ProposalGeometryTarget[];
+  reviewTarget: ResidentReviewTargetRanges | null;
   searchText: ResidentSearchResult;
   findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;
