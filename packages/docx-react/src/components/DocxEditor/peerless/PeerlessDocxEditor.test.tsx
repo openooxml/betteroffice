@@ -450,7 +450,8 @@ test('worker tracked change cards accept and reject through worker review comman
   const sidebar = { comments: [], revisions: [{ key: 'revision-7', start: { story: 'body', position: 1 } }], trackedChanges: {
     entries: [{ revisionId: 7, type: 'insertion', text: 'Typed', author: 'Editor', date: '2026-10-01T00:00:00Z', from: 1, to: 6 }], commentToRevision: [] } };
   const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
-    ({ status: 'ok', version, value: request.kind === 'sidebar' ? sidebar : review })) as never);
+    ({ status: 'ok', version, value: request.kind === 'sidebar' ? sidebar : request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
   restorers.push(() => readAt.mockRestore());
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
