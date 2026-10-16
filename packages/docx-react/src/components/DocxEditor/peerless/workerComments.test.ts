@@ -280,7 +280,7 @@ function sidebarFixture(options: { hostComments?: Note[]; readOnly?: boolean; mo
     request.kind === 'commentSelectionRange' ? range :
     request.kind === 'reviewTarget' ? projected.some(comment => comment.id === request.target!.id) ? { id: `n${request.target!.id}`, ranges: [range] } : null :
     request.kind === 'reviewSnapshot' ? { comments: [], uiComments: structuredClone(projected), commentIds: {}, frameEpoch: 1, layoutRevision: 1 } : null }));
-  const submit = mock((intent: { kind: string; payload: { id?: string; body?: string; parentId?: string; patch?: { done: boolean } } }) => {
+  const submit = mock((intent: { kind: string; payload: { id?: string; body?: string; parentId?: string; patch?: { done: boolean }; ranges?: unknown; author?: string; expectVersion?: string } }) => {
     seq += 1;
     const id = Number(intent.payload.id?.slice(1));
     if (intent.kind === 'addComment') projected = [...projected, note(20 + seq, intent.payload.body!, intent.payload.parentId ? { parentId: Number(intent.payload.parentId.slice(1)) } : {})];
@@ -288,7 +288,7 @@ function sidebarFixture(options: { hostComments?: Note[]; readOnly?: boolean; mo
     if (intent.kind === 'removeComment') projected = projected.filter(comment => comment.id !== id);
     const receipt = intent.kind === 'addComment' ? { comment: { seq, id: 20 + seq, comments: structuredClone(projected) } } : { commentChange: { seq, comments: structuredClone(projected) } };
     const view = viewStore.getSnapshot();
-    viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version + 1, throughSeq: seq, presentedThroughSeq: 0, selection, editState: { ...editState, ...receipt } });
+    viewStore.acceptWorkerState(view.identity, { epoch: 1, version: view.version + 1, throughSeq: seq, presentedThroughSeq: 0, selection, editState: { ...editState, ...receipt } as never });
     return { status: 'submitted', ticket: { seq, ack: Promise.resolve({ status: 'applied', seq }), presented: Promise.resolve('presented') } };
   });
   const events: unknown[][] = [];

@@ -19,7 +19,7 @@ test('worker comments sidebar toggles through its host binding and refuses a fix
       commentsSidebar: { open, control, toggle: () => { open = !open; update(); } } });
     update();
     expect(controller.commands.store.getState('commentsSidebar')).toMatchObject({ enabled: true, active: false });
-    expect(await controller.commands.execute('commentsSidebar', null)).toEqual({ ok: true, status });
+    expect(await controller.commands.store.execute('commentsSidebar', null)).toEqual({ ok: true, status });
     expect(controller.commands.store.getState('commentsSidebar')).toMatchObject({ enabled: true, active: true });
   }
   controller.update({ read: (async () => null) as never, focus() {}, zoom: 1, commentsSidebar: { open: true, control: 'fixed', toggle() {} } });

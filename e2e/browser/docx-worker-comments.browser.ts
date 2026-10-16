@@ -21,6 +21,7 @@ async function selectLine(page: Page, down: number) {
   for (let line = 0; line < down; line++) await input.press('ArrowDown');
   await input.press('Home');
   await input.press('Shift+End');
+  await expect(page.getByRole('button', { name: 'Add comment' })).toBeVisible();
 }
 
 async function compose(page: Page, text: string) {
