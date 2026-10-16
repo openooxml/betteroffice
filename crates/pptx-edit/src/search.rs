@@ -5,8 +5,8 @@ use serde::Serialize;
 use yrs::{Map, TextRef, Transact};
 
 use crate::deck::{
-    live_shape_order, map_string_array, required_map, required_order, shape_ref, slide_ref,
-    slide_shape_order, string_array_ref,
+    live_shape_order, live_slide_ids, map_string_array, required_map, shape_ref, slide_ref,
+    slide_shape_order,
 };
 use crate::{DeckSession, EditError, EditResult, STORIES, story::snapshot_story};
 
@@ -156,13 +156,8 @@ impl DeckSession {
         let needle = Needle::new(query, case_sensitive);
         let txn = self.doc.transact();
         let stories = required_map(&txn, STORIES)?;
-        let mut seen_slides = HashSet::new();
         let mut matches = Vec::new();
-        for (slide_index, slide_id) in string_array_ref(&required_order(&txn)?, &txn)
-            .into_iter()
-            .filter(|id| seen_slides.insert(id.clone()))
-            .enumerate()
-        {
+        for (slide_index, slide_id) in live_slide_ids(&txn)?.into_iter().enumerate() {
             let slide = slide_ref(&txn, &slide_id)?;
             let mut shapes = live_shape_order(&slide_shape_order(&slide, &txn)?, &txn)?;
             shapes.reverse();

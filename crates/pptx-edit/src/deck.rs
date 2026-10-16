@@ -279,14 +279,9 @@ impl DeckSession {
     pub(crate) fn session_metadata(&self) -> EditResult<DeckMetadata> {
         let txn = self.doc.transact();
         let meta = required_map(&txn, META)?;
-        let order = required_order(&txn)?;
         let slides = required_map(&txn, SLIDES)?;
-        let mut seen_slides = HashSet::new();
         let mut summaries = Vec::new();
-        for slide_id in string_array_ref(&order, &txn) {
-            if !seen_slides.insert(slide_id.clone()) {
-                continue;
-            }
+        for slide_id in live_slide_ids(&txn)? {
             let slide = slides
                 .get(&txn, &slide_id)
                 .and_then(|value| value.cast::<MapRef>().ok())
@@ -309,25 +304,7 @@ impl DeckSession {
 
     /// Slide ids in deck order, matching `snapshot().slides` without walking shapes.
     pub fn slide_ids(&self) -> EditResult<Vec<String>> {
-        let txn = self.doc.transact();
-        let order = required_order(&txn)?;
-        let slides = required_map(&txn, SLIDES)?;
-        let mut seen_slides = HashSet::new();
-        let mut ids = Vec::new();
-        for slide_id in string_array_ref(&order, &txn) {
-            if !seen_slides.insert(slide_id.clone()) {
-                continue;
-            }
-            if slides
-                .get(&txn, &slide_id)
-                .and_then(|value| value.cast::<MapRef>().ok())
-                .is_none()
-            {
-                return Err(EditError::InvalidState(format!("missing slide {slide_id}")));
-            }
-            ids.push(slide_id);
-        }
-        Ok(ids)
+        live_slide_ids(&self.doc.transact())
     }
 
     /// Snapshot one slide without materializing the rest of the deck.
@@ -352,14 +329,11 @@ impl DeckSession {
                 "unknown slide layout {path:?}"
             )));
         }
-        let (order, slides, length) = {
+        let (order, slides, position, length) = {
             let txn = self.doc.transact();
             let order = required_order(&txn)?;
-            let length = order.len(&txn);
-            if index > length {
-                return Err(EditError::OutOfBounds { index, length });
-            }
-            (order, required_map(&txn, SLIDES)?, length)
+            let (position, length) = slide_insert_position(&order, &txn, index)?;
+            (order, required_map(&txn, SLIDES)?, position, length)
         };
         let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
@@ -370,7 +344,7 @@ impl DeckSession {
             slide.insert(&mut txn, "layoutPartPath", layout_part_path);
         }
         slide.insert(&mut txn, "shapes", ArrayPrelim::default());
-        order.insert(&mut txn, index, slide_id.as_str());
+        order.insert(&mut txn, position, slide_id.as_str());
         Ok(SlideReceipt {
             slide_id,
             from_index: None,
@@ -384,15 +358,10 @@ impl DeckSession {
         slide_id: &str,
         index: u32,
     ) -> EditResult<SlideReceipt> {
-        let (new_id, order, slides, shapes, stories, mut slide, copies) = {
+        let (new_id, order, position, slides, shapes, stories, mut slide, copies) = {
             let txn = self.doc.transact();
             let order = required_order(&txn)?;
-            if index > order.len(&txn) {
-                return Err(EditError::OutOfBounds {
-                    index,
-                    length: order.len(&txn),
-                });
-            }
+            let (position, _) = slide_insert_position(&order, &txn, index)?;
             let source = slide_ref(&txn, slide_id)?;
             let shapes = required_map(&txn, SHAPES)?;
             let stories = required_map(&txn, STORIES)?;
@@ -451,6 +420,7 @@ impl DeckSession {
             (
                 new_id,
                 order,
+                position,
                 required_map(&txn, SLIDES)?,
                 shapes,
                 stories,
@@ -485,7 +455,7 @@ impl DeckSession {
             }
         }
         slides.insert(&mut txn, new_id.as_str(), slide);
-        order.insert(&mut txn, index, new_id.as_str());
+        order.insert(&mut txn, position, new_id.as_str());
         drop(txn);
         self.automatic_undo_barrier();
         Ok(SlideReceipt {
@@ -509,8 +479,7 @@ impl DeckSession {
     pub fn delete_slide(&self, context: &EditCtx, slide_id: &str) -> EditResult<SlideReceipt> {
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
-        let index = array_index(&order, &txn, slide_id)
-            .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+        let index = live_slide_index(&txn, slide_id)?;
         let slides = required_map(&txn, SLIDES)?;
         let slide = slide_ref(&txn, slide_id)?;
         let shape_order = slide_shape_order(&slide, &txn)?;
@@ -529,7 +498,7 @@ impl DeckSession {
         for id in comment_ids {
             comments.remove(&mut txn, &id);
         }
-        order.remove(&mut txn, index);
+        remove_slide_entries(&order, &mut txn, slide_id);
         slides.remove(&mut txn, slide_id);
         Ok(SlideReceipt {
             slide_id: slide_id.to_owned(),
@@ -546,18 +515,18 @@ impl DeckSession {
     ) -> EditResult<SlideReceipt> {
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
-        let length = order.len(&txn);
+        let length = live_slide_order(&txn)?.len() as u32;
         if to_index >= length {
             return Err(EditError::OutOfBounds {
                 index: to_index,
                 length,
             });
         }
-        let from_index = array_index(&order, &txn, slide_id)
-            .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+        let from_index = live_slide_index(&txn, slide_id)?;
         if from_index != to_index {
-            order.remove(&mut txn, from_index);
-            order.insert(&mut txn, to_index, slide_id);
+            remove_slide_entries(&order, &mut txn, slide_id);
+            let (position, _) = slide_insert_position(&order, &txn, to_index)?;
+            order.insert(&mut txn, position, slide_id);
         }
         Ok(SlideReceipt {
             slide_id: slide_id.to_owned(),
@@ -2096,27 +2065,17 @@ pub(crate) fn slide_scope(
 ) -> EditResult<SlideScope> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
-    let order = required_order(&txn)?;
     let slides = required_map(&txn, SLIDES)?;
     let shapes = required_map(&txn, SHAPES)?;
     let stories = required_map(&txn, STORIES)?;
-    let mut seen_slides = HashSet::new();
-    let mut position = 0usize;
-    let mut slide_id = None;
-    for id in string_array_ref(&order, &txn) {
-        if !seen_slides.insert(id.clone()) {
-            continue;
-        }
-        if position == slide_index {
-            slide_id = Some(id);
-            break;
-        }
-        position += 1;
+    let mut ids = live_slide_ids(&txn)?;
+    if slide_index >= ids.len() {
+        return Err(EditError::OutOfBounds {
+            index: slide_index.min(u32::MAX as usize) as u32,
+            length: ids.len() as u32,
+        });
     }
-    let slide_id = slide_id.ok_or(EditError::OutOfBounds {
-        index: slide_index.min(u32::MAX as usize) as u32,
-        length: seen_slides.len() as u32,
-    })?;
+    let slide_id = ids.swap_remove(slide_index);
     Ok(SlideScope {
         index: slide_index,
         slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, &slide_id)?,
@@ -2128,16 +2087,11 @@ pub(crate) fn slide_scope(
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
-    let order = required_order(&txn)?;
     let slides = required_map(&txn, SLIDES)?;
     let shapes = required_map(&txn, SHAPES)?;
     let stories = required_map(&txn, STORIES)?;
-    let mut seen_slides = HashSet::new();
     let mut slide_snapshots = Vec::new();
-    for slide_id in string_array_ref(&order, &txn) {
-        if !seen_slides.insert(slide_id.clone()) {
-            continue;
-        }
+    for slide_id in live_slide_ids(&txn)? {
         slide_snapshots.push(snapshot_slide(
             &slides, &shapes, &stories, package, &txn, &slide_id,
         )?);
@@ -2543,6 +2497,64 @@ fn parse_shape_kind(value: &str) -> EditResult<ShapeKind> {
 pub(crate) fn required_order<T: ReadTxn>(txn: &T) -> EditResult<ArrayRef> {
     txn.get_array(SLIDE_ORDER)
         .ok_or_else(|| EditError::InvalidState("missing slide order".to_owned()))
+}
+
+/// The visible slide order as `(raw order index, id)`: the first entry of each id that has a slide.
+pub(crate) fn live_slide_order<T: ReadTxn>(txn: &T) -> EditResult<Vec<(u32, String)>> {
+    let order = required_order(txn)?;
+    let slides = required_map(txn, SLIDES)?;
+    let mut seen = HashSet::new();
+    Ok(order
+        .iter(txn)
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let id = out_string(&value)?;
+            let live = slides.contains_key(txn, &id) && seen.insert(id.clone());
+            live.then_some((index as u32, id))
+        })
+        .collect())
+}
+
+pub(crate) fn live_slide_ids<T: ReadTxn>(txn: &T) -> EditResult<Vec<String>> {
+    Ok(live_slide_order(txn)?
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect())
+}
+
+fn live_slide_index<T: ReadTxn>(txn: &T, slide_id: &str) -> EditResult<u32> {
+    live_slide_order(txn)?
+        .iter()
+        .position(|(_, id)| id == slide_id)
+        .map(|index| index as u32)
+        .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))
+}
+
+/// The raw order index that places a new entry at visible `index`, and the visible length.
+fn slide_insert_position<T: ReadTxn>(
+    order: &ArrayRef,
+    txn: &T,
+    index: u32,
+) -> EditResult<(u32, u32)> {
+    let live = live_slide_order(txn)?;
+    let length = live.len() as u32;
+    match live.get(index as usize) {
+        Some((position, _)) => Ok((*position, length)),
+        None if index == length => Ok((order.len(txn), length)),
+        None => Err(EditError::OutOfBounds { index, length }),
+    }
+}
+
+fn remove_slide_entries(order: &ArrayRef, txn: &mut TransactionMut<'_>, slide_id: &str) {
+    let indices: Vec<u32> = order
+        .iter(&*txn)
+        .enumerate()
+        .filter(|(_, value)| out_string(value).as_deref() == Some(slide_id))
+        .map(|(index, _)| index as u32)
+        .collect();
+    for index in indices.into_iter().rev() {
+        order.remove(txn, index);
+    }
 }
 
 pub(crate) fn required_map<T: ReadTxn>(txn: &T, name: &str) -> EditResult<MapRef> {

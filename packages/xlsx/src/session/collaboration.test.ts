@@ -216,3 +216,64 @@ test('collaborative worker replicas sync freeze panes and undo', async () => {
     await right.dispose();
   }
 });
+
+test('collaborative worker replicas sync cell merges and undo', async () => {
+  const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 401 });
+  const right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 402 });
+  const wire = transports();
+  const providers = [
+    new CollaborationProvider(left.replica!, wire.pair[0]),
+    new CollaborationProvider(right.replica!, wire.pair[1]),
+  ];
+  const range = { start: { row: 29, col: 0 }, end: { row: 30, col: 1 } };
+  const mergedRanges = async (session: WorkbookSession) => {
+    const geometry = await session.call.cellGeometry(0, range.start.row, range.start.col);
+    const frame = await session.call.frame({
+      x: geometry.scrollPosition.x, y: geometry.scrollPosition.y, width: 800, height: 600,
+    }, { sheet: 0 });
+    return (frame.mergedRanges ?? []).filter((merged) =>
+      merged.start.row <= range.end.row && range.start.row <= merged.end.row &&
+      merged.start.col <= range.end.col && range.start.col <= merged.end.col);
+  };
+  try {
+    const synced = Promise.all(providers.map(whenSynced));
+    for (const provider of providers) provider.connect();
+    await synced;
+    expect(await mergedRanges(left)).toEqual([]);
+    expect(await mergedRanges(right)).toEqual([]);
+    for (const type of ['mergeCells', 'unmergeCells'] as const) {
+      let merged = whenAcknowledged(right);
+      const edit = left.editSession!.submit('applyOps', {
+        payload: { args: [[{ type, sheet: 0, range }]] },
+      });
+      expect((await edit.ack).status).toBe('applied');
+      await merged;
+      const expected = type === 'mergeCells' ? [range] : [];
+      expect(await mergedRanges(left)).toEqual(expected);
+      expect(await mergedRanges(right)).toEqual(expected);
+
+      merged = whenAcknowledged(right);
+      const undo = left.editSession!.submit('undo', { payload: { args: [] } });
+      expect((await undo.ack).status).toBe('applied');
+      await merged;
+      const undone = type === 'mergeCells' ? [] : [range];
+      expect(await mergedRanges(left)).toEqual(undone);
+      expect(await mergedRanges(right)).toEqual(undone);
+
+      merged = whenAcknowledged(right);
+      const redo = left.editSession!.submit('redo', { payload: { args: [] } });
+      expect((await redo.ack).status).toBe('applied');
+      await merged;
+      expect(await mergedRanges(right)).toEqual(expected);
+      const refused = left.editSession!.submit('applyOps', {
+        payload: { args: [[{ type, sheet: 0, range: { start: { row: 1_048_576, col: 0 }, end: { row: 1_048_576, col: 1 } } }]] },
+      });
+      expect((await refused.ack).status).toBe('refused');
+      expect(await mergedRanges(left)).toEqual(expected);
+    }
+  } finally {
+    for (const provider of providers) provider.destroy();
+    await left.dispose();
+    await right.dispose();
+  }
+});

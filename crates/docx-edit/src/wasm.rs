@@ -2814,19 +2814,20 @@ impl EditSession {
     /// committed transaction. `update` is v1-encoded — feed it straight to
     /// [`EditSession::apply_update`] on a peer — and is copied out of wasm
     /// memory, so JS may hold it across later edits. The second argument is
-    /// `1` when the transaction had no local origin. One observer per session;
-    /// a second call replaces the first, and a throwing callback is ignored.
+    /// `1` when the transaction had no local origin; a remote update's own
+    /// formatting cleanup follows it as a `0` update to forward. One observer
+    /// per session; a second call replaces the first, and a throwing callback
+    /// is ignored.
     pub fn set_update_observer(&mut self, callback: &Function) -> Result<(), JsValue> {
         let callback = callback.clone();
         let subscription = self
             .engine
             .doc()
-            .yrs_doc()
-            .observe_update_v1(move |txn, event| {
+            .observe_update_v1(move |update, remote| {
                 // Uint8Array::from copies out of wasm memory — the JS side
                 // owns the bytes and may hold them across further edits.
-                let bytes = Uint8Array::from(event.update.as_slice());
-                let origin = if txn.origin().is_none() { 1.0 } else { 0.0 };
+                let bytes = Uint8Array::from(update);
+                let origin = if remote { 1.0 } else { 0.0 };
                 let _ = callback.call2(&JsValue::NULL, &bytes.into(), &JsValue::from_f64(origin));
             })
             .map_err(js_err)?;
@@ -2851,11 +2852,10 @@ impl EditSession {
         let subscription = self
             .engine
             .doc()
-            .yrs_doc()
-            .observe_update_v1(move |txn, event| {
-                let mut encoded = Vec::with_capacity(event.update.len() + 1);
-                encoded.push(if txn.origin().is_none() { 1 } else { 0 });
-                encoded.extend_from_slice(&event.update);
+            .observe_update_v1(move |update, remote| {
+                let mut encoded = Vec::with_capacity(update.len() + 1);
+                encoded.push(u8::from(remote));
+                encoded.extend_from_slice(update);
                 observed.borrow_mut().push_back(encoded);
             })
             .map_err(js_err)?;

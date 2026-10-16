@@ -1195,8 +1195,10 @@ export class EditSession {
      * committed transaction. `update` is v1-encoded — feed it straight to
      * [`EditSession::apply_update`] on a peer — and is copied out of wasm
      * memory, so JS may hold it across later edits. The second argument is
-     * `1` when the transaction had no local origin. One observer per session;
-     * a second call replaces the first, and a throwing callback is ignored.
+     * `1` when the transaction had no local origin; a remote update's own
+     * formatting cleanup follows it as a `0` update to forward. One observer
+     * per session; a second call replaces the first, and a throwing callback
+     * is ignored.
      */
     set_update_observer(callback: Function): void;
     /**
