@@ -1022,6 +1022,52 @@ test('worker property queries and section mutations preserve versions undo layou
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker hyperlink properties expand contiguous runs at both caret boundaries', async () => {
+  const { client, point } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:hyperlink w:anchor="target"><w:r><w:t>First</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>Second</w:t></w:r></w:hyperlink><w:r><w:t> plain</w:t></w:r></w:p>' });
+  try {
+    for (const offset of [0, 3, 5, 11]) {
+      const at = { ...point, offset };
+      const result = await client.documentRead({ kind: 'properties', target: { kind: 'hyperlink', selection: { anchor: at, focus: at } } });
+      expect(result.value).toMatchObject({ kind: 'hyperlink', hyperlink: { href: '#target' }, range: {
+        story: 'body', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 11 },
+      } });
+    }
+    const at = { ...point, offset: 14 };
+    expect((await client.documentRead({ kind: 'properties', target: { kind: 'hyperlink', selection: { anchor: at, focus: at } } })).value)
+      .toMatchObject({ hyperlink: null, range: { story: 'body', start: { paraId: point.paraId, offset: 14 }, end: { paraId: point.paraId, offset: 14 } } });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker setHyperlink inserts and replaces display text', async () => {
+  const { client, engine, initial, point } = await openWorker();
+  try {
+    const at = { ...point, offset: 0 };
+    const selection = { anchor: at, focus: at };
+    const version = initial.frame.payload.documentVersion!;
+    const refused = await client.edit(intent(1, 0, 'setHyperlink', { selection, hyperlink: { href: 'https://example.com/link' }, expectVersion: version }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-range' });
+    const inserted = await client.edit(intent(2, 0, 'setHyperlink', { selection, hyperlink: { href: 'https://example.com/link', tooltip: 'Tip' }, displayText: 'Linked', expectVersion: version }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')[0]).toMatchObject({ text: 'Linked', attributes: { hyperlink: { href: 'https://example.com/link' } } });
+    for (const offset of [0, 3, 6]) {
+      const caret = { ...at, offset };
+      const read = await client.documentRead({ kind: 'properties', target: { kind: 'hyperlink', selection: { anchor: caret, focus: caret } } });
+      expect(read.value).toMatchObject({ kind: 'hyperlink', range: { story: 'body', start: { paraId: at.paraId, offset: 0 }, end: { paraId: at.paraId, offset: 6 } }, hyperlink: { href: 'https://example.com/link' } });
+    }
+    const changed = await client.edit(intent(3, 1, 'setHyperlink', { selection: { anchor: at, focus: { ...at, offset: 6 } }, hyperlink: { href: '#target' }, displayText: 'Changed', expectVersion: inserted.frame!.payload.documentVersion! }));
+    expect(changed.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')[0]).toMatchObject({ text: 'Changed', attributes: { hyperlink: { href: '#target' } } });
+    const saved = await client.save({ comments: [] });
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.bytes))['word/document.xml']!);
+    expect(xml).toContain('w:anchor="target"');
+    expect(xml).toContain('Changed');
+    expect(xml).not.toContain('Linked');
+    const removed = await client.edit(intent(4, 2, 'setHyperlink', { selection: { anchor: at, focus: { ...at, offset: 7 } }, hyperlink: null, expectVersion: saved.version }));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')[0]?.attributes.hyperlink).toBeUndefined();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker orders hyperlink note and watermark properties and refuses stale requests', async () => {
   const { client, engine, initial, point } = await openWorker();
   try {

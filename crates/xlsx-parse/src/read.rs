@@ -773,6 +773,10 @@ fn parse_hyperlink(
     };
     let range = CellRange::parse_a1(&reference)
         .map_err(|_| ParseError::Malformed(format!("bad hyperlink ref {reference:?}")))?;
+    let range = CellRange {
+        start: CellRef::new(range.start.row, range.start.col),
+        end: CellRef::new(range.end.row, range.end.col),
+    };
     let external_target = attr(element, b"id")?
         .and_then(|id| relationships.get(&id))
         .filter(|relationship| {

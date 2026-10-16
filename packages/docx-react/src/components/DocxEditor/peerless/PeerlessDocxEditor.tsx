@@ -10,11 +10,14 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import {
   applyFrameDelta,
   decodeFrameDelta,
+  findDisplayListHyperlinkAtPoint,
   type RetainedFrame,
 } from '@betteroffice/docx/layout/render';
 import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
 import { createRustMeasureSource, type ResidentFontRequirement } from '@betteroffice/docx/layout';
-import { extractEmbeddedFontFaces, toArrayBuffer, type DocxInput } from '@betteroffice/docx/utils';
+import { extractEmbeddedFontFaces, sanitizeHref, toArrayBuffer, type DocxInput } from '@betteroffice/docx/utils';
+import { HyperlinkPopup, type HyperlinkPopupData } from '../../ui/HyperlinkPopup';
+import { toast } from 'sonner';
 import {
   residentCaretSnapshotForFrame,
   type DocxCommandFrame,
@@ -107,6 +110,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const worker = useRef<ResidentEngineWorkerClient | null>(null);
   const sourceComments = useRef<NonNullable<DocxEditorProps['comments']>>([]);
   const [zoom, setZoom] = useState(initialZoom);
+  const [hyperlinkPopup, setHyperlinkPopup] = useState<HyperlinkPopupData | null>(null);
+  const linkGesture = useRef(0);
   const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__peerless-input')?.focus({ preventScroll: true }), []);
   const read = useCallback<ResidentEngineWorkerClient['documentRead']>((request) => {
     if (!worker.current) return Promise.reject(new Error('Peer-less worker is not ready'));
@@ -753,6 +758,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => {
     active.current = null;
     setPreviewJob(null);
+    setHyperlinkPopup(null);
+    linkGesture.current += 1;
     openedSource.current = sourceKey;
     pluginGeometry.clear();
     if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
@@ -760,6 +767,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
+    const gesture = ++linkGesture.current;
+    setHyperlinkPopup(null);
     const geometry = controller.getSnapshot().view?.geometry;
     const section = 'final';
     const targets = geometry?.parts?.filter(part => part.pageId === page.page.pageId &&
@@ -773,14 +782,35 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       (y < body.y ? 'header' : y > body.y + body.height ? 'footer' : null));
     if (band === 'header' || band === 'footer') {
       const activePart = controller.getSnapshot().view?.editState?.activePart;
-      if (activePart?.kind === band && activePart.page === page.page.pageIndex) return false;
-      if (clickCount === 2) {
-        const target = { kind: band, section, page: page.page.pageIndex };
-        void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
+      if (activePart?.kind !== band || activePart.page !== page.page.pageIndex) {
+        if (clickCount === 2) {
+          const target = { kind: band, section, page: page.page.pageIndex };
+          void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
+        }
+        return true;
       }
-      return true;
     }
-    return false;
+    const region = band === 'header' || band === 'footer' ? { kind: band } : { kind: 'body' as const };
+    const hit = clickCount === 1 && page.displayPage ? findDisplayListHyperlinkAtPoint({ pages: [page.displayPage] }, 0, x, y, region) : null;
+    const href = sanitizeHref(hit?.href ?? '');
+    const bounds = host.current?.querySelector('[data-peerless-pages-host]')?.getBoundingClientRect();
+    const hostBounds = host.current?.getBoundingClientRect();
+    if (!hit || !href || !bounds || !hostBounds) return false;
+    const data = { href, displayText: hit.displayText, tooltip: hit.tooltip, position: {
+      left: bounds.left - hostBounds.left + (page.bounds.x + hit.rect.x) * zoom,
+      top: bounds.top - hostBounds.top + (page.bounds.y + hit.rect.y + hit.rect.h) * zoom + 4,
+    } };
+    void controller.submit({ kind: 'selectPoint', payload: intent }).then(async result => {
+      if (!result.ok || gesture !== linkGesture.current) return;
+      const selection = controller.getSnapshot().view?.workerSelection;
+      if (!selection || selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset) return;
+      focus();
+      if (href.startsWith('#')) {
+        const story = region.kind === 'body' ? 'body' : selection.focus.story;
+        await navigation.scrollToBookmark(href.slice(1), story);
+      } else setHyperlinkPopup(data);
+    }).catch(error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
+    return true;
   };
   const activeBox = shellState.view?.geometry && parts.activePart && shellState.view.geometry.coversThroughSeq === shellState.view.throughSeq ?
     shellState.view.geometry.parts?.find(part => part.story === parts.activePart?.story && part.pageIndex === parts.activePart.page) : undefined;
@@ -897,6 +927,17 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}
       {previewJob && shellState.preview === previewJob.frame &&
         <WorkerDocumentPreview job={previewJob} zoom={zoom} onPresented={onPreviewPresented} />}
+      <HyperlinkPopup data={hyperlinkPopup} readOnly={effectiveReadOnly} onClose={() => setHyperlinkPopup(null)}
+        onNavigate={href => { window.open(href, '_blank', 'noopener,noreferrer'); }}
+        onCopy={async href => {
+          try { await navigator.clipboard.writeText(href); } catch {
+            const textarea = document.createElement('textarea');
+            textarea.value = href; textarea.style.position = 'fixed'; textarea.style.opacity = '0';
+            document.body.appendChild(textarea); textarea.select(); document.execCommand('copy'); textarea.remove();
+          }
+        }}
+        onEdit={(displayText, href) => { void propertyDialogs.applyPopupLink(displayText, href, hyperlinkPopup?.tooltip).then(applied => { if (applied) setHyperlinkPopup(null); }); }}
+        onRemove={() => { void propertyDialogs.removeLinkAtCaret().then(applied => { if (applied) { setHyperlinkPopup(null); toast('Link removed'); } }); }} />
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}

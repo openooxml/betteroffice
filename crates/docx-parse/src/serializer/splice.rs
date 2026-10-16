@@ -16,18 +16,20 @@ use super::s13::element_span;
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
-/// source to stand in for it: the same comment markers in order, at the same text offsets, and
-/// no revision or note ID the source lacks. Source IDs the written XML lacks are kept, as are
+/// source to stand in for it: the same comment markers in order, at the same text offsets, the
+/// same permission markers, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept, as are
 /// relationship IDs: the save keeps every source relationship.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Marks {
     comments: Vec<(String, String, usize)>,
+    permissions: Vec<(String, String)>,
     ids: BTreeMap<(&'static str, String), usize>,
 }
 
 impl Marks {
     fn admit(&self, written: &Marks) -> bool {
         self.comments == written.comments
+            && self.permissions == written.permissions
             && written
                 .ids
                 .iter()
@@ -36,7 +38,7 @@ impl Marks {
 }
 
 /// Run content that takes a position in the text, besides `w:t` and `w:delText` characters.
-const POSITIONED: [&str; 19] = [
+pub(crate) const POSITIONED: [&str; 19] = [
     "w:tab",
     "w:ptab",
     "w:br",
@@ -100,6 +102,10 @@ fn marks(xml: &str) -> Option<Marks> {
                 marks.comments.push((tag.name.to_owned(), id(), offset));
                 continue;
             }
+            "w:permStart" | "w:permEnd" => {
+                marks.permissions.push((tag.name.to_owned(), id()));
+                continue;
+            }
             "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => "revision",
             name if name.ends_with("Change") => "revision",
             "w:footnoteReference" => "footnote",
@@ -108,6 +114,7 @@ fn marks(xml: &str) -> Option<Marks> {
         };
         *marks.ids.entry((kind, id())).or_insert(0) += 1;
     }
+    marks.permissions.sort();
     Some(marks)
 }
 
@@ -644,7 +651,7 @@ fn with_insertions(source: &str, added: &[(usize, &str)]) -> String {
     output
 }
 
-fn paragraph_span(xml: &str, occurrence: &ParagraphOccurrence) -> Option<Range<usize>> {
+pub(crate) fn paragraph_span(xml: &str, occurrence: &ParagraphOccurrence) -> Option<Range<usize>> {
     let start = occurrence.tag.start;
     let relative = element_span(&xml[start..], &[])?;
     Some(start + relative.start..start + relative.end)

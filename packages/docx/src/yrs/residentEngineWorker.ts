@@ -77,6 +77,7 @@ import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResiden
 import { readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
+  resolveBookmarkTarget,
   resolveCommentTarget,
   resolveParagraphTarget,
   resolveRevisionTarget,
@@ -2072,6 +2073,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.head,
           request.read.expectVersion
         );
+        break;
+      case 'bookmarkTarget':
+        value = resolveBookmarkTarget(displayPositionIndex(session), request.read.story, request.read.name, engine.version());
         break;
       case 'bookmarkPosition':
         value = resolveBookmarkPosition(

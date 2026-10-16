@@ -8,6 +8,7 @@ import type { DocxWorkerEditSession } from '@betteroffice/docx/peerless';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { normalizeInputEvent } from './inputEvents';
+import { toolbarFixture } from './toolbarCommands.testing';
 
 function fixture(presentedThroughSeq = 0) {
   const viewStore = createPeerlessViewStore({
@@ -159,7 +160,7 @@ test('worker state opens shell command gates without a legacy document or sessio
   expect(controller.commands.store.getState('undo').enabled).toBe(false);
 });
 
-test('worker text color preserves theme shades and automatic clearing while unavailable highlights refuse', async () => {
+test('worker text color preserves theme shades and automatic clearing', async () => {
   const { controller, binding, viewStore } = fixture();
   const state = viewStore.getSnapshot();
   viewStore.acceptWorkerState(state.identity, { ...state, epoch: 1, selection: null,
@@ -168,12 +169,25 @@ test('worker text color preserves theme shades and automatic clearing while unav
   binding.commands = { format } as never;
   controller.attach(binding);
   expect(await controller.commands.store.execute('textColor', { color: { themeColor: 'accent1', themeTint: '80' } })).toMatchObject({ ok: true });
-  expect(await controller.commands.store.execute('highlightColor', { color: 'none' })).toMatchObject({ ok: false });
   expect(await controller.commands.store.execute('textColor', { color: 'auto' })).toMatchObject({ ok: true });
   expect(format.mock.calls.map(([intent]) => intent)).toEqual([
     { kind: 'formatRange', payload: { delta: { color: { themeColor: 'accent1' }, other: { textColor: { themeColor: 'accent1', themeTint: '80' } } } } },
     { kind: 'formatRange', payload: { delta: { color: null, other: { textColor: null } } } },
   ]);
+});
+
+test('worker highlightColor formats and clears through formatRange', async () => {
+  const { controller, format, parity } = toolbarFixture();
+  parity('highlightColor');
+  for (const color of ['yellow', 'none']) {
+    expect(await controller.commands.store.execute('highlightColor', { color })).toMatchObject({ ok: true });
+    expect(format).toHaveBeenLastCalledWith({ kind: 'formatRange', payload: { delta: { highlight: color === 'none' ? null : color } } }, { fence: true });
+  }
+});
+
+test('worker insertBreak stays a loud sync-API failure', () => {
+  const { controller } = toolbarFixture();
+  expect(() => controller.ref.insertBreak({ paraId: 'p1', type: 'page' })).toThrow(LEGACY_SYNC_API_PROP);
 });
 
 test('font readiness updates choices and callbacks while screen paint waits for accepted geometry', async () => {
