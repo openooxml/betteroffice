@@ -81,6 +81,70 @@ test('peer-less typing commits the cell and formula bar before navigation', asyn
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 
+for (const route of ['select', 'execCommand', 'none'] as const) {
+  test(`peer-less ${
+    route === 'none' ? 'typing without selection appends to' : `native select-all via ${route} replaces`
+  } a delayed prefill`, async ({ page }) => {
+    await open(page);
+    await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('initial');
+    await page.evaluate(() => window.__xlsxWorkerEditor.holdCellInputs());
+    await page.getByTestId('xlsx-scroll').focus();
+    await page.getByTestId('xlsx-scroll').press('F2');
+    const input = page.getByTestId('xlsx-cell-editor');
+    await expect(input).toBeFocused();
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.heldCellInputs())).toBeGreaterThan(0);
+    await input.evaluate((element, route) => {
+      if (route === 'select') (element as HTMLInputElement).select();
+      else if (route === 'execCommand') document.execCommand('selectAll');
+    }, route);
+    await input.pressSequentially('replacement');
+    await page.evaluate(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      window.__xlsxWorkerEditor.releaseCellInputs();
+    });
+    await expect(input).not.toHaveValue('');
+    await expect(input).not.toHaveValue('initial');
+    const expected = route === 'none' ? 'initialreplacement' : 'replacement';
+    expect(await input.inputValue()).toBe(expected);
+    await input.press('Enter');
+    await expect.poll(() => cells(page)).toEqual([[expected]]);
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+  });
+}
+
+for (const route of ['keyboard', 'native', 'paste', 'unicode'] as const) {
+  test(`peer-less uncached pending prefill keeps native input for ${route}`, async ({ page, context }) => {
+    await open(page);
+    await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('initial');
+    await page.evaluate(() => window.__xlsxWorkerEditor.holdCellInputs());
+    const scroll = page.getByTestId('xlsx-scroll');
+    await scroll.focus();
+    await scroll.press('ArrowRight');
+    await selection(page, 0, 1);
+    await scroll.press('F2');
+    const input = page.getByTestId('xlsx-cell-editor');
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue('');
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.heldCellInputs())).toBeGreaterThan(0);
+    if (route === 'keyboard') await input.press('ControlOrMeta+A');
+    if (route === 'native') await input.evaluate((element) => (element as HTMLInputElement).select());
+    if (route === 'paste') {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await pinnedEvaluate(page, () => navigator.clipboard.writeText('replacement'));
+      await input.press('ControlOrMeta+v');
+    } else if (route === 'unicode') await page.keyboard.insertText('😀');
+    else await input.pressSequentially('replacement');
+    await page.evaluate(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      window.__xlsxWorkerEditor.releaseCellInputs();
+    });
+    const expected = route === 'keyboard' ? 'replacement' : route === 'unicode' ? '1😀' : '1replacement';
+    await expect(input).toHaveValue(expected);
+    await input.press('Enter');
+    await expect.poll(() => cells(page, 'B1')).toEqual([[expected]]);
+  });
+}
+
 for (const release of ['F2', 'select all', 'Delete', 'typing'] as const) {
   test(`peer-less F2 keeps the edit keys when its held seed arrives after ${release}`, async ({ page }) => {
     await open(page);
