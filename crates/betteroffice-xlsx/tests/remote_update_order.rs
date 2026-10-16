@@ -3,6 +3,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
+use yrs::{Doc, Map, ReadTxn, Transact, Update};
 
 const SAMPLE: &[u8] = include_bytes!("../../../packages/xlsx/test-fixtures/sample.xlsx");
 
@@ -59,6 +62,20 @@ fn deliver(target: Workbook, updates: &[&Vec<u8>]) -> Workbook {
         .expect("remote updates must apply within 10 s")
 }
 
+fn merge(updates: &[&Vec<u8>]) -> Vec<u8> {
+    Update::merge_updates(updates.iter().map(|update| Update::decode_v1(update).unwrap()))
+        .encode_v1()
+}
+
+fn assert_same_state(left: &Workbook, right: &Workbook) {
+    assert_eq!(left.encode_state_vector_v1(), right.encode_state_vector_v1());
+    assert_eq!(left.model(), right.model());
+    assert!(
+        Update::decode_v1(&left.encode_state_as_update_v1()).unwrap()
+            == Update::decode_v1(&right.encode_state_as_update_v1()).unwrap()
+    );
+}
+
 fn assert_projects_its_state(workbook: &Workbook, mirror_id: u64) {
     let mirror = deliver(open(mirror_id), &[&workbook.encode_state_as_update_v1()]);
     assert_eq!(mirror.model(), workbook.model());
@@ -102,4 +119,50 @@ fn an_overwrite_that_overtakes_an_edit_waits_for_it_and_converges() {
     assert_eq!(input(&target, "D1"), "three");
     assert_eq!(input(&target, "H20"), "two");
     assert_eq!(target.model(), source.model());
+}
+
+#[test]
+fn merged_and_separate_delivery_of_an_overtaking_edit_agree() {
+    let mut source = open(841);
+    let updates = edit(
+        &mut source,
+        &[("D1", "one"), ("H20", "two"), ("D1", "three")],
+    );
+
+    let merged = deliver(open(842), &[&merge(&[&updates[0], &updates[2]])]);
+    let separate = deliver(open(843), &[&updates[0], &updates[2]]);
+    assert_eq!(input(&merged, "D1"), input(&separate, "D1"));
+    assert_eq!(input(&merged, "H20"), "");
+    assert_same_state(&merged, &separate);
+
+    let merged = deliver(merged, &[&updates[1]]);
+    let separate = deliver(separate, &[&updates[1]]);
+    assert_eq!(input(&merged, "D1"), "three");
+    assert_eq!(input(&merged, "H20"), "two");
+    assert_eq!(merged.model(), source.model());
+    assert_same_state(&merged, &separate);
+}
+
+#[test]
+fn a_held_update_carrying_an_older_schema_from_a_higher_client_settles() {
+    let mut source = open(851);
+    let updates = edit(&mut source, &[("D1", "one"), ("D1", "two")]);
+    let doc = Doc::with_client_id(9_000);
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&open(852).encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let before = doc.transact().state_vector();
+    doc.get_or_insert_map("xlsx").insert(&mut doc.transact_mut(), "schemaVersion", 5_i64);
+    let stale = doc.transact().encode_diff_v1(&before);
+
+    let target = deliver(open(853), &[&merge(&[&stale, &updates[1]])]);
+    assert_eq!(input(&target, "D1"), "");
+    assert_projects_its_state(&target, 854);
+
+    let target = deliver(target, &[&updates[0]]);
+    assert_eq!(input(&target, "D1"), "two");
+    let source = deliver(source, &[&stale, &target.encode_state_as_update_v1()]);
+    let target = deliver(target, &[&source.encode_state_as_update_v1()]);
+    assert_eq!(input(&source, "D1"), "two");
+    assert_same_state(&target, &source);
 }
