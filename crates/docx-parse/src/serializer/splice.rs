@@ -662,6 +662,38 @@ fn row_spans(xml: &str) -> Option<Vec<RowSpan>> {
     Some(rows)
 }
 
+/// The entry of `recorded.order` each `w:p` of `serialized` was written as: `None` for one
+/// inside another paragraph or for the empty paragraph of a cell without content. `None` unless
+/// the paragraphs outside any other are exactly those `recorded` lists, in its order.
+fn recorded_entries(serialized: &str, recorded: &RecordedParagraphs) -> Option<Vec<Option<usize>>> {
+    let mut placeholders = recorded.placeholders.iter().copied().peekable();
+    let mut entries = Vec::new();
+    let mut next = 0;
+    let mut end = 0;
+    for occurrence in paragraph_occurrences(serialized)? {
+        if occurrence.tag.start < end {
+            entries.push(None);
+            continue;
+        }
+        end = paragraph_span(serialized, &occurrence)?.end;
+        if placeholders.next_if_eq(&next).is_some() {
+            if serialized.get(occurrence.tag) != Some("<w:p/>") {
+                return None;
+            }
+            entries.push(None);
+        } else if next < recorded.order.len() {
+            entries.push(Some(next));
+            next += 1;
+        } else {
+            return None;
+        }
+    }
+    if next != recorded.order.len() || placeholders.next().is_some() {
+        return None;
+    }
+    Some(entries)
+}
+
 #[derive(Default)]
 struct RowEdits<'a> {
     edits: Vec<(Range<usize>, u8, &'a str)>,
@@ -680,13 +712,22 @@ fn row_edits<'a>(
         return Some(RowEdits::default());
     }
     let source_rows = row_spans(source)?;
-    let target_rows = row_spans(serialized)?;
+    let mut target_rows = row_spans(serialized)?;
     let mut edits = RowEdits::default();
     if source_rows.is_empty() {
         return Some(edits);
     }
-    if paragraph_occurrences(serialized)?.len() != recorded.order.len() {
-        return None;
+    let entries = recorded_entries(serialized, recorded)?;
+    for row in &mut target_rows {
+        let paragraphs: Vec<usize> = row
+            .paragraphs
+            .iter()
+            .filter_map(|at| entries[*at])
+            .collect();
+        if paragraphs.is_empty() && !row.paragraphs.is_empty() {
+            return None;
+        }
+        row.paragraphs = paragraphs;
     }
     let mut insertion_at = 0;
     let insertion_indices: Vec<Option<usize>> = recorded
@@ -737,13 +778,17 @@ fn row_edits<'a>(
             .push((position..position, 1, &serialized[row.span.clone()]));
     }
     for row in &source_rows {
-        if row.paragraphs.is_empty()
+        let dropped = |at: &usize| removed.contains(&(*at as u32));
+        if !row.paragraphs.iter().any(dropped)
             || row
                 .paragraphs
                 .iter()
-                .any(|at| !removed.contains(&(*at as u32)))
+                .any(|at| recorded.written.contains_key(&(*at as u32)))
         {
             continue;
+        }
+        if !row.paragraphs.iter().all(dropped) {
+            return None;
         }
         if edits
             .edits
@@ -1084,22 +1129,23 @@ mod tests {
         format!("{ROOT}<w:body>{paragraphs}</w:body></w:document>")
     }
 
+    fn package(xml: &str) -> Vec<u8> {
+        ooxml_opc::rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
+        ])
+        .unwrap()
+    }
+
     fn assert_whole_part_fallback(source: &str, written: &[(Option<u32>, &str)], edit: Edit) {
         assert_eq!(splice_written(source, written, edit, &[], ("", "")), None);
-        let package = |xml: &str| {
-            ooxml_opc::rezip_parts(&[
-                (
-                    "[Content_Types].xml".to_owned(),
-                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
-                ),
-                (
-                    "_rels/.rels".to_owned(),
-                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
-                ),
-                ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
-            ])
-            .unwrap()
-        };
         let original = package(source);
         let target = body(&written.iter().map(|(_, xml)| *xml).collect::<String>());
         let parsed = crate::parse_docx_s9_wire(&package(&target), Default::default())
@@ -1326,6 +1372,146 @@ mod tests {
             ("", ""),
         );
         assert_eq!(spliced, Some(source.replace(cell, &format!("{new}{cell}"))));
+    }
+
+    /// The `word/document.xml` a save writes for `source` once `edit` changed its model: spliced
+    /// as `spliced` describes, or whole without it.
+    fn saved_document(
+        source: &str,
+        edit: impl FnOnce(&mut Vec<serde_json::Value>),
+        spliced: Option<serde_json::Value>,
+    ) -> String {
+        let original = package(source);
+        let options = crate::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        };
+        let parsed = crate::parse_docx_s9_wire(&original, options)
+            .unwrap()
+            .document
+            .package;
+        let mut content = serde_json::to_value(&parsed.document.content).unwrap();
+        edit(content.as_array_mut().unwrap());
+        let mut request = json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": content},
+            "options": {"updateModifiedDate": false},
+        });
+        if let Some(mut part) = spliced {
+            part["part"] = json!("word/document.xml");
+            part["sha256"] = json!(format!("{:x}", Sha256::digest(source.as_bytes())));
+            request["paragraphIds"] = json!({"splicedParts": [part]});
+        }
+        let saved = write_docx_s13(serde_json::from_value(request).unwrap(), &original).unwrap();
+        let (_, xml) = ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap();
+        String::from_utf8(xml).unwrap()
+    }
+
+    /// A body paragraph, then a table whose first column merges its two rows, then a paragraph:
+    /// ordinals 0, 1 to 4 in reading order with 3 in the continuation cell, and 5.
+    fn merged_table_body() -> String {
+        let cell = |properties: &str, paragraph: &str| {
+            format!(
+                "<w:tc><w:tcPr><w:tcW w:w=\"10\" w:type=\"dxa\"/>{properties}</w:tcPr>{paragraph}</w:tc>"
+            )
+        };
+        let paragraph = |id: &str, text: &str| {
+            format!("<w:p w14:paraId=\"{id}\"><w:r><w:t>{text}</w:t></w:r></w:p>")
+        };
+        body(&format!(
+            "{}<w:tbl><w:tblGrid><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/></w:tblGrid><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl>{}",
+            paragraph("0000000A", "first"),
+            cell(
+                "<w:vMerge w:val=\"restart\"/>",
+                &paragraph("0000000B", "merged")
+            ),
+            cell("", &paragraph("0000000C", "right")),
+            cell("<w:vMerge/>", "<w:p w14:paraId=\"0000000D\"/>"),
+            cell("", &paragraph("0000000E", "below")),
+            paragraph("0000000F", "last"),
+        ))
+    }
+
+    /// The model of [`merged_table_body`] as a save projects it: the continuation cell's
+    /// paragraph is not read, so that cell has no content.
+    fn without_continued_content(content: &mut [serde_json::Value]) {
+        content[1]["rows"][1]["cells"][0]["content"] = json!([]);
+    }
+
+    /// `source`, a one-run paragraph, with no `sourceOrdinal`, the paragraph ID `id` and `text`.
+    fn new_paragraph(source: &serde_json::Value, id: &str, text: &str) -> serde_json::Value {
+        let mut paragraph = source.clone();
+        paragraph.as_object_mut().unwrap().remove("sourceOrdinal");
+        paragraph["paraId"] = json!(id);
+        *paragraph.pointer_mut("/content/0/content/0/text").unwrap() = json!(text);
+        paragraph
+    }
+
+    #[test]
+    fn paragraphs_and_rows_inserted_around_cells_without_content_splice() {
+        let source = merged_table_body();
+        let saved = saved_document(
+            &source,
+            |content| {
+                without_continued_content(content);
+                let new = new_paragraph(&content[0], "00000010", "new");
+                content.insert(1, new);
+            },
+            Some(json!({
+                "paragraphs": [0, 1, 2, 4, 5],
+                "inserted": [S13SpliceAnchor::After(0)],
+            })),
+        );
+        let (head, tail) = source.split_at(source.find("<w:tbl>").unwrap());
+        assert!(saved.starts_with(head) && saved.ends_with(tail), "{saved}");
+        let new = &saved[head.len()..saved.len() - tail.len()];
+        assert!(new.starts_with("<w:p ") && new.ends_with("</w:p>"), "{new}");
+        assert!(new.contains("<w:t>new</w:t>"), "{new}");
+
+        let saved = saved_document(
+            &source,
+            |content| {
+                without_continued_content(content);
+                let mut row = content[1]["rows"][1].clone();
+                let added = new_paragraph(&row["cells"][1]["content"][0], "00000010", "added");
+                row["cells"][1]["content"][0] = added;
+                content[1]["rows"].as_array_mut().unwrap().insert(1, row);
+            },
+            Some(json!({
+                "paragraphs": [0, 1, 2, 4, 5],
+                "inserted": [S13SpliceAnchor::After(2)],
+            })),
+        );
+        let (head, tail) = source.split_at(source.find("</w:tr>").unwrap() + "</w:tr>".len());
+        assert!(saved.starts_with(head) && saved.ends_with(tail), "{saved}");
+        let row = &saved[head.len()..saved.len() - tail.len()];
+        assert!(
+            row.starts_with("<w:tr") && row.ends_with("</w:tr>"),
+            "{row}"
+        );
+        assert!(
+            row.contains("<w:p/>") && row.contains("<w:t>added</w:t>"),
+            "{row}"
+        );
+    }
+
+    #[test]
+    fn removing_a_row_with_a_paragraph_the_model_does_not_read_writes_the_whole_part() {
+        let source = merged_table_body();
+        let remove_row = |content: &mut Vec<serde_json::Value>| {
+            content[1]["rows"].as_array_mut().unwrap().remove(1);
+        };
+        let spliced = saved_document(
+            &source,
+            remove_row,
+            Some(json!({"paragraphs": [0, 1, 2, 5], "removed": [4]})),
+        );
+        assert_eq!(spliced, saved_document(&source, remove_row, None));
+        assert!(!spliced.contains("below"), "{spliced}");
     }
 
     #[test]
