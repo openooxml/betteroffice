@@ -941,8 +941,10 @@ impl StoryParts<'_> {
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
-        let tokens = source.is_some_and(super::permissions::has_markers);
-        context.begin_splice(part.paragraphs.iter().copied(), tokens);
+        let token_prefix = source
+            .filter(|source| super::permissions::has_markers(source))
+            .map(super::permissions::token_prefix);
+        context.begin_splice(part.paragraphs.iter().copied(), token_prefix);
         let serialized = serialize(context);
         let written = context.end_splice();
         let mut serialized = serialized?;

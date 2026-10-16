@@ -367,3 +367,47 @@ fn a_paragraph_kept_as_raw_markup_does_not_take_the_markers_of_an_identical_one(
     assert!(saved.contains(&format!("{START}{}</w:p>", run("One"))));
     assert!(saved.contains(&format!("{}{END}</w:p>", run("Deux"))));
 }
+
+#[test]
+fn a_source_paragraph_comment_cannot_hide_permission_ranges() {
+    for block in [
+        "",
+        r#"<x:block xmlns:x="urn:example:block"><![CDATA[<!--bo-paragraph _0-->]]></x:block>"#,
+    ] {
+        let source = format!(
+            "<!--bo-paragraph 0-->{}",
+            document(&format!("{block}<w:p>{START}{}{END}</w:p>", run("Draft")))
+        );
+        let original = package(&source);
+        let parsed = parse_docx_s9_wire(&original, S9ParseOptions::default())
+            .unwrap()
+            .document
+            .package;
+        let mut content = serde_json::to_value(&parsed.document.content).unwrap();
+        let paragraph = usize::from(!block.is_empty());
+        content[paragraph]["sourceOrdinal"] = json!(0);
+        content[paragraph]["content"][0]["content"][0]["text"] = json!("Final");
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": content},
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"splicedParts": [{
+                "part": "word/document.xml",
+                "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+                "paragraphs": [0],
+                "changed": [0],
+            }]},
+        }))
+        .unwrap();
+        let saved = write_docx_s13(request, &original).unwrap();
+        let (_, xml) = ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(xml).unwrap(),
+            source.replace("Draft", "Final")
+        );
+    }
+}

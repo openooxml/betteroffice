@@ -31,7 +31,6 @@ struct SpliceRecorder {
     expected: HashSet<u32>,
     recorded: RecordedParagraphs,
     conflict: bool,
-    tokens: bool,
 }
 
 /// The paragraphs written for a spliced part, outside any other paragraph.
@@ -47,6 +46,7 @@ pub(crate) struct RecordedParagraphs {
     /// Whether one source paragraph was written twice differently, or one with a
     /// `sourceOrdinal` the part does not address was written; only the first is recorded.
     pub(crate) conflict: bool,
+    pub(crate) token_prefix: Option<String>,
 }
 
 impl SerializerContext {
@@ -130,12 +130,18 @@ impl SerializerContext {
     }
 
     /// Records the XML written for the model paragraphs whose `sourceOrdinal` is in `expected`
-    /// until [`Self::end_splice`], each written after its [`super::permissions::token`] when
-    /// `tokens`.
-    pub(crate) fn begin_splice(&mut self, expected: impl IntoIterator<Item = u32>, tokens: bool) {
+    /// until [`Self::end_splice`], with tokens when `token_prefix` is supplied.
+    pub(crate) fn begin_splice(
+        &mut self,
+        expected: impl IntoIterator<Item = u32>,
+        token_prefix: Option<String>,
+    ) {
         self.splice = Some(SpliceRecorder {
             expected: expected.into_iter().collect(),
-            tokens,
+            recorded: RecordedParagraphs {
+                token_prefix,
+                ..RecordedParagraphs::default()
+            },
             ..SpliceRecorder::default()
         });
     }
@@ -172,9 +178,10 @@ impl SerializerContext {
             }
         }
         recorded.order.push(ordinal);
-        recorder
-            .tokens
-            .then(|| super::permissions::token(recorded.order.len() - 1))
+        recorded
+            .token_prefix
+            .as_deref()
+            .map(|prefix| super::permissions::token(prefix, recorded.order.len() - 1))
     }
 
     pub(crate) fn enter_paragraph(&mut self, rendered_page_break_before: bool) {

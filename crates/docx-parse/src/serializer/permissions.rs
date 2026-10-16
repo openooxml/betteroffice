@@ -32,10 +32,17 @@ enum Slot {
     Inserted(usize),
 }
 
-/// The comment a part whose source holds permission markers is serialized with right before
-/// the paragraph recorded at `position` in writing order (see [`keep`]).
-pub(crate) fn token(position: usize) -> String {
-    format!("<!--bo-paragraph {position}-->")
+pub(crate) fn token_prefix(source: &str) -> String {
+    let mut prefix = "<!--bo-paragraph ".to_owned();
+    while source.contains(&prefix) {
+        prefix.push('_');
+    }
+    prefix
+}
+
+/// The comment before the paragraph recorded at `position` in writing order.
+pub(crate) fn token(prefix: &str, position: usize) -> String {
+    format!("{prefix}{position}-->")
 }
 
 /// Carries the permission markers of the paragraphs of `source` into those `recorded` holds
@@ -47,9 +54,9 @@ pub(crate) fn keep(
     recorded: &mut RecordedParagraphs,
     serialized: &mut String,
 ) {
-    if !has_markers(source) {
+    let Some(prefix) = recorded.token_prefix.as_deref() else {
         return;
-    }
+    };
     let replacements = placements(source, part, recorded).unwrap_or_default();
     let mut output = String::with_capacity(serialized.len() + 256);
     let mut cursor = 0;
@@ -66,7 +73,7 @@ pub(crate) fn keep(
                 )
             }
         };
-        let token = token(position);
+        let token = token(prefix, position);
         let Some(found) = serialized[cursor..].find(&token) else {
             continue;
         };
