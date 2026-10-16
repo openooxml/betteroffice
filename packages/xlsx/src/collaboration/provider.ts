@@ -9,6 +9,8 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  isEmptyUpdate,
+  isStateVector,
   stateVectorDominates,
   withoutDocumentFingerprint,
   type ProtocolError,
@@ -106,6 +108,7 @@ export class CollaborationProvider {
   private replicaTail: Promise<void> = Promise.resolve();
   private replicaBytes = 0;
   private openEpoch = 0;
+  private requestedStateVectors: Uint8Array[] = [];
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
   private readonly maxMessagesPerFrame: number;
@@ -490,6 +493,7 @@ export class CollaborationProvider {
     const connection = ++this.openEpoch;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.requestedStateVectors = [];
     this.isOpen = true;
     this.hasPublishedAwarenessForOpen = false;
     this.clearPending();
@@ -536,6 +540,8 @@ export class CollaborationProvider {
       );
       return;
     }
+    if (!this.isCurrentOpen(token, connection)) return;
+    this.publishDeleteSet(token, connection, stateVector);
     if (!this.isCurrentOpen(token, connection)) return;
 
     try {
@@ -656,6 +662,41 @@ export class CollaborationProvider {
     this.openEpoch += 1;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.requestedStateVectors = [];
+  }
+
+  private publishDeleteSet(token: number, connection: number, stateVector: Uint8Array): void {
+    if (!isStateVector(stateVector)) return;
+    const vector = withoutDocumentFingerprint(stateVector).slice();
+    if (this.asyncReplica) {
+      const operation = this.replicaTail.then(async () => {
+        if (!this.isCurrentOpen(token, connection)) return;
+        const update = await this.asyncReplica!.encodeStateAsUpdate(vector);
+        if (this.isCurrentOpen(token, connection)) this.sendDeleteSet(token, requireBytes(update, 'encodeStateAsUpdate'));
+      }).catch((cause) => {
+        if (this.isCurrentOpen(token, connection)) this.failConnection(token,
+          normalizeError('replica', 'Async replica operation failed', cause));
+      });
+      this.replicaTail = operation;
+      return;
+    }
+    let update: Uint8Array;
+    try {
+      update = requireBytes(this.replica.encodeStateAsUpdate(vector), 'encodeStateAsUpdate');
+    } catch (cause) {
+      this.failConnection(token, normalizeError('replica', 'Failed to encode replica update', cause));
+      return;
+    }
+    this.sendDeleteSet(token, update);
+  }
+
+  private sendDeleteSet(token: number, update: Uint8Array): void {
+    if (isEmptyUpdate(update)) return;
+    try {
+      this.sendFrame(encodeUpdate(update, this.maxFrameBytes));
+    } catch (cause) {
+      this.failConnection(token, normalizeError('protocol', 'Failed to encode update', cause));
+    }
   }
 
   private enqueueReplicaMessages(token: number, bytes: number, messages: ReturnType<typeof decodeMessages>): void {
@@ -735,7 +776,10 @@ export class CollaborationProvider {
   ): void {
     let missing: boolean;
     try {
-      missing = !stateVectorDominates(stateVector, remoteStateVector);
+      this.requestedStateVectors = this.requestedStateVectors
+        .filter((target) => !stateVectorDominates(stateVector, target));
+      missing = !stateVectorDominates(stateVector, remoteStateVector) &&
+        !this.requestedStateVectors.some((target) => stateVectorDominates(target, remoteStateVector));
     } catch (cause) {
       this.report(normalizeError('protocol', 'Invalid state vector', cause));
       return;
@@ -748,7 +792,9 @@ export class CollaborationProvider {
         token,
         normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
       );
+      return;
     }
+    this.requestedStateVectors.push(remoteStateVector.slice());
   }
 
   private applyRemoteUpdate(token: number, update: Uint8Array): boolean {
