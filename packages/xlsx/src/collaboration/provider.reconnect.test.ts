@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { openWorkbook } from '../wasm/loader';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from '../session/testHelpers';
+import { asyncReplicaFor } from './asyncReplica';
 import { CollaborationProvider } from './provider';
 import { decodeMessages } from './protocol';
 import type { CollaborationReplica, CollaborationTransport, CollaborationTransportEvent } from './types';
@@ -10,7 +11,9 @@ type Kind = 'sync' | 'async';
 interface Peer {
   replica: CollaborationReplica;
   edit(col: number, input: string): Promise<void>;
+  undo(): Promise<void>;
   read(): Promise<string[]>;
+  vector(): Promise<Uint8Array>;
   dispose(): unknown;
 }
 
@@ -23,18 +26,22 @@ async function openPeer(kind: Kind, clientId: number): Promise<Peer> {
     return {
       replica: handle,
       edit: async (col, input) => { expect(handle.editCell(0, 2, col + 1, input).applied).toBe(true); },
+      undo: async () => { expect(handle.undo().applied).toBe(true); },
       read: async () => [1, 2].map((col) => handle.cell(0, 2, col).input),
+      vector: async () => handle.encodeStateVector(),
       dispose: () => handle.dispose(),
     };
   }
   const session = await createTestWorkbookSession(fixture, undefined, { collaborative: true, clientId });
+  const applied = async (ticket: { ack: Promise<{ status: string }> }) => {
+    expect((await ticket.ack).status).toBe('applied');
+  };
   return {
     replica: session.replica!,
-    edit: async (col, input) => {
-      const ack = await session.editSession!.submit('editCell', { payload: { args: [0, 2, col + 1, input] } }).ack;
-      expect(ack.status).toBe('applied');
-    },
+    edit: (col, input) => applied(session.editSession!.submit('editCell', { payload: { args: [0, 2, col + 1, input] } })),
+    undo: () => applied(session.editSession!.submit('undo', { payload: { args: [] } })),
     read: async () => (await session.call.cellInputs(0, 'B3:C3')).cells[0].map((cell) => cell.input),
+    vector: () => asyncReplicaFor(session.replica!)!.encodeStateVector(),
     dispose: () => session.dispose(),
   };
 }
@@ -77,11 +84,26 @@ function relay(size: number) {
       for (const listener of [...listeners[frame.to]]) listener({ type: 'message', data: frame.data });
     }
   };
+  const carries = (data: Uint8Array, type: string) => decodeMessages(data).some((message) => message.type === type);
+  const holdBack = async (held: string, doubled: string) => {
+    for (let idle = 0, moved = 0; idle < 64 && moved < 32;) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const at = queue.findIndex((frame) => !carries(frame.data, held));
+      if (at < 0) { idle += 1; continue; }
+      idle = 0;
+      moved += 1;
+      const [frame] = queue.splice(at, 1);
+      const copies = carries(frame.data, doubled) ? 2 : 1;
+      for (let copy = 0; copy < copies; copy += 1) {
+        for (const listener of [...listeners[frame.to]]) listener({ type: 'message', data: frame.data });
+      }
+    }
+  };
   const count = (from: number, type: string, since: number) => sent.slice(since)
     .filter((frame) => frame.from === from)
     .flatMap((frame) => decodeMessages(frame.data))
     .filter((message) => message.type === type).length;
-  return { transports, setOnline, reopen, flush, sent, count };
+  return { transports, setOnline, reopen, flush, holdBack, sent, count };
 }
 
 async function network(kind: Kind, size: number) {
@@ -192,6 +214,66 @@ for (const kind of ['sync', 'async'] as const) {
         const settled = net.sent.length;
         await net.flush();
         expect(net.sent.length).toBe(settled);
+      } finally { await close(); }
+    });
+
+    it('request each missing state once while answers are delayed and duplicated', async () => {
+      const { peers: [left, right], net, close } = await network(kind, 2);
+      try {
+        net.setOnline(0, false);
+        net.setOnline(1, false);
+        await left.edit(0, 'left offline');
+        await right.edit(1, 'right offline');
+        const mark = net.sent.length;
+        net.reopen(0, 1);
+        await net.holdBack('sync-step-2', 'sync-step-1');
+        await net.flush();
+        const cells = await Promise.all([left.read(), right.read()]);
+        expect(cells[1]).toEqual(cells[0]);
+        expect(cells[0]).toEqual(['left offline', 'right offline']);
+        expect([0, 1].map((index) => net.count(index, 'sync-step-1', mark))).toEqual([2, 2]);
+        const settled = net.sent.length;
+        await net.flush();
+        expect(net.sent.length).toBe(settled);
+      } finally { await close(); }
+    });
+
+    it('publish offline deletions to a peer that saw no open', async () => {
+      const { peers: [left, right], net, close } = await network(kind, 2);
+      try {
+        await left.edit(0, 'cleared');
+        await left.edit(1, 'undone');
+        await net.flush();
+        expect(await right.read()).toEqual(['cleared', 'undone']);
+        net.setOnline(0, false);
+        const vector = await left.vector();
+        await left.undo();
+        expect(await left.vector()).toEqual(vector);
+        await left.edit(0, '');
+        expect(await left.vector()).toEqual(vector);
+        net.setOnline(0, true);
+        await net.flush();
+        const cells = await Promise.all([left.read(), right.read()]);
+        expect(cells[1]).toEqual(cells[0]);
+        expect(cells[0].filter(Boolean)).toEqual([]);
+      } finally { await close(); }
+    });
+
+    it('publish offline deletions to every replica on a relay', async () => {
+      const { peers, net, close } = await network(kind, 3);
+      try {
+        await peers[2].edit(0, 'cleared');
+        await peers[2].edit(1, 'undone');
+        await net.flush();
+        net.setOnline(2, false);
+        await peers[2].undo();
+        await peers[2].edit(0, '');
+        net.setOnline(2, true);
+        await net.flush();
+        const cells = await Promise.all(peers.map((peer) => peer.read()));
+        expect(cells[1]).toEqual(cells[0]);
+        expect(cells[2]).toEqual(cells[0]);
+        expect(cells[0].filter(Boolean)).toEqual([]);
       } finally { await close(); }
     });
   });
