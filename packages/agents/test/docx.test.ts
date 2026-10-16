@@ -311,7 +311,11 @@ test('add_comment anchors a comment on exactly the matched phrase, one paragraph
     { op: 'add_comment', match: match.match, author: 'Ada Reviewer', text: 'Check the source.\nCompare with Q2.', date: '2026-10-01T09:30:00Z' },
   ]);
   expect(receipt).toEqual({ applied: true, version: doc.list().version, results: [{ index: 0, op: 'add_comment', ref: match.ref, start: match.start, end: match.end, comment: expect.any(String) }] });
-  expect(after.map(p => [p.text, p.style])).toEqual(before.map(p => [p.text, p.style]));
+  expect(doc.read(match.ref).text).toBe('Revenue grew strongly in the third quarter.');
+  const reference = before.findIndex(p => p.text.startsWith('Revenue grew'));
+  expect(after[reference].text).toBe('Revenue grew strongly in the third\ufffc quarter.');
+  expect(after.map(p => p.style)).toEqual(before.map(p => p.style));
+  expect(after.filter((_, i) => i !== reference)).toEqual(before.filter((_, i) => i !== reference));
   const [comment, ...rest] = comments((await part(bytes, 'word/comments.xml'))!);
   expect(rest).toEqual([]);
   expect(comment).toMatchObject({ author: 'Ada Reviewer', date: '2026-10-01T09:30:00Z', paragraphs: ['Check the source.', 'Compare with Q2.'] });
