@@ -1940,6 +1940,51 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!?]!\?$/);
   });
 
+  test('a point read superseded by an edit returns null and the plugin keeps running', async () => {
+    const errors: DocxPluginError[] = [];
+    const changes: string[] = [];
+    let context: DocxPluginContext<State> | undefined;
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin<State>({
+      id: 'point-reader',
+      createState: () => ({ count: 0 }),
+      initialize: value => { context = value; },
+      overlay: props => { geometry = props.geometry; return null; },
+      onEvent(_context, event) {
+        if (event.type === 'document-change') changes.push(event.version);
+      },
+    });
+    const { ref, view } = await mount({ plugins: [plugin], pluginGrants: { 'point-reader': { document: 'read' } }, onPluginError: error => errors.push(error) });
+    const { version, paragraph } = await firstParagraph(ref);
+    await until(() => geometry?.layout.version === version);
+    const host = view.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    host.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    const worker = workers.find(candidate => candidate.requests.includes('documentRead'))!;
+    const reads = () => worker.requests.filter(type => type === 'documentRead').length;
+    const before = reads();
+    let result: unknown = 'unanswered';
+    let edited = false;
+    worker.hold();
+    const action = context!.run(async next => {
+      result = await next.geometry!.readPositionAtPoint(100, 100);
+    });
+    await until(() => reads() > before);
+    void ref.current!.applyEdits(appendRequest(version, paragraph.paraId)).then(() => { edited = true; });
+    await until(() => {
+      worker.release(reply => !('read' in reply));
+      return edited;
+    });
+    worker.release();
+    await act(() => action);
+    expect(result).toBeNull();
+    expect(errors).toEqual([]);
+    const seen = changes.length;
+    const latest = await firstParagraph(ref);
+    await act(async () => { await ref.current!.applyEdits(appendRequest(latest.version, latest.paragraph.paraId)); });
+    await until(() => changes.length > seen);
+    expect(errors).toEqual([]);
+  });
+
   test('a read superseded by an edit refuses and the plugin keeps running', async () => {
     const errors: DocxPluginError[] = [];
     const changes: string[] = [];
