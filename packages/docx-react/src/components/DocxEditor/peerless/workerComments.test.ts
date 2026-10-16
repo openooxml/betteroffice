@@ -81,6 +81,7 @@ function reviewFixture(options: { readOnly?: boolean; mode?: 'viewing' } = {}) {
   const submit = mock((intent: { kind: string; payload: Record<string, unknown> & { author?: string; patch?: { done: boolean } } }) => {
     seq += 1;
     if (intent.kind === 'addComment') comments = [...comments, { id: 8, author: intent.payload.author!, content: [], parentId: 7 }];
+    if (intent.kind === 'removeComment') comments = comments.filter(comment => comment.id !== 7);
     if (intent.kind === 'updateComment') comments = comments.map(comment => comment.id === 7 ? { ...comment, done: intent.payload.patch!.done } : comment);
     const view = viewStore.getSnapshot();
     const result = { seq, comments: structuredClone(comments) };
@@ -95,7 +96,7 @@ function reviewFixture(options: { readOnly?: boolean; mode?: 'viewing' } = {}) {
     onCommentsChange: (next) => { changes.push(next as TestComment[]); changed?.(); } });
   const binding = { session: { flush: async () => {} }, admission: {}, commands: { submit }, viewStore } as unknown as PeerlessEditSessionBinding;
   controller.attach(binding);
-  return { controller, submit, ranges, host, changes, nextChange: () => new Promise<void>(resolve => { changed = resolve; }) };
+  return { controller, binding, viewStore, read, submit, ranges, host, changes, nextChange: () => new Promise<void>(resolve => { changed = resolve; }) };
 }
 
 test('a reply anchors where its parent is, resolves the new comment id and getComments shows it under its parent', async () => {
@@ -148,4 +149,51 @@ test('getComments follows the latest review read of the worker document', async 
   expect(controller.ref.getComments()).toEqual([]);
   await controller.query({ kind: 'reviewSnapshot' });
   expect(controller.ref.getComments()).toEqual([{ id: 7, author: 'A', content: [] }]);
+});
+
+
+test('removing a worker comment admits its native id and emits the shortened projection once', async () => {
+  const { controller, submit, changes } = reviewFixture();
+  expect(await controller.removeComment(7)).toEqual({ ok: true, status: 'executed' });
+  expect(submit.mock.calls).toEqual([[{ kind: 'removeComment', payload: { id: 'native-7', expectVersion: 'native' } }]]);
+  expect(controller.ref.getComments()).toEqual([]);
+  expect(changes).toEqual([[]]);
+});
+
+for (const barrier of ['save', 'flushPendingInput'] as const) {
+  test(`${barrier} joins comment operations queued before admission`, async () => {
+    const { controller, read, submit } = reviewFixture();
+    const original = read.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let reading!: () => void;
+    const started = new Promise<void>(resolve => { reading = resolve; });
+    read.mockImplementation(async request => {
+      if (request.kind === 'reviewTarget') { reading(); await held; }
+      return original(request);
+    });
+    controller.ref.resolveComment(7);
+    let completed = false;
+    const pending = controller.ref[barrier]().then(() => { completed = true; });
+    await started;
+    expect(completed).toBe(false);
+    release();
+    await pending;
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(controller.ref.getComments()[0]?.done).toBe(true);
+  });
+}
+
+test('getComments invalidates an old version and accepts a lower version in a new incarnation', async () => {
+  const { controller, viewStore, host } = reviewFixture();
+  await controller.setCommentDone(7, true);
+  const previous = viewStore.getSnapshot();
+  viewStore.acceptWorkerState(previous.identity, { epoch: 1, version: 10, throughSeq: 2, selection: null, editState });
+  expect(controller.ref.getComments()).toEqual(host);
+  const identity = { ...previous.identity, incarnation: 2, epoch: 2 };
+  viewStore.acceptWorkerState(identity, { epoch: 2, version: 0, throughSeq: 0, selection: null, editState });
+  viewStore.installFrameGeometry({ identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
+  expect(controller.ref.getComments()).toEqual(host);
+  await controller.query({ kind: 'reviewSnapshot' });
+  expect(controller.ref.getComments()).toEqual([{ ...host[0]!, done: true }]);
 });
