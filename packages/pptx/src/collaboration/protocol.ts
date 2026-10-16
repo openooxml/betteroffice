@@ -276,21 +276,54 @@ export function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
   return payload.subarray(0, tagOffset);
 }
 
-function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
+function varUintReader(payload: Uint8Array, label: string): { read(): bigint; done(): boolean } {
   let offset = 0;
-  const read = (): bigint => {
-    let value = 0n;
-    for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES; index += 1) {
-      if (offset >= payload.byteLength) throw new ProtocolError('Truncated state vector');
-      const byte = payload[offset++];
-      value |= BigInt(byte & 0x7f) << BigInt(7 * index);
-      if (byte < 0x80) return value;
-    }
-    throw new ProtocolError('State vector varUint exceeds 64 bits');
+  return {
+    read() {
+      let value = 0n;
+      for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES; index += 1) {
+        if (offset >= payload.byteLength) throw new ProtocolError(`Truncated ${label.toLowerCase()}`);
+        const byte = payload[offset++];
+        value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+        if (byte < 0x80) return value;
+      }
+      throw new ProtocolError(`${label} varUint exceeds 64 bits`);
+    },
+    done: () => offset === payload.byteLength,
   };
+}
+
+function decodeStateVector(payload: Uint8Array): Map<bigint, bigint> {
+  const reader = varUintReader(payload, 'State vector');
   const clocks = new Map<bigint, bigint>();
-  for (let count = read(); count > 0n; count -= 1n) clocks.set(read(), read());
+  for (let count = reader.read(); count > 0n; count -= 1n) clocks.set(reader.read(), reader.read());
+  if (!reader.done()) throw new ProtocolError('Trailing state vector bytes');
   return clocks;
+}
+
+/** Whether `payload` decodes as one v1 state vector, optionally fingerprinted. */
+export function isStateVector(payload: Uint8Array): boolean {
+  try {
+    decodeStateVector(withoutDocumentFingerprint(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `update` is a v1 update with no structs and no deleted ranges. */
+export function isEmptyUpdate(update: Uint8Array): boolean {
+  const reader = varUintReader(withoutDocumentFingerprint(update), 'Update');
+  try {
+    if (reader.read() !== 0n) return false;
+    for (let clients = reader.read(); clients > 0n; clients -= 1n) {
+      reader.read();
+      if (reader.read() !== 0n) return false;
+    }
+    return reader.done();
+  } catch {
+    return false;
+  }
 }
 
 /** Whether `vector` has every client clock of `other`; both are v1 state vectors, optionally fingerprinted. */

@@ -9,6 +9,8 @@ import {
   encodeSyncStep2,
   encodeUpdate,
   encodeVarUint,
+  isEmptyUpdate,
+  isStateVector,
   ProtocolError,
   stateVectorDominates,
 } from './protocol';
@@ -241,5 +243,25 @@ describe('state vector dominance', () => {
       stateVector(),
       Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1)
     )).toThrow('State vector varUint exceeds 64 bits');
+  });
+});
+
+describe('state vector and update shapes', () => {
+  it('accepts only whole v1 state vectors', () => {
+    expect(isStateVector(stateVector())).toBe(true);
+    expect(isStateVector(stateVector([1n << 60n, 5n], [2n, 3n]))).toBe(true);
+    expect(isStateVector(Uint8Array.of())).toBe(false);
+    expect(isStateVector(Uint8Array.of(7))).toBe(false);
+    expect(isStateVector(Uint8Array.of(0, 1))).toBe(false);
+    expect(() => stateVectorDominates(stateVector(), Uint8Array.of(0, 1))).toThrow('Trailing state vector bytes');
+  });
+
+  it('treats only updates without structs or deleted ranges as empty', () => {
+    expect(isEmptyUpdate(Uint8Array.of(0, 0))).toBe(true);
+    expect(isEmptyUpdate(Uint8Array.of(0, 1, 7, 0))).toBe(true);
+    expect(isEmptyUpdate(Uint8Array.of(0, 1, 7, 1, 0, 2))).toBe(false);
+    expect(isEmptyUpdate(Uint8Array.of(1, 1, 7, 0, 4, 1, 1, 0x61, 0, 0))).toBe(false);
+    expect(isEmptyUpdate(Uint8Array.of())).toBe(false);
+    expect(isEmptyUpdate(Uint8Array.of(0, 0, 0))).toBe(false);
   });
 });

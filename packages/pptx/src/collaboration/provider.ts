@@ -8,6 +8,8 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  isEmptyUpdate,
+  isStateVector,
   stateVectorDominates,
   withoutDocumentFingerprint,
 } from './protocol';
@@ -135,6 +137,7 @@ export class CollaborationProvider {
   private incomingBusy = false;
   private asyncReplica = false;
   private incomingGeneration = 0;
+  private requestedStateVectors: Uint8Array[] = [];
   private isFlushing = false;
   private localClock = 0;
   private reportedClockExhaustion = false;
@@ -426,6 +429,7 @@ export class CollaborationProvider {
       case 'close':
         this.isOpen = false;
         this.connectAttempt += 1;
+        this.requestedStateVectors = [];
         this.stopPresenceTimers();
         this.clearPending();
         this.clearRemotePresence();
@@ -451,6 +455,7 @@ export class CollaborationProvider {
   private handleOpen(token: number): void {
     if (this.isOpen) return;
     this.isOpen = true;
+    this.requestedStateVectors = [];
     this.clearPending();
     this.setStatus('connected', false);
     if (!this.isCurrent(token) || !this.isOpen) return;
@@ -458,7 +463,10 @@ export class CollaborationProvider {
     const attempt = this.connectAttempt;
     this.replicaResult(token, attempt, () => this.replica.encodeStateVector(), (value) => {
       try {
-        this.sendFrame(encodeSyncStep1(requireBytes(value, 'encodeStateVector'), this.maxFrameBytes));
+        const stateVector = requireBytes(value, 'encodeStateVector');
+        this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+        if (!this.isCurrent(token) || !this.isOpen) return;
+        this.publishDeleteSet(token, attempt, stateVector);
         if (!this.isCurrent(token) || !this.isOpen) return;
         this.startPresenceTimers();
         this.broadcastLocalPresence(false);
@@ -468,6 +476,20 @@ export class CollaborationProvider {
         this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause));
       }
     });
+  }
+
+  private publishDeleteSet(token: number, attempt: number, stateVector: Uint8Array): void {
+    if (!isStateVector(stateVector)) return;
+    void this.replicaResult(token, attempt,
+      () => this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(stateVector).slice()),
+      (value) => {
+        try {
+          const update = requireBytes(value, 'encodeStateAsUpdate');
+          if (!isEmptyUpdate(update)) this.sendFrame(encodeUpdate(update, this.maxFrameBytes));
+        } catch (cause) {
+          this.failConnection(token, normalizeError('protocol', 'Failed to encode update', cause));
+        }
+      });
   }
 
   private replicaResult<T>(token: number, attempt: number, operation: () => T | Promise<T>, done: (value: T) => void): void | Promise<void> {
@@ -547,6 +569,7 @@ export class CollaborationProvider {
           const stateVector = requireBytes(value, 'encodeStateVector');
           if (this.missesRemoteState(stateVector, remoteStateVector)) {
             this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+            this.requestedStateVectors.push(remoteStateVector.slice());
           }
         } catch (cause) {
           this.failConnection(token, normalizeError('protocol', 'Failed to encode handshake', cause));
@@ -558,7 +581,10 @@ export class CollaborationProvider {
 
   private missesRemoteState(stateVector: Uint8Array, remoteStateVector: Uint8Array): boolean {
     try {
-      return !stateVectorDominates(stateVector, remoteStateVector);
+      this.requestedStateVectors = this.requestedStateVectors
+        .filter((target) => !stateVectorDominates(stateVector, target));
+      return !stateVectorDominates(stateVector, remoteStateVector) &&
+        !this.requestedStateVectors.some((target) => stateVectorDominates(target, remoteStateVector));
     } catch (cause) {
       this.report(normalizeError('protocol', 'Invalid state vector', cause));
       return false;
