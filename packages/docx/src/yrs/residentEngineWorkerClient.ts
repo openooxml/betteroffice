@@ -283,6 +283,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
               : Object.assign(new Error(response.commandError.message), response.commandError)
             : response.code === 'save-unavailable'
             ? new ResidentWorkerSaveUnavailableError(response.error)
+            : response.code === 'cut-kept'
+            ? new ResidentWorkerCutKeptError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
         );
       }
@@ -1184,6 +1186,9 @@ export class ResidentWorkerFailureError extends Error {}
 
 /** The worker has no whole opened package to save. @internal */
 export class ResidentWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
+
+/** A whole source failed to open and the worker still holds the source cut it was to replace. @internal */
+export class ResidentWorkerCutKeptError extends Error {}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {

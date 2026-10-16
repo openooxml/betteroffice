@@ -47,3 +47,33 @@ test('review snapshots of a preview succeed without a comment projection', async
   expect(review).not.toHaveProperty('uiComments');
   expect(review).not.toHaveProperty('commentIds');
 }, TIMEOUT);
+
+test('a read-only state applies granted host proposals and refuses ungranted proposals and edits', async () => {
+  const arm = await openCommandEngine(['Alpha beta', 'Second']);
+  arm.state.proposals = createProposalRegistry(arm.engine.proposalEngine);
+  arm.state.readOnly = true;
+  const paragraph = arm.engine.paragraphIdentities().paragraphs[0]!.session!;
+  const proposals = [{ id: 'one', paragraph, op: 'replaceText' as const, search: 'Alpha', replaceWith: 'Omega', suggest: { author: 'Ada', date: '2026-01-01' } }];
+  const version = () => arm.engine.proposalEngine.version();
+  const before = snapshot(arm);
+  expect(execute(arm, command(arm, 'propose', { expectVersion: version(), proposals }))).toMatchObject({ status: 'refused', reason: 'read-only' });
+  expect(execute(arm, command(arm, 'propose', { expectVersion: version(), proposals, hostProposal: false }))).toMatchObject({ status: 'refused', reason: 'read-only' });
+  expect(execute(arm, command(arm, 'propose', { expectVersion: version(), proposals, hostProposal: 'yes' as never }))).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+  expect(execute(arm, command(arm, 'insertText', { text: '!', hostProposal: true } as never))).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+  expect(snapshot(arm)).toEqual(before);
+  expect(arm.state.proposals.snapshot().proposals).toEqual([]);
+  expect(execute(arm, command(arm, 'propose', { expectVersion: version(), proposals, hostProposal: true }))).toMatchObject({ status: 'applied' });
+  const proposed = arm.state.proposals.snapshot();
+  expect(proposed.proposals.map(({ id, state }) => ({ id, state }))).toEqual([{ id: 'one', state: 'proposed' }]);
+  expect(execute(arm, command(arm, 'setProposalStates', { expectVersion: version(), expectPreviewVersion: proposed.previewVersion,
+    changes: [{ id: 'one', state: 'accepted' }] }))).toMatchObject({ status: 'refused', reason: 'read-only' });
+  expect(execute(arm, command(arm, 'setProposalStates', { expectVersion: version(), expectPreviewVersion: proposed.previewVersion,
+    changes: [{ id: 'one', state: 'accepted' }], hostProposal: true }))).toMatchObject({ status: 'applied' });
+  expect(arm.state.proposals.snapshot().proposals[0]!.state).toBe('accepted');
+  expect(execute(arm, command(arm, 'insertText', { text: '!' }))).toMatchObject({ status: 'refused', reason: 'read-only' });
+  expect(execute(arm, command(arm, 'undo', {}))).toMatchObject({ status: 'refused', reason: 'read-only' });
+  expect(execute(arm, command(arm, 'withdrawProposals', { expectVersion: version(), ids: ['one'] }))).toMatchObject({ status: 'refused', reason: 'read-only' });
+  expect(execute(arm, command(arm, 'withdrawProposals', { expectVersion: version(), ids: ['one'], hostProposal: true }))).toMatchObject({ status: 'applied' });
+  expect(arm.state.proposals.snapshot().proposals).toEqual([]);
+  expect(arm.state.readOnly).toBe(true);
+}, TIMEOUT);

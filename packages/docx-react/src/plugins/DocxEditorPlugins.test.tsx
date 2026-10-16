@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../components/DocxEditor/peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -32,7 +33,7 @@ import {
   useDocxCommand,
   useDocxCommands,
   type DocxCommandResult,
-  type DocxEditorProps,
+  type DocxEditorBaseProps,
   type DocxEditorRef,
   type DocxPlugin,
   type DocxPluginCommandResult,
@@ -56,7 +57,7 @@ import {
 import { setupWorkerEngine } from '../components/DocxEditor/__fixtures__/workerEngine';
 import { testScope } from '../components/DocxEditor/__fixtures__/testScope';
 
-const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, false, documentBytes(), false);
+const mount = (props: Partial<DocxEditorBaseProps> = {}) => mountEditor(props, false, documentBytes(), false);
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
@@ -190,7 +191,7 @@ function recorder(id = 'acme.review', extra: Partial<DocxPluginDefinition<State>
 }
 
 async function mountEditor(
-  props: Partial<DocxEditorProps>,
+  props: Partial<DocxEditorBaseProps>,
   strict: boolean,
   buffer: ArrayBuffer,
   experimentalWorkerOpen: false | undefined
@@ -202,11 +203,11 @@ async function mountEditor(
   );
   let currentProps = props;
   const onError = (error: Error) => { errors.push(error); currentProps.onError?.(error); };
-  const element = (next: Partial<DocxEditorProps>) => {
+  const element = (next: Partial<DocxEditorBaseProps>) => {
     currentProps = next;
     const editor = experimentalWorkerOpen === false
-      ? <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} {...next} onError={onError} />
-      : <DocxEditor ref={ref} documentBuffer={buffer} {...next} onError={onError} />;
+      ? <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} {...next} onError={onError} />
+      : <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={buffer} {...next} onError={onError} />;
     return strict ? <StrictMode>{editor}</StrictMode> : editor;
   };
   const view = render(element(props));
@@ -225,7 +226,7 @@ async function mountEditor(
       await ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
     });
   }
-  return { ref, view, rerender: (next: Partial<DocxEditorProps>) => view.rerender(element(next)) };
+  return { ref, view, rerender: (next: Partial<DocxEditorBaseProps>) => view.rerender(element(next)) };
 }
 
 async function firstParagraph(ref: React.RefObject<DocxEditorRef | null>) {
@@ -276,7 +277,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   });
 
   const mount = (
-    props: Partial<DocxEditorProps> = {},
+    props: Partial<DocxEditorBaseProps> = {},
     strict = false,
     buffer: ArrayBuffer = documentBytes()
   ) => mountEditor(props, strict, buffer, experimentalWorkerOpen);
@@ -1805,7 +1806,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   test('installing plugins materializes no compatibility document', async () => {
     const yrs = await import('@betteroffice/docx/yrs');
     const materialized = spyOn(yrs, 'yrsToDocument');
-    const edit = async (props: Partial<DocxEditorProps>) => {
+    const edit = async (props: Partial<DocxEditorBaseProps>) => {
       const { ref } = await mount(props);
       await settle(300);
       materialized.mockClear();
@@ -1954,7 +1955,7 @@ describe('DocxEditor plugins (worker engine)', () => {
     };
   });
 
-  async function mountWorker(props: Partial<DocxEditorProps> = {}) {
+  async function mountWorker(props: Partial<DocxEditorBaseProps> = {}) {
     const opens = workers.reduce(
       (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
     );

@@ -1,5 +1,5 @@
 import { expect, test, type Mock } from 'bun:test';
-import { inputs, proposalHost } from './workerProposalHost.testing';
+import { inputs, proposalHost, source } from './workerProposalHost.testing';
 
 test('host proposal rounds return four records from the presented review snapshot', async () => {
   const h = proposalHost();
@@ -122,19 +122,119 @@ test('an unavailable presented review rejects within the bounded wait', async ()
   h.controller.dispose();
 });
 
-test('allowed host proposals retain worker read-only state and return its refusal', async () => {
-  const h = proposalHost({ readOnly: true });
-  expect(await h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: [inputs[0]!] })).toEqual({
-    ok: false, version: 'native-0', failure: { code: 'read-only', message: 'The editor is read-only', proposalId: inputs[0]!.id },
-  });
-  expect(h.binding.viewStore.getSnapshot().editState!.readOnly).toBe(true);
-  expect(h.submit.mock.calls.map(([kind]) => kind)).toEqual(['propose']);
+test('read-only and viewing editors apply, decide and withdraw host proposals with allowHostProposals', async () => {
+  for (const config of [{ readOnly: true }, { mode: 'viewing' as const }]) {
+    const h = proposalHost(config);
+    expect(await h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: inputs })).toEqual({ ok: true, snapshot: h.snapshot() });
+    expect(h.snapshot().proposals).toHaveLength(4);
+    for (const state of ['accepted', 'proposed', 'rejected', 'proposed'] as const) {
+      const before = await h.controller.ref.getProposals();
+      expect(await h.controller.ref.setProposalStates({ expectVersion: before.version, expectPreviewVersion: before.previewVersion,
+        changes: [{ id: inputs[0]!.id, state }] })).toEqual({ ok: true, snapshot: h.snapshot() });
+      expect(h.snapshot().proposals[0]!.state).toBe(state);
+    }
+    const before = await h.controller.ref.getProposals();
+    expect(await h.controller.ref.withdrawProposals({ expectVersion: before.version, ids: [inputs[0]!.id] })).toEqual({ ok: true, snapshot: h.snapshot() });
+    expect(h.snapshot().proposals).toHaveLength(3);
+    expect(h.submit.mock.calls.map(([kind, payload]) => [kind, (payload as { hostProposal?: boolean }).hostProposal]))
+      .toEqual([['propose', true], ...Array.from({ length: 4 }, () => ['setProposalStates', true]), ['withdrawProposals', true]]);
+    expect(h.binding.viewStore.getSnapshot().editState!.readOnly).toBe(true);
+    h.controller.dispose();
+  }
+});
+
+test('without allowHostProposals read-only and viewing editors refuse proposals, and edits stay refused either way', async () => {
+  for (const config of [{ readOnly: true }, { mode: 'viewing' as const }]) {
+    for (const allowHostProposals of [false, true]) {
+      const h = proposalHost({ ...config, allowHostProposals });
+      if (!allowHostProposals) {
+        expect(await h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: [inputs[0]!] })).toEqual({
+          ok: false, version: 'native-0', failure: { code: 'read-only', message: 'The editor is read-only', proposalId: inputs[0]!.id },
+        });
+        expect(await h.controller.ref.setProposalStates({ expectVersion: 'native-0', expectPreviewVersion: 0, changes: [] }))
+          .toMatchObject({ ok: false, failure: { code: 'read-only' } });
+        expect(await h.controller.ref.withdrawProposals({ expectVersion: 'native-0', ids: [] })).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+      }
+      expect(h.binding.commands.submit({ kind: 'insertText', payload: { text: 'x' } }, { hostProposal: true })).toEqual({ status: 'ignored', reason: 'read-only' });
+      expect(await h.controller.ref.applyEdits({ expectVersion: 'native-0', steps: [] })).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+      expect(h.submit).not.toHaveBeenCalled();
+      h.controller.dispose();
+    }
+  }
+});
+
+test('proposals called before the worker document is ready wait for it and apply in order', async () => {
+  const h = proposalHost({ readOnly: true, opening: true });
+  const proposed = h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: inputs });
+  const read = h.controller.ref.getProposals();
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+  expect(h.submit).not.toHaveBeenCalled();
+  h.controller.opening(source);
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+  expect(h.submit).not.toHaveBeenCalled();
+  h.controller.attach(h.binding);
+  expect(await proposed).toEqual({ ok: true, snapshot: h.snapshot() });
+  expect(await read).toEqual(h.snapshot());
+  expect(h.snapshot().proposals).toHaveLength(4);
   h.controller.dispose();
 });
 
-test.todo('engine host proposal admission permits read-only and viewing editors with allowHostProposals', async () => {
-  const h = proposalHost({ readOnly: true });
-  expect(await h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: inputs })).toMatchObject({ ok: true });
+test('a host round queued before the document is ready is submitted on its first presented frame within microtasks', async () => {
+  const h = proposalHost({ readOnly: true, opening: true, automatic: false });
+  const round = h.controller.ref.getProposals().then(current => h.controller.ref.proposeChanges({ expectVersion: current.version, proposals: inputs }));
+  for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+  expect(h.submit).not.toHaveBeenCalled();
+  const ready = h.binding.viewStore.getSnapshot();
+  h.controller.attach(h.binding);
+  for (let turn = 0; turn < 200 && !h.submit.mock.calls.length; turn++) await Promise.resolve();
+  expect(h.submit.mock.calls.map(([kind]) => kind)).toEqual(['propose']);
+  expect(h.binding.viewStore.getSnapshot().geometry).toBe(ready.geometry);
+  await (h.submit.mock.results[0]!.value as ReturnType<typeof h.submit>).ack;
+  h.present();
+  expect(await round).toEqual({ ok: true, snapshot: h.snapshot() });
+  h.controller.dispose();
+});
+
+test('proposals waiting for the document fail when it is replaced, fails or the editor closes', async () => {
+  const request = { expectVersion: 'native-0', proposals: inputs };
+  const replaced = proposalHost({ opening: true });
+  const pending = replaced.controller.ref.proposeChanges(request);
+  replaced.controller.opening(Uint8Array.of(2));
+  await expect(pending).rejects.toThrow('Document was replaced');
+  replaced.controller.attach(replaced.binding);
+  expect(await replaced.controller.ref.proposeChanges(request)).toMatchObject({ ok: true });
+  expect(replaced.submit).toHaveBeenCalledTimes(1);
+  replaced.controller.dispose();
+  const failed = proposalHost({ opening: true });
+  const failing = failed.controller.ref.proposeChanges(request);
+  failed.controller.fail(new Error('Document is corrupt'));
+  await expect(failing).rejects.toThrow('Document is corrupt');
+  failed.controller.dispose();
+  const closed = proposalHost({ opening: true });
+  const closing = closed.controller.ref.getProposals();
+  closed.controller.dispose();
+  await expect(closing).rejects.toThrow('Editor was closed');
+  const empty = proposalHost({ opening: true });
+  empty.controller.empty();
+  await expect(empty.controller.ref.proposeChanges(request)).rejects.toThrow('Peer-less editor is not ready');
+  expect(empty.submit).not.toHaveBeenCalled();
+  empty.controller.dispose();
+});
+
+test('a proposal dropped with a failed composition reports that failure instead of read-only', async () => {
+  const h = proposalHost();
+  let reservation: ReturnType<typeof h.binding.admission.reserveComposition> | undefined;
+  (h.binding.session.flush as unknown as Mock<() => Promise<void>>).mockImplementationOnce(async () => {
+    reservation = h.binding.admission.reserveComposition();
+  });
+  const pending = h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: inputs });
+  for (let turn = 0; turn < 100 && !h.binding.admission.getSnapshot().heldIntents; turn++) await Promise.resolve();
+  expect(h.binding.admission.getSnapshot().heldIntents).toBe(1);
+  const failure = new Error('composition submit failed');
+  h.submit.mockImplementationOnce(() => { throw failure; });
+  expect(() => h.binding.admission.settleComposition(reservation!.slot, { text: 'composed', target: reservation!.target })).toThrow(failure);
+  await expect(pending).rejects.toBe(failure);
+  expect(h.snapshot().proposals).toEqual([]);
   h.controller.dispose();
 });
 test.todo('engine identical proposal retry with the original token returns noop before version checking', async () => {
@@ -150,5 +250,39 @@ test.todo('engine identity-assigning save presents its advanced native version b
   await h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: inputs });
   await h.controller.ref.save();
   expect(await h.controller.ref.getProposals()).toEqual(h.snapshot());
+  h.controller.dispose();
+});
+
+test('proposals waiting for the document are bounded by time, a stalled first presentation and a queue cap', async () => {
+  const request = { expectVersion: 'native-0', proposals: inputs };
+  const late = proposalHost({ opening: true });
+  late.controller.update({ ...late.settings, openTimeoutMs: 20 });
+  await expect(late.controller.ref.proposeChanges(request)).rejects.toThrow('The document did not open in time');
+  late.controller.dispose();
+  const stalled = proposalHost({ opening: true });
+  const pending = stalled.controller.ref.getProposals();
+  const stall = new Error('Full frame responses did not satisfy requested coverage and revision');
+  stalled.controller.stalled(stall);
+  await expect(pending).rejects.toBe(stall);
+  stalled.controller.attach(stalled.binding);
+  expect(await stalled.controller.ref.getProposals()).toEqual(stalled.snapshot());
+  stalled.controller.dispose();
+  const capped = proposalHost({ opening: true });
+  const queued = Array.from({ length: 64 }, () => capped.controller.ref.getProposals());
+  await expect(capped.controller.ref.getProposals()).rejects.toThrow('Too many calls are waiting for the document');
+  capped.controller.attach(capped.binding);
+  expect(await Promise.all(queued)).toEqual(queued.map(() => capped.snapshot()));
+  capped.controller.dispose();
+});
+
+test('worker refusals outside the public proposal codes map onto them and keep the worker reason', async () => {
+  const h = proposalHost();
+  for (const [reason, code] of [['invalid-payload', 'invalid-step'], ['review-unavailable', 'unsupported'], ['stale-version', 'stale-version']] as const) {
+    h.refuse(reason);
+    expect(await h.controller.ref.proposeChanges({ expectVersion: 'native-0', proposals: [inputs[0]!] })).toEqual({
+      ok: false, version: 'native-0', failure: { code, proposalId: inputs[0]!.id,
+        message: code === 'stale-version' ? 'the document changed since the expected version was read' : reason },
+    });
+  }
   h.controller.dispose();
 });

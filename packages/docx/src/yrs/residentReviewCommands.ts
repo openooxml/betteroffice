@@ -1,5 +1,6 @@
 import { commandSelectionRange } from './residentCommandAnchors';
 import type { DocxCommandIntent, DocxCommentResult, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
+import type { DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 
 export const reviewCommandKeys = {
   addComment: ['ranges', 'author', 'date', 'body', 'expectVersion'],
@@ -8,12 +9,17 @@ export const reviewCommandKeys = {
   removeComment: ['id', 'expectVersion'],
   acceptRevision: ['revisionId', 'expectVersion'],
   rejectRevision: ['revisionId', 'expectVersion'],
-  propose: ['proposals', 'expectVersion'],
-  setProposalStates: ['changes', 'expectVersion', 'expectPreviewVersion'],
-  withdrawProposals: ['ids', 'expectVersion'],
+  propose: ['proposals', 'expectVersion', 'hostProposal'],
+  setProposalStates: ['changes', 'expectVersion', 'expectPreviewVersion', 'hostProposal'],
+  withdrawProposals: ['ids', 'expectVersion', 'hostProposal'],
 };
 
 export type ReviewCommand = Extract<DocxCommandIntent, { kind: keyof typeof reviewCommandKeys }>;
+
+export function grantedHostProposal(command: ReviewCommand): boolean {
+  return (command.kind === 'propose' || command.kind === 'setProposalStates' || command.kind === 'withdrawProposals') &&
+    command.payload.hostProposal === true;
+}
 
 export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, command: ReviewCommand): string | null {
   const payload = command.payload;
@@ -48,9 +54,10 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   const before = state.proposals?.snapshot();
   if (command.kind === 'propose' || command.kind === 'setProposalStates' || command.kind === 'withdrawProposals') {
     if (!state.proposals) return { status: 'refused', reason: 'review-unavailable' };
-    const result = command.kind === 'propose' ? state.proposals.propose(command.payload)
-      : command.kind === 'setProposalStates' ? state.proposals.setStates(command.payload)
-      : state.proposals.withdraw(command.payload);
+    const { hostProposal: _grant, ...request } = command.payload;
+    const result = command.kind === 'propose' ? state.proposals.propose(request as DocxProposalRequest)
+      : command.kind === 'setProposalStates' ? state.proposals.setStates(request as DocxProposalStateRequest)
+      : state.proposals.withdraw(request as DocxProposalWithdrawRequest);
     if (!result.ok) return { status: 'refused', reason: result.failure.code };
     return { status: JSON.stringify(before) === JSON.stringify(result.snapshot) ? 'noop' : 'applied' };
   }
