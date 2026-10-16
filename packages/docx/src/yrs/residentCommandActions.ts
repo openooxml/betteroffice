@@ -693,7 +693,7 @@ function applyPreparedDocxCommand(
         ? resolveReservations(engine.geometryReader, reservations, engine.proposalEngine.version(),
           environment?.getLayoutReservations?.() ?? null)
         : retainReservationOwners(reservations, environment?.getLayoutReservations?.() ?? null) }
-      : rest, reservations && (current ? { version: reservations.version, key: reservations.key ?? null } : null));
+      : rest, reservations ? (current ? { version: reservations.version, key: reservations.key ?? null } : null) : undefined);
     return result('noop');
   }
   if (command.kind === 'applyEdits') {

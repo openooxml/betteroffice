@@ -397,6 +397,25 @@ test('frames name the reservation set their layout includes, or none current for
   }
 }, TIMEOUT);
 
+test('a render environment command without reservations keeps the set its frames name', async () => {
+  const { client, initial, point } = await openWorker();
+  try {
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: false, reservations: {
+      version: '0', key: 'k1', sets: [{ owner: 'A', items: [{ id: 'a', kind: 'inline', width: 30, height: 20, anchor: { kind: 'range', version: '0',
+        range: { story: 'body', view: 'accepted', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 } } } }] }],
+    } } as never));
+    expect(set.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
+    const themed = await client.edit(intent(2, 0, 'setRenderEnvironment', { themeColors: { accent1: 'FF0000' }, showHiddenText: true } as never));
+    expect(themed.outcomes[0]?.status).toBe('noop');
+    expect(themed.frame!.payload.reservations).toEqual({ version: '0', key: 'k1' });
+    const frame = [set, themed].reduce((retained, ack) => applyFrameDeltaOwned(retained, decodeFrameDelta(ack.frame!.payload.frame)),
+      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame)));
+    expect(frame.displayList.pages.flatMap((page) => page.reservations ?? [])).toEqual([expect.objectContaining({ owner: 'A', id: 'a', width: 30 })]);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test.each([true, false])('render environment reservations survive a review preview relayout (regions=%s)', async (layoutWithRegions) => {
   const { client, initial, point } = await openWorker({ layoutWithRegions });
   try {
