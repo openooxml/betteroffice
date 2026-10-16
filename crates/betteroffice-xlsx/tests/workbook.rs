@@ -6050,7 +6050,7 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
     let workbook_xml = String::from_utf8(after["xl/workbook.xml"].clone()).unwrap();
     assert!(workbook_xml.contains(r#"<definedName name="NamedCell">Data!$A$1</definedName>"#));
     assert!(!after.contains_key("xl/calcChain.xml"));
-    assert!(workbook_xml.contains(r#"fullCalcOnLoad="1""#));
+    assert!(workbook_xml.contains(r#"<calcPr calcId="191029"/>"#));
     assert_eq!(
         after["xl/sharedStrings.xml"],
         before["xl/sharedStrings.xml"]
@@ -6971,7 +6971,7 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     assert!(workbook_xml.contains(&format!(r#"<sheets xmlns:r="{strict_rel}" {strict_main}"#)));
     assert!(workbook_xml.contains(r#"<sheet name="Data" sheetId="1" rel:id="rId1"/>"#));
     assert!(workbook_xml.contains(r#"r:id="rId2""#));
-    assert!(workbook_xml.contains("<calcPr"));
+    assert!(!workbook_xml.contains("calcPr"));
     assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
     let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
     assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
