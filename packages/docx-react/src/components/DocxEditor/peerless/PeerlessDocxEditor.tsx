@@ -25,8 +25,7 @@ import {
   type ResidentCommandConnection,
   type YrsResidentFontRegistration,
 } from '@betteroffice/docx/yrs';
-import { createResidentCommandConnection, discardCommandPresentation, type ResidentCommandCheckpoint } from '@betteroffice/docx/peerless';
-import { SessionFailure } from '../../../../../../shared/office-session/types';
+import { createResidentCommandConnection, discardCommandPresentation, SessionFailure, type ResidentCommandCheckpoint } from '@betteroffice/docx/peerless';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';

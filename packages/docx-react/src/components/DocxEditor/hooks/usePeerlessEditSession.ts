@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
-import { SessionFailure } from '../../../../../../shared/office-session/types';
-import { createDocxWorkerEditSession, discardCommandPresentation } from '@betteroffice/docx/peerless';
+import { createDocxWorkerEditSession, discardCommandPresentation, SessionFailure } from '@betteroffice/docx/peerless';
 import type {
   DocxCommandFrame,
   DocxCommandPageIdentity,
