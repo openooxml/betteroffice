@@ -2,7 +2,7 @@
 
 import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
-import { readResidentReviewSnapshot } from './residentReview';
+import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -1988,6 +1988,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.story,
           request.read.paraId
         );
+        break;
+      case 'reviewTarget':
+        value = readReviewTarget(session, request.read.target);
         break;
       case 'anchorTargets': {
         const reader = session.geometryReader;

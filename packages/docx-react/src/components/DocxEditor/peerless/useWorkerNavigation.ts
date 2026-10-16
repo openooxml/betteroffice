@@ -3,7 +3,7 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { createPeerlessShellController } from './shellController';
 import { workerPageAtViewport } from './pageNavigation';
-import type { DocxOutlineHeading } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, DocxOutlineHeading, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
@@ -59,12 +59,8 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (!page || !element) return;
     element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + page.bounds.y * latest.current.zoom;
   }, [controller, host, scroller]);
-  const scrollToParagraph = useCallback(async (paraId: string, story = 'body') => {
-    const current = binding();
-    if (!current) return false;
-    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
-    if (typeof target === 'string' || current !== binding()) return false;
-    const result = current.commands.submit({ kind: 'select', payload: { selection: { anchor: target.loc, focus: target.loc } } }, { source: 'selection', fence: true });
+  const revealSelection = useCallback(async (current: PeerlessEditSessionBinding, selection: DocxCommandSelection) => {
+    const result = current.commands.submit({ kind: 'select', payload: { selection } }, { source: 'selection', fence: true });
     if (result.status !== 'submitted') return false;
     const outcome = await result.ticket.ack;
     if (current !== binding() || (outcome.status !== 'applied' && outcome.status !== 'noop')) return false;
@@ -72,7 +68,22 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     const caret = current.viewStore.getSnapshot().geometry?.caret;
     if (caret && scroller.current) scroller.current.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - scroller.current.getBoundingClientRect().top + caret.y * latest.current.zoom - 24;
     return true;
-  }, [binding, controller, host, scroller]);
+  }, [binding, host, scroller]);
+  const scrollToParagraph = useCallback(async (paraId: string, story = 'body') => {
+    const current = binding();
+    if (!current) return false;
+    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
+    if (typeof target === 'string' || current !== binding()) return false;
+    return revealSelection(current, { anchor: target.loc, focus: target.loc });
+  }, [binding, controller, revealSelection]);
+  /** Selects the first range a comment or revision anchors and scrolls its caret into view; false when it does not exist. */
+  const scrollToReviewTarget = useCallback(async (target: ResidentReviewTarget) => {
+    const current = binding();
+    if (!current) return false;
+    const range = (await controller.read({ kind: 'reviewTarget', target }))?.ranges[0];
+    if (!range || current !== binding()) return false;
+    return revealSelection(current, { anchor: { story: range.story, ...range.start }, focus: { story: range.story, ...range.end } });
+  }, [binding, controller, revealSelection]);
   const revealParagraph = useCallback(async (paraId: string, story: string, focus = false) => {
     if (focus) return scrollToParagraph(paraId, story);
     const current = binding();
@@ -112,5 +123,5 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     }
     return false;
   }, [binding, controller, host, scroller, scrollToPage, scrollToParagraph]);
-  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, revealParagraph };
+  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, scrollToReviewTarget, revealParagraph };
 }
