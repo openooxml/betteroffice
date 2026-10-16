@@ -1120,6 +1120,7 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
     },
     apply: (command, context) => remember(applyDocxCommand(engine, state, command, context, environment)),
     afterRemoteMerge: (context) => {
+      state.proposals?.reconcile();
       const run = state.remoteMerges;
       state.remoteMerges = { from: run?.to === context.currentVersion ? run.from : context.currentVersion, to: context.currentVersion + 1 };
       const storedMarks = state.storedMarks;

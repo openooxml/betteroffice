@@ -13,6 +13,7 @@ import { MAX_UPDATE_BYTES } from './residentCommandActions';
 import { MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import type { Document } from '../types/document';
+import type { DocxProposalInput } from './proposals';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
 beforeAll(async () => {
@@ -466,3 +467,48 @@ test.todo('a local delete across a seeded section boundary must mark sectionsTou
     expect(await sectionView(a)).toEqual(deleted);
   } finally { toA.off(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
+
+const proposalIn = (replica: Replica): DocxProposalInput => ({ id: 'proposal', paragraph: replica.engine.paragraphIdentities().paragraphs[0]!.session!,
+  suggest: { author: 'Host', date: '2026-10-13T00:00:00Z' }, op: 'replaceText', search: 'e', replaceWith: 'E', occurrence: 'all' });
+const pendingRevisions = (replica: Replica) => replica.engine.proposalEngine.listRevisions().map(({ revisionId }) => revisionId);
+
+async function proposalsOf(replica: Replica) {
+  await replica.client.requestFullFrame();
+  return (await replica.client.documentRead({ kind: 'reviewSnapshot' })).value!.proposals.proposals
+    .map(({ id, revisionIds }) => ({ id, revisionIds: [...revisionIds] }));
+}
+
+for (const settle of ['all', 'some', 'withdraw'] as const) {
+  test(`a proposal made in a room reaches the peer and ${settle === 'withdraw' ? 'its withdrawal clears both replicas' : `the peer accepting ${settle} of it narrows the card`}`, async () => {
+    const bytes = documentBytes(undefined, '<w:p><w:r><w:t>Seed and seed</w:t></w:r></w:p>');
+    const a = await open(9201, undefined, undefined, bytes);
+    const b = await open(9202, a.engine.encodeState(), undefined, bytes);
+    const toA = relay(b, a), toB = relay(a, b);
+    try {
+      const proposed = await a.session.submit('propose', { expectVersion: a.engine.proposalEngine.version(), proposals: [proposalIn(a)] }).ack;
+      expect(proposed).toMatchObject({ status: 'applied' });
+      const [card] = await proposalsOf(a);
+      expect(card!.revisionIds.length).toBeGreaterThan(1);
+      await toB.flush();
+      expect(pendingRevisions(b)).toEqual(expect.arrayContaining(card!.revisionIds));
+      if (settle === 'withdraw') {
+        expect((await a.session.submit('withdrawProposals', { ids: ['proposal'], expectVersion: a.engine.proposalEngine.version() }).ack).status).toBe('applied');
+        await toB.flush();
+        expect(pendingRevisions(b).filter(id => card!.revisionIds.includes(id))).toEqual([]);
+        expect(await proposalsOf(a)).toEqual([]);
+        expect(b.engine.paragraphs('body')).toEqual(a.engine.paragraphs('body'));
+        return;
+      }
+      for (const revisionId of settle === 'all' ? card!.revisionIds : card!.revisionIds.slice(0, 1)) {
+        if (!pendingRevisions(b).includes(revisionId)) continue;
+        expect((await b.session.submit('acceptRevision', { revisionId, expectVersion: b.engine.proposalEngine.version() }).ack).status).toBe('applied');
+      }
+      await toA.flush();
+      const remaining = card!.revisionIds.filter(id => pendingRevisions(a).includes(id));
+      if (settle === 'all') expect(remaining).toEqual([]);
+      else expect(remaining.length).toBeGreaterThan(0);
+      expect(remaining.length).toBeLessThan(card!.revisionIds.length);
+      expect(await proposalsOf(a)).toEqual(remaining.length ? [{ id: 'proposal', revisionIds: remaining }] : []);
+    } finally { toA.off(); toB.off(); a.session.dispose(); b.session.dispose(); }
+  }, TIMEOUT);
+}
