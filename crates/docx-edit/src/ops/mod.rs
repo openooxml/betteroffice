@@ -386,6 +386,15 @@ pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -
         .is_some_and(|chunk| chunk.is_block_embed(txn))
 }
 
+/// Moves `index` past the block embeds that start there: inline content may follow a
+/// paragraph's leading blocks but never precede them.
+pub(crate) fn past_leading_blocks<T: ReadTxn>(story: &TextRef, txn: &T, mut index: u32) -> u32 {
+    while block_embed_at(story, txn, index) {
+        index += 1;
+    }
+    index
+}
+
 pub(crate) fn inherit_block_revisions(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
