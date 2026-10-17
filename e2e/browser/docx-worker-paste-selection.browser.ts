@@ -7,11 +7,11 @@ const overlay = '[data-peerless-docx] div[aria-hidden="true"][style*="rgba(59, 1
 const caret = '[data-peerless-docx] div[aria-hidden="true"][style*="currentcolor" i]';
 
 async function open(page: Page) {
-  const run = (text: string, title: boolean) =>
-    `<w:r><w:rPr>${title ? '<w:b/><w:u w:val="single"/>' : ''}<w:sz w:val="24"/></w:rPr><w:t>${text}</w:t></w:r>`;
+  const run = (text: string, rPr = '') => `<w:r><w:rPr>${rPr}<w:sz w:val="24"/></w:rPr><w:t>${text}</w:t></w:r>`;
   const body = '<w:p><w:pPr><w:jc w:val="center"/><w:rPr><w:b/><w:u w:val="single"/><w:sz w:val="24"/></w:rPr></w:pPr>' +
-    `${run('Document Title', true)}</w:p>` +
-    ['First paragraph.', 'Second paragraph.', 'Third paragraph.'].map(text => `<w:p>${run(text, false)}</w:p>`).join('');
+    `${run('Document Title', '<w:b/><w:u w:val="single"/>')}</w:p>` +
+    `<w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr>${run('First paragraph.')}</w:p>` +
+    `<w:p>${run('Second paragraph.', '<w:b/>')}</w:p><w:p>${run('Third paragraph.')}</w:p>`;
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
@@ -131,7 +131,36 @@ test('Enter at the end of bold text keeps bold for the new paragraph', async ({ 
     { text: 'Document Title', bold: true },
     { text: 'Next', bold: true },
     { text: 'First paragraph.', bold: false },
-    { text: 'Second paragraph.', bold: false },
+    { text: 'Second paragraph.', bold: true },
+    { text: 'Third paragraph.', bold: false },
+  ]);
+});
+
+test('a paste and Enter take the formatting of the run at the caret, not the paragraph mark', async ({ page }, info) => {
+  await open(page);
+  const input = page.locator('.paged-editor__peerless-input');
+  await input.press('ArrowDown');
+  await input.press('Home');
+  await input.press('Shift+End');
+  await expect(page.locator(overlay)).not.toHaveCount(0);
+  await page.evaluate(() => {
+    const data = new DataTransfer();
+    data.setData('text/plain', 'One.\nTwo.');
+    document.activeElement!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+  });
+  await expect(page.locator(overlay)).toHaveCount(0);
+  await input.press('ArrowDown');
+  await input.press('End');
+  await input.press('Enter');
+  await input.pressSequentially('Next');
+  const bold = page.getByTestId('formatting-bar').getByRole('button', { name: 'Bold', exact: true });
+  await expect.soft(bold).toHaveAttribute('aria-pressed', 'true');
+  expect(await boldParagraphs(page, info)).toEqual([
+    { text: 'Document Title', bold: true },
+    { text: 'One.', bold: false },
+    { text: 'Two.', bold: false },
+    { text: 'Second paragraph.', bold: true },
+    { text: 'Next', bold: true },
     { text: 'Third paragraph.', bold: false },
   ]);
 });
