@@ -627,6 +627,8 @@ export interface YrsRenderEnv {
   numericIds?: Record<string, number>;
   /** Include hidden text in visible layout without changing the document. */
   showHiddenText?: boolean;
+  /** Report borderless table cell edges as view-only guides on each display page. */
+  showTableGridlines?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
   /** View-only layout reservations; saves and paged exports leave them out. @internal */

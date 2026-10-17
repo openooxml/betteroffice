@@ -255,6 +255,13 @@ describe('command gate', () => {
     expect(codeOf('commentsSidebar', host)).toBeNull();
   });
 
+  test('table gridlines report their view state where the editor draws them', () => {
+    expect(codeOf('tableGridlines', testEnvironment({ tableGridlines: undefined }))).toBe('unsupported-command');
+    const off = evaluateDocxCommand('tableGridlines', null, testEnvironment({ readOnly: true, tableGridlines: false }));
+    expect([off.enabled, off.active]).toEqual([true, false]);
+    expect(evaluateDocxCommand('tableGridlines', null, testEnvironment({ tableGridlines: true })).active).toBe(true);
+  });
+
   test('review resolution needs a live revision and navigation needs any', () => {
     expect(codeOf('reviewAccept', testEnvironment({ currentRevisionId: null }))).toBe(
       'revision-required'

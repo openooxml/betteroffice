@@ -114,6 +114,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const worker = useRef<ResidentEngineWorkerClient | null>(null);
   const sourceComments = useRef<NonNullable<DocxEditorProps['comments']>>([]);
   const [zoom, setZoom] = useState(initialZoom);
+  const [tableGridlines, setTableGridlines] = useState(props.showTableGridlines === true);
+  const [gridlinesProp, setGridlinesProp] = useState(props.showTableGridlines);
+  if (gridlinesProp !== props.showTableGridlines) {
+    setGridlinesProp(props.showTableGridlines);
+    setTableGridlines(props.showTableGridlines === true);
+  }
   const [hyperlinkPopup, setHyperlinkPopup] = useState<HyperlinkPopupData | null>(null);
   const linkGesture = useRef(0);
   const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__peerless-input')?.focus({ preventScroll: true }), []);
@@ -163,6 +169,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
   const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
     comments: () => props.comments ?? sourceComments.current,
+    tableGridlines, onTableGridlines: setTableGridlines,
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
@@ -289,11 +296,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-    theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
+    theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
   useLayoutEffect(() => {
     settings.current = { readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-      theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded };
-  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded]);
+      theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded };
+  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, tableGridlines, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded]);
   type Ticket = ReturnType<PeerlessEditSessionBinding['session']['submit']>;
   const active = useRef<{
     binding: PeerlessEditSessionBinding;
@@ -369,7 +376,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const measure = async (metadata: Document) => {
         const theme = settings.current.theme ?? metadata.package.theme;
         const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-        const environment = { themeColors, showHiddenText: settings.current.showHiddenText };
+        const environment = { themeColors, showHiddenText: settings.current.showHiddenText, showTableGridlines: settings.current.showTableGridlines };
         const layout = buildResidentRegionLayoutRequest(metadata, 24, { ...environment,
           defaultTabStopTwips: metadata.package.settings?.defaultTabStop ?? null, mediaTokens: settings.current.mediaTokens === true });
         const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
@@ -549,7 +556,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const reserved = reservationsRef.current;
     const reservations = sentReservations();
     const payload = {
-      themeColors, showHiddenText: settings.current.showHiddenText, ...(reservations ? { reservations } : {}),
+      themeColors, showHiddenText: settings.current.showHiddenText, showTableGridlines: settings.current.showTableGridlines, ...(reservations ? { reservations } : {}),
     };
     const requested = JSON.stringify(payload);
     if (current.requestedRenderEnvironment === requested) return;
@@ -662,7 +669,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     updateFontEnvironment();
   }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller]);
   useLayoutEffect(updateReadOnly, [effectiveReadOnly, updateReadOnly]);
-  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, reservations, updateRenderEnvironment]);
+  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, tableGridlines, reservations, updateRenderEnvironment]);
   useLayoutEffect(updateFontEnvironment, [props.fonts, measurementFontProvider, props.onFontsLoaded, updateFontEnvironment]);
   useLayoutEffect(() => () => { active.current?.clipboard?.dispose(); active.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }, []);
 

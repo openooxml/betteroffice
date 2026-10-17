@@ -679,6 +679,7 @@
     "borderColor": "Warna Batas",
     "borderWidth": "Lebar Batas",
     "unknownAction": "Tindakan Tidak Diketahui",
+    "viewGridlines": "Tampilkan Garis Kisi",
     "borders": {
       "all": "Semua Batas",
       "outside": "Batas Luar",

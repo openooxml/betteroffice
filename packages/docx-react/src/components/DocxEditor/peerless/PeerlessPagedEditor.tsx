@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/peerless';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/peerless';
-import { displayPageNoteAnchorRevision, displayPageRevision } from '@betteroffice/docx/layout/render';
+import { displayPageNoteAnchorRevision, displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { nextPageWindow } from '../CanvasPagesView';
 import { viewportColumnBand } from '../internals/viewportBand';
@@ -36,6 +36,15 @@ function pageLayout(pages: readonly PageGeometry[]) {
   return layout;
 }
 
+function TableGridlines({ page }: { page: DisplayPage }): ReactElement | null {
+  if (!page.tableGridlines?.length) return null;
+  return <svg aria-hidden data-table-gridlines="" viewBox={`0 0 ${page.width} ${page.height}`} preserveAspectRatio="none"
+    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
+    {page.tableGridlines.map((line, index) => <line key={index} x1={line.x1} y1={line.y1} x2={line.x2} y2={line.y2}
+      stroke="#a6a6a6" strokeWidth={1} strokeDasharray="2 2" vectorEffect="non-scaling-stroke" shapeRendering="crispEdges" />)}
+  </svg>;
+}
+
 const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visible, noteAnchorRevision, hold, fullMirror }: {
   geometry: PageGeometry;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
@@ -64,7 +73,8 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
     className="paged-editor__page canvas-page"
     style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'none' }}
   >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible && fullMirror} visible={visible}
-    noteAnchorRevision={noteAnchorRevision} hold={hold} />}</div>;
+    noteAnchorRevision={noteAnchorRevision} hold={hold} />}
+    {geometry.displayPage && <TableGridlines page={geometry.displayPage} />}</div>;
 }, (previous, next) => previous.canvasForPage === next.canvasForPage &&
   previous.visible === next.visible && previous.hold === next.hold && previous.fullMirror === next.fullMirror &&
   previous.geometry.displayPage === next.geometry.displayPage &&

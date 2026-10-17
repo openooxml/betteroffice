@@ -219,7 +219,7 @@ const DOCX_COMMAND_POLICIES = {
   toggleMark: { keys: ['mark'] }, formatRange: { keys: ['delta'] }, clearFormatting: { keys: [] },
   setParagraphAttrs: { keys: ['attrs'] }, applyParagraphStyle: { keys: ['styleId'] },
   setReadOnly: { keys: ['readOnly'], exact: true },
-  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText', 'reservations'], exact: true },
+  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText', 'showTableGridlines', 'reservations'], exact: true },
 } satisfies Record<DocxCommandKind, DocxCommandPolicy>;
 
 function commandPolicy(kind: string): DocxCommandPolicy | undefined {
@@ -382,6 +382,7 @@ function validCommandIntent(
     case 'setRenderEnvironment':
       if (!object(payload.themeColors) || !Object.values(payload.themeColors).every(value =>
         typeof value === 'string' && /^[0-9a-f]{6}$/i.test(value)) || !boolean(payload.showHiddenText) ||
+        (payload.showTableGridlines !== undefined && !boolean(payload.showTableGridlines)) ||
         (payload.reservations !== undefined && !validReservationsPayload(payload.reservations))) return refuse('invalid-payload');
       break;
   }
