@@ -53,5 +53,8 @@ fn a_split_with_a_missing_text_dependency_keeps_paragraphs_addressable() {
         receiver.apply_update_v1(&splitter.encode_state_as_update_v1()).unwrap();
     }
     assert_eq!(keys(&receiver), keys(&splitter));
+    writer.apply_update_v1(&receiver.encode_state_as_update_v1()).unwrap();
+    assert_eq!(keys(&receiver), keys(&writer));
     assert_addressable(&splitter);
+    assert_addressable(&writer);
 }
