@@ -3165,9 +3165,10 @@ test('an imported reply without range markers inherits its ancestor anchor and s
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+const note = (id: number, text: string) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
+  content: [{ type: 'paragraph' as const, formatting: {}, content: [{ type: 'run' as const, formatting: {}, content: [{ type: 'text' as const, text }] }] }] });
+
 test('a host comment list wins over the worker comment projection on save and keeps native anchors', async () => {
-  const note = (id: number, text: string) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
-    content: [{ type: 'paragraph' as const, formatting: {}, content: [{ type: 'run' as const, formatting: {}, content: [{ type: 'text' as const, text }] }] }] });
   const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
   try {
     const [source] = engine.listComments();
@@ -3183,6 +3184,27 @@ test('a host comment list wins over the worker comment projection on save and ke
     expect(await part(hosted, 'word/document.xml')).toContain(`<w:commentRangeStart w:id="${anchored}"`);
     expect(await part({ comments: [], commentsSource: 'host' }, 'word/comments.xml')).not.toContain('Parent');
     expect(await part({ comments: [note(id, 'Ignored')] }, 'word/comments.xml')).toContain('Parent');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a host comment list saves on the comment ids the worker handed out after a removal', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const paraId = engine.paragraphs('body')[1]!.paraId;
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } };
+    const ids: number[] = [];
+    for (const [index, body] of ['First', 'Second'].entries()) {
+      const added = await client.edit(intent(index + 1, index, 'addComment', { ranges: [range], author: 'A', date: '2026-01-01', body,
+        expectVersion: engine.proposalEngine.version() }));
+      ids.push(added.editState!.comment!.id);
+    }
+    const first = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: ids[0]! } })).value!;
+    expect((await client.edit(intent(3, 2, 'removeComment', { id: first.id, expectVersion: engine.proposalEngine.version() }))).outcomes[0]?.status).toBe('applied');
+    const parts = unzipContainer(new Uint8Array((await client.save({ comments: [note(0, 'Host parent'), note(ids[1]!, 'Host second')], commentsSource: 'host' })).bytes));
+    const part = (name: string) => new TextDecoder().decode(parts[name] ?? new Uint8Array());
+    const saved = part('word/comments.xml').match(/<w:comment [^>]*w:id="(\d+)"(?:(?!<\/w:comment>)[\s\S])*Host second/)?.[1];
+    expect(saved).toBeDefined();
+    expect(part('word/document.xml')).toContain(`<w:commentRangeStart w:id="${saved}"`);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
