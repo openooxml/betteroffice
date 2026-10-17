@@ -950,6 +950,7 @@ impl EditingDoc {
         if before.checked_add(1) != Some(after) {
             return;
         }
+        let index = self.text_insert_index(story_id, before, index);
         let at = self
             .paragraph_indexes
             .lock()
@@ -993,6 +994,22 @@ impl EditingDoc {
             }
         }
         self.advance_table_membership(before, after);
+    }
+
+    /// Where inline text inserted at `index` lands: past the block embeds leading its paragraph.
+    pub(crate) fn text_insert_index(&self, story_id: &str, epoch: u64, index: u32) -> u32 {
+        let cached = self.paragraph_indexes.lock().unwrap().get(story_id, epoch);
+        if let Some(paragraphs) = cached {
+            return paragraphs
+                .para_at(index)
+                .filter(|para| index < para.node_start)
+                .map_or(index, |para| para.node_start);
+        }
+        let txn = self.yrs_doc().transact();
+        let Ok(story) = story_ref(&txn, story_id) else {
+            return index;
+        };
+        crate::ops::past_leading_blocks(&story, &txn, index)
     }
 
     /// Advances cached story indexes after a single plain text deletion.
