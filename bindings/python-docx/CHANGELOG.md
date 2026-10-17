@@ -1,5 +1,11 @@
 # @betteroffice/python-docx
 
+## 0.2.1
+
+### Patch Changes
+
+- c6ab4fa: Native page and slide rendering holds each image's decoder to the image budget left, so a GIF whose frame is larger than its declared size is skipped instead of allocating past the budget.
+
 ## 0.2.0
 
 ### Minor Changes

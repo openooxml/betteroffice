@@ -1,5 +1,71 @@
 # @betteroffice/xlsx
 
+## 0.4.0
+
+### Minor Changes
+
+- 8aa1269: Adds bounded XLSX outline and range reading, versioned range, grid and sheet writes, formatting, find/replace and sort tools, PNG range previews, and `attachXlsx` for live workbook handles. Adds a `setCellValues` range step to the workbook engine.
+- 03f4c75: Enables `collaboration` and remote presence with `XlsxEditor asyncApi`, opt-in, through `XlsxAsyncEditorApi.collaboration` and `createAsyncCollaborationReplica`. Adds experimental `XlsxAsyncEditorApi.recoverySave`, which keeps accepted edits, undo and redo across worker failures and leaves the editor read-only.
+- d920761: `openWorkbook` accepts a `calculation` option with a `WorkbookCalculationContext` (`nowSerial`, `randSeed`), and `WorkbookHandle.setCalculationContext` changes it, so date, time and random functions such as `RANDBETWEEN` compute the same values on every handle that shares the context.
+- 557cf3d: Collaborative workbooks now accept cell merges and unmerges. They sync to peers, undo and redo in one step and survive save and reopen.
+- d69ea57: Collaborative workbooks now accept freeze pane changes. They sync to peers as a sheet setting, undo in one step and survive save and reopen; other structural edits are still refused while collaborating.
+- ab7cf5d: Workbooks can now add, replace and remove cell hyperlinks with `setHyperlink` and `removeHyperlink`. In collaborative workbooks the edits sync to peers, undo in one step and survive save and reopen.
+- b3b88b1: Adds `moveRange`, which moves a range within one sheet and rewrites formulas that refer to it in one undo step. Partial ranges and features a move cannot preserve are refused. Also available on the worker session.
+- 3e47c79: `openWorkbookSession` sessions add an experimental `call.frame(viewport, { sheet })` that returns the viewport's display list with the workbook version it was built from; a newer frame request replaces a queued older one.
+- f7cf3ff: Experimental workbook sessions add `call.sheetView`, `call.cellGeometry` and `call.cellInputs` for worker-owned viewing, and `openWorkbookSession` accepts a `signal` that cancels an open in flight. Session frames include visible `mergedRanges` by default; session use remains opt-in.
+- a0c86f2: Adds experimental, opt-in `openWorkbookSession` for async workbook reads, version-checked edits, sheet metadata, and saving while keeping caller buffers usable.
+
+### Patch Changes
+
+- d799954: Deletions made offline now reach every peer after a reconnect, even when newer edits reach those peers first. Pinned client ids must now stay below `Number.MAX_SAFE_INTEGER - 1`.
+- 3f34165: Collaboration now converges after a replica reconnects over peer-to-peer or relay transports: edits made while offline reach peers that stayed connected, not only the reconnecting replica.
+- 1e98891: A document with a chart that has a blank data point no longer fails to display, and a blank column or bar point draws no bar in every format. Display input the renderer cannot read now leaves only that block unpainted, with a console warning.
+- 8aa1269: Preserves existing cell, paragraph, run and notes formatting during edits. Adds optional `bullet` to `set_paragraphs`; `true` creates paragraph bullets, `false` removes them, and omitting it preserves existing bullets.
+- 1ed2ad0: Built-in worker sessions for presentations and workbooks start compiling the engine as soon as the worker starts, and later built-in sessions in the same page reuse the compiled module, so opening another document is faster.
+- 14919ef: Editable sessions with `experimentalWorkerOpen` now use the worker-owned editor and show pending cell text before edits commit. The flag remains experimental and opt-in; the default editor is unchanged.
+- abac0ee: Fixes approximate lookups returning blank cells as zero or selecting keys of a different type. Approximate matching skips blanks and keys of other types by default while preserving exact-match behavior.
+- 1c20b14: Keeps saves and plugin edits ordered through completed IME input and invalid-entry refusals. Rejects sparse and oversized edit batches before allocation.
+- 03f4c75: Preserves untouched cells and queued edits when saving or recovering with opt-in `asyncApi`. Honors `onSaveRequest`, loads the async editor separately, and reports missing canvas support or legacy API access with directed errors, including `XlsxAsyncApiSyncAccessError`.
+- 4bd6409: Edited workbooks whose worksheet, workbook, styles or shared-strings part starts with a UTF-8 byte order mark now save instead of failing with "tag not closed".
+- c63c0bc: Saving an edited workbook that has no formulas now keeps its calculation settings as they were, so spreadsheet apps no longer recalculate it in full on open. Workbooks with formulas still request a full recalculation.
+- cb67050: Fixes clipped currency ticks and bar category labels in xlsx charts. Adds provided `PlotSink::anchors_text_end` and `PlotSink::push_end_aligned_text` methods so a sink can anchor text at its right edge.
+- 4d0cbda: Workbooks with charts repaint faster after edits that don't change a chart's data.
+- 93ad395: Renders stacked, percent-stacked, secondary-axis and logarithmic charts by default instead of placeholders. Newly supported charts with unresolved or ambiguous axis references still display placeholders, while previously supported charts keep rendering.
+- 97c818d: Recalculation without a `nowSerial` clock no longer overwrites the saved results of `TODAY()`, `NOW()` and year-less `DATEVALUE()` formulas with `#VALUE!`. Passing `nowSerial` recalculates them normally.
+- 4f42e5f: Date functions (`DATE`, `DAY`, `MONTH`, `YEAR`, `WEEKDAY`, `WEEKNUM`, `ISOWEEKNUM`, `EDATE`, `EOMONTH`, `DAYS`, `YEARFRAC`, `NETWORKDAYS`, `WORKDAY`) return `#NUM!` for dates past 9999-12-31 or huge day counts, instead of a wrong date or an overflow.
+- 1762411: Sheets whose hidden or filtered rows and columns exceeded the display cap now open: only visible cells count. Oversized viewer frames render a bounded portion with one non-fatal warning per workbook; print and raster keep their size errors.
+- 28fa82a: Saving style edits preserves conditional-format styles without copying their number formats into cell formats. Workbooks with large conditional-format collections can open without a style-limit error, while saved collaborative state from earlier releases remains compatible.
+- 2f7efc6: Single-cell edits apply directly instead of rebuilding the workbook's editing state, so cell edits on large workbooks are much faster, with identical results.
+- 11db7d8: Scrolling large workbooks repaints faster: the grid's row and column geometry is reused between frames until the workbook changes.
+- 86c6a78: Standalone workbooks keep authored row heights and column widths through hide/unhide, undo, and save. Collaborative sessions are unchanged.
+- dfb1b1f: Renders sheets that hide their unused columns or rows. A frame now ends at the last column and row with extent, so these sheets no longer fail with `DisplayTooLargeError` at the first viewport.
+- b0c67e0: Standalone cell edits and undo or redo run faster when no update listeners are attached. Enabled by default, with collaboration and later subscriptions preserved.
+- 03f4c75: Cell edits in large workbooks update the grid faster while preserving row sizing. Enabled by default.
+- 766690d: `=ISOWEEKNUM()` with no argument or more than one now evaluates to `#VALUE!` instead of crashing the calculation engine, which in the browser ended the document worker.
+- 2ec69b0: Formulas referencing another workbook, using R1C1 `INDIRECT` or adding to date text keep their saved results after an edit instead of `#REF!` or `#VALUE!`. A range used as a single value reads the cell on the formula's row or column, as in Excel.
+- 355675f: Edited saves keep a formula cell's original markup, including shared formulas, when only its calculated result or style changes.
+- f2042f0: Improves preservation of original cell styles during edited saves, including protection and rotation, and keeps unrelated sheets unchanged.
+- 1fef3e9: Fixes literal tilde matching in conditional formulas and wildcard lookups.
+- c28d8db: Opens workbooks with a column wider than Excel's 255-character limit, which previously failed with "workbook contains an invalid column width". The column renders at 255 and the authored width is kept on save.
+- a9f9bdb: Saves workbooks whose rows Excel stored at its maximum height as `ht="409.6"`, which previously failed with "workbook contains an invalid row height".
+- 3f8c882: Merged cells no longer show grid lines inside them, matching Excel.
+- 30bf7b2: Saving a workbook without edits now returns the original file unchanged, keeping its cached values and calculation chain.
+- ce4053e: Corrects currency, accounting and fraction formats. Adds optional `TextCmd.numberFormat` layout data, emitted by default for numeric cells, for padding and fill using font metrics, General rendering that fits column widths, and overflow hashes.
+- 400ac5e: Workbooks open faster and with a lower peak memory, with identical results.
+- 5813049: Applying a collaborator's update that arrives ahead of an earlier one no longer freezes the workbook. The update waits until the missing edit arrives, and every replica then shows the same cells.
+- 341ab6e: Renders patterned cell fills and all border styles by default. Preserves their colors and styles when editing cell formatting, saving workbooks, or restoring worker snapshots.
+- 451cfb9: Fixes editing in apps that install the XLSX packages so it no longer fails with "Workbook edit peer does not support retained operations". Recovery and worker cell previews also work correctly.
+- c8a1e86: An edited save that would have to rewrite a worksheet's cells without source markup the editor does not model now fails with an error naming the sheet and the markup, and the workbook stays editable.
+- accc7a0: Saving an edited workbook is faster, with identical output.
+- 4bf5031: A workbook opened from a package with duplicate workbook relationship ids, or with a sheet stored on its calc chain part, now saves a file that opens again. Sheets are read only from the workbook's own sheet list, the one a save rewrites.
+- d402284: Supported scatter and bubble charts now render instead of a placeholder.
+- f98fc39: Fixes `SEARCH` character positions after Unicode case conversion and preserves case-insensitive matches for Greek text.
+- 611d365: TODAY() and NOW() use the computer's local time, matching Excel.
+- db59bf8: Edit batches now write content into unlocked cells of protected sheets, and formats when the protection allows formatting cells. Locked cells stay refused. Values and formulas written into empty cells keep their row or column style, as typed input does.
+- 37c7e36: Display lists now clamp to the sheet grid by default. Adds `DisplayTooLargeError` and `getDisplayListCellLimit` so callers can size tiles when a viewport exceeds the display limit.
+- 03f4c75: Enables `plugins` in `<XlsxEditor asyncApi>`, including reads, edit batches, panels, overlays, and selection events. Opt-in through `asyncApi`.
+- 21e0be7: Rows with cells, a row style or an explicit height stay visible when a sheet hides unused rows by default (`zeroHeight`). Empty rows remain hidden, and collaboration snapshots remain compatible.
+
 ## 0.3.0
 
 ### Minor Changes

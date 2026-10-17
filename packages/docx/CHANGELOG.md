@@ -1,5 +1,130 @@
 # @betteroffice/docx
 
+## 0.5.0
+
+### Minor Changes
+
+- 15b1588: Adds experimental `createAsyncCollaborationReplica`, `AsyncCollaborationReplica` and `AsyncReplicaAdapter`, so `CollaborationProvider` can sync a replica whose state lives in a worker. Synchronous replicas behave as before.
+- ac3c6ab: `CollaborationProvider` can stream large initial syncs as bounded Update frames that the joiner applies as one change (`maxSyncBytes`, default 64 MiB). Chunked answers are opt-in for point-to-point transports (`syncChunkBytes`). Replicas opt in with `encodeStateAsUpdateChunks` and `applyUpdateChunks`. Frame and buffer options now have upper bounds.
+- 2586016: Worker-open editors build their editing copy from the worker's opened document instead of parsing the file a second time. The `yrs` entry adds `encodePeerMetadata`, `bootstrapPeer`, `PeerMetadataError` and `peerMetadataTags`.
+- dc7b189: DOCX plugins can return a `DocxReservationSet` from the opt-in `reservations` hook to lay out inline boxes, blocks and hidden ranges, then draw in them through `getAnchorGeometry({ kind: 'reservation', id })` once `DocxPluginLayout.reservationsVersion` is the set's version. Saves and paged exports leave them out.
+- 1135529: Adds plugin `read.listStories` and `read.readStories`, which list every story with its kind and read all stories, or chosen kinds or ids, in one call. Sessions gain `listStories` and `readStories`.
+- 18abb7d: `onReplica` receives an async replica: read through `replica.async`, or pass `legacySyncApi` for synchronous reads. Unpinned client ids are fresh per open. A pinned id that would reuse clocks already used on the page opens fresh, with a warning; ids from `Number.MAX_SAFE_INTEGER - 1` are rejected.
+- 18abb7d: `collaboration` now runs on the default worker editor, with remote cursors, reconnect synchronization, and undo that preserves other participants' edits. `onChange` is refused as elsewhere.
+- 89a5631: Adds physical locations, widget values and visible geometry to `contentControlHandles` worker snapshots. Control mutations continue to use opaque physical handles.
+- c500a9e: The opt-in worker-only docx editor gains object geometry, toolbar formatting, list, break and insertion commands, and review commands with proposals. `@betteroffice/docx/yrs` exports `DocxCommandKind`, `DocxCommentPatch`, `ResidentReviewSnapshot` and `ResidentToolbarMetadata`.
+- 54d6be3: Adds opt-in `setFontEnvironment` worker commands with WOFF and WOFF2 support and session-owned font faces. Adds `onFontEnvironment` readiness and presentation events and `onMemory` worker samples.
+- 89a5631: Adds `objectSelection` worker property reads that normalize a single image selection to its physical target.
+- 89a5631: Worker `pointPosition` reads accept an optional `nativePoint` to resolve rendered page coordinates. Opt-in.
+- 89a5631: Worker-only editors connect plugin comments and navigation. `insertComment` adds the comment and resolves to its ID, also in suggesting mode and right after a save, and plugin `scrollToParagraph` moves the selection only when `focus` is set. Saves keep comment bodies, replies and resolved threads.
+- 8a451d4: Adds opt-in `open.collaboration` so the worker engine can act as a collaboration replica. Remote merges apply through the worker command pipeline like local edits.
+- 8f32760: Adds an internally opt-in worker-only DOCX editor with asynchronous reads, editing, saving, search and navigation. `legacySyncApi` preserves synchronous callbacks; lazy-load failures report `DocxWorkerEditorChunkLoadError` through `onError`.
+- 54d6be3: Adds opt-in `ResidentSourceWorkerClient` from `@betteroffice/docx/peerless` with `openSource` and `prewarm` for bytes or parsed documents. Source previews hand off to editing without reparsing, and media tokens resolve inside the worker.
+
+### Patch Changes
+
+- d799954: Deletions made offline now reach every peer after a reconnect, even when newer edits reach those peers first. Pinned client ids must now stay below `Number.MAX_SAFE_INTEGER - 1`.
+- e89c008: Saving a document after adding a comment now keeps the existing comments in `comments.xml` exactly as they were, including their paragraph styles and formatting.
+- de864b6: Accepting or rejecting the first suggestion that needs a new font face is faster.
+- 1f63be9: Paints floating pictures, shapes and text boxes anchored in a table cell once, on the page that holds their anchor paragraph, when the cell's row splits across pages.
+- 1e98891: A document with a chart that has a blank data point no longer fails to display, and a blank column or bar point draws no bar in every format. Display input the renderer cannot read now leaves only that block unpainted, with a console warning.
+- 899ca8f: Edits that start or end inside an emoji, such as deleting or typing over a double-clicked emoji, now apply to the whole emoji.
+- b155fb7: Collaborating replicas no longer drift apart in formatting. Deletions a replica makes while cleaning up formatting during a remote update now arrive as their own `'local'` update, which providers forward.
+- c6289a2: The delete-only `'local'` update a replica sends after a remote update now carries only deletions the replica made itself, so a peer that has not seen a concurrent winning edit keeps the losing edit's paragraph attributes and ids.
+- 51ad3a4: Docx collaboration now converges after a replica reconnects over peer-to-peer or relay transports: edits made while offline, including deletions, reach peers that stayed connected, not only the reconnecting replica.
+- d138961: Tables that two collaborators insert at the same time keep their own cells, so undoing or deleting one no longer breaks the other. Cell story ids are opaque: a cell created by an edit may carry a `~<n>` suffix, for example `body:t0:r0c0~51`.
+- 46b2035: After a section's margins or columns change, text that carries over onto the next page is laid out at the same width as a full layout.
+- 4c97b07: Copied shifts advance `displayPageRevision`; anchor updates also advance `displayPageNoteAnchorRevision`. Page mirrors refresh position-only updates at idle by default, while interactive control targets update immediately.
+- 28a4685: Text on pages after an edit keeps its document positions when the editor redraws, so clicks and selections there land in the right place.
+- 2e387c3: Preserves opaque drawings, tracked changes and hyperlinks through editor saves by default, and recovers legacy chart placements. Adds opt-in `repackDocxWithWarnings` with `warnings`; seeding rejects opaque payloads over 8 MiB with `OpaqueSeedBudgetError`.
+- 0650355: Footnote and endnote areas now take the height of the document's own separator, so pages with notes break where Word breaks them.
+- 1ce4fea: Renders grouped pictures with composed position, size, crop, rotation and flips while preserving collaboration snapshots. Rotation-independent picture fills remain unsupported; native PNG rendering skips picture-filled shapes without dropping their pages.
+- 13d91c2: Deleting text in long documents is faster.
+- e64268d: Preserves body bookmarks when paragraphs, tables, or sections are deleted, merged, or moved. Saved bookmarks keep their attributes, remain ordered, and are not duplicated.
+- 5d554a6: Saving a rebuilt paragraph now keeps its authored `adjustRightInd` and `cnfStyle` properties, and style inherited `adjustRightInd`, `autoSpaceDE` and `autoSpaceDN` values stay inherited instead of becoming direct formatting.
+- 659c727: Saves that splice edits into the source part keep editing permission ranges: a marker in replaced text moves to the edit, and markers of deleted or merged paragraphs move to a neighbouring paragraph. Parts written whole without a splice plan still drop them.
+- 3462280: Typing in a plain paragraph stays fast when other paragraphs hold tables, fields or lists.
+- 56dc9d6: Documents with deeply nested fields (e.g. repeated header `INCLUDEPICTURE` fields) now open instead of failing or running out of memory. Parser output sets `fieldTree.code` and `fieldTree.result` only on fields that contain no other field; outer fields keep their content in `structuredCode` and `structuredResult`.
+- 3a49caa: Embedded OLE objects such as equations draw their preview image again, and saves still keep the object unchanged.
+- 42d185e: Documents open faster in the engine, with identical output. The Rust crates add `PackageBytes`, `RetainedPackage::from_bytes` and `*_bytes` parse entry points that take owned package bytes.
+- dad1895: Opening a DOCX now surfaces non-fatal warnings for parts without content types and duplicate drawing, bookmark, and Word paragraph IDs. Hosts addressing paragraphs by raw Word IDs should prefer session anchors with `resolveParagraphAnchor()` or call `persistParagraphIds()` to repair duplicates.
+- 50c17a0: Reading paragraph identities again on an unchanged document returns the previous result without walking the document. Applies with and without `experimentalWorkerOpen`.
+- 5889248: Collaboration updates from other peers larger than 64 MiB (`MAX_UPDATE_BYTES`) are now refused before decoding, matching the xlsx and pptx limit. Loading a document state with `loadState` is unchanged.
+- 89a5631: Adds worker-backed plugin validation, edit batches, commands, docks, overlays and sidebar cards to the default worker-only editor.
+- c2a2836: Keeps DOCX paragraphs editable when collaboration updates arrive out of order.
+- c3fc221: Text caret clicks and moves within the first visible pages respond immediately while long documents continue opening. Range selections and object or part clicks wait for complete geometry.
+- a41dc2e: Accepting or rejecting a suggestion repaints faster.
+- ca379ae: Documents whose first pages hold dense tables show their first page sooner. `openDocxPreview` accepts an optional `paragraphBudget` that ends the preview at the first whole block where the paragraphs read reach it.
+- db592dd: Plain-text edits refresh only the affected preview record instead of rebuilding every record.
+- af1ca31: Find highlights and remote selections inside long tables with repeating header rows now query only the pages in view.
+- 9d5732d: The editor ref adds async twins for its synchronous document members (`readSelectionInfo`, `findParagraphs`, `scrollToParagraph`, `scrollToComment`, `scrollToChange`, `insertComment`, `insertCommentReply`, `onDocumentChange`) and deprecates the originals. In viewer sessions selections reach `onSelectionChange` and plugins, and `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, which `DocxReplicaNotReadyError` retry loops do not catch.
+- 29352cc: Plugin `getAnchorGeometry` now resolves targets in headers and footers, including the default worker viewers, with `rects` on every built page that paints them. Unbuilt display pages name their header and footer parts in `hfParts` (`HfParts` in Rust).
+- d6c88fd: In viewer sessions deleting a comment from its card removes it in the document worker, without a main-thread document copy.
+- 2ade521: In viewer sessions `exportStructuredWithPages` reads from the document worker without a main-thread document copy, and its result now includes comment authors and dates and source page-break positions.
+- 44872e9: Documents opened read-only or for viewing with `experimentalWorkerOpen` select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
+- 9b01ae9: Documents opened read-only or for viewing with `experimentalWorkerOpen` show comment and tracked-change cards, plugin cards and the outline from the document worker, without a main-thread document copy.
+- 893351b: In viewer sessions `listContentControls`, `findContentControls` and the built-in Find read from the document worker without a main-thread document copy, and tracked-change accept and reject commands refuse at once.
+- c602f99: The editor closes its display-list store handles when it unmounts and releases worker selection reads when a session ends, instead of leaving them to garbage collection.
+- 7184c82: Replacing or deleting text at the end of a formatted paragraph no longer spreads its formatting onto the following empty paragraphs and tables, so saving keeps the rest of the document unchanged.
+- ffb5f20: Adding a header or footer and removing it before saving no longer leaves the saved file pointing at a header or footer part it does not contain.
+- 8470707: Structured exports of documents opened with `experimentalWorkerOpen` keep their comments' authors and dates.
+- 685e026: Saving a document with comment replies no longer rewrites the whole body. Replies that already have their own range keep it without duplicates, and a missing reply range is added inside the source paragraph, so text boxes, fields and other content stay intact.
+- 9d335e8: Accepting, rejecting or undoing a suggestion in a long document lays out faster.
+- b7f626b: Typing early in a long document no longer resolves the text of every later page again, because `layout_document_incremental` now moves the run positions of retained pages by the edit's offset and takes equal fingerprints to mean a block is unchanged apart from its document positions.
+- 4301476: Saving no longer writes inherited formatting into the document: run, cell and table properties are saved relative to their styles, and table row edits leave other rows unchanged. Toggle properties such as bold now combine across styles as OOXML specifies, which can change rendering.
+- 7ba49bf: Saving a document keeps the language set on its text, also in edited paragraphs, so Word keeps checking its spelling and grammar in that language. Complex script theme fonts are saved under the attribute name Word reads, so Word applies them.
+- 65e1070: Saving after splitting, merging, adding or removing paragraphs now also keeps the paragraphs you didn't edit as they were.
+- 27973a5: Destroying an edit session releases document and font memory even when the application keeps the session object.
+- 4581c0d: Refuses to withdraw proposals while remote updates wait on missing state, instead of failing the session.
+- 1db8dbd: A table border shared by two cells is drawn when either cell declares it, and conflicting cell borders resolve like Word: the heavier border wins, then the darker colour.
+- 378d706: Typing in long documents does less font work per keystroke when the edit leaves the fonts unchanged.
+- 11ebf08: Editing a paragraph that holds one end of a bookmark or comment range spanning other paragraphs now saves only that paragraph when range IDs remain unambiguous, keeping the rest of the document exactly as it was.
+- 40581a8: Saving a document that inserts or removes paragraphs or table rows keeps the untouched XML of parts whose tables have vertically merged cells, instead of rewriting the whole part.
+- 6dc21f0: Editing text after a paragraph that spans two pages now keeps that paragraph's page break the same as a fresh layout.
+- 10a7185: Story segment reads for the editor are faster on large documents, with identical output.
+- 65a0429: Copying a table, or a selection that holds one, now also writes HTML, and pasting HTML with a table (from BetterOffice, Word or Google Docs) inserts a real table in one undo step instead of tab-separated text.
+- a7fe160: Adds view-only table gridlines to the worker editor: dashed guides at cell edges without a border, toggled by the `showTableGridlines` prop, the `tableGridlines` command or the View gridlines table menu item. They are never saved, printed or exported.
+- 4df7290: A table row split at the page bottom now moves to the next page whole when one of its cells would show no line on the page, like Word.
+- 2f97c01: Tall table rows now split at each cell's own line boundary at the page bottom, like Word, instead of moving whole to the next page when the cells' lines don't line up.
+- 3149184: Tables honor fixed and autofit layouts and preferred cell widths by default, sizing autofit columns from their content within the available width; adds `measure_intrinsic_widths` for measuring paragraph content widths.
+- 58740bf: Charts inside DOCX text boxes are drawn at their size in the text box, with the run's hyperlink, bidi order and tracked-change marks, instead of being left out.
+- f666e0c: Pictures inside text boxes are drawn instead of being dropped.
+- 3763178: Collaborative docx editing no longer crashes when a peer deletes a story or table this replica edited and undid. Once undo history attaches, a replica keeps deleted content until reload, so undo can always restore it. Raw yrs undo bridges should call `EditingDoc::keep_deleted` first.
+- baf8aaa: Undo in the worker-only Word editor groups typing by when the keys were pressed, so a quickly typed word undoes in one step even when each edit takes the engine longer to apply.
+- c7dfab5: Keeps paragraph selections editable after undo or redo of edits merged with collaborators.
+- 11f68f2: Read-only sessions take each layout update from the worker as a compact summary instead of the full layout, which cuts main-thread work per update with identical rendering.
+- e6f0556: Background page building in long documents is faster, in both editor modes.
+- 452f8d7: Accepting or rejecting a suggestion in a long document repaints faster.
+- 6447834: The default worker editor supports comment navigation, replies, resolution and repeated document loads, with superseded navigation returning false. Imported resolved comments can reopen, replies inherit ancestor anchors, and saves await queued comment operations; updates report full projections in `editState.commentChange`.
+- 869088b: Plugin `getAnchorGeometry` now supports paragraph, search, range and revision targets in the default worker-only editor and in read-only `legacySyncApi` worker viewers that serve host proposals; the first request can return `layout-unavailable` until geometry arrives.
+- 9f0e517: Enables the `imageWrap` and `imageTransform` commands in `PeerlessDocxEditor` when an image is selected, on by default.
+- 270ebbb: Canvas image rendering works in workers and bounds cached image memory by default. Adds optional `maxCacheBytes` to `createCanvasImageResolver` to customize the memory budget.
+- e363d6e: Worker-hosted DOCX collaboration no longer fails when a remote update arrives before the update it depends on: the replica keeps its last view until the missing update arrives, then converges.
+- 49e6237: Typing, proposal decisions and document reads stay responsive while a large document finishes laying out in the background.
+- 54d6be3: Rejects oversized and malformed web fonts with `ResidentFontError` before decoding. Preserves earlier section edits through saves and targets Page Setup correctly, while preparing selected fonts for accurate text widths.
+- 86cc000: Documents opened with `experimentalWorkerOpen` save in the document worker, so viewing sessions save and download without loading the document on the main thread and editors no longer pause while saving.
+- 2c1081d: Adds table structure commands to the worker-only DOCX editor: `insertTableRow`, `insertTableColumn`, `deleteTableRow`, `deleteTableColumn`, `deleteTable`, `mergeTableCells`, `splitTableCell` and `setTableCellShading`. Each command is one undo step.
+- 5081193: Adds table border presets, border pen controls, table style borders and the table properties dialog to the worker editor, including preferred width and alignment.
+- ed1b3bb: Adds `selectTableCells` and multi-cell table selection to the worker-only DOCX editor, and wires the table toolbar menu, context menu and split cell dialog to the worker table commands.
+- 5e0712b: Worker-only DOCX editors send keys typed while earlier edits are still pending as one edit instead of one per key, so typing catches up faster on a busy worker. Keys on either side of an IME composition stay separate edits.
+- 4c97b07: Typing in the worker-only docx editor paints each keystroke before the worker replies, in the layout engine's own glyphs, and waits for the reply when it cannot match it exactly. Adds `drawGlyphRunPrimitive` and an optional `clip` argument to `rasterizeDisplayPageToBackBuffer`.
+- b7f626b: Typing in the worker-only docx editor lays out each text command through the resident incremental path instead of a full pass. Suggesting edits, empty insertions and sessions whose resident input is not ready keep the generic edit and full pass.
+- 36d4c0c: The worker-only editor paints a long document's first pages once they lay out exactly with their fonts, including for `previewFirstPage`, and finishes the rest in the background. Documents with page totals, notes, floats or columns open fully laid out.
+- c390629: Fixes cylinder (`can`) shapes with a near-zero top adjustment drawing their top ellipse slightly outside the shape frame. Arcs that start or end on an axis now stay exact on very flat ellipses.
+- d605375: Adds DrawingML preset shapes for rounded and snipped rectangles, arcs, arrows, flowcharts, frames, math symbols and teardrops. PPTX also renders cylinders and brackets with their separate fill and outline paths. Enabled by default.
+- 735854e: Renders ECMA-376 preset geometries for callouts, clouds, curved and circular arrows, gears, online storage flowcharts, moons, and hearts instead of falling back to rectangles.
+- b91dc52: Renders ECMA-376 preset geometries for curved down arrows, down arrow callouts, quad arrows, document flowcharts, vertical and horizontal scrolls, waves, double waves and irregular seals instead of falling back to rectangles.
+- bbf6885: Paged structured exports of documents whose footnote placement alternates between layouts now succeed instead of returning `layout-not-converged`, with a `note-layout-fallback` diagnostic on each page that keeps extra note space.
+- f237363: A picture with both EMF+ and GDI records whose GDI records are malformed now shows a placeholder instead of an empty picture when its EMF+ records draw nothing.
+- 8f32760: Opt-in peer-less DOCX editors now save deferred input, copy and cut tracked-change selections correctly, and show selected ranges.
+- 8f32760: Opt-in peer-less DOCX editors now apply `theme` and `showHiddenText` changes through the worker without reopening the document. `colorMode` updates the editor chrome.
+- 57f25f9: Enables highlight, page and section breaks, and caret hyperlink editing on the worker route by default. Link clicks open a popup in body text, table cells and open header/footer bands; bookmark links move the caret and viewport.
+- c8c2d37: Enables `exportStructuredWithPages` on the default worker editor and read-only viewer. Exports flush pending input and read the current page layout; `expectLayoutVersion` keeps its existing refusal semantics.
+- d402284: Scatter and bubble chart X axes now fit charts whose X values are all equal, and X values without a Y value no longer stretch the X axis.
+- 11dabf9: Worker-only DOCX pages render at device pixel density and zoom, keeping text sharp on HiDPI screens and when zoomed in.
+- 4ca014a: The toolbar is monochrome by default, in light and dark mode, and a pressed button shows a subtle neutral tint. Hosts restyle it with `--bo-toolbar-*` CSS properties, shared with the xlsx and pptx toolbars.
+- 403e502: Run font sizes outside Word's 1–1638 pt range, such as `w:sz="0"`, now lay out and paint at the nearest size in that range, so paged structured exports of such documents succeed instead of returning `layout-unavailable`.
+
 ## 0.4.3
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/docx-native-linux-x64-gnu",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "cpu": [
     "x64"
   ],

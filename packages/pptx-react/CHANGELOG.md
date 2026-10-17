@@ -1,5 +1,67 @@
 # @betteroffice/pptx-react
 
+## 0.3.0
+
+### Minor Changes
+
+- a274d91: Opt-in `asyncApi` editors add shape gestures, object insertion, command chrome and fenced async access through `handleAsync` and `PptxPeerlessEditorAccess`. `readOnly` blocks new edits while preserving accepted input and selection.
+- 32d9958: Opt-in `asyncApi` editors add notes, comments, recovery, zoom, proposal review, slideshows and exports. Text input supports `i18n.editor.textInput` and `i18n.editor.selectionAnnouncement`; `recoverySave` includes `throughSeq` and `version` and remains available after worker failure.
+- 57fc198: `plugins`, `pluginGrants` and `onPluginError` require the deprecated `legacySyncApi` opt-in. The default worker editor reports unsupported plugins through `onError` instead of silently ignoring them.
+- 57fc198: `PptxEditor` now defaults to the worker-only runtime with an async `onReady` API. `legacySyncApi` retains the hybrid sync API as a deprecated opt-in removed in 0.6.0; `experimentalWorkerOpen={false}` remains a deprecated in-thread opt-in.
+- 90dc250: Editable `PptxEditor` sessions with `experimentalWorkerOpen` now use the worker-owned editor, with `saveAsync`, `handleAsync` and `recoverySave` on the editor API. The flag remains experimental and opt-in, the default editor is unchanged, and collaboration is not supported in this mode yet and throws `PptxWorkerEditorCollaborationError`.
+- f6e3563: Read-only `PptxEditor` can open presentations in a worker with the experimental `experimentalWorkerOpen` prop. Off by default.
+- 7576c01: Plugins now work with the default worker-only `PptxEditor`, including lifecycle hooks, panels, overlays and contributed commands. Plugin edit batches honor grants and `readOnly`.
+
+### Patch Changes
+
+- b9eaf55: Backspace and Delete remove the selected shape when no text is being edited.
+- 57fc198: Keeps default collaboration sessions open when hosts recreate equivalent options or publish replicas. Optional `collaboration.roomId` opens a new session when the room changes.
+- 57fc198: Fixes immediate typing after drawing a text box in the default editor and preserves keyboard focus when changing zoom.
+- 396ebf9: Pictures use bounded decode sizes and image caching by default, reducing memory use in picture-heavy presentations. Adds optional `maxDimension` to `decodePresentationImage` and `acquire` and `release` to `CanvasImageResolver` for scoped painting.
+- a274d91: Opt-in `asyncApi` editors contain chunk loading failures, report `PptxWorkerEditorChunkLoadError` once, and retry on remount.
+- a274d91: Default presentation editors defer the peerless core. Adds `@betteroffice/pptx/editor` and `@betteroffice/pptx/peerless` entries while preserving existing root exports.
+- a274d91: Opt-in `asyncApi` editors preserve input across remote merges, support copy and cut, and report capability and synchronous API refusals. Default editors load the peer-less surface lazily, and synchronous collaboration accepts incoming updates independently of outgoing queue limits.
+- bddb7c8: Toggling `readOnly` on an `experimentalWorkerOpen` editor keeps the open deck and its unsaved edits; while read-only, `applyEdits` and editing commands are refused.
+- 57fc198: Reports failures thrown by `onReady` through `onError` and the console by default. Synchronous API migration errors now name the deprecated `legacySyncApi` opt-in.
+- 32d9958: Peer-less editors retain acknowledged edits after worker failures and order notes and comments with typing. Proposal review commits composition, restores editing when proposals disappear, navigates to the proposal's slide, and reports refusals; PNG export follows acknowledged navigation.
+- 01c8ecb: Large presentations show their first slide sooner and edit faster: thumbnails are laid out after the first paint, and unchanged slides keep their cached layouts and thumbnails, so typing and remote edits lay out only the slides they change.
+- a97e75c: Fixes toolbar overflow crashes with "Maximum update depth exceeded" when toolbar groups change width as items move into More, such as when a Content Security Policy blocks the package stylesheet.
+- 4ca014a: The toolbar matches the docx toolbar: monochrome, Material Symbols icons, visible keyboard focus, and undo and redo first. Hosts restyle it with `--bo-toolbar-*` CSS properties.
+- Updated dependencies [d799954]
+- Updated dependencies [3f34165]
+- Updated dependencies [1e98891]
+- Updated dependencies [c390629]
+- Updated dependencies [d605375]
+- Updated dependencies [735854e]
+- Updated dependencies [b91dc52]
+- Updated dependencies [8aa1269]
+- Updated dependencies [1ed2ad0]
+- Updated dependencies [32d9958]
+- Updated dependencies [8aa1269]
+- Updated dependencies [4b0b899]
+- Updated dependencies [9196ce5]
+- Updated dependencies [cf8823f]
+- Updated dependencies [396ebf9]
+- Updated dependencies [90fc980]
+- Updated dependencies [0e9b9ee]
+- Updated dependencies [a274d91]
+- Updated dependencies [a274d91]
+- Updated dependencies [a274d91]
+- Updated dependencies [32d9958]
+- Updated dependencies [90dc250]
+- Updated dependencies [73959ca]
+- Updated dependencies [4a780fd]
+- Updated dependencies [0be5495]
+- Updated dependencies [01c8ecb]
+- Updated dependencies [6d049c3]
+- Updated dependencies [3dcf5be]
+- Updated dependencies [28e0c39]
+- Updated dependencies [7576c01]
+- Updated dependencies [550b200]
+- Updated dependencies [d402284]
+  - @betteroffice/pptx@0.3.0
+  - @betteroffice/pptx-i18n@0.3.0
+
 ## 0.2.0
 
 ### Minor Changes

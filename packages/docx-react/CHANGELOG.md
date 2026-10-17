@@ -1,5 +1,217 @@
 # @betteroffice/docx-react
 
+## 0.5.0
+
+### Minor Changes
+
+- 6f09327: Adds `pageMirror`. With `'text'`, the worker-only editor keeps only readable page text, links and tables for assistive tech: cheaper while scrolling, but without on-page positions or plugin DOM range matches. Defaults to `'full'`.
+- dc7b189: DOCX plugins can return a `DocxReservationSet` from the opt-in `reservations` hook to lay out inline boxes, blocks and hidden ranges, then draw in them through `getAnchorGeometry({ kind: 'reservation', id })` once `DocxPluginLayout.reservationsVersion` is the set's version. Saves and paged exports leave them out.
+- c69dd04: Worker-only editing is now the default: the document lives in a worker; reads and edits are async. Deprecated `legacySyncApi` restores the sync hybrid and `onChange(Document)` until 0.6.0. `experimentalWorkerOpen={false}` and browsers lacking worker features use the in-thread engine.
+- 9d5732d: The editor ref adds async twins for its synchronous document members (`readSelectionInfo`, `findParagraphs`, `scrollToParagraph`, `scrollToComment`, `scrollToChange`, `insertComment`, `insertCommentReply`, `onDocumentChange`) and deprecates the originals. In viewer sessions selections reach `onSelectionChange` and plugins, and `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, which `DocxReplicaNotReadyError` retry loops do not catch.
+- 569e67f: Plugin geometry adds required `readAnchorGeometries(targets)`, `getPageRect(pageIndex)` and `isPageBuilt(pageIndex)` (hand-written geometry fakes need them), and answers reaching unbuilt pages list `unbuiltPages`. New anchor failure codes `pending` (worker-only; retry it like `layout-unavailable`) and `read-failed` break exhaustive switches.
+- 3ba8e8e: Worker-open editors load their editing copy eagerly and replay input typed while it loads instead of dropping it; until it is ready, synchronous ref reads return empty answers and synchronous edits throw `DocxReplicaNotReadyError`.
+- 731c4f2: Worker-open editors now apply host proposal changes (`proposeChanges`, `setProposalStates`, `withdrawProposals`) in the document worker, as viewers already do.
+- 1135529: Adds plugin `read.listStories` and `read.readStories`, which list every story with its kind and read all stories, or chosen kinds or ids, in one call. Sessions gain `listStories` and `readStories`.
+- 4702106: With `experimentalWorkerOpen`, viewer sessions (read-only or viewing) answer synchronous edits without a main-thread copy: `getEditorRef` returns `null`, `setParagraphStyle`, `applyFormatting` and `insertBreak` return `false`, and comment insert and reply members return `null`. Tracked-change decisions and navigation are refused.
+- 17a722c: With `experimentalWorkerOpen`, read-only and viewing editors keep documents only in the worker: `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, `getSelectionInfo` returns `null`, and unanswerable async calls reject. Opens and viewer renders failing on a replacement worker report the new `DocxWorkerError` to `onError` and show an alert.
+- cb1b234: Adds `DocxErrorInfo` as optional `onError` metadata. Recoverable worker reports include `{ recoverable: true }`; fatal and legacy reports omit metadata.
+- 18abb7d: `onReplica` receives an async replica: read through `replica.async`, or pass `legacySyncApi` for synchronous reads. Unpinned client ids are fresh per open. A pinned id that would reuse clocks already used on the page opens fresh, with a warning; ids from `Number.MAX_SAFE_INTEGER - 1` are rejected.
+- 18abb7d: `collaboration` now runs on the default worker editor, with remote cursors, reconnect synchronization, and undo that preserves other participants' edits. `onChange` is refused as elsewhere.
+- 89a5631: Adds checkbox, dropdown, date and repeating control widgets to the worker editor. On by default.
+- 89a5631: Adds image properties and position dialogs to the worker editor. Available by default for selected images.
+- 89a5631: Enables image sizing, page-relative image positioning, table column width and text color controls by default in worker mode. Automatic text color removal is supported.
+- 89a5631: Connects header, footer and note editing to worker commands, including part creation, removal and editing chrome.
+- 89a5631: Worker editor `readPositionAtPoint` resolves plugin targets from rendered page coordinates at every zoom. On by default.
+- 89a5631: Worker-only editors connect plugin comments and navigation. `insertComment` adds the comment and resolves to its ID, also in suggesting mode and right after a save, and plugin `scrollToParagraph` moves the selection only when `focus` is set. Saves keep comment bodies, replies and resolved threads.
+- 54d6be3: Adds page setup and watermark dialogs to the opt-in worker-only editor. Selected text supports hyperlink editing with its display text preserved.
+- 89a5631: Enables `showRuler` in the opt-in worker-only editor with section margins, paragraph indents and tab stops. Drags commit on release, and tab markers support dragging, addition and removal.
+- 54d6be3: Supports parsed `document` input, opt-in `previewFirstPage` and `mediaTokens`, custom `fonts`, and `fontFamilies` in the worker editor. Connects `onFontsLoaded`, `onFirstPagePainted`, `onMemoryPressure` and `getMemoryStats` to worker events.
+- 8f32760: Adds an internally opt-in worker-only DOCX editor with asynchronous reads, editing, saving, search and navigation. `legacySyncApi` preserves synchronous callbacks; lazy-load failures report `DocxWorkerEditorChunkLoadError` through `onError`.
+
+### Patch Changes
+
+- af009f4: When a long document finishes laying out after its first pages appear, only the pages that changed are sent to the main thread instead of every page. Applies with and without `experimentalWorkerOpen`.
+- d138961: Tables that two collaborators insert at the same time keep their own cells, so undoing or deleting one no longer breaks the other. Cell story ids are opaque: a cell created by an edit may carry a `~<n>` suffix, for example `body:t0:r0c0~51`.
+- 4c97b07: Copied shifts advance `displayPageRevision`; anchor updates also advance `displayPageNoteAnchorRevision`. Page mirrors refresh position-only updates at idle by default, while interactive control targets update immediately.
+- 2e387c3: Preserves opaque drawings, tracked changes and hyperlinks through editor saves by default, and recovers legacy chart placements. Adds opt-in `repackDocxWithWarnings` with `warnings`; seeding rejects opaque payloads over 8 MiB with `OpaqueSeedBudgetError`.
+- 2586016: Worker-open editors build their editing copy from the worker's opened document instead of parsing the file a second time. The `yrs` entry adds `encodePeerMetadata`, `bootstrapPeer`, `PeerMetadataError` and `peerMetadataTags`.
+- 15f3f58: Worker-only DOCX pages that cannot be painted no longer make the editor re-request full frames in a loop. It retries once, waits for its own pending request, reports the stall once through `onError` without closing the document, and retries after zoom or viewport changes.
+- 03f4c75: Fixes committed IME text and queued toolbar commands blocking saves in production editor builds.
+- 8f32760: Fixes an IME input queue initialization error in minified DOCX editor builds.
+- 47cb8e2: Makes the Insert menu's table picker and break choices keyboard accessible by default, with arrow navigation and predictable focus return.
+- a060575: The editor's minimum content width now follows the zoom level, so pages zoomed to fit a narrow pane no longer leave a horizontal scrollbar sized for 100%.
+- 6f09327: In the worker-only docx editor, pages that scroll into or out of view build or trim their accessibility mirror at idle time once scrolling settles, instead of during the scroll.
+- 89a5631: Adds worker-backed plugin validation, edit batches, commands, docks, overlays and sidebar cards to the default worker-only editor.
+- 682ac35: Keeps plugin page overlays mounted as the worker editor publishes new layout frames after edits.
+- ca379ae: Documents whose first pages hold dense tables show their first page sooner. `openDocxPreview` accepts an optional `paragraphBudget` that ends the preview at the first whole block where the paragraphs read reach it.
+- 89a5631: Proposal plugins now update after accepting or rejecting changes in editable hosts.
+- af1ca31: Find highlights and remote selections inside long tables with repeating header rows now query only the pages in view.
+- c8ae8fd: Accepting, rejecting or undoing a suggestion no longer scrolls an editable document back to the caret.
+- 457b336: Editor sessions using `experimentalWorkerOpen` now preserve source page breaks in `exportStructuredWithPages` and return versions usable with editor edits.
+- 29352cc: Plugin `getAnchorGeometry` now resolves targets in headers and footers, including the default worker viewers, with `rects` on every built page that paints them. Unbuilt display pages name their header and footer parts in `hfParts` (`HfParts` in Rust).
+- 5c43f15: Idle-time page mirror and story cache work now yields to the browser in slices of at most 8 ms instead of running as one long task.
+- 4e03a24: Jumping to a heading, paragraph, comment or change on a page that has not been drawn yet settles on the target line sooner.
+- 47601c1: Jumping to a heading or position that a large document has not paginated yet scrolls there once pagination reaches it.
+- 48351a3: `insertBreak({ type: 'page' })` on a paragraph with text now splits it and places the page break between the two parts, like the editor's own page break command, so the document keeps laying out.
+- 5827185: Backspace and Delete respond faster in long documents.
+- d6c88fd: In viewer sessions deleting a comment from its card removes it in the document worker, without a main-thread document copy.
+- 2ade521: In viewer sessions `exportStructuredWithPages` reads from the document worker without a main-thread document copy, and its result now includes comment authors and dates and source page-break positions.
+- 44872e9: Documents opened read-only or for viewing with `experimentalWorkerOpen` select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
+- 9b01ae9: Documents opened read-only or for viewing with `experimentalWorkerOpen` show comment and tracked-change cards, plugin cards and the outline from the document worker, without a main-thread document copy.
+- 893351b: In viewer sessions `listContentControls`, `findContentControls` and the built-in Find read from the document worker without a main-thread document copy, and tracked-change accept and reject commands refuse at once.
+- 73d0ca6: Comment cards stay collapsed when a document opens, including with `experimentalWorkerOpen`. `scrollToParaId` now updates the toolbar and command state for the paragraph it moves to.
+- 65e1070: Saving after splitting, merging, adding or removing paragraphs now also keeps the paragraphs you didn't edit as they were.
+- 65a0429: Copying a table, or a selection that holds one, now also writes HTML, and pasting HTML with a table (from BetterOffice, Word or Google Docs) inserts a real table in one undo step instead of tab-separated text.
+- a7fe160: Adds view-only table gridlines to the worker editor: dashed guides at cell edges without a border, toggled by the `showTableGridlines` prop, the `tableGridlines` command or the View gridlines table menu item. They are never saved, printed or exported.
+- 3149184: Tables honor fixed and autofit layouts and preferred cell widths by default, sizing autofit columns from their content within the available width; adds `measure_intrinsic_widths` for measuring paragraph content widths.
+- baf8aaa: Undo in the worker-only Word editor groups typing by when the keys were pressed, so a quickly typed word undoes in one step even when each edit takes the engine longer to apply.
+- 11f68f2: Read-only sessions take each layout update from the worker as a compact summary instead of the full layout, which cuts main-thread work per update with identical rendering.
+- 58b0216: In the worker-only docx editor, a press elsewhere, such as on the header and footer controls, ends a page click sequence, so a double-click that follows it is recognized as a double-click.
+- 5e226c4: Worker editor copy and cut write plain text, plus HTML for table selections, to the native clipboard. Pending copies attempt a fresh copy event while user activation is available, then fall back to the async Clipboard API if needed.
+- 6447834: The default worker editor supports comment navigation, replies, resolution and repeated document loads, with superseded navigation returning false. Imported resolved comments can reopen, replies inherit ancestor anchors, and saves await queued comment operations; updates report full projections in `editState.commentChange`.
+- c500a9e: The opt-in worker-only docx editor gains object geometry, toolbar formatting, list, break and insertion commands, and review commands with proposals. `@betteroffice/docx/yrs` exports `DocxCommandKind`, `DocxCommentPatch`, `ResidentReviewSnapshot` and `ResidentToolbarMetadata`.
+- 869088b: Plugin `getAnchorGeometry` now supports paragraph, search, range and revision targets in the default worker-only editor and in read-only `legacySyncApi` worker viewers that serve host proposals; the first request can return `layout-unavailable` until geometry arrives.
+- 9f0e517: Enables the `imageWrap` and `imageTransform` commands in `PeerlessDocxEditor` when an image is selected, on by default.
+- d404cea: Plugin overlays now wait for a ready document. Plugin sidebar cards discard stale geometry and placement when the document is replaced.
+- e4246d9: In the worker-only editor, a plugin's `applyEdits` makes its batch current before resolving, so `setState(..., applied.version)` succeeds and the write no longer aborts the plugin's own load or change hook. Reads and navigation raced by an edit or a closed document refuse instead of rejecting.
+- d404cea: The worker-only editor now uses `rulerUnit`, draws `pluginOverlays`, places `pluginSidebarItems` without installed plugins and reports viewing mode to plugins as `readOnly`.
+- 54d6be3: Rejects oversized and malformed web fonts with `ResidentFontError` before decoding. Preserves earlier section edits through saves and targets Page Setup correctly, while preparing selected fonts for accurate text widths.
+- 89a5631: Worker ruler indents and tabs wait for a valid paragraph selection before becoming editable. Section margin controls remain available during startup.
+- 86cc000: Documents opened with `experimentalWorkerOpen` save in the document worker, so viewing sessions save and download without loading the document on the main thread and editors no longer pause while saving.
+- 5081193: Adds table border presets, border pen controls, table style borders and the table properties dialog to the worker editor, including preferred width and alignment.
+- ed1b3bb: Adds `selectTableCells` and multi-cell table selection to the worker-only DOCX editor, and wires the table toolbar menu, context menu and split cell dialog to the worker table commands.
+- fc79fe8: Tracked changes can be accepted and rejected on the worker editor: the Review toolbar commands act on the change at the selection, and the sidebar shows a card for each change with accept and reject buttons.
+- 5e0712b: Worker-only DOCX editors send keys typed while earlier edits are still pending as one edit instead of one per key, so typing catches up faster on a busy worker. Keys on either side of an IME composition stay separate edits.
+- 4c97b07: Typing in the worker-only docx editor paints each keystroke before the worker replies, in the layout engine's own glyphs, and waits for the reply when it cannot match it exactly. Adds `drawGlyphRunPrimitive` and an optional `clip` argument to `rasterizeDisplayPageToBackBuffer`.
+- 36d4c0c: The worker-only editor paints a long document's first pages once they lay out exactly with their fonts, including for `previewFirstPage`, and finishes the rest in the background. Documents with page totals, notes, floats or columns open fully laid out.
+- 8f32760: Opt-in peer-less DOCX editors now save deferred input, copy and cut tracked-change selections correctly, and show selected ranges.
+- 8f32760: Opt-in peer-less DOCX editors now apply `theme` and `showHiddenText` changes through the worker without reopening the document. `colorMode` updates the editor chrome.
+- 57f25f9: Enables highlight, page and section breaks, and caret hyperlink editing on the worker route by default. Link clicks open a popup in body text, table cells and open header/footer bands; bookmark links move the caret and viewport.
+- c8c2d37: Enables `exportStructuredWithPages` on the default worker editor and read-only viewer. Exports flush pending input and read the current page layout; `expectLayoutVersion` keeps its existing refusal semantics.
+- a97e75c: Fixes toolbar overflow crashes with "Maximum update depth exceeded" when toolbar groups change width as items move into More, such as when a Content Security Policy blocks the package stylesheet.
+- 11dabf9: Worker-only DOCX pages render at device pixel density and zoom, keeping text sharp on HiDPI screens and when zoomed in.
+- 4ca014a: The toolbar is monochrome by default, in light and dark mode, and a pressed button shows a subtle neutral tint. Hosts restyle it with `--bo-toolbar-*` CSS properties, shared with the xlsx and pptx toolbars.
+- 89a5631: Enables character and paragraph formatting, lists, indentation, paragraph styles, table insertion and picked images in the worker-only DOCX toolbar.
+- Updated dependencies [d799954]
+- Updated dependencies [e89c008]
+- Updated dependencies [de864b6]
+- Updated dependencies [15b1588]
+- Updated dependencies [1f63be9]
+- Updated dependencies [1e98891]
+- Updated dependencies [ac3c6ab]
+- Updated dependencies [899ca8f]
+- Updated dependencies [b155fb7]
+- Updated dependencies [c6289a2]
+- Updated dependencies [51ad3a4]
+- Updated dependencies [d138961]
+- Updated dependencies [46b2035]
+- Updated dependencies [4c97b07]
+- Updated dependencies [28a4685]
+- Updated dependencies [2e387c3]
+- Updated dependencies [2586016]
+- Updated dependencies [0650355]
+- Updated dependencies [1ce4fea]
+- Updated dependencies [13d91c2]
+- Updated dependencies [e64268d]
+- Updated dependencies [5d554a6]
+- Updated dependencies [659c727]
+- Updated dependencies [3462280]
+- Updated dependencies [56dc9d6]
+- Updated dependencies [3a49caa]
+- Updated dependencies [42d185e]
+- Updated dependencies [dad1895]
+- Updated dependencies [50c17a0]
+- Updated dependencies [5889248]
+- Updated dependencies [89a5631]
+- Updated dependencies [c2a2836]
+- Updated dependencies [dc7b189]
+- Updated dependencies [c3fc221]
+- Updated dependencies [a41dc2e]
+- Updated dependencies [ca379ae]
+- Updated dependencies [db592dd]
+- Updated dependencies [af1ca31]
+- Updated dependencies [9d5732d]
+- Updated dependencies [29352cc]
+- Updated dependencies [1135529]
+- Updated dependencies [d6c88fd]
+- Updated dependencies [2ade521]
+- Updated dependencies [44872e9]
+- Updated dependencies [9b01ae9]
+- Updated dependencies [893351b]
+- Updated dependencies [c602f99]
+- Updated dependencies [7184c82]
+- Updated dependencies [ffb5f20]
+- Updated dependencies [8470707]
+- Updated dependencies [685e026]
+- Updated dependencies [9d335e8]
+- Updated dependencies [b7f626b]
+- Updated dependencies [4301476]
+- Updated dependencies [7ba49bf]
+- Updated dependencies [65e1070]
+- Updated dependencies [27973a5]
+- Updated dependencies [4581c0d]
+- Updated dependencies [1db8dbd]
+- Updated dependencies [378d706]
+- Updated dependencies [11ebf08]
+- Updated dependencies [40581a8]
+- Updated dependencies [6dc21f0]
+- Updated dependencies [10a7185]
+- Updated dependencies [65a0429]
+- Updated dependencies [a7fe160]
+- Updated dependencies [4df7290]
+- Updated dependencies [2f97c01]
+- Updated dependencies [3149184]
+- Updated dependencies [58740bf]
+- Updated dependencies [f666e0c]
+- Updated dependencies [3763178]
+- Updated dependencies [baf8aaa]
+- Updated dependencies [c7dfab5]
+- Updated dependencies [11f68f2]
+- Updated dependencies [e6f0556]
+- Updated dependencies [452f8d7]
+- Updated dependencies [18abb7d]
+- Updated dependencies [18abb7d]
+- Updated dependencies [6447834]
+- Updated dependencies [89a5631]
+- Updated dependencies [c500a9e]
+- Updated dependencies [54d6be3]
+- Updated dependencies [869088b]
+- Updated dependencies [9f0e517]
+- Updated dependencies [89a5631]
+- Updated dependencies [270ebbb]
+- Updated dependencies [89a5631]
+- Updated dependencies [e363d6e]
+- Updated dependencies [89a5631]
+- Updated dependencies [49e6237]
+- Updated dependencies [54d6be3]
+- Updated dependencies [8a451d4]
+- Updated dependencies [86cc000]
+- Updated dependencies [8f32760]
+- Updated dependencies [54d6be3]
+- Updated dependencies [2c1081d]
+- Updated dependencies [5081193]
+- Updated dependencies [ed1b3bb]
+- Updated dependencies [5e0712b]
+- Updated dependencies [4c97b07]
+- Updated dependencies [b7f626b]
+- Updated dependencies [36d4c0c]
+- Updated dependencies [c390629]
+- Updated dependencies [d605375]
+- Updated dependencies [735854e]
+- Updated dependencies [b91dc52]
+- Updated dependencies [bbf6885]
+- Updated dependencies [f237363]
+- Updated dependencies [8f32760]
+- Updated dependencies [8f32760]
+- Updated dependencies [57f25f9]
+- Updated dependencies [c8c2d37]
+- Updated dependencies [d402284]
+- Updated dependencies [11dabf9]
+- Updated dependencies [4ca014a]
+- Updated dependencies [403e502]
+  - @betteroffice/docx@0.5.0
+  - @betteroffice/docx-i18n@0.5.0
+
 ## 0.4.3
 
 ### Patch Changes

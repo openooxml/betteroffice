@@ -1,5 +1,11 @@
 # @betteroffice/pptx-i18n
 
+## 0.3.0
+
+### Minor Changes
+
+- 32d9958: Opt-in `asyncApi` editors add notes, comments, recovery, zoom, proposal review, slideshows and exports. Text input supports `i18n.editor.textInput` and `i18n.editor.selectionAnnouncement`; `recoverySave` includes `throughSeq` and `version` and remains available after worker failure.
+
 ## 0.2.0
 
 ### Minor Changes
