@@ -36,6 +36,30 @@ test('worker viewer synchronous formatting mutations return false', () => {
   }
 });
 
+for (const options of [{ readOnly: true }, { mode: 'viewing' as const }]) {
+  test(`worker viewer async comment mutations return null and resolveComment is a no-op with ${options.readOnly ? 'readOnly' : 'viewing'}`, async () => {
+    const h = proposalHost(options);
+    const read = mock(async () => ({} as never));
+    const onCommentsChange = mock(() => {});
+    h.controller.update({ ...h.settings, read, onCommentsChange });
+    try {
+      const comment = h.controller.ref.insertComment({ paraId: 'p', text: 'Comment', author: 'Author' });
+      const reply = h.controller.ref.insertCommentReply(1, 'Reply', 'Author');
+      expect(comment).toBeInstanceOf(Promise);
+      expect(reply).toBeInstanceOf(Promise);
+      expect(await comment).toBeNull();
+      expect(await reply).toBeNull();
+      expect(h.controller.ref.resolveComment(1)).toBeUndefined();
+      expect(h.submit).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
+      expect(h.readAt).not.toHaveBeenCalled();
+      expect(onCommentsChange).not.toHaveBeenCalled();
+    } finally {
+      h.controller.dispose();
+    }
+  });
+}
+
 test('worker viewer synchronous document reads throw DocxAsyncOnlyError with twins', () => {
   for (const readOnly of [true, false]) {
     const { ref } = viewer(readOnly);
