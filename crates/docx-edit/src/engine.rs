@@ -4536,7 +4536,8 @@ impl EngineSession {
                             .doc
                             .paragraph_index(&range.story)
                             .ok()?
-                            .node_start(paragraph)?;
+                            .para_span(paragraph)?
+                            .0;
                         if lowered.doc_epoch == before {
                             lowered.local.refresh_coordinates(
                                 paragraph,

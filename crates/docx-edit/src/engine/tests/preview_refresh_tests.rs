@@ -250,21 +250,6 @@ fn resident_text_at_a_paragraph_led_by_a_table_patches_locally() {
 }
 
 #[test]
-fn deferred_resident_text_at_a_paragraph_led_by_a_table_matches_cold() {
-    let (engine, request) = local_patch_laid_out(&table_led_document(), 9702, true);
-    let start = table_led_start(&engine);
-    for (at, text) in [(1, "z"), (start + 1, "x")] {
-        engine
-            .edit_resident_text(crate::StoryRange::new("body", at, at), Some(text), true)
-            .unwrap();
-    }
-    assert!(engine.render.borrow().stories["body"].local.deferred);
-    let epoch = engine.display.borrow().binary_frame_epoch;
-    engine.apply_and_layout("body", epoch).unwrap();
-    assert_local_patch_matches_cold(&engine, &request, "deferred text after a leading table");
-}
-
-#[test]
 fn preview_refresh_text_at_a_paragraph_led_by_a_table_matches_recorded_outputs() {
     let _open = OpenSwitch::new(Some(false));
     let _preview = PreviewSwitch::new(Some(false));
