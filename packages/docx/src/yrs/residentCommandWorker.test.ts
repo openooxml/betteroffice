@@ -1741,7 +1741,7 @@ test('worker safety resizes the issued cell rather than the table story suffix o
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, selection: { anchor: point, focus: point } }));
     const cell = inserted.frame!.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === inserted.selection!.focus.story)!;
-    expect(cell.story).toBe('body:t1:r0c0');
+    expect(cell.story).toMatch(/^body:t1:r0c0~\d+$/);
     const resized = await client.edit(intent(2, 1, 'resizeObject', { handle: cell.handle, widthTwips: 1234, expectVersion: inserted.frame!.payload.documentVersion! }));
     expect(resized.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1234]);
@@ -1809,7 +1809,7 @@ test('worker safety repairs selection after rejecting a suggested table before o
   const { client, engine } = await openWorker();
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, suggesting: { name: 'Ada', date: '2026-01-01' } }));
-    expect(inserted.selection!.focus.story).toBe('body:t0:r0c0');
+    expect(inserted.selection!.focus.story).toMatch(/^body:t0:r0c0~\d+$/);
     const revisionId = engine.geometryReader.listRevisions()[0]!.revisionId;
     const rejected = await client.edit(intent(2, 1, 'rejectRevision', { revisionId, expectVersion: engine.proposalEngine.version() }));
     expect(rejected.outcomes[0]?.status).toBe('applied');
