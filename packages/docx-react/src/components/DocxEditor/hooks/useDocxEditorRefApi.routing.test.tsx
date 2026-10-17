@@ -1033,6 +1033,9 @@ for (const member of PASS_THROUGH) {
     expect(call).toHaveBeenCalledTimes(3);
     const deprecated = !['getComments', 'resolveComment', 'readParagraphs', 'onDocumentChange'].includes(member);
     expect(warning).toHaveBeenCalledTimes(deprecated ? 1 : 0);
+    if (['getPositionAtPoint', 'highlightRange', 'scrollToPosition'].includes(member)) {
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('keeps its synchronous behaviour in viewer sessions'));
+    }
   });
 }
 

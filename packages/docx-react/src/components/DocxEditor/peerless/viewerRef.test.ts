@@ -94,8 +94,17 @@ for (const [member, twin, args] of [
     for (let call = 0; call < 2; call++) expect(() => Reflect.apply(ref[member] as Function, ref, args)).toThrow(PeerlessSyncApiError);
     expect(console.warn).toHaveBeenCalledTimes(1);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`Use ${twin}.`));
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('throws PeerlessSyncApiError in worker-only viewer sessions'));
   });
 }
+
+test('worker viewer point reads warn once that they return null', () => {
+  const { ref } = viewer();
+  expect(ref.getPositionAtPoint(10, 20)).toBeNull();
+  expect(ref.getPositionAtPoint(10, 20)).toBeNull();
+  expect(console.warn).toHaveBeenCalledTimes(1);
+  expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('returns null in worker-only viewer sessions. Use readPositionAtPoint.'));
+});
 
 test('worker viewer synchronous proposals return false without host permission', () => {
   const { ref } = viewer();
