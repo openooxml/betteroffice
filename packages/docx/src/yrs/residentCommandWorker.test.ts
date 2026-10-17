@@ -2103,9 +2103,30 @@ test('a legacy section break refuses table cells and state-only final sections',
     expect(cell.map(paragraph => paragraph.text)).toEqual(['Cell']);
     expect(() => remote.insertSectionBreak({ story: 'body:t0:r0c0', paraId: cell[0]!.paraId, offset: 2 }, 'nextPage')).toThrow('body paragraphs');
     expect(remote.paragraphs('body:t0:r0c0')).toHaveLength(1);
-    const tail = remote.paragraphs('body').at(-1)!;
-    expect(() => remote.insertSectionBreak({ story: 'body', paraId: tail.paraId, offset: 2 }, 'nextPage')).toThrow('section properties');
     expect(remote.paragraphs('body').map(paragraph => paragraph.text)).toEqual(engine.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { remote.destroy(); client.destroy(); }
+  const origin = await createYrsSession({ clientId: 8316 });
+  const stateOnly = await createYrsSession({ clientId: 8317 });
+  try {
+    origin.openDocx(syntheticDocument(false, false, false, bodyXml), true);
+    stateOnly.loadState(origin.encodeState());
+    const tail = stateOnly.paragraphs('body').at(-1)!;
+    expect(() => stateOnly.insertSectionBreak({ story: 'body', paraId: tail.paraId, offset: 2 }, 'nextPage')).toThrow('section properties');
+    expect(stateOnly.paragraphs('body').map(paragraph => paragraph.text)).toEqual(origin.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { stateOnly.destroy(); origin.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break in a final section with an empty sectPr lowers on the worker', async () => {
+  const { client, engine } = await openWorker();
+  const remote = await createYrsSession({ clientId: 8318 });
+  try {
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(2);
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage' });
   } finally { remote.destroy(); client.destroy(); }
 }, TIMEOUT);
 

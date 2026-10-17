@@ -1293,7 +1293,7 @@ export function wrapSession(
             sectionClosingParaIds(facade),
             type
           );
-          if (!final.metadata || Object.keys(properties).length === 0) throw new Error('Section break needs the section properties');
+          if (!final.metadata) throw new Error('Section break needs the section properties');
           return properties;
         }, type);
         if (final.metadata) session.set_part_metadata(JSON.stringify(final.metadata), '[]');
