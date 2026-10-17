@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 #[cfg(any(feature = "wasm", test))]
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(any(feature = "wasm", test))]
@@ -108,6 +109,7 @@ impl DeckSession {
 pub struct DeckUndoManager {
     clock: Arc<CaptureClock>,
     inner: yrs::undo::UndoManager<()>,
+    kept: Arc<AtomicBool>,
     #[cfg(any(feature = "wasm", test))]
     history: Option<HistoryObserver>,
 }
@@ -329,9 +331,13 @@ impl DeckUndoManager {
         inner.expand_scope(doc, &stories);
         inner.expand_scope(doc, &comments);
         inner.expand_scope(doc, &meta);
+        let kept = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&kept);
+        inner.observe_item_added_with("kept", move |_, _| flag.store(true, Ordering::Relaxed));
         Ok(Self {
             inner,
             clock,
+            kept,
             #[cfg(any(feature = "wasm", test))]
             history: None,
         })
@@ -345,6 +351,12 @@ impl DeckUndoManager {
             ));
         }
         Ok(())
+    }
+
+    /// Whether this manager ever pushed a stack item, the only way its doc gains keep flags. Keep
+    /// flags outlive the stack items that set them, so a doc that ever had one must not collect.
+    pub(crate) fn ever_kept(&self) -> bool {
+        self.kept.load(Ordering::Relaxed)
     }
 
     pub(crate) fn diagnostics(&self) -> (usize, usize) {

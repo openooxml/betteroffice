@@ -248,6 +248,7 @@ struct LoweringContext {
 #[serde(deny_unknown_fields)]
 enum SourceBlock {
     Raw,
+    Bookmark,
     /// A paragraph with a source id, which a raw block can be restored in front of.
     Anchor(String),
     /// A table, control or id-less paragraph, which that search skips over.
@@ -1665,6 +1666,96 @@ pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
         .ok()
         .and_then(|value| payload(marks_to_attrs(&formatting_to_marks(Some(&value)))).ok())
         .unwrap_or_default()
+}
+
+/// Run attributes held as one field of a mark: (attribute, field, `defaultTextFormatting` key).
+const MARK_FIELDS: [(&str, &str, &str); 10] = [
+    ("fontSize", "size", "fontSize"),
+    ("fontSize", "sizeCs", "fontSizeCs"),
+    ("characterSpacing", "spacing", "spacing"),
+    ("characterSpacing", "position", "position"),
+    ("characterSpacing", "scale", "scale"),
+    ("characterSpacing", "kerning", "kerning"),
+    ("emphasisMark", "type", "emphasisMark"),
+    ("textEffect", "effect", "effect"),
+    ("modernTextEffects", "effects", "modernEffects"),
+    ("runStyle", "styleId", "styleId"),
+];
+
+/// Boolean run attributes that `defaultTextFormatting` spells the same.
+const RUN_FLAGS: [&str; 8] = [
+    "bold",
+    "italic",
+    "allCaps",
+    "smallCaps",
+    "emboss",
+    "imprint",
+    "hidden",
+    "rtl",
+];
+
+fn without_nulls(value: &Any) -> Any {
+    match value {
+        Any::Map(map) => Any::Map(Arc::new(
+            map.iter()
+                .filter(|(_, value)| **value != Any::Null)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )),
+        _ => value.clone(),
+    }
+}
+
+/// The inverse of [`mark_run_attrs`]: the `defaultTextFormatting` that lowers to the run
+/// formatting in `attrs`, kept to what a typed run saves: revisions, hyperlinks and the grid
+/// opt-out drop.
+pub(crate) fn mark_run_formatting<'a>(
+    attrs: impl IntoIterator<Item = (&'a String, &'a Any)>,
+) -> Option<Any> {
+    let mut formatting: HashMap<String, Any> = HashMap::new();
+    for (key, value) in attrs {
+        if *value == Any::Null || *value == Any::Bool(false) {
+            continue;
+        }
+        let field = |name: &str| match value {
+            Any::Map(map) => map.get(name).filter(|value| **value != Any::Null).cloned(),
+            _ => None,
+        };
+        let (name, carried) = match key.as_str() {
+            flag if RUN_FLAGS.contains(&flag) => (flag, Any::Bool(true)),
+            "textShadow" => ("shadow", Any::Bool(true)),
+            "textOutline" => ("outline", Any::Bool(true)),
+            "superscript" | "subscript" => ("vertAlign", Any::from(key.as_str())),
+            "underline" | "fontFamily" => (key.as_str(), without_nulls(value)),
+            "textColor" => ("color", without_nulls(value)),
+            "strike" if field("double") == Some(Any::Bool(true)) => {
+                ("doubleStrike", Any::Bool(true))
+            }
+            "strike" => ("strike", Any::Bool(true)),
+            "highlight" => match value {
+                Any::String(color) => match color.strip_prefix('#') {
+                    Some(rgb) => {
+                        let fill = HashMap::from([("rgb".to_owned(), Any::from(rgb))]);
+                        let shading =
+                            HashMap::from([("fill".to_owned(), Any::Map(Arc::new(fill)))]);
+                        ("shading", Any::Map(Arc::new(shading)))
+                    }
+                    None => (key.as_str(), value.clone()),
+                },
+                _ => continue,
+            },
+            _ => {
+                for &(_, from, to) in MARK_FIELDS.iter().filter(|(mark, ..)| *mark == key) {
+                    if let Some(value) = field(from) {
+                        formatting.insert(to.to_owned(), value);
+                    }
+                }
+                continue;
+            }
+        };
+        formatting.insert(name.to_owned(), carried);
+    }
+    (!formatting.is_empty()).then(|| Any::Map(Arc::new(formatting)))
 }
 
 fn mark_attrs(mark: &Mark) -> Value {
@@ -5150,9 +5241,18 @@ fn visit_story(
     for (block_index, block) in blocks.iter().enumerate() {
         let position = cursor;
         let Some(block_id) = cursor.take(&story_id, block) else {
-            block_order.push(SourceBlock::Raw);
-            source_order.push(None);
             let xml = string(field(Some(block), "xml")).unwrap_or_default();
+            block_order.push(
+                if matches!(
+                    crate::structured::source::element_name(xml).as_str(),
+                    "w:bookmarkStart" | "w:bookmarkEnd"
+                ) {
+                    SourceBlock::Bookmark
+                } else {
+                    SourceBlock::Raw
+                },
+            );
+            source_order.push(None);
             let raws = context
                 .provenance
                 .raw_blocks
@@ -5463,7 +5563,7 @@ fn visit_story(
     }
     if block_order
         .iter()
-        .any(|block| matches!(block, SourceBlock::Raw))
+        .any(|block| matches!(block, SourceBlock::Raw | SourceBlock::Bookmark))
     {
         context.source.blocks.insert(story_id.clone(), block_order);
         context

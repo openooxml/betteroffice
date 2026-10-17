@@ -44,9 +44,13 @@ pub(super) fn insert_merge_edit(
 }
 
 pub(super) fn clear_merge_edits(sheet: &MapRef, txn: &mut TransactionMut<'_>) {
+    clear_sheet_edits(sheet, txn, MERGE_PREFIX);
+}
+
+pub(super) fn clear_sheet_edits(sheet: &MapRef, txn: &mut TransactionMut<'_>, prefix: &str) {
     for key in sheet
         .keys(txn)
-        .filter(|key| key.starts_with(MERGE_PREFIX))
+        .filter(|key| key.starts_with(prefix))
         .map(str::to_string)
         .collect::<Vec<_>>()
     {
@@ -133,7 +137,7 @@ impl MergeProjection {
 }
 
 #[derive(Default)]
-struct MergeIndex {
+pub(super) struct MergeIndex {
     nodes: BTreeMap<u32, MergeNode>,
 }
 
@@ -171,7 +175,7 @@ impl RowIntervals {
 }
 
 impl MergeIndex {
-    fn overlaps(&self, node: u32, first: u32, last: u32, range: &CellRange) -> bool {
+    pub(super) fn overlaps(&self, node: u32, first: u32, last: u32, range: &CellRange) -> bool {
         let Some(entry) = self.nodes.get(&node) else {
             return false;
         };
@@ -186,7 +190,7 @@ impl MergeIndex {
             || (range.end.col > middle && self.overlaps(node * 2 + 1, middle + 1, last, range))
     }
 
-    fn insert(&mut self, node: u32, first: u32, last: u32, range: &CellRange) {
+    pub(super) fn insert(&mut self, node: u32, first: u32, last: u32, range: &CellRange) {
         let entry = self.nodes.entry(node).or_default();
         entry.all.insert(range.start.row, range.end.row);
         if range.start.col <= first && last <= range.end.col {

@@ -9,10 +9,10 @@ import {
   encodeSyncStep2,
   encodeUpdate,
   encodeVarUint,
-  isStateVector,
+  OPEN_SYNC_CLIENT,
+  parseSyncRequest,
   ProtocolError,
-  stateVectorDominates,
-  withClientClockAhead,
+  withOpenSyncRequest,
 } from './protocol';
 import { colorForClientId } from './awareness';
 
@@ -223,103 +223,64 @@ function stateVectorOf(entries: readonly [bigint, bigint][]): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
-describe('state vector dominance', () => {
-  it('compares clocks per client regardless of encoding order', () => {
-    expect(stateVectorDominates(stateVector(), stateVector())).toBe(true);
-    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector())).toBe(true);
-    expect(stateVectorDominates(stateVector(), stateVector([1n, 5n]))).toBe(false);
-    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([1n, 6n]))).toBe(false);
-    expect(stateVectorDominates(stateVector([1n, 5n]), stateVector([2n, 1n]))).toBe(false);
-    expect(stateVectorDominates(
-      stateVector([1n, 5n], [2n, 3n]),
-      stateVector([2n, 3n], [1n, 4n])
-    )).toBe(true);
-  });
-
-  it('keeps 64-bit client ids distinct', () => {
-    const max = (1n << 64n) - 1n;
-    expect(stateVectorDominates(stateVector([1n << 53n, 9n]), stateVector([(1n << 53n) + 1n, 1n]))).toBe(false);
-    expect(stateVectorDominates(stateVector([max, 3n]), stateVector([max, 2n]))).toBe(true);
-    expect(stateVectorDominates(stateVector([max - 1n, 3n]), stateVector([max, 2n]))).toBe(false);
-  });
-
-  it('ignores a document fingerprint suffix', () => {
-    const fingerprinted = (payload: Uint8Array) => concat(
-      payload,
-      new TextEncoder().encode('\0betteroffice-document-fingerprint-v1\0'),
-      new Uint8Array(32).fill(0x5a)
-    );
-    expect(stateVectorDominates(fingerprinted(stateVector([1n, 5n])), stateVector([1n, 5n]))).toBe(true);
-    expect(stateVectorDominates(stateVector([1n, 5n]), fingerprinted(stateVector([1n, 6n])))).toBe(false);
-  });
-
-  it('rejects vectors that do not decode', () => {
-    expect(() => stateVectorDominates(stateVector([1n, 5n]), Uint8Array.of(2, 1, 5))).toThrow(ProtocolError);
-    expect(() => stateVectorDominates(Uint8Array.of(), stateVector([1n, 5n]))).toThrow(ProtocolError);
-    expect(() => stateVectorDominates(
-      stateVector(),
-      Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1)
-    )).toThrow('State vector varUint exceeds 64 bits');
-  });
-});
-
-describe('state vector shapes', () => {
-  it('accepts only whole v1 state vectors', () => {
-    expect(isStateVector(stateVector())).toBe(true);
-    expect(isStateVector(stateVector([1n << 60n, 5n], [2n, 3n]))).toBe(true);
-    expect(isStateVector(Uint8Array.of())).toBe(false);
-    expect(isStateVector(Uint8Array.of(7))).toBe(false);
-    expect(isStateVector(Uint8Array.of(0, 1))).toBe(false);
-    expect(() => stateVectorDominates(stateVector(), Uint8Array.of(0, 1))).toThrow('Trailing state vector bytes');
-  });
-});
-
-describe('state vector with the local clock ahead', () => {
+describe('open sync requests', () => {
+  const open = BigInt(OPEN_SYNC_CLIENT);
   const fingerprinted = (payload: Uint8Array) => concat(
     payload,
     new TextEncoder().encode('\0betteroffice-document-fingerprint-v1\0'),
     new Uint8Array(32).fill(0x5a)
   );
 
-  it('advances only the given client, adding it at clock 1 when absent', () => {
-    expect(withClientClockAhead(stateVector(), 7)).toEqual(stateVector([7n, 1n]));
-    expect(withClientClockAhead(stateVector([5n, 3n]), 7)).toEqual(stateVector([5n, 3n], [7n, 1n]));
-    expect(withClientClockAhead(stateVector([7n, 4n], [5n, 3n]), 7)).toEqual(stateVector([7n, 5n], [5n, 3n]));
-    expect(withClientClockAhead(stateVector([300n, 127n]), 300)).toEqual(stateVector([300n, 128n]));
-    const max = Number.MAX_SAFE_INTEGER;
-    expect(withClientClockAhead(stateVector([BigInt(max), 9n]), max)).toEqual(stateVector([BigInt(max), 10n]));
+  it('mark after the entries and keep a document fingerprint', () => {
+    expect(OPEN_SYNC_CLIENT).toBe(Number.MAX_SAFE_INTEGER - 1);
+    expect(withOpenSyncRequest(stateVector())).toEqual(stateVector([open, 0n]));
+    expect(withOpenSyncRequest(stateVector([5n, 3n], [7n, 1n]))).toEqual(stateVector([5n, 3n], [7n, 1n], [open, 0n]));
+    expect(withOpenSyncRequest(fingerprinted(stateVector([7n, 4n]))))
+      .toEqual(fingerprinted(stateVector([7n, 4n], [open, 0n])));
   });
 
-  it('is never dominated by the vector it came from, and dominates it', () => {
-    const vector = stateVector([1n, 5n], [2n, 3n]);
-    for (const client of [1, 2, 9]) {
-      const ahead = withClientClockAhead(vector, client)!;
-      expect(stateVectorDominates(vector, ahead)).toBe(false);
-      expect(stateVectorDominates(ahead, vector)).toBe(true);
+  it('parse back what was marked and leave unmarked vectors byte-identical', () => {
+    const max = (1n << 64n) - 1n;
+    for (const vector of [
+      stateVector(),
+      stateVector([5n, 3n]),
+      stateVector([1n << 53n, 9n], [max, 2n]),
+      fingerprinted(stateVector([7n, 4n], [300n, 128n])),
+    ]) {
+      expect(parseSyncRequest(withOpenSyncRequest(vector)!)).toEqual({ stateVector: vector, open: true });
+      const plain = parseSyncRequest(vector);
+      expect(plain).toEqual({ stateVector: vector, open: false });
+      expect(plain.stateVector).toBe(vector);
+    }
+    expect(parseSyncRequest(stateVector([open, 0n], [5n, 3n])))
+      .toEqual({ stateVector: stateVector([5n, 3n]), open: true });
+  });
+
+  it('read the open client at a nonzero clock as a plain entry', () => {
+    const vector = stateVector([open, 1n], [5n, 3n]);
+    expect(parseSyncRequest(vector)).toEqual({ stateVector: vector, open: false });
+    expect(withOpenSyncRequest(vector)).toBeUndefined();
+  });
+
+  it('leave malformed payloads unmarked both ways', () => {
+    for (const payload of [
+      Uint8Array.of(),
+      Uint8Array.of(7),
+      Uint8Array.of(0, 1),
+      Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1),
+      Uint8Array.of(0xff, 0xff, 0xff, 0xff, 0x0f, 1, 1),
+    ]) {
+      expect(withOpenSyncRequest(payload)).toBe(payload);
+      expect(parseSyncRequest(payload)).toEqual({ stateVector: payload, open: false });
     }
   });
 
-  it('keeps a document fingerprint suffix', () => {
-    expect(withClientClockAhead(fingerprinted(stateVector([7n, 4n])), 7))
-      .toEqual(fingerprinted(stateVector([7n, 5n])));
-  });
-
-  it('crosses neither the native entry limit nor the native clock limit', () => {
-    const others = Array.from({ length: 65_535 }, (_, index): [bigint, bigint] => [BigInt(index + 1), 1n]);
-    const full = stateVectorOf([...others, [70_000n, 4n]]);
-    expect(withClientClockAhead(full, 80_000)).toBeUndefined();
-    expect(withClientClockAhead(full, 70_000)).toEqual(stateVectorOf([...others, [70_000n, 5n]]));
-    expect(withClientClockAhead(stateVectorOf(others), 80_000)).toEqual(stateVectorOf([...others, [80_000n, 1n]]));
-    expect(withClientClockAhead(stateVector([7n, 2_147_483_647n], [5n, 3n]), 7)).toBeUndefined();
-    expect(withClientClockAhead(stateVector([7n, 2_147_483_646n], [5n, 3n]), 7))
-      .toEqual(stateVector([7n, 2_147_483_647n], [5n, 3n]));
-  });
-
-  it('rejects vectors that do not decode and invalid client ids', () => {
-    expect(() => withClientClockAhead(Uint8Array.of(7), 1)).toThrow(ProtocolError);
-    expect(() => withClientClockAhead(Uint8Array.of(0, 1), 1)).toThrow('Trailing state vector bytes');
-    for (const client of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => withClientClockAhead(stateVector(), client)).toThrow(ProtocolError);
-    }
+  it('mark up to the native entry limit and no further', () => {
+    const entries = Array.from({ length: 65_535 }, (_, index): [bigint, bigint] => [BigInt(index + 1), 1n]);
+    const marked = withOpenSyncRequest(stateVectorOf(entries))!;
+    expect(marked).toEqual(stateVectorOf([...entries, [open, 0n]]));
+    expect(parseSyncRequest(marked)).toEqual({ stateVector: stateVectorOf(entries), open: true });
+    expect(withOpenSyncRequest(stateVectorOf([...entries, [70_000n, 1n]]))).toBeUndefined();
+    expect(withOpenSyncRequest(stateVector([open, 0n]))).toBeUndefined();
   });
 });

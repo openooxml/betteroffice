@@ -34,6 +34,7 @@ import type {
   YrsSession,
   YrsStickyPosition,
   YrsStoryRange,
+  YrsCellBorders,
   YrsTableRange,
 } from './index';
 import type { DocxClipboardFragment } from './clipboardFragment';
@@ -282,6 +283,7 @@ export interface DocxCommandPayloads {
   setRenderEnvironment: {
     themeColors: Record<string, string>;
     showHiddenText: boolean;
+    showTableGridlines?: boolean;
     /** Applied only while the document version is still `reservations.version`. */
     reservations?: DocxReservationsPayload;
   };
@@ -314,6 +316,8 @@ export interface DocxCommandPayloads {
   mergeTableCells: DocxSelectionIntent;
   splitTableCell: DocxSelectionIntent & { rows: number; columns: number };
   setTableCellShading: DocxSelectionIntent & { color: string | null };
+  setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
+  setTableProperties: DocxSelectionIntent & { op: 'patch'; patch: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }; expectVersion?: string };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
@@ -468,6 +472,7 @@ export interface ResidentCommandHooksEnvironment {
   setRenderEnvironment?(environment: {
     themeColors: Record<string, string>;
     showHiddenText: boolean;
+    showTableGridlines?: boolean;
     reservations?: DocxResolvedReservations;
   }, set?: DocxFrameReservations | null): void;
 }

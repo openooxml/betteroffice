@@ -3,6 +3,8 @@ import type { YrsHyperlinkAttrs, YrsLoc, YrsStickyPosition, YrsStoryRange } from
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelection } from './residentCommandProtocol';
 import { commandSelectionRange } from './residentCommandAnchors';
+import { resolveLiveCell as resolveTableCell } from './residentCommandTableSelection';
+import { resolveResidentObject } from './residentObjectGeometry';
 import { getDocumentWatermark, setDocumentWatermark } from '../docx/watermarkApi';
 import { updateFinalSectionProperties, resolvedFinalSectionProperties } from '../editor/finalSection';
 
@@ -18,13 +20,15 @@ export type ResidentPropertyTarget =
   | { kind: 'watermark' }
   | { kind: 'hyperlink'; selection: DocxCommandSelection }
   | { kind: 'objectSelection'; selection: DocxCommandSelection }
-  | { kind: 'object'; at: YrsLoc };
+  | { kind: 'object'; at?: YrsLoc; handle?: string }
+  | { kind: 'tableSelection'; selection: DocxCommandSelection };
 
 export type ResidentPropertySnapshot =
   | { kind: 'section'; section: string; properties: SectionProperties }
   | { kind: 'watermark'; watermark: Watermark | null }
   | { kind: 'hyperlink'; range: YrsStoryRange; hyperlink: YrsHyperlinkAttrs | null }
-  | { kind: 'object'; handle: string; properties: Record<string, unknown> };
+  | { kind: 'object'; handle: string; properties: Record<string, unknown> }
+  | { kind: 'table'; properties: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null } };
 
 export function packageMetadata(document: Document): ResidentPackageMetadata {
   const pkg = document.package;
@@ -95,7 +99,10 @@ function imageAt(engine: ResidentEngineSession, at: YrsLoc): Record<string, unkn
 
 export function resolvePropertyImage(engine: ResidentEngineSession, handle: string): YrsLoc | null {
   const entry = images.get(engine)?.get(handle);
-  if (!entry) return null;
+  if (!entry) {
+    const resolved = resolveResidentObject(engine, handle);
+    return resolved?.kind === 'image' ? { story: resolved.story, paraId: resolved.paraId, offset: resolved.offset } : null;
+  }
   const at = engine.resolveStickyPosition(entry.position);
   if (!at || !imageAt(engine, at)) return null;
   const current = engine.encodeStickyPosition(at);
@@ -103,6 +110,20 @@ export function resolvePropertyImage(engine: ResidentEngineSession, handle: stri
 }
 
 export function readResidentProperties(engine: ResidentEngineSession, target: ResidentPropertyTarget): ResidentPropertySnapshot | null {
+  if (target.kind === 'tableSelection') {
+    const range = commandSelectionRange(engine, target.selection);
+    if (!range) return null;
+    const cell = resolveTableCell(engine, range.story);
+    if (!cell) return null;
+    const payload = engine.tablePayload(cell.story, cell.tableIndex) as { tblPr?: Record<string, unknown> } | null;
+    if (!payload) return null;
+    const tblPr = payload.tblPr ?? {};
+    return { kind: 'table', properties: {
+      width: typeof tblPr.width === 'number' ? tblPr.width : null,
+      widthType: typeof tblPr.widthType === 'string' ? tblPr.widthType : 'auto',
+      justification: tblPr.justification === 'center' || tblPr.justification === 'right' ? tblPr.justification : 'left',
+    } };
+  }
   if (target.kind === 'section') {
     const properties = sectionProperties(engine.propertyDocument(), target.section);
     return properties ? { kind: 'section', section: target.section, properties } : null;
@@ -142,14 +163,16 @@ export function readResidentProperties(engine: ResidentEngineSession, target: Re
   }
   const range = target.kind === 'objectSelection' ? commandSelectionRange(engine, target.selection) : null;
   if (target.kind === 'objectSelection' && (!range || range.start.paraId !== range.end.paraId || range.end.offset - range.start.offset !== 1)) return null;
-  const at = target.kind === 'objectSelection' ? { story: range!.story, ...range!.start } : target.at;
+  const at = target.kind === 'objectSelection' ? { story: range!.story, ...range!.start }
+    : target.at ?? (target.handle ? resolvePropertyImage(engine, target.handle) : null);
+  if (!at) return null;
   const properties = imageAt(engine, at);
   if (!properties) return null;
   let handles = images.get(engine);
   if (!handles) { handles = new Map(); images.set(engine, handles); }
   const position = engine.encodeStickyPosition(at);
   const existing = [...handles].find(([, entry]) => entry.position.story === position.story && String(entry.position.encoded) === String(position.encoded));
-  const handle = existing?.[0] ?? crypto.randomUUID();
+  const handle = existing?.[0] ?? (target.kind === 'object' && target.handle ? target.handle : crypto.randomUUID());
   if (!existing) handles.set(handle, { position });
   return { kind: 'object', handle, properties };
 }

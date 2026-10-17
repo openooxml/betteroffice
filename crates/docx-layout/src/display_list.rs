@@ -142,6 +142,10 @@ pub struct DisplayPage {
     /// Where host layout reservations landed on this page; never painted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reservations: Vec<DisplayReservation>,
+    /// Table cell edges without a visible border, for a view-only overlay;
+    /// never painted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_gridlines: Vec<DisplayGridline>,
     /// Geometry only: the page's content is built when a host asks for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unbuilt: bool,
@@ -164,6 +168,16 @@ pub struct DisplayReservation {
     pub y: Number,
     pub width: Number,
     pub height: Number,
+}
+
+/// One table cell edge segment in page coordinates.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayGridline {
+    pub x1: Number,
+    pub y1: Number,
+    pub x2: Number,
+    pub y2: Number,
 }
 
 /// Relationship ids of the header and footer parts a page paints.
@@ -2181,6 +2195,8 @@ pub(crate) struct TableBlockIn {
     /// header/footer flow cursor.
     #[serde(default)]
     pub(crate) floating: Option<FloatingTablePositionIn>,
+    #[serde(default)]
+    gridlines: Option<bool>,
 }
 
 pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
@@ -4394,6 +4410,8 @@ pub(crate) struct RenderCtx<'a> {
     pub(crate) field_widths: Option<&'a FieldWidthMap>,
     /// Collects the page's reservation rects; `None` drops them.
     pub(crate) reservations: Option<&'a std::cell::RefCell<Vec<DisplayReservation>>>,
+    /// Collects the page's table gridlines; `None` drops them.
+    pub(crate) gridlines: Option<&'a std::cell::RefCell<Vec<DisplayGridline>>>,
 }
 
 impl RenderCtx<'_> {
@@ -5023,6 +5041,7 @@ fn recompose_hf_region(
     cached_page_totals: bool,
     shape: Option<&ShapeFonts<'_>>,
     reservations: &std::cell::RefCell<Vec<DisplayReservation>>,
+    gridlines: &std::cell::RefCell<Vec<DisplayGridline>>,
 ) {
     let Some(variant) = hf
         .variants
@@ -5054,6 +5073,7 @@ fn recompose_hf_region(
         shape,
         field_widths: (!field_widths.is_empty()).then_some(&field_widths),
         reservations: Some(reservations),
+        gridlines: Some(gridlines),
     };
     let content_width = page.size.w - page.margins.left - page.margins.right;
     let height = variant
@@ -5295,6 +5315,7 @@ fn build_display_list_selected(
             continue;
         }
         let page_reservations = std::cell::RefCell::new(Vec::new());
+        let page_gridlines = std::cell::RefCell::new(Vec::new());
         let ctx = RenderCtx {
             page_number: page.number.unwrap_or(page_index as u64 + 1),
             page_label: page.page_label.clone(),
@@ -5304,6 +5325,7 @@ fn build_display_list_selected(
             shape: shape_fonts.as_ref(),
             field_widths: None,
             reservations: Some(&page_reservations),
+            gridlines: Some(&page_gridlines),
         };
         let mut prims: Vec<Primitive> = Vec::new();
         let mut page_borders: Vec<PageBorderPrimitive> = Vec::new();
@@ -5571,6 +5593,7 @@ fn build_display_list_selected(
                     input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
                     &page_reservations,
+                    &page_gridlines,
                 );
             }
             if let Some(region) = &mut footer {
@@ -5583,6 +5606,7 @@ fn build_display_list_selected(
                     input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
                     &page_reservations,
+                    &page_gridlines,
                 );
             }
         }
@@ -5608,6 +5632,7 @@ fn build_display_list_selected(
             footer,
             note_areas,
             reservations: page_reservations.take(),
+            table_gridlines: page_gridlines.take(),
             unbuilt: false,
             position_span: None,
             hf_parts: None,
@@ -9991,8 +10016,10 @@ pub(crate) fn emit_table_fragment(
         // the neighbour's facing edge; top and left draw only on the outer boundary
         let borders = cell.borders.as_ref();
         let bidi = block.bidi == Some(true);
-        let mut push_edge = |x1: f64, y1: f64, x2: f64, y2: f64, e: &BorderEdgeIn| {
-            if !border_visible(e) {
+        let gridlines = ctx.gridlines.filter(|_| block.gridlines == Some(true));
+        let mut push_edge = |x1: f64, y1: f64, x2: f64, y2: f64, e: Option<&BorderEdgeIn>| {
+            let visible = e.filter(|e| border_visible(e));
+            if visible.is_none() && gridlines.is_none() {
                 return;
             }
             // clip vertically to the window band
@@ -10003,6 +10030,18 @@ pub(crate) fn emit_table_fragment(
             if y1 == y2 && (y1 < clip_top_y || y1 > clip_bottom_y) {
                 return;
             }
+            let (y1, y2) = if y1 == y2 { (y1, y2) } else { (y1c, y2c) };
+            let Some(e) = visible else {
+                if let Some(gridlines) = gridlines {
+                    gridlines.borrow_mut().push(DisplayGridline {
+                        x1: px(x1),
+                        y1: px(y1),
+                        x2: px(x2),
+                        y2: px(y2),
+                    });
+                }
+                return;
+            };
             let style = display_border_style(e.style.as_deref());
             let width = e.width.unwrap_or(1.0);
             // explicit ownership: the owning grid cell rides on the line so
@@ -10013,9 +10052,9 @@ pub(crate) fn emit_table_fragment(
             };
             prims.push(Primitive::Line(LinePrimitive {
                 x1: px(x1),
-                y1: px(if y1 == y2 { y1 } else { y1c }),
+                y1: px(y1),
                 x2: px(x2),
-                y2: px(if y1 == y2 { y2 } else { y2c }),
+                y2: px(y2),
                 stroke_width: px(width),
                 color: e.color.clone().unwrap_or_else(|| "#000000".to_string()),
                 dash: border_dash(style, width),
@@ -10026,18 +10065,16 @@ pub(crate) fn emit_table_fragment(
                 ..LinePrimitive::contract_defaults()
             }));
         };
-        if p.is_first_row
-            && let Some(e) = borders.and_then(|b| b.top.as_ref())
-        {
+        if p.is_first_row {
+            let e = borders.and_then(|b| b.top.as_ref());
             let starts_table = if carried {
                 plan.header_row_count > 0
             } else {
                 frag.clip_top.unwrap_or(0.0) == 0.0
             };
-            let inset = if p.g.row_index == 0 && starts_table {
-                e.width.unwrap_or(1.0) / 2.0
-            } else {
-                0.0
+            let inset = match e {
+                Some(e) if p.g.row_index == 0 && starts_table => e.width.unwrap_or(1.0) / 2.0,
+                _ => 0.0,
             };
             push_edge(cx, cy + inset, cx + p.g.width, cy + inset, e);
         }
@@ -10052,9 +10089,8 @@ pub(crate) fn emit_table_fragment(
                         .as_ref()
                 })
                 .and_then(|b| b.left.as_ref());
-            if let Some(e) = resolve_shared_border(own_right, neighbour_left) {
-                push_edge(cx + p.g.width, cy, cx + p.g.width, cy + p.cell_h, e);
-            }
+            let e = resolve_shared_border(own_right, neighbour_left);
+            push_edge(cx + p.g.width, cy, cx + p.g.width, cy + p.cell_h, e);
         } else {
             let base_top = row_tops.get(p.g.row_index).copied().unwrap_or(0.0);
             let mut run_start_row = p.g.row_index;
@@ -10080,39 +10116,39 @@ pub(crate) fn emit_table_fragment(
                 let next_resolved = resolve_shared_border(own_right, next_left);
                 if !borders_edge_equal(run_resolved, next_resolved) {
                     uniform = false;
-                    if let Some(e) = run_resolved {
-                        let y1 = cy
-                            + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top);
-                        let y2 = cy + (row_tops.get(r).copied().unwrap_or(base_top) - base_top);
-                        push_edge(cx + p.g.width, y1, cx + p.g.width, y2, e);
-                    }
+                    let y1 =
+                        cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top);
+                    let y2 = cy + (row_tops.get(r).copied().unwrap_or(base_top) - base_top);
+                    push_edge(cx + p.g.width, y1, cx + p.g.width, y2, run_resolved);
                     run_start_row = r;
                     run_resolved = next_resolved;
                 }
             }
-            if let Some(e) = run_resolved {
-                let y1 = if uniform {
-                    cy
-                } else {
-                    cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top)
-                };
-                push_edge(cx + p.g.width, y1, cx + p.g.width, cy + p.cell_h, e);
-            }
+            let y1 = if uniform {
+                cy
+            } else {
+                cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top)
+            };
+            push_edge(
+                cx + p.g.width,
+                y1,
+                cx + p.g.width,
+                cy + p.cell_h,
+                run_resolved,
+            );
         }
         let own_bottom = borders.and_then(|b| b.bottom.as_ref());
-        let bottom_y = |e: &BorderEdgeIn| {
+        let bottom_y = |e: Option<&BorderEdgeIn>| {
             if plan.full_bottom_border && p.g.row_index + p.g.row_span >= block.rows.len() {
-                frag.y + frag.height - e.width.unwrap_or(1.0) / 2.0
+                frag.y + frag.height - e.map_or(0.0, |e| e.width.unwrap_or(1.0)) / 2.0
             } else {
                 cy + p.cell_h
             }
         };
         let below_row = plan.row_painted_below(p.g, frag);
         if below_row.is_none() {
-            if let Some(e) = own_bottom {
-                let y = bottom_y(e);
-                push_edge(cx, y, cx + p.g.width, y, e);
-            }
+            let y = bottom_y(own_bottom);
+            push_edge(cx, y, cx + p.g.width, y, own_bottom);
         } else if p.g.col_span <= 1 {
             let neighbour_top = below_row
                 .and_then(|row| plan.cell_starting_at(row, p.g.column_index))
@@ -10122,10 +10158,9 @@ pub(crate) fn emit_table_fragment(
                         .as_ref()
                 })
                 .and_then(|b| b.top.as_ref());
-            if let Some(e) = resolve_shared_border(own_bottom, neighbour_top) {
-                let y = bottom_y(e);
-                push_edge(cx, y, cx + p.g.width, y, e);
-            }
+            let e = resolve_shared_border(own_bottom, neighbour_top);
+            let y = bottom_y(e);
+            push_edge(cx, y, cx + p.g.width, y, e);
         } else {
             let col_at = |offset: usize| {
                 if bidi {
@@ -10161,23 +10196,25 @@ pub(crate) fn emit_table_fragment(
                 let next_resolved = resolve_shared_border(own_bottom, next_top);
                 if !borders_edge_equal(run_resolved, next_resolved) {
                     uniform = false;
-                    if let Some(e) = run_resolved {
-                        let y = bottom_y(e);
-                        push_edge(run_x1, y, cursor_x, y, e);
-                    }
+                    let y = bottom_y(run_resolved);
+                    push_edge(run_x1, y, cursor_x, y, run_resolved);
                     run_x1 = cursor_x;
                     run_resolved = next_resolved;
                 }
                 cursor_x += col_width(c);
             }
-            if let Some(e) = run_resolved {
-                let y = bottom_y(e);
-                let x2 = if uniform { cx + p.g.width } else { cursor_x };
-                push_edge(run_x1, y, x2, y, e);
-            }
+            let y = bottom_y(run_resolved);
+            let x2 = if uniform { cx + p.g.width } else { cursor_x };
+            push_edge(run_x1, y, x2, y, run_resolved);
         }
-        if is_first_col && let Some(e) = borders.and_then(|b| b.left.as_ref()) {
-            push_edge(cx, cy, cx, cy + p.cell_h, e);
+        if is_first_col {
+            push_edge(
+                cx,
+                cy,
+                cx,
+                cy + p.cell_h,
+                borders.and_then(|b| b.left.as_ref()),
+            );
         }
 
         let content_stamp_from = prims.len();
@@ -11890,6 +11927,7 @@ fn unbuilt_page_with_span(
         footer: None,
         note_areas: Vec::new(),
         reservations: Vec::new(),
+        table_gridlines: Vec::new(),
         unbuilt: true,
         position_span,
         hf_parts: headers_footers

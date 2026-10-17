@@ -16,18 +16,20 @@ use super::s13::element_span;
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
-/// source to stand in for it: the same comment markers in order, at the same text offsets, and
-/// no revision or note ID the source lacks. Source IDs the written XML lacks are kept, as are
+/// source to stand in for it: the same comment markers in order, at the same text offsets, the
+/// same permission markers, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept, as are
 /// relationship IDs: the save keeps every source relationship.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Marks {
     comments: Vec<(String, String, usize)>,
+    permissions: Vec<(String, String)>,
     ids: BTreeMap<(&'static str, String), usize>,
 }
 
 impl Marks {
     fn admit(&self, written: &Marks) -> bool {
         self.comments == written.comments
+            && self.permissions == written.permissions
             && written
                 .ids
                 .iter()
@@ -36,7 +38,7 @@ impl Marks {
 }
 
 /// Run content that takes a position in the text, besides `w:t` and `w:delText` characters.
-const POSITIONED: [&str; 19] = [
+pub(crate) const POSITIONED: [&str; 19] = [
     "w:tab",
     "w:ptab",
     "w:br",
@@ -100,6 +102,10 @@ fn marks(xml: &str) -> Option<Marks> {
                 marks.comments.push((tag.name.to_owned(), id(), offset));
                 continue;
             }
+            "w:permStart" | "w:permEnd" => {
+                marks.permissions.push((tag.name.to_owned(), id()));
+                continue;
+            }
             "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => "revision",
             name if name.ends_with("Change") => "revision",
             "w:footnoteReference" => "footnote",
@@ -108,14 +114,29 @@ fn marks(xml: &str) -> Option<Marks> {
         };
         *marks.ids.entry((kind, id())).or_insert(0) += 1;
     }
+    marks.permissions.sort();
     Some(marks)
 }
 
-/// How many comment markers of each kind and ID `xml` holds.
-fn comment_counts(xml: &str) -> Option<BTreeMap<(String, String), isize>> {
+/// Counts bookmark and comment markers by kind and ID.
+fn marker_counts(xml: &str) -> Option<BTreeMap<(String, String), isize>> {
     let mut counts = BTreeMap::new();
-    for (name, id, _) in marks(xml)?.comments {
-        *counts.entry((name, id)).or_insert(0) += 1;
+    for tag in tags(xml)? {
+        if !tag.end
+            && matches!(
+                tag.name,
+                "w:bookmarkStart"
+                    | "w:bookmarkEnd"
+                    | "w:commentRangeStart"
+                    | "w:commentRangeEnd"
+                    | "w:commentReference"
+            )
+        {
+            let id = attribute(&tag, "w:id")
+                .and_then(|range| unescaped(xml, range))
+                .unwrap_or_default();
+            *counts.entry((tag.name.to_owned(), id)).or_insert(0) += 1;
+        }
     }
     Some(counts)
 }
@@ -644,7 +665,7 @@ fn with_insertions(source: &str, added: &[(usize, &str)]) -> String {
     output
 }
 
-fn paragraph_span(xml: &str, occurrence: &ParagraphOccurrence) -> Option<Range<usize>> {
+pub(crate) fn paragraph_span(xml: &str, occurrence: &ParagraphOccurrence) -> Option<Range<usize>> {
     let start = occurrence.tag.start;
     let relative = element_span(&xml[start..], &[])?;
     Some(start + relative.start..start + relative.end)
@@ -1009,21 +1030,21 @@ pub(crate) fn splice_story_part(
             .filter(|occurrence| occurrence.ordinal == ordinal)?;
         spans.insert(ordinal, paragraph_span(source, occurrence)?);
     }
-    let mut outside_source = comment_counts(source)?;
-    let mut outside_written = comment_counts(serialized)?;
+    let mut outside_source = marker_counts(source)?;
+    let mut outside_written = marker_counts(serialized)?;
     let mut end = 0;
     for (ordinal, span) in &spans {
         if span.start < end {
             return None;
         }
         end = span.end;
-        subtract(&mut outside_source, comment_counts(&source[span.clone()])?);
+        subtract(&mut outside_source, marker_counts(&source[span.clone()])?);
         if let Some(xml) = written.get(ordinal) {
-            subtract(&mut outside_written, comment_counts(xml)?);
+            subtract(&mut outside_written, marker_counts(xml)?);
         }
     }
     for (_, xml) in &inserted {
-        subtract(&mut outside_written, comment_counts(xml)?);
+        subtract(&mut outside_written, marker_counts(xml)?);
     }
     if outside_source != outside_written {
         return None;
@@ -1343,6 +1364,17 @@ mod tests {
         let whole = write_docx_s13(request, &original).unwrap();
         assert_eq!(document_part(&saved), document_part(&whole));
         assert_ne!(document_part(&saved), source.as_bytes());
+    }
+
+    #[test]
+    fn body_bookmarks_moved_into_a_paragraph_refuse_source_splicing() {
+        let first = "<w:p><w:r><w:t>Before</w:t></w:r></w:p>";
+        let second = "<w:p><w:r><w:t>After</w:t></w:r></w:p>";
+        let start = r#"<w:bookmarkStart w:id="7" w:name="Range"/>"#;
+        let end = r#"<w:bookmarkEnd w:id="7"/>"#;
+        let source = body(&format!("{first}{start}{end}{second}"));
+        let edited = format!("<w:p>{start}<w:r><w:t>Before</w:t></w:r>{end}</w:p>");
+        assert_eq!(splice(&source, &[(0, &edited), (1, second)], &[0]), None);
     }
 
     #[test]
@@ -2480,18 +2512,17 @@ mod tests {
     fn refuses_rewriting_a_paragraph_whose_range_ends_outside_every_paragraph_or_whose_prefix_an_ancestor_rebinds()
      {
         let paragraph = "<w:p><w:r><w:t>a</w:t></w:r><w:bookmarkEnd w:id=\"3\"/></w:p>";
-        let source = format!(
-            "{ROOT}<w:body><w:bookmarkStart w:id=\"3\" w:name=\"b\"/>{paragraph}</w:body></w:document>"
-        );
+        let start = r#"<w:bookmarkStart w:id="3" w:name="b"/>"#;
+        let source = format!("{ROOT}<w:body>{start}{paragraph}</w:body></w:document>");
         let edited = "<w:p><w:r><w:t>b</w:t></w:r><w:bookmarkEnd w:id=\"3\"/></w:p>";
         assert_eq!(
-            splice(&source, &[(0, edited)], &[0]),
+            splice_around(&source, &[(0, edited)], &[0], &[], (start, "")),
             Some(source.replace(paragraph, edited))
         );
         let dropped = "<w:p><w:r><w:t>b</w:t></w:r></w:p>";
-        assert!(splice(&source, &[(0, dropped)], &[0]).is_none());
+        assert!(splice_around(&source, &[(0, dropped)], &[0], &[], (start, "")).is_none());
         assert_eq!(
-            splice(&source, &[(0, paragraph)], &[]),
+            splice_around(&source, &[(0, paragraph)], &[], &[], (start, "")),
             Some(source.clone())
         );
 

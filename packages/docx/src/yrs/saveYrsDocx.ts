@@ -10,6 +10,7 @@ import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFa
 import type { Comment, Paragraph } from '../types/content';
 import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
+import { savedCommentIds } from './residentCommentProjection';
 import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
@@ -91,7 +92,9 @@ function savedComments(
   base: Document
 ): { comments: Comment[]; sessionIds: Map<number, string>; changed: boolean } {
   const source = base.package.document.comments ?? [];
-  const held = new Map(session.listComments().map((comment) => [comment.id, comment]));
+  const listed = session.listComments();
+  const ids = savedCommentIds(source.map((comment) => comment.id), listed);
+  const held = new Map(listed.map((comment) => [comment.id, comment]));
   let changed = false;
   const comments = source.map((comment) => {
     const entry = held.get(String(comment.id));
@@ -105,17 +108,10 @@ function savedComments(
       ...(entry.body == null ? {} : { content: commentContent(entry.body) }),
     };
   });
-  const used = new Set(source.map((comment) => comment.id));
   const sessionIds = new Map<number, string>();
-  let next = Math.max(0, ...used) + 1;
   for (const entry of held.values()) {
     changed = true;
-    let id = /^\d+$/.test(entry.id) ? Number(entry.id) : Number.NaN;
-    if (!Number.isSafeInteger(id) || used.has(id)) {
-      while (used.has(next)) next += 1;
-      id = next;
-    }
-    used.add(id);
+    const id = ids.get(entry.id)!;
     if (String(id) !== entry.id) sessionIds.set(id, entry.id);
     comments.push({
       id,

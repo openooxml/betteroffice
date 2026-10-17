@@ -8,7 +8,8 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeVarUint,
-  stateVectorDominates,
+  OPEN_SYNC_CLIENT,
+  parseSyncRequest,
   withoutDocumentFingerprint,
 } from './protocol';
 import type { CollaborationReplica, CollaborationTransport, CollaborationTransportEvent } from './types';
@@ -56,11 +57,11 @@ async function openPeer(kind: Kind, clientId: number): Promise<Peer> {
   };
 }
 
-function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
+function relay(size: number) {
   const listeners = Array.from({ length: size }, () => new Set<(event: CollaborationTransportEvent) => void>());
   const online = new Array<boolean>(size).fill(false);
   const sent: { from: number; data: Uint8Array }[] = [];
-  const missing = new Array<number>(size).fill(0);
+  const opens = new Array<number>(size).fill(0);
   let queue: { from: number; to: number; data: Uint8Array }[] = [];
   const setOnline = (index: number, open: boolean) => {
     online[index] = open;
@@ -97,10 +98,7 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
         .flatMap((message) => message.type === 'sync-step-1' ? [message.stateVector] : []);
       const copies = twice && requests.length ? 2 : 1;
       for (let copy = 0; copy < copies; copy += 1) {
-        if (requests.length) {
-          const vector = await vectorOf(frame.to);
-          missing[frame.to] += requests.filter((request) => !stateVectorDominates(vector, request)).length;
-        }
+        opens[frame.to] += requests.filter((request) => parseSyncRequest(request).open).length;
         for (const listener of [...listeners[frame.to]]) listener({ type: 'message', data: frame.data });
       }
     }
@@ -109,7 +107,7 @@ function relay(size: number, vectorOf: (index: number) => Promise<Uint8Array>) {
     .filter((frame) => frame.from === from)
     .flatMap((frame) => decodeMessages(frame.data))
     .filter((message) => message.type === type).length;
-  return { transports, setOnline, reopen, flush, sent, missing, count };
+  return { transports, setOnline, reopen, flush, sent, opens, count };
 }
 
 function connectLegacyPeer(replica: CollaborationReplica, transport: CollaborationTransport, errors: string[]) {
@@ -156,7 +154,7 @@ function phantomClients(count: number): Uint8Array {
 
 async function network(kind: Kind, size: number, legacy?: number) {
   const peers = await Promise.all(Array.from({ length: size }, (_, index) => openPeer(kind, 101 + index)));
-  const net = relay(size, (index) => peers[index].vector());
+  const net = relay(size);
   const errors: string[] = [];
   const providers = peers.flatMap((peer, index) => index === legacy
     ? [] : [new CollaborationProvider(peer.replica, net.transports[index])]);
@@ -332,7 +330,47 @@ for (const kind of ['sync', 'async'] as const) {
       } finally { await close(); }
     });
 
-    it('send at most one reverse request per newer state received, then go quiet', async () => {
+    it('publish an offline deletion when the history already holds the open request client', async () => {
+      const { peers: [left, right], net, errors, close } = await network(kind, 2);
+      try {
+        await right.edit(4, 'cleared');
+        await net.flush();
+        const history = Uint8Array.from([1, 1, ...encodeVarUint(OPEN_SYNC_CLIENT), 0, 0, 3, 0]);
+        for (const peer of [left, right]) await peer.replica.applyUpdate(history.slice());
+        expect(clients(await left.vector())).toContain(BigInt(OPEN_SYNC_CLIENT));
+        net.setOnline(0, false);
+        await left.edit(4, '');
+        net.setOnline(0, true);
+        await net.flush();
+        expect(errors).toEqual([]);
+        expect(await right.read(4)).toEqual(await left.read(4));
+        expect((await right.read(4))[0]).toBe('');
+      } finally { await close(); }
+    });
+
+    it('mark an open request at one entry below the native limit', async () => {
+      const { peers: [left, right], net, errors, close } = await network(kind, 2, 1);
+      try {
+        const filler = phantomClients(65_535 - clients(await left.vector()).length);
+        for (const peer of [left, right]) await peer.replica.applyUpdate(filler.slice());
+        expect(clients(await left.vector())).toHaveLength(65_535);
+        net.setOnline(0, false);
+        await right.edit(1, 'legacy');
+        const mark = net.sent.length;
+        net.setOnline(0, true);
+        await net.flush();
+        const [request] = net.sent.slice(mark).filter((frame) => frame.from === 0)
+          .flatMap((frame) => decodeMessages(frame.data))
+          .flatMap((message) => message.type === 'sync-step-1' ? [message.stateVector] : []);
+        expect(parseSyncRequest(request).open).toBe(true);
+        expect(clients(request)).toHaveLength(65_536);
+        expect(errors).toEqual([]);
+        expect(await left.read()).toEqual(await right.read());
+        expect((await left.read())[1]).toBe('legacy');
+      } finally { await close(); }
+    });
+
+    it('answer every delivered open request with one reverse request, then go quiet', async () => {
       const { peers, net, close } = await network(kind, 3);
       try {
         net.setOnline(2, false);
@@ -340,7 +378,7 @@ for (const kind of ['sync', 'async'] as const) {
         await peers[0].edit(1, 'online');
         await net.flush();
         const mark = net.sent.length;
-        net.missing.fill(0);
+        net.opens.fill(0);
         net.setOnline(2, true);
         await net.flush({ twice: true });
         const cells = await Promise.all(peers.map((peer) => peer.read()));
@@ -348,8 +386,8 @@ for (const kind of ['sync', 'async'] as const) {
         expect(cells[2]).toEqual(cells[0]);
         expect(cells[0]).toEqual(['offline', 'online']);
         const reverse = [0, 1, 2].map((index) => net.count(index, 'sync-step-1', mark) - (index === 2 ? 1 : 0));
-        expect(reverse.slice(0, 2).every((requests) => requests > 0)).toBe(true);
-        expect(reverse.map((requests, index) => Math.max(0, requests - net.missing[index]))).toEqual([0, 0, 0]);
+        expect(net.opens).toEqual([2, 2, 0]);
+        expect(reverse).toEqual(net.opens);
         const settled = net.sent.length;
         await net.flush({ twice: true });
         expect(net.sent.length).toBe(settled);

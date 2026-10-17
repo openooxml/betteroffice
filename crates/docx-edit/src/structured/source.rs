@@ -850,16 +850,15 @@ pub(crate) fn story_root(story: &str) -> &str {
     cut.map_or(story, |index| &story[..index])
 }
 
-/// The table a cell story (`{story}:t{index}:r{row}c{cell}`) belongs to.
+/// The table a cell story (`{story}:t{index}:r{row}c{cell}`, plus `~{client}` when an edit made
+/// it) belongs to.
 pub(crate) fn cell_table(cell_story: &str) -> Option<&str> {
     let cut = cell_story.rfind(":r")?;
     let cell = &cell_story[cut + 2..];
     let (row, column) = cell.split_once('c')?;
-    (!row.is_empty()
-        && !column.is_empty()
-        && row.bytes().all(|byte| byte.is_ascii_digit())
-        && column.bytes().all(|byte| byte.is_ascii_digit()))
-    .then(|| &cell_story[..cut])
+    let (column, client) = column.split_once('~').unwrap_or((column, "0"));
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    (digits(row) && digits(column) && digits(client)).then(|| &cell_story[..cut])
 }
 
 type Located<'a> = (Vec<u32>, &'a docx_parse::XmlElement);
@@ -1304,6 +1303,18 @@ pub(crate) fn holds_control(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_table_reads_opened_and_edit_born_cell_ids() {
+        assert_eq!(cell_table("body:t0:r1c2"), Some("body:t0"));
+        assert_eq!(cell_table("body:t0:r1c2~51"), Some("body:t0"));
+        assert_eq!(
+            cell_table("body:t0:r0c0~51:t1:r1c2~52"),
+            Some("body:t0:r0c0~51:t1")
+        );
+        assert_eq!(cell_table("body:t0:r1c2~"), None);
+        assert_eq!(cell_table("body:t0:r1c2~x"), None);
+    }
 
     #[test]
     fn resolving_source_paths_reads_each_container_once() {

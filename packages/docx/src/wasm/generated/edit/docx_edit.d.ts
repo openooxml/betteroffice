@@ -514,6 +514,10 @@ export class EditSession {
     format_text_target_json(target_json: string, delta_json: string): string;
     geometry_position_outline_json(root: string): string;
     /**
+     * Whether a remote update is waiting on one that has not arrived yet.
+     */
+    has_pending_update(): boolean;
+    /**
      * Whether the document has a story with this id.
      */
     has_story(story: string): boolean;
@@ -1180,6 +1184,7 @@ export class EditSession {
      * with text inserted at it.
      */
     set_selection(story: string, anchor_para: string, anchor_offset: number, head_para: string, head_offset: number): void;
+    set_table_properties(table_json: string, patch_json: string): string;
     /**
      * Sets the preferred width, in twips, of the table `table_json`
      * ([`TableLocator`]) names. Always a plain local edit. Errors unless
@@ -1211,8 +1216,9 @@ export class EditSession {
     set_windowed_incremental_builds(enabled: boolean): void;
     /**
      * Resolves tracked changes by revision id outside undo history:
-     * `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
-     * resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
+     * `{"accept":[string, …],"reject":[string, …]}` -> `{"ok":true,"revisionIds":[string, …]}`,
+     * the ids resolved, or `{"ok":false,"version","failure"}`. An id that matches nothing is
+     * skipped. See [`EditingDoc::settle_revisions`].
      */
     settle_revisions_json(request: string): string;
     /**
@@ -1778,6 +1784,7 @@ export interface InitOutput {
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_geometry_position_outline_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_has_pending_update: (a: number) => number;
     readonly editsession_has_story: (a: number, b: number, c: number) => number;
     readonly editsession_header_footer_aliases_json: (a: number) => [number, number];
     readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1890,6 +1897,7 @@ export interface InitOutput {
     readonly editsession_set_partial_document: (a: number, b: number) => void;
     readonly editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+    readonly editsession_set_table_properties: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_undo_input_time: (a: number, b: number, c: number) => void;

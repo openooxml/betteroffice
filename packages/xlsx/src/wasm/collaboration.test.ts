@@ -38,7 +38,7 @@ describe('wasm collaboration', () => {
     expect(() => openWorkbook(sampleBytes(), { clientId: 1 })).toThrow(
       'clientId requires collaborative mode'
     );
-    for (const clientId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
+    for (const clientId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
       expect(() => openWorkbook(sampleBytes(), { collaborative: true, clientId })).toThrow(
         'clientId must be a nonzero safe integer'
       );
@@ -47,14 +47,14 @@ describe('wasm collaboration', () => {
       openWorkbook(Uint8Array.of(1, 2, 3), { collaborative: true, clientId: 77 })
     ).toThrow();
 
-    const explicit = collaborative(Number.MAX_SAFE_INTEGER);
+    const explicit = collaborative(Number.MAX_SAFE_INTEGER - 2);
     const generated = openWorkbook(sampleBytes(), { collaborative: true });
     const standalone = openWorkbook(sampleBytes());
     try {
-      expect(explicit.clientId).toBe(Number.MAX_SAFE_INTEGER);
+      expect(explicit.clientId).toBe(Number.MAX_SAFE_INTEGER - 2);
       expect(explicit.sheetInfo().sheetIds).toEqual(['sheet:0', 'sheet:1', 'sheet:2']);
       expect(generated.clientId).toBeGreaterThan(0);
-      expect(generated.clientId).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
+      expect(generated.clientId).toBeLessThan(Number.MAX_SAFE_INTEGER - 1);
       expect(requireReplica(explicit)).toBe(explicit);
       expect(standalone.encodeStateVector()).toBeInstanceOf(Uint8Array);
       expect(standalone.encodeStateAsUpdate()).toBeInstanceOf(Uint8Array);
@@ -473,6 +473,41 @@ describe('wasm collaboration', () => {
       }
     } finally {
       handle.dispose();
+    }
+  });
+
+  it('authors disjoint hyperlinks through the public handle, converges, undoes, and reopens XLSX', () => {
+    const left = collaborative(6011);
+    const right = collaborative(6012);
+    const first = { range: { start: { row: 0, col: 0 }, end: { row: 0, col: 0 } }, location: 'Empty!A1' };
+    const second = { range: { start: { row: 1, col: 1 }, end: { row: 1, col: 1 } }, location: 'Data!B1' };
+    const viewport = { x: 0, y: 0, width: 300, height: 100 };
+    try {
+      const baseline = left.encodeStateVector();
+      expect(left.setHyperlink(0, first).applied).toBe(true);
+      expect(right.setHyperlink(0, second).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(left.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Empty!A1', 'Data!B1']);
+      expect(right.displayList(viewport).hyperlinks).toEqual(left.displayList(viewport).hyperlinks);
+
+      expect(left.undo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(right.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Data!B1']);
+      const reopened = openWorkbook(right.save());
+      try {
+        expect(reopened.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Data!B1']);
+      } finally {
+        reopened.dispose();
+      }
+      expect(right.removeHyperlink(0, second.range).applied).toBe(true);
+      expect(left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector())).applied).toBe(true);
+      expect(left.displayList(viewport).hyperlinks ?? []).toEqual([]);
+    } finally {
+      left.dispose();
+      right.dispose();
     }
   });
 

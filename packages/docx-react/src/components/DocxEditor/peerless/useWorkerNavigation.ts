@@ -3,7 +3,7 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import { workerPageAtViewport } from './pageNavigation';
-import type { DocxCommandSelection, DocxOutlineHeading, ResidentDocumentRead, ResidentReviewTarget } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, DocxOutlineHeading, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
@@ -79,12 +79,13 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     const isCurrent = () => current === binding() && identity.session === current.viewStore.getSnapshot().identity.session &&
       identity.incarnation === current.viewStore.getSnapshot().identity.incarnation && identity.epoch === current.viewStore.getSnapshot().identity.epoch;
     const select = async (value: DocxCommandSelection) => {
+      const throughSeq = current.viewStore.getSnapshot().throughSeq;
       const result = current.commands.submit({ kind: 'select', payload: { selection: value } }, { source: 'selection', fence: true });
       if (result.status !== 'submitted') return false;
       const [outcome, presented] = await Promise.all([result.ticket.ack, result.ticket.presented]);
       if (!isCurrent() || (outcome.status !== 'applied' && outcome.status !== 'noop')) return false;
-      const seq = outcome.seq ?? result.ticket.seq;
-      return presented === 'presented' && seq !== undefined && current.viewStore.getSnapshot().throughSeq <= seq;
+      const seq = outcome.seq ?? result.ticket.seq ?? throughSeq;
+      return presented === 'presented' && current.viewStore.getSnapshot().throughSeq <= seq;
     };
     if (!await select({ anchor: selection.anchor, focus: selection.anchor })) return false;
     const shown = current.viewStore.getSnapshot().geometry?.caret;
@@ -96,13 +97,16 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     scroller.current.scrollTop += host.current.getBoundingClientRect().top - scroller.current.getBoundingClientRect().top + shown.y * latest.current.zoom - 24;
     return true;
   }, [binding, host, scroller]);
-  const scrollToTarget = useCallback((request: Extract<ResidentDocumentRead, { kind: 'navigationTarget' | 'bookmarkTarget' }>) => navigate(async current => {
-    const target = await controller.read(request);
+  const scrollToParagraph = useCallback((paraId: string, story = 'body') => navigate(async current => {
+    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
+    if (typeof target === 'string' || current !== binding()) return false;
+    return revealSelection(current, { anchor: target.loc, focus: target.loc });
+  }), [binding, controller, navigate, revealSelection]);
+  const scrollToBookmark = useCallback((name: string, story = 'body') => navigate(async current => {
+    const target = await controller.read({ kind: 'bookmarkTarget', story, name });
     if (!target || typeof target === 'string' || current !== binding()) return false;
     return revealSelection(current, { anchor: target.loc, focus: target.loc });
   }), [binding, controller, navigate, revealSelection]);
-  const scrollToParagraph = useCallback((paraId: string, story = 'body') => scrollToTarget({ kind: 'navigationTarget', story, paraId }), [scrollToTarget]);
-  const scrollToBookmark = useCallback((name: string, story = 'body') => scrollToTarget({ kind: 'bookmarkTarget', story, name }), [scrollToTarget]);
   /** Selects the first range a comment or revision anchors and scrolls its start into view; false when it does not exist. */
   const scrollToReviewTarget = useCallback((target: ResidentReviewTarget) => navigate(async current => {
     const range = (await controller.read({ kind: 'reviewTarget', target }))?.ranges[0];

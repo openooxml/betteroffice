@@ -661,6 +661,7 @@
     "borderColor": "边框颜色",
     "borderWidth": "边框宽度",
     "unknownAction": "未知操作",
+    "viewGridlines": "查看网格线",
     "borders": {
       "all": "所有框线",
       "outside": "外侧框线",

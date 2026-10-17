@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { resolveImageLayoutAttrs, type ImageLayoutCurrentAttrs, type ImageLayoutTarget } from '@betteroffice/docx/docx';
 import type { EndnoteProperties, FootnoteProperties } from '@betteroffice/docx/types/document';
 import type { DocxCommandSelection } from '@betteroffice/docx/yrs';
 import type { DocxEditorProps } from '../../DocxEditor';
@@ -8,11 +9,38 @@ import { ImagePropertiesDialog, type ImagePropertiesData } from '../../dialogs/I
 import { ImagePositionDialog, type ImagePositionData } from '../../dialogs/ImagePositionDialog';
 import { PageSetupDialog } from '../../dialogs/PageSetupDialog';
 import { SplitCellDialog } from '../../dialogs/SplitCellDialog';
-import type { DocxCommandResult } from '../../../commands/types';
+import { TablePropertiesDialog, type TableProperties } from '../../dialogs/TablePropertiesDialog';
+import type { DocxCommandResult, DocxImageTransform } from '../../../commands/types';
 import { WatermarkDialog } from '../../dialogs/WatermarkDialog';
+import { imageWrapTarget } from '../hooks/useDocxCommands';
+import { yrsImageTransformForProjectedNode } from '../yrsCommands';
 import { useWorkerQuery } from './useWorkerQuery';
 import { useWorkerPageSetupControls, useWorkerWatermarkControls } from './workerPropertyControls';
 import { applyWorkerProperty, readWorkerSection, type WorkerPropertyQuery, type WorkerShellController } from './workerProperties';
+
+export function imageWrapTargetFromAttrs(attrs: Readonly<Record<string, unknown>> | null | undefined): ImageLayoutTarget | null {
+  return attrs ? imageWrapTarget(attrs) : null;
+}
+
+export function buildImageWrapPatch(currentAttrs: Readonly<Record<string, unknown>>, target: ImageLayoutTarget): Record<string, unknown> {
+  const next = resolveImageLayoutAttrs(target, currentAttrs as ImageLayoutCurrentAttrs);
+  return {
+    wrap: next.wrapType,
+    wrapType: next.wrapType,
+    displayMode: next.displayMode ?? null,
+    cssFloat: next.cssFloat ?? null,
+    wrapText: next.wrapText ?? null,
+    position: next.position ?? null,
+    ...('distTop' in next ? { distTop: next.distTop ?? null } : {}),
+    ...('distBottom' in next ? { distBottom: next.distBottom ?? null } : {}),
+    ...('distLeft' in next ? { distLeft: next.distLeft ?? null } : {}),
+    ...('distRight' in next ? { distRight: next.distRight ?? null } : {}),
+  };
+}
+
+export function buildImageTransformPatch(currentAttrs: Readonly<Record<string, unknown>>, action: DocxImageTransform): { transform: string | null } {
+  return { transform: yrsImageTransformForProjectedNode({ kind: 'image', attrs: currentAttrs }, action) };
+}
 
 type WorkerLink = { query: WorkerPropertyQuery; initialData: HyperlinkData; targetSelection: DocxCommandSelection; replaceText: boolean };
 
@@ -29,8 +57,12 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
     apply(rows: number, columns: number): Promise<DocxCommandResult> } | null>(null);
   const openSplitCell = useCallback((defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
     apply: (rows: number, columns: number) => Promise<DocxCommandResult>) => { setSplit({ defaults, apply }); }, []);
+  const [tableProps, setTableProps] = useState<{ initial: TableProperties;
+    apply(props: TableProperties): Promise<DocxCommandResult> } | null>(null);
+  const openTableProperties = useCallback((initial: TableProperties,
+    apply: (props: TableProperties) => Promise<DocxCommandResult>) => { setTableProps({ initial, apply }); }, []);
   const report = (error: unknown) => props.onError?.(error instanceof Error ? error : new Error(String(error)));
-  useEffect(() => { setImage(null); setNotes(null); setLink(null); setSplit(null); },
+  useEffect(() => { setImage(null); setNotes(null); setLink(null); setSplit(null); setTableProps(null); },
     [state.view?.identity.session, state.view?.identity.incarnation, state.view?.identity.epoch]);
   const openImage = async (position = false) => {
     try {
@@ -104,6 +136,35 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
       handle: image.query.value.handle, patch, expectVersion: image.query.version,
     } }, props.onError)) setImage(null);
   };
+  const applyImageWrap = async (target: ImageLayoutTarget, handleOverride?: string): Promise<boolean> => {
+    try {
+      await controller.ref.flushPendingInput();
+      const selected = controller.getSnapshot().view?.workerSelection;
+      if (!selected && !handleOverride) throw new Error('Image selection is unavailable');
+      const query = await controller.query({ kind: 'properties',
+        target: handleOverride ? { kind: 'object', handle: handleOverride } : { kind: 'objectSelection', selection: selected! } });
+      if (query.value?.kind !== 'object') throw new Error('Image properties are unavailable');
+      return await applyWorkerProperty(controller, query, { kind: 'setObjectProperties', payload: {
+        handle: handleOverride ?? query.value.handle,
+        patch: buildImageWrapPatch(query.value.properties, target),
+        expectVersion: query.version,
+      } }, props.onError);
+    } catch (error) { report(error); return false; }
+  };
+  const applyImageTransform = async (action: DocxImageTransform): Promise<boolean> => {
+    try {
+      await controller.ref.flushPendingInput();
+      const selected = controller.getSnapshot().view?.workerSelection;
+      if (!selected) throw new Error('Image selection is unavailable');
+      const query = await controller.query({ kind: 'properties', target: { kind: 'objectSelection', selection: selected } });
+      if (query.value?.kind !== 'object') throw new Error('Image properties are unavailable');
+      return await applyWorkerProperty(controller, query, { kind: 'setObjectProperties', payload: {
+        handle: query.value.handle,
+        patch: buildImageTransformPatch(query.value.properties, action),
+        expectVersion: query.version,
+      } }, props.onError);
+    } catch (error) { report(error); return false; }
+  };
   const applyImageProperties = (data: ImagePropertiesData) => applyImage({ ...data, alt: data.alt ?? null,
     borderWidth: data.borderWidth ?? 0, borderColor: data.borderColor ?? null, borderStyle: data.borderStyle ?? null });
   const applyImagePosition = (data: ImagePositionData) => applyImage({ position: { horizontal: data.horizontal, vertical: data.vertical },
@@ -116,9 +177,11 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
     width: typeof imageData.width === 'number' ? imageData.width : typeof imageData.widthEmu === 'number' ? imageData.widthEmu / 9525 : undefined,
     height: typeof imageData.height === 'number' ? imageData.height : typeof imageData.heightEmu === 'number' ? imageData.heightEmu / 9525 : undefined,
   } : undefined;
+  const imageState = object?.value?.kind === 'object' ? { wrap: imageWrapTargetFromAttrs(object.value.properties) } : null;
   return { openLink, applyPopupLink: (displayText: string, href: string, tooltip?: string) => changeLinkAtCaret({ displayText, url: href, tooltip }),
     removeLinkAtCaret: () => changeLinkAtCaret(null), openNotes, openImage, openImagePosition: () => openImage(true), imagePropertiesAvailable: object?.value?.kind === 'object',
-    openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell,
+    imageState, applyImageWrap, applyImageTransform,
+    openPageSetup: page.handleOpenPageSetup, openWatermark: watermark.handleOpenWatermark, openSplitCell, openTableProperties,
     element: <>
       {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps} onApply={page.handlePageSetupApply} />}
       {watermark.showWatermark && <WatermarkDialog isOpen onClose={watermark.close} current={watermark.currentWatermark}
@@ -128,6 +191,9 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
         onRemove={hyperlink ? () => { void applyLink(null); } : undefined} />}
       {notes?.value?.kind === 'section' && <FootnotePropertiesDialog isOpen onClose={() => setNotes(null)} onApply={applyNotes}
         footnotePr={notes.value.properties.footnotePr} endnotePr={notes.value.properties.endnotePr} />}
+      {tableProps && <TablePropertiesDialog isOpen onClose={() => setTableProps(null)}
+        currentProps={tableProps.initial as Record<string, unknown>}
+        onApply={(props) => { void tableProps.apply(props); setTableProps(null); }} />}
       {split && <SplitCellDialog isOpen onClose={() => setSplit(null)} initialRows={split.defaults.initialRows}
         initialCols={split.defaults.initialCols} minRows={split.defaults.minRows} minCols={split.defaults.minCols}
         onApply={(rows, columns) => { void split.apply(rows, columns); setSplit(null); }} />}

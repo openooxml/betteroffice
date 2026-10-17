@@ -15,6 +15,7 @@ import initWasmModule, {
 import type { InitInput } from './generated/xlsx_wasm.js';
 import * as xlsxWasm from './generated/xlsx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
@@ -264,6 +265,14 @@ export interface MergedRange {
   end: CellPoint;
 }
 
+export interface WorkbookHyperlink {
+  range: MergedRange;
+  externalTarget?: string;
+  location?: string;
+  tooltip?: string;
+  display?: string;
+}
+
 export interface HistoryState {
   canUndo: boolean;
   canRedo: boolean;
@@ -489,6 +498,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
   /** Move a range within one sheet and rewrite references in one native undo step. */
   moveRange(sheet: number, source: string, destination: string): EditResult;
+  setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
+  removeHyperlink(sheet: number, range: MergedRange): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -997,6 +1008,20 @@ function wrapWorkbookDocument(
     moveRange(sheet: number, source: string, destination: string): EditResult {
       return parseJson(() => doc.moveRangeJson(JSON.stringify({ sheet, source, destination })), true);
     },
+    setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult {
+      return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{
+        type: 'setHyperlink', sheet, hyperlink: {
+          range: hyperlink.range,
+          external_target: hyperlink.externalTarget ?? null,
+          location: hyperlink.location ?? null,
+          tooltip: hyperlink.tooltip ?? null,
+          display: hyperlink.display ?? null,
+        },
+      }] })), true);
+    },
+    removeHyperlink(sheet: number, range: MergedRange): EditResult {
+      return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{ type: 'removeHyperlink', sheet, range }] })), true);
+    },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);
     },
@@ -1284,9 +1309,9 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
     if (
       !Number.isSafeInteger(options.clientId) ||
       options.clientId <= 0 ||
-      options.clientId > Number.MAX_SAFE_INTEGER
+      options.clientId >= OPEN_SYNC_CLIENT
     ) {
-      throw new RangeError('clientId must be a nonzero safe integer');
+      throw new RangeError('clientId must be a nonzero safe integer below Number.MAX_SAFE_INTEGER - 1');
     }
     return options.clientId;
   }
@@ -1300,7 +1325,7 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
   do {
     random.getRandomValues(words);
     value = (words[0] & 0x1fffff) * 0x1_0000_0000 + words[1];
-  } while (value === 0);
+  } while (value === 0 || value >= OPEN_SYNC_CLIENT);
   return value;
 }
 

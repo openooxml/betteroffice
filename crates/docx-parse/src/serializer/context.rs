@@ -43,6 +43,10 @@ pub(crate) struct RecordedParagraphs {
     /// Every recorded paragraph in writing order: its `sourceOrdinal`, or `None` for the next
     /// of `inserted`.
     pub(crate) order: Vec<Option<u32>>,
+    /// Whether one source paragraph was written twice differently, or one with a
+    /// `sourceOrdinal` the part does not address was written; only the first is recorded.
+    pub(crate) conflict: bool,
+    pub(crate) token_prefix: Option<String>,
     /// The empty paragraph written for each table cell without content, as the number of
     /// `order` entries written before it.
     pub(crate) placeholders: Vec<usize>,
@@ -129,48 +133,58 @@ impl SerializerContext {
     }
 
     /// Records the XML written for the model paragraphs whose `sourceOrdinal` is in `expected`
-    /// until [`Self::end_splice`].
-    pub(crate) fn begin_splice(&mut self, expected: impl IntoIterator<Item = u32>) {
+    /// until [`Self::end_splice`], with tokens when `token_prefix` is supplied.
+    pub(crate) fn begin_splice(
+        &mut self,
+        expected: impl IntoIterator<Item = u32>,
+        token_prefix: Option<String>,
+    ) {
         self.splice = Some(SpliceRecorder {
             expected: expected.into_iter().collect(),
+            recorded: RecordedParagraphs {
+                token_prefix,
+                ..RecordedParagraphs::default()
+            },
             ..SpliceRecorder::default()
         });
     }
 
-    /// The recorded paragraphs; `None` when one source paragraph was written twice differently,
-    /// or one with a `sourceOrdinal` the part does not address was written.
+    /// The recorded paragraphs.
     pub(crate) fn end_splice(&mut self) -> Option<RecordedParagraphs> {
-        self.splice
-            .take()
-            .filter(|recorder| !recorder.conflict)
-            .map(|recorder| recorder.recorded)
+        self.splice.take().map(|recorder| RecordedParagraphs {
+            conflict: recorder.conflict,
+            ..recorder.recorded
+        })
     }
 
     /// Records a paragraph written outside any other paragraph: by its `sourceOrdinal`, which
-    /// must be one the part addresses, or as a paragraph the source lacks.
-    pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) {
+    /// must be one the part addresses, or as a paragraph the source lacks. The token to write
+    /// before it, if any.
+    pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) -> Option<String> {
         if !self.rendered_page_breaks.is_empty() {
-            return;
+            return None;
         }
-        let Some(recorder) = self.splice.as_mut() else {
-            return;
-        };
+        let recorder = self.splice.as_mut()?;
         let recorded = &mut recorder.recorded;
         match ordinal {
             None => recorded.inserted.push(xml.to_owned()),
             Some(ordinal) if recorder.expected.contains(&ordinal) => {
                 if let Some(previous) = recorded.written.get(&ordinal) {
                     recorder.conflict |= previous != xml;
-                    return;
+                    return None;
                 }
                 recorded.written.insert(ordinal, xml.to_owned());
             }
             Some(_) => {
                 recorder.conflict = true;
-                return;
+                return None;
             }
         }
         recorded.order.push(ordinal);
+        recorded
+            .token_prefix
+            .as_deref()
+            .map(|prefix| super::permissions::token(prefix, recorded.order.len() - 1))
     }
 
     /// Records the empty paragraph written outside any other paragraph for a table cell

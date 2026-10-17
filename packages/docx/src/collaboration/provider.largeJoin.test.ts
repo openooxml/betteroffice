@@ -72,7 +72,7 @@ function replicaOf(session: YrsSession, atomic = true): { replica: Collaboration
 
 /**
  * Opens the source first, so only the joiner's SyncStep1 is answered: the joiner receives the source's state. The pair
- * is point-to-point, so the source chunks its answer at 1 MiB.
+ * is point-to-point, so the source chunks its answer at 1 MiB. `answer` leaves out the source's SyncStep1 back.
  */
 function join(
   source: CollaborationReplica,
@@ -93,11 +93,12 @@ function join(
   sourceTransport.emit({ type: 'open' });
   sourceTransport.sent = [];
   joinerTransport.emit({ type: 'open' });
-  const answer = sourceTransport.sent.flatMap((frame) => decodeMessages(frame));
+  const frames = sourceTransport.sent.filter((frame) => decodeMessages(frame)[0]?.type !== 'sync-step-1');
+  const answer = frames.flatMap((frame) => decodeMessages(frame));
   const { synced, status } = joinerProvider;
   sourceProvider.destroy();
   joinerProvider.destroy();
-  return { synced, status, errors, frames: sourceTransport.sent, answer };
+  return { synced, status, errors, frames, answer };
 }
 
 async function sessionWithState(clientId: number, bytes: number, paragraphBytes: number): Promise<YrsSession> {

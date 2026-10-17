@@ -31,6 +31,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { requireUnreservedClientId } from '../collaboration/protocol';
 import type {
   DocxEditRefusal,
   DocxEditRequest,
@@ -110,6 +111,7 @@ export * from './contentControls';
 export * from './readTypes';
 export * from './findParagraphs';
 export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
+export { breakRefusedWhileSuggesting } from './sectionBreak';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
@@ -626,6 +628,8 @@ export interface YrsRenderEnv {
   numericIds?: Record<string, number>;
   /** Include hidden text in visible layout without changing the document. */
   showHiddenText?: boolean;
+  /** Report borderless table cell edges as view-only guides on each display page. */
+  showTableGridlines?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
   /** View-only layout reservations; saves and paged exports leave them out. @internal */
@@ -948,6 +952,12 @@ export interface YrsCellBorder {
 export type YrsCellBorders = Partial<
   Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
+
+export interface YrsTablePropertiesPatch {
+  width?: number | null;
+  widthType?: string | null;
+  justification?: 'left' | 'center' | 'right' | null;
+}
 
 /** Undo grouping for tracked local transactions. */
 export type YrsUndoCaptureMode = 'auto' | 'manual';
@@ -1321,6 +1331,7 @@ export interface YrsSession extends CollaborationReplica {
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
+  setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
   insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
@@ -1375,9 +1386,13 @@ export interface YrsSession extends CollaborationReplica {
   setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
   /** Commits image geometry at a paragraph-keyed position; reaches images that share an id. */
   setImageGeometryAt(at: YrsLoc, geometry: YrsImageGeometry): void;
-  /** Inserts a native page-break embed at a paragraph-keyed location. */
-  insertPageBreak(at: YrsLoc): void;
-  /** Inserts a native section-break embed at a paragraph-keyed location. */
+  /**
+   * Inserts a native page-break embed at a paragraph-keyed location, past the
+   * paragraph's leading blocks; inside a paragraph it splits the paragraph
+   * first. Returns where the break landed.
+   */
+  insertPageBreak(at: YrsLoc): YrsLoc;
+  /** Splits the paragraph at a paragraph-keyed location into a section boundary that starts the next section with `type`. */
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
@@ -1656,7 +1671,7 @@ export interface CreateYrsSessionOptions {
  * it lazily so non-editor consumers avoid the wasm startup cost.
  */
 export async function createYrsSession(options?: CreateYrsSessionOptions): Promise<YrsSession> {
-  const clientId = options?.clientId ?? randomClientId();
+  const clientId = requireUnreservedClientId(options?.clientId ?? randomClientId());
   const wasm = await import('./wasm/index');
   await wasm.preloadEditWasm();
   return wrapSession(wasm.createEditSession(clientId), clientId);

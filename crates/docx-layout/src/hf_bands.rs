@@ -624,6 +624,7 @@ fn compose_region(
         shape,
         field_widths: field_widths.as_ref(),
         reservations: None,
+        gridlines: None,
     };
     let ctx = &ctx;
     let content_width = page.size.w - page.margins.left - page.margins.right;

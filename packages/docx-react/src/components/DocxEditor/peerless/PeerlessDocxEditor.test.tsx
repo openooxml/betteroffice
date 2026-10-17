@@ -36,6 +36,7 @@ import { createEchoPainter } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
+import * as clipboard from './clipboard';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -120,7 +121,8 @@ class FakeWorker {
     } else if (message.type === 'save') {
       response = { id: message.id, ok: true, saved: Uint8Array.of(4, 5).buffer, updates: [], version: 'saved' };
     } else if (message.type === 'documentRead') {
-      response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'headings'
+      response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'clipboardSlice' ? { text: 'Selected text', fragment: null }
+        : message.read.kind === 'headings'
         ? [{ story: 'body', paraId: 'heading', text: 'Worker heading', level: 0, position: 1 }]
         : message.read.kind === 'sectionProperties' ? { version: 'worker-version', sections: [{ section: 'final', properties: { marginLeft: 2160 } }], paragraphs: [] }
         : message.read.kind === 'searchText' ? { matches: [], carried: -1 }
@@ -140,7 +142,8 @@ class FakeWorker {
         },
         frame: {
           coversThroughSeq: 0, revision: 1,
-          payload: { frame: new ArrayBuffer(0), caret: { frameEpoch: 1, caretRect: null }, layoutRevision },
+          payload: { frame: commandFrame(1).payload.frame, caret: { frameEpoch: 1, caretRect: null }, layoutRevision,
+            stagedPresentation: { frameEpoch: 1, pages: [] } },
         },
       };
       this.initial = initial;
@@ -168,6 +171,7 @@ class FakeWorker {
             cancelled ? { reason: 'dependency-refused' } : {}),
         }],
         editState: { ...state.editState, readOnly },
+        ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
       };
       this.initial = { ...state, ...ack };
       response = { id: message.id, ok: true, commandAck: ack };
@@ -914,17 +918,19 @@ test('preview paint hides opening while commands and plugins wait for handoff', 
 
 test('worker render props initialize layout and update through the shared command tail', async () => {
   const theme = { colorScheme: { accent1: 'FF0000' } } as DocxEditorProps['theme'];
-  const view = render(<DocxEditor {...peerlessProps} theme={theme} colorMode="dark" showHiddenText readOnly />);
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} theme={theme} colorMode="dark" showHiddenText showTableGridlines readOnly />);
   await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
   const opened = requests.find((request) => request.type === 'commandInit');
   if (opened?.type !== 'commandInit') throw new Error('Worker did not initialize');
-  expect(JSON.parse(opened.request.layoutInput).renderEnv).toMatchObject({ themeColors: { accent1: 'FF0000' }, showHiddenText: true });
+  expect(JSON.parse(opened.request.layoutInput).renderEnv).toMatchObject({ themeColors: { accent1: 'FF0000' }, showHiddenText: true, showTableGridlines: true });
+  expect(ref.current!.commands.getState('tableGridlines').active).toBe(true);
   expect(view.getByTestId('docx-editor').classList.contains('dark')).toBe(true);
-  view.rerender(<DocxEditor {...peerlessProps} theme={{ colorScheme: { accent1: '0000FF' } } as DocxEditorProps['theme']}
-    colorMode="light" showHiddenText={false} readOnly />);
+  view.rerender(<DocxEditor {...peerlessProps} ref={ref} theme={{ colorScheme: { accent1: '0000FF' } } as DocxEditorProps['theme']}
+    colorMode="light" showHiddenText={false} showTableGridlines={false} readOnly />);
   await waitFor(() => expect(requests.filter((request) => request.type === 'edit' && request.command.kind === 'setRenderEnvironment')).toHaveLength(1));
   expect(requests.find((request) => request.type === 'edit' && request.command.kind === 'setRenderEnvironment')).toMatchObject({ command: {
-    payload: { themeColors: { accent1: '0000FF' }, showHiddenText: false },
+    payload: { themeColors: { accent1: '0000FF' }, showHiddenText: false, showTableGridlines: false },
   } });
   expect(view.getByTestId('docx-editor').classList.contains('dark')).toBe(false);
   expect(requests.filter((request) => request.type === 'openSource')).toHaveLength(1);
@@ -2166,4 +2172,46 @@ test('each file load waits for its own bytes and opens one worker when revisitin
     await pending;
     expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(4);
   } finally { finish?.(new Uint8Array(source).buffer); view.unmount(); }
+});
+
+
+test('the real worker editor serves one copy event from its prefetched selection without the async API', async () => {
+  surface.mockRestore();
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  restorers.push(() => { if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor); else Reflect.deleteProperty(navigator, 'clipboard'); });
+  const onCopy = mock(() => {});
+  const onError = mock(() => {});
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} onCopy={onCopy} onError={onError} />);
+  const input = await view.findByRole('textbox', { name: 'Document input' });
+  await act(async () => { fireEvent.keyDown(input, { key: 'a', ctrlKey: true }); });
+  await waitFor(() => expect(requests.filter(r => r.type === 'documentRead' && r.read.kind === 'clipboardSlice')).toHaveLength(1));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  const written = new Map<string, string>();
+  const data = { setData: (type: string, text: string) => { written.set(type, text); },
+    getData: (type: string) => written.get(type) ?? '' } as unknown as DataTransfer;
+  fireEvent.copy(input, { clipboardData: data });
+  expect(data.getData('text/plain')).toBe('Selected text');
+  expect(data.getData('text/html')).toBe('');
+  await waitFor(() => expect(onCopy).toHaveBeenCalledTimes(1));
+  expect(onError).not.toHaveBeenCalled();
+});
+
+
+test('unmount disposes the real worker editor clipboard subscription', async () => {
+  surface.mockRestore();
+  const create = clipboard.createClipboardPrefetch;
+  const disposals: ReturnType<typeof mock>[] = [];
+  const factory = spyOn(clipboard, 'createClipboardPrefetch').mockImplementation(options => {
+    const prefetch = create(options);
+    const dispose = mock(prefetch.dispose);
+    disposals.push(dispose);
+    return { ...prefetch, dispose };
+  });
+  restorers.push(() => factory.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await view.findByRole('textbox', { name: 'Document input' });
+  await waitFor(() => expect(disposals).toHaveLength(1));
+  view.unmount();
+  expect(disposals[0]).toHaveBeenCalledTimes(1);
 });
