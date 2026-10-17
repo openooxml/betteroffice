@@ -188,6 +188,7 @@ class FakeWorker {
         message.read.kind === "toolbarMetadata" ? { styles: [], fontFamilies: [] }
         : message.read.kind === "sectionProperties" ? { version: "0", sections: [], paragraphs: [] }
         : message.read.kind === "readParagraphs" ? { ok: true, view: "accepted", version: "0", paragraphs: [] }
+        : message.read.kind === "reviewSnapshot" ? null
         : [] } };
     }
     this.reply(response);
