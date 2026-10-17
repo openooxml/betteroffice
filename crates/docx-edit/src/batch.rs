@@ -494,6 +494,21 @@ pub(crate) fn refusal(version: DocumentVersion, failure: EditFailure) -> EditRef
     EditRefusal { version, failure }
 }
 
+fn holds_pending<T: ReadTxn>(txn: &T) -> bool {
+    txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
+}
+
+fn unintegrated(version: DocumentVersion) -> EditRefusal {
+    refusal(
+        version,
+        failure(
+            EditFailureCode::Unsupported,
+            "the document holds updates that are not integrated yet".to_owned(),
+            None,
+        ),
+    )
+}
+
 /// What one step did, in request order. Ranges use the final accepted view; a deletion reports
 /// its collapsed boundary, and removed paragraph ids are history, not anchors.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2728,15 +2743,8 @@ impl EditingDoc {
             ));
         }
         let txn = self.yrs_doc().transact();
-        if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-            return Err(refusal(
-                version,
-                failure(
-                    EditFailureCode::Unsupported,
-                    "the document holds updates that are not integrated yet".to_owned(),
-                    None,
-                ),
-            ));
+        if holds_pending(&txn) {
+            return Err(unintegrated(version));
         }
         let source = self.source_metadata();
         let mut views = Views::committed(self, &txn);
@@ -3049,13 +3057,14 @@ impl EditingDoc {
     /// batch commits: the `accept` ids apply and the `reject` ids roll back, as
     /// [`EditingDoc::accept_change`] and [`EditingDoc::reject_change`] resolve them. An id that
     /// matches nothing is skipped; any other failure leaves the document unchanged. Returns the
-    /// ids resolved.
+    /// ids resolved, or an `unsupported` refusal while the document holds updates that are not
+    /// integrated yet.
     pub fn settle_revisions(
         &self,
         accept: &[crate::RevisionId],
         reject: &[crate::RevisionId],
         history: &UndoSession,
-    ) -> crate::OpResult<Vec<crate::RevisionId>> {
+    ) -> crate::OpResult<Result<Vec<crate::RevisionId>, EditRefusal>> {
         if !history.belongs_to(self) {
             return Err(EditError::InvalidUpdate(
                 "the undo history belongs to another document".to_owned(),
@@ -3068,11 +3077,8 @@ impl EditingDoc {
         );
         let (state, state_vector) = {
             let txn = self.yrs_doc().transact();
-            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-                return Err(EditError::InvalidUpdate(
-                    "the document holds updates that are not integrated yet".to_owned(),
-                )
-                .into());
+            if holds_pending(&txn) {
+                return Ok(Err(unintegrated(self.version())));
             }
             (
                 deterministic::encode_state_as_update_v1(&txn, &StateVector::default()),
@@ -3098,7 +3104,7 @@ impl EditingDoc {
             }
         }
         if resolved.is_empty() {
-            return Ok(resolved);
+            return Ok(Ok(resolved));
         }
         let update = deterministic::encode_diff_v1(&stage.yrs_doc().transact(), &state_vector);
         let adoption = Update::decode_v1(&update)
@@ -3114,11 +3120,8 @@ impl EditingDoc {
                 )
                 .into());
             }
-            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-                return Err(EditError::InvalidUpdate(
-                    "the document holds updates that are not integrated yet".to_owned(),
-                )
-                .into());
+            if holds_pending(&txn) {
+                return Ok(Err(unintegrated(self.version())));
             }
             txn.apply_update(adoption)
                 .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
@@ -3126,7 +3129,7 @@ impl EditingDoc {
         history.add_undo_barrier();
         self.id_counter
             .store(stage.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
-        Ok(resolved)
+        Ok(Ok(resolved))
     }
 
     /// Drops the authored values of the text controls a committed batch filled, in a transaction
@@ -3151,15 +3154,8 @@ impl EditingDoc {
         {
             return Err(stale(current));
         }
-        if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-            return Err(refusal(
-                current,
-                failure(
-                    EditFailureCode::Unsupported,
-                    "the document holds updates that are not integrated yet".to_owned(),
-                    None,
-                ),
-            ));
+        if holds_pending(&txn) {
+            return Err(unintegrated(current));
         }
         Ok(())
     }

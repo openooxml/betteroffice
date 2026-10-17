@@ -283,6 +283,45 @@ test('a worker replica whose projection fails with no update pending fails loudl
     expect(b.client.hasFailed()).toBe(true);
   } finally { provider.destroy(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
+
+test('a comment that reaches a worker replica before the text it is anchored on lays out and resolves once the text arrives', async () => {
+  const a = await open(9201);
+  const b = await open(9202, a.engine.encodeState());
+  const c = await open(9203, a.engine.encodeState());
+  let fromA: ArrayBuffer[] = [];
+  const fromB: ArrayBuffer[] = [];
+  const offA = a.client.onCollabUpdates(event => fromA.push(...event.updates.map(u => u.slice().buffer)));
+  const offB = b.client.onCollabUpdates(event => fromB.push(...event.updates.map(u => u.slice().buffer)));
+  const apply = (target: typeof c, update: ArrayBuffer) =>
+    target.session.submit('applyRemoteUpdate', { update }, merge).ack.then(ack => ack.status, (error: unknown) => String(error));
+  try {
+    expect((await b.session.submit('insertText', { text: 'B' }).ack).status).toBe('applied');
+    for (const update of fromB) expect(await apply(a, update)).toBe('applied');
+    fromA = [];
+    const [first, second] = a.engine.paragraphs('body').map(paragraph => paragraph.paraId);
+    const range = { story: 'body', start: { paraId: first!, offset: 4 }, end: { paraId: first!, offset: 5 } };
+    expect((await a.session.submit('addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Note',
+      expectVersion: a.engine.proposalEngine.version() }).ack).status).toBe('applied');
+    const at = { story: 'body', paraId: second!, offset: 0 };
+    expect((await a.session.submit('insertText', { selection: { anchor: at, focus: at }, text: 'A' }).ack).status).toBe('applied');
+    expect(fromA.length).toBeGreaterThan(0);
+
+    for (const update of fromA) expect(await apply(c, update)).toBe('applied');
+    expect(c.client.hasFailed()).toBe(false);
+    const id = a.engine.listComments()[0]!.id;
+    expect(c.engine.listComments().map(comment => comment.id)).toEqual([id]);
+    expect(await commentedText(c)).toBe('');
+    expect((await c.client.save({ comments: [] })).bytes.byteLength).toBeGreaterThan(0);
+    for (const update of fromB) expect(await apply(c, update)).toBe('applied');
+    expect(c.engine.resolveComment(id)).toEqual(a.engine.resolveComment(id));
+    const highlighted = await commentedText(a);
+    expect(highlighted).not.toBe('');
+    expect(await commentedText(c)).toBe(highlighted);
+    expect(c.engine.paragraphs('body')).toEqual(a.engine.paragraphs('body'));
+    const end = { story: 'body', paraId: first!, offset: 5 };
+    expect((await c.session.submit('insertText', { selection: { anchor: end, focus: end }, text: 'C' }).ack).status).toBe('applied');
+  } finally { offA(); offB(); a.session.dispose(); b.session.dispose(); c.session.dispose(); }
+}, TIMEOUT);
 test('update push precedes command ack and queued typing survives a merge', async () => {
   const a = await open(9201);
   const b = await open(9202, a.engine.encodeState());
@@ -461,6 +500,45 @@ test('a byte source saves the shared stories it joined with and leaves a plain o
       expect(joined.header).toEqual(['HeaderSeed shared']);
     } finally { shared.session.dispose(); }
   } finally { remote.destroy(); plain.session.dispose(); }
+}, TIMEOUT);
+
+test('worker replicas that number comments in different local orders save and reopen the same comments', async () => {
+  const a = await open(9202);
+  const b = await open(9201, a.engine.encodeState());
+  const comment = (replica: Replica, index: number, body: string) => {
+    const paraId = replica.engine.paragraphs('body')[index]!.paraId;
+    return replica.session.submit('addComment', { ranges: [{ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 3 } }],
+      author: 'Ada', date: '2026-01-01', body, expectVersion: replica.engine.proposalEngine.version() }).ack.then(ack => ack.status);
+  };
+  const exchange = (target: Replica, source: Replica) =>
+    target.session.submit('applyRemoteUpdate', { update: remoteUpdate(target, source.engine) }, merge).ack.then(ack => ack.status);
+  const saved = async (replica: Replica) => {
+    const bytes = new Uint8Array((await replica.client.save({ comments: [] })).bytes);
+    const parts = unzipContainer(bytes);
+    const xml = new TextDecoder().decode(parts['word/comments.xml']!);
+    const ids = Object.fromEntries([...xml.matchAll(/<w:comment w:id="(\d+)"[^>]*>([\s\S]*?)<\/w:comment>/gu)]
+      .map(match => [[...match[2]!.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/gu)].map(run => run[1]).join(''), match[1]]));
+    const markers = new TextDecoder().decode(parts['word/document.xml']!).split('</w:p>').slice(0, 2)
+      .map(paragraph => [...paragraph.matchAll(/<w:comment(?:RangeStart|RangeEnd|Reference) w:id="(\d+)"/gu)].map(match => match[1]));
+    const reopened = await createYrsSession({ clientId: 9298 });
+    try {
+      reopened.openDocx(bytes.slice(), true);
+      return { xml, ids, markers, reopened: reopened.listComments().map(listed => listed.id).sort() };
+    } finally { reopened.destroy(); }
+  };
+  try {
+    expect(await comment(a, 0, 'First')).toBe('applied');
+    expect((await saved(a)).ids).toEqual({ First: '1' });
+    expect(await comment(b, 1, 'Second')).toBe('applied');
+    expect((await saved(b)).ids).toEqual({ Second: '1' });
+    expect(await exchange(a, b)).toBe('applied');
+    expect(await exchange(b, a)).toBe('applied');
+    const left = await saved(a);
+    expect(Object.values(left.ids).sort()).toEqual(['1', '2']);
+    expect(left.markers).toEqual([Array(3).fill(left.ids.First), Array(3).fill(left.ids.Second)]);
+    expect(left.reopened).toEqual(['1', '2']);
+    expect(await saved(b)).toEqual(left);
+  } finally { a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
 
 test('a merge that deletes the story holding the local selection repairs the confirmed selection', async () => {
@@ -643,6 +721,10 @@ function relay(from: Replica, to: Replica) {
 
 const pageTexts = (frame: RetainedFrame) => frame.displayList.pages.map(({ primitives }) => primitives
   .map(primitive => primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : '').join(''));
+
+const commentedText = async (replica: Replica) => applyFrameDeltaOwned(null, decodeFrameDelta((await replica.client.requestFullFrame()).frame!.payload.frame))
+  .displayList.pages.flatMap(({ primitives }) => primitives)
+  .map(primitive => (primitive.kind === 'glyphRun' || primitive.kind === 'text') && primitive.commentIds?.length ? primitive.text : '').join('');
 
 async function sectionView(replica: Replica) {
   const frame = applyFrameDeltaOwned(null, decodeFrameDelta((await replica.client.requestFullFrame()).frame!.payload.frame));

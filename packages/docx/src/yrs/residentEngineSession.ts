@@ -24,6 +24,7 @@ import type {
 } from '../collaboration/types';
 import { requireUnreservedClientId } from '../collaboration/protocol';
 import type {
+  DocxEditRefusal,
   DocxEditResult,
   DocxFindTextResult,
   DocxReadParagraphsResult,
@@ -197,7 +198,7 @@ export type ResidentEngineSession = Pick<
   sectionProperties(): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
-  commentProjection(): ResidentCommentProjection | null;
+  commentProjection(fresh?: boolean): ResidentCommentProjection | null;
   mediaDataUrl(token: string): string | null;
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
@@ -497,8 +498,11 @@ export async function createResidentEngineSession(
       >,
     settleRevisions: (accept, reject) => {
       const since = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
-      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      const settled = JSON.parse(
+        session.settle_revisions_json(JSON.stringify({ accept, reject }))
+      ) as { ok: true } | DocxEditRefusal;
       markProjectionStories(storiesChangedSince(since).stories);
+      return settled.ok ? undefined : settled.failure;
     },
     ...(typeof session.begin_shared_reads === 'function' &&
     typeof session.end_shared_reads === 'function'
@@ -602,7 +606,7 @@ export async function createResidentEngineSession(
       const at = session.clear_cell_selection();
       return at === undefined ? null : JSON.parse(at) as YrsLoc;
     },
-    commentProjection: () => partBase ? projectResidentComments(resident, commentAliases) : null,
+    commentProjection: fresh => partBase ? projectResidentComments(resident, commentAliases, fresh) : null,
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();
