@@ -38,6 +38,8 @@ import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
 import { editorSaveKeys } from './editorSaveKeys';
+import { splitSection } from './sectionBreak';
+import type { SectionProperties } from '../types/document';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -311,6 +313,22 @@ export function wrapSession(
           head: { ...value.head },
         }
       : null;
+
+  const finalSectionProperties = (): SectionProperties => {
+    type Body = { body?: { finalSectionProperties?: SectionProperties } };
+    const parts = JSON.parse(session.part_metadata_json()) as Body;
+    const properties = JSON.parse(session.document_properties_json()) as { metadata?: Body };
+    const source = docxSourceKeys
+      ? (JSON.parse(docxSourceKeys.metadata) as { finalSectionProperties?: SectionProperties })
+      : undefined;
+    const margins = JSON.parse(session.section_margins_json()) as { final?: SectionProperties };
+    return {
+      ...(parts.body?.finalSectionProperties ??
+        properties.metadata?.body?.finalSectionProperties ??
+        source?.finalSectionProperties),
+      ...margins.final,
+    };
+  };
 
   const ensureUndo = (targetStory?: string): void => {
     if (!undoTracked) {
@@ -1255,11 +1273,17 @@ export function wrapSession(
     },
     insertPageBreak: (at) => {
       ensureUndo(at.story);
-      mutate(() => session.insert_page_break(at.story, at.paraId, at.offset));
+      mutate(() => {
+        const target =
+          at.offset > 0
+            ? { story: at.story, paraId: facade.splitParagraph(at).secondParaId, offset: 0 }
+            : at;
+        session.insert_page_break(target.story, target.paraId, target.offset);
+      });
     },
     insertSectionBreak: (at, type) => {
       ensureUndo(at.story);
-      mutate(() => session.insert_section_break(at.story, at.paraId, at.offset, type));
+      mutate(() => splitSection(facade, at, (closing) => closing ?? finalSectionProperties(), type));
     },
     insertWatermark: (at, watermark) => {
       ensureUndo(at.story);
