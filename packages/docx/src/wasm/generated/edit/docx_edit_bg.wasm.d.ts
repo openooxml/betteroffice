@@ -203,6 +203,7 @@ export const editsession_set_part_metadata: (a: number, b: number, c: number, d:
 export const editsession_set_partial_document: (a: number, b: number) => void;
 export const editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+export const editsession_set_table_properties: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_undo_input_time: (a: number, b: number, c: number) => void;

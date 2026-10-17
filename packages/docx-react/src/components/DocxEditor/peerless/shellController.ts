@@ -1,7 +1,9 @@
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
 import { WASM32_MEMORY_LIMIT_BYTES, type DocxEditRequest, type DocxEditResult, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
   type ResidentFontEnvironment, type ResidentFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
-import { computeSplitDialogDefaults } from '@betteroffice/docx/utils';
+import { computeSplitDialogDefaults, resolveColorToHex } from '@betteroffice/docx/utils';
+import type { YrsCellBorders } from '@betteroffice/docx/yrs';
+import { getBuiltinTableStyle } from '../../ui/TableStyleGallery';
 import { normalizeFontFamilies } from '@betteroffice/docx/utils/fontOptions';
 import { DEFAULT_FONTS } from '../../ui/FontPicker';
 import { DEFAULT_STYLES } from '../../ui/StylePicker';
@@ -56,9 +58,11 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   onImageWrap?: (wrap: ImageLayoutTarget) => void | boolean | Promise<boolean | DocxCommandResult>;
   onImageTransform?: (action: DocxImageTransform) => void | boolean | Promise<boolean | DocxCommandResult>;
   zoom: number;
+  tableGridlines?: boolean;
   isDark?: boolean;
   focus(): void;
   onZoom?(zoom: number): void;
+  onTableGridlines?(visible: boolean): void;
   read: ResidentEngineWorkerClient['documentRead'];
   readAt?: ResidentEngineWorkerClient['documentReadAt'];
   search?: DocxHostSearch;
@@ -74,6 +78,8 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   pickImage?(insert: (image: Readonly<Record<string, unknown>>) => Promise<DocxCommandResult>): void;
   openSplitCell?(defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
     apply: (rows: number, columns: number) => Promise<DocxCommandResult>): void;
+  openTableProperties?(initialProps: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null },
+    apply: (props: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }) => Promise<DocxCommandResult>): void;
 }
 
 export function createPeerlessShellController(initial: Options) {
@@ -102,6 +108,12 @@ export function createPeerlessShellController(initial: Options) {
   let proposalTail: Promise<unknown> = Promise.resolve();
   let documentKey: unknown;
   let generation = 0;
+  let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
+  const syncBorderPen = () => {
+    const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
+    const resolved = cellColor ? resolveColorToHex(cellColor, options.theme ?? undefined) : undefined;
+    if (resolved) borderPen = { ...borderPen, color: { rgb: resolved } };
+  };
   const waiting = new Set<(error: Error) => void>();
   const reviewReads = new WeakMap<PeerlessEditSessionBinding, Promise<ResidentReviewSnapshot>>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
@@ -148,16 +160,19 @@ export function createPeerlessShellController(initial: Options) {
       status: snapshot.status === 'failed' ? 'unavailable' : snapshot.status === 'opening' ? 'loading' : snapshot.status,
       readOnly: options.readOnly === true || (mode() !== 'viewing' && view?.editState?.readOnly === true),
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
-      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
+      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
+      supportedCommands: new Set(['zoom', 'tableGridlines', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
         'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
-        'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor']),
+        'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
+        'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
+        'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle', 'tableProperties', 'openTableProperties']),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
-      table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext } : null,
+      table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext,
+        table: { attrs: { justification: view.editState.tableContext.justification } } } : null,
       image: options.image !== undefined ? options.image : options.imagePropertiesAvailable ? { wrap: null } : null, revisions: [], revisionIds: new Set(), currentRevisionId: null,
       styles: workerStyleOptions(metadata && metadata.binding === binding && metadata.version === view?.version ? metadata.value.styles : [], translate), fonts: [
         ...choices.map(font => ({ args: { family: getPrimaryFontFamily(font.fontFamily) || font.name }, label: font.name,
@@ -344,7 +359,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'open', 'print', 'insertTable'].includes(id),
+    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'tableGridlines', 'open', 'print', 'insertTable'].includes(id),
     admit: async (operation) => {
       const current = binding;
       if (current && snapshot.status === 'ready') {
@@ -393,6 +408,40 @@ export function createPeerlessShellController(initial: Options) {
             const normalized = color === null || color === undefined || color === '' ? null : color.replace(/^#/, '');
             return submit({ kind: 'setTableCellShading', payload: { color: normalized } });
           }
+          case 'borderAll': case 'borderOutside': case 'borderInside': case 'borderNone':
+          case 'borderTop': case 'borderBottom': case 'borderLeft': case 'borderRight': {
+            const pen = borderPen;
+            const all = (border: typeof pen): YrsCellBorders => ({ top: border, bottom: border, left: border, right: border, insideH: border, insideV: border });
+            const borders: YrsCellBorders = key === 'borderAll' ? all(pen)
+              : key === 'borderOutside' ? { top: pen, bottom: pen, left: pen, right: pen }
+              : key === 'borderInside' ? { insideH: pen, insideV: pen }
+              : key === 'borderNone' ? all({ style: 'none', size: 0, color: { rgb: '000000' } })
+              : { [key.slice('border'.length).toLowerCase()]: pen } as YrsCellBorders;
+            return submit({ kind: 'setTableBorders', payload: { borders } });
+          }
+          case 'borderColor': {
+            borderPen = { ...borderPen, color: { rgb: (args as { color: string }).color.replace(/^#/, '') } };
+            const pen = borderPen;
+            return submit({ kind: 'setTableBorders', payload: { borders: { top: pen, bottom: pen, left: pen, right: pen, insideH: pen, insideV: pen } } });
+          }
+          case 'borderWidth': {
+            borderPen = { ...borderPen, size: (args as { size: number }).size };
+            const pen = borderPen;
+            return submit({ kind: 'setTableBorders', payload: { borders: { top: pen, bottom: pen, left: pen, right: pen, insideH: pen, insideV: pen } } });
+          }
+          case 'cellBorder': {
+            const action = args as { side: string; style: string; size: number; color: string };
+            const border = { style: action.style, size: action.size, color: { rgb: action.color.replace(/^#/, '') } };
+            const borders: YrsCellBorders = action.side === 'all'
+              ? { top: border, bottom: border, left: border, right: border, insideH: border, insideV: border }
+              : { [action.side]: border } as YrsCellBorders;
+            return submit({ kind: 'setTableBorders', payload: { borders } });
+          }
+          case 'applyTableStyle': {
+            const preset = getBuiltinTableStyle((args as { styleId: string }).styleId);
+            if (!preset?.tableBorders) return { ok: true, status: 'noop' };
+            return submit({ kind: 'setTableBorders', payload: { borders: preset.tableBorders } });
+          }
           case 'splitCell': {
             if (!options.openSplitCell) break;
             const tableContext = snapshot.view?.editState?.tableContext;
@@ -400,6 +449,29 @@ export function createPeerlessShellController(initial: Options) {
             const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
             options.openSplitCell(defaults, (rows, columns) =>
               deferred.complete(() => submit({ kind: 'splitTableCell', payload: { rows, columns } })));
+            return { ok: true, status: 'opened' };
+          }
+          case 'tableProperties': {
+            const props = (args as { props: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null } }).props;
+            return submit({ kind: 'setTableProperties', payload: { op: 'patch', patch: props } });
+          }
+          case 'openTableProperties': {
+            if (!options.openTableProperties) break;
+            const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
+            const selected = snapshot.view?.workerSelection;
+            if (!selected) return { ok: false, failure: { code: 'command-failed', message: 'Table selection is unavailable.' } };
+            const originBinding = binding;
+            const originMode = mode();
+            const opened = await query({ kind: 'properties', target: { kind: 'tableSelection', selection: selected } });
+            if (binding !== originBinding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+            if (mode() !== originMode || !sameSelection(selected, snapshot.view?.workerSelection)) {
+              return { ok: false, failure: { code: 'target-changed', message: 'Table selection changed.' } };
+            }
+            if (opened.value?.kind !== 'table') return { ok: false, failure: { code: 'command-failed', message: 'Table properties are unavailable.' } };
+            const captured = opened.selection ?? selected;
+            options.openTableProperties(opened.value.properties, (props) =>
+              deferred.complete(() => applyQuery(opened, { kind: 'setTableProperties',
+                payload: { op: 'patch', patch: props, expectVersion: opened.version, selection: captured } })));
             return { ok: true, status: 'opened' };
           }
           default: break;
@@ -449,6 +521,12 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'zoom') {
         options = { ...options, zoom: (args as { scale: number }).scale };
         options.onZoom?.(options.zoom);
+        publish();
+        return { ok: true, status: 'executed' };
+      }
+      if (id === 'tableGridlines') {
+        options = { ...options, tableGridlines: options.tableGridlines !== true };
+        options.onTableGridlines?.(options.tableGridlines === true);
         publish();
         return { ok: true, status: 'executed' };
       }
@@ -620,7 +698,7 @@ export function createPeerlessShellController(initial: Options) {
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
-    update(next: Options) { options = next; translate = translation(next);
+    update(next: Options) { options = next; translate = translation(next); syncBorderPen();
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
       reportMemory();
     },
@@ -680,6 +758,7 @@ export function createPeerlessShellController(initial: Options) {
         const ready = view.presentedThroughSeq >= 0;
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
           preview: ready ? null : snapshot.preview };
+        syncBorderPen();
         publish();
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {

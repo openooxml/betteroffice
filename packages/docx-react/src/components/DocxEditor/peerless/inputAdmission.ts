@@ -437,7 +437,7 @@ const SUGGESTED = {
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
   formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,
   insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
-  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true,
+  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true, setTableProperties: true,
   selectTableCells: false,
   addComment: false, resizeObject: false, moveObject: false,
   setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,

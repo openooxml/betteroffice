@@ -2,6 +2,7 @@ import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
+import { breakRefusedWhileSuggesting, leadingBlockCount } from './sectionBreak';
 import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange } from './index';
 import {
   commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
@@ -102,6 +103,31 @@ function validDelta(value: unknown): value is YrsInlineFormatDelta {
   });
 }
 
+function validBorders(value: unknown): boolean {
+  if (!object(value)) return false;
+  const sides = ['top', 'bottom', 'left', 'right', 'insideH', 'insideV'];
+  return Object.entries(value).every(([key, entry]) => {
+    if (!sides.includes(key)) return false;
+    if (entry === null) return true;
+    if (!object(entry)) return false;
+    return fields(entry, {
+      style: string,
+      size: (size) => number(size) && (size as number) >= 0,
+      color: (color) => object(color) && fields(color, { rgb: string }) &&
+        typeof (color as { rgb?: unknown }).rgb === 'string' && /^#?[0-9a-fA-F]{6}$/.test((color as { rgb: string }).rgb),
+    }) && string((entry as { style?: unknown }).style) && (entry as { style: string }).style.trim().length > 0;
+  });
+}
+
+function validTablePatch(value: unknown): boolean {
+  if (!object(value)) return false;
+  return fields(value, {
+    width: nullable((entry) => number(entry) && (entry as number) >= 0 && Number.isInteger(entry as number)),
+    widthType: nullable(oneOf('auto', 'dxa', 'pct', 'nil')),
+    justification: nullable(oneOf('left', 'center', 'right')),
+  });
+}
+
 function validMark(value: unknown): value is YrsRunMark {
   if (!object(value)) return false;
   if (['bold', 'italic', 'underline', 'superscript', 'subscript'].includes(String(value.type))) {
@@ -186,6 +212,7 @@ const DOCX_COMMAND_POLICIES = {
   insertTableRow: { keys: ['side'] }, insertTableColumn: { keys: ['side'] },
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
   mergeTableCells: { keys: [] }, splitTableCell: { keys: ['rows', 'columns'] }, setTableCellShading: { keys: ['color'] },
+  setTableBorders: { keys: ['borders'] }, setTableProperties: { keys: ['op', 'patch', 'expectVersion'] },
   resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'expectVersion'], exact: true },
   moveObject: { keys: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
@@ -209,7 +236,7 @@ const DOCX_COMMAND_POLICIES = {
   toggleMark: { keys: ['mark'] }, formatRange: { keys: ['delta'] }, clearFormatting: { keys: [] },
   setParagraphAttrs: { keys: ['attrs'] }, applyParagraphStyle: { keys: ['styleId'] },
   setReadOnly: { keys: ['readOnly'], exact: true },
-  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText', 'reservations'], exact: true },
+  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText', 'showTableGridlines', 'reservations'], exact: true },
 } satisfies Record<DocxCommandKind, DocxCommandPolicy>;
 
 function commandPolicy(kind: string): DocxCommandPolicy | undefined {
@@ -353,6 +380,13 @@ function validCommandIntent(
     case 'setTableCellShading':
       if (payload.color !== null && (typeof payload.color !== 'string' || !/^[0-9a-fA-F]{6}$/.test(payload.color))) return refuse('invalid-payload');
       break;
+    case 'setTableBorders':
+      if (!validBorders(payload.borders)) return refuse('invalid-payload');
+      break;
+    case 'setTableProperties':
+      if (payload.op !== 'patch' || !validTablePatch(payload.patch) ||
+        (payload.expectVersion !== undefined && !string(payload.expectVersion))) return refuse('invalid-payload');
+      break;
     case 'insertImage':
       if (!object(payload.image) || !json(payload.image) || Object.hasOwn(payload.image, '_kind') || ['widthEmu', 'heightEmu'].some(key => payload.image && object(payload.image) && payload.image[key] !== undefined && !positive(payload.image[key]))) return refuse('invalid-image');
       break;
@@ -365,6 +399,7 @@ function validCommandIntent(
     case 'setRenderEnvironment':
       if (!object(payload.themeColors) || !Object.values(payload.themeColors).every(value =>
         typeof value === 'string' && /^[0-9a-f]{6}$/i.test(value)) || !boolean(payload.showHiddenText) ||
+        (payload.showTableGridlines !== undefined && !boolean(payload.showTableGridlines)) ||
         (payload.reservations !== undefined && !validReservationsPayload(payload.reservations))) return refuse('invalid-payload');
       break;
   }
@@ -552,6 +587,8 @@ export function preflightDocxCommand(
   if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
   if (isTableCommandKind(command.kind)) {
     if (state.readOnly) return refuse('read-only');
+    if (command.kind === 'setTableProperties' && command.payload.expectVersion !== undefined &&
+      command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const tableResolved = resolveCommandSelection(engine, state, command, context);
     if (!tableResolved.ok) return refuse(tableResolved.reason);
     const tabled = preflightTableCommand(engine, command as TableCommandIntent, tableResolved.selection);
@@ -577,15 +614,11 @@ export function preflightDocxCommand(
     } };
   }
   if (state.readOnly) return refuse('read-only');
-  if ((command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') && command.payload.suggesting) return refuse('unsupported-suggesting');
+  if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
-    let leading = 0;
-    for (const segment of engine.paragraphSegments('body', [index])[0] ?? []) {
-      if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
-      leading += 1;
-    }
+    const leading = leadingBlockCount(engine.paragraphSegments('body', [index])[0] ?? []);
     if (resolved.range.start.offset < leading) return refuse('invalid-selection');
     if (command.kind === 'insertSectionBreak') {
       const properties = residentSectionPropertiesAt(engine, { story: 'body', ...resolved.range.start });
@@ -636,11 +669,7 @@ function pastLeadingBlocks(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsLo
   const spans = engine.geometryReader.paragraphSpans(at.story);
   const index = spans.findIndex(span => span.paraId === at.paraId);
   if (index < 0) return null;
-  let leading = 0;
-  for (const segment of engine.paragraphSegments(at.story, [index])[0] ?? []) {
-    if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
-    leading += 1;
-  }
+  const leading = leadingBlockCount(engine.paragraphSegments(at.story, [index])[0] ?? []);
   return { ...at, offset: Math.min(spans[index]!.length, Math.max(leading, at.offset)) };
 }
 
@@ -1054,9 +1083,8 @@ function applyPreparedDocxCommand(
         caret({ story, paraId: paragraph.paraId, offset: 0 });
       } else {
         if (command.kind === 'insertPageBreak') {
-          if (at.offset > 0) at = { story: at.story, paraId: engine.splitParagraph(at).secondParaId, offset: 0 };
-          engine.insertPageBreak(at);
-          caret({ ...at, offset: at.offset + 1 });
+          const target = engine.insertPageBreak(at);
+          caret({ ...target, offset: target.offset + 1 });
         } else {
           const properties = collapsed(range) ? prepared.sectionBreakProperties : residentSectionPropertiesAt(engine, at);
           if (!properties) throw new Error('Prepared command lacks section properties');
@@ -1066,7 +1094,7 @@ function applyPreparedDocxCommand(
       break;
     }
     case 'insertTableRow': case 'insertTableColumn': case 'deleteTableRow': case 'deleteTableColumn':
-    case 'deleteTable': case 'mergeTableCells': case 'splitTableCell': case 'setTableCellShading': {
+    case 'deleteTable': case 'mergeTableCells': case 'splitTableCell': case 'setTableCellShading': case 'setTableBorders': case 'setTableProperties': {
       if (!prepared.table) throw new Error('Prepared command lacks table target');
       const focus = selection.focus;
       applyTableCommand(engine, state, prepared.command as TableCommandIntent, prepared.table,

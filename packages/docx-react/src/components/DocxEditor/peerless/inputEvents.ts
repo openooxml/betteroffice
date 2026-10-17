@@ -19,8 +19,8 @@ export type PeerlessPropertyIntent = { [K in PeerlessPropertyKind]: { kind: K; p
 type PeerlessControlKind = 'setContentControlValue' | 'addRepeatingItem' | 'removeRepeatingItem';
 export type PeerlessControlIntent = { [K in PeerlessControlKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessControlKind];
 
-type PeerlessTableKind = 'insertTableRow' | 'insertTableColumn' | 'deleteTableRow' | 'deleteTableColumn' | 'deleteTable' | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading';
-export type PeerlessTableIntent = { [K in PeerlessTableKind]: { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> } }[PeerlessTableKind];
+type PeerlessTableKind = 'insertTableRow' | 'insertTableColumn' | 'deleteTableRow' | 'deleteTableColumn' | 'deleteTable' | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading' | 'setTableBorders' | 'setTableProperties';
+export type PeerlessTableIntent = { [K in PeerlessTableKind]: { kind: K; payload: K extends 'setTableProperties' ? DocxCommandPayloads[K] : Omit<DocxCommandPayloads[K], 'selection'> } }[PeerlessTableKind];
 
 export type PeerlessInputIntent = PeerlessProposalIntent | { [K in 'applyEdits' | 'addComment']: { kind: K; payload: DocxCommandPayloads[K] } }['applyEdits' | 'addComment'] | PeerlessControlIntent | PeerlessRulerIntent | PeerlessPropertyIntent | PeerlessPartIntent | PeerlessSelectionIntent | PeerlessTextIntent | PeerlessTableIntent | { kind: 'undo' | 'redo'; payload: Record<string, never> } | { kind: 'replaceMatches'; payload: DocxCommandPayloads['replaceMatches'] } | { [K in 'setRenderEnvironment' | 'setFontEnvironment']: { kind: K; payload: DocxCommandPayloads[K] } }['setRenderEnvironment' | 'setFontEnvironment'] | { [K in 'insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak' | 'pasteFragment']: { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> } }['insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak' | 'pasteFragment'];
 

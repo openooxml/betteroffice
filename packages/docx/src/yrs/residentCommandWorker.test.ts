@@ -1590,7 +1590,7 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
     const table = await client.edit(intent(3, 2, 'insertTable', { selection: { anchor: point, focus: point }, rows: 2, columns: 2 }));
     expect(table.outcomes[0]?.status).toBe('applied');
     expect(table.editState?.tableContext).toMatchObject({ rowCount: 2, columnCount: 2 });
-    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0$/);
+    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0~\d+$/);
     expect(engine.geometryReader.storyIds().length).toBe(5);
     expect(await client.documentReadAt({ kind: 'toolbarMetadata' }, metadata.version)).toEqual({ status: 'superseded' });
     const undone = await client.edit(intent(4, 3, 'undo', {}));
@@ -1741,7 +1741,7 @@ test('worker safety resizes the issued cell rather than the table story suffix o
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, selection: { anchor: point, focus: point } }));
     const cell = inserted.frame!.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === inserted.selection!.focus.story)!;
-    expect(cell.story).toBe('body:t1:r0c0');
+    expect(cell.story).toMatch(/^body:t1:r0c0~\d+$/);
     const resized = await client.edit(intent(2, 1, 'resizeObject', { handle: cell.handle, widthTwips: 1234, expectVersion: inserted.frame!.payload.documentVersion! }));
     expect(resized.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1234]);
@@ -1809,7 +1809,7 @@ test('worker safety repairs selection after rejecting a suggested table before o
   const { client, engine } = await openWorker();
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, suggesting: { name: 'Ada', date: '2026-01-01' } }));
-    expect(inserted.selection!.focus.story).toBe('body:t0:r0c0');
+    expect(inserted.selection!.focus.story).toMatch(/^body:t0:r0c0~\d+$/);
     const revisionId = engine.geometryReader.listRevisions()[0]!.revisionId;
     const rejected = await client.edit(intent(2, 1, 'rejectRevision', { revisionId, expectVersion: engine.proposalEngine.version() }));
     expect(rejected.outcomes[0]?.status).toBe('applied');
@@ -2025,6 +2025,182 @@ test('round two break sections preserve current and existing closing properties'
     expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Tail']);
     expect(engine.sectionProperties().sections).toHaveLength(2);
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break lowers on the worker as a section split', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8311 });
+  try {
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed', 'Tail']);
+    expect(remote.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed', 'Tail']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(3);
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'continuous', marginLeft: 1800 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 1800 });
+    const { parseDocx } = await import('../docx/parser');
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.sections).toHaveLength(3);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break in the final section copies its properties and keeps its start', async () => {
+  const bodyXml = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:type w:val="evenPage"/><w:pgMar w:left="2000"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr, headersFooters: true });
+  const remote = await createYrsSession({ clientId: 8312 });
+  try {
+    remote.openDocx(syntheticDocument(true, false, false, bodyXml, sectPr), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Ta', 'il']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(2);
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'evenPage', marginLeft: 2000 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 2000 });
+    const { parseDocx } = await import('../docx/parser');
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.headers?.size).toBe(1);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a resident section break undoes in one step', async () => {
+  const { client, engine } = await openWorker({ sectPr: '<w:sectPr><w:pgMar w:left="1800"/></w:sectPr>' });
+  try {
+    const paraId = engine.paragraphs('body')[0]!.paraId;
+    engine.insertSectionBreak({ story: 'body', paraId, offset: 2 }, 'nextPage');
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed']);
+    expect(engine.undo()).toBe(true);
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break keeps the closing section margins on both halves', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p><w:pPr><w:sectPr><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8314 });
+  try {
+    engine.setSectionMargins(engine.sectionProperties().sections[0]!.section, { marginLeft: 2400 });
+    remote.loadState(engine.encodeState());
+    const paraId = remote.paragraphs('body')[0]!.paraId;
+    remote.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { other: { sectPr: { marginLeft: 1800 } } });
+    remote.insertSectionBreak({ story: 'body', paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(3);
+    expect(sections[0]!.properties).toMatchObject({ marginLeft: 2400 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 2400 });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break refuses table cells and state-only final sections', async () => {
+  const bodyXml = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>Tail</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml });
+  const remote = await createYrsSession({ clientId: 8315 });
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = remote.paragraphs('body:t0:r0c0');
+    expect(cell.map(paragraph => paragraph.text)).toEqual(['Cell']);
+    expect(() => remote.insertSectionBreak({ story: 'body:t0:r0c0', paraId: cell[0]!.paraId, offset: 2 }, 'nextPage')).toThrow('body paragraphs');
+    expect(remote.paragraphs('body:t0:r0c0')).toHaveLength(1);
+    expect(remote.paragraphs('body').map(paragraph => paragraph.text)).toEqual(engine.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { remote.destroy(); client.destroy(); }
+  const origin = await createYrsSession({ clientId: 8316 });
+  const stateOnly = await createYrsSession({ clientId: 8317 });
+  try {
+    origin.openDocx(syntheticDocument(false, false, false, bodyXml), true);
+    stateOnly.loadState(origin.encodeState());
+    const tail = stateOnly.paragraphs('body').at(-1)!;
+    expect(() => stateOnly.insertSectionBreak({ story: 'body', paraId: tail.paraId, offset: 2 }, 'nextPage')).toThrow('section properties');
+    expect(stateOnly.paragraphs('body').map(paragraph => paragraph.text)).toEqual(origin.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { stateOnly.destroy(); origin.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break in a final section with an empty sectPr lowers on the worker', async () => {
+  const { client, engine } = await openWorker();
+  const remote = await createYrsSession({ clientId: 8318 });
+  try {
+    remote.openDocx(syntheticDocument(), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(2);
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage' });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break gives the closed section the headers it inherits', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr: '<w:sectPr/>', headersFooters: true });
+  const remote = await createYrsSession({ clientId: 8319 });
+  try {
+    remote.openDocx(syntheticDocument(true, false, false, bodyXml, '<w:sectPr/>'), false);
+    remote.loadState(engine.encodeState());
+    const sectPr = (text: string) => {
+      const properties = remote.paragraphs('body').find(paragraph => paragraph.text === text)!.properties;
+      return (properties.sectPr ?? properties._sectionProperties) as SectionProperties;
+    };
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
+    expect(sectPr('Se').headerReferences).toEqual(sectPr('First').headerReferences);
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.sectionProperties().sections).toHaveLength(3);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break after an earlier split keeps each section on the worker', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr });
+  const remote = await createYrsSession({ clientId: 8320 });
+  try {
+    remote.openDocx(syntheticDocument(false, false, false, bodyXml, sectPr), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'continuous');
+    const seed = remote.paragraphs('body').find(paragraph => paragraph.text === 'Seed')!;
+    remote.insertSectionBreak({ story: 'body', paraId: seed.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Fi', 'rst', 'Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections.map(section => section.properties.pageWidth)).toEqual([12240, 12240, 11906, 11906]);
+    expect(sections.at(-1)!.properties).toMatchObject({ sectionStart: 'nextPage' });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('page breaks land past leading blocks on both session kinds', async () => {
+  const bodyXml = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml });
+  const remote = await createYrsSession({ clientId: 8316 });
+  try {
+    remote.loadState(engine.encodeState());
+    const spans = engine.geometryReader.paragraphSpans('body').length;
+    const tail = remote.paragraphs('body').findIndex(paragraph => paragraph.text === 'Tail');
+    remote.insertPageBreak({ story: 'body', paraId: remote.paragraphs('body')[tail]!.paraId, offset: 0 });
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(spans);
+    expect(engine.paragraphSegments('body', [tail])[0]!.slice(0, 2).map(segment => segment.kind === 'embed' ? segment.embedKind : segment.kind)).toEqual(['table', 'pageBreak']);
+    const seed = engine.paragraphs('body').findIndex(paragraph => paragraph.text === 'Seed');
+    const target = engine.insertPageBreak({ story: 'body', paraId: engine.paragraphs('body')[seed]!.paraId, offset: 2 });
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(spans + 1);
+    expect(target).toMatchObject({ paraId: engine.paragraphs('body')[seed + 1]!.paraId, offset: 0 });
+    expect(engine.paragraphSegments('body', [seed + 1])[0]![0]).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
+    expect((await client.save({ comments: [] })).bytes.byteLength).toBeGreaterThan(0);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy page break inside a paragraph splits it before the break', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8313 });
+  try {
+    remote.loadState(engine.encodeState());
+    remote.insertPageBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 });
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(3);
+    const segments = engine.paragraphSegments('body', [1])[0]!;
+    expect(segments[0]).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
+    expect(segments.flatMap(segment => segment.kind === 'text' ? [segment.text] : []).join('')).toBe('ed');
+  } finally { remote.destroy(); client.destroy(); }
 }, TIMEOUT);
 
 test('round two break sections remain editable through section property commands', async () => {
@@ -2822,6 +2998,38 @@ test('worker saves table cell shading and reopens it from the bytes', async () =
     const tables = reopened.package.document.content.filter((block): block is Extract<typeof block, { type: 'table' }> => block.type === 'table');
     expect(tables).toHaveLength(1);
     expect(JSON.stringify(tables[0]!.rows[0]!.cells[0]!.formatting?.shading)).toContain('AABBCC');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker_table_formatting_saves_and_reopens', async () => {
+  const { client, engine } = await openWorker({ bodyXml: TABLE_BODY });
+  try {
+    const cellA = cellPoint(engine, 'A');
+    await client.edit(intent(1, 0, 'select', { selection: cellA.selection }));
+    const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+    const bordered = await client.edit(intent(2, 0, 'setTableBorders', {
+      borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line },
+    }));
+    expect(bordered.outcomes[0]?.status).toBe('applied');
+    const styled = await client.edit(intent(3, 1, 'setTableProperties', {
+      op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+    }));
+    expect(styled.outcomes[0]?.status).toBe('applied');
+    const duplicate = await client.edit(intent(3, 1, 'setTableProperties', {
+      op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+    }));
+    expect(duplicate.outcomes).toEqual(styled.outcomes);
+    const saved = await client.save({ comments: [] });
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.bytes))['word/document.xml']!);
+    expect(xml).toContain('w:tcBorders');
+    expect(xml).toContain('<w:tblW w:w="2500" w:type="pct"/>');
+    expect(xml).toContain('<w:jc w:val="center"/>');
+    expect(xml).not.toContain('w:tblStyle');
+    const { parseDocx } = await import('../docx');
+    const reopened = await parseDocx(saved.bytes, { preloadFonts: false });
+    const tables = reopened.package.document.content.filter((block): block is Extract<typeof block, { type: 'table' }> => block.type === 'table');
+    expect(tables).toHaveLength(1);
+    expect(JSON.stringify(tables[0]!.formatting)).toContain('2500');
   } finally { client.destroy(); }
 }, TIMEOUT);
 

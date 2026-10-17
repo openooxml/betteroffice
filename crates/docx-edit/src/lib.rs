@@ -665,7 +665,7 @@ pub struct EditingDoc {
     shared_read_depth: AtomicU32,
     /// Story projections held only inside a shared-read scope.
     story_views: Mutex<EpochCache<target::StoryView>>,
-    source: Mutex<Option<identity::SourcePackage>>,
+    source: Arc<Mutex<Option<identity::SourcePackage>>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
     source_note_separators: Mutex<Option<SourceNoteSeparators>>,
@@ -751,7 +751,7 @@ impl EditingDoc {
             resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
-            source: Mutex::new(None),
+            source: Arc::new(Mutex::new(None)),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
             source_note_separators: Mutex::default(),
@@ -950,6 +950,7 @@ impl EditingDoc {
         if before.checked_add(1) != Some(after) {
             return;
         }
+        let index = self.text_insert_index(story_id, before, index);
         let at = self
             .paragraph_indexes
             .lock()
@@ -993,6 +994,22 @@ impl EditingDoc {
             }
         }
         self.advance_table_membership(before, after);
+    }
+
+    /// Where inline text inserted at `index` lands: past the block embeds leading its paragraph.
+    pub(crate) fn text_insert_index(&self, story_id: &str, epoch: u64, index: u32) -> u32 {
+        let cached = self.paragraph_indexes.lock().unwrap().get(story_id, epoch);
+        if let Some(paragraphs) = cached {
+            return paragraphs
+                .para_at(index)
+                .filter(|para| index < para.node_start)
+                .map_or(index, |para| para.node_start);
+        }
+        let txn = self.yrs_doc().transact();
+        let Ok(story) = story_ref(&txn, story_id) else {
+            return index;
+        };
+        crate::ops::past_leading_blocks(&story, &txn, index)
     }
 
     /// Advances cached story indexes after a single plain text deletion.
@@ -1258,17 +1275,7 @@ impl EditingDoc {
 
     /// The retained package's identity index, built on first use.
     pub(crate) fn source_index(&self) -> Option<Arc<identity::SourceIndex>> {
-        let mut source = self.source.lock().unwrap();
-        let index = match source.as_ref()? {
-            identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
-            identity::SourcePackage::Pending(bytes, digest) => {
-                seed::source_index(bytes.clone(), digest.clone())
-                    .ok()
-                    .map(Arc::new)
-            }
-        };
-        *source = index.clone().map(identity::SourcePackage::Ready);
-        index
+        identity::source_index(&self.source)
     }
 
     /// Low-level access for the transport, awareness, and undo bridges. Attach undo through
@@ -1792,7 +1799,7 @@ impl EditingDoc {
     fn integrate_updates(&self, updates: Vec<Update>, origin: UpdateOrigin) -> EditResult<()> {
         let _host_edit = matches!(origin, UpdateOrigin::Host)
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
-        let watch = identity::IdentityWatch::new(self);
+        let watch = identity::IdentityWatch::new(self.yrs_doc());
         let reanchored = comment_references::CommentWatch::new(self);
         let result = match origin {
             UpdateOrigin::Remote => {

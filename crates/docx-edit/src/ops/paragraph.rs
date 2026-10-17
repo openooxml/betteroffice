@@ -31,9 +31,9 @@ use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
-    adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, block_embed_at,
-    capture_pilcrow, paragraph_content_before, position_chunks, revision_id_in_range,
-    snapshot_range,
+    Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
+    block_embed_at, capture_pilcrow, paragraph_content_before, position_chunks,
+    revision_id_in_range, snapshot_range,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -82,7 +82,8 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
 
 /// The only paragraph properties an EMPTY second half inherits on split —
 /// pressing Enter at the end of a paragraph starts a clean one that keeps the
-/// style and vertical rhythm but nothing else.
+/// style and vertical rhythm but nothing else, with run defaults rebuilt from
+/// the formatting at the caret.
 const INHERITED_PARA_ATTRS: [&str; 11] = [
     "defaultTextFormatting",
     "pStyle",
@@ -96,10 +97,6 @@ const INHERITED_PARA_ATTRS: [&str; 11] = [
     "afterAutospacing",
     "contextualSpacing",
 ];
-
-/// The `defaultTextFormatting` keys that cross a split: font, size and color
-/// only. Bold, italic, underline and the rest deliberately do not carry.
-const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
 
 const BORDERS: &str = "borders";
 const TABS: &str = "tabs";
@@ -326,20 +323,32 @@ fn apply_paragraph_attr_projection(
     Ok(())
 }
 
-/// Reduces a `defaultTextFormatting` map to the font/size/color subset that crosses a split.
-fn style_carry_dtf(value: &Any) -> Option<Any> {
-    let Any::Map(map) = value else {
-        return None;
-    };
-    let subset: HashMap<String, Any> = map
+/// The run defaults a paragraph started at `at` carries, as Word carries the insertion point's
+/// formatting: the unit before the caret's, or the mark's own when the paragraph is empty.
+fn caret_run_formatting<T: ReadTxn>(
+    chunks: &[Chunk],
+    at: u32,
+    txn: &T,
+    props: &[(String, Any)],
+) -> Option<Any> {
+    let before = chunks
         .iter()
-        .filter(|(key, _)| STYLE_CARRY_DTF_KEYS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    if subset.is_empty() {
-        None
-    } else {
-        Some(Any::Map(Arc::new(subset)))
+        .find(|chunk| chunk.start < at && at <= chunk.end())
+        .filter(|chunk| match &chunk.kind {
+            ChunkKind::Pilcrow(_) => false,
+            ChunkKind::Embed(Some(map)) => !crate::map_string(map, txn, KIND_KEY)
+                .is_some_and(|kind| crate::segments::is_block_embed(&kind)),
+            _ => true,
+        });
+    match before {
+        Some(chunk) => crate::seed::mark_run_formatting(&chunk.attrs),
+        None => {
+            let defaults = props
+                .iter()
+                .find(|(key, _)| key == DEFAULT_TEXT_FORMATTING)
+                .map(|(_, defaults)| crate::seed::mark_run_attrs(defaults))?;
+            crate::seed::mark_run_formatting(defaults.iter().map(|(key, value)| (key, value)))
+        }
     }
 }
 
@@ -354,8 +363,8 @@ impl EditingDoc {
     ///
     /// - mid-paragraph: it keeps its own properties;
     /// - at the paragraph end, so the second half is empty: only
-    ///   the `INHERITED_PARA_ATTRS` subset survives, with
-    ///   `defaultTextFormatting` reduced to the font/size/color carry keys;
+    ///   the `INHERITED_PARA_ATTRS` subset survives, with `defaultTextFormatting`
+    ///   rebuilt from the run formatting at the caret, so typing continues in it;
     /// - at the end WITH a `next_style`: it switches to that style's
     ///   projection outright instead.
     ///
@@ -454,20 +463,14 @@ impl EditingDoc {
                 apply_paragraph_attr_projection(txn, &orig_map, &next.paragraph_attrs)?;
                 orig_map.remove(txn, BORDERS);
             } else {
-                // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
-                // font/size/color carry. Borders fall out of the sweep.
-                for (key, value) in &props {
+                // Blank-attr inheritance: keep only the inherited subset; borders fall out of it.
+                for (key, _) in &props {
                     if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
                         orig_map.remove(txn, key);
-                    } else if key == DEFAULT_TEXT_FORMATTING {
-                        set_or_remove(
-                            txn,
-                            &orig_map,
-                            DEFAULT_TEXT_FORMATTING,
-                            style_carry_dtf(value),
-                        );
                     }
                 }
+                let carried = caret_run_formatting(&chunks, at.index, &*txn, &props);
+                set_or_remove(txn, &orig_map, DEFAULT_TEXT_FORMATTING, carried);
             }
         } else {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.

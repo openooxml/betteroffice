@@ -805,7 +805,8 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
 /// "pageContentHeight": number|null, "numericIds": {yrsId: number},
-/// "showHiddenText": bool, "defaultParagraphStyleId": string,
+/// "showHiddenText": bool, "showTableGridlines": bool,
+/// "defaultParagraphStyleId": string,
 /// "revisionPreview": {revisionId: "accepted"|"rejected"} }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
@@ -830,6 +831,10 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
         .map(str::to_owned);
     env.show_hidden_text = value
         .get("showHiddenText")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    env.show_table_gridlines = value
+        .get("showTableGridlines")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     env.media_tokens = value
@@ -3584,6 +3589,21 @@ impl EditSession {
             .engine
             .doc()
             .set_table_width(&EditCtx::local("", ""), &table, width_twips)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
+    pub fn set_table_properties(
+        &self,
+        table_json: &str,
+        patch_json: &str,
+    ) -> Result<String, JsValue> {
+        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
+        let patch = parse_any_object(patch_json, "table properties patch")?;
+        let receipt = self
+            .engine
+            .doc()
+            .set_table_properties(&EditCtx::local("", ""), &table, &patch)
             .map_err(js_err)?;
         serde_json::to_string(&receipt).map_err(js_err)
     }

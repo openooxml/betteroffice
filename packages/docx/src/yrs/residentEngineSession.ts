@@ -58,7 +58,8 @@ import type { ResidentControlTarget, ResidentControlPosition } from './residentC
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
 import { getDocumentWatermark } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
-import { readSectionSnapshot, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { readSectionSnapshot, residentSectionPropertiesAt, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { pageBreakTarget, splitSection } from './sectionBreak';
 
 /** @internal */
 export interface ResidentExactPrefixLayout {
@@ -91,6 +92,8 @@ export type ResidentEngineSession = Pick<
   | 'mergeCells'
   | 'splitCell'
   | 'setCellShading'
+  | 'setCellBorders'
+  | 'setTableProperties'
   | 'insertTable'
   | 'insertTableFragment'
   | 'validateTableFragment'
@@ -569,27 +572,18 @@ export async function createResidentEngineSession(
   const resident: ResidentEngineSession = {
     clientId,
     splitSection: (at, properties, start) => {
-      const paragraphs = resident.paragraphs(at.story);
-      const index = paragraphs.findIndex(paragraph => paragraph.paraId === at.paraId);
-      if (index < 0) throw new Error('Section break paragraph is unavailable');
-      const sectionOf = (attrs: Record<string, unknown>) => (attrs.sectPr ?? attrs._sectionProperties) as SectionProperties | undefined;
-      const closing = paragraphs.slice(index).find(paragraph => sectionOf(paragraph.properties));
-      const split = resident.splitParagraph(at);
-      const set = (paraId: string, sectPr: SectionProperties) =>
-        resident.setParagraphAttrs({ story: at.story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
-          { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
-      set(split.firstParaId, properties);
-      if (closing) set(closing.paraId === at.paraId ? split.secondParaId : closing.paraId, { ...sectionOf(closing.properties), sectionStart: start });
+      ensureUndo();
+      const split = splitSection(resident, session, at, () => properties, start);
       sectionsTouched = true;
       sectionLayout = null;
-      if (!closing) {
+      if (!split.closed) {
         const document = partDocument();
         const body = updateFinalSectionProperties(document.package.document, final => ({ ...final, sectionStart: start }));
         session.set_part_metadata(JSON.stringify(partMetadata({ ...document, package: { ...document.package, document: body } })), '[]');
         partsTouched = true;
         sectionLayout = null;
       }
-      return { story: at.story, paraId: split.secondParaId, offset: 0 };
+      return split.at;
     },
     residentGeometry: (root, ranges, selection) => JSON.parse(session.resident_geometry_json(root, JSON.stringify({ ranges, selection }))),
     residentRangeRects: (region, partId, ranges) => {
@@ -715,6 +709,16 @@ export async function createResidentEngineSession(
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),
+    setCellBorders: (range, borders) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.set_cell_borders(JSON.stringify(range), JSON.stringify(borders)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    setTableProperties: (table, patch) => applyCommandMutation(table.story, () => {
+      const receipt = JSON.parse(session.set_table_properties(JSON.stringify(table), JSON.stringify(patch)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
     insertTableFragment: (at, table, author) => applyCommandMutation(at.story, () => {
       const receipt = JSON.parse(session.insert_table_fragment(at.story, at.paraId, at.offset, JSON.stringify(table), author?.name, author?.date));
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
@@ -722,8 +726,16 @@ export async function createResidentEngineSession(
     }),
     validateTableFragment: (table) => { session.validate_table_fragment(JSON.stringify(table)); },
     insertImage: (at, image, author) => applyCommandMutation(at.story, () => JSON.parse(session.insert_image(at.story, at.paraId, at.offset, JSON.stringify(image), author?.name, author?.date))),
-    insertPageBreak: at => applyCommandMutation(at.story, () => session.insert_page_break(at.story, at.paraId, at.offset)),
-    insertSectionBreak: (at, type) => applyCommandMutation(at.story, () => session.insert_section_break(at.story, at.paraId, at.offset, type)),
+    insertPageBreak: at => applyCommandMutation(at.story, () => {
+      const target = pageBreakTarget(resident, session, at);
+      session.insert_page_break(target.story, target.paraId, target.offset);
+      return target;
+    }),
+    insertSectionBreak: (at, type) => {
+      const properties = residentSectionPropertiesAt(resident, at);
+      if (!properties) throw new Error('Section break paragraph is unavailable');
+      resident.splitSection(at, properties, type);
+    },
     tablePayload: (story, index) => {
       const payload = session.table_payload(story, index);
       return payload === undefined ? null : JSON.parse(payload);

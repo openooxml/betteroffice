@@ -16,6 +16,7 @@ use yrs::{
     Doc, IdSet, IndexedSequence, Map, Origin, Out, ReadTxn, Snapshot, Subscription, Text, Transact,
 };
 
+use crate::identity::{IdentityRepair, IdentityWatch};
 use crate::{COMMENTS, EditingDoc, STORIES};
 
 /// Undo capture window.
@@ -109,6 +110,7 @@ pub struct DocUndoManager {
     changed_stories: Arc<Mutex<Vec<String>>>,
     _popped: Subscription,
     doc: Doc,
+    identities: IdentityRepair,
     anchor_state: Arc<Mutex<AnchorState>>,
     _anchors: Subscription,
     _history: [Subscription; 2],
@@ -237,6 +239,7 @@ impl DocUndoManager {
         };
         Self {
             doc: doc.doc.clone(),
+            identities: doc.identity_repair(),
             anchor_state,
             _anchors: anchors,
             _history: [added, updated],
@@ -266,20 +269,37 @@ impl DocUndoManager {
 
     pub fn undo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let identities = IdentityWatch::new(&self.doc);
         let applied = self.inner.undo_blocking();
         if applied {
-            self.restore_comment_boundaries();
+            self.restore_history(identities);
         }
         applied
     }
 
     pub fn redo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let identities = IdentityWatch::new(&self.doc);
         let applied = self.inner.redo_blocking();
         if applied {
-            self.restore_comment_boundaries();
+            self.restore_history(identities);
         }
         applied
+    }
+
+    fn restore_history(&self, identities: IdentityWatch) {
+        let changed = identities.changed();
+        drop(identities);
+        if changed {
+            let stories = self
+                .identities
+                .repair(&mut self.doc.transact_mut_with("system"));
+            let mut changed = lock(&self.changed_stories);
+            changed.extend(stories);
+            changed.sort();
+            changed.dedup();
+        }
+        self.restore_comment_boundaries();
     }
 
     fn restore_comment_boundaries(&self) {
