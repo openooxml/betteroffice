@@ -20,6 +20,7 @@ test('worker viewer synchronous reads and comment mutations return null', () => 
     const { ref } = viewer(readOnly);
     expect(ref.getEditorRef()).toBeNull();
     expect(ref.getSelectionInfo()).toBeNull();
+    expect(ref.getPositionAtPoint(10, 20)).toBeNull();
     expect(ref.addComment({ paraId: 'p', text: 'Comment', author: 'Author' })).toBeNull();
     expect(ref.replyToComment(1, 'Reply', 'Author')).toBeNull();
   }
