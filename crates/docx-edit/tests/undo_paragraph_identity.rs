@@ -49,3 +49,33 @@ fn undoing_a_split_after_a_remote_split_keeps_unique_paragraph_keys() {
     local.apply_update_v1(&remote.encode_state_as_update_v1()).unwrap();
     assert_eq!(keys(&local), keys(&remote));
 }
+
+#[test]
+fn a_restored_derived_key_stays_with_its_original_pilcrow_on_every_replica() {
+    let local = EditingDoc::new(1);
+    local.create_story("body", "abcdef", "Normal", "left").unwrap();
+    let remote = EditingDoc::new(2);
+    remote.apply_update_v1(&local.encode_state_as_update_v1()).unwrap();
+    local.split_paragraph(&ctx(), Position::new("body", 2), None).unwrap();
+    remote.split_paragraph(&ctx(), Position::new("body", 4), None).unwrap();
+    let from_local = local.encode_state_as_update_v1();
+    local.apply_update_v1(&remote.encode_state_as_update_v1()).unwrap();
+    remote.apply_update_v1(&from_local).unwrap();
+    remote.apply_update_v1(&local.encode_state_as_update_v1()).unwrap();
+    local.apply_update_v1(&remote.encode_state_as_update_v1()).unwrap();
+    let middle = keys(&local)[1].clone();
+    assert!(middle.contains('~'));
+    let mut undo = local.undo_manager();
+    local.merge_paragraphs(&ctx(), &middle, MergeDirection::Forward).unwrap();
+    remote.apply_update_v1(&local.encode_state_as_update_v1()).unwrap();
+    let at = remote.locate(&Loc::new("body", middle, 1)).unwrap();
+    remote.split_paragraph(&ctx(), at, None).unwrap();
+    local.apply_update_v1(&remote.encode_state_as_update_v1()).unwrap();
+    assert!(undo.undo());
+    remote.apply_update_v1(&local.encode_state_as_update_v1()).unwrap();
+    assert_addressable(&remote);
+    assert_addressable(&local);
+    local.apply_update_v1(&remote.encode_state_as_update_v1()).unwrap();
+    remote.apply_update_v1(&local.encode_state_as_update_v1()).unwrap();
+    assert_eq!(keys(&local), keys(&remote));
+}
