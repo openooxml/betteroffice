@@ -523,15 +523,30 @@ for (const remove of [false, true]) {
 }
 
 
-test('recovery refuses a previously applied reservation payload with an expired version', async () => {
-  const client = new ResidentEngineWorkerClient(startWorker());
+test('recovery keeps reservations from a replayed render-settings update', async () => {
+  const bytes = source(1);
+  const clients = [startWorker(), startWorker()].map(worker => new ResidentEngineWorkerClient(worker));
   try {
-    await client.openSource({ bytes: source(1) });
-    await client.commandInit({ ...init(), incarnation: 2 });
-    const ack = await client.edit({ session: 'source-worker', incarnation: 2, seq: 1, replay: true,
-      basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: {
-        themeColors: {}, showHiddenText: false, reservations: { version: 'expired', key: 'retained', sets: [] },
-      } });
-    expect(ack.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-version' });
-  } finally { client.destroy(); }
+    await clients[0]!.openSource({ bytes });
+    await clients[0]!.commandInit(init());
+    const identities = await clients[0]!.documentRead({ kind: 'paragraphIdentities' });
+    const environment: DocxCommandPayloads['setRenderEnvironment'] = { themeColors: {}, showHiddenText: false, reservations: {
+      version: identities.version, key: 'retained', sets: [{ owner: 'layout', items: [{ id: 'space', kind: 'block',
+        anchor: { kind: 'paragraph', paragraph: identities.value.paragraphs[0]!.session! }, side: 'before', height: 50 }] }],
+    } };
+    await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+      basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: environment });
+    const checkpoint = await clients[0]!.checkpoint();
+    const update = { kind: 'setRenderEnvironment', payload: { ...environment, showHiddenText: true } } as const;
+    expect((await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 2,
+      basis: { epoch: 1, version: checkpoint.version }, ...update })).outcomes[0]?.status).toBe('noop');
+    await clients[1]!.openSource({ bytes, state: checkpoint.state });
+    await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version,
+      throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+    const replayed = await clients[1]!.edit({ session: 'source-worker', incarnation: 2, seq: 2, replay: true,
+      basis: { epoch: 1, version: checkpoint.version }, ...update });
+    expect(replayed.outcomes[0]?.status).toBe('noop');
+    const recovered = (await clients[1]!.checkpoint()).recoveryState?.layoutReservations;
+    expect(Object.values(recovered?.values ?? {})).toMatchObject([{ owner: 'layout', id: 'space', height: 50 }]);
+  } finally { clients.forEach(client => client.destroy()); }
 }, TIMEOUT);
