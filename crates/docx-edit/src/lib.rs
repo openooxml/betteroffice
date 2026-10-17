@@ -1545,6 +1545,24 @@ impl EditingDoc {
         comment_id: &str,
         patch: BTreeMap<String, Any>,
     ) -> EditResult<()> {
+        self.write_comment_metadata(comment_id, patch, false)
+    }
+
+    #[cfg(feature = "wasm")]
+    pub(crate) fn seed_comment_metadata(
+        &self,
+        comment_id: &str,
+        patch: BTreeMap<String, Any>,
+    ) -> EditResult<()> {
+        self.write_comment_metadata(comment_id, patch, true)
+    }
+
+    fn write_comment_metadata(
+        &self,
+        comment_id: &str,
+        patch: BTreeMap<String, Any>,
+        seed: bool,
+    ) -> EditResult<()> {
         for (key, value) in &patch {
             let valid = match key.as_str() {
                 "body" => true,
@@ -1564,6 +1582,13 @@ impl EditingDoc {
         let comment = comments
             .get(&txn, comment_id)
             .and_then(|value| value.cast::<MapRef>().ok())
+            .or_else(|| {
+                seed.then(|| {
+                    let comment = comments.insert(&mut txn, comment_id, MapPrelim::default());
+                    comment.insert(&mut txn, "anchors", Any::Array(Arc::from([])));
+                    comment
+                })
+            })
             .ok_or_else(|| EditError::CommentNotFound(comment_id.to_owned()))?;
         for (key, value) in patch {
             comment.insert(&mut txn, key, value);

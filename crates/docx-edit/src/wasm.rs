@@ -4328,6 +4328,26 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// Initializes imported metadata, creating an unanchored comment when absent.
+    pub fn seed_comment_metadata_json(
+        &self,
+        comment_id: &str,
+        patch_json: &str,
+    ) -> Result<(), JsValue> {
+        let patch: Value = serde_json::from_str(patch_json).map_err(js_err)?;
+        let fields = patch
+            .as_object()
+            .ok_or_else(|| js_err("comment metadata must be an object"))?;
+        let patch = fields
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), json_to_any(value)?)))
+            .collect::<Result<_, JsValue>>()?;
+        self.engine
+            .doc()
+            .seed_comment_metadata(comment_id, patch)
+            .map_err(js_err)
+    }
+
     pub fn update_comment_metadata_json(
         &self,
         comment_id: &str,

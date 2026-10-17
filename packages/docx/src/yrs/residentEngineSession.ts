@@ -199,6 +199,7 @@ export type ResidentEngineSession = Pick<
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(fresh?: boolean): ResidentCommentProjection | null;
+  initializeComments(): void;
   mediaDataUrl(token: string): string | null;
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
@@ -270,6 +271,7 @@ export async function createResidentEngineSession(
   const session = createEditSession(requireUnreservedClientId(clientId));
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
+  let commentsInitialized = false;
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
@@ -278,6 +280,16 @@ export async function createResidentEngineSession(
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
   let parsedFacade: YrsSession | undefined;
+  const initializeComments = () => {
+    const source = partBase?.package.document.comments ?? [];
+    const existing = new Set<string>(JSON.parse(session.list_comments()).map((comment: { id: string }) => comment.id));
+    for (const comment of source) session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
+      author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
+      parentId: comment.parentId === undefined ? null : String(comment.parentId),
+      ...(existing.has(String(comment.id)) ? {} : { body: comment.blockContent ?? comment.content }),
+    }));
+    commentsInitialized = true;
+  };
   const partDocument = (): Document => {
     if (!partBase) throw new Error('Part metadata requires an opened package');
     const stored = JSON.parse(session.part_metadata_json()) as ResidentPartMetadata;
@@ -606,7 +618,8 @@ export async function createResidentEngineSession(
       const at = session.clear_cell_selection();
       return at === undefined ? null : JSON.parse(at) as YrsLoc;
     },
-    commentProjection: fresh => partBase ? projectResidentComments(resident, commentAliases, fresh) : null,
+    commentProjection: fresh => partBase ? projectResidentComments(resident, commentAliases, commentsInitialized, fresh) : null,
+    initializeComments,
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();
@@ -870,6 +883,7 @@ export async function createResidentEngineSession(
     },
     openDocument: (document, options) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
@@ -906,6 +920,7 @@ export async function createResidentEngineSession(
     },
     openDocx: (bytes, digest, generation, seedStories = true) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       const json = resolveHostJsonCommentMedia(
@@ -921,6 +936,7 @@ export async function createResidentEngineSession(
     },
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       const json =

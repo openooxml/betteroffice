@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
-import type { createPeerlessShellController } from './shellController';
+import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
 import { workerPageAtViewport } from './pageNavigation';
-import type { DocxOutlineHeading, ResidentDocumentRead } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, DocxOutlineHeading, ResidentReviewTarget } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
@@ -59,22 +59,60 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (!page || !element) return;
     element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + page.bounds.y * latest.current.zoom;
   }, [controller, host, scroller]);
-  const scrollToTarget = useCallback(async (request: Extract<ResidentDocumentRead, { kind: 'navigationTarget' | 'bookmarkTarget' }>) => {
+  const navigate = useCallback(async (operation: (current: PeerlessEditSessionBinding) => Promise<boolean>) => {
     const current = binding();
-    if (!current) return false;
-    const target = await controller.read(request);
-    if (!target || typeof target === 'string' || current !== binding()) return false;
-    const result = current.commands.submit({ kind: 'select', payload: { selection: { anchor: target.loc, focus: target.loc } } }, { source: 'selection', fence: true });
-    if (result.status !== 'submitted') return false;
-    const outcome = await result.ticket.ack;
-    if (current !== binding() || (outcome.status !== 'applied' && outcome.status !== 'noop')) return false;
-    if (await result.ticket.presented !== 'presented' || current !== binding()) return false;
-    const caret = current.viewStore.getSnapshot().geometry?.caret;
-    if (caret && scroller.current) scroller.current.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - scroller.current.getBoundingClientRect().top + caret.y * latest.current.zoom - 24;
+    if (!current || controller.getSnapshot().status !== 'ready') return false;
+    const identity = current.viewStore.getSnapshot().identity;
+    const isCurrent = () => current === binding() && controller.getSnapshot().status === 'ready' &&
+      identity.session === current.viewStore.getSnapshot().identity.session && identity.incarnation === current.viewStore.getSnapshot().identity.incarnation &&
+      identity.epoch === current.viewStore.getSnapshot().identity.epoch;
+    try { const revealed = await operation(current); return isCurrent() && revealed; }
+    catch (error) {
+      if (error instanceof WorkerReadSupersededError) return false;
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'disposed' &&
+        !isCurrent()) return false;
+      throw error;
+    }
+  }, [binding, controller]);
+  const revealSelection = useCallback(async (current: PeerlessEditSessionBinding, selection: DocxCommandSelection) => {
+    const identity = current.viewStore.getSnapshot().identity;
+    const isCurrent = () => current === binding() && identity.session === current.viewStore.getSnapshot().identity.session &&
+      identity.incarnation === current.viewStore.getSnapshot().identity.incarnation && identity.epoch === current.viewStore.getSnapshot().identity.epoch;
+    const select = async (value: DocxCommandSelection) => {
+      const throughSeq = current.viewStore.getSnapshot().throughSeq;
+      const result = current.commands.submit({ kind: 'select', payload: { selection: value } }, { source: 'selection', fence: true });
+      if (result.status !== 'submitted') return false;
+      const [outcome, presented] = await Promise.all([result.ticket.ack, result.ticket.presented]);
+      if (!isCurrent() || (outcome.status !== 'applied' && outcome.status !== 'noop')) return false;
+      const seq = outcome.seq ?? result.ticket.seq ?? throughSeq;
+      return presented === 'presented' && current.viewStore.getSnapshot().throughSeq <= seq;
+    };
+    if (!await select({ anchor: selection.anchor, focus: selection.anchor })) return false;
+    const shown = current.viewStore.getSnapshot().geometry?.caret;
+    if (!shown || !scroller.current || !host.current) return false;
+    if (selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset) {
+      if (!await select({ anchor: selection.focus, focus: selection.anchor })) return false;
+    }
+    if (!scroller.current || !host.current) return false;
+    scroller.current.scrollTop += host.current.getBoundingClientRect().top - scroller.current.getBoundingClientRect().top + shown.y * latest.current.zoom - 24;
     return true;
-  }, [binding, controller, host, scroller]);
-  const scrollToParagraph = useCallback((paraId: string, story = 'body') => scrollToTarget({ kind: 'navigationTarget', story, paraId }), [scrollToTarget]);
-  const scrollToBookmark = useCallback((name: string, story = 'body') => scrollToTarget({ kind: 'bookmarkTarget', story, name }), [scrollToTarget]);
+  }, [binding, host, scroller]);
+  const scrollToParagraph = useCallback((paraId: string, story = 'body') => navigate(async current => {
+    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
+    if (typeof target === 'string' || current !== binding()) return false;
+    return revealSelection(current, { anchor: target.loc, focus: target.loc });
+  }), [binding, controller, navigate, revealSelection]);
+  const scrollToBookmark = useCallback((name: string, story = 'body') => navigate(async current => {
+    const target = await controller.read({ kind: 'bookmarkTarget', story, name });
+    if (!target || typeof target === 'string' || current !== binding()) return false;
+    return revealSelection(current, { anchor: target.loc, focus: target.loc });
+  }), [binding, controller, navigate, revealSelection]);
+  /** Selects the first range a comment or revision anchors and scrolls its start into view; false when it does not exist. */
+  const scrollToReviewTarget = useCallback((target: ResidentReviewTarget) => navigate(async current => {
+    const range = (await controller.read({ kind: 'reviewTarget', target }))?.ranges[0];
+    if (!range || current !== binding()) return false;
+    return revealSelection(current, { anchor: { story: range.story, ...range.start }, focus: { story: range.story, ...range.end } });
+  }), [binding, controller, navigate, revealSelection]);
   const revealParagraph = useCallback(async (paraId: string, story: string, focus = false) => {
     if (focus) return scrollToParagraph(paraId, story);
     const current = binding();
@@ -114,5 +152,5 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     }
     return false;
   }, [binding, controller, host, scroller, scrollToPage, scrollToParagraph]);
-  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, scrollToBookmark, revealParagraph };
+  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, scrollToBookmark, scrollToReviewTarget, revealParagraph };
 }

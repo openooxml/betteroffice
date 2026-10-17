@@ -89,22 +89,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   memoryBudget,
   measurementFontProvider,
   } = props;
-  const [replacement, setReplacement] = useState<{ input: DocxInput; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
+  type ParsedDocument = NonNullable<DocxEditorProps['document']>;
+  const [replacement, setReplacement] = useState<{ input: DocxInput | null; parsed: ParsedDocument | null; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
   const replaced = replacement && replacement.prop === props.documentBuffer && replacement.document === props.document;
   const documentBuffer = replaced ? replacement.input : props.documentBuffer;
-  const parsedDocument = documentBuffer ? null : props.document;
+  const parsedDocument = documentBuffer ? null : replaced ? replacement.parsed : props.document;
   const hasSource = !!(documentBuffer || parsedDocument);
   const workerCollaboration = useWorkerCollaboration(props.collaboration, documentBuffer ?? parsedDocument);
   const sourceKey = useMemo(() => crypto.randomUUID(), [documentBuffer, parsedDocument]);
   const openedSource = useRef(sourceKey);
-  const loadRequest = useRef<{ input: DocxInput; resolve(): void; reject(error: Error): void } | null>(null);
-  const loadBuffer = useCallback((input: DocxInput) => {
+  const loadRequest = useRef<{ input: DocxInput | ParsedDocument; resolve(): void; reject(error: Error): void } | null>(null);
+  const load = useCallback((input: DocxInput | null, parsed: ParsedDocument | null) => {
     loadRequest.current?.reject(new Error('Document was replaced'));
     return new Promise<void>((resolve, reject) => {
-      loadRequest.current = { input, resolve, reject };
-      setReplacement({ input, prop: props.documentBuffer, document: props.document });
+      loadRequest.current = { input: (input ?? parsed)!, resolve, reject };
+      setReplacement({ input, parsed, prop: props.documentBuffer, document: props.document });
     });
   }, [props.documentBuffer, props.document]);
+  const loadBuffer = useCallback((input: DocxInput) => load(input, null), [load]);
+  const loadDocument = useCallback((document: ParsedDocument) => load(null, document), [load]);
   const host = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -166,7 +169,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, reportRecoverableError]);
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
-  const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, print, onZoom: setZoom, isDark,
+  const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
+    comments: () => props.comments ?? sourceComments.current,
     tableGridlines, onTableGridlines: setTableGridlines,
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
@@ -187,7 +191,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (id === 'print') { await print(); return { ok: true, status: 'executed' }; }
     return fileIO.perform(id);
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
-    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph }));
+    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph,
+    scrollToReviewTarget: navigation.scrollToReviewTarget }));
   const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   useEffect(() => registerTableActionExecutor((action) =>
     controller.commands.store.execute('tableAction', action as never)), [controller]);
@@ -206,13 +211,6 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const legacyRef = useRef<PagedEditorRef | null>(null);
   useKeyboardShortcuts({ commands: controller.commands, pagedEditorRef: legacyRef, containerRef: container,
     disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false });
-  useEffect(() => {
-    const request = loadRequest.current;
-    if (!request) return;
-    if (request.input !== documentBuffer) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
-    else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
-    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
-  }, [shellState, documentBuffer, controller]);
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);
@@ -313,7 +311,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     barrier?: Ticket;
     clipboard?: ReturnType<typeof createClipboardPrefetch>;
   } | null>(null);
-  const [loaded, setLoaded] = useState<{ input: DocxInput; source: Uint8Array } | null>(null);
+  const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
+  const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
   const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
@@ -324,19 +323,19 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (parsedDocument) return { ...parsedDocument };
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
-    return loaded && loaded.input === documentBuffer ? new Uint8Array(loaded.source) : null;
-  }, [documentBuffer, parsedDocument, loaded, workerCollaboration.reopenKey]);
+    return loaded?.generation === sourceGeneration ? new Uint8Array(loaded.source) : null;
+  }, [documentBuffer, parsedDocument, sourceGeneration, loaded, workerCollaboration.reopenKey]);
 
   useEffect(() => {
     if (!documentBuffer || documentBuffer instanceof Uint8Array || documentBuffer instanceof ArrayBuffer) return;
     let current = true;
     void toArrayBuffer(documentBuffer).then((buffer) => {
-      if (current) setLoaded({ input: documentBuffer, source: new Uint8Array(buffer) });
+      if (current) setLoaded({ generation: sourceGeneration, source: new Uint8Array(buffer) });
     }, (error: unknown) => {
       if (current) reportError(error instanceof Error ? error : new Error(String(error)));
     });
     return () => { current = false; };
-  }, [documentBuffer, reportError]);
+  }, [documentBuffer, sourceGeneration, reportError]);
 
   const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection> => {
     signal.throwIfAborted();
@@ -802,8 +801,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     linkGesture.current += 1;
     openedSource.current = sourceKey;
     pluginGeometry.clear();
-    if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
-  }, [controller, source, sourceKey, documentBuffer, parsedDocument, hasSource, pluginGeometry]);
+    if (hasSource) controller.opening(sourceGeneration); else controller.empty();
+  }, [controller, sourceGeneration, source, sourceKey, hasSource, pluginGeometry]);
+  useEffect(() => {
+    const request = loadRequest.current;
+    if (!request) return;
+    if (request.input !== (documentBuffer ?? parsedDocument)) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
+    else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
+    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
+  }, [shellState, documentBuffer, parsedDocument, controller]);
   useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {

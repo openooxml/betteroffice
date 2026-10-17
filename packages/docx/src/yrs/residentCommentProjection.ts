@@ -40,11 +40,12 @@ export function savedCommentIds(sourceIds: readonly number[], native: readonly P
 /**
  * The comments a save writes: the source package's, each with the fields the session wrote over its
  * seeded placeholders and without the ones it removed, then the comments added in the session.
+ * With `initialized`, native resolved state replaces the source state.
  * Session comments keep the IDs `aliases` handed out, in the order this replica first projected them;
  * with `fresh`, they take {@link savedCommentIds} instead, so replicas holding the same comments save
  * the same IDs.
  */
-export function projectResidentComments(engine: ResidentEngineSession, aliases: Map<string, number>, fresh = false): ResidentCommentProjection {
+export function projectResidentComments(engine: ResidentEngineSession, aliases: Map<string, number>, initialized = false, fresh = false): ResidentCommentProjection {
   const source = engine.propertyDocument().package.document.comments ?? [];
   const native = engine.listComments();
   for (const comment of native) {
@@ -65,9 +66,11 @@ export function projectResidentComments(engine: ResidentEngineSession, aliases: 
     const comment = held.get(original.id);
     if (!comment) return aliases.has(String(original.id)) ? [] : [original];
     const parentId = parentOf(comment);
+    const done = initialized ? comment.done : comment.done || (original.done ?? false);
     return [{ ...original, ...(comment.author ? { author: comment.author } : {}), ...(comment.date ? { date: comment.date } : {}),
       ...(comment.body == null ? {} : { content: commentContent(comment.body, original.content) }),
-      ...(comment.done && !original.done ? { done: true, ...(original.status === undefined ? {} : { status: 'resolved' as const }) } : {}),
+      ...(done === (original.done ?? false) ? {} : { done,
+        ...(original.status === undefined ? {} : { status: done ? 'resolved' as const : 'active' as const }) }),
       ...(parentId === undefined ? {} : { parentId }) }];
   });
   const sourceIds = new Set(source.map(comment => comment.id));

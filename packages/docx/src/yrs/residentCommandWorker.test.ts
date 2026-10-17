@@ -15,6 +15,7 @@ import { createYrsSession } from './index';
 import { resolveReservations, type DocxReservation } from './reservations';
 import type { DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { ResidentReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
 
@@ -3046,5 +3047,120 @@ test('worker refuses table structure commands in header stories', async () => {
     const refused = await client.edit(intent(2, 1, 'insertTableRow', { side: 'below' }));
     expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
     expect(refused.version).toBe(1);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const TRACKED_PARAGRAPH = '<w:p w14:paraId="00000003"><w:r><w:t>Old </w:t></w:r>' +
+  '<w:ins w:id="9" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins></w:p>';
+
+test('review target reads resolve a comment by its public id and a revision by its id', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body + TRACKED_PARAGRAPH, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [comment] = engine.listComments();
+    const [revision] = engine.geometryReader.listRevisions();
+    if (!comment || !revision) throw new Error('Source review items unavailable');
+    const publicId = engine.commentProjection()!.ids[comment.id]!;
+    const first = engine.paragraphs('body')[0]!.paraId;
+    const read = async (target: ResidentReviewTarget) => (await client.documentRead({ kind: 'reviewTarget', target })).value;
+    expect(await read({ kind: 'comment', id: publicId })).toEqual({ id: comment.id,
+      ranges: [{ story: 'body', start: { paraId: first, offset: 0 }, end: { paraId: first, offset: 4 } }] });
+    expect(await read({ kind: 'revision', revisionId: revision.revisionId })).toEqual({ id: revision.revisionId,
+      ranges: [{ story: revision.story, start: revision.range.start, end: revision.range.end }] });
+    expect(await read({ kind: 'comment', id: publicId + 40 })).toBeNull();
+    expect(await read({ kind: 'revision', revisionId: 'missing' })).toBeNull();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a reply comment links its parent in one undo step and comment commands report every comment', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const reply = (seq: number, version: number, parent: string) => client.edit(intent(seq, version, 'addComment', {
+      ranges, author: 'B', date: '2026-01-02', body: 'Reply', parentId: parent, expectVersion: engine.proposalEngine.version() }));
+    const unknown = await reply(1, 0, 'missing');
+    expect(unknown.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unknown-comment' });
+    const replied = await reply(2, unknown.version, parent.id);
+    expect(replied.outcomes[0]?.status).toBe('applied');
+    const added = engine.listComments().find(comment => comment.id !== parent.id)!;
+    expect(added.parentId).toBe(parent.id);
+    const replyId = replied.editState!.comment!.id;
+    expect(replied.editState!.comment!.comments.find(comment => comment.id === replyId)).toMatchObject({ parentId, author: 'B' });
+    const done = await client.edit(intent(3, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.editState!.commentChange).toMatchObject({ seq: 3, comments: expect.arrayContaining([expect.objectContaining({ id: parentId, done: true })]) });
+    expect(done.editState!.comment).toBeUndefined();
+    const undone = await client.edit(intent(4, done.version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    const undoneReply = await client.edit(intent(5, undone.version, 'undo', {}));
+    expect(undoneReply.outcomes[0]?.status).toBe('applied');
+    expect(engine.listComments().map(comment => comment.id)).toEqual([parent.id]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker saves a reply added through comment commands with its parent and the parent done state', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const replied = await client.edit(intent(1, 0, 'addComment', { ranges, author: 'B', date: '2026-01-02T00:00:00Z', body: 'Reply',
+      parentId: parent.id, expectVersion: engine.proposalEngine.version() }));
+    const done = await client.edit(intent(2, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.outcomes[0]?.status).toBe('applied');
+    const saved = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments ?? [];
+    expect(saved.find(comment => comment.id === parentId)).toMatchObject({ done: true });
+    expect(saved.find(comment => comment.id === replied.editState!.comment!.id)).toMatchObject({ parentId, author: 'B' });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+
+test('reopening an imported resolved comment updates the projection and saved extended metadata', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended,
+    prepare: engine => {
+      expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+      return { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 };
+    } });
+  try {
+    const result = await client.edit(intent(1, 0, 'updateComment', { id: '0', patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(result.outcomes[0]?.status).toBe('applied');
+    expect(result.editState?.commentChange?.comments.find(comment => comment.id === 0)?.done).toBe(false);
+    const bytes = (await client.save({ comments: [] })).bytes;
+    const comments = (await parseDocx(bytes)).package.document.comments!;
+    expect(comments.find(comment => comment.id === 0)?.done ?? false).toBe(false);
+    const parts = unzipContainer(new Uint8Array(bytes));
+    expect(new TextDecoder().decode(parts['word/commentsExtended.xml'])).toMatch(/w15:paraId="0C000001"[^>]*w15:done="0"/);
+    expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 0)?.done).toBe(true);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('an imported reply without range markers inherits its ancestor anchor and supports reply resolve and removal', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended });
+  try {
+    const parent = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 0 } })).value!;
+    const reply = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value;
+    expect(reply).toEqual({ id: '1', ranges: parent.ranges });
+    const added = await client.edit(intent(1, 0, 'addComment', { ranges: reply!.ranges, parentId: reply!.id, body: 'Nested reply', author: 'C', date: '2026-01-03', expectVersion: engine.proposalEngine.version() }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    expect(added.editState?.comment?.comments.find(comment => comment.id === added.editState?.comment?.id)?.parentId).toBe(1);
+    const reopened = await client.edit(intent(2, 1, 'updateComment', { id: reply!.id, patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(reopened.outcomes[0]?.status).toBe('applied');
+    expect(reopened.editState?.commentChange?.comments.find(comment => comment.id === 1)?.done).toBe(false);
+    const removed = await client.edit(intent(3, 2, 'removeComment', { id: reply!.id, expectVersion: engine.proposalEngine.version() }));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    expect(removed.editState?.commentChange?.comments.some(comment => comment.id === 1)).toBe(false);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.some(comment => comment.id === 1)).toBe(false);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect((await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value).toEqual(reply);
+    const restored = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 1);
+    expect(restored).toMatchObject({ parentId: 0 });
+    expect(restored?.done ?? false).toBe(false);
   } finally { client.destroy(); }
 }, TIMEOUT);

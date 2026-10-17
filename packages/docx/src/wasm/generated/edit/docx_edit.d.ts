@@ -982,6 +982,10 @@ export class EditSession {
     search_text(query: string, case_sensitive: boolean, limit?: number | null): string;
     section_margins_json(): string;
     /**
+     * Initializes imported metadata, creating an unanchored comment when absent.
+     */
+    seed_comment_metadata_json(comment_id: string, patch_json: string): void;
+    /**
      * [`EditSession::open_docx`] with seeding always on.
      */
     seed_from_docx(bytes: Uint8Array, generation?: string | null): string;
@@ -1861,6 +1865,7 @@ export interface InitOutput {
     readonly editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_section_margins_json: (a: number) => [number, number];
+    readonly editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;

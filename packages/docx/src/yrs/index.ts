@@ -122,7 +122,7 @@ export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentRangeHighlights } from './residentRangeHighlights';
 export type { ResidentPresencePeer, ResidentPresenceGeometry } from './residentCollaboration';
 export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
-export type { DocxCommentPatch, ResidentReviewSnapshot } from './residentReview';
+export type { DocxCommentPatch, ResidentReviewSnapshot, ResidentReviewTarget, ResidentReviewTargetRanges } from './residentReview';
 export type { ResidentToolbarMetadata } from './residentToolbarMetadata';
 export type {
   DocxDisplayRange,
