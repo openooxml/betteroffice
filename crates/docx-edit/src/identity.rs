@@ -851,8 +851,7 @@ fn valid(value: Option<String>) -> Option<String> {
     value.filter(|value| parse_paragraph_id(value).is_some())
 }
 
-/// A renamed duplicate's key, derived from its mark's CRDT identity so every
-/// replica repairing the same state picks the same one.
+/// Base for a repaired session key, derived from its mark's CRDT identity.
 fn derived_key(map: &MapRef) -> String {
     match AsRef::<Branch>::as_ref(map).id() {
         BranchID::Nested(id) => format!("{}~{}", id.client, id.clock),
@@ -1750,6 +1749,7 @@ impl EditingDoc {
             holders.entry(pilcrow.key.as_str()).or_default().push(index);
         }
         let mut renamed = Vec::new();
+        let mut repaired_keys = HashSet::new();
         for (key, indexes) in &holders {
             if !key.is_empty() && indexes.len() == 1 && !copies.contains(&indexes[0]) {
                 continue;
@@ -1771,7 +1771,17 @@ impl EditingDoc {
                 .filter(|index| Some(*index) != keeper)
             {
                 let pilcrow = &scan.pilcrows[index];
-                renamed.push((index, pilcrow.key.clone(), derived_key(&pilcrow.map)));
+                let base = derived_key(&pilcrow.map);
+                let mut key = base.clone();
+                let mut suffix = 0u64;
+                while holders.contains_key(key.as_str())
+                    || claimed.contains(key.as_str())
+                    || !repaired_keys.insert(key.clone())
+                {
+                    suffix += 1;
+                    key = format!("{base}~{suffix}");
+                }
+                renamed.push((index, pilcrow.key.clone(), key));
             }
         }
         renamed.sort_by_key(|(index, _, _)| *index);
