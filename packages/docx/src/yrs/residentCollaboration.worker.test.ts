@@ -434,6 +434,45 @@ test('a byte source saves the shared stories it joined with and leaves a plain o
   } finally { remote.destroy(); plain.session.dispose(); }
 }, TIMEOUT);
 
+test('worker replicas that number comments in different local orders save and reopen the same comments', async () => {
+  const a = await open(9202);
+  const b = await open(9201, a.engine.encodeState());
+  const comment = (replica: Replica, index: number, body: string) => {
+    const paraId = replica.engine.paragraphs('body')[index]!.paraId;
+    return replica.session.submit('addComment', { ranges: [{ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 3 } }],
+      author: 'Ada', date: '2026-01-01', body, expectVersion: replica.engine.proposalEngine.version() }).ack.then(ack => ack.status);
+  };
+  const exchange = (target: Replica, source: Replica) =>
+    target.session.submit('applyRemoteUpdate', { update: remoteUpdate(target, source.engine) }, merge).ack.then(ack => ack.status);
+  const saved = async (replica: Replica) => {
+    const bytes = new Uint8Array((await replica.client.save({ comments: [] })).bytes);
+    const parts = unzipContainer(bytes);
+    const xml = new TextDecoder().decode(parts['word/comments.xml']!);
+    const ids = Object.fromEntries([...xml.matchAll(/<w:comment w:id="(\d+)"[^>]*>([\s\S]*?)<\/w:comment>/gu)]
+      .map(match => [[...match[2]!.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/gu)].map(run => run[1]).join(''), match[1]]));
+    const markers = new TextDecoder().decode(parts['word/document.xml']!).split('</w:p>').slice(0, 2)
+      .map(paragraph => [...paragraph.matchAll(/<w:comment(?:RangeStart|RangeEnd|Reference) w:id="(\d+)"/gu)].map(match => match[1]));
+    const reopened = await createYrsSession({ clientId: 9298 });
+    try {
+      reopened.openDocx(bytes.slice(), true);
+      return { xml, ids, markers, reopened: reopened.listComments().map(listed => listed.id).sort() };
+    } finally { reopened.destroy(); }
+  };
+  try {
+    expect(await comment(a, 0, 'First')).toBe('applied');
+    expect((await saved(a)).ids).toEqual({ First: '1' });
+    expect(await comment(b, 1, 'Second')).toBe('applied');
+    expect((await saved(b)).ids).toEqual({ Second: '1' });
+    expect(await exchange(a, b)).toBe('applied');
+    expect(await exchange(b, a)).toBe('applied');
+    const left = await saved(a);
+    expect(Object.values(left.ids).sort()).toEqual(['1', '2']);
+    expect(left.markers).toEqual([Array(3).fill(left.ids.First), Array(3).fill(left.ids.Second)]);
+    expect(left.reopened).toEqual(['1', '2']);
+    expect(await saved(b)).toEqual(left);
+  } finally { a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
+
 test('a merge that deletes the story holding the local selection repairs the confirmed selection', async () => {
   const a = await open(9201);
   const remote = await createYrsSession({ clientId: 9203 });
