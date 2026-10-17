@@ -3113,9 +3113,10 @@ fn lift_drawings(
 
 /// Resolves every comment anchored in `story_id` to sorted, story-global
 /// UTF-16 intervals with the numeric ids the layout contract carries. Anchors
-/// in other stories are skipped and an empty range contributes nothing; an
-/// anchor that no longer resolves is an error, because the run cuts derived
-/// from these intervals would silently misplace the comment.
+/// in other stories are skipped and an empty range contributes nothing. An
+/// anchor whose text this replica has not integrated yet contributes nothing
+/// either: anchors are opaque bytes, so a comment can arrive before the text
+/// it points at, and the next lowering picks it up once that text arrives.
 fn resolve_comment_intervals<T: ReadTxn>(
     txn: &T,
     story_id: &str,
@@ -3138,13 +3139,11 @@ fn resolve_comment_intervals<T: ReadTxn>(
             if anchor.story != story_id {
                 continue;
             }
-            let start = anchor.start.get_offset(txn).ok_or_else(|| {
-                EditError::InvalidComment("start anchor no longer resolves".into())
-            })?;
-            let end = anchor
-                .end
-                .get_offset(txn)
-                .ok_or_else(|| EditError::InvalidComment("end anchor no longer resolves".into()))?;
+            let (Some(start), Some(end)) =
+                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
+            else {
+                continue;
+            };
             if start.index < end.index {
                 intervals.push(CommentInterval {
                     start: start.index,
