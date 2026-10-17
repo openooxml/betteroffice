@@ -28,13 +28,20 @@ fn assert_addressable(doc: &EditingDoc) {
     }
 }
 
-#[test]
-fn a_split_with_a_missing_text_dependency_keeps_paragraphs_addressable() {
-    let receiver = EditingDoc::new(1);
+fn ooxml_ids(doc: &EditingDoc) -> Vec<Option<String>> {
+    doc.paragraph_identities()
+        .paragraphs
+        .into_iter()
+        .map(|paragraph| paragraph.ooxml_para_id)
+        .collect()
+}
+
+fn split_with_a_missing_text_dependency(receiver_client: u64, splitter_client: u64) {
+    let receiver = EditingDoc::new(receiver_client);
     receiver
         .create_story("body", "abcdef", "Normal", "left")
         .unwrap();
-    let splitter = EditingDoc::new(2);
+    let splitter = EditingDoc::new(splitter_client);
     let writer = EditingDoc::new(3);
     let initial = receiver.encode_state_as_update_v1();
     for doc in [&splitter, &writer] {
@@ -72,6 +79,21 @@ fn a_split_with_a_missing_text_dependency_keeps_paragraphs_addressable() {
         .apply_update_v1(&receiver.encode_state_as_update_v1())
         .unwrap();
     assert_eq!(keys(&receiver), keys(&writer));
+    let ids = ooxml_ids(&receiver);
+    assert_eq!(ids, ooxml_ids(&splitter));
+    assert_eq!(ids, ooxml_ids(&writer));
+    let saved: Vec<&String> = ids.iter().flatten().collect();
+    assert_eq!(saved.iter().collect::<HashSet<_>>().len(), saved.len());
     assert_addressable(&splitter);
     assert_addressable(&writer);
+}
+
+#[test]
+fn a_split_with_a_missing_text_dependency_keeps_paragraphs_addressable() {
+    split_with_a_missing_text_dependency(1, 2);
+}
+
+#[test]
+fn a_repair_that_outranks_the_pending_split_converges_on_every_peer() {
+    split_with_a_missing_text_dependency(4, 2);
 }
