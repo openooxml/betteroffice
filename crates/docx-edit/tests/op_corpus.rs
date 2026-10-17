@@ -750,7 +750,9 @@ fn split_at_end_carries_the_insertion_point_run_formatting() {
         assert_eq!(typed.get(key), source.get(key), "{key}");
     }
     assert_eq!(
-        typed.get("textColor").and_then(|color| map_get(color, "rgb")),
+        typed
+            .get("textColor")
+            .and_then(|color| map_get(color, "rgb")),
         Some(&Any::from("336699"))
     );
     assert!(!active(&typed, "ins"));
