@@ -299,6 +299,12 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   initialZoom?: number;
   /** Whether to show hidden (vanished) text in the layout (default: false) */
   showHiddenText?: boolean;
+  /**
+   * Whether to show dashed, view-only guides at table cell edges without a border (default: false).
+   * The `tableGridlines` command toggles them; they are never saved, printed or exported.
+   * Worker-only editor only.
+   */
+  showTableGridlines?: boolean;
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
