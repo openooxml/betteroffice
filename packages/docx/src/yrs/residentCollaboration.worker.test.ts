@@ -215,6 +215,45 @@ test('a worker replica whose projection fails with no update pending fails loudl
     expect(b.client.hasFailed()).toBe(true);
   } finally { provider.destroy(); a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
+
+test('a comment that reaches a worker replica before the text it is anchored on lays out and resolves once the text arrives', async () => {
+  const a = await open(9201);
+  const b = await open(9202, a.engine.encodeState());
+  const c = await open(9203, a.engine.encodeState());
+  let fromA: ArrayBuffer[] = [];
+  const fromB: ArrayBuffer[] = [];
+  const offA = a.client.onCollabUpdates(event => fromA.push(...event.updates.map(u => u.slice().buffer)));
+  const offB = b.client.onCollabUpdates(event => fromB.push(...event.updates.map(u => u.slice().buffer)));
+  const apply = (target: typeof c, update: ArrayBuffer) =>
+    target.session.submit('applyRemoteUpdate', { update }, merge).ack.then(ack => ack.status, (error: unknown) => String(error));
+  try {
+    expect((await b.session.submit('insertText', { text: 'B' }).ack).status).toBe('applied');
+    for (const update of fromB) expect(await apply(a, update)).toBe('applied');
+    fromA = [];
+    const [first, second] = a.engine.paragraphs('body').map(paragraph => paragraph.paraId);
+    const range = { story: 'body', start: { paraId: first!, offset: 4 }, end: { paraId: first!, offset: 5 } };
+    expect((await a.session.submit('addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Note',
+      expectVersion: a.engine.proposalEngine.version() }).ack).status).toBe('applied');
+    const at = { story: 'body', paraId: second!, offset: 0 };
+    expect((await a.session.submit('insertText', { selection: { anchor: at, focus: at }, text: 'A' }).ack).status).toBe('applied');
+    expect(fromA.length).toBeGreaterThan(0);
+
+    for (const update of fromA) expect(await apply(c, update)).toBe('applied');
+    expect(c.client.hasFailed()).toBe(false);
+    const id = a.engine.listComments()[0]!.id;
+    expect(c.engine.listComments().map(comment => comment.id)).toEqual([id]);
+    expect(await commentedText(c)).toBe('');
+    expect((await c.client.save({ comments: [] })).bytes.byteLength).toBeGreaterThan(0);
+    for (const update of fromB) expect(await apply(c, update)).toBe('applied');
+    expect(c.engine.resolveComment(id)).toEqual(a.engine.resolveComment(id));
+    const highlighted = await commentedText(a);
+    expect(highlighted).not.toBe('');
+    expect(await commentedText(c)).toBe(highlighted);
+    expect(c.engine.paragraphs('body')).toEqual(a.engine.paragraphs('body'));
+    const end = { story: 'body', paraId: first!, offset: 5 };
+    expect((await c.session.submit('insertText', { selection: { anchor: end, focus: end }, text: 'C' }).ack).status).toBe('applied');
+  } finally { offA(); offB(); a.session.dispose(); b.session.dispose(); c.session.dispose(); }
+}, TIMEOUT);
 test('update push precedes command ack and queued typing survives a merge', async () => {
   const a = await open(9201);
   const b = await open(9202, a.engine.encodeState());
@@ -551,6 +590,10 @@ function relay(from: Replica, to: Replica) {
 
 const pageTexts = (frame: RetainedFrame) => frame.displayList.pages.map(({ primitives }) => primitives
   .map(primitive => primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : '').join(''));
+
+const commentedText = async (replica: Replica) => applyFrameDeltaOwned(null, decodeFrameDelta((await replica.client.requestFullFrame()).frame!.payload.frame))
+  .displayList.pages.flatMap(({ primitives }) => primitives)
+  .map(primitive => (primitive.kind === 'glyphRun' || primitive.kind === 'text') && primitive.commentIds?.length ? primitive.text : '').join('');
 
 async function sectionView(replica: Replica) {
   const frame = applyFrameDeltaOwned(null, decodeFrameDelta((await replica.client.requestFullFrame()).frame!.payload.frame));
