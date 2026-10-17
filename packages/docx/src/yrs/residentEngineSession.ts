@@ -195,7 +195,7 @@ export type ResidentEngineSession = Pick<
   sectionProperties(): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
-  commentProjection(): ResidentCommentProjection | null;
+  commentProjection(fresh?: boolean): ResidentCommentProjection | null;
   mediaDataUrl(token: string): string | null;
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
@@ -595,7 +595,7 @@ export async function createResidentEngineSession(
       const at = session.clear_cell_selection();
       return at === undefined ? null : JSON.parse(at) as YrsLoc;
     },
-    commentProjection: () => partBase ? projectResidentComments(resident, commentAliases) : null,
+    commentProjection: fresh => partBase ? projectResidentComments(resident, commentAliases, fresh) : null,
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();
