@@ -450,3 +450,74 @@ test('checkpoint recovery restores proposal records and preview decisions', asyn
     expect((await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!.proposals.proposals[0]?.state).toBe('rejected');
   } finally { clients.forEach(client => client.destroy()); }
 }, TIMEOUT);
+
+
+test('checkpoint recovery retains resolved reservations and table gridlines', async () => {
+  const bytes = source(1);
+  const workers = [startWorker(), startWorker()];
+  const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+  try {
+    await clients[0]!.openSource({ bytes });
+    const settings = { ...init(), layoutInput: JSON.stringify({ ...JSON.parse(LAYOUT), renderEnv: { showTableGridlines: true } }) };
+    await clients[0]!.commandInit(settings);
+    const identities = await clients[0]!.documentRead({ kind: 'paragraphIdentities' });
+    const environment = { themeColors: {}, showHiddenText: false, showTableGridlines: true, reservations: {
+      version: identities.version, key: 'retained', sets: [{ owner: 'layout', items: [{ id: 'space', kind: 'block',
+        anchor: { kind: 'paragraph', paragraph: identities.value.paragraphs[0]!.session! }, side: 'before', height: 50 }] }],
+    } };
+    const changed = await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+      basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: environment });
+    expect(changed.outcomes[0]?.status).toBe('applied');
+    const checkpoint = await clients[0]!.checkpoint();
+    const before = (await clients[0]!.requestFullFrame()).frame!;
+    await clients[1]!.openSource({ bytes, state: checkpoint.state });
+    const layout = spyOn(workers[1]!.sessions[0]!, 'layoutDocumentWithRegionsAfterEdit');
+    const resumed = await clients[1]!.commandInit({ ...settings, incarnation: 2, version: checkpoint.version,
+      throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+    const restored = JSON.parse(layout.mock.calls.at(-1)![0]).renderEnv;
+    expect(restored.showTableGridlines).toBe(true);
+    expect(Object.values(restored.reservations ?? {})).toMatchObject([{ owner: 'layout', id: 'space', height: 50 }]);
+    expect(resumed.frame.payload.reservations).toEqual(before.payload.reservations);
+    expect(firstPage([resumed.frame.payload.frame])).toEqual(firstPage([before.payload.frame]));
+    layout.mockRestore();
+  } finally { clients.forEach(client => client.destroy()); }
+}, TIMEOUT);
+
+for (const remove of [false, true]) {
+  test(`checkpoint recovery retains source comment ${remove ? 'deletion' : 'metadata'} and revision refs`, async () => {
+    const parts = new Map(Object.entries(unzipContainer(source(1))));
+    const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml'))
+      .replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')));
+    parts.set('word/_rels/document.xml.rels', toBytes(new TextDecoder().decode(parts.get('word/_rels/document.xml.rels'))
+      .replace('</Relationships>', '<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>')));
+    parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:commentRangeStart w:id="0"/><w:r><w:t>Text</w:t></w:r><w:ins w:id="7" w:author="Writer" w:date="2026-01-01"><w:r><w:t>Revision</w:t></w:r></w:ins><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p><w:sectPr/></w:body></w:document>`));
+    parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="${w}"><w:comment w:id="0" w:author="Writer"><w:p><w:r><w:t>Original</w:t></w:r></w:p></w:comment></w:comments>`));
+    const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+    const clients = [startWorker(), startWorker()].map(worker => new ResidentEngineWorkerClient(worker));
+    try {
+      await clients[0]!.openSource({ bytes });
+      await clients[0]!.commandInit(init());
+      const review = (await clients[0]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+      expect(review.comments).toHaveLength(1);
+      expect(review.revisions).toHaveLength(1);
+      const id = review.comments[0]!.id;
+      const changed = await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+        basis: { epoch: 1, version: 0 }, kind: remove ? 'removeComment' : 'updateComment',
+        payload: remove ? { id, expectVersion: review.version } : { id, expectVersion: review.version, patch: { author: 'Editor', body: 'Changed', done: true } } });
+      expect(changed.outcomes[0]?.status).toBe('applied');
+      const checkpoint = await clients[0]!.checkpoint();
+      const before = (await clients[0]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+      await clients[1]!.openSource({ bytes, state: checkpoint.state });
+      await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version,
+        throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+      const after = (await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+      expect(after.comments).toEqual(before.comments);
+      expect(after.uiComments).toEqual(before.uiComments);
+      expect(after.commentIds).toEqual(before.commentIds);
+      expect(after.revisions).toEqual(before.revisions);
+      expect(unzipContainer(new Uint8Array((await clients[1]!.save({ comments: [] })).bytes)))
+        .toEqual(unzipContainer(new Uint8Array((await clients[0]!.save({ comments: [] })).bytes)));
+    } finally { clients.forEach(client => client.destroy()); }
+  }, TIMEOUT);
+}
