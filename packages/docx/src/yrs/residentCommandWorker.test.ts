@@ -1590,7 +1590,7 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
     const table = await client.edit(intent(3, 2, 'insertTable', { selection: { anchor: point, focus: point }, rows: 2, columns: 2 }));
     expect(table.outcomes[0]?.status).toBe('applied');
     expect(table.editState?.tableContext).toMatchObject({ rowCount: 2, columnCount: 2 });
-    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0$/);
+    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0~\d+$/);
     expect(engine.geometryReader.storyIds().length).toBe(5);
     expect(await client.documentReadAt({ kind: 'toolbarMetadata' }, metadata.version)).toEqual({ status: 'superseded' });
     const undone = await client.edit(intent(4, 3, 'undo', {}));

@@ -106,7 +106,10 @@ fn cell_ids(doc: &EditingDoc) -> Vec<String> {
 
 fn assert_lowers(engine: &EngineSession, case: &str) {
     if let Err(error) = engine.lower_story_json("body", &RenderEnv::default()) {
-        panic!("{case}: replica {} cannot lower the body: {error:?}", engine.doc().client_id());
+        panic!(
+            "{case}: replica {} cannot lower the body: {error:?}",
+            engine.doc().client_id()
+        );
     }
 }
 
@@ -114,11 +117,20 @@ fn assert_lowers(engine: &EngineSession, case: &str) {
 fn removing_a_table_leaves_the_concurrent_table_whole() {
     for removal in [Removal::Delete, Removal::Undo] {
         for actor_is_left in [true, false] {
-            let case = format!("{removal:?} on the {} replica", if actor_is_left { "left" } else { "right" });
+            let case = format!(
+                "{removal:?} on the {} replica",
+                if actor_is_left { "left" } else { "right" }
+            );
             let origin = EditingDoc::new(100);
-            origin.create_story("body", "Hello", "Normal", "left").unwrap();
+            origin
+                .create_story("body", "Hello", "Normal", "left")
+                .unwrap();
             let (left, right) = replicas(&origin);
-            let (actor, peer) = if actor_is_left { (&left, &right) } else { (&right, &left) };
+            let (actor, peer) = if actor_is_left {
+                (&left, &right)
+            } else {
+                (&right, &left)
+            };
             let mut undo = actor.doc().undo_manager();
             let mine = typed_table(actor.doc(), "mine");
             let theirs = typed_table(peer.doc(), "theirs");
@@ -169,8 +181,14 @@ fn opened_cell_ids_stay_put_and_edit_born_ids_never_change() {
         .insert_table(&ctx(), Position::new("body", 0), 1, 2)
         .unwrap()
         .created_story_ids;
-    assert!(row.iter().all(|id| id.ends_with(&format!("~{LEFT}"))), "{row:?}");
-    assert!(table.iter().all(|id| id.ends_with(&format!("~{RIGHT}"))), "{table:?}");
+    assert!(
+        row.iter().all(|id| id.ends_with(&format!("~{LEFT}"))),
+        "{row:?}"
+    );
+    assert!(
+        table.iter().all(|id| id.ends_with(&format!("~{RIGHT}"))),
+        "{table:?}"
+    );
     exchange(&left, &right);
 
     let mut born: Vec<String> = opened.iter().chain(&row).chain(&table).cloned().collect();
@@ -200,14 +218,21 @@ fn opened_cell_ids_stay_put_and_edit_born_ids_never_change() {
 #[test]
 fn a_cell_born_on_one_replica_is_listed_and_edited_by_the_same_id_on_another() {
     let origin = EditingDoc::new(100);
-    origin.create_story("body", "Hello", "Normal", "left").unwrap();
+    origin
+        .create_story("body", "Hello", "Normal", "left")
+        .unwrap();
     let (left, right) = replicas(&origin);
     let cell = typed_table(left.doc(), "left");
     exchange(&left, &right);
     assert!(cell_ids(right.doc()).contains(&cell));
     right
         .doc()
-        .insert_text(&ctx(), Position::new(&cell, 0), "right ", FormatPolicy::Plain)
+        .insert_text(
+            &ctx(),
+            Position::new(&cell, 0),
+            "right ",
+            FormatPolicy::Plain,
+        )
         .unwrap();
     exchange(&left, &right);
     for engine in [&left, &right] {
@@ -219,12 +244,21 @@ fn a_cell_born_on_one_replica_is_listed_and_edited_by_the_same_id_on_another() {
 #[test]
 fn the_canonical_form_does_not_depend_on_the_replica_that_made_the_cells() {
     let origin = EditingDoc::new(100);
-    origin.create_story("body", "Hello", "Normal", "left").unwrap();
+    origin
+        .create_story("body", "Hello", "Normal", "left")
+        .unwrap();
     let (left, right) = replicas(&origin);
     let left_cell = typed_table(left.doc(), "same");
     let right_cell = typed_table(right.doc(), "same");
     assert_ne!(left_cell, right_cell);
-    let canonical = |doc: &EditingDoc, story: &str| to_canonical_bytes(&project_story(doc, story).unwrap());
-    assert_eq!(canonical(left.doc(), "body"), canonical(right.doc(), "body"));
-    assert_eq!(canonical(left.doc(), &left_cell), canonical(right.doc(), &right_cell));
+    let canonical =
+        |doc: &EditingDoc, story: &str| to_canonical_bytes(&project_story(doc, story).unwrap());
+    assert_eq!(
+        canonical(left.doc(), "body"),
+        canonical(right.doc(), "body")
+    );
+    assert_eq!(
+        canonical(left.doc(), &left_cell),
+        canonical(right.doc(), &right_cell)
+    );
 }

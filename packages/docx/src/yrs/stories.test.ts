@@ -144,6 +144,7 @@ it('names a cell made on one replica by the same id on every replica', async () 
   const right = await createYrsSession({ clientId: 76212 });
   sessions.push(left, right);
   left.openDocx(storiesDocx(), true);
+  right.openDocx(storiesDocx(), false);
   right.applyUpdate(left.encodeState());
   const sync = () => {
     right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));

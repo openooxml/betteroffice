@@ -60,7 +60,7 @@ fn tables_in_stories_the_session_created_list_their_cells() {
         let cell = listed
             .stories
             .iter()
-            .find(|info| info.story == format!("{story}:t0:r0c0"))
+            .find(|info| info.story == format!("{story}:t0:r0c0~7104"))
             .unwrap();
         assert_eq!(cell.kind, StoryInfoKind::TableCell, "{story}");
         assert_eq!(cell.parent.as_deref(), Some(story), "{story}");

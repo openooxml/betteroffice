@@ -221,8 +221,7 @@ test.each([false, true])('held table Tab between text matches ready input with s
   const preview = await seededSession();
   const full = await seededSession();
   const paraId = full.paragraphs('body')[0]!.paraId;
-  full.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
-  const cells = [0, 1].map((column) => `body:t0:r0c${column}`);
+  const cells = full.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2).createdStoryIds;
   const story = cells[shift ? 1 : 0];
   const loc = { story, paraId: full.paragraphs(story)[0]!.paraId, offset: 0 };
   const ready = await createYrsSession();
@@ -284,9 +283,8 @@ test.each([false, true])('opening body Tab keeps native focus movement with shif
 
 test.each([false, true])('held click in a table prevents Tab and replays cell navigation with shift=%s', async (shift) => {
   const session = await seededSession();
-  session.insertTable({ ...session.selection()!.head, offset: 0 }, 1, 2);
+  const stories = session.insertTable({ ...session.selection()!.head, offset: 0 }, 1, 2).createdStoryIds;
   const body = session.selection()!.head;
-  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
   const story = stories[shift ? 1 : 0];
   const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
   const input = createRef<YrsInputRef>();
@@ -313,8 +311,7 @@ test.each([false, true])('held click in a table prevents Tab and replays cell na
 test.each([false, true])('held click outside a table keeps native Tab after navigation with shift=%s', async (shift) => {
   const session = await seededSession();
   const body = session.selection()!.head;
-  session.insertTable({ ...body, offset: 0 }, 1, 2);
-  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  const stories = session.insertTable({ ...body, offset: 0 }, 1, 2).createdStoryIds;
   session.setSelection({ story: stories[0], paraId: session.paragraphs(stories[0])[0]!.paraId, offset: 0 });
   const input = createRef<YrsInputRef>();
   const replicaReadyRef = { current: true };
@@ -344,8 +341,7 @@ test.each([false, true])('held click outside a table keeps native Tab after navi
 test.each([false, true])('held Tab replayed outside a table leaves document, selection and focus unchanged with shift=%s', async (shift) => {
   const session = await seededSession();
   const body = session.selection()!.head;
-  session.insertTable({ ...body, offset: 0 }, 1, 2);
-  const story = 'body:t0:r0c0';
+  const story = session.insertTable({ ...body, offset: 0 }, 1, 2).createdStoryIds[0]!;
   const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
   const state = session.encodeState();
   const version = session.version();
@@ -394,8 +390,7 @@ test.each([false, true])('held Tab replayed outside a table leaves document, sel
 test.each([false, true])('held Tab outside a table at replay is a no-op and the next typed key lands in the editor with shift=%s', async (shift) => {
   const session = await seededSession();
   const body = session.selection()!.head;
-  session.insertTable({ ...body, offset: 0 }, 1, 2);
-  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  const stories = session.insertTable({ ...body, offset: 0 }, 1, 2).createdStoryIds;
   const story = stories[0];
   const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
   const input = createRef<YrsInputRef>();
@@ -437,8 +432,7 @@ test.each([false, true])('held Tab outside a table at replay is a no-op and the 
 test('held no-op first-cell Shift+Tab keeps two undo steps across an 800 ms edit gap', async () => {
   const source = await seededSession();
   const paraId = source.paragraphs('body')[0]!.paraId;
-  source.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
-  const story = 'body:t0:r0c0';
+  const story = source.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2).createdStoryIds[0]!;
   const state = source.encodeState();
   let now = 1_000;
   const clock = spyOn(performance, 'now').mockImplementation(() => now);
