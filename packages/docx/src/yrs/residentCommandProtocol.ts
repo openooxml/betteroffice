@@ -283,6 +283,7 @@ export interface DocxCommandPayloads {
   setRenderEnvironment: {
     themeColors: Record<string, string>;
     showHiddenText: boolean;
+    showTableGridlines?: boolean;
     /** Applied only while the document version is still `reservations.version`. */
     reservations?: DocxReservationsPayload;
   };
@@ -471,6 +472,7 @@ export interface ResidentCommandHooksEnvironment {
   setRenderEnvironment?(environment: {
     themeColors: Record<string, string>;
     showHiddenText: boolean;
+    showTableGridlines?: boolean;
     reservations?: DocxResolvedReservations;
   }, set?: DocxFrameReservations | null): void;
 }
