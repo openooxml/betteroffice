@@ -80,8 +80,8 @@ parts outside the editor inside `<DocxCommandProvider commands={commands}>`, wit
 Controls keep their active and `'mixed'` states, shortcuts, and read-only,
 viewing and suggesting restrictions. `EditorToolbar.Review` also includes comments
 and tracked-change controls; these commands are unavailable in the default
-worker-only editor. Comment replies and resolution are available through the
-async ref, while sidebar comment cards display threads without editing controls.
+worker-only editor. `insertCommentReply` and `resolveComment` are available
+through the ref; sidebar comment cards display threads without editing controls.
 A disabled command always states why
 (`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
 availability again after preceding input, resolving to `{ ok: true, status }`

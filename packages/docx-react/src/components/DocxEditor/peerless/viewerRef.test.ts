@@ -110,7 +110,11 @@ test('worker viewer synchronous proposals queue allowed changes behind pending i
   const read = mock(async () => ({ status: 'ok', version: 'native-0', value: { sessionId: 's', paragraphs: [
     { session: { story: 'body', paraId: 'p' } },
   ] } }));
-  h.controller.update({ ...h.settings, read: read as never });
+  const readAt = h.settings.readAt;
+  h.controller.update({ ...h.settings, read: read as never, readAt: (async (request: { kind: string }, version: string) =>
+    request.kind === 'paragraphIdentities' ? { status: 'ok', version, value: { sessionId: 's', paragraphs: [
+      { session: { story: 'body', paraId: 'p' } },
+    ] } } : readAt!(request as never, version)) as never });
   const composition = h.binding.admission.reserveComposition();
   expect(h.controller.ref.proposeChange({ paraId: 'p', search: 'old', replaceWith: 'new', author: 'Author' })).toBe(true);
   expect(read).not.toHaveBeenCalled();

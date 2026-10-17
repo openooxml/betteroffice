@@ -585,7 +585,7 @@ export interface DocxEditorRef {
   exportStructuredWithPages: (
     options: DocxPageExportOptions
   ) => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
-  /** @deprecated Use {@link readPositionAtPoint}. Worker viewers return a cached answer or null while reading it. */
+  /** @deprecated Use {@link readPositionAtPoint}. Worker-only viewers return null; hybrid worker viewers may return a cached answer. */
   getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
   /** Reads the text under client coordinates after pending input commits. Worker viewers resolve it against the presented frame, retrying superseded reads. */
   readPositionAtPoint: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>;
@@ -627,9 +627,8 @@ export interface DocxEditorRef {
   scrollToParaId: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   /**
    * Scroll the paginated view to a specific display position.
-   * For Word `w14:paraId` use
-   * `scrollToParaId` instead.
-   * @example ref.current?.scrollToPosition(42)
+   * Requires `legacySyncApi`; worker navigation uses paragraph IDs.
+   * @deprecated Use {@link scrollToParagraph} with a paragraph ID.
    */
   scrollToPosition: (displayPosition: number) => void;
   /** @deprecated Use {@link scrollToComment}. Worker viewers start the async navigation and return true. */
@@ -641,8 +640,8 @@ export interface DocxEditorRef {
    * overlay highlights it, and scroll its start into view. The selection
    * persists until it next changes (there is no auto-clearing flash). No-op
    * for a malformed range or a `from` past the document end; `to` is clamped
-   * to the document size.
-   * @example ref.current?.highlightRange(10, 24)
+   * to the document size. Requires `legacySyncApi`.
+   * @deprecated Use {@link readPositionAtPoint} for worker text positions; use {@link scrollToParagraph} to select and reveal a paragraph.
    */
   highlightRange: (from: number, to: number) => void;
   /** Open print preview */
