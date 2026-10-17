@@ -425,10 +425,12 @@ test.each([false, true])('held Tab outside a table at replay is a no-op and the 
     expect(verticalMove).toHaveBeenCalledTimes(1);
     expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['', '']);
     expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === body.paraId)?.text).toBe('XSeed');
-    const caret = { ...body, offset: 1 };
+    const caret = { ...body, offset: 2 };
     expect(session.selection()).toEqual({ anchor: caret, head: caret });
     expect(session.cellSelection()).toBeNull();
     expect(document.activeElement).toBe(textarea);
+    session.insertText({ ...body, offset: 1 }, 'Y');
+    expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === body.paraId)?.text).toBe('YXSeed');
   } finally {
     restore();
   }
