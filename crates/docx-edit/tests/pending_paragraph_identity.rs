@@ -20,7 +20,11 @@ fn assert_addressable(doc: &EditingDoc) {
         keys.iter().all(|key| !key.is_empty()),
         "empty paragraph key: {keys:?}"
     );
-    assert_eq!(keys.iter().collect::<HashSet<_>>().len(), keys.len());
+    assert_eq!(
+        keys.iter().collect::<HashSet<_>>().len(),
+        keys.len(),
+        "duplicate paragraph keys: {keys:?}"
+    );
     for key in keys {
         let at = doc.locate(&Loc::new("body", key, 0)).unwrap();
         doc.insert_text(&ctx(), at, "x", FormatPolicy::Plain)
@@ -36,7 +40,67 @@ fn ooxml_ids(doc: &EditingDoc) -> Vec<Option<String>> {
         .collect()
 }
 
-fn split_with_a_missing_text_dependency(receiver_client: u64, splitter_client: u64) {
+fn sync(peers: [&EditingDoc; 3]) {
+    for _ in 0..3 {
+        for from in peers {
+            let update = from.encode_state_as_update_v1();
+            for to in peers {
+                if !std::ptr::eq(from, to) {
+                    to.apply_update_v1(&update).unwrap();
+                }
+            }
+        }
+    }
+}
+
+fn assert_converged(peers: [&EditingDoc; 3]) {
+    sync(peers);
+    for doc in &peers[1..] {
+        assert_eq!(keys(doc), keys(peers[0]));
+        assert_eq!(ooxml_ids(doc), ooxml_ids(peers[0]));
+    }
+    let ids = ooxml_ids(peers[0]);
+    let saved: Vec<&String> = ids.iter().flatten().collect();
+    assert_eq!(saved.iter().collect::<HashSet<_>>().len(), saved.len());
+    for doc in peers {
+        assert_addressable(doc);
+    }
+    sync(peers);
+}
+
+fn split_after_an_unseen_insert(
+    receiver: &EditingDoc,
+    splitter: &EditingDoc,
+    writer: &EditingDoc,
+    key: &str,
+    offset: u32,
+) {
+    let at = writer.locate(&Loc::new("body", key, offset)).unwrap();
+    writer
+        .insert_text(&ctx(), at, "n", FormatPolicy::Plain)
+        .unwrap();
+    let insertion = writer
+        .encode_diff_v1(&receiver.encode_state_vector_v1())
+        .unwrap();
+    splitter.apply_update_v1(&insertion).unwrap();
+    let before_split = splitter.encode_state_vector_v1();
+    let at = splitter.locate(&Loc::new("body", key, offset + 1)).unwrap();
+    splitter.split_paragraph(&ctx(), at, None).unwrap();
+    let split = splitter.encode_diff_v1(&before_split).unwrap();
+    let paragraphs = receiver.paragraphs("body").unwrap().len();
+    receiver.apply_update_v1(&split).unwrap();
+    assert_eq!(receiver.paragraphs("body").unwrap().len(), paragraphs);
+    assert_addressable(receiver);
+
+    receiver.apply_update_v1(&insertion).unwrap();
+    assert_eq!(receiver.paragraphs("body").unwrap().len(), paragraphs + 1);
+    assert_addressable(receiver);
+}
+
+fn split_with_a_missing_text_dependency(
+    receiver_client: u64,
+    splitter_client: u64,
+) -> [EditingDoc; 3] {
     let receiver = EditingDoc::new(receiver_client);
     receiver
         .create_story("body", "abcdef", "Normal", "left")
@@ -47,45 +111,10 @@ fn split_with_a_missing_text_dependency(receiver_client: u64, splitter_client: u
     for doc in [&splitter, &writer] {
         doc.apply_update_v1(&initial).unwrap();
     }
-    writer
-        .insert_text(&ctx(), Position::new("body", 3), "n", FormatPolicy::Plain)
-        .unwrap();
-    let insertion = writer
-        .encode_diff_v1(&receiver.encode_state_vector_v1())
-        .unwrap();
-    splitter.apply_update_v1(&insertion).unwrap();
-    let before_split = splitter.encode_state_vector_v1();
-    splitter
-        .split_paragraph(&ctx(), Position::new("body", 4), None)
-        .unwrap();
-    let split = splitter.encode_diff_v1(&before_split).unwrap();
-    receiver.apply_update_v1(&split).unwrap();
-    assert_eq!(receiver.paragraphs("body").unwrap().len(), 1);
-    assert_addressable(&receiver);
-
-    receiver.apply_update_v1(&insertion).unwrap();
-    assert_eq!(receiver.paragraphs("body").unwrap().len(), 2);
-    assert_addressable(&receiver);
-    for _ in 0..3 {
-        splitter
-            .apply_update_v1(&receiver.encode_state_as_update_v1())
-            .unwrap();
-        receiver
-            .apply_update_v1(&splitter.encode_state_as_update_v1())
-            .unwrap();
-    }
-    assert_eq!(keys(&receiver), keys(&splitter));
-    writer
-        .apply_update_v1(&receiver.encode_state_as_update_v1())
-        .unwrap();
-    assert_eq!(keys(&receiver), keys(&writer));
-    let ids = ooxml_ids(&receiver);
-    assert_eq!(ids, ooxml_ids(&splitter));
-    assert_eq!(ids, ooxml_ids(&writer));
-    let saved: Vec<&String> = ids.iter().flatten().collect();
-    assert_eq!(saved.iter().collect::<HashSet<_>>().len(), saved.len());
-    assert_addressable(&splitter);
-    assert_addressable(&writer);
+    let key = keys(&receiver).remove(0);
+    split_after_an_unseen_insert(&receiver, &splitter, &writer, &key, 3);
+    assert_converged([&receiver, &splitter, &writer]);
+    [receiver, splitter, writer]
 }
 
 #[test]
@@ -96,4 +125,12 @@ fn a_split_with_a_missing_text_dependency_keeps_paragraphs_addressable() {
 #[test]
 fn a_repair_that_outranks_the_pending_split_converges_on_every_peer() {
     split_with_a_missing_text_dependency(4, 2);
+}
+
+#[test]
+fn splitting_a_repaired_paragraph_again_keeps_its_repair_key_unique() {
+    let [receiver, splitter, writer] = split_with_a_missing_text_dependency(4, 2);
+    let key = keys(&receiver).pop().unwrap();
+    split_after_an_unseen_insert(&receiver, &splitter, &writer, &key, 1);
+    assert_converged([&receiver, &splitter, &writer]);
 }
