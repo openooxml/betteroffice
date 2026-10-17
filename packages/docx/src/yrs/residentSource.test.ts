@@ -521,3 +521,17 @@ for (const remove of [false, true]) {
     } finally { clients.forEach(client => client.destroy()); }
   }, TIMEOUT);
 }
+
+
+test('recovery refuses a previously applied reservation payload with an expired version', async () => {
+  const client = new ResidentEngineWorkerClient(startWorker());
+  try {
+    await client.openSource({ bytes: source(1) });
+    await client.commandInit({ ...init(), incarnation: 2, replayAppliedSeqs: [1] });
+    const ack = await client.edit({ session: 'source-worker', incarnation: 2, seq: 1, replay: true,
+      basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: {
+        themeColors: {}, showHiddenText: false, reservations: { version: 'expired', key: 'retained', sets: [] },
+      } });
+    expect(ack.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-version' });
+  } finally { client.destroy(); }
+}, TIMEOUT);
