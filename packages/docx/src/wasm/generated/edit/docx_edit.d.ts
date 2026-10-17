@@ -1212,8 +1212,9 @@ export class EditSession {
     set_windowed_incremental_builds(enabled: boolean): void;
     /**
      * Resolves tracked changes by revision id outside undo history:
-     * `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
-     * resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
+     * `{"accept":[string, …],"reject":[string, …]}` -> `{"ok":true,"revisionIds":[string, …]}`,
+     * the ids resolved, or `{"ok":false,"version","failure"}`. An id that matches nothing is
+     * skipped. See [`EditingDoc::settle_revisions`].
      */
     settle_revisions_json(request: string): string;
     /**

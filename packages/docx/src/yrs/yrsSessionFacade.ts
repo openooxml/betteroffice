@@ -55,6 +55,7 @@ import { decodeEncodedSelection } from './encodedSelection';
 import type { CollaborationTextInsertion, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { DocxListStoriesResult } from './stories';
 import type {
+  DocxEditRefusal,
   DocxEditResult,
   DocxFindTextResult,
   DocxReadParagraphsResult,
@@ -449,8 +450,11 @@ export function wrapSession(
     revisionStamps: (ids) => JSON.parse(session.revision_stamps_json(JSON.stringify(ids))),
     settleRevisions: (accept, reject) => {
       const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
-      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      const settled = JSON.parse(
+        session.settle_revisions_json(JSON.stringify({ accept, reject }))
+      ) as { ok: true } | DocxEditRefusal;
       markDirty(facade.storiesChangedSince(since).stories);
+      return settled.ok ? undefined : settled.failure;
     },
     ...(typeof session.begin_shared_reads === 'function' &&
     typeof session.end_shared_reads === 'function'

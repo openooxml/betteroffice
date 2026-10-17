@@ -24,6 +24,7 @@ import type {
 } from '../collaboration/types';
 import { requireUnreservedClientId } from '../collaboration/protocol';
 import type {
+  DocxEditRefusal,
   DocxEditResult,
   DocxFindTextResult,
   DocxReadParagraphsResult,
@@ -487,8 +488,11 @@ export async function createResidentEngineSession(
       >,
     settleRevisions: (accept, reject) => {
       const since = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
-      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      const settled = JSON.parse(
+        session.settle_revisions_json(JSON.stringify({ accept, reject }))
+      ) as { ok: true } | DocxEditRefusal;
       markProjectionStories(storiesChangedSince(since).stories);
+      return settled.ok ? undefined : settled.failure;
     },
     ...(typeof session.begin_shared_reads === 'function' &&
     typeof session.end_shared_reads === 'function'

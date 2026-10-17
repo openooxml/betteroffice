@@ -1191,7 +1191,10 @@ describe('YrsSession host proposals', () => {
         };
       },
       listRevisions: () => [],
-      settleRevisions: (accept, reject) => settled.push([accept, reject]),
+      settleRevisions: (accept, reject) => {
+        settled.push([accept, reject]);
+        return undefined;
+      },
     });
     for (const [id, paraId] of [
       ['first', '00000003'],
