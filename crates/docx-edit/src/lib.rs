@@ -665,7 +665,7 @@ pub struct EditingDoc {
     shared_read_depth: AtomicU32,
     /// Story projections held only inside a shared-read scope.
     story_views: Mutex<EpochCache<target::StoryView>>,
-    source: Mutex<Option<identity::SourcePackage>>,
+    source: Arc<Mutex<Option<identity::SourcePackage>>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
     source_note_separators: Mutex<Option<SourceNoteSeparators>>,
@@ -751,7 +751,7 @@ impl EditingDoc {
             resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
-            source: Mutex::new(None),
+            source: Arc::new(Mutex::new(None)),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
             source_note_separators: Mutex::default(),
@@ -1258,17 +1258,7 @@ impl EditingDoc {
 
     /// The retained package's identity index, built on first use.
     pub(crate) fn source_index(&self) -> Option<Arc<identity::SourceIndex>> {
-        let mut source = self.source.lock().unwrap();
-        let index = match source.as_ref()? {
-            identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
-            identity::SourcePackage::Pending(bytes, digest) => {
-                seed::source_index(bytes.clone(), digest.clone())
-                    .ok()
-                    .map(Arc::new)
-            }
-        };
-        *source = index.clone().map(identity::SourcePackage::Ready);
-        index
+        identity::source_index(&self.source)
     }
 
     /// Low-level access for the transport, awareness, and undo bridges. Attach undo through
@@ -1792,7 +1782,7 @@ impl EditingDoc {
     fn integrate_updates(&self, updates: Vec<Update>, origin: UpdateOrigin) -> EditResult<()> {
         let _host_edit = matches!(origin, UpdateOrigin::Host)
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
-        let watch = identity::IdentityWatch::new(self);
+        let watch = identity::IdentityWatch::new(self.yrs_doc());
         let reanchored = comment_references::CommentWatch::new(self);
         let result = match origin {
             UpdateOrigin::Remote => {

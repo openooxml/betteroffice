@@ -656,6 +656,20 @@ pub(crate) enum SourcePackage {
     Ready(Arc<SourceIndex>),
 }
 
+pub(crate) fn source_index(source: &Mutex<Option<SourcePackage>>) -> Option<Arc<SourceIndex>> {
+    let mut source = source.lock().unwrap();
+    let index = match source.as_ref()? {
+        SourcePackage::Ready(index) => return Some(Arc::clone(index)),
+        SourcePackage::Pending(bytes, digest) => {
+            crate::seed::source_index(bytes.clone(), digest.clone())
+                .ok()
+                .map(Arc::new)
+        }
+    };
+    *source = index.clone().map(SourcePackage::Ready);
+    index
+}
+
 /// What a save projects from one story, compared with the story as seeded
 /// to decide whether its part saves as its source bytes.
 struct StoryState {
@@ -1578,9 +1592,9 @@ pub(crate) struct IdentityWatch {
 }
 
 impl IdentityWatch {
-    pub(crate) fn new(doc: &EditingDoc) -> Self {
+    pub(crate) fn new(doc: &Doc) -> Self {
         let changed = Arc::new(AtomicBool::new(false));
-        let txn = doc.yrs_doc().transact();
+        let txn = doc.transact();
         let (stories, assignments) = (txn.get_map(STORIES), txn.get_map(SOURCE_PARAGRAPH_IDS));
         drop(txn);
         let mut subscriptions = Vec::new();
@@ -1639,6 +1653,45 @@ struct Repairs {
 impl Repairs {
     fn is_empty(&self) -> bool {
         self.renamed.is_empty() && self.reassigned.is_empty()
+    }
+}
+
+pub(crate) struct IdentityRepair {
+    source: Arc<Mutex<Option<SourcePackage>>>,
+    seen: SeenCell,
+}
+
+impl IdentityRepair {
+    fn source_index(&self) -> Option<Arc<SourceIndex>> {
+        source_index(&self.source)
+    }
+
+    fn with_seen<T: ReadTxn, R>(&self, txn: &T, f: impl FnOnce(&mut Seen) -> R) -> R {
+        let mut seen = self.seen.lock().unwrap();
+        f(seen.get_or_insert_with(|| Seen::scan(txn)))
+    }
+
+    pub(crate) fn repair(&self, txn: &mut TransactionMut<'_>) -> Vec<String> {
+        let (scan, plan) = self.plan_repairs(&*txn, false, &|_| false);
+        if plan.is_empty() {
+            return Vec::new();
+        }
+        self.with_seen(&*txn, |_| ());
+        let mut allocator = IdAllocator {
+            seen: Arc::clone(&self.seen),
+            source: self.source_index(),
+        };
+        let mut stories: BTreeSet<String> = plan
+            .renamed
+            .iter()
+            .map(|(index, _, _)| scan.pilcrows[*index].story.clone())
+            .collect();
+        for assignment in EditingDoc::apply_repairs(txn, &scan, &mut allocator, &plan) {
+            if let ParagraphRef::Session { story, .. } = assignment.paragraph {
+                stories.insert(story);
+            }
+        }
+        stories.into_iter().collect()
     }
 }
 
@@ -1711,6 +1764,24 @@ impl EditingDoc {
         }
     }
 
+    pub(crate) fn identity_repair(&self) -> IdentityRepair {
+        IdentityRepair {
+            source: Arc::clone(&self.source),
+            seen: self.seen_cell(),
+        }
+    }
+
+    fn plan_repairs<T: ReadTxn>(
+        &self,
+        txn: &T,
+        persist: bool,
+        copy: &dyn Fn(&MapRef) -> bool,
+    ) -> (Scan, Repairs) {
+        self.identity_repair().plan_repairs(txn, persist, copy)
+    }
+}
+
+impl IdentityRepair {
     /// Plans the repairs of duplicated identities. A pilcrow `copy` accepts
     /// holds none of the identity it carries: it never keeps a duplicate, nor
     /// a key or ID a paragraph since deleted held, whatever key it names.
@@ -1761,6 +1832,7 @@ impl EditingDoc {
                 .max_by_key(|index| {
                     (
                         !copies.contains(index),
+                        derived_key(&scan.pilcrows[*index].map) == *key,
                         standing(*index),
                         std::cmp::Reverse(*index),
                     )
@@ -1835,7 +1907,9 @@ impl EditingDoc {
         repairs.renamed = renamed;
         (scan, repairs)
     }
+}
 
+impl EditingDoc {
     /// Deterministically restores unique session keys and Word paragraph IDs
     /// after divergent replicas merged; see [`Self::persist_paragraph_ids`]
     /// for the ownership rules. Duplicated source IDs and conflicting saved
@@ -1849,7 +1923,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(&EditCtx::system(""));
         let (scan, plan) = self.plan_repairs(&txn, false, &|_| false);
         let mut allocator = IdAllocator::new(self, &txn);
-        self.apply_repairs(&mut txn, &scan, &mut allocator, &plan);
+        Self::apply_repairs(&mut txn, &scan, &mut allocator, &plan);
         plan.renamed
             .into_iter()
             .map(|(_, previous, key)| (previous, key))
@@ -1879,7 +1953,7 @@ impl EditingDoc {
         let (scan, plan) = self.plan_repairs(&*txn, false, &copy);
         if !plan.is_empty() {
             let mut allocator = IdAllocator::new(self, &*txn);
-            self.apply_repairs(txn, &scan, &mut allocator, &plan);
+            Self::apply_repairs(txn, &scan, &mut allocator, &plan);
         }
         let keys: HashMap<usize, &str> = plan
             .renamed
@@ -1917,7 +1991,6 @@ impl EditingDoc {
     }
 
     fn source_story_of(
-        &self,
         scan: &Scan,
         source: Option<&SourceIndex>,
         holder: Holder,
@@ -1937,13 +2010,12 @@ impl EditingDoc {
     }
 
     fn apply_repairs(
-        &self,
         txn: &mut TransactionMut<'_>,
         scan: &Scan,
         allocator: &mut IdAllocator,
         plan: &Repairs,
     ) -> Vec<ParagraphIdAssignment> {
-        let source = self.source_index();
+        let source = allocator.source.clone();
         let mut keys: BTreeMap<usize, (&str, &str)> = BTreeMap::new();
         for (index, previous, key) in &plan.renamed {
             scan.pilcrows[*index].map.insert(txn, PARA_ID, key.as_str());
@@ -1951,7 +2023,7 @@ impl EditingDoc {
         }
         let mut assignments = Vec::new();
         for reassignment in &plan.reassigned {
-            let source_story = self.source_story_of(scan, source.as_deref(), reassignment.holder);
+            let source_story = Self::source_story_of(scan, source.as_deref(), reassignment.holder);
             match reassignment.holder {
                 Holder::Pilcrow(index) => {
                     let pilcrow = &scan.pilcrows[index];
@@ -2021,7 +2093,7 @@ impl EditingDoc {
                     previous_ooxml_para_id: None,
                     ooxml_para_id: id,
                     origin: ParagraphIdOrigin::Repaired,
-                    source_story: self.source_story_of(
+                    source_story: Self::source_story_of(
                         scan,
                         source.as_deref(),
                         Holder::Pilcrow(index),
@@ -2079,7 +2151,7 @@ impl EditingDoc {
         }
         let mut allocator = IdAllocator::new(self, &txn);
         let mut report = PersistedParagraphIds {
-            assignments: self.apply_repairs(&mut txn, &scan, &mut allocator, &plan),
+            assignments: Self::apply_repairs(&mut txn, &scan, &mut allocator, &plan),
             diagnostics: Vec::new(),
         };
         for (id, holders) in &plan.conflicts {
@@ -2144,7 +2216,7 @@ impl EditingDoc {
                 previous_ooxml_para_id: None,
                 ooxml_para_id: id,
                 origin: ParagraphIdOrigin::Persisted,
-                source_story: self.source_story_of(
+                source_story: Self::source_story_of(
                     &scan,
                     source.as_deref(),
                     Holder::Pilcrow(index),
