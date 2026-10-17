@@ -62,6 +62,7 @@ let holdCut = false;
 let failWholeOpen = false;
 let recoverSurface = false;
 let realSurface = false;
+let documentVersions = false;
 /** Per source preview, in order: whether its first page is built or missing. */
 let previewPages: ('built' | 'none')[] = [];
 const PREVIEW_EPOCHS = { built: 90, none: 1 } as const;
@@ -102,6 +103,10 @@ class FakeWorker {
 
   constructor() {
     workers.push(this);
+  }
+
+  documentVersion() {
+    return documentVersions ? { documentVersion: `worker-${workers.indexOf(this) + 1}-${this.text.length}` } : {};
   }
 
   postMessage(message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule) {
@@ -154,7 +159,7 @@ class FakeWorker {
       const initial: ResidentCommandInitReply = {
         session, incarnation, epoch, version, throughSeq, outcomes: [], selection: null,
         editState: {
-          readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
+          readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null, ...this.documentVersion(),
           canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
         },
         frame: realSurface ? { ...commandFrame(throughSeq + 1), coversThroughSeq: throughSeq } : {
@@ -188,7 +193,7 @@ class FakeWorker {
           ...(refused ? { reason: readOnlyRefusal ? 'read-only' : 'stale-version' } :
             cancelled ? { reason: 'dependency-refused' } : {}),
         }],
-        editState: { ...state.editState, readOnly },
+        editState: { ...state.editState, readOnly, ...this.documentVersion() },
         ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
         ...(realSurface ? { frame: { ...commandFrame(command.seq + 1), coversThroughSeq: command.seq } } : {}),
       };
@@ -334,6 +339,7 @@ beforeEach(() => {
   failWholeOpen = false;
   recoverSurface = false;
   realSurface = false;
+  documentVersions = false;
   previewPages = [];
   restorers.push(installPreviewPages());
   setMissingWorkerCapabilitiesForTests([]);
@@ -2289,4 +2295,35 @@ test('the real paged editor recovers the full checkpoint document and fails on a
   expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'out-of-memory' });
   expect(workers).toHaveLength(2);
   expect(view.getByRole('alert')).toBeDefined();
+});
+
+test('a recovered worker receives plugin reservations versioned to its own document', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  documentVersions = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const plugin = defineDocxPlugin({ id: 'gap', createState: () => null, reservations: (context) => ({
+    version: context.snapshot.version, items: [{ id: 'gap', kind: 'block', side: 'before', height: 20,
+      anchor: { kind: 'paragraph', paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'a' } } }] }) });
+  const onError = mock((_error: Error) => {});
+  render(<DocxEditor {...peerlessProps} plugins={[plugin]} onError={onError} showToolbar={false} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const sent = () => requests.flatMap(request => request.type === 'edit' && request.command.kind === 'setRenderEnvironment'
+    ? [{ replay: !!request.command.replay, version: (request.command.payload as yrs.DocxCommandPayloads['setRenderEnvironment']).reservations?.version }] : []);
+  await waitFor(() => expect(sent().at(-1)).toEqual({ replay: false, version: 'worker-1-0' }));
+  workers[0]!.outOfMemory = true;
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: 'kept' } });
+    if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+    expect((await submitted.ticket.ack).status).toBe('applied');
+  });
+  expect(workers).toHaveLength(2);
+  await waitFor(() => expect(sent().at(-1)).toEqual({ replay: false, version: 'worker-2-4' }));
+  expect(onError).not.toHaveBeenCalled();
 });
