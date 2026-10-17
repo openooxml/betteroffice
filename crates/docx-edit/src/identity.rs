@@ -1751,13 +1751,13 @@ impl EditingDoc {
         }
         let mut renamed = Vec::new();
         for (key, indexes) in &holders {
-            if indexes.len() == 1 && !copies.contains(&indexes[0]) {
+            if !key.is_empty() && indexes.len() == 1 && !copies.contains(&indexes[0]) {
                 continue;
             }
             let keeper = indexes
                 .iter()
                 .copied()
-                .filter(|index| !copies.contains(index) || !reserved(key))
+                .filter(|index| !key.is_empty() && (!copies.contains(index) || !reserved(key)))
                 .max_by_key(|index| {
                     (
                         !copies.contains(index),
