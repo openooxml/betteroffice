@@ -40,6 +40,7 @@ test('final section start metadata falls back to the saved keys with sections ke
   expect(metadata.body.finalSectionProperties).toEqual({ marginLeft: 2000, sectionStart: 'oddPage' });
   expect(metadata.headers![0]![1].content).toEqual([]);
   expect(metadata.footnotes![0]!.content).toEqual([]);
+  expect(finalSectionStartMetadata({}, saved, ['p1', 'p2'], 'oddPage')!.body.sections!.map(section => section.id)).toEqual(['p1', undefined]);
 });
 
 test('final section start metadata is undefined without stored metadata or saved keys', () => {

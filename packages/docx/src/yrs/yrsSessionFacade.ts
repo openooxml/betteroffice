@@ -40,7 +40,8 @@ import { registerSessionInternals } from './sessionInternals';
 import { editorSaveKeys } from './editorSaveKeys';
 import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
 import type { ResidentPartMetadata } from './residentParts';
-import type { SectionProperties } from '../types/document';
+import type { DocumentBody, SectionProperties } from '../types/document';
+import { resolvedFinalSectionProperties } from '../editor/finalSection';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -234,6 +235,7 @@ export function wrapSession(
   let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = opened
     ? editorSaveKeys(opened.host.document)
     : null;
+  let sourceClosing: string[] | null = null;
 
   let readCacheRevision = 0;
   let cachedHeaderFooterAliases: {
@@ -316,17 +318,17 @@ export function wrapSession(
       : null;
 
   const finalSectionProperties = (): SectionProperties => {
-    type Body = { body?: { finalSectionProperties?: SectionProperties } };
+    type Body = { body?: DocumentBody };
     const parts = JSON.parse(session.part_metadata_json()) as Body;
     const properties = JSON.parse(session.document_properties_json()) as { metadata?: Body };
     const source = docxSourceKeys
-      ? (JSON.parse(docxSourceKeys.metadata) as { finalSectionProperties?: SectionProperties })
+      ? (JSON.parse(docxSourceKeys.metadata) as DocumentBody)
       : undefined;
     const margins = JSON.parse(session.section_margins_json()) as { final?: SectionProperties };
     return {
-      ...(parts.body?.finalSectionProperties ??
-        properties.metadata?.body?.finalSectionProperties ??
-        source?.finalSectionProperties),
+      ...(resolvedFinalSectionProperties(parts.body) ??
+        resolvedFinalSectionProperties(properties.metadata?.body) ??
+        resolvedFinalSectionProperties(source)),
       ...margins.final,
     };
   };
@@ -416,6 +418,7 @@ export function wrapSession(
     const host = withHostMedia(decodeDocxHost(json, source));
     docxSource = source;
     docxSourceKeys = editorSaveKeys(host.document);
+    sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
     partialDocument = false;
     return host;
   };
@@ -714,6 +717,7 @@ export function wrapSession(
         session.load(update);
         proposals.reset();
       });
+      if (docxSourceKeys && !sourceClosing) sourceClosing = sectionClosingParaIds(facade);
     },
     encodePeerMetadata: () => {
       if (typeof peerSession.encode_peer_metadata !== 'function') {
@@ -753,6 +757,7 @@ export function wrapSession(
         resetMedia();
         docxSource = source;
         docxSourceKeys = keys;
+        sourceClosing = sectionClosingParaIds(facade);
         partialDocument = false;
         proposals.reset();
       });
@@ -1290,7 +1295,7 @@ export function wrapSession(
           final.metadata = finalSectionStartMetadata(
             JSON.parse(session.part_metadata_json()) as Partial<ResidentPartMetadata>,
             docxSourceKeys?.metadata,
-            sectionClosingParaIds(facade),
+            sourceClosing ?? sectionClosingParaIds(facade),
             type
           );
           if (!final.metadata) throw new Error('Section break needs the section properties');
@@ -1586,6 +1591,7 @@ export function wrapSession(
       residentFonts.length = 0;
       docxSource = null;
       docxSourceKeys = null;
+      sourceClosing = null;
       resetMedia();
       listeners.clear();
       proposals.destroy();
@@ -1613,6 +1619,7 @@ export function wrapSession(
       });
       docxSource = original.slice();
       docxSourceKeys = null;
+      sourceClosing = null;
       return json;
     },
     finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),

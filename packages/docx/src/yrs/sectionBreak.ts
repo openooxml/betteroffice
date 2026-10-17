@@ -93,8 +93,9 @@ type SavedMetadata = {
 
 /**
  * Part metadata whose final section starts with `start`: the stored metadata
- * when a session seeded it, else the opened package's save keys with sections
- * keyed by the body paragraphs that close them. Undefined when neither exists.
+ * when a session seeded it, else the opened package's save keys with each
+ * non-final section keyed by the body paragraph that closed it when the package
+ * was opened. Undefined when neither exists.
  */
 export function finalSectionStartMetadata(
   stored: Partial<ResidentPartMetadata>,
@@ -114,8 +115,8 @@ export function finalSectionStartMetadata(
     entries?.map(([id, entry]): [string, HeaderFooter] => [id, part(entry)]);
   return withStart({
     body: {
-      sections: source.sections?.map((section, index) =>
-        index < closing.length ? { ...part(section), id: closing[index]! } : part(section)),
+      sections: source.sections?.map((section, index, all) =>
+        index < Math.min(closing.length, all.length - 1) ? { ...part(section), id: closing[index]! } : part(section)),
       finalSectionProperties: source.finalSectionProperties,
     },
     headers: parts(source.headers),

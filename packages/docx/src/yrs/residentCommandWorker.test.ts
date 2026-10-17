@@ -2120,6 +2120,7 @@ test('a legacy section break in a final section with an empty sectPr lowers on t
   const { client, engine } = await openWorker();
   const remote = await createYrsSession({ clientId: 8318 });
   try {
+    remote.openDocx(syntheticDocument(), false);
     remote.loadState(engine.encodeState());
     remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
     await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
@@ -2127,6 +2128,43 @@ test('a legacy section break in a final section with an empty sectPr lowers on t
     const sections = engine.sectionProperties().sections;
     expect(sections).toHaveLength(2);
     expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage' });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break gives the closed section the headers it inherits', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr: '<w:sectPr/>', headersFooters: true });
+  const remote = await createYrsSession({ clientId: 8319 });
+  try {
+    remote.openDocx(syntheticDocument(true, false, false, bodyXml, '<w:sectPr/>'), false);
+    remote.loadState(engine.encodeState());
+    const sectPr = (text: string) => {
+      const properties = remote.paragraphs('body').find(paragraph => paragraph.text === text)!.properties;
+      return (properties.sectPr ?? properties._sectionProperties) as SectionProperties;
+    };
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
+    expect(sectPr('Se').headerReferences).toEqual(sectPr('First').headerReferences);
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.sectionProperties().sections).toHaveLength(3);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break after an earlier split keeps each section on the worker', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr });
+  const remote = await createYrsSession({ clientId: 8320 });
+  try {
+    remote.openDocx(syntheticDocument(false, false, false, bodyXml, sectPr), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'continuous');
+    const seed = remote.paragraphs('body').find(paragraph => paragraph.text === 'Seed')!;
+    remote.insertSectionBreak({ story: 'body', paraId: seed.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Fi', 'rst', 'Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections.map(section => section.properties.pageWidth)).toEqual([12240, 12240, 11906, 11906]);
+    expect(sections.at(-1)!.properties).toMatchObject({ sectionStart: 'nextPage' });
   } finally { remote.destroy(); client.destroy(); }
 }, TIMEOUT);
 
