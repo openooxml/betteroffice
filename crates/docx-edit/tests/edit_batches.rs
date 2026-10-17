@@ -1661,9 +1661,8 @@ fn budgets_return_limit_exceeded() {
     );
 }
 
-#[test]
-fn pending_updates_make_batches_unsupported() {
-    let doc = basic();
+/// Applies a peer's second edit without its first, so `doc` holds an update it cannot integrate.
+fn hold_pending_update(doc: &EditingDoc) {
     let peer = EditingDoc::new(7005);
     peer.apply_update_v1(&doc.encode_state_as_update_v1())
         .unwrap();
@@ -1684,10 +1683,52 @@ fn pending_updates_make_batches_unsupported() {
     .unwrap();
     doc.apply_update_v1(&peer.encode_diff_v1(&known).unwrap())
         .unwrap();
+}
+
+#[test]
+fn pending_updates_make_batches_unsupported() {
+    let doc = basic();
+    hold_pending_update(&doc);
     assert_eq!(
         code(&doc, vec![replace(search("beta", "00000001"), "x")]),
         EditFailureCode::Unsupported
     );
+}
+
+#[test]
+fn pending_updates_make_settling_unsupported() {
+    let doc = basic();
+    let undo = UndoSession::new();
+    let mut proposed = request(
+        &doc,
+        vec![suggested(
+            replace(search("beta", "00000001"), "delta"),
+            "Ann",
+        )],
+    );
+    proposed.history = EditHistory::None;
+    let replaced = apply_request(&doc, &undo, &proposed).receipts[0]
+        .revision_ids
+        .clone();
+    hold_pending_update(&doc);
+    let revision_ids = |doc: &EditingDoc| {
+        doc.list_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|revision| revision.change.revision_id)
+            .collect::<Vec<_>>()
+    };
+    let (version, texts, revisions) = (doc.version(), accepted(&doc), revision_ids(&doc));
+
+    let refused = doc
+        .settle_revisions(&[], &replaced, &undo)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.failure.code, EditFailureCode::Unsupported);
+    assert_eq!(refused.version, version);
+    assert_eq!(doc.version(), version);
+    assert_eq!(accepted(&doc), texts);
+    assert_eq!(revision_ids(&doc), revisions);
 }
 
 #[test]
@@ -2264,6 +2305,7 @@ fn settled_revisions_apply_outside_undo_history() {
             &[replaced.clone(), vec!["404".to_owned()]].concat(),
             &undo,
         )
+        .unwrap()
         .unwrap();
     assert_eq!(
         resolved.iter().collect::<std::collections::BTreeSet<_>>(),
@@ -2318,7 +2360,9 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
         .revision_ids;
     assert_eq!(styled.len(), 1);
 
-    doc.settle_revisions(&[], &replaced, &undo).unwrap();
+    doc.settle_revisions(&[], &replaced, &undo)
+        .unwrap()
+        .unwrap();
     let ids = |doc: &EditingDoc| {
         doc.list_revisions()
             .unwrap()

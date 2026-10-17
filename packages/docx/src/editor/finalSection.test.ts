@@ -46,7 +46,8 @@ describe('updateFinalSectionProperties', () => {
   });
 
   test('creates the body sectPr when none was authored', () => {
-    const next = updateFinalSectionProperties({ content: [] }, (properties) => ({
+    const body: DocumentBody = { content: [] };
+    const next = updateFinalSectionProperties(body, (properties) => ({
       ...properties,
       titlePg: true,
     }));
