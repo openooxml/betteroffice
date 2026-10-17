@@ -38,7 +38,8 @@ import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
 import { editorSaveKeys } from './editorSaveKeys';
-import { pageBreakTarget, splitSection } from './sectionBreak';
+import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
+import type { ResidentPartMetadata } from './residentParts';
 import type { SectionProperties } from '../types/document';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
@@ -1282,16 +1283,20 @@ export function wrapSession(
     insertSectionBreak: (at, type) => {
       ensureUndo(at.story);
       mutate(() => {
-        const split = splitSection(facade, session, at, (closing) => {
-          const properties = closing ?? finalSectionProperties();
-          if (Object.keys(properties).length === 0) throw new Error('Section break needs the section properties');
+        const final: { metadata?: ResidentPartMetadata } = {};
+        splitSection(facade, session, at, (closing) => {
+          if (closing) return closing;
+          const properties = finalSectionProperties();
+          final.metadata = finalSectionStartMetadata(
+            JSON.parse(session.part_metadata_json()) as Partial<ResidentPartMetadata>,
+            docxSourceKeys?.metadata,
+            sectionClosingParaIds(facade),
+            type
+          );
+          if (!final.metadata || Object.keys(properties).length === 0) throw new Error('Section break needs the section properties');
           return properties;
         }, type);
-        if (!split.closed) {
-          const parts = JSON.parse(session.part_metadata_json()) as { body?: Record<string, unknown> };
-          const body = { ...parts.body, finalSectionProperties: { ...finalSectionProperties(), sectionStart: type } };
-          session.set_part_metadata(JSON.stringify({ body }), '[]');
-        }
+        if (final.metadata) session.set_part_metadata(JSON.stringify(final.metadata), '[]');
       });
     },
     insertWatermark: (at, watermark) => {

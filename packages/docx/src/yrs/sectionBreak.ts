@@ -1,5 +1,7 @@
-import type { SectionProperties } from '../types/document';
+import type { DocumentBody, Endnote, Footnote, HeaderFooter, SectionProperties } from '../types/document';
+import { updateFinalSectionProperties } from '../editor/finalSection';
 import type { YrsLoc, YrsSession, YrsStorySegment } from './index';
+import type { ResidentPartMetadata } from './residentParts';
 import type { EditSession } from './wasm/index';
 
 export type SectionStart = NonNullable<SectionProperties['sectionStart']>;
@@ -69,4 +71,62 @@ export function splitSection(
     if (moved !== closing.paraId && closingMargins) wasm.set_section_margins(moved, JSON.stringify(closingMargins));
   }
   return { at: { story: at.story, paraId: split.secondParaId, offset: 0 }, closed: Boolean(closing) };
+}
+
+const BREAK_COMMANDS = new Set(['insertPageBreak', 'insertSectionBreak']);
+
+/** Page and section breaks split paragraphs, which suggesting mode cannot track. */
+export function breakRefusedWhileSuggesting(kind: string, suggesting: boolean): boolean {
+  return suggesting && BREAK_COMMANDS.has(kind);
+}
+
+type Saved<T> = Omit<T, 'content'>;
+type SavedMetadata = {
+  finalSectionProperties?: SectionProperties;
+  sections?: Saved<NonNullable<DocumentBody['sections']>[number]>[];
+  headers?: [string, Saved<HeaderFooter>][];
+  footers?: [string, Saved<HeaderFooter>][];
+  footnotes?: Saved<Footnote>[];
+  endnotes?: Saved<Endnote>[];
+  relationships?: ResidentPartMetadata['relationships'];
+};
+
+/**
+ * Part metadata whose final section starts with `start`: the stored metadata
+ * when a session seeded it, else the opened package's save keys with sections
+ * keyed by the body paragraphs that close them. Undefined when neither exists.
+ */
+export function finalSectionStartMetadata(
+  stored: Partial<ResidentPartMetadata>,
+  saved: string | undefined,
+  closing: readonly string[],
+  start: SectionStart
+): ResidentPartMetadata | undefined {
+  const withStart = (metadata: ResidentPartMetadata): ResidentPartMetadata => ({
+    ...metadata,
+    body: updateFinalSectionProperties(metadata.body, (properties) => ({ ...properties, sectionStart: start })),
+  });
+  if (stored.body) return withStart(stored as ResidentPartMetadata);
+  if (saved === undefined) return undefined;
+  const source = JSON.parse(saved) as SavedMetadata;
+  const part = <T extends object>(entry: T) => ({ ...entry, content: [] });
+  const parts = (entries: [string, Saved<HeaderFooter>][] | undefined) =>
+    entries?.map(([id, entry]): [string, HeaderFooter] => [id, part(entry)]);
+  return withStart({
+    body: {
+      sections: source.sections?.map((section, index) =>
+        index < closing.length ? { ...part(section), id: closing[index]! } : part(section)),
+      finalSectionProperties: source.finalSectionProperties,
+    },
+    headers: parts(source.headers),
+    footers: parts(source.footers),
+    footnotes: source.footnotes?.map((note) => part(note)),
+    endnotes: source.endnotes?.map((note) => part(note)),
+    relationships: source.relationships,
+  });
+}
+
+/** Body paragraphs that close a section, in document order. */
+export function sectionClosingParaIds(session: Pick<YrsSession, 'paragraphs'>): string[] {
+  return session.paragraphs('body').filter((paragraph) => sectionOf(paragraph.properties)).map((paragraph) => paragraph.paraId);
 }

@@ -111,6 +111,7 @@ export * from './contentControls';
 export * from './readTypes';
 export * from './findParagraphs';
 export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
+export { breakRefusedWhileSuggesting } from './sectionBreak';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
