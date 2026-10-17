@@ -78,6 +78,7 @@ export const DOCX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   reviewPrevious: descriptor('reviewPrevious', 'commands.reviewPrevious', false),
   reviewNext: descriptor('reviewNext', 'commands.reviewNext', false),
   commentsSidebar: descriptor('commentsSidebar', 'editor.toggleCommentsSidebar', false),
+  tableGridlines: descriptor('tableGridlines', 'table.viewGridlines', false),
   open: descriptor('open', 'toolbar.open', false, [plain('Mod+O')]),
   save: descriptor('save', 'toolbar.save', false, [plain('Mod+S')]),
   print: descriptor('print', 'toolbar.print', false),

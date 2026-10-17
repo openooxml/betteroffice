@@ -22,7 +22,7 @@ export function resolveCellNavigation(
   readOnly: boolean
 ): DocxCellNavigationPlan | 'read-only' | null {
   const story = selection.focus.story;
-  const matches = Array.from(story.matchAll(/:t(\d+):r(\d+)c(\d+)(?=:|$)/g));
+  const matches = Array.from(story.matchAll(/:t(\d+):r(\d+)c(\d+)(?:~\d+)?(?=:|$)/g));
   const match = matches.at(-1);
   if (!match || match.index === undefined) return { selection, cells: null };
   const table = { story: story.slice(0, match.index), tableIndex: Number(match[1]) };

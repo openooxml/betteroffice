@@ -664,6 +664,7 @@
     "borderColor": "Kenarlık rengi",
     "borderWidth": "Kenarlık kalınlığı",
     "unknownAction": "Bilinmeyen işlem",
+    "viewGridlines": "Kılavuz çizgilerini göster",
     "borders": {
       "all": "Tüm kenarlıklar",
       "outside": "Dış kenarlıklar",

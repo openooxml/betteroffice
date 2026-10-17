@@ -1143,11 +1143,24 @@ fn table_base(locator: &TableLocator) -> String {
     format!("{}:t{}", locator.story, locator.table_index)
 }
 
+/// Story ids without the `~{client}` suffix of an edit-born cell, so a slot is fresh only when
+/// no replica's cell holds it.
 fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
     let Some(stories) = txn.get_map(STORIES) else {
         return HashSet::new();
     };
-    stories.iter(txn).map(|(id, _)| id.to_string()).collect()
+    stories
+        .iter(txn)
+        .map(|(id, _)| bare_story_id(id).to_owned())
+        .collect()
+}
+
+fn bare_story_id(id: &str) -> &str {
+    let Some((bare, client)) = id.rsplit_once('~') else {
+        return id;
+    };
+    let digits = !client.is_empty() && client.bytes().all(|byte| byte.is_ascii_digit());
+    if digits { bare } else { id }
 }
 
 fn fresh_row_slot(used: &HashSet<String>, base: &str, start: usize, columns: usize) -> usize {
@@ -1171,16 +1184,19 @@ fn fresh_column_slot(used: &HashSet<String>, base: &str, rows: usize, start: usi
         .expect("usize address space cannot be exhausted by story ids")
 }
 
+/// A cell story id minted by an edit. The `~{client}` suffix keeps it apart from the cell a
+/// concurrent replica mints for the same slot; ids read from a document carry none.
 fn fresh_cell_story(
     used: &mut HashSet<String>,
     base: &str,
     row: usize,
     mut column: usize,
+    client: u64,
 ) -> String {
     loop {
         let candidate = format!("{base}:r{row}c{column}");
         if used.insert(candidate.clone()) {
-            return candidate;
+            return format!("{candidate}~{client}");
         }
         column += 1;
     }
@@ -1734,7 +1750,7 @@ impl EditingDoc {
         for row in 0..rows as usize {
             let mut cells = Vec::with_capacity(columns as usize);
             for column in 0..columns as usize {
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 cells.push(CellData {
                     tc_pr: HashMap::from([
@@ -1889,7 +1905,8 @@ impl EditingDoc {
         for (row_index, row) in valid.rows.iter().enumerate() {
             let mut cells = Vec::with_capacity(row.cells.len());
             for (cell_index, cell) in row.cells.iter().enumerate() {
-                let story_id = fresh_cell_story(used, &base, row_index, cell_index);
+                let story_id =
+                    fresh_cell_story(used, &base, row_index, cell_index, self.client_id());
                 let stories = txn
                     .get_map(STORIES)
                     .expect("stories root is declared by EditingDoc::new");
@@ -2089,7 +2106,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row_slot, column);
+            let story_id = fresh_cell_story(&mut used, &base, row_slot, column, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -2180,7 +2197,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row, column_slot);
+            let story_id = fresh_cell_story(&mut used, &base, row, column_slot, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -2480,7 +2497,7 @@ impl EditingDoc {
                     });
                     continue;
                 }
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
@@ -2931,12 +2948,12 @@ mod tests {
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c0".to_owned())
+                .contains(&"body:t0:r2c0~71".to_owned())
         );
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c1".to_owned())
+                .contains(&"body:t0:r2c1~71".to_owned())
         );
         for story in &receipt.created_story_ids {
             assert_eq!(doc.paragraphs(story).unwrap().len(), 1);
@@ -3303,12 +3320,12 @@ mod tests {
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r0c2".to_owned())
+                .contains(&"body:t0:r0c2~71".to_owned())
         );
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r1c2".to_owned())
+                .contains(&"body:t0:r1c2~71".to_owned())
         );
         let (_, grid, rows) = table_value(&doc);
         assert_eq!(grid.as_array().unwrap().len(), 3);

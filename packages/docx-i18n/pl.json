@@ -661,6 +661,7 @@
     "borderColor": "Kolor obramowania",
     "borderWidth": "Szerokość obramowania",
     "unknownAction": "Nieznana akcja",
+    "viewGridlines": "Wyświetl linie siatki",
     "borders": {
       "all": "Wszystkie obramowania",
       "outside": "Obramowanie zewnętrzne",

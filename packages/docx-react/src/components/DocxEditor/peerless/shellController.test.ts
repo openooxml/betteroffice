@@ -704,3 +704,16 @@ test('control projection reads survive geometry refreshes in the same command ep
   controller.attach(binding);
   await expect(controller.query({ kind: 'contentControlHandles' })).resolves.toMatchObject({ version: 'native', value: { controls: [] } });
 });
+
+test('table gridlines toggle as view state and report it as active', async () => {
+  const { controller, binding } = fixture();
+  const onTableGridlines = mock((_visible: boolean) => {});
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, onTableGridlines } as never);
+  controller.attach(binding);
+  expect(controller.commands.store.getState('tableGridlines')).toMatchObject({ enabled: true, active: false });
+  expect(await controller.commands.store.execute('tableGridlines', null)).toMatchObject({ ok: true });
+  expect(onTableGridlines.mock.calls).toEqual([[true]]);
+  expect(controller.commands.store.getState('tableGridlines').active).toBe(true);
+  expect(await controller.commands.store.execute('tableGridlines', null)).toMatchObject({ ok: true });
+  expect(onTableGridlines.mock.calls).toEqual([[true], [false]]);
+});
