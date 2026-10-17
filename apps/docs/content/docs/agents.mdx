@@ -49,7 +49,9 @@ try {
 }
 ```
 
-Use `attachDocx(session)` to work with an existing editor session. Proposals
+Use `attachDocx(session)` with a directly owned `YrsSession`. The default React
+editor keeps its session in a worker; use its async ref methods, including
+`readParagraphs` and `proposeChanges`, for live editor integration. Proposals
 check target text and formatting before acceptance; unrelated edits survive.
 Acceptance is one undo step. Exporting a pending proposal leaves the live
 document unchanged.

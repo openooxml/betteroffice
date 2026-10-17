@@ -66,7 +66,7 @@ import {
           <ToolbarCommandButton id="bold" />
         </ToolbarGroup>
         <ToolbarCommandButton id="undo" />
-        <EditorToolbar.Review />
+        <ToolbarCommandSelect id="editingMode" />
         <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
       </EditorToolbar.Toolbar>
     </EditorToolbar>
@@ -78,7 +78,11 @@ Omit `toolbar` for the default chrome, pass `null` for none, or render the same
 parts outside the editor inside `<DocxCommandProvider commands={commands}>`, with
 `commands` captured from the ref (it may be `null` until the editor mounts).
 Controls keep their active and `'mixed'` states, shortcuts, and read-only,
-viewing and suggesting restrictions. A disabled command always states why
+viewing and suggesting restrictions. `EditorToolbar.Review` also includes comments
+and tracked-change controls; these commands are unavailable in the default
+worker-only editor. `insertCommentReply` and `resolveComment` are available
+through the ref; sidebar comment cards display threads without editing controls.
+A disabled command always states why
 (`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
 availability again after preceding input, resolving to `{ ok: true, status }`
 or `{ ok: false, failure }`. Dialogs a command opens apply to the
@@ -851,13 +855,12 @@ Its layout options are plain JSON: `measurementDefaults`, `renderEnvironment`
 left with no font, including the default family text naming none falls back to, or
 any text measured with stand-in metrics is refused as `layout-unavailable`. On a live session,
 `session.exportStructuredWithPages(options)` reads the region layout the session
-retains and never lays out, flushes or loads fonts; the React ref's
-`exportStructuredWithPages(options)` flushes pending input and exports the
-editor's layout of that version, laying the document out again or waiting for
-fonts when the layout was computed from other fonts, measurement defaults, render
-environment or pagination options. Page references describe that authoritative
-layout at the returned version; a later edit may supersede it before it is
-painted.
+retains and never lays out, flushes or loads fonts. The default worker-only React
+ref does not support `exportStructuredWithPages`; use `save()` and the bytes
+export above. With `legacySyncApi`, the ref flushes pending input and exports the
+editor's layout, computing it again or waiting for fonts when needed. Hybrid
+viewers wait for their worker's layout. Page references describe that layout at
+the returned version; a later edit may supersede it before it is painted.
 
 - `pageIndex` counts physical pages from zero, blank parity pages included;
   `displayedNumber` and `displayedLabel` follow the section's PAGE numbering,

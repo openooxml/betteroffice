@@ -30,6 +30,7 @@ import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, 
 import type { Comment } from '@betteroffice/docx/types/content';
 
 import { LAYOUT_POLL_MS, LAYOUT_REFUSALS, LAYOUT_WAIT_MS, VIEWER_LAYOUT_WAIT_MS, type WorkerPageExportResult } from '../internals/workerOpenExport';
+import { routeViewerRefAccess } from '../hooks/useDocxEditorRefApi';
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
@@ -311,28 +312,30 @@ export function createPeerlessShellController(initial: Options) {
     proposalTail = pending.catch(() => {});
     return pending;
   };
+  const applyProposal = async (current: PeerlessEditSessionBinding, intent: ProposalIntent): Promise<DocxProposalResult> => {
+    if (binding !== current) throw new Error('Document was replaced');
+    const env = environment();
+    if ((env.readOnly || env.mode === 'viewing') && !options.allowHostProposals) return proposalFailure(current, intent, 'read-only');
+    let admitted = current.commands.submit(intent, { fence: true, hostProposal: options.allowHostProposals === true });
+    try {
+      while (admitted.status === 'held') admitted = await admitted.released;
+    } catch (error) {
+      if (binding !== current) throw new Error('Document was replaced');
+      throw error;
+    }
+    if (binding !== current) throw new Error('Document was replaced');
+    if (admitted.status === 'ignored') return proposalFailure(current, intent, admitted.reason);
+    const outcome = await admitted.ticket.ack;
+    if (binding !== current) throw new Error('Document was replaced');
+    if (outcome.status !== 'applied' && outcome.status !== 'noop') {
+      if (!outcome.reason) throw new Error('The worker did not confirm the proposal command');
+      return proposalFailure(current, intent, outcome.reason);
+    }
+    return { ok: true, snapshot: await presentedProposals(current) };
+  };
   const mutateProposal = (intent: ProposalIntent): Promise<DocxProposalResult> => {
     const captured = structuredClone(intent);
-    return proposalRound(async current => {
-      const env = environment();
-      if ((env.readOnly || env.mode === 'viewing') && !options.allowHostProposals) return proposalFailure(current, captured, 'read-only');
-      let admitted = current.commands.submit(captured, { fence: true, hostProposal: options.allowHostProposals === true });
-      try {
-        while (admitted.status === 'held') admitted = await admitted.released;
-      } catch (error) {
-        if (binding !== current) throw new Error('Document was replaced');
-        throw error;
-      }
-      if (binding !== current) throw new Error('Document was replaced');
-      if (admitted.status === 'ignored') return proposalFailure(current, captured, admitted.reason);
-      const outcome = await admitted.ticket.ack;
-      if (binding !== current) throw new Error('Document was replaced');
-      if (outcome.status !== 'applied' && outcome.status !== 'noop') {
-        if (!outcome.reason) throw new Error('The worker did not confirm the proposal command');
-        return proposalFailure(current, captured, outcome.reason);
-      }
-      return { ok: true, snapshot: await presentedProposals(current) };
-    });
+    return proposalRound(current => applyProposal(current, captured));
   };
   const settleTicket = async (current: PeerlessEditSessionBinding, held: PeerlessAdmissionResult): Promise<{ result: DocxCommandResult; seq?: number }> => {
     const replaced = { result: { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } } } as const;
@@ -837,11 +840,40 @@ export function createPeerlessShellController(initial: Options) {
     onDocumentChange: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; },
     onSelectionChange: (listener) => { selections.add(listener); return () => { selections.delete(listener); }; },
   } satisfies Partial<DocxEditorRef>;
-  const ref = new Proxy(implemented as DocxEditorRef, {
+  const syncRef = new Proxy(implemented as DocxEditorRef, {
     get(target, member) {
       if (member in target) return Reflect.get(target, member);
       return () => { throw new PeerlessSyncApiError(String(member)); };
     },
+  });
+  const viewer = () => options.readOnly === true || mode() === 'viewing';
+  const viewerRef = routeViewerRefAccess(syncRef, viewer, {
+    getPositionAtPoint: () => null,
+    onContentChange: () => () => {},
+    proposeChange: request => {
+      if (!options.allowHostProposals || (!request.search && !request.replaceWith)) return false;
+      const captured = { ...request };
+      void proposalRound(async current => {
+        const identities = await query({ kind: 'paragraphIdentities' });
+        const paragraph = identities.value.paragraphs.find(({ session }) => session?.paraId === captured.paraId &&
+          (session.story === 'body' || session.story.startsWith('body:')))?.session;
+        const intent: ProposalIntent = { kind: 'propose', payload: {
+          expectVersion: identities.version,
+          proposals: [{ id: crypto.randomUUID(), paragraph: { kind: 'session', sessionId: identities.value.sessionId,
+            story: paragraph?.story ?? 'body', paraId: captured.paraId },
+          suggest: { author: captured.author, date: new Date().toISOString() },
+          ...(captured.search ? { op: 'replaceText', search: captured.search, replaceWith: captured.replaceWith }
+            : { op: 'insertText', at: 'end', text: captured.replaceWith }) }],
+        } };
+        return paragraph ? applyProposal(current, intent) : proposalFailure(current, intent, 'missing-target');
+      }).then(result => {
+        if (!result.ok) throw new Error(result.failure.message ?? result.failure.code);
+      }).catch(error => emit(options.onError, error instanceof Error ? error : new Error(String(error))));
+      return true;
+    },
+  });
+  const ref = new Proxy(viewerRef, {
+    get: (target, member) => member in target ? Reflect.get(target, member) : Reflect.get(syncRef, member),
   });
   return {
     commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview, revealReviewTarget,
