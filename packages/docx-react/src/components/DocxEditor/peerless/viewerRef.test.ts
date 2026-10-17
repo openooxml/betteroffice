@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import type { ResidentReviewTarget } from '@betteroffice/docx/yrs';
 import { DocxAsyncOnlyError } from '../hooks/useDocxEditorRefApi';
 import { resetDeprecatedViewerMembersForTests } from '../internals/deprecatedViewerMembers';
 import { createPeerlessShellController, PeerlessSyncApiError } from './shellController';
@@ -56,8 +57,8 @@ test('worker viewer synchronous document reads throw DocxAsyncOnlyError with twi
 
 test('worker viewer synchronous navigation starts async twins and returns true', async () => {
   const controller = viewer();
-  const paragraph = mock(async () => { throw new Error('gone'); });
-  const review = mock(async () => false);
+  const paragraph = mock(async (_paraId: string) => { throw new Error('gone'); });
+  const review = mock(async (_target: ResidentReviewTarget) => false);
   controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, readOnly: true,
     scrollToParagraph: paragraph, scrollToReviewTarget: review });
   expect(controller.ref.scrollToParaId('p')).toBe(true);
