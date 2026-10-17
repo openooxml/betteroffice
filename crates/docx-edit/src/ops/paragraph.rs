@@ -82,7 +82,7 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
 
 /// The only paragraph properties an EMPTY second half inherits on split —
 /// pressing Enter at the end of a paragraph starts a clean one that keeps the
-/// style and vertical rhythm but nothing else.
+/// style, the vertical rhythm and the mark's run formatting but nothing else.
 const INHERITED_PARA_ATTRS: [&str; 11] = [
     "defaultTextFormatting",
     "pStyle",
@@ -96,10 +96,6 @@ const INHERITED_PARA_ATTRS: [&str; 11] = [
     "afterAutospacing",
     "contextualSpacing",
 ];
-
-/// The `defaultTextFormatting` keys that cross a split: font, size and color
-/// only. Bold, italic, underline and the rest deliberately do not carry.
-const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
 
 const BORDERS: &str = "borders";
 const TABS: &str = "tabs";
@@ -326,23 +322,6 @@ fn apply_paragraph_attr_projection(
     Ok(())
 }
 
-/// Reduces a `defaultTextFormatting` map to the font/size/color subset that crosses a split.
-fn style_carry_dtf(value: &Any) -> Option<Any> {
-    let Any::Map(map) = value else {
-        return None;
-    };
-    let subset: HashMap<String, Any> = map
-        .iter()
-        .filter(|(key, _)| STYLE_CARRY_DTF_KEYS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    if subset.is_empty() {
-        None
-    } else {
-        Some(Any::Map(Arc::new(subset)))
-    }
-}
-
 impl EditingDoc {
     /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
@@ -354,8 +333,8 @@ impl EditingDoc {
     ///
     /// - mid-paragraph: it keeps its own properties;
     /// - at the paragraph end, so the second half is empty: only
-    ///   the `INHERITED_PARA_ATTRS` subset survives, with
-    ///   `defaultTextFormatting` reduced to the font/size/color carry keys;
+    ///   the `INHERITED_PARA_ATTRS` subset survives, including the mark's
+    ///   whole `defaultTextFormatting`, so typing continues in its formatting;
     /// - at the end WITH a `next_style`: it switches to that style's
     ///   projection outright instead.
     ///
@@ -454,18 +433,10 @@ impl EditingDoc {
                 apply_paragraph_attr_projection(txn, &orig_map, &next.paragraph_attrs)?;
                 orig_map.remove(txn, BORDERS);
             } else {
-                // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
-                // font/size/color carry. Borders fall out of the sweep.
-                for (key, value) in &props {
+                // Blank-attr inheritance: keep only the inherited subset; borders fall out of it.
+                for (key, _) in &props {
                     if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
                         orig_map.remove(txn, key);
-                    } else if key == DEFAULT_TEXT_FORMATTING {
-                        set_or_remove(
-                            txn,
-                            &orig_map,
-                            DEFAULT_TEXT_FORMATTING,
-                            style_carry_dtf(value),
-                        );
                     }
                 }
             }
