@@ -833,6 +833,44 @@ fn split_at_end_of_an_empty_paragraph_keeps_only_what_typed_runs_hold() {
 }
 
 #[test]
+fn split_at_end_leaves_the_grid_opt_out_behind() {
+    let (doc, original) = doc_with("");
+    let dtf: BTreeMap<String, Any> = BTreeMap::from([
+        ("bold".to_string(), Any::Bool(true)),
+        ("snapToGrid".to_string(), Any::Bool(false)),
+    ]);
+    doc.set_paragraph_default_format(&ctx(), &ParaSelector::One(original), Some(&dtf))
+        .unwrap();
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 0),
+        "Grid",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    assert_eq!(seg_attrs(&doc, "Grid").get("snapToGrid"), Some(&Any::Bool(false)));
+    doc.split_paragraph(&ctx(), Position::new("body", 4), None)
+        .unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let carried = paragraphs[1]
+        .properties
+        .get("defaultTextFormatting")
+        .expect("the run formatting carries");
+    assert_eq!(map_get(carried, "bold"), Some(&Any::Bool(true)));
+    assert_eq!(map_get(carried, "snapToGrid"), None);
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 5),
+        "Next",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let typed = seg_attrs(&doc, "Next");
+    assert!(active(&typed, "bold"));
+    assert!(!active(&typed, "snapToGrid"));
+}
+
+#[test]
 fn split_at_end_with_next_style_switches_the_second_half() {
     let (doc, _) = doc_with("Heading text");
     let next = ResolvedStyleProjection {
