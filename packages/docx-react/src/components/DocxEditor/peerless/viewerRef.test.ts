@@ -1,8 +1,8 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
-import type { DocxEditorRef } from '../../DocxEditor';
 import { DocxAsyncOnlyError } from '../hooks/useDocxEditorRefApi';
 import { resetDeprecatedViewerMembersForTests } from '../internals/deprecatedViewerMembers';
 import { createPeerlessShellController, PeerlessSyncApiError } from './shellController';
+import { proposalHost } from './workerProposalHost.testing';
 
 afterEach(() => {
   mock.restore();
@@ -94,3 +94,32 @@ for (const [member, twin, args] of [
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`Use ${twin}.`));
   });
 }
+
+test('worker viewer synchronous proposals return false without host permission', () => {
+  const { ref } = viewer();
+  expect(ref.proposeChange({ paraId: 'p', search: 'old', replaceWith: 'new', author: 'Author' })).toBe(false);
+});
+
+test('worker viewer synchronous proposals queue allowed changes behind pending input', async () => {
+  const h = proposalHost({ readOnly: true });
+  let submitted!: () => void;
+  const admission = new Promise<void>(resolve => { submitted = resolve; });
+  const submit = h.binding.commands.submit.bind(h.binding.commands);
+  h.binding.commands.submit = (...args) => { const result = submit(...args); submitted(); return result; };
+  const read = mock(async () => ({ status: 'ok', version: 'native-0', value: { sessionId: 's', paragraphs: [
+    { session: { story: 'body', paraId: 'p' } },
+  ] } }));
+  h.controller.update({ ...h.settings, read: read as never });
+  const composition = h.binding.admission.reserveComposition();
+  expect(h.controller.ref.proposeChange({ paraId: 'p', search: 'old', replaceWith: 'new', author: 'Author' })).toBe(true);
+  expect(read).not.toHaveBeenCalled();
+  expect(h.submit).not.toHaveBeenCalled();
+  h.binding.admission.settleComposition(composition.slot, null);
+  await admission;
+  expect(await h.controller.ref.getProposals()).toMatchObject({ proposals: [{ state: 'proposed' }] });
+  expect(h.submit.mock.calls[0]).toMatchObject(['propose', { expectVersion: 'native-0', proposals: [{
+    paragraph: { kind: 'session', sessionId: 's', story: 'body', paraId: 'p' },
+    op: 'replaceText', search: 'old', replaceWith: 'new', suggest: { author: 'Author' },
+  }] }, { fence: true }]);
+  h.controller.dispose();
+});
