@@ -476,6 +476,8 @@ export function preflightDocxCommand(
   }
   if (command.kind === 'setRenderEnvironment') {
     if (!environment?.setRenderEnvironment) return refuse('unsupported-command');
+    if (command.replay && command.payload.reservations &&
+      command.payload.reservations.version !== engine.proposalEngine.version()) return refuse('stale-version');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'setFontEnvironment') {

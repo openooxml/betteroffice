@@ -1,6 +1,7 @@
 import type { DocxEditRequest, DocxEditResult, DocxTextRange } from './edits';
 import type { DisplayListRect } from '../layout/render/displayListQueries';
 import type { ResidentFontEnvironment, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
+import type { ResidentCommentRecoveryState } from './residentCommentProjection';
 import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
 import type {
   ApplyContext,
@@ -408,6 +409,8 @@ export interface ResidentCommandRecoveryState {
   cellSelection: YrsTableRange | null;
   proposals: DocxProposalRegistryState;
   selections: [number, DocxCommandSelection | null][];
+  comments?: ResidentCommentRecoveryState;
+  layoutReservations?: { values: DocxResolvedReservations; set?: DocxFrameReservations };
 }
 
 /** @internal */

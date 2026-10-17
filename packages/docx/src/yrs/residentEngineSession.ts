@@ -45,7 +45,7 @@ import type { Comment } from '../types/content';
 import type { Document, SectionProperties } from '../types/document';
 import type { DocxListStoriesResult } from './stories';
 import type { DocxCommentPatch } from './residentReview';
-import { projectResidentComments, type ResidentCommentProjection } from './residentCommentProjection';
+import { projectResidentComments, type ResidentCommentRecoveryState, type ResidentCommentProjection } from './residentCommentProjection';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -200,7 +200,8 @@ export type ResidentEngineSession = Pick<
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(fresh?: boolean): ResidentCommentProjection | null;
   /** Seeds the opened package's comment metadata, unless the session joined from a peer's state. */
-  initializeComments(): void;
+  initializeComments(recovery?: ResidentCommentRecoveryState): void;
+  commentRecoveryState?(): ResidentCommentRecoveryState;
   mediaDataUrl(token: string): string | null;
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
@@ -282,7 +283,13 @@ export async function createResidentEngineSession(
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
   let parsedFacade: YrsSession | undefined;
-  const initializeComments = () => {
+  const initializeComments = (recovery?: ResidentCommentRecoveryState) => {
+    if (recovery) {
+      commentAliases.clear();
+      for (const [id, alias] of recovery.aliases) commentAliases.set(id, alias);
+      commentsInitialized = recovery.initialized;
+    }
+    if (commentsInitialized) return;
     const source = commentsImported ? partBase?.package.document.comments ?? [] : [];
     const existing = new Set<string>(JSON.parse(session.list_comments()).map((comment: { id: string }) => comment.id));
     for (const comment of source) session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
@@ -622,6 +629,7 @@ export async function createResidentEngineSession(
     },
     commentProjection: fresh => partBase ? projectResidentComments(resident, commentAliases, commentsInitialized, fresh) : null,
     initializeComments,
+    commentRecoveryState: () => ({ aliases: [...commentAliases], initialized: commentsInitialized }),
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();

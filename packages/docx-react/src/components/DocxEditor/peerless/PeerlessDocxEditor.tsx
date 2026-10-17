@@ -773,8 +773,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!context) throw new Error('Editor was closed');
       return await openResident(resume.source, context.signal, context.getRasterScale, resume);
     },
-    onRecovery: (event) => { if (event.phase === 'recovered') { updateReadOnly(); updateFontEnvironment(); } },
-  }), [source, openResident, updateReadOnly, updateFontEnvironment]);
+    onRecovery: (event) => {
+      if (event.phase === 'recovered') {
+        updateReadOnly(); updateRenderEnvironment(); updateFontEnvironment();
+      }
+    },
+  }), [source, openResident, updateReadOnly, updateRenderEnvironment, updateFontEnvironment]);
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
     source, openConnection, recovery, canvasForPage, prepareGeometry, onError: reportError,
     onRecoverableError: error => { controller.stalled(error); reportRecoverableError(error); },
