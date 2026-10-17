@@ -1,5 +1,45 @@
 # @betteroffice/pptx
 
+## 0.3.0
+
+### Minor Changes
+
+- 32d9958: Adds `setShapeAdjust` to batch validation and editing, available by default. Adjustment proposals through async handles now succeed, and invalid comment payloads return typed refusals.
+- 8aa1269: Adds bounded PPTX outline, slide reading, atomic editing, PNG previews, and `attachPptx` for live presentation handles. Adds `duplicateSlide`, `setStoryParagraphs`, `fork`, and `layouts` to the presentation engine.
+- 90fc980: Adds opt-in `includeMedia: false` to `inspectPresentation` for smaller results that retain media paths, content types, and byte lengths. Media bytes remain included by default.
+- a274d91: Opt-in `asyncApi` editors add shape gestures, object insertion, command chrome and fenced async access through `handleAsync` and `PptxPeerlessEditorAccess`. `readOnly` blocks new edits while preserving accepted input and selection.
+- 32d9958: Opt-in `asyncApi` editors add notes, comments, recovery, zoom, proposal review, slideshows and exports. Text input supports `i18n.editor.textInput` and `i18n.editor.selectionAnnouncement`; `recoverySave` includes `throughSeq` and `version` and remains available after worker failure.
+- 90dc250: Editable `PptxEditor` sessions with `experimentalWorkerOpen` now use the worker-owned editor, with `saveAsync`, `handleAsync` and `recoverySave` on the editor API. The flag remains experimental and opt-in, the default editor is unchanged, and collaboration is not supported in this mode yet and throws `PptxWorkerEditorCollaborationError`.
+- 73959ca: `openPresentationSession` sessions add an experimental `call.frame(slideIndex)` that returns the slide's display list, the presentation version it was built from and the image media it references; a newer frame request replaces a queued older one.
+- 550b200: Adds experimental `openPresentationSession` for worker-owned presentation reads, version-checked edits, slide metadata, and async saving. Opt-in; caller buffers remain usable.
+
+### Patch Changes
+
+- d799954: Deletions made offline now reach every peer after a reconnect, even when newer edits reach those peers first. Pinned client ids must now stay below `Number.MAX_SAFE_INTEGER - 1`.
+- 3f34165: Collaboration now converges after a replica reconnects over peer-to-peer or relay transports: edits made while offline reach peers that stayed connected, not only the reconnecting replica.
+- 1e98891: A document with a chart that has a blank data point no longer fails to display, and a blank column or bar point draws no bar in every format. Display input the renderer cannot read now leaves only that block unpainted, with a console warning.
+- c390629: Fixes cylinder (`can`) shapes with a near-zero top adjustment drawing their top ellipse slightly outside the shape frame. Arcs that start or end on an axis now stay exact on very flat ellipses.
+- d605375: Adds DrawingML preset shapes for rounded and snipped rectangles, arcs, arrows, flowcharts, frames, math symbols and teardrops. PPTX also renders cylinders and brackets with their separate fill and outline paths. Enabled by default.
+- 735854e: Renders ECMA-376 preset geometries for callouts, clouds, curved and circular arrows, gears, online storage flowcharts, moons, and hearts instead of falling back to rectangles.
+- b91dc52: Renders ECMA-376 preset geometries for curved down arrows, down arrow callouts, quad arrows, document flowcharts, vertical and horizontal scrolls, waves, double waves and irregular seals instead of falling back to rectangles.
+- 8aa1269: Preserves existing cell, paragraph, run and notes formatting during edits. Adds optional `bullet` to `set_paragraphs`; `true` creates paragraph bullets, `false` removes them, and omitting it preserves existing bullets.
+- 1ed2ad0: Built-in worker sessions for presentations and workbooks start compiling the engine as soon as the worker starts, and later built-in sessions in the same page reuse the compiled module, so opening another document is faster.
+- 4b0b899: Collaborating deck replicas no longer drift apart in text formatting. Deletions a replica makes while cleaning up formatting during a remote update now arrive as their own `'local'` update, which providers forward.
+- 9196ce5: When collaborators move or restyle the same shape at once, the replica whose change loses no longer forwards a deletion that left other replicas with a shape missing its position, which made them refuse the update.
+- cf8823f: Shapes with custom geometry that use guide formulas, have a path without its own size, or contain one unusable path draw their outline instead of a fallback rectangle.
+- 396ebf9: Pictures use bounded decode sizes and image caching by default, reducing memory use in picture-heavy presentations. Adds optional `maxDimension` to `decodePresentationImage` and `acquire` and `release` to `CanvasImageResolver` for scoped painting.
+- 0e9b9ee: Embedded objects from older PowerPoint files show their preview picture from the slide's legacy drawing instead of a grey placeholder.
+- a274d91: Default presentation editors defer the peerless core. Adds `@betteroffice/pptx/editor` and `@betteroffice/pptx/peerless` entries while preserving existing root exports.
+- a274d91: Opt-in `asyncApi` editors preserve input across remote merges, support copy and cut, and report capability and synchronous API refusals. Default editors load the peer-less surface lazily, and synchronous collaboration accepts incoming updates independently of outgoing queue limits.
+- 4a780fd: Presentation sessions open and serve their first slide faster on large decks.
+- 0be5495: Slides with many shadows now finish rendering and exporting by omitting shadows that exceed the rendering budget. Shapes and pictures remain visible.
+- 01c8ecb: Large presentations show their first slide sooner and edit faster: thumbnails are laid out after the first paint, and unchanged slides keep their cached layouts and thumbnails, so typing and remote edits lay out only the slides they change.
+- 6d049c3: Collaborative decks stay valid when one person moves a slide while another deletes it: every peer now converges to the same slide order instead of failing to load the shared deck.
+- 3dcf5be: Editing text no longer drops authored formatting: unchanged fonts keep `a:latin` panose, pitchFamily and charset, unchanged colours keep theme tokens and transforms instead of becoming RGB, styled breaks keep their own `rPr`, and changed font families drop old face metrics.
+- 28e0c39: Collaborative deck editing no longer crashes when a peer removes a shape this replica edited, undid and edited again. Undo history now keeps everything it may restore.
+- 7576c01: Plugins now work with the default worker-only `PptxEditor`, including lifecycle hooks, panels, overlays and contributed commands. Plugin edit batches honor grants and `readOnly`.
+- d402284: Scatter and bubble chart X axes now fit charts whose X values are all equal, and X values without a Y value no longer stretch the X axis.
+
 ## 0.2.0
 
 ### Minor Changes

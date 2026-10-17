@@ -1,5 +1,12 @@
 # @betteroffice/fonts
 
+## 0.4.1
+
+### Patch Changes
+
+- a27d25a: Documents and presentations using CJK font families now get usable fallback fonts when the optional CJK add-on is unavailable.
+- fd80cf5: Adds optional `bold` and `italic` arguments to `maxDigitWidth` and `resolveDigitAdvance` so Verdana column widths use the requested style's digit metrics. Both default to `false`; unrecorded styles continue measuring the drawn face.
+
 ## 0.4.0
 
 ### Minor Changes

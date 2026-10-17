@@ -1,5 +1,72 @@
 # @betteroffice/rust-crates
 
+## 0.5.0
+
+### Minor Changes
+
+- 557cf3d: Collaborative workbooks now accept cell merges and unmerges. They sync to peers, undo and redo in one step and survive save and reopen.
+- d69ea57: Collaborative workbooks now accept freeze pane changes. They sync to peers as a sheet setting, undo in one step and survive save and reopen; other structural edits are still refused while collaborating.
+- ab7cf5d: Workbooks can now add, replace and remove cell hyperlinks with `setHyperlink` and `removeHyperlink`. In collaborative workbooks the edits sync to peers, undo in one step and survive save and reopen.
+- b3b88b1: Adds `moveRange`, which moves a range within one sheet and rewrites formulas that refer to it in one undo step. Partial ranges and features a move cannot preserve are refused. Also available on the worker session.
+
+### Patch Changes
+
+- b155fb7: Collaborating replicas no longer drift apart in formatting. Deletions a replica makes while cleaning up formatting during a remote update now arrive as their own `'local'` update, which providers forward.
+- c6289a2: The delete-only `'local'` update a replica sends after a remote update now carries only deletions the replica made itself, so a peer that has not seen a concurrent winning edit keeps the losing edit's paragraph attributes and ids.
+- 2e387c3: Preserves opaque drawings, tracked changes and hyperlinks through editor saves by default, and recovers legacy chart placements. Adds opt-in `repackDocxWithWarnings` with `warnings`; seeding rejects opaque payloads over 8 MiB with `OpaqueSeedBudgetError`.
+- 2586016: Worker-open editors build their editing copy from the worker's opened document instead of parsing the file a second time. The `yrs` entry adds `encodePeerMetadata`, `bootstrapPeer`, `PeerMetadataError` and `peerMetadataTags`.
+- 0650355: Footnote and endnote areas now take the height of the document's own separator, so pages with notes break where Word breaks them.
+- 3a49caa: Embedded OLE objects such as equations draw their preview image again, and saves still keep the object unchanged.
+- 42d185e: Documents open faster in the engine, with identical output. The Rust crates add `PackageBytes`, `RetainedPackage::from_bytes` and `*_bytes` parse entry points that take owned package bytes.
+- dad1895: Opening a DOCX now surfaces non-fatal warnings for parts without content types and duplicate drawing, bookmark, and Word paragraph IDs. Hosts addressing paragraphs by raw Word IDs should prefer session anchors with `resolveParagraphAnchor()` or call `persistParagraphIds()` to repair duplicates.
+- 5889248: Collaboration updates from other peers larger than 64 MiB (`MAX_UPDATE_BYTES`) are now refused before decoding, matching the xlsx and pptx limit. Loading a document state with `loadState` is unchanged.
+- 29352cc: Plugin `getAnchorGeometry` now resolves targets in headers and footers, including the default worker viewers, with `rects` on every built page that paints them. Unbuilt display pages name their header and footer parts in `hfParts` (`HfParts` in Rust).
+- b7f626b: Typing early in a long document no longer resolves the text of every later page again, because `layout_document_incremental` now moves the run positions of retained pages by the edit's offset and takes equal fingerprints to mean a block is unchanged apart from its document positions.
+- 4301476: Saving no longer writes inherited formatting into the document: run, cell and table properties are saved relative to their styles, and table row edits leave other rows unchanged. Toggle properties such as bold now combine across styles as OOXML specifies, which can change rendering.
+- 4df7290: A table row split at the page bottom now moves to the next page whole when one of its cells would show no line on the page, like Word.
+- 2f97c01: Tall table rows now split at each cell's own line boundary at the page bottom, like Word, instead of moving whole to the next page when the cells' lines don't line up.
+- 3149184: Tables honor fixed and autofit layouts and preferred cell widths by default, sizing autofit columns from their content within the available width; adds `measure_intrinsic_widths` for measuring paragraph content widths.
+- 3763178: Collaborative docx editing no longer crashes when a peer deletes a story or table this replica edited and undid. Once undo history attaches, a replica keeps deleted content until reload, so undo can always restore it. Raw yrs undo bridges should call `EditingDoc::keep_deleted` first.
+- baf8aaa: Undo in the worker-only Word editor groups typing by when the keys were pressed, so a quickly typed word undoes in one step even when each edit takes the engine longer to apply.
+- 11f68f2: Read-only sessions take each layout update from the worker as a compact summary instead of the full layout, which cuts main-thread work per update with identical rendering.
+- 54d6be3: Rejects oversized and malformed web fonts with `ResidentFontError` before decoding. Preserves earlier section edits through saves and targets Page Setup correctly, while preparing selected fonts for accurate text widths.
+- 4c97b07: Typing in the worker-only docx editor paints each keystroke before the worker replies, in the layout engine's own glyphs, and waits for the reply when it cannot match it exactly. Adds `drawGlyphRunPrimitive` and an optional `clip` argument to `rasterizeDisplayPageToBackBuffer`.
+- b7f626b: Typing in the worker-only docx editor lays out each text command through the resident incremental path instead of a full pass. Suggesting edits, empty insertions and sessions whose resident input is not ready keep the generic edit and full pass.
+- b6d7d7a: Sanitizing now recognizes Word, Excel and PowerPoint templates, slideshows and add-ins, converts their macro-enabled kinds to the macro-free sibling, and removes VBA signatures and payloads declared only through a default content type.
+- 4b0b899: Collaborating deck replicas no longer drift apart in text formatting. Deletions a replica makes while cleaning up formatting during a remote update now arrive as their own `'local'` update, which providers forward.
+- 9196ce5: When collaborators move or restyle the same shape at once, the replica whose change loses no longer forwards a deletion that left other replicas with a shape missing its position, which made them refuse the update.
+- 0be5495: Slides with many shadows now finish rendering and exporting by omitting shadows that exceed the rendering budget. Shapes and pictures remain visible.
+- 01c8ecb: Large presentations show their first slide sooner and edit faster: thumbnails are laid out after the first paint, and unchanged slides keep their cached layouts and thumbnails, so typing and remote edits lay out only the slides they change.
+- 28e0c39: Collaborative deck editing no longer crashes when a peer removes a shape this replica edited, undid and edited again. Undo history now keeps everything it may restore.
+- c6ab4fa: Native page and slide rendering holds each image's decoder to the image budget left, so a GIF whose frame is larger than its declared size is skipped instead of allocating past the budget.
+- d402284: Scatter and bubble chart X axes now fit charts whose X values are all equal, and X values without a Y value no longer stretch the X axis.
+- 4bd6409: Edited workbooks whose worksheet, workbook, styles or shared-strings part starts with a UTF-8 byte order mark now save instead of failing with "tag not closed".
+- d920761: `openWorkbook` accepts a `calculation` option with a `WorkbookCalculationContext` (`nowSerial`, `randSeed`), and `WorkbookHandle.setCalculationContext` changes it, so date, time and random functions such as `RANDBETWEEN` compute the same values on every handle that shares the context.
+- cb67050: Fixes clipped currency ticks and bar category labels in xlsx charts. Adds provided `PlotSink::anchors_text_end` and `PlotSink::push_end_aligned_text` methods so a sink can anchor text at its right edge.
+- 4d0cbda: Workbooks with charts repaint faster after edits that don't change a chart's data.
+- 97c818d: Recalculation without a `nowSerial` clock no longer overwrites the saved results of `TODAY()`, `NOW()` and year-less `DATEVALUE()` formulas with `#VALUE!`. Passing `nowSerial` recalculates them normally.
+- 28fa82a: Saving style edits preserves conditional-format styles without copying their number formats into cell formats. Workbooks with large conditional-format collections can open without a style-limit error, while saved collaborative state from earlier releases remains compatible.
+- 2f7efc6: Single-cell edits apply directly instead of rebuilding the workbook's editing state, so cell edits on large workbooks are much faster, with identical results.
+- 11db7d8: Scrolling large workbooks repaints faster: the grid's row and column geometry is reused between frames until the workbook changes.
+- 86c6a78: Standalone workbooks keep authored row heights and column widths through hide/unhide, undo, and save. Collaborative sessions are unchanged.
+- b0c67e0: Standalone cell edits and undo or redo run faster when no update listeners are attached. Enabled by default, with collaboration and later subscriptions preserved.
+- 03f4c75: Cell edits in large workbooks update the grid faster while preserving row sizing. Enabled by default.
+- 2ec69b0: Formulas referencing another workbook, using R1C1 `INDIRECT` or adding to date text keep their saved results after an edit instead of `#REF!` or `#VALUE!`. A range used as a single value reads the cell on the formula's row or column, as in Excel.
+- 355675f: Edited saves keep a formula cell's original markup, including shared formulas, when only its calculated result or style changes.
+- f2042f0: Improves preservation of original cell styles during edited saves, including protection and rotation, and keeps unrelated sheets unchanged.
+- 1fef3e9: Fixes literal tilde matching in conditional formulas and wildcard lookups.
+- 30bf7b2: Saving a workbook without edits now returns the original file unchanged, keeping its cached values and calculation chain.
+- ce4053e: Corrects currency, accounting and fraction formats. Adds optional `TextCmd.numberFormat` layout data, emitted by default for numeric cells, for padding and fill using font metrics, General rendering that fits column widths, and overflow hashes.
+- 400ac5e: Workbooks open faster and with a lower peak memory, with identical results.
+- c8a1e86: An edited save that would have to rewrite a worksheet's cells without source markup the editor does not model now fails with an error naming the sheet and the markup, and the workbook stays editable.
+- accc7a0: Saving an edited workbook is faster, with identical output.
+- 4bf5031: A workbook opened from a package with duplicate workbook relationship ids, or with a sheet stored on its calc chain part, now saves a file that opens again. Sheets are read only from the workbook's own sheet list, the one a save rewrites.
+- d402284: Supported scatter and bubble charts now render instead of a placeholder.
+- f98fc39: Fixes `SEARCH` character positions after Unicode case conversion and preserves case-insensitive matches for Greek text.
+- db59bf8: Edit batches now write content into unlocked cells of protected sheets, and formats when the protection allows formatting cells. Locked cells stay refused. Values and formulas written into empty cells keep their row or column style, as typed input does.
+- 37c7e36: Display lists now clamp to the sheet grid by default. Adds `DisplayTooLargeError` and `getDisplayListCellLimit` so callers can size tiles when a viewport exceeds the display limit.
+- 21e0be7: Rows with cells, a row style or an explicit height stay visible when a sheet hides unused rows by default (`zeroHeight`). Empty rows remain hidden, and collaboration snapshots remain compatible.
+
 ## 0.4.3
 
 ### Patch Changes

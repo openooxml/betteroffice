@@ -1,5 +1,16 @@
 # @betteroffice/vsdx-react
 
+## 0.2.0
+
+### Minor Changes
+
+- d5ecdfd: Adds opt-in `DataBindingPanel`, `matchColumnsToRows` and `bindRowToShape`, which write an imported table row onto a shape's data rows by column header in one undo step. List and boolean values are validated; a refused field leaves the shape unchanged and is named back.
+
+### Patch Changes
+
+- @betteroffice/vsdx@0.2.0
+- @betteroffice/vsdx-i18n@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

@@ -1,5 +1,12 @@
 # @betteroffice/python-xlsx
 
+## 0.2.1
+
+### Patch Changes
+
+- 28fa82a: Saving style edits preserves conditional-format styles without copying their number formats into cell formats. Workbooks with large conditional-format collections can open without a style-limit error, while saved collaborative state from earlier releases remains compatible.
+- 86c6a78: Standalone workbooks keep authored row heights and column widths through hide/unhide, undo, and save. Collaborative sessions are unchanged.
+
 ## 0.2.0
 
 ### Minor Changes
