@@ -20,7 +20,7 @@ fn assert_addressable(doc: &EditingDoc) {
     assert_eq!(keys.iter().collect::<HashSet<_>>().len(), keys.len(), "duplicate paragraph keys: {keys:?}");
     for key in keys {
         let at = doc.locate(&Loc::new("body", key, 0)).unwrap();
-        doc.insert_text(&ctx(), at, "x", FormatPolicy::Plain).unwrap();
+        doc.insert_text(&EditCtx::system(""), at, "x", FormatPolicy::Plain).unwrap();
     }
 }
 
