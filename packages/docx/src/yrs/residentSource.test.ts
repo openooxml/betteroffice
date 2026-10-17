@@ -8,7 +8,7 @@ import { createYrsSession } from './index';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
 import { ResidentEngineWorkerClient as DefaultWorkerClient } from './residentEngineWorkerClient';
-import type { ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandPayloads, ResidentCommandInitRequest } from './residentCommandProtocol';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 
 const TIMEOUT = 20_000;
@@ -461,7 +461,7 @@ test('checkpoint recovery retains resolved reservations and table gridlines', as
     const settings = { ...init(), layoutInput: JSON.stringify({ ...JSON.parse(LAYOUT), renderEnv: { showTableGridlines: true } }) };
     await clients[0]!.commandInit(settings);
     const identities = await clients[0]!.documentRead({ kind: 'paragraphIdentities' });
-    const environment = { themeColors: {}, showHiddenText: false, showTableGridlines: true, reservations: {
+    const environment: DocxCommandPayloads['setRenderEnvironment'] = { themeColors: {}, showHiddenText: false, showTableGridlines: true, reservations: {
       version: identities.version, key: 'retained', sets: [{ owner: 'layout', items: [{ id: 'space', kind: 'block',
         anchor: { kind: 'paragraph', paragraph: identities.value.paragraphs[0]!.session! }, side: 'before', height: 50 }] }],
     } };
