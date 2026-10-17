@@ -11,7 +11,9 @@ fn document(outer: &str, inner: &str) -> Vec<u8> {
     let borders = ["top", "left", "bottom", "right"]
         .map(|side| edge(side, outer))
         .concat()
-        + &["insideH", "insideV"].map(|side| edge(side, inner)).concat();
+        + &["insideH", "insideV"]
+            .map(|side| edge(side, inner))
+            .concat();
     let cell = r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>"#;
     let row = format!("<w:tr>{cell}{cell}</w:tr>");
     let body = format!(
@@ -65,7 +67,7 @@ fn table_borders(display: &Value) -> usize {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|primitive| primitive["role"] == "tableBorder")
+        .filter(|primitive| primitive["role"] == "table-border")
         .count()
 }
 

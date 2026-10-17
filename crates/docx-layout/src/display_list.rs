@@ -10129,7 +10129,13 @@ pub(crate) fn emit_table_fragment(
             } else {
                 cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top)
             };
-            push_edge(cx + p.g.width, y1, cx + p.g.width, cy + p.cell_h, run_resolved);
+            push_edge(
+                cx + p.g.width,
+                y1,
+                cx + p.g.width,
+                cy + p.cell_h,
+                run_resolved,
+            );
         }
         let own_bottom = borders.and_then(|b| b.bottom.as_ref());
         let bottom_y = |e: Option<&BorderEdgeIn>| {
@@ -10202,7 +10208,13 @@ pub(crate) fn emit_table_fragment(
             push_edge(run_x1, y, x2, y, run_resolved);
         }
         if is_first_col {
-            push_edge(cx, cy, cx, cy + p.cell_h, borders.and_then(|b| b.left.as_ref()));
+            push_edge(
+                cx,
+                cy,
+                cx,
+                cy + p.cell_h,
+                borders.and_then(|b| b.left.as_ref()),
+            );
         }
 
         let content_stamp_from = prims.len();
