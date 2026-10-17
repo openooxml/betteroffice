@@ -22,6 +22,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { requireUnreservedClientId } from '../collaboration/protocol';
 import type {
   DocxEditResult,
   DocxFindTextResult,
@@ -88,6 +89,8 @@ export type ResidentEngineSession = Pick<
   | 'mergeCells'
   | 'splitCell'
   | 'setCellShading'
+  | 'setCellBorders'
+  | 'setTableProperties'
   | 'insertTable'
   | 'insertTableFragment'
   | 'validateTableFragment'
@@ -191,6 +194,7 @@ export type ResidentEngineSession = Pick<
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(): ResidentCommentProjection | null;
+  initializeComments(): void;
   mediaDataUrl(token: string): string | null;
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
@@ -219,11 +223,14 @@ export type ResidentEngineSession = Pick<
   directBatchesApplied(): number;
   /** @internal */
   markProjectionStories(stories: readonly string[]): void;
+  /** Whether a remote update is held until the one it depends on arrives. */
+  hasPendingUpdate(): boolean;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string, seedStories?: boolean): string;
-  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean }): string;
+  /** With `initialUpdate`, the shared state replaces the package's stories. */
+  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): string;
   decodeFont(bytes: Uint8Array): Uint8Array;
-  openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean }): void;
+  openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
@@ -253,11 +260,13 @@ export async function createResidentEngineSession(
   heapLimitBytes?: number,
   clientId = randomClientId()
 ): Promise<ResidentEngineSession> {
+  requireUnreservedClientId(clientId);
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
   const session = createEditSession(clientId);
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
+  let commentsInitialized = false;
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
@@ -266,6 +275,16 @@ export async function createResidentEngineSession(
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
   let parsedFacade: YrsSession | undefined;
+  const initializeComments = () => {
+    const source = partBase?.package.document.comments ?? [];
+    const existing = new Set<string>(JSON.parse(session.list_comments()).map((comment: { id: string }) => comment.id));
+    for (const comment of source) session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
+      author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
+      parentId: comment.parentId === undefined ? null : String(comment.parentId),
+      ...(existing.has(String(comment.id)) ? {} : { body: comment.blockContent ?? comment.content }),
+    }));
+    commentsInitialized = true;
+  };
   const partDocument = (): Document => {
     if (!partBase) throw new Error('Part metadata requires an opened package');
     const stored = JSON.parse(session.part_metadata_json()) as ResidentPartMetadata;
@@ -592,7 +611,8 @@ export async function createResidentEngineSession(
       const at = session.clear_cell_selection();
       return at === undefined ? null : JSON.parse(at) as YrsLoc;
     },
-    commentProjection: () => partBase ? projectResidentComments(resident, commentAliases) : null,
+    commentProjection: () => partBase ? projectResidentComments(resident, commentAliases, commentsInitialized) : null,
+    initializeComments,
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();
@@ -696,6 +716,16 @@ export async function createResidentEngineSession(
     }),
     setCellShading: (range, color) => applyCommandMutation(range.anchor.story, () => {
       const receipt = JSON.parse(session.set_cell_shading(JSON.stringify(range), color ?? undefined));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    setCellBorders: (range, borders) => applyCommandMutation(range.anchor.story, () => {
+      const receipt = JSON.parse(session.set_cell_borders(JSON.stringify(range), JSON.stringify(borders)));
+      markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
+      return receipt;
+    }),
+    setTableProperties: (table, patch) => applyCommandMutation(table.story, () => {
+      const receipt = JSON.parse(session.set_table_properties(JSON.stringify(table), JSON.stringify(patch)));
       markProjectionStories([...receipt.changedStoryIds, ...receipt.createdStoryIds, ...receipt.deletedStoryIds]);
       return receipt;
     }),
@@ -828,10 +858,17 @@ export async function createResidentEngineSession(
     decodeFont: bytes => session.decode_font(bytes),
     openSourceDocx: (bytes, options) => {
       session.set_media_tokens(options.mediaTokens === true);
-      return resident.openDocx(bytes, options.digest, options.generation);
+      const json = resident.openDocx(bytes, options.digest, options.generation, !options.initialUpdate);
+      if (options.initialUpdate) {
+        resident.loadState(options.initialUpdate);
+        partBase = keySections(partBase!);
+        markProjectionStories(session.story_ids());
+      }
+      return json;
     },
     openDocument: (document, options) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
@@ -839,9 +876,14 @@ export async function createResidentEngineSession(
       parsedFacade = wrapSession(session, clientId);
       const nativeMediaDataUrl = parsedFacade.mediaDataUrl;
       parsedFacade.mediaDataUrl = token => parsedMedia.get(token) ?? nativeMediaDataUrl(token);
-      documentToYrs(parsedFacade, options.mediaTokens ? tokenizeResidentDocument(document, parsedMedia) : document, options);
-      partBase = keySections(document);
-      session.set_part_metadata(JSON.stringify(partMetadata(partBase)), '[]');
+      if (options.initialUpdate) {
+        resident.loadState(options.initialUpdate);
+        partBase = keySections(document);
+      } else {
+        documentToYrs(parsedFacade, options.mediaTokens ? tokenizeResidentDocument(document, parsedMedia) : document, options);
+        partBase = keySections(document);
+        session.set_part_metadata(JSON.stringify(partMetadata(partBase)), '[]');
+      }
       partsTouched = false;
       marginsTouched = false;
       sectionsTouched = false;
@@ -863,6 +905,7 @@ export async function createResidentEngineSession(
     },
     openDocx: (bytes, digest, generation, seedStories = true) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       const json = resolveHostJsonCommentMedia(
@@ -878,6 +921,7 @@ export async function createResidentEngineSession(
     },
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
       commentAliases.clear();
+      commentsInitialized = false;
       geometryStories.clear();
       projectionStories.clear();
       const json =
@@ -923,6 +967,7 @@ export async function createResidentEngineSession(
       session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),
     encodeStateVector: () => session.encode_state_vector(),
+    hasPendingUpdate: () => session.has_pending_update(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(partLayoutInput(input)),
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
@@ -1014,9 +1059,10 @@ export async function createResidentEngineSession(
     },
     applyUpdate: (update) => {
       sectionLayout = null;
-      return JSON.parse(
-        session.apply_update_with_inference(update)
-      ) as CollaborationTextInsertion | null;
+      const before = session.resident_section_revision().split(':')[1];
+      const raw = session.apply_update_with_inference(update);
+      if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
+      return JSON.parse(raw) as CollaborationTextInsertion | null;
     },
     onUpdate: (listener) => {
       listeners.add(listener);

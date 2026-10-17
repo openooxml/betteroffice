@@ -19,7 +19,8 @@ export interface PeerlessInputProps {
   ariaLabel?: string;
   onCompositionChange?(state: PeerlessCompositionState | null): void;
   onRecoverableText?(text: string): void;
-  onClipboard?(cut: boolean): Promise<void>;
+  /** Fills `data` synchronously when the selection's clipboard payload is ready. */
+  onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
@@ -240,7 +241,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const copy = (event: ClipboardEvent) => {
       if (!callbacks.current.onClipboard || state.composing) return;
       event.preventDefault();
-      void callbacks.current.onClipboard(event.type === 'cut');
+      void callbacks.current.onClipboard(event.type === 'cut', event.clipboardData);
     };
     element.addEventListener('keydown', keydown);
     element.addEventListener('keyup', keyup);

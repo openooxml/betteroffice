@@ -100,6 +100,36 @@ export function revisionPreviewKeyOf(target: object | null | undefined): string 
   return target ? (revisionPreviewKeys.get(target) ?? null) : null;
 }
 
+const reservationsKeys = new WeakMap<object, string>();
+const resolvedReservationKeys = new WeakMap<object, string>();
+
+/** Names a resolved reservation set laid out from the set computed at `version`. */
+export function keyResolvedReservations(resolved: object, version: string, serial: number): string {
+  const key = JSON.stringify([version, serial]);
+  resolvedReservationKeys.set(resolved, key);
+  return key;
+}
+
+/** The key of a resolved reservation set; '' when there is none. */
+export function resolvedReservationsKey(resolved: object | null | undefined): string {
+  return resolved ? (resolvedReservationKeys.get(resolved) ?? '') : '';
+}
+
+/** Records the reservations key a layout or query facade was rendered with. */
+export function stampReservationsKey(target: object, key: string): void {
+  reservationsKeys.set(target, key);
+}
+
+/** The reservations key `target` was rendered with, or null when unstamped. */
+export function reservationsKeyOf(target: object | null | undefined): string | null {
+  return target ? (reservationsKeys.get(target) ?? null) : null;
+}
+
+/** The version of the reservation set a key names, or null for none. */
+export function reservationsVersionOfKey(key: string | null): string | null {
+  return key ? (JSON.parse(key) as [string, number])[0] : null;
+}
+
 /** A session's current version; null for a session that cannot report one. */
 export function readSessionVersion(
   session: { version?: () => string } | null | undefined

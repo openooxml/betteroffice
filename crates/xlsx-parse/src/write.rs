@@ -3307,13 +3307,20 @@ fn patched_pool<T>(
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
     overrides: Option<&HashMap<usize, Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
+    template.require_unwrapped_child(pool_name)?;
+    let pool = template
+        .child(pool_name)
+        .map(|child| XmlTemplate::capture(&child.bytes))
+        .transpose()?;
+    if let Some(pool) = &pool {
+        pool.require_unwrapped_child(item_name)?;
+    }
     if values.is_empty() {
         return Ok(None);
     }
-    let Some(child) = template.child(pool_name) else {
+    let Some(pool) = pool else {
         return write_pool().map(Some);
     };
-    let pool = XmlTemplate::capture(&child.bytes)?;
     let sources = pool.children_named(item_name).collect::<Vec<_>>();
     let mut items = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {

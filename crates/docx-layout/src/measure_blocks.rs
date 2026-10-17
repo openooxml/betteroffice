@@ -1251,6 +1251,14 @@ pub fn measure_block(
                 inner_measures,
             }))
         }
+        LayoutBlock::Reserved(reserved) => Ok(BlockExtent::Image(ImageExtent {
+            width: reserved
+                .width
+                .unwrap_or(content_width)
+                .min(content_width.max(0.0))
+                .max(0.0),
+            height: reserved.height,
+        })),
         LayoutBlock::SectionBreak(_) => Ok(BlockExtent::SectionBreak),
         LayoutBlock::PageBreak(_) => Ok(BlockExtent::PageBreak),
         LayoutBlock::ColumnBreak(_) => Ok(BlockExtent::ColumnBreak),
@@ -1805,6 +1813,7 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
                 line_width += tab.width.unwrap_or(48.0).max(0.0);
             }
             Run::Image(image) => line_width += synthetic_inline_image_width(image),
+            Run::Reserved(reserved) => line_width += reserved.width,
             Run::Field(field) => {
                 font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
                 let fallback = field
@@ -2646,6 +2655,10 @@ fn cell_content_widths(
             LayoutBlock::Image(_) | LayoutBlock::Shape(_) => return None,
             LayoutBlock::Chart(chart) => (chart.width, chart.width),
             LayoutBlock::TextBox(text_box) => (text_box.width, text_box.width),
+            LayoutBlock::Reserved(reserved) => {
+                let width = reserved.width.unwrap_or_default();
+                (width, width)
+            }
             _ => continue,
         };
         minimum = minimum.max(widths.0);
@@ -3438,7 +3451,9 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
         .collect();
     let image_only = extent.lines.len() == 1
         && !non_empty.is_empty()
-        && non_empty.iter().all(|run| matches!(run, Run::Image(_)));
+        && non_empty
+            .iter()
+            .all(|run| matches!(run, Run::Image(_) | Run::Reserved(_)));
     if !image_only {
         return extent.total_height;
     }
@@ -3448,6 +3463,7 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
             Run::Image(image) => {
                 Some(rotation_bound(&image.rotation_bounds, "height").unwrap_or(image.height))
             }
+            Run::Reserved(reserved) => Some(reserved.height),
             _ => None,
         })
         .fold(0.0_f64, f64::max);

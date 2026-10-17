@@ -1,4 +1,6 @@
 import type { ResidentRangeHighlights } from './residentRangeHighlights';
+import type { ResidentPresencePeer, ResidentPresenceGeometry, ResidentCollaborationUpdates } from './residentCollaboration';
+export type { ResidentPresencePeer, ResidentPresenceGeometry } from './residentCollaboration';
 import type { ResidentPartGeometry, ResidentPartMetadata } from './residentParts';
 import type { ResidentControlSnapshot } from './residentControls';
 import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residentProperties';
@@ -111,6 +113,9 @@ export interface ResidentProposalResponse {
 
 /** @internal */
 export type ResidentDocumentRead =
+  | { kind: 'collabStateVector' }
+  | { kind: 'collabDiff'; stateVector?: Uint8Array }
+  | { kind: 'collabPresence'; peers: ResidentPresencePeer[]; pages: [number, number]; expectVersion: string; expectFrameEpoch: number; expectLayoutRevision: number }
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
   | { kind: 'partSnapshot' }
@@ -136,6 +141,7 @@ export type ResidentDocumentRead =
   | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'bookmarkTarget'; story: string; name: string }
   | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] }
   | { kind: 'reviewTarget'; target: ResidentReviewTarget }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string; nativePoint?: DocxSelectionPointIntent }
@@ -158,6 +164,9 @@ export type ResidentDocumentRead =
 
 /** @internal */
 export interface ResidentDocumentReadValues {
+  collabStateVector: Uint8Array;
+  collabDiff: Uint8Array;
+  collabPresence: ResidentPresenceGeometry | null;
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;
   partSnapshot: { metadata: ResidentPartMetadata; geometry: ResidentPartGeometry[]; frameEpoch: number | null; layoutRevision: number };
@@ -180,6 +189,7 @@ export interface ResidentDocumentReadValues {
   findText: DocxFindTextResult;
   findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+  bookmarkTarget: { loc: YrsLoc; position: number } | null;
   anchorTargets: ProposalGeometryTarget[];
   reviewTarget: ResidentReviewTargetRanges | null;
   searchText: ResidentSearchResult;
@@ -467,6 +477,7 @@ export type ResidentEngineWorkerResponse = (
       outOfMemory?: boolean;
     }
 ) & {
+  collabUpdates?: ResidentCollaborationUpdates & { session?: string; incarnation?: number; epoch?: number };
   /** The worker's wasm memories as the reply left. */
   memory?: WasmModuleMemory[];
 };

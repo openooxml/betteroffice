@@ -1,6 +1,7 @@
 import type { DocxEditRequest, DocxEditResult, DocxTextRange } from './edits';
 import type { DisplayListRect } from '../layout/render/displayListQueries';
 import type { ResidentFontEnvironment, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
+import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
 import type {
   ApplyContext,
   ApplyResult,
@@ -33,6 +34,7 @@ import type {
   YrsSession,
   YrsStickyPosition,
   YrsStoryRange,
+  YrsCellBorders,
   YrsTableRange,
 } from './index';
 import type { DocxClipboardFragment } from './clipboardFragment';
@@ -92,10 +94,17 @@ export interface DocxCommentResult {
   comments: Comment[];
 }
 
+/** Every comment after an `updateComment`, `setCommentRanges` or `removeComment` command. */
+export interface DocxCommentChangeResult {
+  seq: number;
+  comments: Comment[];
+}
+
 export interface DocxEditState {
   documentVersion?: string;
   batch?: { seq: number; result: DocxEditResult };
   comment?: DocxCommentResult;
+  commentChange?: DocxCommentChangeResult;
   activePart?: ResidentPartTarget | null;
   readOnly: boolean;
   review?: { version: string; previewVersion: number };
@@ -269,8 +278,14 @@ export interface DocxCommandStagedPresentation {
 }
 
 export interface DocxCommandPayloads {
+  applyRemoteUpdate: { update: ArrayBuffer };
   applyEdits: { request: DocxEditRequest; suggesting?: YrsAuthor };
-  setRenderEnvironment: { themeColors: Record<string, string>; showHiddenText: boolean };
+  setRenderEnvironment: {
+    themeColors: Record<string, string>;
+    showHiddenText: boolean;
+    /** Applied only while the document version is still `reservations.version`. */
+    reservations?: DocxReservationsPayload;
+  };
   setFontEnvironment: ResidentFontEnvironment;
   setContentControlValue: { handle: string; value: YrsContentControlValue; expectVersion: string };
   addRepeatingItem: { handle: string; expectVersion: string };
@@ -278,7 +293,7 @@ export interface DocxCommandPayloads {
   openPart: DocxPartTarget;
   ensurePart: DocxPartTarget;
   removePart: DocxPartTarget;
-  setHyperlink: { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; expectVersion: string };
+  setHyperlink: { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; displayText?: string; expectVersion: string };
   setObjectProperties: { handle: string; patch: Record<string, unknown>; expectVersion: string };
   setSectionProperties: { section: string; patch: Partial<SectionProperties>; expectVersion: string };
   setNoteProperties: { section: string; footnotePr: FootnoteProperties; endnotePr: EndnoteProperties; expectVersion: string };
@@ -300,6 +315,8 @@ export interface DocxCommandPayloads {
   mergeTableCells: DocxSelectionIntent;
   splitTableCell: DocxSelectionIntent & { rows: number; columns: number };
   setTableCellShading: DocxSelectionIntent & { color: string | null };
+  setTableBorders: DocxSelectionIntent & { borders: YrsCellBorders };
+  setTableProperties: DocxSelectionIntent & { op: 'patch'; patch: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }; expectVersion?: string };
   pasteFragment: DocxSelectionIntent & { fragment: DocxClipboardFragment };
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
@@ -309,7 +326,7 @@ export interface DocxCommandPayloads {
   replaceMatches: { targets: DocxTextRange[]; text: string; expectVersion: string; suggesting?: YrsAuthor };
   undo: Record<string, never>;
   redo: Record<string, never>;
-  addComment: { ranges: YrsStoryRange[]; author: string; date: string; body: unknown; expectVersion: string };
+  addComment: { ranges: YrsStoryRange[]; author: string; date: string; body: unknown; expectVersion: string; parentId?: string };
   updateComment: { id: string; patch: DocxCommentPatch; expectVersion: string };
   setCommentRanges: { id: string; ranges: YrsStoryRange[]; expectVersion: string };
   removeComment: { id: string; expectVersion: string };
@@ -344,8 +361,18 @@ export type DocxCommandIntent = {
   [K in DocxCommandKind]: CommandEnvelope<DocxCommandPayloads[K]> & { kind: K };
 }[DocxCommandKind];
 
+/**
+ * @internal The reservation set a layout includes: the `version` and `key` of the payload it was
+ * resolved from, or a null `key` for entries kept from an earlier set.
+ */
+export interface DocxFrameReservations {
+  version: string;
+  key: string | null;
+}
+
 export interface DocxCommandFramePayload {
   fontEnvironment?: ResidentFontEnvironmentSnapshot;
+  reservations?: DocxFrameReservations;
   parts?: ResidentPartGeometry[];
   geometry?: ResidentFrameGeometry;
   frame: ArrayBuffer;
@@ -433,15 +460,29 @@ export interface ResidentCommandHooks {
 export interface ResidentCommandHooksEnvironment {
   supportsFontEnvironment?: boolean;
   proposals?: DocxProposalRegistry;
+  /** The session merges remote updates; its collaboration wrap applies them. */
+  collaboration?: boolean;
   readSelectionLayout(): DocxCommandSelectionLayout;
-  setRenderEnvironment?(environment: DocxCommandPayloads['setRenderEnvironment']): void;
+  getLayoutReservations?(): DocxResolvedReservations | null;
+  /**
+   * Omits `reservations` to keep the current ones; `set` names the payload they were resolved
+   * from, null when they were kept from an earlier set.
+   */
+  setRenderEnvironment?(environment: {
+    themeColors: Record<string, string>;
+    showHiddenText: boolean;
+    reservations?: DocxResolvedReservations;
+  }, set?: DocxFrameReservations | null): void;
 }
 
 export type ResidentCommandHooksFactory = (
   engine: ResidentEngineSession,
   init: ResidentCommandInitRequest,
   environment?: ResidentCommandHooksEnvironment
-) => Pick<ResidentCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState'>;
+) => Pick<ResidentCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState'> & {
+  /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
+  afterRemoteMerge?(context: DocxCommandApplyContext): void;
+};
 
 export interface ResidentCommandRegistry {
   handlers: Partial<MethodHandlers<DocxCommandMethods, unknown>>;
@@ -524,6 +565,8 @@ export interface ResidentDocxCommandState {
   storedMarks: DocxStoredMarks | null;
   stickyPositions: Map<string, YrsStickyPosition>;
   proposals?: DocxProposalRegistry;
+  /** Host versions in `(from, to]`, all produced by applied remote merges and none by a local command. */
+  remoteMerges?: { from: number; to: number };
 }
 
 export type ResidentDocxCommandEngine = ResidentEngineSession & Pick<YrsSession,

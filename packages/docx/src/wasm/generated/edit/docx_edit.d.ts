@@ -151,6 +151,13 @@ export class EditSession {
      */
     apply_update(update: Uint8Array): void;
     /**
+     * Applies the ordered updates of one sync in a single remote transaction,
+     * so the result matches [`EditSession::apply_update`] on the whole diff.
+     * Errors on a non-`Uint8Array` entry or a malformed or oversized update,
+     * before applying any.
+     */
+    apply_update_chunks(updates: Array<any>): void;
+    /**
      * [`EditSession::apply_update`] plus an inference about where the peer
      * that authored it is typing, for caret presence. Returns
      * `{"clientId","story","paraId","endOffset"}` for the end of that peer's
@@ -385,6 +392,15 @@ export class EditSession {
      * state vector.
      */
     encode_diff(remote_state_vector: Uint8Array): Uint8Array;
+    /**
+     * [`EditSession::encode_diff`] as ordered updates for a sync that must
+     * travel in bounded frames: the whole diff when it fits
+     * `max_chunk_bytes`, otherwise causally ordered struct updates followed
+     * by the delete set alone. Each fits the limit except one that carries a
+     * single larger struct. Errors on a malformed state vector or a zero
+     * limit.
+     */
+    encode_diff_chunks(remote_state_vector: Uint8Array, max_chunk_bytes: number): Array<any>;
     encode_peer_metadata(): Uint8Array;
     /**
      * The full document state as one yrs v1 update. Hand it to
@@ -497,6 +513,10 @@ export class EditSession {
      */
     format_text_target_json(target_json: string, delta_json: string): string;
     geometry_position_outline_json(root: string): string;
+    /**
+     * Whether a remote update is waiting on one that has not arrived yet.
+     */
+    has_pending_update(): boolean;
     /**
      * Whether the document has a story with this id.
      */
@@ -962,6 +982,10 @@ export class EditSession {
     search_text(query: string, case_sensitive: boolean, limit?: number | null): string;
     section_margins_json(): string;
     /**
+     * Initializes imported metadata, creating an unanchored comment when absent.
+     */
+    seed_comment_metadata_json(comment_id: string, patch_json: string): void;
+    /**
      * [`EditSession::open_docx`] with seeding always on.
      */
     seed_from_docx(bytes: Uint8Array, generation?: string | null): string;
@@ -1160,6 +1184,7 @@ export class EditSession {
      * with text inserted at it.
      */
     set_selection(story: string, anchor_para: string, anchor_offset: number, head_para: string, head_offset: number): void;
+    set_table_properties(table_json: string, patch_json: string): string;
     /**
      * Sets the preferred width, in twips, of the table `table_json`
      * ([`TableLocator`]) names. Always a plain local edit. Errors unless
@@ -1179,8 +1204,10 @@ export class EditSession {
      * committed transaction. `update` is v1-encoded — feed it straight to
      * [`EditSession::apply_update`] on a peer — and is copied out of wasm
      * memory, so JS may hold it across later edits. The second argument is
-     * `1` when the transaction had no local origin. One observer per session;
-     * a second call replaces the first, and a throwing callback is ignored.
+     * `1` when the transaction had no local origin; a remote update's own
+     * formatting cleanup follows it as a `0` update to forward. One observer
+     * per session; a second call replaces the first, and a throwing callback
+     * is ignored.
      */
     set_update_observer(callback: Function): void;
     /**
@@ -1696,6 +1723,7 @@ export interface InitOutput {
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_apply_update_chunks: (a: number, b: any) => [number, number];
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1737,6 +1765,7 @@ export interface InitOutput {
     readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
     readonly editsession_encode_state_vector: (a: number) => [number, number];
@@ -1754,6 +1783,7 @@ export interface InitOutput {
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_geometry_position_outline_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_has_pending_update: (a: number) => number;
     readonly editsession_has_story: (a: number, b: number, c: number) => number;
     readonly editsession_header_footer_aliases_json: (a: number) => [number, number];
     readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1834,6 +1864,7 @@ export interface InitOutput {
     readonly editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_section_margins_json: (a: number) => [number, number];
+    readonly editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;
@@ -1865,6 +1896,7 @@ export interface InitOutput {
     readonly editsession_set_partial_document: (a: number, b: number) => void;
     readonly editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+    readonly editsession_set_table_properties: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_undo_input_time: (a: number, b: number, c: number) => void;

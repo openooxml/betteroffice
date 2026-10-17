@@ -1336,7 +1336,10 @@ impl<'a> Exporter<'a> {
         let mut sources: HashMap<String, &SourceComment> = HashMap::new();
         if let Some(read) = self.read() {
             for comment in &read.comments {
-                if stored.contains_key(&comment.id) || !read.seeded_comments.contains(&comment.id) {
+                if stored.contains_key(&comment.id)
+                    || (!read.seeded_comments.contains(&comment.id)
+                        && !read.comment_writes.written(&comment.id, "anchors"))
+                {
                     order.push(comment.id.clone());
                     sources.insert(comment.id.clone(), comment);
                 }

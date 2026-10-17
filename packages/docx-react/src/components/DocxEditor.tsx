@@ -451,7 +451,8 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    */
   pluginSidebarItems?: ReactSidebarItem[];
   /**
-   * Geometry for `pluginSidebarItems`; ignored while `plugins` are installed.
+   * Geometry for `pluginSidebarItems`; ignored while `plugins` are installed and in the
+   * worker-only editor, which supplies its own.
    * @deprecated The editor supplies its own geometry.
    */
   pluginRenderedDomContext?: RenderedDomContext | null;
@@ -2677,6 +2678,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               commandBridgeRef={commandBridgeRef}
               yrsCore={yrsCore}
               pluginHostOpen={pluginHostSession !== null}
+              reservations={pluginHost.reservations}
+              reservationSets={pluginHost.reservationSets}
               onError={reportPagedError}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}

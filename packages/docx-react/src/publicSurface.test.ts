@@ -107,3 +107,10 @@ test('errors and new public types are exported from the root', () => {
   const change: DocxDocumentChange = { version: 'v' };
   expect([match.paraId, selection.paraId, insertion.paraId, change.version]).toEqual(['p', null, 'p', 'v']);
 });
+
+
+test('plugin notification drains stay internal', () => {
+  expect(index).not.toMatch(/\b(?:DocxPluginHost|createDocxPluginHost|notificationsIdle)\b/);
+  expect(plugins).not.toContain('notificationsIdle');
+  expect(editor).not.toContain('notificationsIdle');
+});

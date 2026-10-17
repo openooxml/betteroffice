@@ -2330,3 +2330,122 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
     assert!(undo.undo());
     assert!(ids(&doc).is_empty());
 }
+
+#[test]
+fn body_bookmarks_do_not_apply_opaque_block_restrictions() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+    let start = r#"<w:bookmarkStart w:id="7" w:name="Range"/>"#;
+    let end = r#"<w:bookmarkEnd w:id="7"/>"#;
+    for body in [
+        format!(
+            "{}{start}{}{end}{table}{}",
+            p("00000001", &r("Before")),
+            p("00000002", &r("Anchor")),
+            p("00000003", &r("After"))
+        ),
+        format!(
+            "{}{start}{}{end}",
+            p("00000001", &r("Before")),
+            p("00000002", &r("Anchor"))
+        ),
+    ] {
+        let doc = open(&body);
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![delete_paragraphs("00000002", "00000002")],
+        );
+        assert_eq!(accepted(&doc)[0], "Before");
+    }
+}
+
+fn formatted(text: &str) -> String {
+    format!(
+        r#"<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:b/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>"#
+    )
+}
+
+/// The formatting of every unit of the body that is not text.
+fn embed_formatting(doc: &EditingDoc) -> Vec<std::collections::BTreeMap<String, Any>> {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter(|segment| !matches!(segment.content, SegmentContent::Text(_)))
+        .map(|segment| segment.attributes)
+        .collect()
+}
+
+#[test]
+fn replacing_the_end_of_a_paragraph_keeps_the_formatting_of_the_marks_and_table_after_it() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="00000003"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let doc = open(
+        &[
+            p("00000001", &formatted("Dose of [compound]")),
+            p("00000002", ""),
+            table.to_owned(),
+            p("00000004", &formatted("Tail")),
+        ]
+        .concat(),
+    );
+    let before = embed_formatting(&doc);
+    let replica = EditingDoc::new(7002);
+    replica
+        .apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![replace(search("[compound]", "00000001"), "Agent X")],
+    );
+    assert_eq!(accepted(&doc)[0], "Dose of Agent X");
+    assert_eq!(embed_formatting(&doc), before);
+    replica
+        .apply_update_v1(
+            &doc.encode_diff_v1(&replica.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(embed_formatting(&replica), before);
+    assert_eq!(accepted(&replica), accepted(&doc));
+    let body = doc
+        .paragraph_save_plan()
+        .spliced_parts
+        .into_iter()
+        .find(|part| part.part == "word/document.xml")
+        .expect("the body splices");
+    assert_eq!(body.changed, vec![0]);
+}
+
+#[test]
+fn removing_the_end_of_a_paragraph_keeps_the_formatting_of_the_marks_after_it() {
+    let doc = open(
+        &[
+            p("00000001", &formatted("One")),
+            p("00000002", ""),
+            p("00000003", &formatted("Two")),
+        ]
+        .concat(),
+    );
+    let before = embed_formatting(&doc);
+    let undo = UndoSession::new();
+    let at = |id: &str, start: u32, end: u32| range(id, start, end, EditTextView::Accepted);
+    apply(&doc, &undo, vec![delete(at("00000001", 2, 3))]);
+    assert_eq!(embed_formatting(&doc), before);
+    let ann = EditCtx::local("Ann", DATE).suggesting();
+    let typed = doc
+        .insert_text(&ann, Position::new("body", 2), "ly", FormatPolicy::Inherit)
+        .unwrap();
+    doc.delete_range(&ann, StoryRange::new("body", 3, 4))
+        .unwrap();
+    assert_eq!(accepted(&doc)[0], "Onl");
+    assert_eq!(embed_formatting(&doc), before);
+    doc.reject_change(
+        &EditCtx::local("", ""),
+        &ChangeTarget::Revision(typed.revision_ids[0].clone()),
+    )
+    .unwrap();
+    assert_eq!(embed_formatting(&doc), before);
+    apply(&doc, &undo, vec![delete(at("00000003", 2, 3))]);
+    assert_eq!(embed_formatting(&doc), before);
+    assert_eq!(accepted(&doc), ["On", "", "Tw"]);
+}

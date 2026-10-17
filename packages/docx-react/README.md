@@ -530,6 +530,11 @@ const review = defineDocxPlugin<State>({
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit
   target.
+- **Reservations.** `reservations(context)` returns `{ version, items }`: inline
+  boxes, blocks beside a paragraph and hidden ranges, in pixels at zoom 1. The
+  editor lays them out and paints nothing there; saves and paged exports leave
+  them out. `{ kind: 'reservation', id }` answers the box once
+  `layout.reservationsVersion` is the set's `version`.
 - **Sidebar cards** anchor to `{ version, story, paraId }` and show only while
   the document is at that version and the body paragraph resolves uniquely.
   `render` receives the `item` it draws, so one component can draw every card;

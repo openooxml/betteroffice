@@ -36,6 +36,7 @@ import { createEchoPainter } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import { peerlessPreviewPaint } from './WorkerDocumentPreview';
+import * as clipboard from './clipboard';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -120,7 +121,8 @@ class FakeWorker {
     } else if (message.type === 'save') {
       response = { id: message.id, ok: true, saved: Uint8Array.of(4, 5).buffer, updates: [], version: 'saved' };
     } else if (message.type === 'documentRead') {
-      response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'headings'
+      response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'clipboardSlice' ? { text: 'Selected text', fragment: null }
+        : message.read.kind === 'headings'
         ? [{ story: 'body', paraId: 'heading', text: 'Worker heading', level: 0, position: 1 }]
         : message.read.kind === 'sectionProperties' ? { version: 'worker-version', sections: [{ section: 'final', properties: { marginLeft: 2160 } }], paragraphs: [] }
         : message.read.kind === 'searchText' ? { matches: [], carried: -1 }
@@ -140,7 +142,8 @@ class FakeWorker {
         },
         frame: {
           coversThroughSeq: 0, revision: 1,
-          payload: { frame: new ArrayBuffer(0), caret: { frameEpoch: 1, caretRect: null }, layoutRevision },
+          payload: { frame: commandFrame(1).payload.frame, caret: { frameEpoch: 1, caretRect: null }, layoutRevision,
+            stagedPresentation: { frameEpoch: 1, pages: [] } },
         },
       };
       this.initial = initial;
@@ -168,6 +171,7 @@ class FakeWorker {
             cancelled ? { reason: 'dependency-refused' } : {}),
         }],
         editState: { ...state.editState, readOnly },
+        ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
       };
       this.initial = { ...state, ...ack };
       response = { id: message.id, ok: true, commandAck: ack };
@@ -464,6 +468,150 @@ test('worker tracked change cards accept and reject through worker review comman
   await waitFor(() => expect(reviewed('acceptRevision')).toEqual([{ revisionId: '7', expectVersion: 'native-0' }]));
   fireEvent.click(await view.findByTitle('Reject'));
   await waitFor(() => expect(reviewed('rejectRevision')).toEqual([{ revisionId: '7', expectVersion: 'native-0' }]));
+  view.unmount();
+  h.controller.dispose();
+});
+
+test('worker shell draws unmanaged plugin overlays under the managed overlay layer', async () => {
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} pluginOverlays={<div data-testid="host-overlay" />} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  const layer = view.getByTestId('host-overlay').parentElement!;
+  const managed = view.getByTestId('plugin-overlays');
+  expect(layer.parentElement).toBe(managed.parentElement);
+  expect(Number(layer.style.zIndex)).toBeLessThan(Number(managed.style.zIndex));
+});
+
+test('unmanaged plugin sidebar items are placed from worker geometry without plugins', async () => {
+  const h = proposalHost();
+  h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  const queries = { pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 600, height: 800 }), anchorRect: () => null,
+    rangeRects: (from: number) => from === 4 ? [{ pageIndex: 0, x: 10, y: 30, width: 5, height: 12 }] : [], dispose() {} } as unknown as frameRender.DisplayListQueries;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(h.readAt as never);
+  const load = spyOn(frameRender, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
+  const create = spyOn(frameRender, 'createDisplayListQueries').mockReturnValue(queries);
+  restorers.push(() => readAt.mockRestore(), () => load.mockRestore(), () => create.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false}
+    pluginSidebarItems={[{ id: 'note', anchorPos: 4, render: () => <div data-testid="host-note" /> }]} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  view.getByTestId('peerless-paged-editor').setAttribute('data-peerless-pages-host', '');
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('30px'));
+  view.unmount();
+  h.controller.dispose();
+});
+
+test('plugin sidebar cards discard placement across source replacement and incarnations', async () => {
+  const hosts = [proposalHost(), proposalHost(), proposalHost()];
+  hosts[2]!.binding.viewStore.getSnapshot().identity.incarnation = 2;
+  hosts[2]!.binding.viewStore.getSnapshot().geometry!.identity.incarnation = 2;
+  for (const h of hosts) h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
+    bounds: { x: 0, y: 0, width: 600, height: 800 }, transform: [1, 0, 0, 1, 0, 0] as const }];
+  let y: number | null = 30;
+  let currentHost = hosts[0]!;
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt')
+    .mockImplementation(((...args: Parameters<typeof currentHost.readAt>) => currentHost.readAt(...args)) as never);
+  const load = spyOn(frameRender, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
+  const create = spyOn(frameRender, 'createDisplayListQueries').mockImplementation(() => {
+    const top = y;
+    return { pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 600, height: 800 }),
+      anchorRect: () => null, rangeRects: (from: number) => from === 4 && top !== null
+        ? [{ pageIndex: 0, x: 10, y: top, width: 5, height: 12 }] : [], dispose() {} } as unknown as frameRender.DisplayListQueries;
+  });
+  restorers.push(() => readAt.mockRestore(), () => load.mockRestore(), () => create.mockRestore(),
+    () => hosts.forEach(h => h.controller.dispose()));
+  const items = [{ id: 'note', anchorPos: 4, render: () => <div data-testid="host-note" /> }];
+  const element = (documentBuffer: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false} pluginSidebarItems={items} />;
+  const view = render(element(source));
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  view.getByTestId('peerless-paged-editor').setAttribute('data-peerless-pages-host', '');
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[0]!.binding); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('30px'));
+  const isPlaced = () => {
+    const note = view.queryByTestId('host-note');
+    const sidebar = note?.closest<HTMLElement>('.docx-unified-sidebar');
+    return !!sidebar && sidebar.style.opacity !== '0' && note!.parentElement!.style.visibility !== 'hidden';
+  };
+  holdInitial = true;
+  view.rerender(element(Uint8Array.of(4, 5, 6)));
+  expect(isPlaced()).toBe(false);
+  await waitFor(() => expect(workers.at(-1)!.pendingReplies.length).toBeGreaterThan(0));
+  expect(isPlaced()).toBe(false);
+  y = null;
+  currentHost = hosts[1]!;
+  await act(async () => {
+    const worker = workers.at(-1)!;
+    for (const response of worker.pendingReplies.splice(0)) worker.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[1]!.binding); });
+  await waitFor(() => expect(create.mock.calls.length).toBeGreaterThan(1));
+  expect(isPlaced()).toBe(false);
+  y = 140;
+  const frame = hosts[1]!.binding.viewStore.getSnapshot().geometry!;
+  await act(async () => { hosts[1]!.binding.viewStore.installFrameGeometry({ ...frame, frameEpoch: frame.frameEpoch + 1 }); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('140px'));
+  const previousQueries = create.mock.calls.length;
+  y = null;
+  currentHost = hosts[2]!;
+  await act(async () => { surface.mock.calls.at(-1)![0].onReady!(hosts[2]!.binding); });
+  await waitFor(() => expect(create.mock.calls.length).toBeGreaterThan(previousQueries));
+  expect(isPlaced()).toBe(false);
+  y = 250;
+  const recoveredFrame = hosts[2]!.binding.viewStore.getSnapshot().geometry!;
+  await act(async () => { hosts[2]!.binding.viewStore.installFrameGeometry({ ...recoveredFrame, frameEpoch: recoveredFrame.frameEpoch + 1 }); });
+  await waitFor(() => expect(view.getByTestId('host-note').parentElement!.style.top).toBe('250px'));
+});
+
+test('unmanaged plugin overlays wait for a ready document and clear on replacement', async () => {
+  holdInitial = true;
+  const element = (documentBuffer: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false}
+    pluginOverlays={<div data-testid="host-overlay" />} />;
+  const view = render(element(source));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  await waitFor(() => expect(workers[0]!.pendingReplies.length).toBeGreaterThan(0));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  await act(async () => {
+    for (const response of workers[0]!.pendingReplies.splice(0)) workers[0]!.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(view.queryByTestId('host-overlay')).not.toBeNull());
+  view.rerender(element(Uint8Array.of(4, 5, 6)));
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+});
+
+test('unmanaged plugin overlays stay hidden for placeholder and parse errors', async () => {
+  const element = (documentBuffer?: Uint8Array) => <DocxEditor documentBuffer={documentBuffer} showToolbar={false}
+    pluginOverlays={<div data-testid="host-overlay" />} />;
+  const view = render(element());
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+  failWholeOpen = true;
+  const onError = mock(() => {});
+  view.rerender(<DocxEditor {...peerlessProps} showToolbar={false} onError={onError}
+    pluginOverlays={<div data-testid="host-overlay" />} />);
+  await waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(view.queryByTestId('host-overlay')).toBeNull();
+});
+
+test('unmanaged plugin sidebar items keyed to a host proposal card are placed at that card', async () => {
+  const h = proposalHost();
+  await h.submit('propose', { proposals: inputs }, {}).ack;
+  h.binding.viewStore.getSnapshot().geometry!.pages = [0, 1].map(pageIndex => ({
+    page: { pageId: String(pageIndex), pageIndex }, bounds: { x: 0, y: pageIndex * 820, width: 600, height: 800 },
+    transform: [1, 0, 0, 1, 0, pageIndex * 820] as const,
+  }));
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(h.readAt as never);
+  restorers.push(() => readAt.mockRestore());
+  const anchorKey = `revision-${frameRender.yrsIdToNumericId('revision-change-1')}`;
+  const view = render(<DocxEditor {...peerlessProps} allowHostProposals commentsSidebarOpen showHostProposalsInSidebar showToolbar={false}
+    pluginSidebarItems={[{ id: 'note', anchorPos: -1, anchorKey, render: () => <div data-testid="host-note" /> }]} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  await waitFor(() => expect(view.container.querySelectorAll('.docx-tracked-change-card')).toHaveLength(4));
+  const note = view.getByTestId('host-note').parentElement!;
+  await waitFor(() => expect([note.style.position, note.style.visibility]).toEqual(['absolute', '']));
+  const cards = [...view.container.querySelectorAll('.docx-tracked-change-card')]
+    .map(card => Number.parseFloat(card.closest<HTMLElement>('.docx-unified-sidebar > div > div')!.style.top)).sort((a, b) => a - b);
+  expect(Number.parseFloat(note.style.top)).toBeGreaterThan(cards[0]!);
+  expect(Number.parseFloat(note.style.top)).toBeLessThan(cards[1]!);
   view.unmount();
   h.controller.dispose();
 });
@@ -925,6 +1073,20 @@ test('worker ref buffer loads replace the worker and resolve on readiness', asyn
   await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
   await pending;
   expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(2);
+  await waitFor(() => expect(workers[0]!.terminate).toHaveBeenCalled());
+  expect(coreSession).not.toHaveBeenCalled();
+});
+
+test('worker ref document loads open the parsed document in a new worker', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+  act(() => { expect(ref.current!.loadDocument(parsed)).toBeUndefined(); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await waitFor(() => expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(2));
+  expect(requests.filter(request => request.type === 'openSource').at(-1)).toMatchObject({ source: { document: parsed } });
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
   await waitFor(() => expect(workers[0]!.terminate).toHaveBeenCalled());
   expect(coreSession).not.toHaveBeenCalled();
 });
@@ -1836,6 +1998,19 @@ test('viewing mode initializes worker read-only and internal mode changes use it
   await waitFor(() => expect(binding!.admission.getSnapshot().readOnly).toBe(false));
 });
 
+test('viewing mode reports read-only to worker plugins', async () => {
+  let context: DocxPluginContext<null> | undefined;
+  const events: { mode: string; readOnly: boolean; snapshot: boolean }[] = [];
+  const plugin = defineDocxPlugin({ id: 'mode-check', createState: () => null, initialize: (value) => { context = value; },
+    onEvent(value, event) {
+      if (event.type === 'mode-change') events.push({ mode: event.mode, readOnly: event.readOnly, snapshot: value.snapshot.readOnly });
+    } });
+  const view = render(<DocxEditor {...peerlessProps} mode="viewing" plugins={[plugin]} />);
+  await waitFor(() => expect(context?.snapshot).toMatchObject({ mode: 'viewing', readOnly: true }));
+  view.rerender(<DocxEditor {...peerlessProps} mode="editing" plugins={[plugin]} />);
+  await waitFor(() => expect(events.at(-1)).toEqual({ mode: 'editing', readOnly: false, snapshot: false }));
+});
+
 test('suggesting shell edits carry the current host author', async () => {
   const view = render(<DocxEditor {...peerlessProps} mode="suggesting" author="Writer" />);
   await waitFor(() => expect(binding).toBeDefined());
@@ -1875,6 +2050,13 @@ test('worker rulers show native section values and the first-line indent control
   expect(view.getByRole('slider', { name: 'First line indent' })).toBeDefined();
 });
 
+test('worker rulers use the host ruler unit', async () => {
+  const view = render(<DocxEditor {...peerlessProps} showRuler rulerUnit="cm" />);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(view.getByRole('slider', { name: 'Horizontal ruler' }).textContent).toContain('21');
+  expect(view.getByRole('slider', { name: 'Vertical ruler' }).textContent).toContain('27');
+});
+
 test('worker-only opens request the font-ready certified initial display window', async () => {
   render(<DocxEditor {...peerlessProps} showToolbar={false} />);
   await waitFor(() => expect(requests.some(request => request.type === 'commandInit')).toBe(true));
@@ -1882,4 +2064,90 @@ test('worker-only opens request the font-ready certified initial display window'
   expect(request?.type === 'commandInit' && request.request).toMatchObject({
     provisionalPages: 3, displayWindow: [0, 3], layoutWithRegions: true,
   });
+});
+
+
+test('loading the same parsed prop document reopens exactly once for every load', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const parsed = yrs.decodeDocxHostJson(hostJson, source).document;
+  const view = render(<DocxEditor document={parsed} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  for (const count of [2, 3]) {
+    act(() => { ref.current!.loadDocument(parsed); });
+    await waitFor(() => expect(workers).toHaveLength(count));
+    await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(count);
+  }
+  view.unmount();
+});
+
+
+test('each file load waits for its own bytes and opens one worker when revisiting a source', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const file = new Blob([source]);
+  const view = render(<DocxEditor documentBuffer={file} ref={ref} showToolbar={false} />);
+  await waitFor(() => expect(ref.current!.commands.getState('save').enabled).toBe(true));
+  let pending!: Promise<void>;
+  act(() => { pending = ref.current!.loadDocumentBuffer(Uint8Array.of(8, 9)); });
+  await waitFor(() => expect(workers).toHaveLength(2));
+  await pending;
+  let finish!: (bytes: ArrayBuffer) => void;
+  const read = spyOn(file, 'arrayBuffer').mockImplementationOnce(() => new Promise<ArrayBuffer>(resolve => { finish = resolve; }));
+  restorers.push(() => read.mockRestore());
+  act(() => { pending = ref.current!.loadDocumentBuffer(file); });
+  void pending.catch(() => {});
+  try {
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    expect(workers).toHaveLength(2);
+    act(() => { finish(new Uint8Array(source).buffer); });
+    await waitFor(() => expect(workers).toHaveLength(3));
+    await pending;
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(3);
+    act(() => { pending = ref.current!.loadDocumentBuffer(file); });
+    await waitFor(() => expect(workers).toHaveLength(4));
+    await pending;
+    expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(4);
+  } finally { finish?.(new Uint8Array(source).buffer); view.unmount(); }
+});
+
+
+test('the real worker editor serves one copy event from its prefetched selection without the async API', async () => {
+  surface.mockRestore();
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  restorers.push(() => { if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor); else Reflect.deleteProperty(navigator, 'clipboard'); });
+  const onCopy = mock(() => {});
+  const onError = mock(() => {});
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} onCopy={onCopy} onError={onError} />);
+  const input = await view.findByRole('textbox', { name: 'Document input' });
+  await act(async () => { fireEvent.keyDown(input, { key: 'a', ctrlKey: true }); });
+  await waitFor(() => expect(requests.filter(r => r.type === 'documentRead' && r.read.kind === 'clipboardSlice')).toHaveLength(1));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  const written = new Map<string, string>();
+  const data = { setData: (type: string, text: string) => { written.set(type, text); },
+    getData: (type: string) => written.get(type) ?? '' } as unknown as DataTransfer;
+  fireEvent.copy(input, { clipboardData: data });
+  expect(data.getData('text/plain')).toBe('Selected text');
+  expect(data.getData('text/html')).toBe('');
+  await waitFor(() => expect(onCopy).toHaveBeenCalledTimes(1));
+  expect(onError).not.toHaveBeenCalled();
+});
+
+
+test('unmount disposes the real worker editor clipboard subscription', async () => {
+  surface.mockRestore();
+  const create = clipboard.createClipboardPrefetch;
+  const disposals: ReturnType<typeof mock>[] = [];
+  const factory = spyOn(clipboard, 'createClipboardPrefetch').mockImplementation(options => {
+    const prefetch = create(options);
+    const dispose = mock(prefetch.dispose);
+    disposals.push(dispose);
+    return { ...prefetch, dispose };
+  });
+  restorers.push(() => factory.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await view.findByRole('textbox', { name: 'Document input' });
+  await waitFor(() => expect(disposals).toHaveLength(1));
+  view.unmount();
+  expect(disposals[0]).toHaveBeenCalledTimes(1);
 });
