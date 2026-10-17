@@ -199,6 +199,7 @@ export type ResidentEngineSession = Pick<
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(fresh?: boolean): ResidentCommentProjection | null;
+  /** Seeds the opened package's comment metadata, unless the session joined from a peer's state. */
   initializeComments(): void;
   mediaDataUrl(token: string): string | null;
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
@@ -272,6 +273,7 @@ export async function createResidentEngineSession(
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
   let commentsInitialized = false;
+  let commentsImported = false;
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
@@ -281,7 +283,7 @@ export async function createResidentEngineSession(
   const parsedMedia = new Map<string, string>();
   let parsedFacade: YrsSession | undefined;
   const initializeComments = () => {
-    const source = partBase?.package.document.comments ?? [];
+    const source = commentsImported ? partBase?.package.document.comments ?? [] : [];
     const existing = new Set<string>(JSON.parse(session.list_comments()).map((comment: { id: string }) => comment.id));
     for (const comment of source) session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
       author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
@@ -884,6 +886,7 @@ export async function createResidentEngineSession(
     openDocument: (document, options) => {
       commentAliases.clear();
       commentsInitialized = false;
+      commentsImported = !options.initialUpdate;
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
@@ -921,6 +924,7 @@ export async function createResidentEngineSession(
     openDocx: (bytes, digest, generation, seedStories = true) => {
       commentAliases.clear();
       commentsInitialized = false;
+      commentsImported = seedStories;
       geometryStories.clear();
       projectionStories.clear();
       const json = resolveHostJsonCommentMedia(
@@ -937,6 +941,7 @@ export async function createResidentEngineSession(
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
       commentAliases.clear();
       commentsInitialized = false;
+      commentsImported = true;
       geometryStories.clear();
       projectionStories.clear();
       const json =

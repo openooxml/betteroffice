@@ -46,10 +46,10 @@ function documentBytes(header?: string, body = SEED_BODY, sectPr = '<w:sectPr/>'
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function parsedDocument(): Promise<Document> {
+async function parsedDocument(bytes = documentBytes()): Promise<Document> {
   const parser = await createYrsSession({ clientId: 9299 });
   try {
-    parser.openDocx(documentBytes(), true);
+    parser.openDocx(bytes, true);
     return parser.materializeDocx()!;
   } finally { parser.destroy(); }
 }
@@ -540,6 +540,57 @@ test('worker replicas that number comments in different local orders save and re
     expect(await saved(b)).toEqual(left);
   } finally { a.session.dispose(); b.session.dispose(); }
 }, TIMEOUT);
+
+function threadBytes(done: boolean) {
+  const w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const override = (part: string, kind: string) =>
+    `<Override PartName="/word/${part}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`;
+  const parts: PartsMap = new Map();
+  const set = (name: string, xml: string) => parts.set(name, toBytes(xml));
+  set('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    override('document', 'document.main') + override('comments', 'comments') + override('commentsExtended', 'commentsExtended') + '</Types>');
+  set('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`);
+  set('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/>` +
+    '<Relationship Id="rIdCx" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/></Relationships>');
+  set('word/document.xml', `<w:document ${w}><w:body><w:p><w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/><w:r><w:t>Seed</w:t></w:r>` +
+    '<w:commentRangeEnd w:id="0"/><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="0"/></w:r><w:r><w:commentReference w:id="1"/></w:r></w:p><w:sectPr/></w:body></w:document>');
+  set('word/comments.xml', `<w:comments ${w} xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">` +
+    '<w:comment w:id="0" w:author="A" w:date="2026-01-01T00:00:00Z"><w:p w14:paraId="0C000001"><w:r><w:t>Parent</w:t></w:r></w:p></w:comment>' +
+    '<w:comment w:id="1" w:author="B" w:date="2026-01-02T00:00:00Z"><w:p w14:paraId="0C000002"><w:r><w:t>Reply</w:t></w:r></w:p></w:comment></w:comments>');
+  set('word/commentsExtended.xml', `<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:commentEx w15:paraId="0C000001" w15:done="${Number(done)}"/>` +
+    `<w15:commentEx w15:paraId="0C000002" w15:paraIdParent="0C000001" w15:done="${Number(done)}"/></w15:commentsEx>`);
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+const threadMetadata = (replica: Replica) => replica.engine.listComments()
+  .map(({ id, author, date, done, parentId }) => ({ id, author, date, done, parentId }));
+
+test('a fresh open seeds comment metadata from the package', async () => {
+  const fresh = await open(9204, undefined, undefined, threadBytes(true));
+  try {
+    expect(threadMetadata(fresh)).toEqual([
+      { id: '0', author: 'A', date: '2026-01-01T00:00:00Z', done: true, parentId: null },
+      { id: '1', author: 'B', date: '2026-01-02T00:00:00Z', done: true, parentId: '0' },
+    ]);
+  } finally { fresh.session.dispose(); }
+}, TIMEOUT);
+
+for (const input of ['bytes', 'document'] as const) {
+  test(`a ${input} source that joins a room keeps the comment metadata a peer changed and writes none of its own`, async () => {
+    const bytes = threadBytes(false);
+    const a = await open(9201, undefined, undefined, bytes);
+    expect((await a.session.submit('updateComment', { id: '0', patch: { done: true }, expectVersion: a.engine.proposalEngine.version() }).ack).status).toBe('applied');
+    const b = await open(9202, a.engine.encodeState(), input === 'document' ? await parsedDocument(bytes) : undefined, bytes);
+    try {
+      expect(threadMetadata(a).map(({ done }) => done)).toEqual([true, false]);
+      expect(threadMetadata(b)).toEqual(threadMetadata(a));
+      expect(b.opened.clientClock).toBe(stateVectorClock(b.engine.encodeStateVector(), 9202));
+      await a.session.submit('applyRemoteUpdate', { update: remoteUpdate(a, b.engine) }, merge).ack;
+      expect(threadMetadata(a).map(({ done }) => done)).toEqual([true, false]);
+      expect(threadMetadata(b)).toEqual(threadMetadata(a));
+    } finally { a.session.dispose(); b.session.dispose(); }
+  }, TIMEOUT);
+}
 
 test('a merge that deletes the story holding the local selection repairs the confirmed selection', async () => {
   const a = await open(9201);
