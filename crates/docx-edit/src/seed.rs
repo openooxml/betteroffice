@@ -1707,13 +1707,14 @@ fn without_nulls(value: &Any) -> Any {
 }
 
 /// The inverse of [`mark_run_attrs`]: the `defaultTextFormatting` that lowers to the run
-/// formatting in `attrs`. Attributes with no run-defaults form (revisions, hyperlinks) drop.
+/// formatting in `attrs`, kept to what a typed run saves: revisions, hyperlinks and the grid
+/// opt-out drop.
 pub(crate) fn mark_run_formatting<'a>(
     attrs: impl IntoIterator<Item = (&'a String, &'a Any)>,
 ) -> Option<Any> {
     let mut formatting: HashMap<String, Any> = HashMap::new();
     for (key, value) in attrs {
-        if *value == Any::Null || (*value == Any::Bool(false) && key != "snapToGrid") {
+        if *value == Any::Null || *value == Any::Bool(false) {
             continue;
         }
         let field = |name: &str| match value {
@@ -1725,7 +1726,6 @@ pub(crate) fn mark_run_formatting<'a>(
             "textShadow" => ("shadow", Any::Bool(true)),
             "textOutline" => ("outline", Any::Bool(true)),
             "superscript" | "subscript" => ("vertAlign", Any::from(key.as_str())),
-            "snapToGrid" => (key.as_str(), Any::Bool(false)),
             "underline" | "fontFamily" => (key.as_str(), without_nulls(value)),
             "textColor" => ("color", without_nulls(value)),
             "strike" if field("double") == Some(Any::Bool(true)) => {
