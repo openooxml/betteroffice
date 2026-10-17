@@ -92,7 +92,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
       throw error;
     }
   }, [atVersion, binding, controller]);
-  const revealSelection = useCallback(async (current: PeerlessEditSessionBinding, selection: DocxCommandSelection, check: () => void = () => {}) => {
+  const revealSelection = useCallback(async (current: PeerlessEditSessionBinding, selection: DocxCommandSelection, check: () => void = () => {}, requireGeometry = true) => {
     const identity = current.viewStore.getSnapshot().identity;
     const isCurrent = () => current === binding() && identity.session === current.viewStore.getSnapshot().identity.session &&
       identity.incarnation === current.viewStore.getSnapshot().identity.incarnation && identity.epoch === current.viewStore.getSnapshot().identity.epoch;
@@ -109,7 +109,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     };
     if (!await select({ anchor: selection.anchor, focus: selection.anchor })) return false;
     const shown = current.viewStore.getSnapshot().geometry?.caret;
-    if (!shown || !scroller.current || !host.current) return false;
+    if (!shown || !scroller.current || !host.current) return !requireGeometry;
     if (selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset) {
       if (!await select({ anchor: selection.focus, focus: selection.anchor })) return false;
     }
@@ -123,7 +123,7 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     const target = await (expectVersion === undefined ? controller.read(request) : controller.readAt(request, expectVersion));
     check();
     if (typeof target === 'string' || current !== binding()) return false;
-    return revealSelection(current, { anchor: target.loc, focus: target.loc }, check);
+    return revealSelection(current, { anchor: target.loc, focus: target.loc }, check, expectVersion === undefined);
   }, expectVersion), [binding, controller, navigate, revealSelection]);
   const scrollToBookmark = useCallback((name: string, story = 'body') => navigate(async current => {
     const target = await controller.read({ kind: 'bookmarkTarget', story, name });
