@@ -51,12 +51,21 @@ fn inline_content_at_the_start_of_a_paragraph_led_by_a_table_follows_the_table()
                 text: "x".into(),
                 attrs: BTreeMap::new(),
             };
-            doc.replace_range_rich(&ctx(), StoryRange::new(at.story, at.index, at.index), &[run])
-                .unwrap();
+            doc.replace_range_rich(
+                &ctx(),
+                StoryRange::new(at.story, at.index, at.index),
+                &[run],
+            )
+            .unwrap();
         },
         |doc, at| {
-            doc.insert_embed(&ctx(), at, "image", vec![("rId".into(), Any::from("rIdImage"))])
-                .unwrap();
+            doc.insert_embed(
+                &ctx(),
+                at,
+                "image",
+                vec![("rId".into(), Any::from("rIdImage"))],
+            )
+            .unwrap();
         },
     ];
     for insert in inserts {

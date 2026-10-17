@@ -13,7 +13,7 @@ use docx_parse::paragraph_identity::{
 };
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use serde_json::json;
-use yrs::Any;
+use yrs::{Any, ReadTxn, Transact};
 
 const DATE: &str = "2026-09-24T00:00:00Z";
 const BODY: &str = "/word/document.xml";
