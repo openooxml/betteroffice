@@ -59,7 +59,7 @@ import { withPackageMetadata, type ResidentPackageMetadata } from './residentPro
 import { getDocumentWatermark } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
 import { readSectionSnapshot, residentSectionPropertiesAt, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
-import { splitSection } from './sectionBreak';
+import { pageBreakTarget, splitSection } from './sectionBreak';
 
 /** @internal */
 export interface ResidentExactPrefixLayout {
@@ -561,7 +561,8 @@ export async function createResidentEngineSession(
 
   const resident: ResidentEngineSession = {
     splitSection: (at, properties, start) => {
-      const split = splitSection(resident, at, () => properties, start);
+      ensureUndo();
+      const split = splitSection(resident, session, at, () => properties, start);
       sectionsTouched = true;
       sectionLayout = null;
       if (!split.closed) {
@@ -714,7 +715,11 @@ export async function createResidentEngineSession(
     }),
     validateTableFragment: (table) => { session.validate_table_fragment(JSON.stringify(table)); },
     insertImage: (at, image, author) => applyCommandMutation(at.story, () => JSON.parse(session.insert_image(at.story, at.paraId, at.offset, JSON.stringify(image), author?.name, author?.date))),
-    insertPageBreak: at => applyCommandMutation(at.story, () => session.insert_page_break(at.story, at.paraId, at.offset)),
+    insertPageBreak: at => applyCommandMutation(at.story, () => {
+      const target = pageBreakTarget(resident, session, at);
+      session.insert_page_break(target.story, target.paraId, target.offset);
+      return target;
+    }),
     insertSectionBreak: (at, type) => {
       const properties = residentSectionPropertiesAt(resident, at);
       if (!properties) throw new Error('Section break paragraph is unavailable');

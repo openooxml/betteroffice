@@ -2,6 +2,7 @@ import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
+import { leadingBlockCount } from './sectionBreak';
 import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange } from './index';
 import {
   commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
@@ -600,11 +601,7 @@ export function preflightDocxCommand(
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
-    let leading = 0;
-    for (const segment of engine.paragraphSegments('body', [index])[0] ?? []) {
-      if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
-      leading += 1;
-    }
+    const leading = leadingBlockCount(engine.paragraphSegments('body', [index])[0] ?? []);
     if (resolved.range.start.offset < leading) return refuse('invalid-selection');
     if (command.kind === 'insertSectionBreak') {
       const properties = residentSectionPropertiesAt(engine, { story: 'body', ...resolved.range.start });
@@ -655,11 +652,7 @@ function pastLeadingBlocks(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsLo
   const spans = engine.geometryReader.paragraphSpans(at.story);
   const index = spans.findIndex(span => span.paraId === at.paraId);
   if (index < 0) return null;
-  let leading = 0;
-  for (const segment of engine.paragraphSegments(at.story, [index])[0] ?? []) {
-    if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
-    leading += 1;
-  }
+  const leading = leadingBlockCount(engine.paragraphSegments(at.story, [index])[0] ?? []);
   return { ...at, offset: Math.min(spans[index]!.length, Math.max(leading, at.offset)) };
 }
 
@@ -1073,9 +1066,8 @@ function applyPreparedDocxCommand(
         caret({ story, paraId: paragraph.paraId, offset: 0 });
       } else {
         if (command.kind === 'insertPageBreak') {
-          if (at.offset > 0) at = { story: at.story, paraId: engine.splitParagraph(at).secondParaId, offset: 0 };
-          engine.insertPageBreak(at);
-          caret({ ...at, offset: at.offset + 1 });
+          const target = engine.insertPageBreak(at);
+          caret({ ...target, offset: target.offset + 1 });
         } else {
           const properties = collapsed(range) ? prepared.sectionBreakProperties : residentSectionPropertiesAt(engine, at);
           if (!properties) throw new Error('Prepared command lacks section properties');

@@ -1335,7 +1335,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             session.setHyperlink(range, null);
           } else if (command.type === 'insertPageBreak' || command.type === 'insertSectionBreak') {
             const at = session.selection()?.head;
-            if (!at) return false;
+            if (!at || isSuggesting) return false;
             if (command.type === 'insertPageBreak') {
               // The native renderer consumes page breaks at block boundaries.
               // Split a non-empty prefix first so the facade insert lands

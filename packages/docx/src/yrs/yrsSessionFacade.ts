@@ -38,7 +38,7 @@ import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
 import { editorSaveKeys } from './editorSaveKeys';
-import { splitSection } from './sectionBreak';
+import { pageBreakTarget, splitSection } from './sectionBreak';
 import type { SectionProperties } from '../types/document';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
@@ -1273,17 +1273,26 @@ export function wrapSession(
     },
     insertPageBreak: (at) => {
       ensureUndo(at.story);
-      mutate(() => {
-        const target =
-          at.offset > 0
-            ? { story: at.story, paraId: facade.splitParagraph(at).secondParaId, offset: 0 }
-            : at;
+      return mutate(() => {
+        const target = pageBreakTarget(facade, session, at);
         session.insert_page_break(target.story, target.paraId, target.offset);
+        return target;
       });
     },
     insertSectionBreak: (at, type) => {
       ensureUndo(at.story);
-      mutate(() => splitSection(facade, at, (closing) => closing ?? finalSectionProperties(), type));
+      mutate(() => {
+        const split = splitSection(facade, session, at, (closing) => {
+          const properties = closing ?? finalSectionProperties();
+          if (Object.keys(properties).length === 0) throw new Error('Section break needs the section properties');
+          return properties;
+        }, type);
+        if (!split.closed) {
+          const parts = JSON.parse(session.part_metadata_json()) as { body?: Record<string, unknown> };
+          const body = { ...parts.body, finalSectionProperties: { ...finalSectionProperties(), sectionStart: type } };
+          session.set_part_metadata(JSON.stringify({ body }), '[]');
+        }
+      });
     },
     insertWatermark: (at, watermark) => {
       ensureUndo(at.story);
