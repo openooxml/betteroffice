@@ -130,3 +130,61 @@ fn a_restored_derived_key_stays_with_its_original_pilcrow_on_every_replica() {
         .unwrap();
     assert_eq!(keys(&local), keys(&remote));
 }
+
+#[test]
+fn undo_repair_keeps_a_derived_key_unique_when_a_split_already_carries_it() {
+    let local = EditingDoc::new(1);
+    local
+        .create_story("body", "abcdef", "Normal", "left")
+        .unwrap();
+    let remote = EditingDoc::new(2);
+    remote
+        .apply_update_v1(&local.encode_state_as_update_v1())
+        .unwrap();
+    local
+        .split_paragraph(&ctx(), Position::new("body", 2), None)
+        .unwrap();
+    remote
+        .split_paragraph(&ctx(), Position::new("body", 4), None)
+        .unwrap();
+    let from_local = local.encode_state_as_update_v1();
+    local
+        .apply_update_v1(&remote.encode_state_as_update_v1())
+        .unwrap();
+    remote.apply_update_v1(&from_local).unwrap();
+    remote
+        .apply_update_v1(&local.encode_state_as_update_v1())
+        .unwrap();
+    local
+        .apply_update_v1(&remote.encode_state_as_update_v1())
+        .unwrap();
+    let derived = keys(&local)[1].clone();
+    assert!(derived.contains('~'));
+    let at = local.locate(&Loc::new("body", derived, 1)).unwrap();
+    let second = local.split_paragraph(&ctx(), at, None).unwrap().second_para_id;
+    let mut undo = local.undo_manager();
+    let at = local
+        .locate(&Loc::new("body", second.clone(), 0))
+        .unwrap();
+    local.split_paragraph(&ctx(), at, None).unwrap();
+    remote
+        .apply_update_v1(&local.encode_state_as_update_v1())
+        .unwrap();
+    let at = remote.locate(&Loc::new("body", second, 0)).unwrap();
+    remote.split_paragraph(&ctx(), at, None).unwrap();
+    local
+        .apply_update_v1(&remote.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(keys(&local).len(), 6);
+    assert!(undo.undo());
+    assert_eq!(keys(&local).len(), 5);
+    assert_addressable(&local);
+    remote
+        .apply_update_v1(&local.encode_state_as_update_v1())
+        .unwrap();
+    local
+        .apply_update_v1(&remote.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(keys(&local), keys(&remote));
+    assert_addressable(&remote);
+}
