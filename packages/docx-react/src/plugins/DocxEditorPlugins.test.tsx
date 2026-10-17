@@ -34,6 +34,7 @@ import {
   useDocxCommands,
   type DocxCommandResult,
   type DocxEditorBaseProps,
+  type DocxEditorPluginProps,
   type DocxEditorRef,
   type DocxPlugin,
   type DocxPluginCommandResult,
@@ -260,20 +261,55 @@ async function selectInThreadFirstWord(ref: React.RefObject<DocxEditorRef | null
 
 const WRITE = { 'acme.review': { document: 'write', editBatches: true } } as const;
 
+function installWorkerEngine() {
+  compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  setMissingWorkerCapabilitiesForTests([]);
+  globalThis.Worker = class {
+    constructor() {
+      const worker = startWorker();
+      workers.push(worker);
+      return worker;
+    }
+  } as unknown as typeof Worker;
+}
+
+type Mount = (props: DocxEditorPluginProps) => Promise<{ ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render> }>;
+
+async function loadHookAppliesOnce(mount: Mount) {
+  const loads: string[] = [];
+  const plugin = defineDocxPlugin<State>({
+    id: 'acme.review',
+    createState: () => ({ count: 0 }),
+    async onEvent(context, event) {
+      if (event.type !== 'load') return;
+      loads.push(event.version);
+      const read = await context.read.readParagraphs({ view: 'accepted' });
+      const paragraph = read.ok ? read.paragraphs.find((c) => c.text.length >= 3) : undefined;
+      if (!read.ok || !paragraph || !context.edits) return;
+      const applied = await context.edits.applyEdits(
+        appendRequest(read.version, paragraph.paraId)
+      );
+      if (applied.ok) context.setState({ count: loads.length }, applied.version);
+    },
+    panel: {
+      title: 'Loaded',
+      placement: 'left',
+      render: ({ context }) => <output data-testid="loaded">{context.state.count}</output>,
+    },
+  });
+  const { ref, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
+  const body = within(view.container);
+  await until(() => body.queryByTestId('loaded')?.textContent === '1');
+  await settle(150);
+  expect(loads).toHaveLength(1);
+  expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!]!$/);
+}
+
 describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experimentalWorkerOpen) => {
   beforeEach(() => {
-    if (experimentalWorkerOpen === false) return;
-    compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
-      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
-    ));
-    setMissingWorkerCapabilitiesForTests([]);
-    globalThis.Worker = class {
-      constructor() {
-        const worker = startWorker();
-        workers.push(worker);
-        return worker;
-      }
-    } as unknown as typeof Worker;
+    if (experimentalWorkerOpen !== false) installWorkerEngine();
   });
 
   const mount = (
@@ -638,35 +674,8 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     });
   });
 
-  test('a load hook that applies a batch every run loads once and keeps its state', async () => {
-    const loads: string[] = [];
-    const plugin = defineDocxPlugin<State>({
-      id: 'acme.review',
-      createState: () => ({ count: 0 }),
-      async onEvent(context, event) {
-        if (event.type !== 'load') return;
-        loads.push(event.version);
-        const read = await context.read.readParagraphs({ view: 'accepted' });
-        const paragraph = read.ok ? read.paragraphs.find((c) => c.text.length >= 3) : undefined;
-        if (!read.ok || !paragraph || !context.edits) return;
-        const applied = await context.edits.applyEdits(
-          appendRequest(read.version, paragraph.paraId)
-        );
-        if (applied.ok) context.setState({ count: loads.length }, applied.version);
-      },
-      panel: {
-        title: 'Loaded',
-        placement: 'left',
-        render: ({ context }) => <output data-testid="loaded">{context.state.count}</output>,
-      },
-    });
-    const { ref, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
-    const body = within(view.container);
-    await until(() => body.queryByTestId('loaded')?.textContent === '1');
-    await settle(150);
-    expect(loads).toHaveLength(1);
-    expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!]!$/);
-  });
+  test('a load hook that applies a batch every run loads once and keeps its state', () =>
+    loadHookAppliesOnce(mount));
 
   test('contributed commands run with their plugin, from the toolbar, ref and shortcuts', async () => {
     const calls: string[] = [];
@@ -1881,6 +1890,146 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     });
     await settle();
     expect(errors.map((error) => [error.pluginId, error.phase])).toEqual([['raw', 'definition']]);
+  });
+});
+
+describe('DocxEditor plugins (peer-less engine)', () => {
+  let canvasContext: ReturnType<typeof spyOn<HTMLCanvasElement, 'getContext'>>;
+  beforeEach(() => {
+    installWorkerEngine();
+    canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ save() {}, restore() {}, setTransform() {},
+      clearRect() {}, drawImage() {}, beginPath() {}, rect() {}, clip() {} } as unknown as CanvasRenderingContext2D);
+  });
+  afterEach(() => canvasContext.mockRestore());
+
+  const mount: Mount = async (props) => {
+    const ref = createRef<DocxEditorRef>();
+    const view = render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    await act(async () => {
+      await ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    });
+    return { ref, view };
+  };
+
+  test('a load hook that applies a batch every run loads once and keeps its state', () =>
+    loadHookAppliesOnce(mount));
+
+  test('a change hook keeps its own batch and sets state at the applied version', async () => {
+    const outcomes: unknown[] = [];
+    const plugin = defineDocxPlugin<State>({
+      id: 'acme.review',
+      createState: () => ({ count: 0 }),
+      async onEvent(context, event) {
+        if (event.type !== 'document-change' || outcomes.length) return;
+        const read = await context.read.readParagraphs({ view: 'accepted' });
+        const paragraph = read.ok ? read.paragraphs.find((c) => c.text.length >= 3) : undefined;
+        if (!read.ok || !paragraph || !context.edits) return;
+        const applied = await context.edits.applyEdits(appendRequest(read.version, paragraph.paraId, '?'));
+        outcomes.push(applied.ok ? true : applied.failure.code, applied.ok && context.setState({ count: 1 }, applied.version));
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin], pluginGrants: WRITE });
+    const { version, paragraph } = await firstParagraph(ref);
+    await act(async () => {
+      await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
+    });
+    await until(() => outcomes.length === 2);
+    await settle(150);
+    expect(outcomes).toEqual([true, true]);
+    expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!?]!\?$/);
+  });
+
+  test('a point read superseded by an edit returns null and the plugin keeps running', async () => {
+    const errors: DocxPluginError[] = [];
+    const changes: string[] = [];
+    let context: DocxPluginContext<State> | undefined;
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin<State>({
+      id: 'point-reader',
+      createState: () => ({ count: 0 }),
+      initialize: value => { context = value; },
+      overlay: props => { geometry = props.geometry; return null; },
+      onEvent(_context, event) {
+        if (event.type === 'document-change') changes.push(event.version);
+      },
+    });
+    const { ref, view } = await mount({ plugins: [plugin], pluginGrants: { 'point-reader': { document: 'read' } }, onPluginError: error => errors.push(error) });
+    const { version, paragraph } = await firstParagraph(ref);
+    await until(() => geometry?.layout.version === version);
+    const host = view.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    host.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    const worker = workers.find(candidate => candidate.requests.includes('documentRead'))!;
+    const reads = () => worker.requests.filter(type => type === 'documentRead').length;
+    const before = reads();
+    let result: unknown = 'unanswered';
+    let edited = false;
+    worker.hold();
+    const action = context!.run(async next => {
+      result = await next.geometry!.readPositionAtPoint(100, 100);
+    });
+    await until(() => reads() > before);
+    void ref.current!.applyEdits(appendRequest(version, paragraph.paraId)).then(() => { edited = true; });
+    await until(() => {
+      worker.release(reply => !('read' in reply));
+      return edited;
+    });
+    worker.release();
+    await act(() => action);
+    expect(result).toBeNull();
+    expect(errors).toEqual([]);
+    const seen = changes.length;
+    const latest = await firstParagraph(ref);
+    await act(async () => { await ref.current!.applyEdits(appendRequest(latest.version, latest.paragraph.paraId)); });
+    await until(() => changes.length > seen);
+    expect(errors).toEqual([]);
+  });
+
+  test('a read superseded by an edit refuses and the plugin keeps running', async () => {
+    const errors: DocxPluginError[] = [];
+    const changes: string[] = [];
+    let context: DocxPluginContext<State> | undefined;
+    const plugin = defineDocxPlugin<State>({
+      id: 'acme.review',
+      createState: () => ({ count: 0 }),
+      initialize: (value) => {
+        context = value;
+      },
+      onEvent(_context, event) {
+        if (event.type === 'document-change') changes.push(event.version);
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin], pluginGrants: WRITE, onPluginError: (error) => errors.push(error) });
+    await until(() => context !== undefined);
+    const { version, paragraph } = await firstParagraph(ref);
+    const worker = workers.find((candidate) => candidate.requests.includes('documentRead'))!;
+    const reads = () => worker.requests.filter((type) => type === 'documentRead').length;
+    const before = reads();
+    let result: unknown;
+    let edited = false;
+    worker.hold();
+    const action = context!.run(async (next) => {
+      result = await next.read.readParagraphs({ view: 'accepted' });
+    });
+    await until(() => reads() > before);
+    void ref.current!.applyEdits(appendRequest(version, paragraph.paraId)).then(() => {
+      edited = true;
+    });
+    await until(() => {
+      worker.release((reply) => !('read' in reply));
+      return edited;
+    });
+    worker.release();
+    await act(() => action);
+    expect(result).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+    expect(errors).toEqual([]);
+    const seen = changes.length;
+    const latest = await firstParagraph(ref);
+    await act(async () => {
+      await ref.current!.applyEdits(appendRequest(latest.version, latest.paragraph.paraId));
+    });
+    await until(() => changes.length > seen);
+    expect(errors).toEqual([]);
   });
 });
 

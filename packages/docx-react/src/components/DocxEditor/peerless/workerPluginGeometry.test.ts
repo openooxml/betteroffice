@@ -131,16 +131,16 @@ test('a viewport frame of the presented layout keeps every proposal anchor witho
 
 test('worker paragraph navigation passes focus intent without moving selection for a scroll', async () => {
   const h = proposalHost();
-  const navigate = mock(async (_target: unknown, _focus?: boolean) => true);
+  const navigate = mock(async (_target: unknown, _focus?: boolean, _version?: string) => true);
   const readAt = h.readAt.mockImplementation(async () => ({ status: 'ok', version: h.snapshot().version,
     value: { loc: { story: 'body', paraId: 'p0', offset: 0 }, position: 0 } as never }));
   const geometry = createWorkerPluginGeometry(h.controller, () => null, () => null, () => {}, navigate);
   try {
     expect(await geometry.navigation.scrollToParagraph({ story: 'body', paraId: 'p0' }, { expectVersion: 'native-0' })).toEqual({ ok: true });
-    expect(navigate).toHaveBeenLastCalledWith({ story: 'body', paraId: 'p0' }, false);
+    expect(navigate).toHaveBeenLastCalledWith({ story: 'body', paraId: 'p0' }, false, 'native-0');
     expect(h.submit).not.toHaveBeenCalled();
     expect(await geometry.navigation.scrollToParagraph({ story: 'body', paraId: 'p0' }, { expectVersion: 'native-0', focus: true })).toEqual({ ok: true });
-    expect(navigate).toHaveBeenLastCalledWith({ story: 'body', paraId: 'p0' }, true);
+    expect(navigate).toHaveBeenLastCalledWith({ story: 'body', paraId: 'p0' }, true, 'native-0');
   } finally { readAt.mockClear(); geometry.dispose(); h.controller.dispose(); }
 });
 

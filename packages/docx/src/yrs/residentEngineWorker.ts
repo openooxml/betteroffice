@@ -5,6 +5,7 @@ import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
 import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
 import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
+import { stateVectorClock } from '../collaboration/protocol';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -1508,8 +1509,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const started = performance.now();
     let opening: ResidentEngineSession | undefined;
     try {
-      opening = await createResidentEngineSession(source.heapLimitBytes, source.collaboration?.clientId);
-      const opened = adoptResidentSource(opening, source);
+      const pinned = source.collaboration;
+      const reseeded = pinned?.clientClock !== undefined && pinned.initialUpdate === undefined;
+      opening = await createResidentEngineSession(source.heapLimitBytes, reseeded ? undefined : pinned?.clientId);
+      let opened = adoptResidentSource(opening, source);
+      if (opened && !reseeded && pinned?.clientClock !== undefined &&
+        stateVectorClock(opening.encodeStateVector(), opening.clientId) < pinned.clientClock) {
+        destroySession(true);
+        opening = await createResidentEngineSession(source.heapLimitBytes);
+        opened = adoptResidentSource(opening, source);
+      }
       if (!opened) {
         opening.destroy();
         reply({ id: request.id, ok: true, previewRefused: true });
@@ -1518,12 +1527,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       const { document, hostJson } = opened;
       if (source.collaboration) collaboration = createResidentCollaboration(opening);
       const metadata = residentSourceMetadata(document);
+      const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity }, [stateVector]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -1896,6 +1906,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       return;
     }
     let value: unknown;
+    let transfer: Transferable[] = [];
     switch (request.read.kind) {
       case 'commentInsertionRange':
         value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
@@ -1906,6 +1917,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'collabDiff':
         value = readResidentCollaborationState(session, request.read.stateVector);
         break;
+      case 'collabDiffChunks': {
+        const chunks = session.encodeStateAsUpdateChunks(request.read.stateVector, request.read.maxChunkBytes);
+        transfer = chunks.map(chunk => chunk.buffer as ArrayBuffer);
+        value = chunks;
+        break;
+      }
       case 'collabPresence':
         value = !retainedFrame || engine.version() !== request.read.expectVersion || retainedLayoutVersion !== engine.version() ||
           request.read.expectFrameEpoch !== retainedFrame.frameEpoch || request.read.expectLayoutRevision !== layoutRevision
@@ -1966,13 +1983,25 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'sectionProperties':
         value = session.sectionProperties();
         break;
-      case 'exportStructuredWithPages':
+      case 'exportStructuredWithPages': {
         if (commandLayout?.complete()) postCommandFrame(0);
+        let currentRequest = request.read.currentRequest;
+        if (request.read.workerFonts === true && commandInit?.layoutWithRegions) {
+          try {
+            const input = JSON.parse(currentRequest);
+            const owned = JSON.parse(commandInit.layoutInput);
+            if (input?.measurement && typeof input.measurement === 'object' && !Array.isArray(input.measurement) && owned.measurement?.fontChains) {
+              input.measurement = { ...input.measurement, fontChains: owned.measurement.fontChains };
+              currentRequest = JSON.stringify(input);
+            }
+          } catch {}
+        }
         value = session.exportStructuredWithPagesJson(
           request.read.options,
-          resolveLayoutReservationInput(session, request.read.currentRequest)
+          resolveLayoutReservationInput(session, currentRequest)
         );
         break;
+      }
       case 'listContentControls':
         value = session.listContentControls(request.read.options);
         break;
@@ -2155,7 +2184,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
     }
-    reply({ id: request.id, ok: true, read: { version: engine.version(), value } });
+    reply({ id: request.id, ok: true, read: { version: engine.version(), value } }, transfer);
     return;
   }
   if (request.type === 'layoutJson') {
@@ -3258,7 +3287,7 @@ async function replySourcePreview(
   preview: ResidentSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
@@ -3299,7 +3328,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;

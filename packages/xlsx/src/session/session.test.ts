@@ -530,15 +530,14 @@ describe('workbook sessions', () => {
     } finally { main.dispose(); }
   });
 
-  test('rejects invalid viewports and sheet indices without changing the session', async () => {
+  test('rejects invalid viewports and sheet indices and degrades oversized frames without changing the session', async () => {
     const worker = await session();
     try {
       const state = worker.state;
       const version = await worker.call.version();
       const saved = await worker.save();
       for (const invalid of [
-        { ...viewport, x: NaN }, { ...viewport, height: Infinity },
-        { ...viewport, width: 0 }, { ...viewport, width: 1e9, height: 1e9 },
+        { ...viewport, x: NaN }, { ...viewport, height: Infinity }, { ...viewport, width: 0 },
       ]) await expect(worker.call.frame(invalid)).rejects.toThrow();
       for (const sheet of [-1, 0.5, state.sheets.length, 2 ** 32, NaN]) {
         await expect(worker.call.frame(viewport, { sheet })).rejects.toMatchObject({
@@ -557,6 +556,11 @@ describe('workbook sessions', () => {
       const frame = await worker.call.frame(viewport);
       expect(frame.epoch).toBe(1);
       expect(frame.version).toBe(version);
+      expect(frame.displayList.truncated).toBeUndefined();
+      const oversized = await worker.call.frame({ ...viewport, width: 1e9, height: 1e9 });
+      expect(oversized.displayList.truncated).toBe(true);
+      expect(oversized.version).toBe(version);
+      expect(worker.state).toEqual(state);
       expect(await worker.save()).toEqual(saved);
     } finally { await worker.dispose(); }
   });

@@ -460,7 +460,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
-  /** Clamps tracks to the grid; throws {@link DisplayTooLargeError} above {@link getDisplayListCellLimit}. */
+  /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
   displayListProfiled(viewport: Viewport): ProfiledDisplayList;
@@ -808,6 +808,13 @@ function wrapWorkbookDocument(
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
+  let displayCapWarned = false;
+
+  function reportDisplayLimit(frame: DisplayList): void {
+    if (!frame.truncated || displayCapWarned) return;
+    displayCapWarned = true;
+    console.warn('xlsx: displayTooLarge: frame truncated at the display cell limit');
+  }
 
   function assertAlive(): void {
     if (disposed) throw new Error('workbook handle is disposed');
@@ -974,10 +981,14 @@ function wrapWorkbookDocument(
       });
     },
     displayList(viewport: Viewport): DisplayList {
-      return parseJson(() => displayListJson(viewport));
+      const frame = parseJson<DisplayList>(() => displayListJson(viewport));
+      reportDisplayLimit(frame);
+      return frame;
     },
     displayListProfiled(viewport: Viewport): ProfiledDisplayList {
-      return parseJson(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
+      const result = parseJson<ProfiledDisplayList>(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
+      reportDisplayLimit(result.displayList);
+      return result;
     },
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): DisplayList {
       return parseJson(() =>
@@ -1232,7 +1243,13 @@ function wrapWorkbookDocument(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
-  displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
+  displayListJsonReaders.set(handle, (viewport, sheet) => {
+    const json = wasmCall(() => displayListJson(viewport, sheet));
+    if (!displayCapWarned && json.includes('"truncated":true')) {
+      reportDisplayLimit(JSON.parse(json) as DisplayList);
+    }
+    return json;
+  });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));

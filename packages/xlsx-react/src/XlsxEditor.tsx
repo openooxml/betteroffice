@@ -112,6 +112,7 @@ import type {
   XlsxRevealAlignment,
 } from './plugins/createPluginClients';
 import { PluginOverlays } from './plugins/PluginOverlays';
+import { frozenGridExtent, visibleGridRange } from './plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from './plugins/PluginPanels';
 import type { XlsxEditorPluginProps, XlsxPluginSelection } from './plugins/types';
 import { useXlsxPluginHost } from './plugins/useXlsxPluginHost';
@@ -457,12 +458,7 @@ function revealAxis(
 /** The frozen panes' extent, read from a frame of the active sheet's top left corner. */
 function frozenExtent(handle: WorkbookHandle, info: SheetInfo, viewport: Viewport) {
   const grid = handle.displayList({ ...viewport, x: 0, y: 0 }).grid;
-  const edge = (offsets: number[] | undefined, frozen: number, whole: number) =>
-    frozen === 0 ? 0 : (offsets?.[frozen] ?? whole);
-  return {
-    width: edge(grid?.colOffsets, info.frozenCols, viewport.width),
-    height: edge(grid?.rowOffsets, info.frozenRows, viewport.height),
-  };
+  return frozenGridExtent(grid, info.frozenRows, info.frozenCols, viewport);
 }
 
 /** Scroll offsets, in unzoomed sheet pixels, that reveal a cell of the active sheet. */
@@ -1336,16 +1332,11 @@ function XlsxEditorContent({
     }
     let nextMergedRanges: readonly MergedRange[] = [];
     const grid = dl.grid;
-    const rows = (grid?.rowOffsets.length ?? 0) - 1;
-    const columns = (grid?.colOffsets.length ?? 0) - 1;
-    if (handle && grid && rows > 0 && columns > 0) {
+    const visibleRange = grid ? visibleGridRange(grid) : null;
+    if (handle && visibleRange) {
       try {
-        const from = handle.cell(activeSheet, grid.startRow, grid.startCol).a1;
-        const to = handle.cell(
-          activeSheet,
-          grid.startRow + rows - 1,
-          grid.startCol + columns - 1
-        ).a1;
+        const from = handle.cell(activeSheet, visibleRange.top, visibleRange.left).a1;
+        const to = handle.cell(activeSheet, visibleRange.bottom, visibleRange.right).a1;
         nextMergedRanges = handle
           .mergedRanges(activeSheet, `${from}:${to}`)
           .slice(0, MAX_OVERLAY_MERGED_RANGES);

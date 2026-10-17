@@ -24,6 +24,7 @@ import { resolveReservations, retainReservationOwners, validReservationsPayload 
 import { resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
+import { MAX_BUFFERED_BYTES } from '../collaboration/protocol';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -177,10 +178,25 @@ interface DocxCommandPolicy {
 
 /** Mirrors docx-edit's `MAX_UPDATE_BYTES`: the engine refuses a larger peer update. */
 export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
+/** What one chunked sync hands over: updates held within the largest `maxSyncBytes`, then its SyncStep2. */
+export const MAX_SYNC_CHUNKS_BYTES = MAX_BUFFERED_BYTES + MAX_UPDATE_BYTES;
+
+const peerUpdate = (update: unknown): update is ArrayBuffer =>
+  update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_UPDATE_BYTES;
 
 const DOCX_COMMAND_POLICIES = {
   applyRemoteUpdate: { keys: ['update'], exact: true, session: 'collaboration', origin: 'remote',
-    payload: ({ update }) => update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_UPDATE_BYTES },
+    payload: ({ update }) => peerUpdate(update) },
+  applyRemoteUpdateChunks: { keys: ['updates'], exact: true, session: 'collaboration', origin: 'remote',
+    payload: ({ updates }) => {
+      if (!Array.isArray(updates) || updates.length === 0) return false;
+      let total = 0;
+      for (const update of updates) {
+        if (!peerUpdate(update)) return false;
+        total += update.byteLength;
+      }
+      return total <= MAX_SYNC_CHUNKS_BYTES;
+    } },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
   setFontEnvironment: { keys: ['faces', 'chains', 'families'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },

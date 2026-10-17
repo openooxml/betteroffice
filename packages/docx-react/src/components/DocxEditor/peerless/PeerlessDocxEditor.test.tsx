@@ -124,6 +124,7 @@ class FakeWorker {
       response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'clipboardSlice' ? { text: 'Selected text', fragment: null }
         : message.read.kind === 'headings'
         ? [{ story: 'body', paraId: 'heading', text: 'Worker heading', level: 0, position: 1 }]
+        : message.read.kind === 'exportStructuredWithPages' ? JSON.stringify({ ok: true, version: 'worker-version', content: { structured: { text: this.text }, layout: { pages: [{ pageIndex: 0 }, { pageIndex: 1 }] } } })
         : message.read.kind === 'sectionProperties' ? { version: 'worker-version', sections: [{ section: 'final', properties: { marginLeft: 2160 } }], paragraphs: [] }
         : message.read.kind === 'searchText' ? { matches: [], carried: -1 }
         : message.read.kind === 'rangeHighlights' || message.read.kind === 'reviewSnapshot' || message.read.kind === 'sidebar' ? null
@@ -1293,38 +1294,35 @@ test('hybrid compatibility opt-in preserves Document callbacks and warns once', 
   expect(warn.mock.calls.filter(([message]) => String(message).includes(LEGACY_SYNC_API_PROP))).toHaveLength(1);
 });
 
-test('collaboration uses the hybrid and warns once across two mounts', () => {
+test('collaboration with legacySyncApi uses the hybrid', () => {
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   restorers.push(() => warn.mockRestore());
-  const first = render(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />);
+  render(<DocxEditor {...peerlessProps} {...{ [LEGACY_SYNC_API_PROP]: true }} collaboration={{ onReplica() {} }} />);
   expect(coreSession).toHaveBeenCalled();
   expect(workers).toHaveLength(0);
-  first.unmount();
-  render(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />);
-  expect(warn.mock.calls.filter(([message]) => String(message).includes('worker-only collaboration'))).toHaveLength(1);
 });
 
-test('peerless collaboration uses the hybrid without the explicit opt-in', () => {
+test('collaboration takes the default worker route without a runtime warning', async () => {
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   restorers.push(() => warn.mockRestore());
   const onError = mock(() => {});
   const view = render(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} onError={onError} />);
+  await waitFor(() => expect(workers).toHaveLength(1));
   expect(view.queryByRole('alert')).toBeNull();
   expect(onError).not.toHaveBeenCalled();
-  expect(coreSession).toHaveBeenCalled();
-  expect(workers).toHaveLength(0);
-  expect(warn.mock.calls).toEqual([[expect.stringContaining('worker-only collaboration')]]);
+  expect(coreSession).not.toHaveBeenCalled();
+  expect(warn.mock.calls.filter(([message]) => String(message).includes('collaboration'))).toEqual([]);
 });
 
-test('collaboration presence remounts between default and hybrid routes', async () => {
-  const view = render(<DocxEditor {...peerlessProps} />);
-  await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
-  view.rerender(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />);
+test('collaboration remounts between default and hybrid routes on legacySyncApi', async () => {
+  const view = render(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />);
+  await waitFor(() => expect(workers).toHaveLength(1));
+  view.rerender(<DocxEditor {...peerlessProps} {...{ [LEGACY_SYNC_API_PROP]: true }} collaboration={{ onReplica() {} }} />);
   await waitFor(() => expect(workers[0]!.terminate).toHaveBeenCalled());
   expect(view.queryByTestId('peerless-paged-editor')).toBeNull();
   expect(coreSession).toHaveBeenCalled();
   coreSession.mockClear();
-  view.rerender(<DocxEditor {...peerlessProps} />);
+  view.rerender(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />);
   await waitFor(() => expect(workers).toHaveLength(2));
   expect(coreSession).not.toHaveBeenCalled();
 });
@@ -2153,3 +2151,26 @@ test('unmount disposes the real worker editor clipboard subscription', async () 
   view.unmount();
   expect(disposals[0]).toHaveBeenCalledTimes(1);
 });
+for (const readOnly of [false, true]) {
+  test(`${readOnly ? 'viewer' : 'editor'} paged export uses the open layout and current render environment`, async () => {
+    const ref = createRef<DocxEditorRef>();
+    const element = (showHiddenText: boolean) => <DocxEditor {...peerlessProps} ref={ref} readOnly={readOnly}
+      showHiddenText={showHiddenText} theme={{ colorScheme: { accent1: 'FF0000' } } as DocxEditorProps['theme']} />;
+    const view = render(element(false));
+    await waitFor(() => expect(view.getByTestId('peerless-paged-editor').dataset.opened).toBe('true'));
+    const init = requests.find(request => request.type === 'commandInit');
+    if (!init || init.type !== 'commandInit') throw new Error('Expected worker initialization');
+    view.rerender(element(true));
+    const options = { revisionView: 'markup' as const, stories: ['body' as const], includeGeometry: true, maxFragments: 50 };
+    const result = await ref.current!.exportStructuredWithPages(options);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.failure.message);
+    expect(result.content.layout.pages).toHaveLength(2);
+    const exported = requests.find(request => request.type === 'documentRead' && request.read.kind === 'exportStructuredWithPages');
+    if (!exported || exported.type !== 'documentRead' || exported.read.kind !== 'exportStructuredWithPages') throw new Error('Expected worker export read');
+    expect(exported.read.options).toEqual(options);
+    const initial = JSON.parse(init.request.layoutInput);
+    expect(JSON.parse(exported.read.currentRequest)).toEqual({ ...initial, renderEnv: { ...initial.renderEnv, showHiddenText: true } });
+    expect(coreSession).not.toHaveBeenCalled();
+  });
+}

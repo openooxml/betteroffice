@@ -115,13 +115,14 @@ export interface ResidentProposalResponse {
 export type ResidentDocumentRead =
   | { kind: 'collabStateVector' }
   | { kind: 'collabDiff'; stateVector?: Uint8Array }
+  | { kind: 'collabDiffChunks'; stateVector: Uint8Array; maxChunkBytes: number }
   | { kind: 'collabPresence'; peers: ResidentPresencePeer[]; pages: [number, number]; expectVersion: string; expectFrameEpoch: number; expectLayoutRevision: number }
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
   | { kind: 'partSnapshot' }
   | { kind: 'properties'; target: ResidentPropertyTarget }
   | { kind: 'sectionProperties' }
-  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
+  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string; workerFonts?: boolean }
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'rangeHighlights'; ranges: YrsStoryRange[]; expectVersion: string; expectFrameEpoch?: number; expectLayoutRevision?: number }
@@ -166,6 +167,7 @@ export type ResidentDocumentRead =
 export interface ResidentDocumentReadValues {
   collabStateVector: Uint8Array;
   collabDiff: Uint8Array;
+  collabDiffChunks: Uint8Array[];
   collabPresence: ResidentPresenceGeometry | null;
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;
@@ -441,6 +443,10 @@ export type ResidentEngineWorkerResponse = (
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
       sourceDocument?: Document;
+      /** An `openSource` reply: the client id the opened replica writes with. */
+      clientId?: number;
+      /** An `openSource` reply: the opened state's clock for `clientId`. */
+      clientClock?: number;
       /** An `open` reply: the package cannot open as a preview; nothing was opened. */
       previewRefused?: boolean;
       /** A `fontRequirements` reply. */

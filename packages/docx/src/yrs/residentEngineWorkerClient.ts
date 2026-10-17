@@ -206,7 +206,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
-  private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }> }) => void>();
+  private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
   constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
@@ -240,7 +240,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       if (collaboration && !this.terminalError && !this.commandReplacementPending &&
         (collaboration.session === undefined || (identity && collaboration.session === identity.session &&
           collaboration.incarnation === identity.incarnation && collaboration.epoch === identity.epoch))) {
-        const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences };
+        const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences, clock: collaboration.clock };
         for (const listener of [...this.collabListeners]) { try { listener(event); } catch {} }
       }
       if (response.ok && response.caret) {
@@ -347,12 +347,19 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }
 
   async edit(command: DocxCommandEnvelope): Promise<DocxCommandAck> {
-    let transfer: Transferable[] = [];
+    const transfer: ArrayBuffer[] = [];
+    const owned = (update: ArrayBuffer) => {
+      const copy = update.slice(0);
+      transfer.push(copy);
+      return copy;
+    };
     if (command.kind === 'applyRemoteUpdate' && command.payload && typeof command.payload === 'object' &&
       'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
-      const update = command.payload.update.slice(0);
-      command = { ...command, payload: { ...command.payload, update } };
-      transfer = [update];
+      command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
+    } else if (command.kind === 'applyRemoteUpdateChunks' && command.payload && typeof command.payload === 'object' &&
+      'updates' in command.payload && Array.isArray(command.payload.updates) &&
+      command.payload.updates.every(update => update instanceof ArrayBuffer)) {
+      command = { ...command, payload: { ...command.payload, updates: command.payload.updates.map(owned) } };
     }
     const response = await this.request({ type: 'edit', command }, transfer);
     return this.commandAck(response);
@@ -379,7 +386,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return () => { this.frameListeners.delete(listener); };
   }
 
-  onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }> }) => void): () => void {
+  onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void): () => void {
     this.collabListeners.add(listener);
     return () => { this.collabListeners.delete(listener); };
   }

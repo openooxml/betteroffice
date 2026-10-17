@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn display_list_errors_carry_cell_limit() {
+    fn display_lists_degrade_above_cell_limit() {
         let session = Session::open(&sample_xlsx(), None).unwrap();
         let viewport = r#"{"x":0,"y":0,"width":100,"height":6000000}"#;
         let mut clock = || 0.0;
@@ -1525,10 +1525,12 @@ mod tests {
             session.display_list_for_json(0, viewport),
             session.display_list_profiled_json(viewport, &mut clock),
         ] {
-            let error: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
-            assert_eq!(error["code"], "displayTooLarge");
-            assert_eq!(error["cells"], 600_002);
-            assert_eq!(error["maxCells"], betteroffice_xlsx::MAX_DISPLAY_CELLS);
+            let value: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+            let frame = value.get("displayList").unwrap_or(&value);
+            assert_eq!(frame["truncated"], true);
+            let rows = frame["grid"]["rowOffsets"].as_array().unwrap().len() - 1;
+            let cols = frame["grid"]["colOffsets"].as_array().unwrap().len() - 1;
+            assert!(rows * cols <= betteroffice_xlsx::MAX_DISPLAY_CELLS as usize);
         }
     }
 

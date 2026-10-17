@@ -420,3 +420,12 @@ test('a second worker crash reports DocxWorkerError and shows the same terminal 
   expect(loads.total).toBe(0);
   expect(loads.events).toEqual([]);
 });
+
+test('worker viewer exports structured pages without a document replica', async ({ page }) => {
+  await page.goto('/docx-viewer-sidebars.html?worker=1&noCopy=1');
+  await expect(page.locator('[data-peerless-docx] canvas').first()).toBeVisible({ timeout: 120_000 });
+  const result = await exportPages(page);
+  expect(result).toMatchObject({ ok: true, failure: null });
+  expect(result.pages).toBeGreaterThanOrEqual(3);
+  expect(await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.mainDocumentLoads().total)).toBe(0);
+});

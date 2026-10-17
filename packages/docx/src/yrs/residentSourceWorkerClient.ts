@@ -12,6 +12,10 @@ export interface ResidentEngineWorkerSourceOpened {
   stateVector: Uint8Array;
   hostJson?: string;
   preview?: ResidentEngineWorkerFrame;
+  /** The client id the opened replica writes with: a fresh one when the pinned id would reuse its clocks. */
+  clientId?: number;
+  /** The opened state's clock for `clientId`. */
+  clientClock?: number;
 }
 
 export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
@@ -128,7 +132,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
       if (this.cutReservation === cut) this.cutReservation = null;
       if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
       return {
-        document: response.sourceDocument, hostJson: response.hostJson,
+        document: response.sourceDocument, hostJson: response.hostJson, clientId: response.clientId, clientClock: response.clientClock,
         stateVector: new Uint8Array(response.stateVector),
         ...(response.frame ? { preview: sourcePreviewFrame(response) } : {}),
       };

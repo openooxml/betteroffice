@@ -9,8 +9,8 @@ import { createResidentCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
 import { createYrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
-import { MAX_UPDATE_BYTES } from './residentCommandActions';
-import { encodeUpdate, MAX_COLLABORATION_FRAME_BYTES } from '../collaboration/protocol';
+import { MAX_SYNC_CHUNKS_BYTES, MAX_UPDATE_BYTES } from './residentCommandActions';
+import { encodeUpdate, MAX_COLLABORATION_FRAME_BYTES, stateVectorClock } from '../collaboration/protocol';
 import { applyFrameDeltaOwned, decodeFrameDelta, type RetainedFrame } from '../layout/render/frameDelta';
 import type { Document } from '../types/document';
 import type { DocxProposalInput } from './proposals';
@@ -54,10 +54,9 @@ async function parsedDocument(): Promise<Document> {
   } finally { parser.destroy(); }
 }
 
-async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes()) {
-  const worker = start(clientId);
+async function openCommands(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
   const client = new ResidentSourceWorkerClient(worker);
-  await client.openSource({ ...(document ? { document } : { bytes }), collaboration: { clientId, initialUpdate } });
+  const opened = await client.openSource({ ...(document ? { document } : { bytes }), collaboration: { clientId, initialUpdate } });
   const engine = worker.sessions[0]!;
   const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 4 };
   const initial = await client.commandInit({ session: `replica-${clientId}`, incarnation: 1, epoch: 1,
@@ -67,17 +66,17 @@ async function openCommands(clientId: number, initialUpdate?: Uint8Array, docume
       measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, fontChains: { 'liberation sans|0|0': [0] } }, renderEnv: {} }),
     layoutWithRegions: true, layoutRevision: 1, extras: '{}',
   });
-  return { worker, client, engine, initial };
+  return { worker, client, engine, initial, opened };
 }
 
-async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes()) {
-  const { worker, client, engine, initial } = await openCommands(clientId, initialUpdate, document, bytes);
+async function open(clientId: number, initialUpdate?: Uint8Array, document?: Document, bytes = documentBytes(), worker = start(clientId)) {
+  const { client, engine, initial, opened } = await openCommands(clientId, initialUpdate, document, bytes, worker);
   const session = createDocxWorkerEditSession({ source: bytes,
     connection: await createResidentCommandConnection(client, initial),
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });
-  return { worker, client, engine, initial, session };
+  return { worker, client, engine, initial, session, opened };
 }
 
 const remoteUpdate = (target: { engine: { encodeStateVector(): Uint8Array } }, source: { encodeStateAsUpdate(vector?: Uint8Array): Uint8Array }) =>
@@ -105,6 +104,75 @@ for (const input of ['bytes', 'document'] as const) {
     } finally { off(); a.session.dispose(); b.session.dispose(); }
   }, TIMEOUT);
 }
+
+test('reserved protocol client ids are refused', async () => {
+  for (const clientId of [Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]) await expect(createYrsSession({ clientId })).rejects.toThrow(RangeError);
+  const session = await createYrsSession({ clientId: Number.MAX_SAFE_INTEGER - 2 });
+  expect(session.clientId).toBe(Number.MAX_SAFE_INTEGER - 2);
+  session.destroy();
+}, TIMEOUT);
+
+test('a pinned id opens under a fresh id when the opened state lags the clock it emitted', async () => {
+  const bytes = documentBytes();
+  const a = await open(9501, undefined, undefined, bytes, start());
+  const before = a.engine.encodeState();
+  const clocks: number[] = [];
+  const off = a.client.onCollabUpdates(event => { if (event.clock !== undefined) clocks.push(event.clock); });
+  try {
+    expect(a.engine.clientId).toBe(9501);
+    expect((await a.session.submit('insertText', { text: ' typed while pinned' }).ack).status).toBe('applied');
+    const clock = clocks.at(-1)!;
+    expect(clock).toBeGreaterThan(0);
+    expect(clock).toBe(stateVectorClock(a.engine.encodeStateVector(), 9501));
+    for (const [initialUpdate, kept] of [[before, false], [a.engine.encodeState(), true]] as const) {
+      const worker = start();
+      const client = new ResidentSourceWorkerClient(worker);
+      try {
+        const opened = await client.openSource({ bytes, collaboration: { clientId: 9501, initialUpdate, clientClock: clock } });
+        expect(opened.clientId === 9501).toBe(kept);
+        expect(worker.sessions.map(session => session.clientId)).toEqual(kept ? [9501] : [9501, opened.clientId!]);
+      } finally { client.destroy(); }
+    }
+  } finally { off(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('a pinned id that seeds again opens under a fresh id and converges with a peer of its first seed', async () => {
+  const seed = async (body: string, clientClock?: number) => {
+    const worker = start();
+    const client = new ResidentSourceWorkerClient(worker);
+    const opened = await client.openSource({ bytes: documentBytes(undefined, body), collaboration: { clientId: 9511, clientClock } });
+    return { client, opened, engine: worker.sessions.at(-1)! };
+  };
+  const first = await seed(SEED_BODY);
+  const peer = await createYrsSession({ clientId: 9512 });
+  const second = await seed(`${SEED_BODY}<w:p><w:r><w:t>A longer replacement seed</w:t></w:r></w:p>`, stateVectorClock(first.opened.stateVector, 9511));
+  try {
+    peer.loadState(first.engine.encodeState());
+    expect(second.opened.clientId).not.toBe(9511);
+    expect(second.engine.clientId).toBe(second.opened.clientId!);
+    peer.applyUpdate(second.engine.encodeStateAsUpdate(peer.encodeStateVector()));
+    second.engine.applyUpdate(peer.encodeStateAsUpdate(second.engine.encodeStateVector()));
+    expect(peer.paragraphs('body')).toEqual(second.engine.paragraphs('body'));
+  } finally { first.client.destroy(); second.client.destroy(); peer.destroy(); }
+}, TIMEOUT);
+
+test('a pinned session reports its own clocks held at open and merged from a peer', async () => {
+  const bytes = documentBytes();
+  const a = await open(9521, undefined, undefined, bytes, start());
+  const checkpoint = a.engine.encodeState();
+  const held = stateVectorClock(a.engine.encodeStateVector(), 9521);
+  expect((await a.session.submit('insertText', { text: ' later' }).ack).status).toBe('applied');
+  const b = await open(9521, checkpoint, undefined, bytes, start());
+  const clocks: number[] = [];
+  const off = b.client.onCollabUpdates(event => { if (event.clock !== undefined) clocks.push(event.clock); });
+  try {
+    expect(held).toBeGreaterThan(0);
+    expect((await b.session.submit('applyRemoteUpdate', { update: remoteUpdate(b, a.engine) }, merge).ack).status).toBe('applied');
+    expect(clocks).toEqual([stateVectorClock(a.engine.encodeStateVector(), 9521)]);
+    expect(clocks[0]).toBeGreaterThan(held);
+    expect(b.opened.clientClock).toBe(held);
+  } finally { off(); a.session.dispose(); b.session.dispose(); }
+}, TIMEOUT);
 
 test('two worker command sessions converge with reordered and duplicated updates', async () => {
   const a = await open(9201);
@@ -584,6 +652,30 @@ test('a remote update past the relay frame cap applies and one past the engine c
       .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
     expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
     expect(a.engine.paragraphs('body')[0]!.text).toBe('Seed!');
+  } finally { remote.destroy(); a.session.dispose(); }
+}, TIMEOUT);
+
+test('chunked remote updates merge as one change and malformed or oversized chunk sets are refused', async () => {
+  const a = await open(9201);
+  const remote = await createYrsSession({ clientId: 9203 });
+  try {
+    remote.loadState(a.engine.encodeState());
+    const paraId = a.engine.paragraphs('body')[0]!.paraId;
+    for (const word of ['one', 'two', 'three', 'four', 'five', 'six']) remote.insertText({ story: 'body', paraId, offset: 0 }, `${word} `);
+    const chunks = remote.encodeStateAsUpdateChunks(a.engine.encodeStateVector(), 24).map(chunk => chunk.slice().buffer);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect((await a.session.submit('applyRemoteUpdateChunks', { updates: chunks }, merge).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('six five four three two one Seed');
+    expect(a.engine.encodeStateVector()).toEqual(remote.encodeStateVector());
+    const state = a.engine.encodeState();
+    const large = new ArrayBuffer(MAX_UPDATE_BYTES);
+    for (const updates of [[], [new ArrayBuffer(0)], [new ArrayBuffer(MAX_UPDATE_BYTES + 1)], [chunks[0]!, new ArrayBuffer(0)],
+      [...Array.from({ length: MAX_SYNC_CHUNKS_BYTES / MAX_UPDATE_BYTES }, () => large), new ArrayBuffer(1)]]) {
+      expect(await a.session.submit('applyRemoteUpdateChunks', { updates }, merge).ack).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(a.engine.encodeState()).toEqual(state);
+    expect((await a.session.submit('insertText', { text: '!' }).ack).status).toBe('applied');
+    expect(a.engine.paragraphs('body')[0]!.text).toBe('six five four three two one Seed!');
   } finally { remote.destroy(); a.session.dispose(); }
 }, TIMEOUT);
 
