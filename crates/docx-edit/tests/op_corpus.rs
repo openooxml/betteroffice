@@ -848,7 +848,10 @@ fn split_at_end_leaves_the_grid_opt_out_behind() {
         FormatPolicy::Inherit,
     )
     .unwrap();
-    assert_eq!(seg_attrs(&doc, "Grid").get("snapToGrid"), Some(&Any::Bool(false)));
+    assert_eq!(
+        seg_attrs(&doc, "Grid").get("snapToGrid"),
+        Some(&Any::Bool(false))
+    );
     doc.split_paragraph(&ctx(), Position::new("body", 4), None)
         .unwrap();
     let paragraphs = doc.paragraphs("body").unwrap();
