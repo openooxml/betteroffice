@@ -866,6 +866,8 @@ export function createPeerlessShellController(initial: Options) {
             : { op: 'insertText', at: 'end', text: captured.replaceWith }) }],
         } };
         return paragraph ? applyProposal(current, intent) : proposalFailure(current, intent, 'missing-target');
+      }).then(result => {
+        if (!result.ok) throw new Error(result.failure.message ?? result.failure.code);
       }).catch(error => emit(options.onError, error instanceof Error ? error : new Error(String(error))));
       return true;
     },

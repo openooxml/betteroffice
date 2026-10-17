@@ -129,3 +129,30 @@ test('worker viewer synchronous proposals queue allowed changes behind pending i
   }] }, { fence: true }]);
   h.controller.dispose();
 });
+
+for (const [reason, message] of [
+  ['missing-target', 'missing-target'],
+  ['proposal-id-conflict', 'proposal-id-conflict'],
+  ['stale-version', 'the document changed since the expected version was read'],
+] as const) {
+  test(`worker viewer queued proposals report ${reason} through onError`, async () => {
+    const h = proposalHost({ readOnly: true });
+    const onError = mock((_error: Error) => {});
+    const readAt = h.settings.readAt;
+    h.controller.update({ ...h.settings, onError, readAt: (async (request: { kind: string }, version: string) =>
+      request.kind === 'paragraphIdentities' ? { status: 'ok', version, value: { sessionId: 's', paragraphs:
+        reason === 'missing-target' ? [] : [{ session: { story: 'body', paraId: 'p' } }],
+      } } : readAt!(request as never, version)) as never });
+    if (reason !== 'missing-target') h.refuse(reason);
+    try {
+      expect(h.controller.ref.proposeChange({ paraId: 'p', search: 'old', replaceWith: 'new', author: 'Author' })).toBe(true);
+      expect(await h.controller.ref.getProposals()).toMatchObject({ proposals: [] });
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]![0]).toBeInstanceOf(Error);
+      expect(onError.mock.calls[0]![0].message).toBe(message);
+      expect(h.submit).toHaveBeenCalledTimes(reason === 'missing-target' ? 0 : 1);
+    } finally {
+      h.controller.dispose();
+    }
+  });
+}
