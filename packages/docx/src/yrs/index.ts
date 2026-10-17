@@ -1383,9 +1383,9 @@ export interface YrsSession extends CollaborationReplica {
   setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
   /** Commits image geometry at a paragraph-keyed position; reaches images that share an id. */
   setImageGeometryAt(at: YrsLoc, geometry: YrsImageGeometry): void;
-  /** Inserts a native page-break embed at a paragraph-keyed location. */
+  /** Inserts a native page-break embed at a paragraph-keyed location; inside a paragraph it splits the paragraph first. */
   insertPageBreak(at: YrsLoc): void;
-  /** Inserts a native section-break embed at a paragraph-keyed location. */
+  /** Splits the paragraph at a paragraph-keyed location into a section boundary that starts the next section with `type`. */
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;

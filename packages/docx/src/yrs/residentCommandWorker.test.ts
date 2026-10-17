@@ -2046,10 +2046,12 @@ test('a legacy section break lowers on the worker as a section split', async () 
 }, TIMEOUT);
 
 test('a legacy section break in the final section copies its properties and keeps its start', async () => {
-  const { client, engine } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>',
-    sectPr: '<w:sectPr><w:type w:val="evenPage"/><w:pgMar w:left="2000"/></w:sectPr>' });
+  const bodyXml = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:type w:val="evenPage"/><w:pgMar w:left="2000"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr });
   const remote = await createYrsSession({ clientId: 8312 });
   try {
+    remote.openDocx(syntheticDocument(false, false, false, bodyXml, sectPr), false);
     remote.loadState(engine.encodeState());
     remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
     await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
