@@ -681,13 +681,20 @@ fn split_first_half_keeps_original_para_id_and_full_ppr() {
 }
 
 #[test]
-fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
+fn split_at_end_inherits_subset_and_the_mark_run_formatting() {
     let (doc, original) = doc_with("heading");
+    let underline = Any::Map(Arc::new(
+        [("style".to_string(), Any::from("single"))]
+            .into_iter()
+            .collect(),
+    ));
     let dtf: BTreeMap<String, Any> = [
         ("fontFamily".to_string(), Any::from("Georgia")),
         ("fontSize".to_string(), Any::Number(48.0)),
         ("color".to_string(), Any::from("336699")),
         ("bold".to_string(), Any::Bool(true)),
+        ("italic".to_string(), Any::Bool(true)),
+        ("underline".to_string(), underline.clone()),
     ]
     .into_iter()
     .collect();
@@ -713,17 +720,29 @@ fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
     assert_eq!(second.get("pStyle"), Some(&Any::from("Normal")));
     assert_eq!(second.get("spaceAfter"), Some(&Any::Number(240.0)));
     assert_eq!(second.get("alignment"), None);
-    // dtf reduced to the font/size/color carry — bold dropped.
     let dtf = second.get("defaultTextFormatting").expect("dtf kept");
     assert_eq!(map_get(dtf, "fontFamily"), Some(&Any::from("Georgia")));
     assert_eq!(map_get(dtf, "fontSize"), Some(&Any::Number(48.0)));
     assert_eq!(map_get(dtf, "color"), Some(&Any::from("336699")));
-    assert_eq!(map_get(dtf, "bold"), None);
+    assert_eq!(map_get(dtf, "bold"), Some(&Any::Bool(true)));
+    assert_eq!(map_get(dtf, "italic"), Some(&Any::Bool(true)));
+    assert_eq!(map_get(dtf, "underline"), Some(&underline));
     // First half untouched.
     assert_eq!(
         paragraphs[0].properties.get("alignment"),
         Some(&Any::from("center"))
     );
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 8),
+        "Next",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let typed = seg_attrs(&doc, "Next");
+    for key in ["bold", "italic", "underline"] {
+        assert!(active(&typed, key), "{key} carries into the new paragraph");
+    }
 }
 
 #[test]

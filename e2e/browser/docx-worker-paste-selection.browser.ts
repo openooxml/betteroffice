@@ -100,13 +100,14 @@ test('bold after a plain-text paste follows the dragged selection in the toolbar
     const at = await page.locator(caret).first().boundingBox();
     return !!at && Math.abs(at.y + at.height / 2 - center(3)) < (lines[3]!.bottom - lines[3]!.top) / 2;
   }).toBe(true);
+  const bold = page.getByTestId('formatting-bar').getByRole('button', { name: 'Bold', exact: true });
+  await expect.soft(bold).toHaveAttribute('aria-pressed', 'true');
 
   await drag(page, { x: left, y: center(0) }, { x: right, y: center(2) });
   await expect.poll(async () => (await highlightedLines(page)).length).toBe(3);
   const selected = await highlightedLines(page);
   expect(Math.abs((selected[2]!.top + selected[2]!.bottom) / 2 - center(2))).toBeLessThan(2);
 
-  const bold = page.getByTestId('formatting-bar').getByRole('button', { name: 'Bold', exact: true });
   await expect.soft(bold).toHaveAttribute('aria-pressed', 'true');
   await page.keyboard.press('ControlOrMeta+b');
   await expect.soft(bold).toHaveAttribute('aria-pressed', 'false');
@@ -115,5 +116,22 @@ test('bold after a plain-text paste follows the dragged selection in the toolbar
     { text: 'Line two.', bold: false },
     { text: 'Line three.', bold: false },
     { text: 'Last line.', bold: true },
+  ]);
+});
+
+test('Enter at the end of bold text keeps bold for the new paragraph', async ({ page }, info) => {
+  await open(page);
+  const input = page.locator('.paged-editor__peerless-input');
+  await input.press('End');
+  await input.press('Enter');
+  await input.pressSequentially('Next');
+  const bold = page.getByTestId('formatting-bar').getByRole('button', { name: 'Bold', exact: true });
+  await expect.soft(bold).toHaveAttribute('aria-pressed', 'true');
+  expect(await boldParagraphs(page, info)).toEqual([
+    { text: 'Document Title', bold: true },
+    { text: 'Next', bold: true },
+    { text: 'First paragraph.', bold: false },
+    { text: 'Second paragraph.', bold: false },
+    { text: 'Third paragraph.', bold: false },
   ]);
 });
