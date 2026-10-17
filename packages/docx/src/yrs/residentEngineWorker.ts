@@ -1722,7 +1722,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     pendingUpdates = [];
     const before = session.proposalEngine.version();
     try {
-      const projection = commandHost ? session.commentProjection(true) : null;
+      const projection = commandHost ? session.commentProjection(request.commentsSource !== 'host') : null;
       editorSaves.commentIds = projection?.sessionIds;
       const comments = request.commentsSource === 'host' ? request.comments : projection?.comments ?? request.comments;
       const saved = openedParsed ? await session.saveDocument(request.host, comments, editorSaves) : await session.save(
