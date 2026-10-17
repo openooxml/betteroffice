@@ -4348,6 +4348,21 @@ impl EngineSession {
         text: Option<&str>,
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
+        let range = match text {
+            Some(_) if range.start == range.end => {
+                let start = self.doc.text_insert_index(
+                    &range.story,
+                    self.doc.committed_epoch(),
+                    range.start,
+                );
+                crate::StoryRange {
+                    start,
+                    end: start,
+                    ..range
+                }
+            }
+            _ => range,
+        };
         let before = self.doc_epoch();
         let seed_epoch_valid =
             self.render
