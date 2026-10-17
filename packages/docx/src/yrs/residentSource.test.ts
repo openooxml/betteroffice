@@ -467,7 +467,7 @@ test('checkpoint recovery retains resolved reservations and table gridlines', as
     } };
     const changed = await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
       basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: environment });
-    expect(changed.outcomes[0]?.status).toBe('applied');
+    expect(changed.outcomes[0]?.status).toBe('noop');
     const checkpoint = await clients[0]!.checkpoint();
     const before = (await clients[0]!.requestFullFrame()).frame!;
     await clients[1]!.openSource({ bytes, state: checkpoint.state });
@@ -527,7 +527,7 @@ test('recovery refuses a previously applied reservation payload with an expired 
   const client = new ResidentEngineWorkerClient(startWorker());
   try {
     await client.openSource({ bytes: source(1) });
-    await client.commandInit({ ...init(), incarnation: 2, replayAppliedSeqs: [1] });
+    await client.commandInit({ ...init(), incarnation: 2 });
     const ack = await client.edit({ session: 'source-worker', incarnation: 2, seq: 1, replay: true,
       basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: {
         themeColors: {}, showHiddenText: false, reservations: { version: 'expired', key: 'retained', sets: [] },
