@@ -161,11 +161,12 @@ fn undo_repair_keeps_a_derived_key_unique_when_a_split_already_carries_it() {
     let derived = keys(&local)[1].clone();
     assert!(derived.contains('~'));
     let at = local.locate(&Loc::new("body", derived, 1)).unwrap();
-    let second = local.split_paragraph(&ctx(), at, None).unwrap().second_para_id;
+    let second = local
+        .split_paragraph(&ctx(), at, None)
+        .unwrap()
+        .second_para_id;
     let mut undo = local.undo_manager();
-    let at = local
-        .locate(&Loc::new("body", second.clone(), 0))
-        .unwrap();
+    let at = local.locate(&Loc::new("body", second.clone(), 0)).unwrap();
     local.split_paragraph(&ctx(), at, None).unwrap();
     remote
         .apply_update_v1(&local.encode_state_as_update_v1())
