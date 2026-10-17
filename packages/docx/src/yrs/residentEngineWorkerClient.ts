@@ -18,6 +18,7 @@ import type {
   YrsSelection,
 } from './index';
 import type { CollaborationCursor } from '../collaboration/types';
+import type { CollaborationTextInsertion } from '../collaboration/types';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentDocumentRead,
@@ -205,6 +206,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
+  private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }> }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
   constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
@@ -233,6 +235,14 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
         }
       }
       if (response.memory) this.lastMemory = response.memory;
+      const collaboration = response.collabUpdates;
+      const identity = response.ok ? response.commandInitial ?? this.commandIdentity : this.commandIdentity;
+      if (collaboration && !this.terminalError && !this.commandReplacementPending &&
+        (collaboration.session === undefined || (identity && collaboration.session === identity.session &&
+          collaboration.incarnation === identity.incarnation && collaboration.epoch === identity.epoch))) {
+        const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences };
+        for (const listener of [...this.collabListeners]) { try { listener(event); } catch {} }
+      }
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
       }
@@ -283,6 +293,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
               : Object.assign(new Error(response.commandError.message), response.commandError)
             : response.code === 'save-unavailable'
             ? new ResidentWorkerSaveUnavailableError(response.error)
+            : response.code === 'cut-kept'
+            ? new ResidentWorkerCutKeptError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
         );
       }
@@ -335,7 +347,14 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }
 
   async edit(command: DocxCommandEnvelope): Promise<DocxCommandAck> {
-    const response = await this.request({ type: 'edit', command });
+    let transfer: Transferable[] = [];
+    if (command.kind === 'applyRemoteUpdate' && command.payload && typeof command.payload === 'object' &&
+      'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
+      const update = command.payload.update.slice(0);
+      command = { ...command, payload: { ...command.payload, update } };
+      transfer = [update];
+    }
+    const response = await this.request({ type: 'edit', command }, transfer);
     return this.commandAck(response);
   }
 
@@ -358,6 +377,11 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   onFrame(listener: (frame: DocxCommandFrame) => void): () => void {
     this.frameListeners.add(listener);
     return () => { this.frameListeners.delete(listener); };
+  }
+
+  onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }> }) => void): () => void {
+    this.collabListeners.add(listener);
+    return () => { this.collabListeners.delete(listener); };
   }
 
   async applyRemoteUpdate(update: Uint8Array): Promise<void> {
@@ -1172,6 +1196,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.frameListeners.clear();
+    this.collabListeners.clear();
     for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     if (notify && first) this.failureListener?.(error);
   }
@@ -1184,6 +1209,9 @@ export class ResidentWorkerFailureError extends Error {}
 
 /** The worker has no whole opened package to save. @internal */
 export class ResidentWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
+
+/** A whole source failed to open and the worker still holds the source cut it was to replace. @internal */
+export class ResidentWorkerCutKeptError extends Error {}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {

@@ -86,10 +86,34 @@ pub enum Op {
         col: ColId,
         width: Option<f64>,
     },
+    SetColVisibility {
+        sheet: SheetId,
+        col: ColId,
+        hidden: bool,
+    },
+    #[doc(hidden)]
+    RestoreColDimension {
+        sheet: SheetId,
+        col: ColId,
+        width: Option<f64>,
+        hidden_width: Option<f64>,
+    },
     SetRowHeight {
         sheet: SheetId,
         row: RowId,
         height: Option<f64>,
+    },
+    SetRowVisibility {
+        sheet: SheetId,
+        row: RowId,
+        hidden: bool,
+    },
+    #[doc(hidden)]
+    RestoreRowDimension {
+        sheet: SheetId,
+        row: RowId,
+        height: Option<f64>,
+        hidden_height: Option<f64>,
     },
     SetFreezePane {
         sheet: SheetId,
@@ -99,6 +123,14 @@ pub enum Op {
     SetHyperlinks {
         sheet: SheetId,
         hyperlinks: Vec<Hyperlink>,
+    },
+    SetHyperlink {
+        sheet: SheetId,
+        hyperlink: Hyperlink,
+    },
+    RemoveHyperlink {
+        sheet: SheetId,
+        range: CellRange,
     },
     #[doc(hidden)]
     RestoreColStyles {

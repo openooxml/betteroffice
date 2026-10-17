@@ -107,6 +107,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
                     | LayoutBlock::Shape(_)
                     | LayoutBlock::Chart(_)
                     | LayoutBlock::TextBox(_)
+                    | LayoutBlock::Reserved(_)
             ) {
             Some(after_tail)
         } else {

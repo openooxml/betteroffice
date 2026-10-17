@@ -1616,6 +1616,218 @@ fn js_round(value: f64) -> f64 {
     (value + 0.5).floor()
 }
 
+/// Projects group children for rendering without changing the parsed shape contract.
+pub fn shape_for_rendering(drawing: &XmlElement) -> Option<Shape> {
+    let mut shape = parse_shape_from_drawing(drawing)?;
+    if shape.scene.is_none() {
+        return Some(shape);
+    }
+    let container = drawing
+        .child_elements()
+        .find(|node| matches!(node.name.as_str(), "wp:inline" | "wp:anchor"))?;
+    let data = container
+        .child_by_full_name("a:graphic")?
+        .child_by_full_name("a:graphicData")?;
+    let root = data
+        .child_elements()
+        .find(|node| is_scene_group(node.local_name()) || node.local_name() == "wpc")?;
+    let mut count = 0;
+    let projected = render_scene_shape(root, Matrix::IDENTITY, (0.0, 0.0), &mut count, 0)?;
+    shape.children = projected.children;
+    Some(shape)
+}
+
+fn render_scene_shape(
+    element: &XmlElement,
+    parent: Matrix,
+    parent_origin: (f64, f64),
+    count: &mut usize,
+    depth: usize,
+) -> Option<Shape> {
+    if depth > MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
+        return None;
+    }
+    *count += 1;
+    let local = element.local_name();
+    let xfrm = scene_transform(element);
+    let off = direct_child(xfrm, "off");
+    let extent = direct_child(xfrm, "ext");
+    if is_scene_group(local) || local == "wpc" {
+        let width = finite_attribute(extent, "cx")
+            .or_else(|| finite_attribute(direct_child(xfrm, "chExt"), "cx"))
+            .unwrap_or(0.0);
+        let height = finite_attribute(extent, "cy")
+            .or_else(|| finite_attribute(direct_child(xfrm, "chExt"), "cy"))
+            .unwrap_or(0.0);
+        let mut group = Shape::empty("rect".into(), ImageSize { width, height });
+        (group.id, group.name) = non_visual_properties(element);
+        group.offset = Some(ShapeOffset {
+            x: finite_attribute(off, "x").unwrap_or(0.0),
+            y: finite_attribute(off, "y").unwrap_or(0.0),
+        });
+        group.transform = parse_transform(xfrm).transform;
+        let matrix = local_shape_matrix(parent, &group);
+        let origin = render_shape_transform(&mut group, matrix, parent_origin);
+        let children_matrix = render_group_matrix(parent, xfrm);
+        let properties = direct_child(Some(element), "grpSpPr");
+        group.fill_paint = parse_fill_paint(properties, direct_child(Some(element), "style"));
+        group.effects = parse_effects(properties, direct_child(Some(element), "style"));
+        group.children = Some(
+            element
+                .child_elements()
+                .filter_map(|child| {
+                    render_scene_shape(
+                        child,
+                        children_matrix,
+                        if depth == 0 { (0.0, 0.0) } else { origin },
+                        count,
+                        depth + 1,
+                    )
+                })
+                .collect(),
+        );
+        return Some(group);
+    }
+    let mut shape = if local == "pic" {
+        parse_picture_shape(element)
+    } else if is_scene_shape(local) {
+        parse_shape(element)
+    } else {
+        return None;
+    };
+    shape.offset = Some(ShapeOffset {
+        x: finite_attribute(off, "x").unwrap_or(0.0),
+        y: finite_attribute(off, "y").unwrap_or(0.0),
+    });
+    let matrix = local_shape_matrix(parent, &shape);
+    render_shape_transform(&mut shape, matrix, parent_origin);
+    if local == "pic" {
+        let fill = direct_child(Some(element), "blipFill")
+            .or_else(|| direct_child(direct_child(Some(element), "spPr"), "blipFill"));
+        if bool_attribute(fill, "rotWithShape") == Some(false)
+            && shape
+                .transform
+                .as_ref()
+                .and_then(|transform| transform.rotation)
+                .is_some_and(|rotation| rotation.abs() > 1e-6)
+        {
+            return None;
+        }
+    }
+    Some(shape)
+}
+
+fn render_shape_transform(
+    shape: &mut Shape,
+    matrix: Matrix,
+    parent_origin: (f64, f64),
+) -> (f64, f64) {
+    let width = shape.size.width * matrix.a.hypot(matrix.b);
+    let height = shape.size.height * matrix.c.hypot(matrix.d);
+    let center = matrix.apply(shape.size.width / 2.0, shape.size.height / 2.0);
+    let origin = (center.0 - width / 2.0, center.1 - height / 2.0);
+    let flip_h = matrix.a * matrix.d - matrix.b * matrix.c < 0.0;
+    let sign = if flip_h { -1.0 } else { 1.0 };
+    let rotation = (sign * matrix.b).atan2(sign * matrix.a).to_degrees();
+    shape.offset = Some(ShapeOffset {
+        x: origin.0 - parent_origin.0,
+        y: origin.1 - parent_origin.1,
+    });
+    shape.size = ImageSize { width, height };
+    shape.transform = Some(Transform2D {
+        rotation: Some(rotation),
+        flip_h: flip_h.then_some(true),
+        flip_v: None,
+    });
+    origin
+}
+
+fn parse_blip_fill_paint(picture: &XmlElement) -> ShapeFillPaint {
+    let blip = first_descendant(Some(picture), "blip", 0);
+    let relationship_id = blip
+        .and_then(|value| {
+            value
+                .attribute(Some("r"), "embed")
+                .or_else(|| value.attribute(None, "embed"))
+                .or_else(|| value.attribute(Some("r"), "link"))
+                .or_else(|| value.attribute(None, "link"))
+                .or_else(|| value.attribute(Some("r"), "id"))
+                .or_else(|| value.attribute(None, "id"))
+        })
+        .filter(|value| !value.is_empty());
+    let mut paint = ShapeFillPaint {
+        kind: Some("picture".into()),
+        picture: relationship_id.map(placeholder_image),
+        src_rect: direct_child(Some(picture), "srcRect").map(parse_relative_rect_value),
+        picture_opacity: parse_blip_alpha(blip),
+        ..ShapeFillPaint::default()
+    };
+    parse_picture_fill_mode(picture, &mut paint);
+    paint
+}
+
+fn parse_picture_shape(node: &XmlElement) -> Shape {
+    let mut shape = parse_shape(node);
+    let blip_fill = direct_child(Some(node), "blipFill")
+        .or_else(|| direct_child(direct_child(Some(node), "spPr"), "blipFill"));
+    shape.fill = Some(ShapeFill {
+        fill_type: "picture".into(),
+        color: None,
+        gradient: None,
+    });
+    let fill_paint = match blip_fill {
+        Some(picture) => parse_blip_fill_paint(picture),
+        None => ShapeFillPaint {
+            kind: Some("picture".into()),
+            picture: relationship_id(node).as_deref().map(placeholder_image),
+            ..ShapeFillPaint::default()
+        },
+    };
+    shape.fill_paint = Some(fill_paint);
+    shape
+}
+
+fn render_group_matrix(parent: Matrix, transform: Option<&XmlElement>) -> Matrix {
+    let Some(transform) = transform else {
+        return parent;
+    };
+    let off = direct_child(Some(transform), "off");
+    let extent = direct_child(Some(transform), "ext");
+    let child_off = direct_child(Some(transform), "chOff");
+    let child_extent = direct_child(Some(transform), "chExt");
+    let x = finite_attribute(off, "x").unwrap_or(0.0);
+    let y = finite_attribute(off, "y").unwrap_or(0.0);
+    let width = finite_attribute(extent, "cx")
+        .or_else(|| finite_attribute(child_extent, "cx"))
+        .unwrap_or(1.0);
+    let height = finite_attribute(extent, "cy")
+        .or_else(|| finite_attribute(child_extent, "cy"))
+        .unwrap_or(1.0);
+    let child_x = finite_attribute(child_off, "x").unwrap_or(0.0);
+    let child_y = finite_attribute(child_off, "y").unwrap_or(0.0);
+    let child_width = nonzero(finite_attribute(child_extent, "cx").unwrap_or(width));
+    let child_height = nonzero(finite_attribute(child_extent, "cy").unwrap_or(height));
+    let rotation = rot_to_degrees(transform.attribute(None, "rot")).unwrap_or(0.0);
+    let flip_x = if transform.attribute(None, "flipH") == Some("1") {
+        -1.0
+    } else {
+        1.0
+    };
+    let flip_y = if transform.attribute(None, "flipV") == Some("1") {
+        -1.0
+    } else {
+        1.0
+    };
+    let center_x = width / 2.0;
+    let center_y = height / 2.0;
+    let mut local = Matrix::translate(-child_x, -child_y);
+    local = Matrix::scale(width / child_width, height / child_height).multiply(local);
+    local = Matrix::translate(-center_x, -center_y).multiply(local);
+    local = Matrix::scale(flip_x, flip_y).multiply(local);
+    local = Matrix::rotate(rotation).multiply(local);
+    local = Matrix::translate(x + center_x, y + center_y).multiply(local);
+    parent.multiply(local)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1702,5 +1914,283 @@ mod tests {
         ));
         let json = serde_json::to_string(&scene).unwrap();
         assert!(!json.contains("null"));
+    }
+    fn test_picture_media(rel: &str, src: &str) -> (RelationshipMap, MediaMap) {
+        let mut relationships = RelationshipMap::new();
+        relationships.insert(
+            rel.into(),
+            crate::relationships::Relationship {
+                id: rel.into(),
+                relationship_type: crate::relationships::relationship_types::IMAGE.into(),
+                target: "media/picture.png".into(),
+                target_mode: None,
+            },
+        );
+        let mut media = MediaMap::new();
+        media.insert(
+            "media/picture.png".into(),
+            std::sync::Arc::new(crate::media::MediaFile {
+                path: "word/media/picture.png".into(),
+                filename: Some("picture.png".into()),
+                mime_type: "image/png".into(),
+                base64: String::new(),
+                data_url: src.into(),
+            }),
+        );
+        (relationships, media)
+    }
+
+    #[test]
+    fn grouped_picture_paragraph_shape_json_matches_main() {
+        let drawing = root(
+            r#"<w:drawing><wp:inline><wp:extent cx="1000" cy="500"/><wp:docPr id="1" name="Group"/><a:graphic><a:graphicData><wpg:wgp><pic:pic><pic:nvPicPr><pic:cNvPr id="2" name="Photo"/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId7"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="100" cy="50"/></a:xfrm></pic:spPr></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        let expected = serde_json::json!({
+            "type": "shape", "shapeType": "rect", "id": "1", "name": "Group",
+            "size": {"width": 1000.0, "height": 500.0},
+            "offset": {"x": 0.0, "y": 0.0}, "transform": {"rotation": 0.0},
+            "children": [], "scene": {"version": 1.0, "root": {
+                "kind": "group", "transform": {"offsetX": 0.0, "offsetY": 0.0, "rotation": 0.0},
+                "children": [{"kind": "picture", "id": "2", "name": "Photo", "relationshipId": "rId7"}]
+            }}
+        });
+        let parsed = parse_shape_from_drawing(&drawing).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap().to_string(),
+            expected.to_string()
+        );
+        let paragraph = root(&format!("<w:p><w:r>{}</w:r></w:p>", drawing.to_xml()));
+        let limits = ParseLimits::default();
+        let parsed = crate::paragraph::parse_paragraph(
+            &paragraph,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "document.xml",
+            &mut ParseBudget::new(&limits),
+            &mut crate::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap(),
+            None,
+            false,
+            0,
+        )
+        .unwrap();
+        let value = serde_json::to_value(parsed).unwrap();
+        assert_eq!(
+            value["content"][0]["content"][0]["shape"].to_string(),
+            expected.to_string()
+        );
+    }
+
+    #[test]
+    fn group_with_picture_and_shape_composes_transforms_and_resolves_media() {
+        let drawing = root(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="2000" cy="1000"/><wp:docPr id="1" name="Group 1"/><a:graphic><a:graphicData><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="2000" cy="1000"/><a:chOff x="50" y="100"/><a:chExt cx="1000" cy="500"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="2" name="Picture 2"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId7"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="150" y="200"/><a:ext cx="300" cy="150"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="3" name="Shape 3"/><wps:spPr><a:xfrm><a:off x="550" y="350"/><a:ext cx="200" cy="100"/></a:xfrm><a:prstGeom prst="ellipse"/><a:solidFill><a:srgbClr val="112233"/></a:solidFill></wps:spPr></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        let mut shape = shape_for_rendering(&drawing).expect("group drawing parses");
+        let (relationships, media) = test_picture_media("rId7", "media:0");
+        resolve_shape_fill_pictures(&mut shape, Some(&relationships), Some(&media));
+
+        let children = shape.children.as_ref().expect("group children");
+        assert_eq!(children.len(), 2);
+
+        let pic_child = &children[0];
+        assert_eq!(pic_child.id.as_deref(), Some("2"));
+        assert_eq!(pic_child.name.as_deref(), Some("Picture 2"));
+        assert_eq!(pic_child.shape_type, "rect");
+        assert_eq!(pic_child.offset, Some(ShapeOffset { x: 300.0, y: 400.0 }));
+        assert_eq!(
+            pic_child.size,
+            ImageSize {
+                width: 600.0,
+                height: 300.0,
+            }
+        );
+        let fill_paint = pic_child.fill_paint.as_ref().expect("picture fill paint");
+        assert_eq!(fill_paint.kind.as_deref(), Some("picture"));
+        assert_eq!(fill_paint.fill_mode.as_deref(), Some("stretch"));
+        let picture = fill_paint.picture.as_ref().expect("resolved picture");
+        assert_eq!(picture.relationship_id, "rId7");
+        assert_eq!(picture.src.as_deref(), Some("media:0"));
+
+        let shape_child = &children[1];
+        assert_eq!(shape_child.shape_type, "ellipse");
+        assert_eq!(
+            shape_child.offset,
+            Some(ShapeOffset {
+                x: 1100.0,
+                y: 700.0,
+            })
+        );
+        assert_eq!(
+            shape_child.size,
+            ImageSize {
+                width: 400.0,
+                height: 200.0,
+            }
+        );
+    }
+
+    #[test]
+    fn nested_group_composes_parent_and_child_group_transforms_for_pictures() {
+        let drawing = root(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="4000" cy="2000"/><wp:docPr id="10" name="Outer"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4000" cy="2000"/><a:chOff x="0" y="0"/><a:chExt cx="2000" cy="1000"/></a:xfrm></wpg:grpSpPr><wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x="200" y="100"/><a:ext cx="1000" cy="500"/><a:chOff x="100" y="50"/><a:chExt cx="500" cy="250"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="11" name="NestedPic"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdNested"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="150" y="100"/><a:ext cx="100" cy="50"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="12" name="NestedShape"/><wps:spPr><a:xfrm><a:off x="300" y="150"/><a:ext cx="50" cy="25"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp></wpg:grpSp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        let shape = shape_for_rendering(&drawing).expect("nested group parses");
+        let outer_children = shape.children.as_ref().expect("outer children");
+        assert_eq!(outer_children.len(), 1);
+        let inner_group = &outer_children[0];
+        assert_eq!(inner_group.offset, Some(ShapeOffset { x: 400.0, y: 200.0 }));
+        let inner_children = inner_group.children.as_ref().expect("inner children");
+        assert_eq!(inner_children.len(), 2);
+
+        let pic = &inner_children[0];
+        assert_eq!(pic.offset, Some(ShapeOffset { x: 200.0, y: 200.0 }));
+        assert_eq!(
+            pic.size,
+            ImageSize {
+                width: 400.0,
+                height: 200.0,
+            }
+        );
+        assert_eq!(
+            pic.fill_paint
+                .as_ref()
+                .and_then(|paint| paint.picture.as_ref())
+                .map(|img| img.relationship_id.as_str()),
+            Some("rIdNested")
+        );
+    }
+
+    #[test]
+    fn cropped_and_rotated_picture_in_group_preserves_crop_transform_and_unrotated_box() {
+        let drawing = root(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="2000" cy="1000"/><wp:docPr id="20" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000" cy="1000"/><a:chOff x="0" y="0"/><a:chExt cx="1000" cy="500"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="21" name="CroppedRotPic"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill rotWithShape="1"><a:blip r:embed="rIdCrop"><a:alphaModFix amt="80000"/></a:blip><a:srcRect l="10000" t="20000" r="15000" b="25000"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm rot="5400000" flipH="1" flipV="1"><a:off x="100" y="50"/><a:ext cx="400" cy="200"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        let shape = shape_for_rendering(&drawing).expect("group parses");
+        let pic = &shape.children.as_ref().expect("children")[0];
+        assert_eq!(pic.offset, Some(ShapeOffset { x: 200.0, y: 100.0 }));
+        assert_eq!(
+            pic.size,
+            ImageSize {
+                width: 800.0,
+                height: 400.0,
+            }
+        );
+        let transform = pic.transform.as_ref().expect("transform");
+        assert!((transform.rotation.unwrap_or(0.0) + 90.0).abs() < 1e-6);
+        assert_eq!(transform.flip_h, None);
+        assert_eq!(transform.flip_v, None);
+
+        let paint = pic.fill_paint.as_ref().expect("fill paint");
+        assert_eq!(paint.rotate_with_shape, None);
+        assert_eq!(paint.picture_opacity, Some(0.8));
+        assert_eq!(
+            paint.src_rect,
+            Some(RelativeRect {
+                left: Some(0.1),
+                top: Some(0.2),
+                right: Some(0.15),
+                bottom: Some(0.25),
+            })
+        );
+    }
+
+    #[test]
+    fn group_picture_with_missing_media_does_not_panic_or_drop_sibling_shapes() {
+        let drawing = root(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="1000" cy="500"/><wp:docPr id="30" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="500"/><a:chOff x="0" y="0"/><a:chExt cx="1000" cy="500"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="31" name="MissingMediaPic"/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdMissing"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="100" cy="80"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><pic:pic><pic:nvPicPr><pic:cNvPr id="32" name="NoBlipPic"/></pic:nvPicPr><pic:blipFill/><pic:spPr><a:xfrm><a:off x="120" y="20"/><a:ext cx="100" cy="80"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="33" name="SurvivingShape"/><wps:spPr><a:xfrm><a:off x="300" y="40"/><a:ext cx="200" cy="100"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        let mut shape = shape_for_rendering(&drawing).expect("group parses");
+        resolve_shape_fill_pictures(
+            &mut shape,
+            Some(&RelationshipMap::new()),
+            Some(&MediaMap::new()),
+        );
+        let children = shape.children.as_ref().expect("children");
+        assert_eq!(children.len(), 3);
+        assert_eq!(
+            children[0]
+                .fill_paint
+                .as_ref()
+                .and_then(|paint| paint.picture.as_ref())
+                .map(|img| img.relationship_id.as_str()),
+            Some("rIdMissing")
+        );
+        assert!(
+            children[1]
+                .fill_paint
+                .as_ref()
+                .and_then(|paint| paint.picture.as_ref())
+                .is_none()
+        );
+        assert_eq!(children[2].name.as_deref(), Some("SurvivingShape"));
+    }
+    #[test]
+    fn flipped_groups_compose_picture_rotation_and_reflection() {
+        for (group, picture, offset, rotation, flipped) in [
+            ("flipH=\"1\"", "", (700.0, 50.0), 0.0, true),
+            ("flipH=\"1\"", "rot=\"5400000\"", (700.0, 50.0), -90.0, true),
+            ("flipV=\"1\"", "rot=\"5400000\"", (100.0, 350.0), 90.0, true),
+            (
+                "rot=\"5400000\" flipH=\"1\"",
+                "rot=\"1800000\"",
+                (550.0, 500.0),
+                60.0,
+                true,
+            ),
+        ] {
+            let drawing = root(&format!(
+                r#"<w:drawing><wp:inline><wp:extent cx="1000" cy="500"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm {group}><a:off x="0" y="0"/><a:ext cx="1000" cy="500"/><a:chOff x="0" y="0"/><a:chExt cx="1000" cy="500"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:blipFill><a:blip r:embed="rId7"/></pic:blipFill><pic:spPr><a:xfrm {picture}><a:off x="100" y="50"/><a:ext cx="200" cy="100"/></a:xfrm></pic:spPr></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+            ));
+            let shape = shape_for_rendering(&drawing).unwrap();
+            let picture = &shape.children.as_ref().unwrap()[0];
+            let position = picture.offset.as_ref().unwrap();
+            assert!(
+                (position.x - offset.0).abs() < 1e-6,
+                "{group}: {}",
+                position.x
+            );
+            assert!(
+                (position.y - offset.1).abs() < 1e-6,
+                "{group}: {}",
+                position.y
+            );
+            let transform = picture.transform.as_ref().unwrap();
+            assert!(
+                (transform.rotation.unwrap() - rotation).abs() < 1e-6,
+                "{group}"
+            );
+            assert_eq!(transform.flip_h.unwrap_or(false), flipped);
+            assert!(!transform.flip_v.unwrap_or(false));
+        }
+    }
+
+    #[test]
+    fn rotation_independent_picture_renders_when_composed_rotation_is_zero() {
+        for (group_rotation, picture_rotation, visible) in [
+            (0, 0, true),
+            (5_400_000, -5_400_000, true),
+            (5_400_000, 0, false),
+            (0, 5_400_000, false),
+        ] {
+            let drawing = root(&format!(
+                r#"<w:drawing><wp:inline><wp:extent cx="1000" cy="500"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm rot="{group_rotation}"><a:ext cx="1000" cy="500"/><a:chExt cx="1000" cy="500"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:blipFill rotWithShape="0"><a:blip r:embed="rId7"/></pic:blipFill><pic:spPr><a:xfrm rot="{picture_rotation}"><a:ext cx="100" cy="50"/></a:xfrm></pic:spPr></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+            ));
+            let shape = shape_for_rendering(&drawing).unwrap();
+            assert_eq!(shape.children.unwrap().len(), usize::from(visible));
+        }
+    }
+
+    #[test]
+    fn rotation_independent_group_picture_is_explicitly_unsupported() {
+        let drawing = root(
+            r#"<w:drawing><wp:inline><wp:extent cx="1000" cy="500"/><a:graphic><a:graphicData><wpg:wgp><pic:pic><pic:blipFill rotWithShape="0"><a:blip r:embed="rId7"/></pic:blipFill><pic:spPr><a:xfrm rot="5400000"><a:ext cx="100" cy="50"/></a:xfrm></pic:spPr></pic:pic><wps:wsp><wps:spPr><a:xfrm><a:ext cx="100" cy="50"/></a:xfrm><a:prstGeom prst="ellipse"/></wps:spPr></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        let shape = shape_for_rendering(&drawing).unwrap();
+        let children = shape.children.unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].shape_type, "ellipse");
     }
 }

@@ -6,7 +6,7 @@ import type {
 } from '@betteroffice/docx/peerless';
 import type { YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
-import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessTextIntent } from './inputEvents';
+import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessTextIntent } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 
 /** @internal */
@@ -225,11 +225,15 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   ): PeerlessAdmissionResult => {
     if (disposed) throw new Error('Input admission is disposed');
     const environment = intent.kind === 'setRenderEnvironment' || intent.kind === 'setFontEnvironment';
-    const proposal = intent.kind === 'propose' || intent.kind === 'setProposalStates' || intent.kind === 'withdrawProposals';
     const { source, onSubmitted, hostProposal, ...metadata } = options;
-    if (readOnly() && !environment && (!isSelection(intent) || deletionExtension) && !(proposal && hostProposal)) {
+    const granted = isProposal(intent) && hostProposal === true;
+    if (readOnly() && !environment && (!isSelection(intent) || deletionExtension) && !granted) {
       if (counted) releaseCount();
       return { status: 'ignored', reason: 'read-only' };
+    }
+    if (isProposal(intent)) {
+      const { hostProposal: _grant, ...payload } = intent.payload;
+      intent = { ...intent, payload: granted ? { ...payload, hostProposal: true } : payload } as AdmissionIntent;
     }
     const authored = SUGGESTED[intent.kind] && (intent.kind !== 'navigateCell' || intent.payload.createLastRow === true);
     if (authored && !stamped.has(intent)) {
@@ -432,6 +436,9 @@ const SUGGESTED = {
   applyEdits: true, replaceMatches: true, insertImage: true, insertTable: true, insertPageBreak: true, insertSectionBreak: true,
   toggleMark: true, formatRange: true, clearFormatting: true, setParagraphAttrs: true, applyParagraphStyle: true,
   formatSelection: true, toggleStrike: true, toggleList: true, changeIndent: true, navigateCell: true,
+  insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
+  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true, setTableProperties: true,
+  selectTableCells: false,
   addComment: false, resizeObject: false, moveObject: false,
   setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
   setSectionMargins: false, setTabStops: false, removeTabStop: false,
@@ -469,9 +476,13 @@ function requireSelection(selection: DocxCommandSelection | null | undefined): D
   return selection;
 }
 
+function isProposal(intent: AdmissionIntent): intent is PeerlessProposalIntent {
+  return intent.kind === 'propose' || intent.kind === 'setProposalStates' || intent.kind === 'withdrawProposals';
+}
+
 function isSelection(intent: AdmissionIntent): boolean {
   return intent.kind === 'openPart' || intent.kind === 'select' || intent.kind === 'navigate' || intent.kind === 'navigateCell' ||
-    intent.kind === 'selectPoint' || intent.kind === 'extendSelection';
+    intent.kind === 'selectTableCells' || intent.kind === 'selectPoint' || intent.kind === 'extendSelection';
 }
 
 function isText(intent: AdmissionIntent): intent is PeerlessTextIntent {

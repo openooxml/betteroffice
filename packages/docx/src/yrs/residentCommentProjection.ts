@@ -15,24 +15,52 @@ function commentContent(body: unknown, fallback: Comment['content']): Comment['c
 }
 
 /**
+ * The IDs a save gives the session's comments, in synced comment order: a source comment keeps its
+ * ID, and any other comment keeps its own ID when that is a free OOXML comment ID and takes the next
+ * free one after the source IDs otherwise.
+ */
+export function savedCommentIds(sourceIds: readonly number[], native: readonly Pick<YrsCommentInfo, 'id'>[]): Map<string, number> {
+  const used = new Set(sourceIds);
+  const keys = new Set(sourceIds.map(String));
+  const ids = new Map(native.filter(comment => keys.has(comment.id)).map(comment => [comment.id, Number(comment.id)]));
+  let next = Math.max(0, ...used) + 1;
+  for (const comment of native) {
+    if (ids.has(comment.id)) continue;
+    let id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
+    if (!Number.isSafeInteger(id) || used.has(id)) {
+      while (used.has(next)) next += 1;
+      id = next;
+    }
+    used.add(id);
+    ids.set(comment.id, id);
+  }
+  return ids;
+}
+
+/**
  * The comments a save writes: the source package's, each with the fields the session wrote over its
  * seeded placeholders and without the ones it removed, then the comments added in the session.
+ * Session comments keep the IDs `aliases` handed out, in the order this replica first projected them;
+ * with `fresh`, they take {@link savedCommentIds} instead, so replicas holding the same comments save
+ * the same IDs.
  */
-export function projectResidentComments(engine: ResidentEngineSession, aliases: Map<string, number>): ResidentCommentProjection {
+export function projectResidentComments(engine: ResidentEngineSession, aliases: Map<string, number>, fresh = false): ResidentCommentProjection {
   const source = engine.propertyDocument().package.document.comments ?? [];
   const native = engine.listComments();
-  const used = new Set([...source.map(comment => comment.id), ...aliases.values()]);
   for (const comment of native) {
     const id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
-    if (Number.isSafeInteger(id)) { aliases.set(comment.id, id); used.add(id); }
+    if (Number.isSafeInteger(id)) aliases.set(comment.id, id);
   }
-  let next = 1;
-  for (const id of used) next = Math.max(next, id + 1);
-  for (const comment of native) if (!aliases.has(comment.id)) { aliases.set(comment.id, next); next++; }
-  const ids = Object.fromEntries(native.map(comment => [comment.id, aliases.get(comment.id)!]));
-  const held = new Map(native.map(comment => [aliases.get(comment.id)!, comment]));
+  if (!fresh) {
+    let next = 1;
+    for (const id of [...source.map(comment => comment.id), ...aliases.values()]) next = Math.max(next, id + 1);
+    for (const comment of native) if (!aliases.has(comment.id)) { aliases.set(comment.id, next); next++; }
+  }
+  const numbers = fresh ? savedCommentIds(source.map(comment => comment.id), native) : aliases;
+  const ids = Object.fromEntries(native.map(comment => [comment.id, numbers.get(comment.id)!]));
+  const held = new Map(native.map(comment => [numbers.get(comment.id)!, comment]));
   const parentOf = (comment: YrsCommentInfo) => comment.parentId === null ? undefined
-    : aliases.get(comment.parentId) ?? (/^\d+$/u.test(comment.parentId) ? Number(comment.parentId) : undefined);
+    : numbers.get(comment.parentId) ?? (/^\d+$/u.test(comment.parentId) ? Number(comment.parentId) : undefined);
   const comments = source.flatMap((original): Comment[] => {
     const comment = held.get(original.id);
     if (!comment) return aliases.has(String(original.id)) ? [] : [original];
@@ -44,11 +72,11 @@ export function projectResidentComments(engine: ResidentEngineSession, aliases: 
   });
   const sourceIds = new Set(source.map(comment => comment.id));
   for (const comment of native) {
-    const id = aliases.get(comment.id)!;
+    const id = numbers.get(comment.id)!;
     if (!sourceIds.has(id)) comments.push({ id, author: comment.author, date: comment.date || undefined,
       content: commentContent(comment.body, []), done: comment.done, parentId: parentOf(comment) });
   }
-  return { comments, ids, sessionIds: new Map(native.map(comment => [aliases.get(comment.id)!, comment.id])) };
+  return { comments, ids, sessionIds: new Map(native.map(comment => [numbers.get(comment.id)!, comment.id])) };
 }
 
 interface CommentInsertionRefusal {

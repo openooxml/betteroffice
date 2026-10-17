@@ -11,6 +11,7 @@ pub enum PresetPathFill {
     None,
     DarkenLess,
     LightenLess,
+    Lighten,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -546,12 +547,28 @@ fn polar_radius(wr: f64, hr: f64, angle: f64) -> f64 {
 }
 
 /// The ellipse parameter that lands on a polar angle, kept continuous across whole turns.
-fn elliptical_parameter(angle: f64, wr: f64, hr: f64) -> f64 {
-    if wr <= 0.0 || hr <= 0.0 {
+///
+/// On a nonzero axis the parameter is the angle: `atan2` would scale the rounding in `sin(PI)`
+/// by `wr / hr`. Near 0, `sin` is exact, so a tiny angle there is real.
+fn elliptical_parameter(angle: f64, wr: f64, hr: f64, frame: Frame) -> f64 {
+    let radius_tolerance = frame.radius_tolerance(wr, hr);
+    if wr < 0.0 || hr < 0.0 || (wr <= radius_tolerance && hr <= radius_tolerance) {
         return angle;
     }
-    let offset = (wr * angle.sin()).atan2(hr * angle.cos()) - angle;
+    let (sin, cos) = angle.sin_cos();
+    let tolerance = f64::EPSILON * angle.abs().max(1.0);
+    if cos.abs() <= tolerance
+        || (sin.abs() <= tolerance && (angle.abs() > FRAC_PI_2 || hr <= radius_tolerance))
+    {
+        return angle;
+    }
+    let offset = (wr * sin).atan2(hr * cos) - angle;
     angle + offset - TAU * (offset / TAU).round()
+}
+
+fn elliptical_point(angle: f64, wr: f64, hr: f64, frame: Frame) -> (f64, f64) {
+    let parameter = elliptical_parameter(angle, wr, hr, frame);
+    (wr * parameter.cos(), hr * parameter.sin())
 }
 
 /// The shape frame in shortest-side units, so ECMA-376's `ss` is 1 and `w`/`h` are at least 1.
@@ -562,6 +579,10 @@ struct Frame {
 }
 
 impl Frame {
+    fn radius_tolerance(self, wr: f64, hr: f64) -> f64 {
+        f64::EPSILON * wr.max(hr).max(self.w).max(self.h)
+    }
+
     fn new(aspect_ratio: f64) -> Self {
         Self {
             w: width_in_shortest_sides(aspect_ratio).min(MAX_FRAME_EXTENT),
@@ -632,10 +653,16 @@ impl Outline {
     /// ECMA-376 `arcTo`: `stAng`/`swAng` are polar angles, and the ellipse is centred so that
     /// `start` lands on the pen position.
     fn arc_to(mut self, wr: f64, hr: f64, start: f64, sweep: f64) -> Self {
-        let first = elliptical_parameter(start, wr, hr);
-        let last = elliptical_parameter(start + sweep, wr, hr);
+        let first = elliptical_parameter(start, wr, hr, self.frame);
+        let last = elliptical_parameter(start + sweep, wr, hr, self.frame);
         let cx = self.cursor.0 - wr * first.cos();
         let cy = self.cursor.1 - hr * first.sin();
+        let tolerance = self.frame.radius_tolerance(wr, hr);
+        if wr.min(hr) >= 0.0 && wr.min(hr) <= tolerance {
+            let (x, y) = (cx + wr * last.cos(), cy + hr * last.sin());
+            let (from_x, from_y) = self.cursor;
+            return self.cubic_to(from_x, from_y, x, y, x, y);
+        }
         let forward = last >= first;
         let mut from = first;
         for step in 0..8 {
@@ -1505,6 +1532,120 @@ mod tests {
 
     fn assert_close(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn zero_radius_arc_to_is_a_straight_segment_between_its_endpoints() {
+        for (wr, hr, start, sweep, from, to) in [
+            (2.0, 0.0, PI, -PI, (1.0, 3.0), (5.0, 3.0)),
+            (2.0, 0.0, PI, PI, (1.0, 3.0), (5.0, 3.0)),
+            (2.0, 0.0, 0.0, PI, (5.0, 3.0), (1.0, 3.0)),
+            (0.0, 2.0, FRAC_PI_2, PI, (3.0, 5.0), (3.0, 1.0)),
+            (0.0, 2.0, FRAC_PI_2, -PI, (3.0, 5.0), (3.0, 1.0)),
+            (2.0, 0.0, 0.0, FRAC_PI_2, (5.0, 3.0), (3.0, 3.0)),
+            (0.0, 2.0, 0.0, FRAC_PI_2, (3.0, 3.0), (3.0, 5.0)),
+            (
+                2.0,
+                0.0,
+                FRAC_PI_2 / 2.0,
+                -FRAC_PI_2 / 2.0,
+                (3.0, 3.0),
+                (5.0, 3.0),
+            ),
+            (2.0, 0.0, 0.0, TAU, (5.0, 3.0), (5.0, 3.0)),
+            (0.0, 0.0, PI, PI, (3.0, 3.0), (3.0, 3.0)),
+        ] {
+            let outline = Outline::new(Frame { w: 10.0, h: 10.0 })
+                .move_to(from.0, from.1)
+                .arc_to(wr, hr, start, sweep);
+            assert_close(outline.cursor.0, to.0);
+            assert_close(outline.cursor.1, to.1);
+            let path = outline.finish();
+            assert_eq!(path.len(), 2);
+            let GeometryPathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } = path[1]
+            else {
+                panic!("expected a flat curve for radii ({wr}, {hr})");
+            };
+            assert_close(x, to.0 / 10.0);
+            assert_close(y, to.1 / 10.0);
+            assert_close(cp1x, from.0 / 10.0);
+            assert_close(cp1y, from.1 / 10.0);
+            assert_close(cp2x, x);
+            assert_close(cp2y, y);
+            for step in 0..=24 {
+                let t = step as f64 / 24.0;
+                let u = 1.0 - t;
+                let point = (
+                    u * u * u * from.0 / 10.0
+                        + 3.0 * u * u * t * cp1x
+                        + 3.0 * u * t * t * cp2x
+                        + t * t * t * x,
+                    u * u * u * from.1 / 10.0
+                        + 3.0 * u * u * t * cp1y
+                        + 3.0 * u * t * t * cp2y
+                        + t * t * t * y,
+                );
+                for (value, from, to) in [(point.0, from.0, to.0), (point.1, from.1, to.1)] {
+                    assert!(
+                        (from.min(to) / 10.0 - 1e-9..=from.max(to) / 10.0 + 1e-9).contains(&value)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flat_ellipse_keeps_its_axes_and_its_tiny_angles() {
+        let frame = Frame {
+            w: 100000.0,
+            h: 100000.0,
+        };
+        let (wr, hr) = (50000.0, 2.7e-8);
+        for axis in [FRAC_PI_2, PI, 3.0 * FRAC_PI_2, TAU, -PI] {
+            assert_eq!(elliptical_parameter(axis, wr, hr, frame), axis);
+        }
+        let tiny = 1.45e-16;
+        let expected = (wr * tiny).atan2(hr);
+        assert!(expected > 1e-4);
+        assert!((elliptical_parameter(tiny, wr, hr, frame) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn vanishing_radius_arc_to_preserves_cardinal_endpoints() {
+        for scale in [1.0, 100000.0] {
+            let frame = Frame {
+                w: 10.0 * scale,
+                h: 10.0 * scale,
+            };
+            for minor in [
+                0.0,
+                f64::from_bits(1),
+                f64::MIN_POSITIVE,
+                1e-20,
+                f64::EPSILON,
+            ] {
+                for (wr, hr, start, sweep, from, to) in [
+                    (2.0, minor, PI, -PI, (1.0, 3.0), (5.0, 3.0)),
+                    (2.0, minor, PI, PI, (1.0, 3.0), (5.0, 3.0)),
+                    (2.0, minor, 0.0, PI, (5.0, 3.0), (1.0, 3.0)),
+                    (minor, 2.0, FRAC_PI_2, PI, (3.0, 5.0), (3.0, 1.0)),
+                    (minor, 2.0, FRAC_PI_2, -PI, (3.0, 5.0), (3.0, 1.0)),
+                ] {
+                    let outline = Outline::new(frame)
+                        .move_to(from.0 * scale, from.1 * scale)
+                        .arc_to(wr * scale, hr * scale, start, sweep);
+                    assert_close(outline.cursor.0 / scale, to.0);
+                    assert_close(outline.cursor.1 / scale, to.1);
+                }
+            }
+        }
     }
 
     #[test]

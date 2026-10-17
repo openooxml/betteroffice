@@ -1,4 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -13,7 +14,7 @@ import type { DocxProposalRequest, YrsRevisionInfo } from '@betteroffice/docx/yr
 import {
   DocxEditor,
   defineDocxPlugin,
-  type DocxEditorProps,
+  type DocxEditorBaseProps,
   type DocxEditorRef,
   type DocxPluginContext,
 } from '../../index';
@@ -294,8 +295,8 @@ test('allowHostProposals admits only the proposal methods in a read-only editor'
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength
   ) as ArrayBuffer;
-  const element = (props: Partial<DocxEditorProps>) => (
-    <DocxEditor
+  const element = (props: Partial<DocxEditorBaseProps>) => (
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
       experimentalWorkerOpen={false}
       ref={ref}
       documentBuffer={buffer}

@@ -926,7 +926,7 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     })))
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum InlineNode {
     Run(Run),
@@ -939,6 +939,60 @@ pub enum InlineNode {
     Math(MathEquation),
     RawXml(Box<RawInlineXml>),
     Tracked(Box<crate::paragraph::TrackedInline>),
+}
+
+/// Decodes what the untagged derive decoded, but tries only the variant its `type` names (then
+/// `Tracked`) instead of every variant in turn, so a nested node is not decoded once per variant.
+/// JSON-oriented: it buffers through `serde_json::Value`, so a duplicate key keeps its last value.
+impl<'de> Deserialize<'de> for InlineNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let typed = match value.get("type").and_then(serde_json::Value::as_str) {
+            Some(node_type) => decode_typed_inline(node_type, &value),
+            None => INLINE_NODE_TYPES
+                .iter()
+                .find_map(|node_type| decode_typed_inline(node_type, &value)),
+        };
+        typed
+            .or_else(|| Deserialize::deserialize(&value).ok().map(Self::Tracked))
+            .ok_or_else(|| {
+                serde::de::Error::custom(
+                    "data did not match any variant of untagged enum InlineNode",
+                )
+            })
+    }
+}
+
+/// The `type` of each variant but `Tracked`, in declaration order.
+const INLINE_NODE_TYPES: [&str; 9] = [
+    "run",
+    "hyperlink",
+    "bookmarkStart",
+    "bookmarkEnd",
+    "simpleField",
+    "complexField",
+    "inlineSdt",
+    "mathEquation",
+    "rawXml",
+];
+
+fn decode_typed_inline(node_type: &str, value: &serde_json::Value) -> Option<InlineNode> {
+    let node = match node_type {
+        "run" => Deserialize::deserialize(value).map(InlineNode::Run),
+        "hyperlink" => Deserialize::deserialize(value).map(InlineNode::Hyperlink),
+        "bookmarkStart" => Deserialize::deserialize(value).map(InlineNode::BookmarkStart),
+        "bookmarkEnd" => Deserialize::deserialize(value).map(InlineNode::BookmarkEnd),
+        "simpleField" => Deserialize::deserialize(value).map(InlineNode::SimpleField),
+        "complexField" => Deserialize::deserialize(value).map(InlineNode::ComplexField),
+        "inlineSdt" => Deserialize::deserialize(value).map(InlineNode::InlineSdt),
+        "mathEquation" => Deserialize::deserialize(value).map(InlineNode::Math),
+        "rawXml" => Deserialize::deserialize(value).map(InlineNode::RawXml),
+        _ => return None,
+    };
+    node.ok()
 }
 
 impl InlineNode {
@@ -1024,6 +1078,36 @@ pub struct StructuredFieldContent {
     pub blocks: Option<Vec<crate::block::BlockContent>>,
 }
 
+impl StructuredFieldContent {
+    /// Whether another field nests in this content, including one kept as plain runs.
+    pub(crate) fn holds_field(&self) -> bool {
+        self.inline.as_deref().is_some_and(inline_holds_field)
+            || self
+                .blocks
+                .as_deref()
+                .is_some_and(crate::block::blocks_hold_field)
+    }
+}
+
+pub(crate) fn inline_holds_field(nodes: &[InlineNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        InlineNode::ComplexField(_) | InlineNode::SimpleField(_) => true,
+        InlineNode::Run(run) => run.content.iter().any(|content| match content {
+            RunContent::FieldChar { char_type, .. } => char_type == "begin",
+            _ => false,
+        }),
+        InlineNode::Hyperlink(link) => {
+            inline_holds_field(link.structured_children.as_ref().unwrap_or(&link.children))
+        }
+        InlineNode::InlineSdt(sdt) => inline_holds_field(&sdt.content),
+        InlineNode::Tracked(change) => inline_holds_field(&change.content),
+        _ => false,
+    })
+}
+
+/// A field's nested-field outline. The parser repeats the field's structured code and result in
+/// `code` and `result` only when no other field nests in them, and `children` never repeat them:
+/// a copy of nested content here would double it per level.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredFieldTree {
@@ -1062,6 +1146,23 @@ pub struct ComplexField {
     pub structured_result: Option<StructuredFieldContent>,
     #[serde(rename = "fieldTree", skip_serializing_if = "Option::is_none")]
     pub field_tree: Option<StructuredFieldTree>,
+}
+
+impl ComplexField {
+    /// Repeats the structured code and result in the field tree only when no other field nests
+    /// in either, so each level's content is stored once.
+    pub(crate) fn project_leaf_tree(&mut self) {
+        let Some(tree) = self.field_tree.as_mut() else {
+            return;
+        };
+        let leaf = !self
+            .structured_code
+            .iter()
+            .chain(&self.structured_result)
+            .any(StructuredFieldContent::holds_field);
+        tree.code = self.structured_code.as_ref().filter(|_| leaf).cloned();
+        tree.result = self.structured_result.as_ref().filter(|_| leaf).cloned();
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1126,13 +1227,15 @@ fn parse_simple_field_at_depth(
         inline: Some(structured),
         blocks: None,
     });
-    let field_tree = structured_result.clone().map(|result| StructuredFieldTree {
-        version: Some(1.0),
-        code: None,
-        result: Some(result),
-        children: None,
-        display_mode: Some("result".to_owned()),
-    });
+    let field_tree = structured_result
+        .as_ref()
+        .map(|result| StructuredFieldTree {
+            version: Some(1.0),
+            code: None,
+            result: (!result.holds_field()).then(|| result.clone()),
+            children: None,
+            display_mode: Some("result".to_owned()),
+        });
     Ok(SimpleField {
         node_type: SimpleFieldType::SimpleField,
         field_type: parse_field_type(&instruction),
@@ -2035,11 +2138,16 @@ impl OpenComplexField {
     }
 
     pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
-        let tree = field.field_tree.clone();
-        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
-        if let Some(tree) = tree {
-            self.children.push(tree);
+        if let Some(tree) = &field.field_tree {
+            self.children.push(StructuredFieldTree {
+                version: tree.version,
+                code: None,
+                result: None,
+                children: tree.children.clone(),
+                display_mode: tree.display_mode.clone(),
+            });
         }
+        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
     }
 
     pub(crate) fn finish(self) -> ComplexField {
@@ -2054,13 +2162,13 @@ impl OpenComplexField {
             });
         let field_tree = StructuredFieldTree {
             version: Some(1.0),
-            code: structured_code.clone(),
-            result: structured_result.clone(),
+            code: None,
+            result: None,
             children: (!self.children.is_empty()).then_some(self.children),
             display_mode: Some("result".to_owned()),
         };
         let instruction = self.instruction.trim().to_owned();
-        ComplexField {
+        let mut field = ComplexField {
             node_type: ComplexFieldType::ComplexField,
             field_type: parse_field_type(&instruction),
             instruction,
@@ -2072,7 +2180,9 @@ impl OpenComplexField {
             structured_code,
             structured_result,
             field_tree: Some(field_tree),
-        }
+        };
+        field.project_leaf_tree();
+        field
     }
 }
 
@@ -2080,6 +2190,68 @@ impl OpenComplexField {
 enum FieldMode {
     Code,
     Result,
+}
+
+/// Keeps a run of a field nested past `MAX_FIELD_NESTING` as plain content of the innermost
+/// open field, field characters included, so the open stays bounded and the save unchanged.
+/// Returns the run when no such field holds it. A run whose field ends reach back into the
+/// structured fields is refused, as every field past the limit was before.
+pub(crate) fn absorb_beyond_field_nesting(
+    fields: &mut [OpenComplexField],
+    beyond: &mut usize,
+    run: Run,
+    part: &str,
+) -> Result<Option<Run>, ParseError> {
+    let chars = run.content.iter().filter_map(|content| match content {
+        RunContent::FieldChar { char_type, .. } => Some(char_type.as_str()),
+        _ => None,
+    });
+    if *beyond == 0 && !(fields.len() >= MAX_FIELD_NESTING && chars.clone().any(|c| c == "begin")) {
+        return Ok(Some(run));
+    }
+    let Some(active) = fields.last_mut() else {
+        return Ok(Some(run));
+    };
+    for char_type in chars {
+        match char_type {
+            "begin" => *beyond += 1,
+            "end" => {
+                *beyond = beyond
+                    .checked_sub(1)
+                    .ok_or_else(|| field_depth_error(part))?
+            }
+            _ => {}
+        }
+    }
+    active.absorb(InlineNode::Run(run.clone()), vec![run]);
+    Ok(None)
+}
+
+/// Fields past `MAX_FIELD_NESTING` open and close as plain runs of one container scope; a
+/// container holding field characters while one is open could close it in a separate scope.
+pub(crate) fn check_container_beyond_field_nesting(
+    beyond: usize,
+    child: &XmlElement,
+    part: &str,
+) -> Result<(), ParseError> {
+    if beyond == 0 || child.local_name() == "r" {
+        return Ok(());
+    }
+    let mut pending = vec![child];
+    while let Some(element) = pending.pop() {
+        if element.local_name() == "fldChar" {
+            return Err(field_depth_error(part));
+        }
+        pending.extend(element.child_elements());
+    }
+    Ok(())
+}
+
+pub(crate) fn field_depth_error(part: &str) -> ParseError {
+    ParseError::ResourceLimit {
+        kind: "fieldDepth",
+        part: part.to_owned(),
+    }
 }
 
 /// Parse the inline grammar at a paragraph/container boundary.
@@ -2121,7 +2293,9 @@ fn parse_inline_container_at_depth(
     budget.check_nesting_depth(depth, part)?;
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
+    let mut beyond_nesting = 0;
     for child in element.child_elements() {
+        check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
                 let run = parse_run(child, theme, styles, doc_defaults).run;
@@ -2144,13 +2318,12 @@ fn parse_inline_container_at_depth(
                         _ => {}
                     }
                 }
+                let Some(run) =
+                    absorb_beyond_field_nesting(&mut fields, &mut beyond_nesting, run, part)?
+                else {
+                    continue;
+                };
                 if has_begin {
-                    if fields.len() >= MAX_FIELD_NESTING {
-                        return Err(ParseError::ResourceLimit {
-                            kind: "fieldDepth",
-                            part: part.to_owned(),
-                        });
-                    }
                     fields.push(OpenComplexField::opening(&run));
                 }
                 if let Some(active) = fields.last_mut() {
@@ -2314,6 +2487,9 @@ fn parse_inline_container_at_depth(
             _ => {}
         }
     }
+    if beyond_nesting > 0 {
+        return Err(field_depth_error(part));
+    }
     // Pinned compatibility: unterminated fields remain inert structured nodes
     // so later block parsing can attach following result blocks.
     while let Some(field) = fields.pop() {
@@ -2377,13 +2553,15 @@ fn parse_rich_simple_field(
         inline: Some(result),
         blocks: None,
     });
-    let field_tree = structured_result.clone().map(|result| StructuredFieldTree {
-        version: Some(1.0),
-        code: None,
-        result: Some(result),
-        children: None,
-        display_mode: None,
-    });
+    let field_tree = structured_result
+        .as_ref()
+        .map(|result| StructuredFieldTree {
+            version: Some(1.0),
+            code: None,
+            result: (!result.holds_field()).then(|| result.clone()),
+            children: None,
+            display_mode: None,
+        });
     Ok(SimpleField {
         node_type: SimpleFieldType::SimpleField,
         field_type: parse_field_type(&instruction),
@@ -2511,6 +2689,8 @@ pub(crate) fn run_content_length(content: &RunContent) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::relationships::{Relationship, TargetMode};
     use crate::styles::Style;
@@ -2851,31 +3031,60 @@ mod tests {
     }
 
     #[test]
-    fn field_depth_limit_is_stable_before_stack_growth() {
-        let mut xml = String::from("<w:p>");
-        for _ in 0..=MAX_FIELD_NESTING {
-            xml.push_str(r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#);
-        }
-        xml.push_str("</w:p>");
-        let paragraph = root(&xml);
+    fn fields_past_the_nesting_limit_stay_plain_runs_of_one_scope() {
         let limits = ParseLimits::default();
-        let error = parse_inline_container(
-            &paragraph,
-            None,
-            None,
-            None,
-            None,
-            "word/document.xml",
-            &ParseBudget::new(&limits),
-            0,
-        )
-        .unwrap_err();
+        let parse = |body: &str| {
+            parse_inline_container(
+                &root(&format!("<w:p>{body}</w:p>")),
+                None,
+                None,
+                None,
+                None,
+                "word/document.xml",
+                &ParseBudget::new(&limits),
+                0,
+            )
+        };
+        let open = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>IF</w:instrText></w:r>"#
+            .repeat(MAX_FIELD_NESTING + 1);
+        let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+        let two_ends =
+            r#"<w:r><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="end"/></w:r>"#;
+        for refused in [
+            open.clone(),
+            format!(
+                r#"{open}<w:hyperlink w:anchor="a">{end}</w:hyperlink>{}"#,
+                end.repeat(MAX_FIELD_NESTING)
+            ),
+            format!("{open}{two_ends}{}", end.repeat(MAX_FIELD_NESTING - 1)),
+        ] {
+            assert!(matches!(
+                parse(&refused),
+                Err(ParseError::ResourceLimit {
+                    kind: "fieldDepth",
+                    ..
+                })
+            ));
+        }
+        let content = parse(&format!("{open}{}", end.repeat(MAX_FIELD_NESTING + 1))).unwrap();
+        let mut node = &content[0];
+        let mut depth = 0;
+        while let InlineNode::ComplexField(field) = node {
+            assert_eq!(field.instruction, "IF");
+            depth += 1;
+            let code = field
+                .structured_code
+                .as_ref()
+                .and_then(|code| code.inline.as_ref());
+            node = &code.unwrap()[1];
+        }
+        assert_eq!(depth, MAX_FIELD_NESTING);
+        let InlineNode::Run(run) = node else {
+            panic!("expected the deepest field's plain begin run")
+        };
         assert!(matches!(
-            error,
-            ParseError::ResourceLimit {
-                kind: "fieldDepth",
-                ..
-            }
+            &run.content[..],
+            [RunContent::FieldChar { char_type, .. }] if char_type == "begin"
         ));
     }
 
@@ -2954,5 +3163,144 @@ mod tests {
 
         let unknown = root(r#"<w:sdtPr><w:mystery/></w:sdtPr>"#);
         assert_eq!(parse_sdt_control_type(Some(&unknown)), "richText");
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum UntaggedInlineNode {
+        Run(Run),
+        Hyperlink(Box<Hyperlink>),
+        BookmarkStart(BookmarkStart),
+        BookmarkEnd(BookmarkEnd),
+        SimpleField(Box<SimpleField>),
+        ComplexField(Box<ComplexField>),
+        InlineSdt(Box<InlineSdt>),
+        Math(MathEquation),
+        RawXml(Box<RawInlineXml>),
+        Tracked(Box<crate::paragraph::TrackedInline>),
+    }
+
+    /// Raw JSON text decoded as an `InlineNode` and as the untagged derive, each serialized back.
+    fn decode_both(text: &str) -> [Option<serde_json::Value>; 2] {
+        [
+            serde_json::from_str::<InlineNode>(text)
+                .ok()
+                .map(|node| serde_json::to_value(node).unwrap()),
+            serde_json::from_str::<UntaggedInlineNode>(text)
+                .ok()
+                .map(|node| serde_json::to_value(node).unwrap()),
+        ]
+    }
+
+    fn assert_decodes_like_untagged(value: &serde_json::Value) {
+        let [typed, untagged] = decode_both(&value.to_string());
+        assert_eq!(typed, untagged, "{value}");
+    }
+
+    /// Every object in `value` whose `type` names an inline node, serialized.
+    fn inline_node_samples(value: &serde_json::Value, samples: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let node_type = map.get("type").and_then(serde_json::Value::as_str);
+                if node_type.is_some_and(|node_type| {
+                    INLINE_NODE_TYPES.contains(&node_type)
+                        || matches!(node_type, "insertion" | "deletion" | "moveFrom" | "moveTo")
+                }) {
+                    samples.insert(value.to_string());
+                }
+                for child in map.values() {
+                    inline_node_samples(child, samples);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    inline_node_samples(child, samples);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn inline_node_json_decodes_as_the_untagged_derive_did() {
+        let paragraph = r#"<w:p><w:r><w:t>a</w:t></w:r><w:hyperlink w:anchor="b"><w:r><w:t>link</w:t></w:r></w:hyperlink><w:bookmarkStart w:id="1" w:name="b"/><w:bookmarkEnd w:id="1"/><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>REF b</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>b</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:sdt><w:sdtPr><w:tag w:val="t"/></w:sdtPr><w:sdtContent><w:r><w:t>s</w:t></w:r></w:sdtContent></w:sdt><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><x:mark xmlns:x="urn:x"/><w:ins w:id="2" w:author="A"><w:r><w:t>i</w:t></w:r></w:ins><w:del w:id="3" w:author="A"><w:r><w:delText>d</w:delText></w:r></w:del><w:moveFrom w:id="4" w:author="A"><w:r><w:delText>f</w:delText></w:r></w:moveFrom><w:moveTo w:id="5" w:author="A"><w:r><w:t>t</w:t></w:r></w:moveTo></w:p>"#;
+        let synthetic = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>{paragraph}</w:body></w:document>"#).into_bytes()),
+        ])
+        .unwrap();
+        let packages: [&[u8]; 7] = [
+            &synthetic,
+            include_bytes!("../../betteroffice-docx/tests/corpus/fixtures/betteroffice-demo.docx"),
+            include_bytes!(
+                "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+            ),
+            include_bytes!("../../docx-edit/tests/fixtures/structured-export/principal.docx"),
+            include_bytes!(
+                "../../docx-edit/tests/fixtures/field-code-paragraphs/body-field-code-nested.docx"
+            ),
+            include_bytes!(
+                "../../docx-edit/tests/fixtures/field-code-paragraphs/header-field-code-nested.docx"
+            ),
+            include_bytes!("../../docx-edit/tests/fixtures/footnote-anchor.docx"),
+        ];
+        let mut samples = BTreeSet::new();
+        for package in packages {
+            let wire = crate::s9::parse_docx_s9_wire(package, Default::default()).unwrap();
+            inline_node_samples(&serde_json::to_value(&wire).unwrap(), &mut samples);
+        }
+        let mut seen = BTreeSet::new();
+        let mut accepted = BTreeSet::new();
+        for sample in &samples {
+            let serde_json::Value::Object(node) =
+                serde_json::from_str::<serde_json::Value>(sample).unwrap()
+            else {
+                unreachable!()
+            };
+            let node_type = node["type"].as_str().unwrap().to_owned();
+            let [typed, untagged] = decode_both(sample);
+            assert_eq!(typed, untagged, "{sample}");
+            if typed.is_some() {
+                accepted.insert(node_type.clone());
+            }
+            seen.insert(node_type);
+            for key in node.keys() {
+                let mut changed = node.clone();
+                changed.remove(key);
+                assert_decodes_like_untagged(&serde_json::Value::Object(changed));
+            }
+            let retyped = INLINE_NODE_TYPES
+                .iter()
+                .chain(&["insertion", "unknown"])
+                .map(|node_type| serde_json::Value::from(*node_type))
+                .chain([serde_json::Value::from(7)]);
+            for node_type in retyped {
+                let mut changed = node.clone();
+                changed.insert("type".to_owned(), node_type);
+                assert_decodes_like_untagged(&serde_json::Value::Object(changed));
+            }
+            let mut extra = node.clone();
+            extra.insert("unexpected".to_owned(), true.into());
+            assert_decodes_like_untagged(&serde_json::Value::Object(extra));
+        }
+        assert_eq!(seen.len(), INLINE_NODE_TYPES.len() + 4, "{seen:?}");
+        assert_eq!(accepted, seen);
+        for other in [
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!("run"),
+            serde_json::json!({}),
+        ] {
+            assert_decodes_like_untagged(&other);
+        }
+        let bookmark_end = |id: f64| Some(serde_json::json!({"type": "bookmarkEnd", "id": id}));
+        assert_eq!(
+            decode_both(r#"["bookmarkEnd",1,null]"#),
+            [bookmark_end(1.0), bookmark_end(1.0)]
+        );
+        assert_eq!(
+            decode_both(r#"{"type":"bookmarkEnd","id":1,"id":2}"#),
+            [bookmark_end(2.0), None]
+        );
     }
 }

@@ -175,6 +175,26 @@ describe('command gate', () => {
     }
   });
 
+  test('shell table allowlist gates actions the worker does not wire', () => {
+    const table = {
+      isInTable: true,
+      rowCount: 2,
+      columnCount: 2,
+      hasMultiCellSelection: true,
+      canSplitCell: true,
+    };
+    const base = testEnvironment({ table });
+    expect(codeOf('tableAction', base, 'selectTable')).toBeNull();
+    expect(codeOf('tableAction', base, 'deleteRow')).toBeNull();
+    const limited = testEnvironment({ table, tableActions: new Set(['selectTable', 'selectRow', 'selectColumn']) });
+    expect(codeOf('tableAction', limited)).toBeNull();
+    expect(codeOf('tableAction', limited, 'selectTable')).toBeNull();
+    expect(codeOf('tableAction', limited, 'selectRow')).toBeNull();
+    expect(codeOf('tableAction', limited, 'selectColumn')).toBeNull();
+    expect(codeOf('tableAction', limited, 'deleteRow')).toBe('unsupported-command');
+    expect(codeOf('tableAction', limited, 'mergeCells')).toBe('unsupported-command');
+  });
+
   test('table structure limits are argument specific', () => {
     const env = testEnvironment({
       table: {
@@ -233,6 +253,13 @@ describe('command gate', () => {
     const host = testEnvironment({ modeControl: 'host', sidebarControl: 'host' });
     expect(codeOf('editingMode', host, { mode: 'suggesting' })).toBeNull();
     expect(codeOf('commentsSidebar', host)).toBeNull();
+  });
+
+  test('table gridlines report their view state where the editor draws them', () => {
+    expect(codeOf('tableGridlines', testEnvironment({ tableGridlines: undefined }))).toBe('unsupported-command');
+    const off = evaluateDocxCommand('tableGridlines', null, testEnvironment({ readOnly: true, tableGridlines: false }));
+    expect([off.enabled, off.active]).toEqual([true, false]);
+    expect(evaluateDocxCommand('tableGridlines', null, testEnvironment({ tableGridlines: true })).active).toBe(true);
   });
 
   test('review resolution needs a live revision and navigation needs any', () => {

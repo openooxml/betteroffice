@@ -88,6 +88,32 @@ async function matchingSheetView(
 }
 
 describe('workbook sessions', () => {
+  test('worker applyOps restores a custom column width after hiding and unhiding', async () => {
+    const worker = await session();
+    let seq = 0;
+    const applyOps = async (ops: unknown[]) => {
+      const ack = await worker.submit({ ...worker.commandIdentity,
+        basis: worker.confirmedBasis, seq: ++seq,
+        kind: 'applyOps', payload: { args: [ops] } });
+      expect(ack.status).toBe('applied');
+    };
+    try {
+      await applyOps([{ type: 'setColWidth', sheet: 0, col: 1, width: 20 }]);
+      const original = (await worker.call.cellGeometry(0, 2, 1)).rect.w;
+      expect(original).toBeGreaterThan(0);
+      await applyOps([{ type: 'setColVisibility', sheet: 0, col: 1, hidden: true }]);
+      expect((await worker.call.cellGeometry(0, 2, 1)).rect.w).toBe(0);
+      const zip = await JSZip.loadAsync(await worker.save());
+      const xml = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+      expect(xml).toMatch(/<col[^>]*width="20"[^>]*hidden="1"/);
+      await applyOps([{ type: 'setColVisibility', sheet: 0, col: 1, hidden: false }]);
+      expect((await worker.call.cellGeometry(0, 2, 1)).rect.w).toBe(original);
+      const reopened = openWorkbook(await worker.save());
+      try { expect(reopened.cellRect(0, 2, 1).w).toBe(original); }
+      finally { reopened.dispose(); }
+    } finally { await worker.dispose(); }
+  });
+
   test('command reply contains the final requested frame', async () => {
     const zip = new JSZip();
     zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');

@@ -16,6 +16,7 @@ use yrs::{
     Doc, IdSet, IndexedSequence, Map, Origin, Out, ReadTxn, Snapshot, Subscription, Text, Transact,
 };
 
+use crate::identity::{IdentityRepair, IdentityWatch};
 use crate::{COMMENTS, EditingDoc, STORIES};
 
 /// Undo capture window.
@@ -109,6 +110,7 @@ pub struct DocUndoManager {
     changed_stories: Arc<Mutex<Vec<String>>>,
     _popped: Subscription,
     doc: Doc,
+    identities: IdentityRepair,
     anchor_state: Arc<Mutex<AnchorState>>,
     _anchors: Subscription,
     _history: [Subscription; 2],
@@ -136,7 +138,8 @@ pub(crate) fn default_clock() -> Arc<dyn Clock> {
 }
 
 impl EditingDoc {
-    /// Local-origin undo manager over every story, on the default clock.
+    /// Local-origin undo manager over every story, on the default clock. The replica keeps
+    /// deleted content from then on.
     pub fn undo_manager(&self) -> DocUndoManager {
         DocUndoManager::new(self, default_clock())
     }
@@ -146,6 +149,7 @@ impl DocUndoManager {
     /// Tracks the local client id only, so agent, remote and system transactions (string
     /// origins) never enter the history; groups edits within [`UNDO_CAPTURE_TIMEOUT_MS`].
     fn new(doc: &EditingDoc, clock: Arc<dyn Clock>) -> Self {
+        doc.keep_deleted();
         let clock = Arc::new(CaptureClock::new(clock));
         let options = yrs::undo::Options {
             capture_timeout_millis: UNDO_CAPTURE_TIMEOUT_MS,
@@ -235,6 +239,7 @@ impl DocUndoManager {
         };
         Self {
             doc: doc.doc.clone(),
+            identities: doc.identity_repair(),
             anchor_state,
             _anchors: anchors,
             _history: [added, updated],
@@ -264,20 +269,37 @@ impl DocUndoManager {
 
     pub fn undo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let identities = IdentityWatch::new(&self.doc);
         let applied = self.inner.undo_blocking();
         if applied {
-            self.restore_comment_boundaries();
+            self.restore_history(identities);
         }
         applied
     }
 
     pub fn redo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let identities = IdentityWatch::new(&self.doc);
         let applied = self.inner.redo_blocking();
         if applied {
-            self.restore_comment_boundaries();
+            self.restore_history(identities);
         }
         applied
+    }
+
+    fn restore_history(&self, identities: IdentityWatch) {
+        let changed = identities.changed();
+        drop(identities);
+        if changed {
+            let stories = self
+                .identities
+                .repair(&mut self.doc.transact_mut_with("system"));
+            let mut changed = lock(&self.changed_stories);
+            changed.extend(stories);
+            changed.sort();
+            changed.dedup();
+        }
+        self.restore_comment_boundaries();
     }
 
     fn restore_comment_boundaries(&self) {
@@ -481,7 +503,8 @@ impl UndoSession {
         }
     }
 
-    /// Starts tracking local edits in every story; later calls keep the history.
+    /// Starts tracking local edits in every story; later calls keep the history. The replica keeps
+    /// deleted content from then on.
     pub fn track(&self, doc: &EditingDoc) {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {

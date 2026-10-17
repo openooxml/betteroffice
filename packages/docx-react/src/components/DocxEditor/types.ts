@@ -55,6 +55,8 @@ export interface TableContextInfo {
   columnCount?: number;
   hasMultiCellSelection?: boolean;
   canSplitCell?: boolean;
+  rowSpan?: number;
+  columnSpan?: number;
   cellBorderColor?: ColorValue;
   cellBackgroundColor?: string;
 }

@@ -1,13 +1,14 @@
 //! Sheet-catalog targets, versioned cell reads and exact text search for edit batches.
 
 use serde::{Deserialize, Serialize};
+use xlsx_model::workbook::ColumnDefaults;
 use xlsx_model::{CellRange, CellRef, CellValue, MAX_COLS, MAX_ROWS, Sheet, SheetId};
 use xlsx_render::display_text;
 
 use super::Workbook;
 use super::batch::{
-    DocumentVersion, EditFailure, EditFailureCode, EditRefusal, MAX_DIAGNOSTIC_CELLS, failure,
-    refusal,
+    DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
+    MAX_DIAGNOSTIC_CELLS, failure, refusal,
 };
 use crate::{CellAddress, Result};
 
@@ -78,7 +79,8 @@ pub struct ReadRequest {
 pub struct SheetEntry {
     pub sheet_id: String,
     pub name: String,
-    /// False for sheets batches refuse to write: non-worksheets and protected worksheets.
+    /// False for non-worksheets, which batches refuse to write, and protected worksheets, which
+    /// take content only in unlocked cells and formats only when they allow formatting cells.
     pub editable: bool,
 }
 
@@ -154,6 +156,12 @@ pub struct TextFound {
 }
 
 pub type FindOutcome = std::result::Result<TextFound, EditRefusal>;
+
+/// How a source sheet limits batch writes.
+enum SheetLock {
+    NotWorksheet,
+    Protected { format_cells: bool },
+}
 
 /// A target resolved against the current catalog.
 #[derive(Clone, Copy, Debug)]
@@ -292,8 +300,7 @@ impl Workbook {
         })
     }
 
-    /// Why batches refuse to write `sheet`, if they do.
-    pub(super) fn sheet_write_refusal(&self, sheet: SheetId) -> Option<(EditFailureCode, String)> {
+    fn sheet_lock(&self, sheet: SheetId) -> Option<SheetLock> {
         let origin = self
             .preserved
             .origins
@@ -301,22 +308,76 @@ impl Workbook {
             .copied()
             .flatten()?;
         let package = self.source_package.as_ref()?.facts();
+        if !package.source_sheet_is_worksheet(origin) {
+            return Some(SheetLock::NotWorksheet);
+        }
+        package
+            .source_sheet_is_protected(origin)
+            .then(|| SheetLock::Protected {
+                format_cells: package.source_sheet_allows_format_cells(origin),
+            })
+    }
+
+    /// Why batches refuse some or all writes to `sheet`, if they do.
+    pub(super) fn sheet_write_refusal(&self, sheet: SheetId) -> Option<(EditFailureCode, String)> {
+        let lock = self.sheet_lock(sheet)?;
         let name = self
             .model
             .sheet(sheet)
             .map_or("", |sheet| sheet.name.as_str());
-        if !package.source_sheet_is_worksheet(origin) {
-            return Some((
+        Some(match lock {
+            SheetLock::NotWorksheet => (
                 EditFailureCode::Unsupported,
                 format!("sheet {name:?} is not a worksheet"),
-            ));
-        }
-        package.source_sheet_is_protected(origin).then(|| {
-            (
+            ),
+            SheetLock::Protected { .. } => (
                 EditFailureCode::LockedTarget,
                 format!("sheet {name:?} is protected"),
-            )
+            ),
         })
+    }
+
+    /// Why batches refuse `operation` on `target`, if they do: a protected sheet takes content
+    /// only in unlocked cells and formats only when it allows formatting cells.
+    pub(super) fn step_write_refusal(
+        &self,
+        operation: &EditOperation,
+        target: Resolved,
+    ) -> Option<(EditFailureCode, String)> {
+        let format_cells = match self.sheet_lock(target.sheet)? {
+            SheetLock::NotWorksheet => return self.sheet_write_refusal(target.sheet),
+            SheetLock::Protected { format_cells } => format_cells,
+        };
+        match operation {
+            EditOperation::SetCellInputs { .. }
+            | EditOperation::SetCellValues { .. }
+            | EditOperation::SetFormulas { .. } => {
+                let sheet = self.model.sheet(target.sheet)?;
+                let mut defaults = ColumnDefaults::new(sheet);
+                let locked = target.iter().find(|&at| {
+                    self.model
+                        .styles
+                        .xf(defaults.effective_style(at).unwrap_or(0))
+                        .and_then(|xf| xf.protection)
+                        .is_none_or(|protection| protection.locked)
+                })?;
+                Some((
+                    EditFailureCode::LockedTarget,
+                    format!(
+                        "{} is locked on protected sheet {:?}",
+                        locked.to_a1(),
+                        sheet.name
+                    ),
+                ))
+            }
+            EditOperation::SetNumberFormat { .. } | EditOperation::PatchStyle { .. } => {
+                if format_cells {
+                    None
+                } else {
+                    self.sheet_write_refusal(target.sheet)
+                }
+            }
+        }
     }
 
     /// Reads cells with the version they were read at. `Err` is an internal failure.

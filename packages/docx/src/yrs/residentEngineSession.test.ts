@@ -36,6 +36,29 @@ async function open() {
   return { session, hostJson, host, record, header };
 }
 
+test('a failed remote apply preserves the original trap without reentering wasm', async () => {
+  const trap = new WebAssembly.RuntimeError('original trap');
+  let entered = false;
+  const raw = {
+    set_local_lowering() {},
+    resident_section_revision: mock(() => {
+      if (entered) throw new Error('poisoned session');
+      return '1:1';
+    }),
+    apply_update_with_inference() { entered = true; throw trap; },
+    free() {},
+  };
+  const create = spyOn(wasm, 'createEditSession').mockReturnValue(raw as unknown as ReturnType<typeof wasm.createEditSession>);
+  let session: ResidentEngineSession | undefined;
+  try {
+    session = await createResidentEngineSession();
+    let caught: unknown;
+    try { session.applyUpdate(new Uint8Array([255])); } catch (error) { caught = error; }
+    expect(caught).toBe(trap);
+    expect(raw.resident_section_revision).toHaveBeenCalledTimes(1);
+  } finally { session?.destroy(); create.mockRestore(); }
+});
+
 test('d0_last_update_unsubscribe_detaches_native_observer_and_can_resubscribe', async () => {
   const raw = {
     set_local_lowering() {},

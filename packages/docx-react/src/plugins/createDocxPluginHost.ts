@@ -29,6 +29,7 @@ import {
   type DocxPluginEditorAccess,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
+import { scopePluginGeometry } from './geometry';
 import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
@@ -86,6 +87,8 @@ export interface DocxPluginHost {
   layoutPresented(layout: DocxPluginLayout): void;
   /** Geometry for the shown `layout` exists now; repeats its `layout-change` if none carried it. */
   geometryPresented(layout: DocxPluginLayout): void;
+  /** @internal Resolves after queued plugin notifications finish. */
+  notificationsIdle(): Promise<void>;
   activations(): readonly DocxPluginActivation[];
   subscribe(listener: () => void): () => void;
   /** The restricted command store an activation's React contributions see. */
@@ -140,6 +143,7 @@ function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boo
       a.id === b.id &&
       a.version === b.version &&
       a.previewVersion === b.previewVersion &&
+      (a.reservationsVersion ?? null) === (b.reservationsVersion ?? null) &&
       a.zoom === b.zoom)
   );
 }
@@ -226,7 +230,9 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       commands: clients.commands,
       edits: clients.edits,
       geometry:
-        geometry && sameLayout(invocation.snapshot.layout, geometry.layout) ? geometry : null,
+        geometry && sameLayout(invocation.snapshot.layout, geometry.layout)
+          ? scopePluginGeometry(geometry, pluginId)
+          : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),
@@ -512,6 +518,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       notifyLayout(generation);
     },
 
+    notificationsIdle: () => runtime.notificationsIdle(),
     activations: () => runtime.activations(),
     subscribe: (listener) => runtime.subscribe(listener),
 

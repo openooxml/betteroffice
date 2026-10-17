@@ -1,16 +1,20 @@
 import { createT, deepMerge, en, type LocaleStrings } from '@betteroffice/docx-i18n';
 import { WASM32_MEMORY_LIMIT_BYTES, type DocxEditRequest, type DocxEditResult, type ResidentEngineWorkerClient, type ResidentEngineWorkerFrame,
   type ResidentFontEnvironment, type ResidentFontEnvironmentEvent, type WasmModuleMemory } from '@betteroffice/docx/yrs';
+import { computeSplitDialogDefaults, resolveColorToHex } from '@betteroffice/docx/utils';
+import type { YrsCellBorders } from '@betteroffice/docx/yrs';
+import { getBuiltinTableStyle } from '../../ui/TableStyleGallery';
 import { normalizeFontFamilies } from '@betteroffice/docx/utils/fontOptions';
 import { DEFAULT_FONTS } from '../../ui/FontPicker';
 import { DEFAULT_STYLES } from '../../ui/StylePicker';
 import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { memoryPressureLevel, type DocxMemoryPressureLevel, type DocxMemoryStats } from '../memoryStats';
 import type { DocxInput } from '@betteroffice/docx/utils';
+import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import type { DocxCommandSelection, DocxEditState, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
 import { createDocxCommandController, DocxCommandAdmissionError, type DocxCommandBinding } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandEnvironment } from '../../../commands/evaluate';
-import type { DocxCommandArgs, DocxCommandId, DocxCommandResult } from '../../../commands/types';
+import type { DocxCommandArgs, DocxCommandId, DocxCommandResult, DocxImageTransform } from '../../../commands/types';
 import type { DocxCommentInsertion, DocxDocumentChange, DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
@@ -20,13 +24,23 @@ import { flushAdmittedInput, type PeerlessAdmissionResult, type PeerlessFormatti
 import type { DocxHostSearch } from '../hooks/useHostSearch';
 import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
-import { readPresentedReview, reviewMatches } from './workerReview';
+import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
 import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
 
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
-const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor',
+export class WorkerReadSupersededError extends Error {}
+
+const OPEN_WAIT_MS = 120_000;
+const MAX_WAITING_ROUNDS = 64;
+const PROPOSAL_FAILURES = {
+  'stale-version': true, 'missing-target': true, 'ambiguous-target': true, 'content-mismatch': true, 'overlapping-steps': true,
+  'locked-target': true, 'read-only': true, 'tracked-revision-conflict': true, unsupported: true, 'invalid-step': true,
+  'limit-exceeded': true, 'stale-preview': true, 'unknown-proposal': true, 'proposal-id-conflict': true,
+} satisfies Record<Extract<DocxProposalResult, { ok: false }>['failure']['code'], true>;
+
+const FORMATTING_COMMANDS = new Set<DocxCommandId>(['bold', 'italic', 'underline', 'fontFamily', 'fontSize', 'textColor', 'highlightColor',
   'strikethrough', 'superscript', 'subscript', 'clearFormatting', 'alignment', 'lineSpacing', 'setLtr', 'setRtl',
   'bulletList', 'numberedList', 'indent', 'outdent', 'paragraphStyle']);
 
@@ -38,11 +52,17 @@ export interface PeerlessWorkerQuery<K extends ResidentDocumentRead['kind'] = Re
 
 interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
+  openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
+  image?: { wrap: ImageLayoutTarget | null } | null;
+  onImageWrap?: (wrap: ImageLayoutTarget) => void | boolean | Promise<boolean | DocxCommandResult>;
+  onImageTransform?: (action: DocxImageTransform) => void | boolean | Promise<boolean | DocxCommandResult>;
   zoom: number;
+  tableGridlines?: boolean;
   isDark?: boolean;
   focus(): void;
   onZoom?(zoom: number): void;
+  onTableGridlines?(visible: boolean): void;
   read: ResidentEngineWorkerClient['documentRead'];
   readAt?: ResidentEngineWorkerClient['documentReadAt'];
   search?: DocxHostSearch;
@@ -56,6 +76,10 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
   pickImage?(insert: (image: Readonly<Record<string, unknown>>) => Promise<DocxCommandResult>): void;
+  openSplitCell?(defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
+    apply: (rows: number, columns: number) => Promise<DocxCommandResult>): void;
+  openTableProperties?(initialProps: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null },
+    apply: (props: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null }) => Promise<DocxCommandResult>): void;
 }
 
 export function createPeerlessShellController(initial: Options) {
@@ -82,6 +106,15 @@ export function createPeerlessShellController(initial: Options) {
   let reviewBinding: PeerlessEditSessionBinding | null = null;
   let reviewIdentity: PeerlessViewSnapshot['identity'] | null = null;
   let proposalTail: Promise<unknown> = Promise.resolve();
+  let documentKey: unknown;
+  let generation = 0;
+  let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
+  const syncBorderPen = () => {
+    const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
+    const resolved = cellColor ? resolveColorToHex(cellColor, options.theme ?? undefined) : undefined;
+    if (resolved) borderPen = { ...borderPen, color: { rgb: resolved } };
+  };
+  const waiting = new Set<(error: Error) => void>();
   const reviewReads = new WeakMap<PeerlessEditSessionBinding, Promise<ResidentReviewSnapshot>>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
     worker: workerMemory?.map(sample => ({ ...sample })) ?? null });
@@ -106,7 +139,7 @@ export function createPeerlessShellController(initial: Options) {
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
     fontRevision = 0; fontFamilies = []; metadata = null; firstPainted = false; workerMemory = null;
-    unsubscribe?.(); binding = null; proposalTail = Promise.resolve(); reviewValue = null; reviewBinding = null; reviewIdentity = null;
+    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
     batchResults.clear(); commentResults.clear(); snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
@@ -127,15 +160,20 @@ export function createPeerlessShellController(initial: Options) {
       status: snapshot.status === 'failed' ? 'unavailable' : snapshot.status === 'opening' ? 'loading' : snapshot.status,
       readOnly: options.readOnly === true || (mode() !== 'viewing' && view?.editState?.readOnly === true),
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
-      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
+      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'insertTable', 'insertImage',
-        ...FORMATTING_COMMANDS, ...(view?.workerSelection && (view.workerSelection.anchor.paraId !== view.workerSelection.focus.paraId || view.workerSelection.anchor.offset !== view.workerSelection.focus.offset) ? ['insertLink' as const] : [])]),
+      supportedCommands: new Set(['zoom', 'tableGridlines', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
+        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', ...FORMATTING_COMMANDS]),
+      tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
+        'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
+        'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
+        'borderColor', 'borderWidth', 'cellBorder', 'applyTableStyle', 'tableProperties', 'openTableProperties']),
       canUndo: view?.editState?.canUndo ?? false, canRedo: view?.editState?.canRedo ?? false,
       selection: toolbar ? { context: toolbar, fontFamily: toolbar.fontFamily ?? null,
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
-      table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext } : null,
-      image: options.imagePropertiesAvailable ? { wrap: null } : null, revisions: [], revisionIds: new Set(), currentRevisionId: null,
+      table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext,
+        table: { attrs: { justification: view.editState.tableContext.justification } } } : null,
+      image: options.image !== undefined ? options.image : options.imagePropertiesAvailable ? { wrap: null } : null, revisions: [], revisionIds: new Set(), currentRevisionId: null,
       styles: workerStyleOptions(metadata && metadata.binding === binding && metadata.version === view?.version ? metadata.value.styles : [], translate), fonts: [
         ...choices.map(font => ({ args: { family: getPrimaryFontFamily(font.fontFamily) || font.name }, label: font.name,
           preview: { fontFamily: font.fontFamily, group: font.category ?? 'other' } })),
@@ -150,18 +188,40 @@ export function createPeerlessShellController(initial: Options) {
     if (!binding || snapshot.status !== 'ready') throw new Error('Peer-less editor is not ready');
     return binding;
   };
+  const replace = () => { generation += 1; proposalTail = Promise.resolve(); };
+  const opened = (): Promise<PeerlessEditSessionBinding> => {
+    if (binding && snapshot.status === 'ready') return Promise.resolve(binding);
+    if (closed || snapshot.status !== 'opening') return Promise.reject(new Error('Peer-less editor is not ready'));
+    if (waiting.size >= MAX_WAITING_ROUNDS) return Promise.reject(new Error('Too many calls are waiting for the document'));
+    const awaited = generation;
+    return new Promise((resolve, reject) => {
+      const settle = (error: Error | null) => {
+        clearTimeout(timer); waits.delete(check); waiting.delete(fail);
+        if (error) reject(error); else resolve(binding!);
+      };
+      const fail = (error: Error) => settle(error);
+      const check = () => {
+        if (closed) settle(new Error('Editor was closed'));
+        else if (snapshot.error) settle(snapshot.error);
+        else if (generation !== awaited) settle(new Error('Document was replaced'));
+        else if (binding && snapshot.status === 'ready') settle(null);
+      };
+      const timer = setTimeout(() => settle(new Error('The document did not open in time')), options.openTimeoutMs ?? OPEN_WAIT_MS);
+      waits.add(check); waiting.add(fail); check();
+    });
+  };
   const flush = async () => {
     const current = ready();
     await flushAdmittedInput(current);
-    if (current !== binding) throw new Error('Document was replaced');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
     return current;
   };
   const read = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<ResidentDocumentReadValues[K]> => {
     const current = await flush();
     const version = current.viewStore.getSnapshot().version;
     const result = await options.read<K>(request);
-    if (current !== binding) throw new Error('Document was replaced');
-    if (version !== current.viewStore.getSnapshot().version) throw new Error('Worker read was superseded');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    if (version !== current.viewStore.getSnapshot().version) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const readAt = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }, token: string): Promise<ResidentDocumentReadValues[K]> => {
@@ -170,12 +230,16 @@ export function createPeerlessShellController(initial: Options) {
     if (!options.readAt) throw new Error('Versioned worker reads are unavailable');
     const result = await options.readAt<K>(request, token);
     const latest = current.viewStore.getSnapshot();
-    if (current !== binding) throw new Error('Document was replaced');
-    if (result.status !== 'ok' || result.version !== token || latest.version !== view.version || !sameIdentity(latest.identity, view.identity)) throw new Error('Worker read was superseded');
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    if (result.status !== 'ok' || result.version !== token || latest.version !== view.version || !sameIdentity(latest.identity, view.identity)) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
-  const reviewSnapshot = () => binding && binding === reviewBinding && reviewIdentity && sameIdentity(reviewIdentity, binding.viewStore.getSnapshot().identity) && reviewValue && reviewMatches(binding.viewStore.getSnapshot(), reviewValue) ? reviewValue : null;
+  const currentReview = (matches: typeof reviewMatches) => binding && binding === reviewBinding && reviewIdentity &&
+    sameIdentity(reviewIdentity, binding.viewStore.getSnapshot().identity) && reviewValue && matches(binding.viewStore.getSnapshot(), reviewValue) ? reviewValue : null;
+  const reviewSnapshot = () => currentReview(reviewMatches);
+  /** The last review read while it still describes the presented document and preview, whichever frame shows them. */
+  const describedReview = () => currentReview(reviewDescribes);
   const readReview = (current: PeerlessEditSessionBinding, timeoutMs = options.reviewTimeoutMs ?? 30000): Promise<ResidentReviewSnapshot> => {
     const pending = reviewReads.get(current);
     if (pending) return pending;
@@ -214,12 +278,13 @@ export function createPeerlessShellController(initial: Options) {
     const view = current.viewStore.getSnapshot();
     const version = view.editState?.review?.version ?? view.editState?.documentVersion ?? view.geometry?.documentVersion ?? intent.payload.expectVersion;
     const ids = intent.kind === 'propose' ? intent.payload.proposals.map(input => input.id) : intent.kind === 'setProposalStates' ? intent.payload.changes.map(change => change.id) : intent.payload.ids;
-    const message = code === 'read-only' ? 'The editor is read-only' : code === 'stale-version' ? 'the document changed since the expected version was read' : undefined;
-    return { ok: false, version, failure: { code, ...(ids.length === 1 ? { proposalId: ids[0] } : {}), ...(message ? { message } : {}) } as Extract<DocxProposalResult, { ok: false }>['failure'] };
+    const known = Object.hasOwn(PROPOSAL_FAILURES, code);
+    const message = code === 'read-only' ? 'The editor is read-only' : code === 'stale-version' ? 'the document changed since the expected version was read' : known ? undefined : code;
+    const failure = (known ? code : code === 'invalid-payload' ? 'invalid-step' : 'unsupported') as keyof typeof PROPOSAL_FAILURES;
+    return { ok: false, version, failure: { code: failure, ...(ids.length === 1 ? { proposalId: ids[0] } : {}), ...(message ? { message } : {}) } as Extract<DocxProposalResult, { ok: false }>['failure'] };
   };
   const proposalRound = <T>(operation: (current: PeerlessEditSessionBinding) => Promise<T>): Promise<T> => {
-    const current = ready();
-    const pending = proposalTail.then(async () => {
+    const pending = Promise.all([opened(), proposalTail]).then(async ([current]) => {
       if (binding !== current) throw new Error('Document was replaced');
       await flush();
       return operation(current);
@@ -232,9 +297,15 @@ export function createPeerlessShellController(initial: Options) {
     return proposalRound(async current => {
       const env = environment();
       if ((env.readOnly || env.mode === 'viewing') && !options.allowHostProposals) return proposalFailure(current, captured, 'read-only');
-      const admitted = await released(current.commands.submit(captured, { fence: true, hostProposal: options.allowHostProposals === true }));
+      let admitted = current.commands.submit(captured, { fence: true, hostProposal: options.allowHostProposals === true });
+      try {
+        while (admitted.status === 'held') admitted = await admitted.released;
+      } catch (error) {
+        if (binding !== current) throw new Error('Document was replaced');
+        throw error;
+      }
       if (binding !== current) throw new Error('Document was replaced');
-      if (admitted?.status !== 'submitted') return proposalFailure(current, captured, 'read-only');
+      if (admitted.status === 'ignored') return proposalFailure(current, captured, admitted.reason);
       const outcome = await admitted.ticket.ack;
       if (binding !== current) throw new Error('Document was replaced');
       if (outcome.status !== 'applied' && outcome.status !== 'noop') {
@@ -288,7 +359,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'open', 'print', 'insertTable'].includes(id),
+    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'tableGridlines', 'open', 'print', 'insertTable'].includes(id),
     admit: async (operation) => {
       const current = binding;
       if (current && snapshot.status === 'ready') {
@@ -315,6 +386,97 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'indent' || id === 'outdent') return format({ kind: 'changeIndent', payload: { direction: id === 'indent' ? 'increase' : 'decrease' } });
       if (id === 'paragraphStyle') return format({ kind: 'applyParagraphStyle', payload: { styleId: (args as DocxCommandArgs['paragraphStyle']).styleId } });
       if (id === 'insertTable') return submit({ kind: 'insertTable', payload: args as DocxCommandArgs['insertTable'] });
+      if (id === 'tableAction') {
+        const key = typeof args === 'string' ? args : (args as { type?: string } | undefined)?.type;
+        const target: 'table' | 'row' | 'column' | null = key === 'selectTable' ? 'table' : key === 'selectRow' ? 'row' : key === 'selectColumn' ? 'column' : null;
+        if (target) {
+          const current = ready();
+          return settleCommand(current, current.commands.submit({ kind: 'selectTableCells', payload: { target } },
+            { source: 'selection', fence: true }));
+        }
+        switch (key) {
+          case 'addRowAbove': return submit({ kind: 'insertTableRow', payload: { side: 'above' } });
+          case 'addRowBelow': return submit({ kind: 'insertTableRow', payload: { side: 'below' } });
+          case 'addColumnLeft': return submit({ kind: 'insertTableColumn', payload: { side: 'left' } });
+          case 'addColumnRight': return submit({ kind: 'insertTableColumn', payload: { side: 'right' } });
+          case 'deleteRow': return submit({ kind: 'deleteTableRow', payload: {} });
+          case 'deleteColumn': return submit({ kind: 'deleteTableColumn', payload: {} });
+          case 'deleteTable': return submit({ kind: 'deleteTable', payload: {} });
+          case 'mergeCells': return submit({ kind: 'mergeTableCells', payload: {} });
+          case 'cellFillColor': {
+            const color = (args as { color?: string | null }).color;
+            const normalized = color === null || color === undefined || color === '' ? null : color.replace(/^#/, '');
+            return submit({ kind: 'setTableCellShading', payload: { color: normalized } });
+          }
+          case 'borderAll': case 'borderOutside': case 'borderInside': case 'borderNone':
+          case 'borderTop': case 'borderBottom': case 'borderLeft': case 'borderRight': {
+            const pen = borderPen;
+            const all = (border: typeof pen): YrsCellBorders => ({ top: border, bottom: border, left: border, right: border, insideH: border, insideV: border });
+            const borders: YrsCellBorders = key === 'borderAll' ? all(pen)
+              : key === 'borderOutside' ? { top: pen, bottom: pen, left: pen, right: pen }
+              : key === 'borderInside' ? { insideH: pen, insideV: pen }
+              : key === 'borderNone' ? all({ style: 'none', size: 0, color: { rgb: '000000' } })
+              : { [key.slice('border'.length).toLowerCase()]: pen } as YrsCellBorders;
+            return submit({ kind: 'setTableBorders', payload: { borders } });
+          }
+          case 'borderColor': {
+            borderPen = { ...borderPen, color: { rgb: (args as { color: string }).color.replace(/^#/, '') } };
+            const pen = borderPen;
+            return submit({ kind: 'setTableBorders', payload: { borders: { top: pen, bottom: pen, left: pen, right: pen, insideH: pen, insideV: pen } } });
+          }
+          case 'borderWidth': {
+            borderPen = { ...borderPen, size: (args as { size: number }).size };
+            const pen = borderPen;
+            return submit({ kind: 'setTableBorders', payload: { borders: { top: pen, bottom: pen, left: pen, right: pen, insideH: pen, insideV: pen } } });
+          }
+          case 'cellBorder': {
+            const action = args as { side: string; style: string; size: number; color: string };
+            const border = { style: action.style, size: action.size, color: { rgb: action.color.replace(/^#/, '') } };
+            const borders: YrsCellBorders = action.side === 'all'
+              ? { top: border, bottom: border, left: border, right: border, insideH: border, insideV: border }
+              : { [action.side]: border } as YrsCellBorders;
+            return submit({ kind: 'setTableBorders', payload: { borders } });
+          }
+          case 'applyTableStyle': {
+            const preset = getBuiltinTableStyle((args as { styleId: string }).styleId);
+            if (!preset?.tableBorders) return { ok: true, status: 'noop' };
+            return submit({ kind: 'setTableBorders', payload: { borders: preset.tableBorders } });
+          }
+          case 'splitCell': {
+            if (!options.openSplitCell) break;
+            const tableContext = snapshot.view?.editState?.tableContext;
+            const defaults = computeSplitDialogDefaults(tableContext?.rowSpan ?? 1, tableContext?.columnSpan ?? 1);
+            const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
+            options.openSplitCell(defaults, (rows, columns) =>
+              deferred.complete(() => submit({ kind: 'splitTableCell', payload: { rows, columns } })));
+            return { ok: true, status: 'opened' };
+          }
+          case 'tableProperties': {
+            const props = (args as { props: { width?: number | null; widthType?: string | null; justification?: 'left' | 'center' | 'right' | null } }).props;
+            return submit({ kind: 'setTableProperties', payload: { op: 'patch', patch: props } });
+          }
+          case 'openTableProperties': {
+            if (!options.openTableProperties) break;
+            const deferred = commands.defer('tableAction', args as DocxCommandArgs['tableAction'], 'selection');
+            const selected = snapshot.view?.workerSelection;
+            if (!selected) return { ok: false, failure: { code: 'command-failed', message: 'Table selection is unavailable.' } };
+            const originBinding = binding;
+            const originMode = mode();
+            const opened = await query({ kind: 'properties', target: { kind: 'tableSelection', selection: selected } });
+            if (binding !== originBinding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+            if (mode() !== originMode || !sameSelection(selected, snapshot.view?.workerSelection)) {
+              return { ok: false, failure: { code: 'target-changed', message: 'Table selection changed.' } };
+            }
+            if (opened.value?.kind !== 'table') return { ok: false, failure: { code: 'command-failed', message: 'Table properties are unavailable.' } };
+            const captured = opened.selection ?? selected;
+            options.openTableProperties(opened.value.properties, (props) =>
+              deferred.complete(() => applyQuery(opened, { kind: 'setTableProperties',
+                payload: { op: 'patch', patch: props, expectVersion: opened.version, selection: captured } })));
+            return { ok: true, status: 'opened' };
+          }
+          default: break;
+        }
+      }
       if (id === 'insertImage' && options.pickImage) {
         const picker = commands.defer('insertImage', null, 'selection');
         options.pickImage(image => picker.complete(() => submit({ kind: 'insertImage', payload: { image } })));
@@ -340,6 +502,14 @@ export function createPeerlessShellController(initial: Options) {
           { fontSize: (args as { points: number }).points };
         return settleCommand(current, current.commands.format({ kind: 'formatRange', payload: { delta } }, { fence: true }));
       }
+      if (id === 'highlightColor') {
+        const color = (args as DocxCommandArgs['highlightColor']).color;
+        return format({ kind: 'formatRange', payload: { delta: { highlight: color && color !== 'none' ? color : null } } });
+      }
+      if (id === 'insertPageBreak') return submit({ kind: 'insertPageBreak', payload: {} });
+      if (id === 'insertSectionBreakNextPage' || id === 'insertSectionBreakContinuous') {
+        return submit({ kind: 'insertSectionBreak', payload: { type: id === 'insertSectionBreakNextPage' ? 'nextPage' : 'continuous' } });
+      }
       if (id === 'textColor') {
         const current = ready();
         const color = (args as DocxCommandArgs['textColor']).color;
@@ -353,6 +523,22 @@ export function createPeerlessShellController(initial: Options) {
         options.onZoom?.(options.zoom);
         publish();
         return { ok: true, status: 'executed' };
+      }
+      if (id === 'tableGridlines') {
+        options = { ...options, tableGridlines: options.tableGridlines !== true };
+        options.onTableGridlines?.(options.tableGridlines === true);
+        publish();
+        return { ok: true, status: 'executed' };
+      }
+      if (id === 'imageWrap') {
+        const result = await options.onImageWrap?.((args as DocxCommandArgs['imageWrap']).wrap);
+        if (result && typeof result === 'object' && 'ok' in result) return result;
+        return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image wrap is unavailable.' } } : { ok: true, status: 'executed' };
+      }
+      if (id === 'imageTransform') {
+        const result = await options.onImageTransform?.((args as DocxCommandArgs['imageTransform']).action);
+        if (result && typeof result === 'object' && 'ok' in result) return result;
+        return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image transform is unavailable.' } } : { ok: true, status: 'executed' };
       }
       return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: 'Worker command is unavailable.' } };
     },
@@ -439,7 +625,7 @@ export function createPeerlessShellController(initial: Options) {
       };
       const check = () => {
         if (closed) return settle(new Error('Editor was closed'));
-        if (snapshot.status === 'failed') return settle(snapshot.error ?? new Error('Document failed to open'));
+        if (snapshot.error) return settle(snapshot.error);
         if (current) {
           if (binding !== current) return settle(new Error('Document was replaced'));
           const view = current.viewStore.getSnapshot();
@@ -508,15 +694,19 @@ export function createPeerlessShellController(initial: Options) {
     },
   });
   return {
-    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot,
+    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview,
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
-    update(next: Options) { options = next; translate = translation(next);
+    update(next: Options) { options = next; translate = translation(next); syncBorderPen();
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
       reportMemory();
     },
-    opening() { reset('opening'); },
+    opening(document?: unknown) {
+      if (document === undefined || document !== documentKey) replace();
+      documentKey = document;
+      reset('opening');
+    },
     preview(frame: ResidentEngineWorkerFrame) {
       if (snapshot.status !== 'opening') return;
       snapshot = { ...snapshot, preview: frame, previewPainted: false }; publish();
@@ -526,6 +716,12 @@ export function createPeerlessShellController(initial: Options) {
       snapshot = { ...snapshot, previewPainted: true }; publish();
     },
     painted,
+    stalled(error: Error) {
+      if (snapshot.status === 'opening') for (const fail of [...waiting]) fail(error);
+    },
+    failOpening(error: Error) {
+      if (snapshot.status === 'opening') { snapshot = { ...snapshot, error }; publish(); }
+    },
     toolbarMetadata(result: PeerlessWorkerQuery<'toolbarMetadata'> | null) {
       const origin = result && queryOrigins.get(result);
       const view = binding?.viewStore.getSnapshot();
@@ -541,8 +737,8 @@ export function createPeerlessShellController(initial: Options) {
       fontRevision = event.revision; fontFamilies = [...event.families]; publish(); emit(options.onFontsLoaded, undefined);
     },
     memory(samples: WasmModuleMemory[]) { workerMemory = samples.map(sample => ({ ...sample })); reportMemory(); },
-    empty() { reset('empty'); },
-    fail(error: Error) { reset('failed', error); },
+    empty() { replace(); documentKey = undefined; reset('empty'); },
+    fail(error: Error) { replace(); reset('failed', error); },
     attach(next: PeerlessEditSessionBinding) {
       if (next === binding) return;
       unsubscribe?.(); binding = next;
@@ -562,6 +758,7 @@ export function createPeerlessShellController(initial: Options) {
         const ready = view.presentedThroughSeq >= 0;
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
           preview: ready ? null : snapshot.preview };
+        syncBorderPen();
         publish();
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {
@@ -578,6 +775,7 @@ export function createPeerlessShellController(initial: Options) {
     },
     detach(previous: PeerlessEditSessionBinding) {
       if (binding !== previous) return;
+      replace();
       reset('empty');
     },
     dispose() { unsubscribe?.(); binding = null; closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },

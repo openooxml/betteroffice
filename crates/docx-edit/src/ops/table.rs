@@ -1143,11 +1143,24 @@ fn table_base(locator: &TableLocator) -> String {
     format!("{}:t{}", locator.story, locator.table_index)
 }
 
+/// Story ids without the `~{client}` suffix of an edit-born cell, so a slot is fresh only when
+/// no replica's cell holds it.
 fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
     let Some(stories) = txn.get_map(STORIES) else {
         return HashSet::new();
     };
-    stories.iter(txn).map(|(id, _)| id.to_string()).collect()
+    stories
+        .iter(txn)
+        .map(|(id, _)| bare_story_id(id).to_owned())
+        .collect()
+}
+
+fn bare_story_id(id: &str) -> &str {
+    let Some((bare, client)) = id.rsplit_once('~') else {
+        return id;
+    };
+    let digits = !client.is_empty() && client.bytes().all(|byte| byte.is_ascii_digit());
+    if digits { bare } else { id }
 }
 
 fn fresh_row_slot(used: &HashSet<String>, base: &str, start: usize, columns: usize) -> usize {
@@ -1171,16 +1184,19 @@ fn fresh_column_slot(used: &HashSet<String>, base: &str, rows: usize, start: usi
         .expect("usize address space cannot be exhausted by story ids")
 }
 
+/// A cell story id minted by an edit. The `~{client}` suffix keeps it apart from the cell a
+/// concurrent replica mints for the same slot; ids read from a document carry none.
 fn fresh_cell_story(
     used: &mut HashSet<String>,
     base: &str,
     row: usize,
     mut column: usize,
+    client: u64,
 ) -> String {
     loop {
         let candidate = format!("{base}:r{row}c{column}");
         if used.insert(candidate.clone()) {
-            return candidate;
+            return format!("{candidate}~{client}");
         }
         column += 1;
     }
@@ -1734,7 +1750,7 @@ impl EditingDoc {
         for row in 0..rows as usize {
             let mut cells = Vec::with_capacity(columns as usize);
             for column in 0..columns as usize {
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 cells.push(CellData {
                     tc_pr: HashMap::from([
@@ -1889,7 +1905,8 @@ impl EditingDoc {
         for (row_index, row) in valid.rows.iter().enumerate() {
             let mut cells = Vec::with_capacity(row.cells.len());
             for (cell_index, cell) in row.cells.iter().enumerate() {
-                let story_id = fresh_cell_story(used, &base, row_index, cell_index);
+                let story_id =
+                    fresh_cell_story(used, &base, row_index, cell_index, self.client_id());
                 let stories = txn
                     .get_map(STORIES)
                     .expect("stories root is declared by EditingDoc::new");
@@ -2089,7 +2106,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row_slot, column);
+            let story_id = fresh_cell_story(&mut used, &base, row_slot, column, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -2180,7 +2197,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row, column_slot);
+            let story_id = fresh_cell_story(&mut used, &base, row, column_slot, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -2480,7 +2497,7 @@ impl EditingDoc {
                     });
                     continue;
                 }
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
@@ -2752,6 +2769,58 @@ impl EditingDoc {
             Vec::new(),
         )
     }
+
+    pub fn set_table_properties(
+        &self,
+        ctx: &EditCtx,
+        locator: &TableLocator,
+        patch: &HashMap<String, Any>,
+    ) -> OpResult<TableReceipt> {
+        for (key, value) in patch {
+            let valid = match key.as_str() {
+                "width" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || any_number(Some(value))
+                            .is_some_and(|width| width >= 0.0 && width.fract() == 0.0)
+                }
+                "widthType" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || matches!(value, Any::String(kind) if ["auto", "dxa", "pct", "nil"].contains(&&**kind))
+                }
+                "justification" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&&**kind))
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(OpError::InvalidFormatValue(format!(
+                    "invalid table property {key}"
+                )));
+            }
+        }
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, locator)?;
+        let mut data = read_table(&table, &txn)?;
+        for (key, value) in patch {
+            if matches!(value, Any::Null | Any::Undefined) {
+                data.tbl_pr.remove(key);
+            } else {
+                data.tbl_pr.insert(key.clone(), value.clone());
+            }
+        }
+        if matches!(data.tbl_pr.get("widthType"), Some(Any::String(kind)) if &**kind == "auto") {
+            data.tbl_pr.remove("width");
+        }
+        table.insert(&mut txn, "tblPr", to_any_map(data.tbl_pr.clone()));
+        receipt(
+            locator.clone(),
+            Some(&data),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2879,12 +2948,12 @@ mod tests {
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c0".to_owned())
+                .contains(&"body:t0:r2c0~71".to_owned())
         );
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c1".to_owned())
+                .contains(&"body:t0:r2c1~71".to_owned())
         );
         for story in &receipt.created_story_ids {
             assert_eq!(doc.paragraphs(story).unwrap().len(), 1);
@@ -3251,12 +3320,12 @@ mod tests {
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r0c2".to_owned())
+                .contains(&"body:t0:r0c2~71".to_owned())
         );
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r1c2".to_owned())
+                .contains(&"body:t0:r1c2~71".to_owned())
         );
         let (_, grid, rows) = table_value(&doc);
         assert_eq!(grid.as_array().unwrap().len(), 3);
@@ -3299,6 +3368,132 @@ mod tests {
             }
         }
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    }
+
+    #[test]
+    fn set_table_properties_patches_width_type_and_justification() {
+        let doc = seed_table();
+        let at = TableLocator::new("body", 0);
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([
+                ("width".to_owned(), Any::Number(2500.0)),
+                ("widthType".to_owned(), Any::from("pct")),
+                ("justification".to_owned(), Any::from("center")),
+            ]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], 2500);
+        assert_eq!(tbl_pr["widthType"], "pct");
+        assert_eq!(tbl_pr["justification"], "center");
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([
+                ("width".to_owned(), Any::Null),
+                ("widthType".to_owned(), Any::from("auto")),
+                ("justification".to_owned(), Any::Null),
+            ]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        assert_eq!(tbl_pr["widthType"], "auto");
+        assert_eq!(tbl_pr["justification"], Value::Null);
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("widthType".to_owned(), Any::from("wide")),])
+            )
+            .is_err()
+        );
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("width".to_owned(), Any::Number(-1.0)),])
+            )
+            .is_err()
+        );
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("width".to_owned(), Any::Number(2500.5)),])
+            )
+            .is_err()
+        );
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([
+                ("width".to_owned(), Any::Number(3000.0)),
+                ("widthType".to_owned(), Any::from("dxa")),
+            ]),
+        )
+        .unwrap();
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([("widthType".to_owned(), Any::from("auto"))]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        assert_eq!(tbl_pr["widthType"], "auto");
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("tableLayout".to_owned(), Any::from("fixed")),])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn set_table_properties_does_not_rewrite_rows_or_grid() {
+        let baseline = seed_table();
+        let state = baseline.encode_state_as_update_v1();
+        let rows_peer = EditingDoc::new(72);
+        rows_peer.apply_update_v1(&state).unwrap();
+        let props_peer = EditingDoc::new(99);
+        props_peer.apply_update_v1(&state).unwrap();
+        rows_peer
+            .set_cell_borders(
+                &direct(),
+                &TableRange::cell(cell(0, 0)),
+                &HashMap::from([("top".to_owned(), line("FF0000"))]),
+            )
+            .unwrap();
+        rows_peer
+            .set_column_width(&direct(), &cell(0, 0), 2400.0)
+            .unwrap();
+        props_peer
+            .set_table_properties(
+                &direct(),
+                &TableLocator::new("body", 0),
+                &HashMap::from([("justification".to_owned(), Any::from("center"))]),
+            )
+            .unwrap();
+        let from_rows = rows_peer.encode_state_as_update_v1();
+        let from_props = props_peer.encode_state_as_update_v1();
+        rows_peer.apply_update_v1(&from_props).unwrap();
+        props_peer.apply_update_v1(&from_rows).unwrap();
+        for doc in [&rows_peer, &props_peer] {
+            let (tbl_pr, grid, rows) = table_value(doc);
+            assert_eq!(tbl_pr["justification"], "center");
+            assert_eq!(grid[0], 2400);
+            assert_eq!(
+                rows[0]["cells"][0]["tcPr"]["borders"]["top"]["color"]["rgb"],
+                "FF0000"
+            );
+        }
     }
 
     #[test]

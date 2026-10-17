@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 import { Logo } from "./components/Logo";
-import { BENCHMARKS, BENCHMARKS_SITE, SITE, SITE_DESCRIPTION, SITE_TITLE } from "./content";
+import { BENCHMARKS, BENCHMARKS_SITE, EVALS_SITE, SITE, SITE_DESCRIPTION, SITE_TITLE } from "./content";
 import "./globals.css";
 
 const sans = Geist({ subsets: ["latin"], variable: "--font-geist", display: "swap" });
@@ -103,6 +103,9 @@ export default function RootLayout({
               </a>
               <a href={BENCHMARKS_SITE} className={navLink}>
                 benchmarks
+              </a>
+              <a href={EVALS_SITE} className={navLink}>
+                evals
               </a>
               <a
                 href="https://github.com/openooxml/betteroffice"

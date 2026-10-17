@@ -1,4 +1,5 @@
 import { test, expect } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type { SessionFramesProbe } from './xlsx-session-frames-harness';
 
 test('xlsx: worker session frames paint the same pixels as a local handle', async ({
@@ -12,7 +13,7 @@ test('xlsx: worker session frames paint the same pixels as a local handle', asyn
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/xlsx-session-frames.html');
   await page.waitForFunction(() => '__xlsxSessionFrames' in window);
-  const { results, workers } = await page.evaluate(async () => {
+  const { results, workers } = await pinnedEvaluate(page, async () => {
     const probe = (window as unknown as { __xlsxSessionFrames: SessionFramesProbe })
       .__xlsxSessionFrames;
     return { results: await probe.done, workers: probe.workers };

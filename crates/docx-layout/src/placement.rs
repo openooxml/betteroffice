@@ -162,6 +162,9 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
     for (page_index, page) in input.layout.pages.iter().enumerate() {
         let mut body: Vec<(usize, Vec<PlacedItem<'a>>)> = Vec::new();
         for fragment in &page.fragments {
+            if matches!(fragment, Fragment::Reserved(_)) {
+                continue;
+            }
             let Some(index) = arena.find(fragment) else {
                 output.issues.push(PlacementIssue {
                     page_index,
@@ -508,7 +511,8 @@ fn whole_items<'a>(
             (
                 LayoutBlock::SectionBreak(_)
                 | LayoutBlock::PageBreak(_)
-                | LayoutBlock::ColumnBreak(_),
+                | LayoutBlock::ColumnBreak(_)
+                | LayoutBlock::Reserved(_),
                 _,
             )
             | (LayoutBlock::Unsupported, _) => {}
@@ -689,6 +693,7 @@ fn fragment_tag(fragment: &Fragment) -> Option<u8> {
         Fragment::Shape(_) => Some(3),
         Fragment::Chart(_) => Some(4),
         Fragment::TextBox(_) => Some(5),
+        Fragment::Reserved(_) => Some(6),
     }
 }
 
@@ -700,6 +705,7 @@ fn fragment_pm_start(fragment: &Fragment) -> Option<f64> {
         Fragment::Shape(value) => value.pm_start,
         Fragment::Chart(value) => value.pm_start,
         Fragment::TextBox(value) => value.pm_start,
+        Fragment::Reserved(_) => None,
     }
 }
 
@@ -752,6 +758,7 @@ impl<'a> Arena<'a> {
             Fragment::Shape(value) => &value.block_id,
             Fragment::Chart(value) => &value.block_id,
             Fragment::TextBox(value) => &value.block_id,
+            Fragment::Reserved(value) => &value.block_id,
         };
         (self.measured[index].block.block_id() == Some(expected)).then_some(index)
     }

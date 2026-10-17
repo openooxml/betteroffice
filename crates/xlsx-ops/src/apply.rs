@@ -99,35 +99,161 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
         Op::SetColWidth { sheet, col, width } => {
             let s = sheet_mut(wb, *sheet)?;
             let old = s.col_widths.get(col).copied();
+            let old_hidden = s.hidden_col_widths.get(col).copied();
             match width {
                 Some(w) => {
+                    if *w == 0.0 {
+                        if let Some(previous) = old.filter(|previous| *previous > 0.0) {
+                            s.hidden_col_widths.insert(*col, previous);
+                        }
+                    } else {
+                        s.hidden_col_widths.remove(col);
+                    }
                     s.col_widths.insert(*col, *w);
                 }
                 None => {
                     s.col_widths.remove(col);
+                    s.hidden_col_widths.remove(col);
                 }
             }
-            Ok(InvertedOp(vec![Op::SetColWidth {
+            Ok(InvertedOp(vec![Op::RestoreColDimension {
                 sheet: *sheet,
                 col: *col,
                 width: old,
+                hidden_width: old_hidden,
+            }]))
+        }
+        Op::SetColVisibility { sheet, col, hidden } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = s.col_widths.get(col).copied();
+            let old_hidden = s.hidden_col_widths.get(col).copied();
+            if *hidden {
+                if let Some(size) = old.filter(|size| *size > 0.0) {
+                    s.hidden_col_widths.insert(*col, size);
+                }
+                s.col_widths.insert(*col, 0.0);
+            } else if old == Some(0.0) {
+                if let Some(size) = s.hidden_col_widths.remove(col) {
+                    s.col_widths.insert(*col, size);
+                } else {
+                    s.col_widths.remove(col);
+                }
+            }
+            Ok(InvertedOp(vec![Op::RestoreColDimension {
+                sheet: *sheet,
+                col: *col,
+                width: old,
+                hidden_width: old_hidden,
+            }]))
+        }
+        Op::RestoreColDimension {
+            sheet,
+            col,
+            width,
+            hidden_width,
+        } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = s.col_widths.get(col).copied();
+            let old_hidden = s.hidden_col_widths.get(col).copied();
+            if let Some(width) = width {
+                s.col_widths.insert(*col, *width);
+            } else {
+                s.col_widths.remove(col);
+            }
+            if let Some(width) = hidden_width {
+                s.hidden_col_widths.insert(*col, *width);
+            } else {
+                s.hidden_col_widths.remove(col);
+            }
+            Ok(InvertedOp(vec![Op::RestoreColDimension {
+                sheet: *sheet,
+                col: *col,
+                width: old,
+                hidden_width: old_hidden,
             }]))
         }
         Op::SetRowHeight { sheet, row, height } => {
             let s = sheet_mut(wb, *sheet)?;
             let old = s.row_heights.get(row).copied();
+            let old_hidden = s.hidden_row_heights.get(row).copied();
             match height {
                 Some(h) => {
+                    if *h == 0.0 {
+                        if let Some(previous) = old.filter(|previous| *previous > 0.0) {
+                            s.hidden_row_heights.insert(*row, previous);
+                        }
+                    } else {
+                        s.hidden_row_heights.remove(row);
+                    }
                     s.row_heights.insert(*row, *h);
                 }
                 None => {
                     s.row_heights.remove(row);
+                    s.hidden_row_heights.remove(row);
                 }
             }
-            Ok(InvertedOp(vec![Op::SetRowHeight {
+            Ok(InvertedOp(vec![Op::RestoreRowDimension {
                 sheet: *sheet,
                 row: *row,
                 height: old,
+                hidden_height: old_hidden,
+            }]))
+        }
+        Op::SetRowVisibility { sheet, row, hidden } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = s.row_heights.get(row).copied();
+            let old_hidden = s.hidden_row_heights.get(row).copied();
+            if *hidden {
+                if let Some(size) = old.filter(|size| *size > 0.0) {
+                    s.hidden_row_heights.insert(*row, size);
+                }
+                s.row_heights.insert(*row, 0.0);
+            } else if s.row_hidden(*row) {
+                if let Some(size) = s.hidden_row_heights.remove(row) {
+                    s.row_heights.insert(*row, size);
+                } else {
+                    s.row_heights.remove(row);
+                    if s.row_hidden(*row) {
+                        let height = s
+                            .format
+                            .default_row_height_pt
+                            .filter(|height| *height > 0.0)
+                            .unwrap_or(15.0);
+                        s.row_heights.insert(*row, height);
+                    }
+                }
+            }
+            Ok(InvertedOp(vec![Op::RestoreRowDimension {
+                sheet: *sheet,
+                row: *row,
+                height: old,
+                hidden_height: old_hidden,
+            }]))
+        }
+        Op::RestoreRowDimension {
+            sheet,
+            row,
+            height,
+            hidden_height,
+        } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = s.row_heights.get(row).copied();
+            let old_hidden = s.hidden_row_heights.get(row).copied();
+            if let Some(height) = height {
+                s.row_heights.insert(*row, *height);
+            } else {
+                s.row_heights.remove(row);
+            }
+            if let Some(height) = hidden_height {
+                s.hidden_row_heights.insert(*row, *height);
+            } else {
+                s.hidden_row_heights.remove(row);
+            }
+            Ok(InvertedOp(vec![Op::RestoreRowDimension {
+                sheet: *sheet,
+                row: *row,
+                height: old,
+                hidden_height: old_hidden,
             }]))
         }
         Op::SetFreezePane { sheet, pane } => {
@@ -142,6 +268,53 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
         Op::SetHyperlinks { sheet, hyperlinks } => {
             let sheet_ref = sheet_mut(wb, *sheet)?;
             let old = std::mem::replace(&mut sheet_ref.hyperlinks, hyperlinks.clone());
+            Ok(InvertedOp(vec![Op::SetHyperlinks {
+                sheet: *sheet,
+                hyperlinks: old,
+            }]))
+        }
+        Op::SetHyperlink { sheet, hyperlink } => {
+            let mut hyperlink = hyperlink.clone();
+            hyperlink.range = CellRange {
+                start: CellRef::new(hyperlink.range.start.row, hyperlink.range.start.col),
+                end: CellRef::new(hyperlink.range.end.row, hyperlink.range.end.col),
+            };
+            let links = &mut sheet_mut(wb, *sheet)?.hyperlinks;
+            let replaced = links
+                .iter()
+                .filter(|existing| existing.range.overlaps(&hyperlink.range))
+                .collect::<Vec<_>>();
+            if replaced.as_slice() == [&hyperlink] {
+                return Ok(InvertedOp(vec![]));
+            }
+            let exact = replaced.len() == 1 && replaced[0].range == hyperlink.range;
+            let old = links.clone();
+            if exact {
+                let index = links
+                    .iter()
+                    .position(|link| link.range == hyperlink.range)
+                    .unwrap();
+                links[index] = hyperlink;
+            } else {
+                links.retain(|existing| !existing.range.overlaps(&hyperlink.range));
+                links.push(hyperlink);
+            }
+            Ok(InvertedOp(vec![Op::SetHyperlinks {
+                sheet: *sheet,
+                hyperlinks: old,
+            }]))
+        }
+        Op::RemoveHyperlink { sheet, range } => {
+            let range = CellRange {
+                start: CellRef::new(range.start.row, range.start.col),
+                end: CellRef::new(range.end.row, range.end.col),
+            };
+            let links = &mut sheet_mut(wb, *sheet)?.hyperlinks;
+            if !links.iter().any(|link| link.range == range) {
+                return Ok(InvertedOp(vec![]));
+            }
+            let old = links.clone();
+            links.retain(|link| link.range != range);
             Ok(InvertedOp(vec![Op::SetHyperlinks {
                 sheet: *sheet,
                 hyperlinks: old,
@@ -201,6 +374,10 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             }]))
         }
         Op::MergeCells { sheet, range } => {
+            let range = &CellRange {
+                start: CellRef::new(range.start.row, range.start.col),
+                end: CellRef::new(range.end.row, range.end.col),
+            };
             let s = sheet_mut(wb, *sheet)?;
             let replaced = s
                 .merges
@@ -225,6 +402,10 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             Ok(InvertedOp(inverse))
         }
         Op::UnmergeCells { sheet, range } => {
+            let range = &CellRange {
+                start: CellRef::new(range.start.row, range.start.col),
+                end: CellRef::new(range.end.row, range.end.col),
+            };
             let s = sheet_mut(wb, *sheet)?;
             match s.merges.iter().position(|m| m == range) {
                 Some(pos) => {
@@ -776,6 +957,9 @@ fn delete_rows(
         .filter_map(|(row, style)| delete_axis(row, at, count).map(|row| (row, style)))
         .collect();
     let dropped_heights = shift_row_heights_down(s, at, count);
+    let dropped_hidden = shift_number_map_down(&mut s.hidden_row_heights, at, count)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
 
@@ -803,10 +987,11 @@ fn delete_rows(
         });
     }
     for (row, h) in dropped_heights {
-        inv.push(Op::SetRowHeight {
+        inv.push(Op::RestoreRowDimension {
             sheet,
             row,
             height: Some(h),
+            hidden_height: dropped_hidden.get(&row).copied(),
         });
     }
     for range in dropped_merges {
@@ -886,6 +1071,9 @@ fn delete_cols(
     let old_col_styles = s.col_styles.clone();
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
+    let dropped_hidden = shift_number_map_down(&mut s.hidden_col_widths, at, count)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     shift_col_styles_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
@@ -905,10 +1093,11 @@ fn delete_cols(
         });
     }
     for (col, w) in dropped_widths {
-        inv.push(Op::SetColWidth {
+        inv.push(Op::RestoreColDimension {
             sheet,
             col,
             width: Some(w),
+            hidden_width: dropped_hidden.get(&col).copied(),
         });
     }
     for range in dropped_merges {
@@ -932,8 +1121,12 @@ fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, Cell)> {
 }
 
 fn shift_row_heights_up(s: &mut Sheet, at: RowId, count: u32) {
-    let shifted: BTreeMap<RowId, f64> = s
-        .row_heights
+    shift_number_map_up(&mut s.row_heights, at, count);
+    shift_number_map_up(&mut s.hidden_row_heights, at, count);
+}
+
+fn shift_number_map_up(map: &mut BTreeMap<u32, f64>, at: u32, count: u32) {
+    let shifted: BTreeMap<u32, f64> = map
         .iter()
         .map(|(&row, &h)| {
             (
@@ -946,13 +1139,17 @@ fn shift_row_heights_up(s: &mut Sheet, at: RowId, count: u32) {
             )
         })
         .collect();
-    s.row_heights = shifted;
+    *map = shifted;
 }
 
 fn shift_row_heights_down(s: &mut Sheet, at: RowId, count: u32) -> Vec<(RowId, f64)> {
+    shift_number_map_down(&mut s.row_heights, at, count)
+}
+
+fn shift_number_map_down(map: &mut BTreeMap<u32, f64>, at: u32, count: u32) -> Vec<(u32, f64)> {
     let mut kept = BTreeMap::new();
     let mut dropped = Vec::new();
-    for (&row, &h) in &s.row_heights {
+    for (&row, &h) in map.iter() {
         if row < at {
             kept.insert(row, h);
         } else if row >= at.saturating_add(count) {
@@ -961,42 +1158,17 @@ fn shift_row_heights_down(s: &mut Sheet, at: RowId, count: u32) -> Vec<(RowId, f
             dropped.push((row, h));
         }
     }
-    s.row_heights = kept;
+    *map = kept;
     dropped
 }
 
 fn shift_col_widths_up(s: &mut Sheet, at: ColId, count: u32) {
-    let shifted: BTreeMap<ColId, f64> = s
-        .col_widths
-        .iter()
-        .map(|(&col, &w)| {
-            (
-                if col >= at {
-                    col.saturating_add(count)
-                } else {
-                    col
-                },
-                w,
-            )
-        })
-        .collect();
-    s.col_widths = shifted;
+    shift_number_map_up(&mut s.col_widths, at, count);
+    shift_number_map_up(&mut s.hidden_col_widths, at, count);
 }
 
 fn shift_col_widths_down(s: &mut Sheet, at: ColId, count: u32) -> Vec<(ColId, f64)> {
-    let mut kept = BTreeMap::new();
-    let mut dropped = Vec::new();
-    for (&col, &w) in &s.col_widths {
-        if col < at {
-            kept.insert(col, w);
-        } else if col >= at.saturating_add(count) {
-            kept.insert(col - count, w);
-        } else {
-            dropped.push((col, w));
-        }
-    }
-    s.col_widths = kept;
-    dropped
+    shift_number_map_down(&mut s.col_widths, at, count)
 }
 
 fn shift_col_styles_up(s: &mut Sheet, at: ColId, count: u32) {
@@ -1145,17 +1317,19 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         });
     }
     for (&col, &w) in &removed.col_widths {
-        inv.push(Op::SetColWidth {
+        inv.push(Op::RestoreColDimension {
             sheet,
             col,
             width: Some(w),
+            hidden_width: removed.hidden_col_widths.get(&col).copied(),
         });
     }
     for (&row, &h) in &removed.row_heights {
-        inv.push(Op::SetRowHeight {
+        inv.push(Op::RestoreRowDimension {
             sheet,
             row,
             height: Some(h),
+            hidden_height: removed.hidden_row_heights.get(&row).copied(),
         });
     }
     if let Some(pane) = removed.freeze_pane {
@@ -1346,6 +1520,113 @@ mod tests {
     }
 
     #[test]
+    fn zero_height_visibility_tracks_edits_undo_and_redo() {
+        let sheet = SheetId(0);
+        let mut initial = wb_one_sheet();
+        initial.sheets[0].format.zero_height = true;
+        initial.sheets[0].set_cell(CellRef::new(1, 0), num(1.0).into());
+        initial.sheets[0].set_cell(
+            CellRef::new(3, 0),
+            Cell {
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        initial.sheets[0].set_cell(CellRef::new(9, 0), num(9.0).into());
+        initial.sheets[0].row_styles.insert(5, 0);
+        initial.sheets[0].row_heights.extend([(7, 20.0), (9, 0.0)]);
+        let visible = |wb: &Workbook| {
+            (0..16)
+                .filter(|&row| !wb.sheets[0].row_hidden(row))
+                .collect::<Vec<_>>()
+        };
+        for (op, expected) in [
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(0, 0),
+                    cell: num(2.0),
+                },
+                vec![0, 1, 3, 5, 7],
+            ),
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(1, 0),
+                    cell: CellState::default(),
+                },
+                vec![3, 5, 7],
+            ),
+            (
+                Op::SetCell {
+                    sheet,
+                    at: CellRef::new(3, 0),
+                    cell: CellState::default(),
+                },
+                vec![1, 5, 7],
+            ),
+            (
+                Op::InsertRows {
+                    sheet,
+                    at: 1,
+                    count: 2,
+                },
+                vec![3, 5, 7, 9],
+            ),
+            (
+                Op::DeleteRows {
+                    sheet,
+                    at: 1,
+                    count: 2,
+                },
+                vec![1, 3, 5],
+            ),
+            (
+                Op::InsertCols {
+                    sheet,
+                    at: 0,
+                    count: 1,
+                },
+                vec![1, 3, 5, 7],
+            ),
+            (
+                Op::DeleteCols {
+                    sheet,
+                    at: 0,
+                    count: 1,
+                },
+                vec![5, 7],
+            ),
+            (
+                Op::SetRowHeight {
+                    sheet,
+                    row: 1,
+                    height: Some(0.0),
+                },
+                vec![3, 5, 7],
+            ),
+            (
+                Op::RestoreRowStyles {
+                    sheet,
+                    styles: BTreeMap::new(),
+                },
+                vec![1, 3, 7],
+            ),
+        ] {
+            let mut workbook = initial.clone();
+            let inverse = apply_ops(&mut workbook, std::slice::from_ref(&op)).unwrap();
+            let edited = workbook.clone();
+            assert_eq!(visible(&workbook), expected, "{op:?}");
+            let redo = apply_ops(&mut workbook, &inverse).unwrap();
+            assert_eq!(workbook, initial, "undo {op:?}");
+            assert_eq!(visible(&workbook), [1, 3, 5, 7]);
+            apply_ops(&mut workbook, &redo).unwrap();
+            assert_eq!(workbook, edited, "redo {op:?}");
+            assert_eq!(visible(&workbook), expected);
+        }
+    }
+
+    #[test]
     fn remap_ref_delete_rows_edges() {
         let op = Op::DeleteRows {
             sheet: SheetId(0),
@@ -1511,6 +1792,33 @@ mod tests {
             CellValue::Text { value: "x".into() }
         );
         assert_eq!(wb.sheets[0].hyperlinks[0].range.to_a1(), "A3:B3");
+    }
+
+    #[test]
+    fn remove_hyperlink_removes_all_duplicates_and_undo_restores_their_order() {
+        let mut wb = wb_one_sheet();
+        let link = |address: &str| Hyperlink {
+            range: CellRange::parse_a1(address).unwrap(),
+            external_target: None,
+            location: Some("Data!D1".into()),
+            tooltip: None,
+            display: None,
+        };
+        wb.sheets[0].hyperlinks = vec![link("A1"), link("D4"), link("A1")];
+        let before = wb.clone();
+        let inverse = apply_in_place(
+            &mut wb,
+            &Op::RemoveHyperlink {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("$A$1").unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.sheets[0].hyperlinks, vec![link("D4")]);
+        for op in inverse.0 {
+            apply_in_place(&mut wb, &op).unwrap();
+        }
+        assert_eq!(wb, before);
     }
 
     #[test]

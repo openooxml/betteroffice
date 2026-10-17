@@ -89,6 +89,13 @@ struct EditBatchArgs {
 }
 
 #[derive(Deserialize)]
+struct MoveRangeArgs {
+    sheet: u32,
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
 struct CellEditInput {
     row: u32,
     col: u32,
@@ -719,6 +726,28 @@ impl Session {
             .edit_cells(
                 SheetId(args.sheet),
                 &edits,
+                self.calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn move_range_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: MoveRangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad move range args: {error}"))?;
+        let source = parse_range(&args.source)?;
+        let destination = CellRef::parse_a1(&args.destination)
+            .map_err(|error| format!("bad move destination: {error}"))?;
+        let result = self
+            .workbook
+            .move_range(
+                SheetId(args.sheet),
+                source,
+                destination,
                 self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
@@ -1690,6 +1719,43 @@ mod tests {
     }
 
     #[test]
+    fn move_range_json_commits_one_formula_aware_edit() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":40,"col":0,"input":"19"}"#, None)
+            .unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":40,"col":1,"input":"=A41*2"}"#, None)
+            .unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        let result = session
+            .move_range_json(
+                r#"{"sheet":0,"source":"A41:B41","destination":"D43"}"#,
+                None,
+            )
+            .unwrap();
+        assert!(result.contains(r#""applied":true"#));
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(42, 4))
+                .unwrap()
+                .input,
+            "=D43*2"
+        );
+        assert!(
+            session
+                .move_range_json(
+                    r#"{"sheet":0,"source":"D43:E43","destination":"XFE1"}"#,
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+    }
+
+    #[test]
     fn quoted_text_and_batch_undo_keep_wire_behavior() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         session
@@ -2124,6 +2190,75 @@ mod tests {
                 .unwrap()
                 .contains(r#""input":"=SUM(A1:A2)""#)
         );
+    }
+
+    #[test]
+    fn collaborative_freeze_panes_cross_the_json_boundary() {
+        let bytes = sample_xlsx();
+        let mut left = Session::open_collaborative(&bytes, 715, None).unwrap();
+        let mut right = Session::open_collaborative(&bytes, 716, None).unwrap();
+        let result = left.apply_ops_json(
+            r#"{"ops":[{"type":"setFreezePane","sheet":0,"pane":{"rows":1,"cols":0,"top_left":{"row":1,"col":0}}}]}"#,
+            None,
+        ).unwrap();
+        assert!(result.contains(r#""applied":true"#), "{result}");
+        assert!(
+            left.sheet_info_json()
+                .unwrap()
+                .contains(r#""frozenRows":1"#)
+        );
+        right
+            .apply_update_json(
+                &left.encode_diff(&right.encode_state_vector()).unwrap(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            right
+                .sheet_info_json()
+                .unwrap()
+                .contains(r#""frozenRows":1"#)
+        );
+        left.undo_json(None).unwrap();
+        assert!(
+            left.sheet_info_json()
+                .unwrap()
+                .contains(r#""frozenRows":0"#)
+        );
+    }
+
+    #[test]
+    fn collaborative_merges_cross_the_json_boundary() {
+        let bytes = sample_xlsx();
+        let mut left = Session::open_collaborative(&bytes, 717, None).unwrap();
+        let mut right = Session::open_collaborative(&bytes, 718, None).unwrap();
+        let operation = r#"{"ops":[{"type":"mergeCells","sheet":0,"range":{"start":{"row":0,"col":0},"end":{"row":1,"col":1}}}]}"#;
+        assert!(
+            left.apply_ops_json(operation, None)
+                .unwrap()
+                .contains(r#""applied":true"#)
+        );
+        right
+            .apply_update_json(
+                &left.encode_diff(&right.encode_state_vector()).unwrap(),
+                None,
+            )
+            .unwrap();
+        let query = r#"{"sheet":0,"range":"A1:B2"}"#;
+        assert!(
+            right
+                .merged_ranges_json(query)
+                .unwrap()
+                .contains(r#""start":{"row":0,"col":0}"#)
+        );
+        left.undo_json(None).unwrap();
+        right
+            .apply_update_json(
+                &left.encode_diff(&right.encode_state_vector()).unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(right.merged_ranges_json(query).unwrap(), r#"{"ranges":[]}"#);
     }
 
     #[test]

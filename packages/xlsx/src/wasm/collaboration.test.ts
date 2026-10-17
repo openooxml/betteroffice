@@ -38,7 +38,7 @@ describe('wasm collaboration', () => {
     expect(() => openWorkbook(sampleBytes(), { clientId: 1 })).toThrow(
       'clientId requires collaborative mode'
     );
-    for (const clientId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
+    for (const clientId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
       expect(() => openWorkbook(sampleBytes(), { collaborative: true, clientId })).toThrow(
         'clientId must be a nonzero safe integer'
       );
@@ -47,14 +47,14 @@ describe('wasm collaboration', () => {
       openWorkbook(Uint8Array.of(1, 2, 3), { collaborative: true, clientId: 77 })
     ).toThrow();
 
-    const explicit = collaborative(Number.MAX_SAFE_INTEGER);
+    const explicit = collaborative(Number.MAX_SAFE_INTEGER - 2);
     const generated = openWorkbook(sampleBytes(), { collaborative: true });
     const standalone = openWorkbook(sampleBytes());
     try {
-      expect(explicit.clientId).toBe(Number.MAX_SAFE_INTEGER);
+      expect(explicit.clientId).toBe(Number.MAX_SAFE_INTEGER - 2);
       expect(explicit.sheetInfo().sheetIds).toEqual(['sheet:0', 'sheet:1', 'sheet:2']);
       expect(generated.clientId).toBeGreaterThan(0);
-      expect(generated.clientId).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
+      expect(generated.clientId).toBeLessThan(Number.MAX_SAFE_INTEGER - 1);
       expect(requireReplica(explicit)).toBe(explicit);
       expect(standalone.encodeStateVector()).toBeInstanceOf(Uint8Array);
       expect(standalone.encodeStateAsUpdate()).toBeInstanceOf(Uint8Array);
@@ -397,6 +397,117 @@ describe('wasm collaboration', () => {
     } finally {
       target.dispose();
       structuralSource.dispose();
+    }
+  });
+
+  it('converges disjoint collaborative merges through the public handle and reopens the saved XLSX', () => {
+    const left = collaborative(6003);
+    const right = collaborative(6004);
+    const first = { start: { row: 29, col: 0 }, end: { row: 30, col: 1 } };
+    const second = { start: { row: 31, col: 3 }, end: { row: 32, col: 4 } };
+    try {
+      const baseline = left.encodeStateVector();
+      expect(left.applyOps([{ type: 'mergeCells', sheet: 0, range: first }]).applied).toBe(true);
+      expect(right.applyOps([{ type: 'mergeCells', sheet: 0, range: second }]).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(left.mergedRanges(0, 'A30:E33')).toEqual([first, second]);
+      expect(right.mergedRanges(0, 'A30:E33')).toEqual([first, second]);
+
+      expect(left.undo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(left.mergedRanges(0, 'A30:E33')).toEqual([second]);
+      expect(right.mergedRanges(0, 'A30:E33')).toEqual([second]);
+
+      const reopened = openWorkbook(right.save());
+      try {
+        expect(reopened.mergedRanges(0, 'A30:E33')).toEqual([second]);
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
+  it('projects overlapping concurrent merges the same way at both public handles', () => {
+    const left = collaborative(6005);
+    const right = collaborative(6006);
+    const first = { start: { row: 39, col: 0 }, end: { row: 41, col: 2 } };
+    const second = { start: { row: 40, col: 1 }, end: { row: 42, col: 3 } };
+    try {
+      const baseline = left.encodeStateVector();
+      left.applyOps([{ type: 'mergeCells', sheet: 0, range: first }]);
+      right.applyOps([{ type: 'mergeCells', sheet: 0, range: second }]);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      right.applyUpdate(leftUpdate);
+      left.applyUpdate(rightUpdate);
+      const projected = left.mergedRanges(0, 'A40:D43');
+      expect(right.mergedRanges(0, 'A40:D43')).toEqual(projected);
+      expect(projected).toHaveLength(1);
+      expect([first, second]).toContainEqual(projected[0]);
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
+  it('accepts collaborative merges and unmerges and refuses invalid ranges atomically', () => {
+    const handle = collaborative(6007);
+    const range = { start: { row: 49, col: 0 }, end: { row: 50, col: 1 } };
+    try {
+      for (const type of ['mergeCells', 'unmergeCells'] as const) {
+        expect(handle.applyOps([{ type, sheet: 0, range }]).applied).toBe(true);
+        const expected = type === 'mergeCells' ? [range] : [];
+        expect(handle.mergedRanges(0, 'A50:B51')).toEqual(expected);
+        const state = handle.encodeStateAsUpdate();
+        expect(() => handle.applyOps([{ type, sheet: 0,
+          range: { start: { row: 1_048_576, col: 0 }, end: { row: 1_048_576, col: 1 } },
+        }])).toThrow();
+        expect(handle.encodeStateAsUpdate()).toEqual(state);
+        expect(handle.mergedRanges(0, 'A50:B51')).toEqual(expected);
+      }
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('authors disjoint hyperlinks through the public handle, converges, undoes, and reopens XLSX', () => {
+    const left = collaborative(6011);
+    const right = collaborative(6012);
+    const first = { range: { start: { row: 0, col: 0 }, end: { row: 0, col: 0 } }, location: 'Empty!A1' };
+    const second = { range: { start: { row: 1, col: 1 }, end: { row: 1, col: 1 } }, location: 'Data!B1' };
+    const viewport = { x: 0, y: 0, width: 300, height: 100 };
+    try {
+      const baseline = left.encodeStateVector();
+      expect(left.setHyperlink(0, first).applied).toBe(true);
+      expect(right.setHyperlink(0, second).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(left.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Empty!A1', 'Data!B1']);
+      expect(right.displayList(viewport).hyperlinks).toEqual(left.displayList(viewport).hyperlinks);
+
+      expect(left.undo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(right.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Data!B1']);
+      const reopened = openWorkbook(right.save());
+      try {
+        expect(reopened.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Data!B1']);
+      } finally {
+        reopened.dispose();
+      }
+      expect(right.removeHyperlink(0, second.range).applied).toBe(true);
+      expect(left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector())).applied).toBe(true);
+      expect(left.displayList(viewport).hyperlinks ?? []).toEqual([]);
+    } finally {
+      left.dispose();
+      right.dispose();
     }
   });
 

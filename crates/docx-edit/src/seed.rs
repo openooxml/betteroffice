@@ -248,6 +248,7 @@ struct LoweringContext {
 #[serde(deny_unknown_fields)]
 enum SourceBlock {
     Raw,
+    Bookmark,
     /// A paragraph with a source id, which a raw block can be restored in front of.
     Anchor(String),
     /// A table, control or id-less paragraph, which that search skips over.
@@ -292,7 +293,7 @@ pub(crate) struct StyledParagraph {
 }
 
 /// Pilcrow keys seeded from direct formatting with a paragraph-style fallback.
-const STYLE_FALLBACK_KEYS: [&str; 23] = [
+const STYLE_FALLBACK_KEYS: [&str; 24] = [
     "alignment",
     "spaceBefore",
     "spaceAfter",
@@ -314,6 +315,7 @@ const STYLE_FALLBACK_KEYS: [&str; 23] = [
     "snapToGrid",
     "autoSpaceDE",
     "autoSpaceDN",
+    "adjustRightInd",
     "outlineLevel",
     "bidi",
 ];
@@ -1082,7 +1084,7 @@ fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
     Ok(entries.into_iter().collect())
 }
 
-fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
+pub(crate) fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
     values
         .into_iter()
         .map(|(key, value)| Ok((key, any_from_value(value)?)))
@@ -1666,6 +1668,96 @@ pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
         .unwrap_or_default()
 }
 
+/// Run attributes held as one field of a mark: (attribute, field, `defaultTextFormatting` key).
+const MARK_FIELDS: [(&str, &str, &str); 10] = [
+    ("fontSize", "size", "fontSize"),
+    ("fontSize", "sizeCs", "fontSizeCs"),
+    ("characterSpacing", "spacing", "spacing"),
+    ("characterSpacing", "position", "position"),
+    ("characterSpacing", "scale", "scale"),
+    ("characterSpacing", "kerning", "kerning"),
+    ("emphasisMark", "type", "emphasisMark"),
+    ("textEffect", "effect", "effect"),
+    ("modernTextEffects", "effects", "modernEffects"),
+    ("runStyle", "styleId", "styleId"),
+];
+
+/// Boolean run attributes that `defaultTextFormatting` spells the same.
+const RUN_FLAGS: [&str; 8] = [
+    "bold",
+    "italic",
+    "allCaps",
+    "smallCaps",
+    "emboss",
+    "imprint",
+    "hidden",
+    "rtl",
+];
+
+fn without_nulls(value: &Any) -> Any {
+    match value {
+        Any::Map(map) => Any::Map(Arc::new(
+            map.iter()
+                .filter(|(_, value)| **value != Any::Null)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )),
+        _ => value.clone(),
+    }
+}
+
+/// The inverse of [`mark_run_attrs`]: the `defaultTextFormatting` that lowers to the run
+/// formatting in `attrs`, kept to what a typed run saves: revisions, hyperlinks and the grid
+/// opt-out drop.
+pub(crate) fn mark_run_formatting<'a>(
+    attrs: impl IntoIterator<Item = (&'a String, &'a Any)>,
+) -> Option<Any> {
+    let mut formatting: HashMap<String, Any> = HashMap::new();
+    for (key, value) in attrs {
+        if *value == Any::Null || *value == Any::Bool(false) {
+            continue;
+        }
+        let field = |name: &str| match value {
+            Any::Map(map) => map.get(name).filter(|value| **value != Any::Null).cloned(),
+            _ => None,
+        };
+        let (name, carried) = match key.as_str() {
+            flag if RUN_FLAGS.contains(&flag) => (flag, Any::Bool(true)),
+            "textShadow" => ("shadow", Any::Bool(true)),
+            "textOutline" => ("outline", Any::Bool(true)),
+            "superscript" | "subscript" => ("vertAlign", Any::from(key.as_str())),
+            "underline" | "fontFamily" => (key.as_str(), without_nulls(value)),
+            "textColor" => ("color", without_nulls(value)),
+            "strike" if field("double") == Some(Any::Bool(true)) => {
+                ("doubleStrike", Any::Bool(true))
+            }
+            "strike" => ("strike", Any::Bool(true)),
+            "highlight" => match value {
+                Any::String(color) => match color.strip_prefix('#') {
+                    Some(rgb) => {
+                        let fill = HashMap::from([("rgb".to_owned(), Any::from(rgb))]);
+                        let shading =
+                            HashMap::from([("fill".to_owned(), Any::Map(Arc::new(fill)))]);
+                        ("shading", Any::Map(Arc::new(shading)))
+                    }
+                    None => (key.as_str(), value.clone()),
+                },
+                _ => continue,
+            },
+            _ => {
+                for &(_, from, to) in MARK_FIELDS.iter().filter(|(mark, ..)| *mark == key) {
+                    if let Some(value) = field(from) {
+                        formatting.insert(to.to_owned(), value);
+                    }
+                }
+                continue;
+            }
+        };
+        formatting.insert(name.to_owned(), carried);
+    }
+    (!formatting.is_empty()).then(|| Any::Map(Arc::new(formatting)))
+}
+
 fn mark_attrs(mark: &Mark) -> Value {
     Value::Object(mark.attrs.iter().cloned().collect())
 }
@@ -1897,7 +1989,7 @@ fn emu_to_pixels(value: f64) -> f64 {
     value / 914_400.0 * 96.0
 }
 
-fn image_payload(image: &Value) -> JsonObject {
+pub(crate) fn image_payload(image: &Value) -> JsonObject {
     let size = field(Some(image), "size");
     let wrap = field(Some(image), "wrap");
     let position = field(Some(image), "position");
@@ -2014,14 +2106,14 @@ fn shape_payload(shape: &Value, source: &BTreeMap<String, String>) -> JsonObject
     map_from_value(json!({ "shapeJson": source_json(shape, source) }))
 }
 
-fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject {
+pub(crate) fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject {
     let size = field(Some(chart), "size");
     map_from_value(json!({
         "chartJson": source_json(chart, source),
         "chartType": nullish(field(Some(chart), "chartType")),
         "title": nullish(field(Some(chart), "title")),
-        "width": number(field(size, "width")).filter(|value| *value != 0.0).map(emu_to_pixels).unwrap_or(320.0),
-        "height": number(field(size, "height")).filter(|value| *value != 0.0).map(emu_to_pixels).unwrap_or(220.0),
+        "width": number(field(size, "width")).map(emu_to_pixels).filter(|value| *value > 0.0).unwrap_or(320.0),
+        "height": number(field(size, "height")).map(emu_to_pixels).filter(|value| *value > 0.0).unwrap_or(220.0),
         "rId": nullish(field(Some(chart), "rId")),
         "path": nullish(field(Some(chart), "path"))
     }))
@@ -2101,6 +2193,16 @@ pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
                 {
                     names.push(name);
                 }
+                // Fields nested past the parser's limit stay raw runs of their parent field.
+                if string(map.get("type")) == Some("complexField") {
+                    for runs in [map.get("fieldCode"), map.get("fieldResult")] {
+                        let (mut instructions, mut raw) = (Vec::new(), Vec::new());
+                        for run in array(runs) {
+                            raw_field_sequence_names(run, &mut instructions, &mut raw);
+                        }
+                        names.extend(raw.into_iter().filter(|name| seen.insert(name.clone())));
+                    }
+                }
                 if string(map.get("type")) == Some("hyperlink") && !scanned_hyperlink {
                     names.extend(
                         hyperlink_sequence_names(value)
@@ -2168,34 +2270,42 @@ pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
         if kind != Some("run") {
             continue;
         }
-        for content in array(field(Some(node), "content")) {
-            let instruction = match string(field(Some(content), "type")) {
-                Some("fieldChar") => match string(field(Some(content), "charType")) {
-                    Some("begin") => {
-                        instructions.push(Some(String::new()));
-                        None
-                    }
-                    Some("separate") => instructions.last_mut().and_then(Option::take),
-                    Some("end") => instructions.pop().flatten(),
-                    _ => None,
-                },
-                Some("instrText") => {
-                    if let Some(Some(instruction)) = instructions.last_mut() {
-                        instruction
-                            .push_str(string(field(Some(content), "text")).unwrap_or_default());
-                    }
-                    None
-                }
-                _ => None,
-            };
-            names.extend(
-                instruction
-                    .as_deref()
-                    .and_then(docx_layout::sequence_fields::sequence_name),
-            );
-        }
+        raw_field_sequence_names(node, &mut instructions, &mut names);
     }
     names
+}
+
+/// SEQ names of the fields a run opens as raw `fldChar` and `instrText` content.
+fn raw_field_sequence_names(
+    run: &Value,
+    instructions: &mut Vec<Option<String>>,
+    names: &mut Vec<String>,
+) {
+    for content in array(field(Some(run), "content")) {
+        let instruction = match string(field(Some(content), "type")) {
+            Some("fieldChar") => match string(field(Some(content), "charType")) {
+                Some("begin") => {
+                    instructions.push(Some(String::new()));
+                    None
+                }
+                Some("separate") => instructions.last_mut().and_then(Option::take),
+                Some("end") => instructions.pop().flatten(),
+                _ => None,
+            },
+            Some("instrText") => {
+                if let Some(Some(instruction)) = instructions.last_mut() {
+                    instruction.push_str(string(field(Some(content), "text")).unwrap_or_default());
+                }
+                None
+            }
+            _ => None,
+        };
+        names.extend(
+            instruction
+                .as_deref()
+                .and_then(docx_layout::sequence_fields::sequence_name),
+        );
+    }
 }
 
 fn math_payload(math: &Value) -> JsonObject {
@@ -3070,6 +3180,7 @@ fn paragraph_attrs(
         ("listAbstractNumId", field(list, "abstractNumId")),
         ("listStartOverride", field(list, "startOverride")),
         ("_originalFormatting", formatting),
+        ("cnfStyle", field(formatting, "cnfStyle")),
     ] {
         if let Some(value) = value.filter(|value| !value.is_null()) {
             attrs.insert(key.to_owned(), drop_nulls(value.clone()));
@@ -3183,6 +3294,7 @@ fn paragraph_attrs(
             "snapToGrid",
             "autoSpaceDE",
             "autoSpaceDN",
+            "adjustRightInd",
             "outlineLevel",
             "bidi",
         ] {
@@ -5129,9 +5241,18 @@ fn visit_story(
     for (block_index, block) in blocks.iter().enumerate() {
         let position = cursor;
         let Some(block_id) = cursor.take(&story_id, block) else {
-            block_order.push(SourceBlock::Raw);
-            source_order.push(None);
             let xml = string(field(Some(block), "xml")).unwrap_or_default();
+            block_order.push(
+                if matches!(
+                    crate::structured::source::element_name(xml).as_str(),
+                    "w:bookmarkStart" | "w:bookmarkEnd"
+                ) {
+                    SourceBlock::Bookmark
+                } else {
+                    SourceBlock::Raw
+                },
+            );
+            source_order.push(None);
             let raws = context
                 .provenance
                 .raw_blocks
@@ -5442,7 +5563,7 @@ fn visit_story(
     }
     if block_order
         .iter()
-        .any(|block| matches!(block, SourceBlock::Raw))
+        .any(|block| matches!(block, SourceBlock::Raw | SourceBlock::Bookmark))
     {
         context.source.blocks.insert(story_id.clone(), block_order);
         context
@@ -8797,6 +8918,7 @@ mod tests {
             "snapToGrid": null,
             "autoSpaceDE": null,
             "autoSpaceDN": null,
+            "adjustRightInd": null,
             "outlineLevel": null,
             "bidi": null,
             "spacingExplicit": null,

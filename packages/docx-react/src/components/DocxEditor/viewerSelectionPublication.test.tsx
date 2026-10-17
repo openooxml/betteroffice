@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -15,7 +16,7 @@ import {
   DocxAsyncOnlyError,
   DocxEditor,
   defineDocxPlugin,
-  type DocxEditorProps,
+  type DocxEditorBaseProps,
   type DocxEditorRef,
   type DocxPluginContext,
   type DocxPluginSelection,
@@ -64,7 +65,7 @@ afterAll(async () => {
 });
 
 async function navigationViewer(
-  props: Partial<DocxEditorProps> = {},
+  props: Partial<DocxEditorBaseProps> = {},
   observeWorker?: (worker: InProcessResidentWorker) => void
 ) {
   spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
@@ -106,7 +107,7 @@ async function navigationViewer(
       if (event.type === 'load') loads.push(next);
     },
   });
-  const view = render(<DocxEditor
+  const view = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
     ref={ref} documentBuffer={await pagedDocx(1, 2)} readOnly experimentalWorkerOpen
     previewFirstPage={false} measurementFontProvider={provider} plugins={[plugin]}
     {...props}
@@ -287,7 +288,7 @@ test('viewer selections reach the prop, ref subscribers and plugin snapshot, inc
       font.byteOffset, font.byteOffset + font.byteLength
     ) as ArrayBuffer) };
     const element = (buffer: ArrayBuffer) => (
-      <DocxEditor
+      <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
         ref={ref}
         documentBuffer={buffer}
         readOnly

@@ -36,7 +36,7 @@ use docx_layout::types::{
 };
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::Serialize;
-use yrs::{StickyIndex, Subscription, Transact};
+use yrs::{StickyIndex, Transact};
 
 mod retain;
 
@@ -811,7 +811,7 @@ fn exact_prefix_block(block: &LayoutBlock) -> bool {
                     })
                     && local(&run.fmt)
             }
-            Run::Unsupported => false,
+            Run::Reserved(_) | Run::Unsupported => false,
         }),
         LayoutBlock::Table(table) => {
             table.floating.is_none()
@@ -1847,7 +1847,7 @@ pub struct EngineSession {
     region_retention_valid: Rc<Cell<bool>>,
     // Kept alive for the lifetime of the document. Dropping it unregisters the
     // observer before the Rc epoch source is released.
-    _doc_epoch_observer: Subscription,
+    _doc_epoch_observer: crate::CommitHook,
     render: RefCell<RenderState>,
     note_separators: RefCell<Option<LoweredNoteSeparators>>,
     preview_font_requirements: RefCell<Option<PreviewFontRequirements>>,
@@ -1961,6 +1961,21 @@ fn plain_layout_options_fingerprint(mut request: serde_json::Value) -> String {
         }
     }
     pages::sha256_hex(canonical_json(&request).as_bytes())
+}
+
+/// `request_json` without the view-only `renderEnv.reservations`.
+fn without_reservations(request_json: &str) -> String {
+    let Ok(mut request) = serde_json::from_str::<serde_json::Value>(request_json) else {
+        return request_json.to_owned();
+    };
+    match request
+        .get_mut("renderEnv")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|env| env.remove("reservations"))
+    {
+        Some(_) => request.to_string(),
+        None => request_json.to_owned(),
+    }
 }
 
 /// Identifies the revision preview a pass lays out under; 0 is none.
@@ -2117,6 +2132,7 @@ fn window_build_pages(
                         Fragment::Shape(value) => (value.pm_start, value.pm_end),
                         Fragment::Chart(value) => (value.pm_start, value.pm_end),
                         Fragment::TextBox(value) => (value.pm_start, value.pm_end),
+                        Fragment::Reserved(_) => (None, None),
                     };
                     start
                         .zip(end)
@@ -2276,7 +2292,7 @@ fn measurement_shift_safe(block: &LayoutBlock) -> bool {
                 && position(paragraph.pm_end)
                 && paragraph.sdt_groups.is_none()
                 && paragraph.runs.iter().all(|run| {
-                    !matches!(run, Run::Image(_) | Run::Unsupported)
+                    !matches!(run, Run::Image(_) | Run::Reserved(_) | Run::Unsupported)
                         && !matches!(run, Run::Text(text) if text.inline_sdt_widget.is_some())
                         && position(run.pm_start())
                         && position(run.pm_end())
@@ -2481,7 +2497,7 @@ fn paragraph_identity(block: &LayoutBlock) -> Option<(&BlockId, Option<f64>)> {
             if paragraph
                 .runs
                 .iter()
-                .all(|run| !matches!(run, Run::Image(_) | Run::Unsupported)) =>
+                .all(|run| !matches!(run, Run::Image(_) | Run::Reserved(_) | Run::Unsupported)) =>
         {
             Some((&paragraph.id, paragraph.pm_start))
         }
@@ -2507,6 +2523,7 @@ fn fragment_identity(block: &LayoutBlock) -> Option<&BlockId> {
         LayoutBlock::TextBox(block) => Some(&block.id),
         LayoutBlock::Shape(block) => Some(&block.id),
         LayoutBlock::Chart(block) => Some(&block.id),
+        LayoutBlock::Reserved(block) => Some(&block.id),
         _ => None,
     }
 }
@@ -3813,6 +3830,7 @@ fn region_reservation_restart_index(
             Fragment::TextBox(fragment) => &fragment.block_id,
             Fragment::Shape(fragment) => &fragment.block_id,
             Fragment::Chart(fragment) => &fragment.block_id,
+            Fragment::Reserved(fragment) => &fragment.block_id,
         };
         let mut matching = input
             .measured
@@ -4070,26 +4088,23 @@ impl EngineSession {
         let observer_retention = Rc::clone(&region_retention_valid);
         let observer_measurement_patch = Rc::clone(&measurement_patch_invalidated);
         let host_edit_depth = Arc::clone(&doc.host_edit_depth);
-        let observer = doc
-            .yrs_doc()
-            .observe_after_transaction(move |txn| {
-                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
-                    observer_measurement_patch.set(true);
-                    observer_epoch.set(observer_epoch.get().wrapping_add(1));
-                    let bulk = host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
-                        || txn.origin() == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN));
-                    if !bulk {
-                        observer_trigger.set(RelayoutTrigger::Interactive);
-                        observer_interactive.set(true);
-                        observer_retention.set(false);
-                    } else if !observer_interactive.get()
-                        && observer_trigger.get() != RelayoutTrigger::Open
-                    {
-                        observer_trigger.set(RelayoutTrigger::Bulk);
-                    }
+        let observer = doc.observe_commit(move |txn| {
+            if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                observer_measurement_patch.set(true);
+                observer_epoch.set(observer_epoch.get().wrapping_add(1));
+                let bulk = host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
+                    || txn.origin() == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN));
+                if !bulk {
+                    observer_trigger.set(RelayoutTrigger::Interactive);
+                    observer_interactive.set(true);
+                    observer_retention.set(false);
+                } else if !observer_interactive.get()
+                    && observer_trigger.get() != RelayoutTrigger::Open
+                {
+                    observer_trigger.set(RelayoutTrigger::Bulk);
                 }
-            })
-            .expect("EngineSession document transaction observer registers");
+            }
+        });
         Self {
             doc,
             doc_epoch,
@@ -4333,6 +4348,21 @@ impl EngineSession {
         text: Option<&str>,
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
+        let range = match text {
+            Some(_) if range.start == range.end => {
+                let start = self.doc.text_insert_index(
+                    &range.story,
+                    self.doc.committed_epoch(),
+                    range.start,
+                );
+                crate::StoryRange {
+                    start,
+                    end: start,
+                    ..range
+                }
+            }
+            _ => range,
+        };
         let before = self.doc_epoch();
         let seed_epoch_valid =
             self.render
@@ -4955,10 +4985,27 @@ impl EngineSession {
             })
             .flatten()
         });
-        let (blocks, map, revealable_blocks, preview) = if let Some(units) = refreshed {
-            crate::bridge::preview::lower_refreshed(&self.doc, story, env, &mut local, units)?
+        let lowered = if let Some(units) = refreshed {
+            crate::bridge::preview::lower_refreshed(&self.doc, story, env, &mut local, units)
         } else {
-            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
+            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)
+        };
+        let (blocks, map, revealable_blocks, preview) = match lowered {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                let mut render = self.render.borrow_mut();
+                let Some(stale) = render
+                    .stories
+                    .get_mut(story)
+                    .filter(|_| self.doc.holds_pending_update())
+                else {
+                    return Err(error);
+                };
+                if let Some(retained) = retained_local {
+                    stale.local = retained;
+                }
+                return Ok(());
+            }
         };
         if let Some(mut retained) = retained_local {
             if local.blocked {
@@ -5424,7 +5471,7 @@ impl EngineSession {
                                 .is_none_or(|wrap| wrap == "inline")
                             && !matches!(image.display_mode.as_deref(), Some("anchor" | "float"))
                     }
-                    Run::Unsupported => false,
+                    Run::Reserved(_) | Run::Unsupported => false,
                 }),
                 LayoutBlock::Table(table) => table.floating.is_none(),
                 LayoutBlock::Image(_)
@@ -5552,6 +5599,7 @@ impl EngineSession {
                     Run::Field(run) => (&mut run.pm_start, &mut run.pm_end),
                     Run::LineBreak(run) => (&mut run.pm_start, &mut run.pm_end),
                     Run::Image(run) => (&mut run.pm_start, &mut run.pm_end),
+                    Run::Reserved(run) => (&mut run.pm_start, &mut run.pm_end),
                     Run::Unsupported => continue,
                 };
                 *start = next.pm_start();
@@ -10572,7 +10620,71 @@ impl EngineSession {
         })
     }
 
+    /// Exports document truth: a retained layout that holds view-only reservations is laid out
+    /// again without them for the export, then restored under its own layout version.
     fn export_with_pages(
+        &self,
+        options: &PageExportOptions,
+        scope: AnchorScope,
+        current: Option<&str>,
+    ) -> Result<ExportRead<DocxPagedStructuredContent<DocxLayoutMap>>, ExportRefusal> {
+        let current = current.map(without_reservations);
+        let reserved = self.capture.borrow().as_ref().and_then(|capture| {
+            (!capture.render_env.reservations.is_empty() && capture.version == self.doc.version())
+                .then_some(capture.serial)
+        });
+        let request = self
+            .regions
+            .borrow()
+            .as_ref()
+            .map(|state| state.request_json.clone());
+        let (Some(serial), Some(request)) = (reserved, request) else {
+            return self.export_with_retained_pages(options, scope, current.as_deref());
+        };
+        let refuse = |code, message: &str| ExportRefusal {
+            version: self.doc.version(),
+            failure: pages::failure(code, message),
+        };
+        let layout_version = format!("{}:{serial}", self.doc.version());
+        if options
+            .expect_layout_version
+            .as_ref()
+            .is_some_and(|expected| *expected != layout_version)
+        {
+            return Err(refuse(
+                ExportFailureCode::StaleLayout,
+                "The layout is not the one expectLayoutVersion names.",
+            ));
+        }
+        if let Err(error) =
+            self.layout_document_with_regions_retained(&without_reservations(&request))
+        {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                &format!("The document cannot be laid out without its reservations: {error}"),
+            ));
+        }
+        let truth = PageExportOptions {
+            expect_layout_version: None,
+            ..options.clone()
+        };
+        let read = self.export_with_retained_pages(&truth, scope, current.as_deref());
+        if let Err(error) = self.layout_document_with_regions_retained(&request) {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                &format!("The reserved layout cannot be restored: {error}"),
+            ));
+        }
+        if let Some(capture) = self.capture.borrow_mut().as_mut() {
+            capture.serial = serial;
+        }
+        read.map(|mut read| {
+            read.content.layout.layout_version = layout_version;
+            read
+        })
+    }
+
+    fn export_with_retained_pages(
         &self,
         options: &PageExportOptions,
         scope: AnchorScope,
@@ -11247,6 +11359,69 @@ mod tests {
         assert_eq!(engine.doc_epoch(), edited_epoch + 1);
         assert_eq!(engine.doc().version(), merged_version);
         assert_eq!(events.borrow().len(), 2);
+    }
+
+    #[test]
+    fn projection_keeps_the_last_story_while_remote_structs_wait_and_fails_loud_after() {
+        let env = RenderEnv::default();
+        let ctx = crate::EditCtx::local("", "");
+        let engine = EngineSession::new(7);
+        engine
+            .doc()
+            .create_story("body", "AB", "Normal", "left")
+            .unwrap();
+        let base = engine.doc().encode_state_as_update_v1();
+        let replica = |id| {
+            let doc = EditingDoc::new(id);
+            doc.apply_update_v1(&base).unwrap();
+            doc
+        };
+        let (embedder, typist) = (replica(8), replica(10));
+        let diff = |doc: &EditingDoc, op: crate::RawOp| {
+            let vector = doc.encode_state_vector_v1();
+            doc.apply_raw_ops("body", vec![op], &ctx).unwrap();
+            doc.encode_diff_v1(&vector).unwrap()
+        };
+        let text = |index| crate::RawOp::Insert {
+            index,
+            text: "x".to_owned(),
+            attrs: Attrs::new(),
+        };
+        let first = diff(&typist, text(0));
+        let second = diff(&typist, text(1));
+        let embed = diff(
+            &embedder,
+            crate::RawOp::InsertEmbed {
+                index: 1,
+                kind: "unknown".to_owned(),
+                payload: Vec::new(),
+                attrs: Attrs::new(),
+            },
+        );
+        let removal = diff(&embedder, crate::RawOp::Delete { index: 1, len: 1 });
+        let unlowered = EngineSession::new(9);
+        unlowered.doc().apply_update_v1(&base).unwrap();
+        engine.lowering_map("body", &env).unwrap();
+        for session in [&engine, &unlowered] {
+            session.doc().apply_update_v1(&second).unwrap();
+            session.doc().apply_update_v1(&embed).unwrap();
+            assert!(session.doc().holds_pending_update());
+        }
+        assert!(matches!(
+            unlowered.lowering_map("body", &env),
+            Err(BridgeError::UnsupportedEmbed { .. })
+        ));
+        assert!(engine.lowering_map("body", &env).is_ok());
+        assert!(!engine.story_is_resident("body", engine.doc_epoch(), &env));
+        engine.doc().apply_update_v1(&first).unwrap();
+        assert!(!engine.doc().holds_pending_update());
+        assert!(matches!(
+            engine.lowering_map("body", &env),
+            Err(BridgeError::UnsupportedEmbed { .. })
+        ));
+        engine.doc().apply_update_v1(&removal).unwrap();
+        engine.lowering_map("body", &env).unwrap();
+        assert!(engine.story_is_resident("body", engine.doc_epoch(), &env));
     }
 
     #[test]
@@ -14331,14 +14506,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             engine.consume_relayout_trigger();
             let origins = Rc::new(RefCell::new(Vec::new()));
             let observed = Rc::clone(&origins);
-            let _subscription = doc
-                .yrs_doc()
-                .observe_after_transaction(move |txn| {
-                    if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
-                        observed.borrow_mut().push(txn.origin().cloned());
-                    }
-                })
-                .unwrap();
+            let _subscription = doc.observe_commit(move |txn| {
+                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observed.borrow_mut().push(txn.origin().cloned());
+                }
+            });
             let update = peer.encode_state_as_update_v1();
             if host {
                 doc.apply_host_update_v1(&update).unwrap();
@@ -14375,6 +14547,44 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 0
             );
         }
+    }
+
+    #[test]
+    fn relayout_runs_before_a_deleted_table_is_collected() {
+        use yrs::{ReadTxn, StateVector};
+
+        let engine = EngineSession::new(9390);
+        let doc = engine.doc();
+        let ctx = crate::EditCtx::local("", "");
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        let table = doc
+            .insert_table(&ctx, crate::Position::new("body", 0), 1, 1)
+            .unwrap();
+        let marker = "text only the deleted table holds";
+        doc.insert_text(
+            &ctx,
+            crate::Position::new(&table.created_story_ids[0], 0),
+            marker,
+            crate::FormatPolicy::Inherit,
+        )
+        .unwrap();
+        let epoch = Rc::clone(&engine.doc_epoch);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let probe = Rc::clone(&seen);
+        let _probe = doc.observe_commit(move |txn| {
+            if !txn.delete_set().is_empty() {
+                let state = txn.encode_state_as_update_v1(&StateVector::default());
+                probe.borrow_mut().push((epoch.get(), state));
+            }
+        });
+        let before = engine.doc_epoch.get();
+        doc.delete_table(&ctx, &table.table).unwrap();
+        let holds = |state: &[u8]| state.windows(marker.len()).any(|w| w == marker.as_bytes());
+        let seen = seen.take();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, before + 1);
+        assert!(holds(&seen[0].1));
+        assert!(!holds(&doc.encode_state_as_update_v1()));
     }
 
     #[test]

@@ -99,6 +99,8 @@ What to install for which language, with a first example each:
 
 Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
 
+[Per-task results and methodology](https://evals.betteroffice.dev).
+
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
 

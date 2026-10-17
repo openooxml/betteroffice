@@ -680,6 +680,7 @@
     "borderColor": "Border Color",
     "borderWidth": "Border width",
     "unknownAction": "Unknown Action",
+    "viewGridlines": "View gridlines",
     "borders": {
       "all": "All borders",
       "outside": "Outside borders",

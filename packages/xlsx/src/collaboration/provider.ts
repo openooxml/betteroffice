@@ -9,6 +9,9 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  parseSyncRequest,
+  withOpenSyncRequest,
+  withoutDocumentFingerprint,
   type ProtocolError,
 } from './protocol';
 import {
@@ -43,9 +46,6 @@ import { asyncReplicaFor, type AsyncCollaborationReplica } from './asyncReplica'
 
 const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_FRAME_BYTES;
 const AWARENESS_EXPIRY_INTERVAL_MS = 1000;
-const DOCUMENT_FINGERPRINT_TAG = new TextEncoder().encode(
-  '\0betteroffice-document-fingerprint-v1\0'
-);
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
@@ -74,16 +74,6 @@ function requireBytes(value: unknown, operation: string): Uint8Array {
     throw new TypeError(`${operation} must return a Uint8Array`);
   }
   return value.slice();
-}
-
-function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
-  const suffixLength = DOCUMENT_FINGERPRINT_TAG.byteLength + 32;
-  const tagOffset = payload.byteLength - suffixLength;
-  if (tagOffset < 0) return payload;
-  for (let index = 0; index < DOCUMENT_FINGERPRINT_TAG.byteLength; index += 1) {
-    if (payload[tagOffset + index] !== DOCUMENT_FINGERPRINT_TAG[index]) return payload;
-  }
-  return payload.subarray(0, tagOffset);
 }
 
 function unrefTimer(timer: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>): void {
@@ -538,8 +528,10 @@ export class CollaborationProvider {
 
   private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
     if (!this.isCurrentOpen(token, connection)) return;
+    let marked: Uint8Array | undefined;
     try {
-      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+      marked = withOpenSyncRequest(stateVector);
+      this.sendFrame(encodeSyncStep1(marked ?? stateVector, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(
         token,
@@ -547,6 +539,7 @@ export class CollaborationProvider {
       );
       return;
     }
+    if (!marked && this.isCurrentOpen(token, connection)) this.sendFullUpdate(token, connection);
     if (!this.isCurrentOpen(token, connection)) return;
 
     try {
@@ -558,6 +551,36 @@ export class CollaborationProvider {
     if (!this.hasPublishedAwarenessForOpen) this.publishAwareness();
     if (!this.isCurrentOpen(token, connection)) return;
     this.startAwarenessTimers();
+  }
+
+  private sendFullUpdate(token: number, connection: number): void {
+    const send = (update: Uint8Array) => {
+      if (!this.isCurrentOpen(token, connection)) return;
+      try {
+        this.sendFrame(encodeUpdate(update, this.maxFrameBytes));
+      } catch (cause) {
+        this.failConnection(token, normalizeError('protocol', 'Failed to encode collaboration handshake', cause));
+      }
+    };
+    const fail = (cause: unknown) => {
+      if (this.isCurrentOpen(token, connection)) {
+        this.failConnection(token, normalizeError('replica', 'Failed to encode replica update', cause));
+      }
+    };
+    if (this.asyncReplica) {
+      void this.asyncReplica.encodeStateAsUpdate()
+        .then((update) => requireBytes(update, 'encodeStateAsUpdate'))
+        .then(send, fail);
+      return;
+    }
+    let update: Uint8Array;
+    try {
+      update = requireBytes(this.replica.encodeStateAsUpdate(), 'encodeStateAsUpdate');
+    } catch (cause) {
+      fail(cause);
+      return;
+    }
+    send(update);
   }
 
   private handleMessage(token: number, data: Uint8Array, decoded?: ReturnType<typeof decodeMessages>): void {
@@ -681,8 +704,14 @@ export class CollaborationProvider {
         if (!this.isCurrentOpen(token, connection)) return;
         try {
           if (message.type === 'sync-step-1') {
-            const update = await this.asyncReplica!.encodeStateAsUpdate(withoutDocumentFingerprint(message.stateVector).slice());
-            if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep2(requireBytes(update, 'encodeStateAsUpdate'), this.maxFrameBytes));
+            const request = parseSyncRequest(message.stateVector);
+            const update = await this.asyncReplica!.encodeStateAsUpdate(withoutDocumentFingerprint(request.stateVector).slice());
+            if (!this.isCurrentOpen(token, connection)) return;
+            this.sendFrame(encodeSyncStep2(requireBytes(update, 'encodeStateAsUpdate'), this.maxFrameBytes));
+            if (request.open && this.isCurrentOpen(token, connection)) {
+              const vector = requireBytes(await this.asyncReplica!.encodeStateVector(), 'encodeStateVector');
+              if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep1(vector, this.maxFrameBytes));
+            }
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             await this.asyncReplica!.applyUpdate(withoutDocumentFingerprint(message.update).slice());
             if (message.type === 'sync-step-2' && this.isCurrentOpen(token, connection)) this.setStatus('connected', true);
@@ -700,10 +729,11 @@ export class CollaborationProvider {
   }
 
   private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
+    const request = parseSyncRequest(remoteStateVector);
     let update: Uint8Array;
     try {
       update = requireBytes(
-        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
+        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(request.stateVector).slice()),
         'encodeStateAsUpdate'
       );
     } catch (cause) {
@@ -718,6 +748,27 @@ export class CollaborationProvider {
       this.sendFrame(encodeSyncStep2(update, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause));
+      return;
+    }
+    if (!request.open || !this.isCurrent(token) || !this.isOpen) return;
+
+    let stateVector: Uint8Array;
+    try {
+      stateVector = requireBytes(this.replica.encodeStateVector(), 'encodeStateVector');
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('replica', 'Failed to encode replica state vector', cause)
+      );
+      return;
+    }
+    try {
+      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
+      );
     }
   }
 

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type {} from './pptx-peerless-editor-probe';
 
 test.use({ launchOptions: { executablePath: process.env.CHROME || undefined } });
@@ -11,12 +12,12 @@ async function open(page: Page, query = 'asyncApi=1') {
   await page.goto(`/pptx-worker-editor.html?${query}`);
   await page.waitForFunction(() => '__pptxWorkerEditor' in window);
   await expect.poll(() => page.evaluate(() => '__pptxPeerlessEditor' in window), { timeout: 5000 }).toBe(true);
-  await page.evaluate(() => window.__pptxPeerlessEditor.ready);
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.ready);
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.paintedTexts())).toContain('initial');
 }
 
 async function content(page: Page, index = 0) {
-  return page.evaluate((index) => window.__pptxPeerlessEditor.content(index), index);
+  return pinnedEvaluate(page, (index) => window.__pptxPeerlessEditor.content(index), index);
 }
 
 async function text(page: Page, index = 0) {
@@ -24,7 +25,7 @@ async function text(page: Page, index = 0) {
 }
 
 async function select(page: Page, start: number, end = start, index = 0) {
-  expect(await page.evaluate(({ start, end, index }) => window.__pptxPeerlessEditor.select(start, end, index),
+  expect(await pinnedEvaluate(page, ({ start, end, index }) => window.__pptxPeerlessEditor.select(start, end, index),
     { start, end, index })).toBe(true);
   await input(page, index).focus();
 }
@@ -32,7 +33,7 @@ async function select(page: Page, start: number, end = start, index = 0) {
 async function replace(page: Page, value: string, index = 0) {
   await select(page, 0, (await text(page, index)).length, index);
   await input(page, index).pressSequentially(value);
-  await page.evaluate((index) => window.__pptxPeerlessEditor.flush(index), index);
+  await pinnedEvaluate(page, (index) => window.__pptxPeerlessEditor.flush(index), index);
   await expect.poll(() => text(page, index)).toBe(value);
 }
 
@@ -64,8 +65,8 @@ test('asyncApi mounts a peer-less editor without a main-thread engine', async ({
 test('hybrid control still creates a main-thread engine', async ({ page }) => {
   await page.goto('/pptx-worker-editor.html');
   await page.waitForFunction(() => '__pptxWorkerEditor' in window);
-  await page.evaluate(() => window.__pptxWorkerEditor.mounted);
-  await page.evaluate(() => window.__pptxWorkerEditor.releaseHydration());
+  await pinnedEvaluate(page, () => window.__pptxWorkerEditor.mounted);
+  await pinnedEvaluate(page, () => window.__pptxWorkerEditor.releaseHydration());
   expect(await page.evaluate(() => window.__pptxMainEngineProbe!.count())).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__pptxWorkerEditor.text())).toBe('initial');
   expect(await page.evaluate(() => window.__pptxWorkerEditor.errors)).toEqual([]);
@@ -116,7 +117,7 @@ test('peer-less shape drag precedes an immediate text click and typing', async (
   await page.keyboard.type('!');
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.held())).toBeGreaterThan(0);
   await page.evaluate(() => window.__pptxPeerlessEditor.release());
-  await page.evaluate(() => window.__pptxPeerlessEditor.flush());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.flush());
   const result = await content(page);
   expect(result.stories[0]!.text).toBe('in!itial');
   expect(result.slides[0]!.shapes[0]!.x).toBe(before.x + Math.round(30 * shape.units.x));
@@ -135,7 +136,7 @@ test('peer-less text box insertion focuses input and commits the new story', asy
   await page.mouse.up();
   await expect(input(page)).toBeFocused();
   await page.keyboard.type('inserted text');
-  await page.evaluate(() => window.__pptxPeerlessEditor.flush());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.flush());
   const result = await content(page);
   expect(result.slides[0]!.shapes).toHaveLength(2);
   expect(result.stories.map((story) => story.text)).toEqual(['initial', 'inserted text', 'other']);
@@ -168,7 +169,7 @@ test('peer-less paste replaces the selected text exactly once', async ({ page, c
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await open(page);
   await select(page, 0, 7);
-  await page.evaluate(() => navigator.clipboard.writeText('pasted value'));
+  await pinnedEvaluate(page, () => navigator.clipboard.writeText('pasted value'));
   await input(page).press('ControlOrMeta+v');
   await expect.poll(() => text(page)).toBe('pasted value');
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.paintedTexts())).toContain('pasted value');
@@ -178,9 +179,9 @@ test('peer-less copy and paste transfer selected text between slides', async ({ 
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await open(page);
   await select(page, 0, 7);
-  await page.evaluate(() => navigator.clipboard.writeText('copy sentinel'));
+  await pinnedEvaluate(page, () => navigator.clipboard.writeText('copy sentinel'));
   await input(page).press('ControlOrMeta+c');
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('initial');
+  await expect.poll(() => pinnedEvaluate(page, () => navigator.clipboard.readText())).toBe('initial');
   expect(await text(page)).toBe('initial');
   await editor(page).getByRole('complementary').getByRole('button').nth(1).click();
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.activeSlide())).toBe(2);
@@ -194,9 +195,9 @@ test('peer-less cut copies before removing selected text and undo restores it', 
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await open(page);
   await select(page, 0, 7);
-  await page.evaluate(() => navigator.clipboard.writeText('cut sentinel'));
+  await pinnedEvaluate(page, () => navigator.clipboard.writeText('cut sentinel'));
   await input(page).press('ControlOrMeta+x');
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('initial');
+  await expect.poll(() => pinnedEvaluate(page, () => navigator.clipboard.readText())).toBe('initial');
   await expect.poll(() => text(page)).toBe('');
   await input(page).press('ControlOrMeta+z');
   await expect.poll(() => text(page)).toBe('initial');
@@ -216,7 +217,7 @@ test('peer-less composition commits once with replies pending', async ({ page })
       bubbles: true, cancelable: true }));
   });
   await page.evaluate(() => window.__pptxPeerlessEditor.release());
-  await page.evaluate(() => window.__pptxPeerlessEditor.flush());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.flush());
   expect(await text(page)).toBe('initial漢字');
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.paintedTexts())).toContain('initial漢字');
 });
@@ -225,7 +226,7 @@ test('peer-less save and reopen preserve edits and accept further typing', async
   await open(page);
   await replace(page, 'saved edit');
   const generation = await page.evaluate(() => window.__pptxPeerlessEditor.generation());
-  expect(await page.evaluate(() => window.__pptxPeerlessEditor.saveAndReopen())).toBeGreaterThan(0);
+  expect(await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.saveAndReopen())).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__pptxPeerlessEditor.generation())).toBeGreaterThan(generation);
   expect(await text(page)).toBe('saved edit');
   expect((await content(page)).stories[1]!.text).toBe('other');
@@ -241,7 +242,7 @@ test('two peer-less editors merge concurrent typing and undo only the local edit
   await input(page, 0).pressSequentially('L');
   await select(page, 7, 7, 1);
   await input(page, 1).pressSequentially('R');
-  await page.evaluate(() => window.__pptxPeerlessEditor.merge());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.merge());
   const merged = await text(page, 0);
   expect(merged).toMatch(/^initial(?:LR|RL)$/);
   expect(await text(page, 1)).toBe(merged);
@@ -251,7 +252,7 @@ test('two peer-less editors merge concurrent typing and undo only the local edit
   await input(page, 0).focus();
   await input(page, 0).press('ControlOrMeta+z');
   await expect.poll(() => text(page, 0)).toBe('initialR');
-  await page.evaluate(() => window.__pptxPeerlessEditor.merge());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.merge());
   expect(await text(page, 1)).toBe('initialR');
 });
 
@@ -259,16 +260,16 @@ test('peer-less remote merge preserves typing queued behind the update', async (
   await open(page, 'asyncApi=1&collaboration=1');
   await select(page, 0, 0, 1);
   await input(page, 1).pressSequentially('REMOTE');
-  await page.evaluate(() => window.__pptxPeerlessEditor.flush(1));
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.flush(1));
   await select(page, 2, 2, 0);
   await page.evaluate(() => window.__pptxPeerlessEditor.hold(0));
   await input(page, 0).pressSequentially('L');
-  await page.evaluate(() => window.__pptxPeerlessEditor.queueRemoteMerge());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.queueRemoteMerge());
   await input(page, 0).pressSequentially('NEXT');
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.held(0))).toBeGreaterThan(0);
   await page.evaluate(() => window.__pptxPeerlessEditor.release(0));
-  await page.evaluate(() => window.__pptxPeerlessEditor.settleRemoteMerge());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.settleRemoteMerge());
   expect(await text(page, 0)).toBe('REMOTEinLNEXTitial');
-  await page.evaluate(() => window.__pptxPeerlessEditor.merge());
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.merge());
   expect(await text(page, 1)).toBe('REMOTEinLNEXTitial');
 });

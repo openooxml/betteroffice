@@ -3,7 +3,7 @@ import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { createPeerlessShellController } from './shellController';
 import { workerPageAtViewport } from './pageNavigation';
-import type { DocxOutlineHeading } from '@betteroffice/docx/yrs';
+import type { DocxOutlineHeading, ResidentDocumentRead } from '@betteroffice/docx/yrs';
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
@@ -59,11 +59,11 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (!page || !element) return;
     element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + page.bounds.y * latest.current.zoom;
   }, [controller, host, scroller]);
-  const scrollToParagraph = useCallback(async (paraId: string, story = 'body') => {
+  const scrollToTarget = useCallback(async (request: Extract<ResidentDocumentRead, { kind: 'navigationTarget' | 'bookmarkTarget' }>) => {
     const current = binding();
     if (!current) return false;
-    const target = await controller.read({ kind: 'navigationTarget', story, paraId });
-    if (typeof target === 'string' || current !== binding()) return false;
+    const target = await controller.read(request);
+    if (!target || typeof target === 'string' || current !== binding()) return false;
     const result = current.commands.submit({ kind: 'select', payload: { selection: { anchor: target.loc, focus: target.loc } } }, { source: 'selection', fence: true });
     if (result.status !== 'submitted') return false;
     const outcome = await result.ticket.ack;
@@ -73,6 +73,8 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     if (caret && scroller.current) scroller.current.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - scroller.current.getBoundingClientRect().top + caret.y * latest.current.zoom - 24;
     return true;
   }, [binding, controller, host, scroller]);
+  const scrollToParagraph = useCallback((paraId: string, story = 'body') => scrollToTarget({ kind: 'navigationTarget', story, paraId }), [scrollToTarget]);
+  const scrollToBookmark = useCallback((name: string, story = 'body') => scrollToTarget({ kind: 'bookmarkTarget', story, name }), [scrollToTarget]);
   const revealParagraph = useCallback(async (paraId: string, story: string, focus = false) => {
     if (focus) return scrollToParagraph(paraId, story);
     const current = binding();
@@ -112,5 +114,5 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
     }
     return false;
   }, [binding, controller, host, scroller, scrollToPage, scrollToParagraph]);
-  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, revealParagraph };
+  return { showOutline, setShowOutline, headings, pageInfo, readCurrentPage, scrollToPage, scrollToParagraph, scrollToBookmark, revealParagraph };
 }

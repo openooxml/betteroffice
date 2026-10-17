@@ -132,8 +132,9 @@ export interface XlsxEditRequest {
 }
 
 /**
- * `locked-target` covers any write to merged-cell followers, array-formula cells and protected
- * sheets. `read-only` comes only from an editor that does not accept edits.
+ * `locked-target` covers any write to merged-cell followers, array-formula cells and locked
+ * cells of protected sheets, and formats on protected sheets that do not allow formatting cells.
+ * `read-only` comes only from an editor that does not accept edits.
  */
 export type XlsxEditFailureCode =
   | 'stale-version'
@@ -194,7 +195,10 @@ export interface XlsxReadRequest {
 export interface XlsxSheetEntry {
   sheetId: string;
   name: string;
-  /** False for sheets batches refuse to write: non-worksheets and protected worksheets. */
+  /**
+   * False for non-worksheets, which batches refuse to write, and protected worksheets, which take
+   * content only in unlocked cells and formats only when they allow formatting cells.
+   */
   editable: boolean;
 }
 
