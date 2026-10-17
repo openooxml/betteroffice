@@ -511,6 +511,7 @@ function tableSubmenu(store: DocxCommandStore, t: TFunction, tools: OverflowTool
     entries,
   });
   const value = state.value ?? null;
+  const gridlines = store.getState('tableGridlines');
   return {
     kind: 'submenu',
     id: 'tableAction',
@@ -529,6 +530,9 @@ function tableSubmenu(store: DocxCommandStore, t: TFunction, tools: OverflowTool
         t('table.borders.tooltip'),
         BORDER_ACTIONS.map((entry) => item(entry.action, t(entry.labelKey)))
       ),
+      ...(gridlines.enabled || gridlines.disabledReason.code !== 'unsupported-command'
+        ? [commandItem(store, t, 'tableGridlines')]
+        : []),
       colorSubmenu(
         store,
         t,
@@ -940,6 +944,7 @@ function CommandColorPicker({ id }: { id: 'textColor' | 'highlightColor' }) {
 function CommandTableControls() {
   const store = useDocxCommands();
   const state = useDocxCommandState('tableAction');
+  const gridlines = useDocxCommandState('tableGridlines');
   const { t } = useTranslation();
   const wrapperRef = useRef<HTMLSpanElement>(null);
   useCommandOverflow(wrapperRef, 'tableAction');
@@ -957,7 +962,21 @@ function CommandTableControls() {
       role="group"
       aria-label={t('formattingBar.groups.table')}
     >
-      <TableBorderPicker onAction={onAction} disabled={disabled} />
+      <TableBorderPicker
+        onAction={onAction}
+        disabled={disabled}
+        gridlines={
+          gridlines.enabled
+            ? {
+                checked: gridlines.active === true,
+                onToggle: () =>
+                  void store
+                    .execute('tableGridlines', null)
+                    .then((result) => restoreFocusAfterPointer(store, result)),
+              }
+            : undefined
+        }
+      />
       <TableBorderColorPicker
         onAction={onAction}
         disabled={disabled}

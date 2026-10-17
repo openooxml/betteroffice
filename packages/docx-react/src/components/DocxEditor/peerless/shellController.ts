@@ -58,9 +58,11 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   onImageWrap?: (wrap: ImageLayoutTarget) => void | boolean | Promise<boolean | DocxCommandResult>;
   onImageTransform?: (action: DocxImageTransform) => void | boolean | Promise<boolean | DocxCommandResult>;
   zoom: number;
+  tableGridlines?: boolean;
   isDark?: boolean;
   focus(): void;
   onZoom?(zoom: number): void;
+  onTableGridlines?(visible: boolean): void;
   read: ResidentEngineWorkerClient['documentRead'];
   readAt?: ResidentEngineWorkerClient['documentReadAt'];
   search?: DocxHostSearch;
@@ -158,9 +160,9 @@ export function createPeerlessShellController(initial: Options) {
       status: snapshot.status === 'failed' ? 'unavailable' : snapshot.status === 'opening' ? 'loading' : snapshot.status,
       readOnly: options.readOnly === true || (mode() !== 'viewing' && view?.editState?.readOnly === true),
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
-      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
+      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
+      supportedCommands: new Set(['zoom', 'tableGridlines', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
         'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
@@ -357,7 +359,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'open', 'print', 'insertTable'].includes(id),
+    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'tableGridlines', 'open', 'print', 'insertTable'].includes(id),
     admit: async (operation) => {
       const current = binding;
       if (current && snapshot.status === 'ready') {
@@ -519,6 +521,12 @@ export function createPeerlessShellController(initial: Options) {
       if (id === 'zoom') {
         options = { ...options, zoom: (args as { scale: number }).scale };
         options.onZoom?.(options.zoom);
+        publish();
+        return { ok: true, status: 'executed' };
+      }
+      if (id === 'tableGridlines') {
+        options = { ...options, tableGridlines: options.tableGridlines !== true };
+        options.onTableGridlines?.(options.tableGridlines === true);
         publish();
         return { ok: true, status: 'executed' };
       }

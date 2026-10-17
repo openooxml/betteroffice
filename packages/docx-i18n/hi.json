@@ -664,6 +664,7 @@
     "borderColor": "बॉर्डर का रंग",
     "borderWidth": "बॉर्डर की चौड़ाई",
     "unknownAction": "अज्ञात क्रिया",
+    "viewGridlines": "ग्रिडलाइनें देखें",
     "borders": {
       "all": "सभी बॉर्डर",
       "outside": "बाहरी बॉर्डर",

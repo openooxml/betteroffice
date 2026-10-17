@@ -664,6 +664,7 @@
     "borderColor": "Couleur de la bordure",
     "borderWidth": "Épaisseur de la bordure",
     "unknownAction": "Action inconnue",
+    "viewGridlines": "Afficher le quadrillage",
     "borders": {
       "all": "Toutes les bordures",
       "outside": "Bordures extérieures",
