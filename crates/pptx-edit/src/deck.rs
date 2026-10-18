@@ -489,7 +489,7 @@ impl DeckSession {
         }
         let read = self.doc.transact();
         let slide = slide_ref(&read, slide_id)?;
-        let before = slide_background(&slide, &read, &self.package)?;
+        let (before, _) = slide_background(&slide, &read, &self.package)?;
         drop(read);
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
@@ -2040,7 +2040,7 @@ fn snapshot_slide<T: ReadTxn>(
     } = slide_parts(slides, package, txn, slide_id)?;
     let slide = slide_ref(txn, slide_id)?;
     snapshot.notes = slide_notes(&slide, txn, package);
-    snapshot.background = slide_background(&slide, txn, package)?;
+    (snapshot.background, snapshot.background_edited) = slide_background(&slide, txn, package)?;
     for shape_id in shape_ids {
         snapshot.shapes.push(snapshot_shape(
             shapes,
@@ -2096,6 +2096,7 @@ pub(crate) fn slide_parts<T: ReadTxn>(
             name: map_string(&slide, txn, "name"),
             notes: String::new(),
             background: None,
+            background_edited: false,
             shapes: Vec::new(),
         },
         theme,
@@ -2192,24 +2193,28 @@ pub(crate) fn slide_notes<T: ReadTxn>(slide: &MapRef, txn: &T, package: &PptxPac
 }
 
 /// The slide's effective background: a stored override, an explicit clear, or
-/// the declaration on the source part.
+/// the declaration on the source part, and whether an edit decided it. A stored
+/// fill the writer could not serialize, as a peer may send, is ignored.
 pub(crate) fn slide_background<T: ReadTxn>(
     slide: &MapRef,
     txn: &T,
     package: &PptxPackage,
-) -> EditResult<Option<ShapeFill>> {
-    if let Some(background) = optional_json::<ShapeFill, _>(slide, txn, "backgroundJson")? {
-        return Ok(Some(background));
+) -> EditResult<(Option<ShapeFill>, bool)> {
+    if let Some(background) = optional_json::<ShapeFill, _>(slide, txn, "backgroundJson")?
+        && validate_background(&background).is_ok()
+    {
+        return Ok((Some(background), true));
     }
     if map_bool(slide, txn, "backgroundCleared") == Some(true) {
-        return Ok(None);
+        return Ok((None, true));
     }
     let source_part_path = map_string(slide, txn, "sourcePartPath");
-    Ok(package
+    let source = package
         .slides
         .iter()
         .find(|source| Some(&source.part_path) == source_part_path.as_ref())
-        .and_then(|source| source.background.clone()))
+        .and_then(|source| source.background.clone());
+    Ok((source, false))
 }
 
 /// Rejects backgrounds the writer cannot serialize; `theme` fills only come
@@ -2234,10 +2239,12 @@ pub(crate) fn validate_background(fill: &ShapeFill) -> EditResult<()> {
                     "a gradient background needs at least two stops".to_owned(),
                 ));
             }
-            if gradient.angle.is_some_and(|angle| !angle.is_finite()) {
-                return Err(EditError::InvalidFill(
-                    "the gradient angle is not a finite number".to_owned(),
-                ));
+            if let Some(angle) = gradient.angle
+                && !(0.0..21_600_000.0).contains(&(angle * 60_000.0).round())
+            {
+                return Err(EditError::InvalidFill(format!(
+                    "gradient angle {angle} is outside 0..360 degrees"
+                )));
             }
             for stop in &gradient.stops {
                 if !stop.position.is_finite() || !(0.0..=100_000.0).contains(&stop.position) {
@@ -2303,6 +2310,10 @@ fn known_scheme_color(color: &str) -> bool {
             | "tx1"
             | "bg2"
             | "tx2"
+            | "dk1"
+            | "lt1"
+            | "dk2"
+            | "lt2"
             | "accent1"
             | "accent2"
             | "accent3"
@@ -2511,6 +2522,7 @@ fn baseline_slide(
         name: slide.name.clone(),
         notes: slide.notes.clone(),
         background: slide.background.clone(),
+        background_edited: false,
         shapes,
     })
 }

@@ -1164,7 +1164,14 @@ fn plan_background(
     if let Some(fill) = &fill {
         validate_background(fill).map_err(|error| invalid(error, &requested))?;
     }
-    let effect = (slide.background != fill).then_some(Effect::Background(fill));
+    let changes = match &fill {
+        Some(_) => slide.background != fill,
+        None => {
+            slide.background.is_some()
+                || (!slide.background_edited && deck.declares_source_background(slide))
+        }
+    };
+    let effect = changes.then_some(Effect::Background(fill));
     Ok(Planned::property(
         index,
         requested,

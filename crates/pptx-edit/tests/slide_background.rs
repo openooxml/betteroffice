@@ -7,6 +7,8 @@ use pptx_edit::{
     GradientStop, ShapeFill, ShapeKind,
 };
 use serde_json::json;
+use yrs::updates::decoder::Decode;
+use yrs::{Doc, Map, MapRef, ReadTxn, Transact, Update};
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
@@ -40,15 +42,67 @@ fn gradient() -> ShapeFill {
 }
 
 fn gradient_with(stops: Vec<GradientStop>) -> ShapeFill {
+    angled(90.0, stops)
+}
+
+fn angled(angle: f64, stops: Vec<GradientStop>) -> ShapeFill {
     ShapeFill {
         fill_type: "gradient".to_owned(),
         color: None,
         gradient: Some(GradientFill {
             gradient_type: "linear".to_owned(),
-            angle: Some(90.0),
+            angle: Some(angle),
             stops,
         }),
     }
+}
+
+fn scheme(slot: &str) -> ShapeFill {
+    ShapeFill {
+        fill_type: "solid".to_owned(),
+        color: Some(ColorValue {
+            theme_color: Some(slot.to_owned()),
+            ..ColorValue::default()
+        }),
+        gradient: None,
+    }
+}
+
+/// `FIXTURE` with a pattern fill, which the model cannot hold, as the first slide's background.
+fn with_pattern_background() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    let source = String::from_utf8(xml.clone()).unwrap();
+    let solid = r#"<a:solidFill><a:srgbClr val="F8F7F2"/></a:solidFill>"#;
+    assert!(source.contains(solid));
+    *xml = source
+        .replace(
+            solid,
+            r#"<a:pattFill prst="pct20"><a:fgClr><a:srgbClr val="0F1720"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill>"#,
+        )
+        .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// A peer's update that stores `json` as the slide's background.
+fn remote_background(session: &DeckSession, client: u64, slide_id: &str, json: &str) -> Vec<u8> {
+    let doc = Doc::with_client_id(client);
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&session.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let mut txn = doc.transact_mut();
+    let slide = txn
+        .get_map("pptx:slides")
+        .unwrap()
+        .get(&txn, slide_id)
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap();
+    slide.insert(&mut txn, "backgroundJson", json);
+    txn.encode_update_v1()
 }
 
 fn background_of(session: &DeckSession, index: usize) -> Option<ShapeFill> {
@@ -238,6 +292,13 @@ fn invalid_backgrounds_are_refused_before_saving() {
                 color: ColorValue::default(),
             },
         ]),
+        angled(-1.0, vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")]),
+        angled(360.0, vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")]),
+        angled(
+            359.999_999_9,
+            vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")],
+        ),
+        angled(400.0, vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")]),
     ];
     for fill in cases {
         let error = session
@@ -308,4 +369,99 @@ fn a_duplicated_slide_keeps_its_background() {
     let snapshot = reopened.snapshot().unwrap();
     assert_eq!(snapshot.slides[0].background, Some(solid("0F1720")));
     assert_eq!(snapshot.slides[1].background, Some(solid("0F1720")));
+}
+
+#[test]
+fn every_scheme_slot_is_a_settable_background_colour() {
+    for (client, slot) in [
+        "dk1",
+        "lt1",
+        "dk2",
+        "lt2",
+        "background1",
+        "text2",
+        "accent6",
+        "folHlink",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = DeckSession::open(FIXTURE, 40 + client as u64 * 2).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        session
+            .set_slide_background(&context(), &slide_id, Some(&scheme(slot)))
+            .unwrap();
+        let reopened = DeckSession::open(&session.save().unwrap(), 41 + client as u64 * 2).unwrap();
+        assert_eq!(background_of(&reopened, 0), Some(scheme(slot)), "{slot}");
+    }
+}
+
+#[test]
+fn a_gradient_angle_on_the_last_degree_round_trips() {
+    let session = DeckSession::open(FIXTURE, 60).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let fill = angled(359.5, vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")]);
+    session
+        .set_slide_background(&context(), &slide_id, Some(&fill))
+        .unwrap();
+    let saved = session.save().unwrap();
+    assert!(part_text(&saved, &slide_part(&session, 0)).contains(r#"ang="21570000""#));
+    assert_eq!(
+        background_of(&DeckSession::open(&saved, 61).unwrap(), 0),
+        Some(fill)
+    );
+}
+
+#[test]
+fn a_remote_background_the_writer_cannot_serialize_falls_back_to_the_source() {
+    let session = DeckSession::open(FIXTURE, 62).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let before = background_of(&session, 0);
+    let declared = part_text(&session.save().unwrap(), &slide_part(&session, 0));
+    for (client, json) in [
+        r#"{"type":"theme","color":{"themeColor":"accent1"}}"#,
+        r#"{"type":"solid","color":{"rgb":"nothex"}}"#,
+        r#"{"type":"solid","color":{"themeColor":"not-a-slot"}}"#,
+        r#"{"type":"gradient","gradient":{"type":"linear","angle":-90,"stops":[{"position":0,"color":{"rgb":"0F1720"}},{"position":100000,"color":{"rgb":"0F766E"}}]}}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let update = remote_background(&session, 70 + client as u64, &slide_id, json);
+        session.apply_update_v1(&update).unwrap();
+        assert_eq!(background_of(&session, 0), before, "{json}");
+        let saved = session.save().unwrap();
+        assert_eq!(part_text(&saved, &slide_part(&session, 0)), declared, "{json}");
+    }
+}
+
+#[test]
+fn clearing_a_background_the_model_cannot_hold_removes_the_declaration() {
+    let source = with_pattern_background();
+    let direct = DeckSession::open(&source, 63).unwrap();
+    let slide_id = direct.snapshot().unwrap().slides[0].id.clone();
+    assert_eq!(background_of(&direct, 0), None);
+    assert!(part_text(&direct.save().unwrap(), &slide_part(&direct, 0)).contains("<a:pattFill"));
+    direct
+        .set_slide_background(&context(), &slide_id, None)
+        .unwrap();
+    let saved = direct.save().unwrap();
+    assert!(!part_text(&saved, &slide_part(&direct, 0)).contains("<p:bg>"));
+
+    let batched = DeckSession::open(&source, 64).unwrap();
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": batched.version(),
+        "steps": [{
+            "op": "setSlideBackground",
+            "target": {"slideId": slide_id},
+            "background": null,
+            "expect": {"background": null}
+        }]
+    }))
+    .unwrap();
+    let application = batched.apply_edits(&request).unwrap().unwrap();
+    assert!(application.applied);
+    assert_eq!(application.changed_slides, vec![slide_id.clone()]);
+    let saved = batched.save().unwrap();
+    assert!(!part_text(&saved, &slide_part(&batched, 0)).contains("<p:bg>"));
 }

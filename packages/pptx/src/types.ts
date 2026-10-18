@@ -179,6 +179,8 @@ export interface SlideSnapshot {
   notes?: string;
   /** The slide's own background; absent when it inherits the layout's. */
   background?: ShapeFill;
+  /** `true` once an edit set or cleared the background the file declares. */
+  backgroundEdited?: boolean;
   shapes: ShapeSnapshot[];
 }
 
