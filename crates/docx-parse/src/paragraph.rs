@@ -821,9 +821,9 @@ fn parse_simple_field_composed(
         field_type: parse_field_type(&instruction),
         instruction,
         content,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("1" | "true"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("1" | "true")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         structured_result,
         field_tree,
     })
@@ -1317,11 +1317,12 @@ pub fn apply_shape_metadata(shape: &mut Shape, drawing: &XmlElement) {
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(4096).collect::<String>());
     let decorative = doc_properties
-        .is_some_and(|element| element.attribute(None, "decorative") == Some("1"))
+        .is_some_and(|element| element.parse_boolean_attribute(None, "decorative") == Some(true))
         || find_descendant_by_name(drawing, "adec:decorative", 0).is_some();
     let hidden = doc_properties
-        .is_some_and(|element| element.attribute(None, "hidden") == Some("1"))
-        || non_visual.is_some_and(|element| element.attribute(None, "hidden") == Some("1"));
+        .is_some_and(|element| element.parse_boolean_attribute(None, "hidden") == Some(true))
+        || non_visual
+            .is_some_and(|element| element.parse_boolean_attribute(None, "hidden") == Some(true));
     let relative_height = find_descendant_by_name(drawing, "wp:anchor", 0)
         .and_then(|anchor| anchor.attribute(None, "relativeHeight"))
         .and_then(|raw| raw.parse::<f64>().ok())

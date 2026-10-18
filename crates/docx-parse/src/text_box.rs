@@ -228,7 +228,7 @@ fn parse_body_properties(
         }
         .map(str::to_owned),
         rotation: rot_to_degrees(body.attribute(None, "rot")).filter(safe_number),
-        upright: (body.attribute(None, "upright") == Some("1")).then_some(true),
+        upright: (body.parse_boolean_attribute(None, "upright") == Some(true)).then_some(true),
         anchor: match body.attribute(None, "anchor") {
             Some("t") => Some("top"),
             Some("ctr") => Some("middle"),
@@ -238,7 +238,8 @@ fn parse_body_properties(
             _ => None,
         }
         .map(str::to_owned),
-        anchor_center: (body.attribute(None, "anchorCtr") == Some("1")).then_some(true),
+        anchor_center: (body.parse_boolean_attribute(None, "anchorCtr") == Some(true))
+            .then_some(true),
         columns: safe_numeric_attribute(Some(body), "numCol"),
         column_spacing: safe_numeric_attribute(Some(body), "spcCol"),
         wrap: match body.attribute(None, "wrap") {
@@ -272,7 +273,8 @@ fn parse_body_properties(
         },
         font_scale: safe_numeric_attribute(normal, "fontScale"),
         line_spacing_reduction: safe_numeric_attribute(normal, "lnSpcReduction"),
-        from_word_art: (body.attribute(None, "fromWordArt") == Some("1")).then_some(true),
+        from_word_art: (body.parse_boolean_attribute(None, "fromWordArt") == Some(true))
+            .then_some(true),
         preset_text_warp: child("prstTxWarp")
             .and_then(|element| element.attribute(None, "prst"))
             .map(str::to_owned),

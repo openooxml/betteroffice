@@ -437,6 +437,19 @@ impl XmlElement {
             .find_map(|name| self.attributes.get(*name).map(String::as_str))
     }
 
+    pub fn parse_boolean_attribute(&self, namespace: Option<&str>, name: &str) -> Option<bool> {
+        parse_on_off(self.attribute(namespace, name)?)
+    }
+
+    pub(crate) fn parse_boolean_attribute_or_false(
+        &self,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Option<bool> {
+        self.attribute(namespace, name)
+            .map(|value| parse_on_off(value).unwrap_or(false))
+    }
+
     pub fn text_content(&self) -> String {
         let mut text = String::new();
         self.append_text(&mut text);
@@ -482,10 +495,7 @@ impl XmlElement {
     }
 
     pub fn parse_boolean(&self, namespace: &str) -> bool {
-        !matches!(
-            self.attribute(Some(namespace), "val"),
-            Some("0" | "false" | "off")
-        )
+        self.parse_boolean_attribute(Some(namespace), "val") != Some(false)
     }
 
     pub fn find_deep(&self, namespace: &str, local: &str) -> Option<&XmlElement> {
@@ -601,6 +611,20 @@ impl XmlElement {
         output.push_str("</");
         output.push_str(&self.name);
         output.push('>');
+    }
+}
+
+pub fn parse_on_off(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on") {
+        Some(true)
+    } else if value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("off")
+    {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -1677,6 +1701,47 @@ fn escape_attribute(value: &str, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_on_off_values() {
+        for (value, expected) in [
+            ("1", Some(true)),
+            ("true", Some(true)),
+            ("on", Some(true)),
+            ("ON", Some(true)),
+            ("0", Some(false)),
+            ("false", Some(false)),
+            ("off", Some(false)),
+            ("FALSE", Some(false)),
+            ("Off", Some(false)),
+            (" \tTrUe\r\n", Some(true)),
+            (" off ", Some(false)),
+            ("garbage", None),
+            ("", None),
+            ("   ", None),
+        ] {
+            assert_eq!(parse_on_off(value), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn parses_boolean_attributes() {
+        let doc = parse(
+            r#"<w:spacing w:beforeAutospacing=" On " w:afterAutospacing="off" invalid="garbage"/>"#,
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        assert_eq!(
+            root.parse_boolean_attribute(Some("w"), "beforeAutospacing"),
+            Some(true)
+        );
+        assert_eq!(
+            root.parse_boolean_attribute(Some("w"), "afterAutospacing"),
+            Some(false)
+        );
+        assert_eq!(root.parse_boolean_attribute(None, "invalid"), None);
+        assert_eq!(root.parse_boolean_attribute(None, "missing"), None);
+    }
 
     #[test]
     fn twips_measures_convert_supported_units_and_validate_the_entire_value() {
