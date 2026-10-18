@@ -3351,7 +3351,12 @@ impl<'a> Exporter<'a> {
             "opaqueDrawing" => {
                 let element =
                     super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());
-                let preview = any_map(payload.get("preview"));
+                let preview = any_map(payload.get("preview")).or_else(|| {
+                    let Any::Array(previews) = payload.get("previews")? else {
+                        return None;
+                    };
+                    any_map(previews.first())
+                });
                 self.note(
                     DiagnosticCode::UnsupportedContent,
                     Severity::Warning,

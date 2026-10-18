@@ -26,7 +26,7 @@ use crate::shape::{
 use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art_from_drawing};
 use crate::styles::{DocDefaults, StyleMap};
 use crate::theme::Theme;
-use crate::vml::{parse_horizontal_rule, vml_image_content};
+use crate::vml::{parse_horizontal_rule, vml_image_content, vml_image_contents};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode, parse_javascript_integer_prefix};
 
 const MAX_HEX_ID_EXCLUSIVE: u32 = 0x7fff_ffff;
@@ -1084,9 +1084,10 @@ pub(crate) fn parse_run_composed(
                     drawing.as_deref_mut(),
                     in_header_footer,
                 )?;
-                let modeled = parsed
-                    .iter()
-                    .any(|content| !matches!(content, RunContent::OpaqueDrawing { .. }));
+                let modeled = parsed.iter().any(|content| match content {
+                    RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
+                    _ => true,
+                });
                 if !modeled && !alternate_content_has_text_box(child) {
                     let preview = parsed.into_iter().find_map(|content| match content {
                         RunContent::OpaqueDrawing { preview, .. } => preview,
@@ -1096,6 +1097,7 @@ pub(crate) fn parse_run_composed(
                         kind: "alternateContent".to_owned(),
                         xml: child.to_raw_inline_xml(),
                         preview,
+                        previews: Vec::new(),
                     }]);
                 } else {
                     replacements.push(parsed);
@@ -1131,17 +1133,30 @@ fn parse_drawing_owned(
             }]);
         }
         let media = drawing.as_ref().map(|context| context.media);
-        if has_ole_object(element, 0) {
+        if element.local_name() == "object" || has_ole_object(element, 0) {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: element.local_name().to_owned(),
                 xml: element.to_raw_inline_xml(),
                 preview: vml_image_content(element, relationships, media, Some(budget))
                     .map(Box::new),
+                previews: Vec::new(),
             }]);
         }
-        if let Some(image) = vml_image_content(element, relationships, media, Some(budget)) {
-            return Ok(vec![RunContent::Drawing {
-                image: Box::new(image),
+        let images = vml_image_contents(element, relationships, media, Some(budget));
+        if images.len() == 1 && find_descendant_by_name(element, "v:group", 0).is_none() {
+            return Ok(images
+                .into_iter()
+                .map(|image| RunContent::Drawing {
+                    image: Box::new(image),
+                })
+                .collect());
+        }
+        if !images.is_empty() {
+            return Ok(vec![RunContent::OpaqueDrawing {
+                kind: element.local_name().to_owned(),
+                xml: element.to_raw_inline_xml(),
+                preview: None,
+                previews: images,
             }]);
         }
         if !has_vml_image_data(element, 0) || !in_header_footer {
@@ -1149,6 +1164,7 @@ fn parse_drawing_owned(
                 kind: element.local_name().to_owned(),
                 xml: element.to_raw_inline_xml(),
                 preview: None,
+                previews: Vec::new(),
             }]);
         }
         return Ok(Vec::new());
@@ -1164,6 +1180,7 @@ fn parse_drawing_owned(
                 kind: "drawing".to_owned(),
                 xml: element.to_raw_inline_xml(),
                 preview: None,
+                previews: Vec::new(),
             }]);
         }
         DrawingChart::None => {}
@@ -1285,7 +1302,7 @@ fn has_vml_image_data(element: &XmlElement, depth: usize) -> bool {
         .any(|child| child.local_name() == "imagedata" || has_vml_image_data(child, depth + 1))
 }
 
-fn has_ole_object(element: &XmlElement, depth: usize) -> bool {
+pub(crate) fn has_ole_object(element: &XmlElement, depth: usize) -> bool {
     if depth > 64 {
         return false;
     }
@@ -1711,6 +1728,53 @@ mod tests {
     }
 
     #[test]
+    fn vml_group_pictures_keep_mapped_geometry_and_separate_picts() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:r><w:pict><v:group coordorigin="100,200" coordsize="1200,600" style="position:absolute;margin-left:12pt;margin-top:24pt;width:300pt;height:90pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"><v:shape style="position:absolute;left:100;top:200;width:300;height:150"><v:imagedata r:id="rId1"/></v:shape><v:shape style="position:absolute;left:500;top:250;width:360;height:200"><v:imagedata r:id="rId2"/></v:shape><v:shape style="position:absolute;left:900;top:400;width:240;height:300"><v:imagedata r:id="rId3"/></v:shape></v:group></w:pict><w:pict><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rId4"/></v:shape></w:pict></w:r></w:p>"#,
+        );
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[0] else {
+            panic!("expected picture run");
+        };
+        let images: Vec<_> = run
+            .content
+            .iter()
+            .flat_map(|content| match content {
+                RunContent::Drawing { image } => vec![&**image],
+                RunContent::OpaqueDrawing { previews, .. } => previews.iter().collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(images.len(), 4);
+        for (image, (id, x, y, width, height)) in images.iter().zip([
+            ("rId1", 16.0, 32.0, 100.0, 30.0),
+            ("rId2", 16.0 + 400.0 / 3.0, 42.0, 120.0, 40.0),
+            ("rId3", 16.0 + 800.0 / 3.0, 72.0, 80.0, 60.0),
+        ]) {
+            assert_eq!(image.relationship_id, id);
+            assert_eq!(image.size.width, (width * 9_525.0_f64).round());
+            assert_eq!(image.size.height, (height * 9_525.0_f64).round());
+            let position = image.position.as_ref().unwrap();
+            assert_eq!(position.horizontal.relative_to, "page");
+            assert_eq!(position.vertical.relative_to, "page");
+            assert_eq!(
+                position.horizontal.pos_offset,
+                Some((x * 9_525.0_f64).round())
+            );
+            assert_eq!(
+                position.vertical.pos_offset,
+                Some((y * 9_525.0_f64).round())
+            );
+            assert_eq!(position.horizontal.offset, position.horizontal.pos_offset);
+            assert_eq!(position.vertical.offset, position.vertical.pos_offset);
+        }
+        assert_eq!(images[3].relationship_id, "rId4");
+        assert_eq!(images[3].size.width, 914_400.0);
+        assert_eq!(images[3].size.height, 457_200.0);
+        assert_eq!(images[3].wrap.wrap_type, "inline");
+        assert_eq!(images[3].position, None);
+    }
+
+    #[test]
     fn unmodeled_drawings_survive_as_opaque_drawings() {
         let paragraph = parse(
             r#"<w:p xmlns:w="w" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml">
@@ -1768,7 +1832,10 @@ mod tests {
                 panic!("expected OLE run");
             };
             assert_eq!(run.content.len(), 1);
-            let RunContent::OpaqueDrawing { kind, xml, preview } = &run.content[0] else {
+            let RunContent::OpaqueDrawing {
+                kind, xml, preview, ..
+            } = &run.content[0]
+            else {
                 panic!("expected opaque AlternateContent");
             };
             assert_eq!(kind, "alternateContent");
@@ -1802,9 +1869,9 @@ mod tests {
                 run.content
                     .iter()
                     .filter_map(|content| match content {
-                        RunContent::OpaqueDrawing { kind, xml, preview } => {
-                            Some((kind.as_str(), xml.as_str(), preview.as_deref()))
-                        }
+                        RunContent::OpaqueDrawing {
+                            kind, xml, preview, ..
+                        } => Some((kind.as_str(), xml.as_str(), preview.as_deref())),
                         _ => None,
                     })
                     .collect::<Vec<_>>()

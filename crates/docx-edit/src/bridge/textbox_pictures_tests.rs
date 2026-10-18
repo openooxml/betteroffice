@@ -158,6 +158,45 @@ fn shown_anchor_pages(display: &Value, layout: &Value, anchor_text: &str) -> Vec
 }
 
 #[test]
+fn vml_group_pictures_paint_at_mapped_positions() {
+    let content = r#"<w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:group coordorigin="100,200" coordsize="1200,600" style="position:absolute;margin-left:12pt;margin-top:24pt;width:300pt;height:90pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"><v:shape alt="first" style="position:absolute;left:100;top:200;width:300;height:150"><v:imagedata r:id="rId9"/></v:shape><v:shape alt="second" style="position:absolute;left:500;top:250;width:360;height:200"><v:imagedata r:id="rId9"/></v:shape><v:shape alt="third" style="position:absolute;left:900;top:400;width:240;height:300"><v:imagedata r:id="rId9"/></v:shape></v:group></w:pict><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape alt="separate" style="width:12pt;height:6pt"><v:imagedata r:id="rId9"/></v:shape></w:pict>"#;
+    for media_tokens in [true, false] {
+        let painted = primitives(content, false, media_tokens);
+        let pictures = images(&painted);
+        assert_eq!(pictures.len(), 4);
+        for (alt, x, y, width, height) in [
+            ("first", 16.0, 32.0, 100.0, 30.0),
+            ("second", 16.0 + 400.0 / 3.0, 42.0, 120.0, 40.0),
+            ("third", 16.0 + 800.0 / 3.0, 72.0, 80.0, 60.0),
+        ] {
+            let image = pictures
+                .iter()
+                .find(|image| image["altText"] == alt)
+                .unwrap();
+            for (key, expected) in [("x", x), ("y", y), ("w", width), ("h", height)] {
+                assert!((image[key].as_f64().unwrap() - expected).abs() <= 0.5);
+            }
+            if media_tokens {
+                assert_eq!(image["relId"], "media:0");
+            } else {
+                assert!(
+                    image["relId"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("data:image/png;base64,")
+                );
+            }
+        }
+        let separate = pictures
+            .iter()
+            .find(|image| image["altText"] == "separate")
+            .unwrap();
+        assert_eq!(separate["w"], 16);
+        assert_eq!(separate["h"], 8);
+    }
+}
+
+#[test]
 fn inline_picture_in_text_box_paints_with_body_image_properties() {
     for media_tokens in [true, false] {
         let boxed = primitives(PICTURE, true, media_tokens);

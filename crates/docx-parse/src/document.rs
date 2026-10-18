@@ -901,10 +901,11 @@ pub fn is_empty_paragraph(paragraph: &Paragraph) -> bool {
             matches!(
                 content,
                 ParagraphContent::Inline(InlineNode::Run(run))
-                    if run.content.iter().any(|content| matches!(
-                        content,
-                        RunContent::Drawing { .. } | RunContent::Shape { .. }
-                    ))
+                    if run.content.iter().any(|content| match content {
+                        RunContent::Drawing { .. } | RunContent::Shape { .. } => true,
+                        RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
+                        _ => false,
+                    })
             )
         })
 }
@@ -1483,6 +1484,17 @@ mod tests {
         assert!(sections[0].content.is_empty());
         assert_eq!(sections[0].properties.page_width, Some(12_240.0));
         assert!(body.final_section_properties.is_none());
+    }
+
+    #[test]
+    fn vml_group_paragraph_is_not_empty() {
+        let body = parse(
+            r#"<w:document xmlns:w="w" xmlns:v="v" xmlns:r="r"><w:body><w:p><w:r><w:pict><v:group style="width:100px;height:100px"><v:shape style="width:500;height:500"><v:imagedata r:id="rId1"/></v:shape><v:shape style="width:500;height:500"><v:imagedata r:id="rId2"/></v:shape></v:group></w:pict></w:r></w:p></w:body></w:document>"#,
+        );
+        let BlockContent::Paragraph(paragraph) = &body.content[0] else {
+            panic!("expected paragraph");
+        };
+        assert!(!is_empty_paragraph(paragraph));
     }
 
     #[test]

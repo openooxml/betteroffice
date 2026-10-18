@@ -2516,6 +2516,12 @@ fn run_content_to_units(
             {
                 payload.insert("preview".to_owned(), json!(image_payload(preview)));
             }
+            if let Some(previews) = field(Some(content), "previews").and_then(Value::as_array) {
+                payload.insert(
+                    "previews".to_owned(),
+                    json!(previews.iter().map(image_payload).collect::<Vec<_>>()),
+                );
+            }
             vec![embed_unit(
                 "opaqueDrawing",
                 payload,

@@ -183,11 +183,11 @@ pub(crate) fn serialize_deleted_run(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let xml = serialize_run(run, context)?;
-    if run
-        .content
-        .iter()
-        .any(|content| matches!(content, RunContent::Drawing { .. }))
-    {
+    if run.content.iter().any(|content| match content {
+        RunContent::Drawing { .. } => true,
+        RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
+        _ => false,
+    }) {
         return Ok(xml);
     }
     Ok(xml
@@ -1434,6 +1434,25 @@ mod tests {
         let next_id = first.allocate_drawing_id();
         assert_eq!(next_id, second.allocate_drawing_id());
         assert_ne!(first_id, next_id);
+    }
+
+    #[test]
+    fn deleted_vml_group_replays_its_intact_textbox_xml() {
+        let xml = r#"<w:pict><v:group><v:shape><v:imagedata r:id="rId1"/></v:shape><v:rect><v:textbox><w:txbxContent><w:p><w:r><w:t>inner</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></v:group></w:pict>"#;
+        let run = Run {
+            node_type: RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![RunContent::OpaqueDrawing {
+                kind: "pict".to_owned(),
+                xml: xml.to_owned(),
+                preview: None,
+                previews: vec![crate::image::placeholder_image("rId1")],
+            }],
+        };
+        let saved = serialize_deleted_run(&run, &mut context()).unwrap();
+        assert!(saved.contains(xml));
+        assert!(!saved.contains("w:delText"));
     }
 
     #[test]

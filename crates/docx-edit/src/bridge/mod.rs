@@ -33,7 +33,7 @@
 //! page content height, and the mapping from yrs ids to the numeric ids the
 //! layout contract uses — arrive in [`RenderEnv`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -1434,7 +1434,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(opaque, txn, "_kind").as_deref() == Some("opaqueDrawing") =>
             {
                 let values = shared_values(opaque, txn);
-                if let Some(preview) = values.get("preview").and_then(any_map) {
+                for preview in opaque_image_previews(&values) {
                     let formatting = lower_run_formatting(attributes, env);
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::Image(lower_image_values(preview, &formatting, env)),
@@ -1534,6 +1534,17 @@ pub fn yrsDocToLayoutBlocks(
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
     yrs_doc_to_layout_blocks(doc, story_id, env)
+}
+
+fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, Any>> {
+    let mut previews = Vec::new();
+    if let Some(preview) = values.get("preview").and_then(any_map) {
+        previews.push(preview);
+    }
+    if let Some(Any::Array(images)) = values.get("previews") {
+        previews.extend(images.iter().filter_map(any_map));
+    }
+    previews
 }
 
 /// The paragraph a field's paragraph joins because the field's code hides its mark, and the
@@ -2742,17 +2753,15 @@ fn lower_inline_sdt_values(
                 });
             }
             "image" | "opaqueDrawing" => {
-                let image = if kind == "opaqueDrawing" {
-                    payload
-                        .and_then(|payload| payload.get("preview"))
-                        .and_then(any_map)
+                let images = if kind == "opaqueDrawing" {
+                    payload.map(opaque_image_previews).unwrap_or_default()
                 } else {
-                    payload
+                    payload.into_iter().collect()
                 };
-                if let Some(payload) = image {
+                for payload in images {
                     runs.push(RawRun {
                         kind: RawRunKind::Image(lower_image_values(payload, &formatting, env)),
-                        formatting,
+                        formatting: formatting.clone(),
                         story_start: story_index,
                         story_end: story_index + 1,
                         pm_start: child_pm_start,

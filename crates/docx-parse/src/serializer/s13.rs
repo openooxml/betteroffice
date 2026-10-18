@@ -3345,6 +3345,111 @@ mod tests {
     }
 
     #[test]
+    fn selective_save_preserves_vml_group_xml_and_all_picture_children() {
+        let pict = r#"<w:pict><v:group coordorigin='100,200' coordsize='1200,600' style='width:300pt;height:90pt'><v:shape style='left:100;top:200;width:300;height:150'><v:imagedata r:id='rId1'/></v:shape>
+  <v:shape style='left:500;top:250;width:360;height:200'><v:imagedata r:id='rId2'/></v:shape><v:rect style='left:900;top:400;width:240;height:300'/></v:group></w:pict>"#;
+        for commented in [false, true] {
+            let markers = if commented {
+                r#"<w:commentRangeStart w:id="7"/><w:r><w:t>Tail</w:t></w:r><w:commentRangeEnd w:id="7"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="7"/></w:r>"#
+            } else {
+                ""
+            };
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p w14:paraId="AAAAAAAA"><w:r><w:t>Lead</w:t>{pict}</w:r>{markers}</w:p><w:p w14:paraId="BBBBBBBB"><w:r><w:t>Original</w:t></w:r></w:p></w:body></w:document>"#
+            );
+            let mut original_parts = part_map(&base_package(&xml));
+            if commented {
+                original_parts.insert(
+                    "word/comments.xml".to_owned(),
+                    br#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="7" w:author="Author"><w:p><w:r><w:t>Comment</w:t></w:r></w:p></w:comment></w:comments>"#.to_vec(),
+                );
+                for (path, bytes) in &mut original_parts {
+                    let addition = match path.as_str() {
+                        "[Content_Types].xml" => Some((
+                            "</Types>",
+                            r#"<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>"#,
+                        )),
+                        "word/_rels/document.xml.rels" => Some((
+                            "</Relationships>",
+                            r#"<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>"#,
+                        )),
+                        _ => None,
+                    };
+                    if let Some((closing, replacement)) = addition {
+                        *bytes = String::from_utf8_lossy(bytes)
+                            .replace(closing, replacement)
+                            .into_bytes();
+                    }
+                }
+            }
+            let original =
+                ooxml_opc::rezip_parts(&original_parts.into_iter().collect::<Vec<_>>()).unwrap();
+            let body = crate::s8::parse_docx_s8_projection(&original).unwrap().body;
+            let body = serde_json::to_value(body).unwrap();
+            let previews = &body["content"][0]["content"][0]["content"][1]["previews"];
+            assert_eq!(previews.as_array().unwrap().len(), 2);
+            if commented {
+                assert_eq!(body["content"][0]["content"][1]["offset"], json!(5.0));
+                assert_eq!(body["content"][0]["content"][3]["offset"], json!(9.0));
+            }
+            for mode in ["selective", "spliced", "full"] {
+                for changed in [None, Some(0), Some(1)] {
+                    let mut edited = body.clone();
+                    let mut changed_ids = Vec::new();
+                    let mut changed_ordinals = Vec::new();
+                    if let Some(index) = changed {
+                        edited["content"][index]["content"][0]["content"][0]["text"] =
+                            json!("Edit");
+                        changed_ids.push(if index == 0 { "AAAAAAAA" } else { "BBBBBBBB" });
+                        changed_ordinals.push(index);
+                    }
+                    let mut request = json!({
+                        "determinism": determinism(),
+                        "document": edited,
+                        "options": {"updateModifiedDate": false}
+                    });
+                    if mode == "selective" {
+                        request["selective"] = json!({"changedParaIds": changed_ids});
+                    } else if mode == "spliced" {
+                        request["document"]["content"][0]["sourceOrdinal"] = json!(0);
+                        request["document"]["content"][1]["sourceOrdinal"] = json!(1);
+                        request["paragraphIds"] = json!({"splicedParts": [{
+                            "part": "word/document.xml",
+                            "sha256": format!("{:x}", Sha256::digest(xml.as_bytes())),
+                            "paragraphs": [0, 1],
+                            "changed": changed_ordinals
+                        }]});
+                    }
+                    let request: S13SaveRequest = serde_json::from_value(request).unwrap();
+                    let saved = write_docx_s13(request, &original).unwrap();
+                    let parts = part_map(&saved);
+                    let document = String::from_utf8_lossy(&parts["word/document.xml"]);
+                    assert!(
+                        document.contains("<v:group coordorigin=")
+                            && document.contains("coordsize="),
+                        "{mode}, {changed:?}, {commented}"
+                    );
+                    assert_eq!(document.matches("<w:pict>").count(), 1);
+                    assert_eq!(document.matches("<v:group ").count(), 1);
+                    assert_eq!(document.matches("<v:imagedata ").count(), 2);
+                    assert!(!document.contains("<w:drawing"));
+                    if changed.is_some() {
+                        assert!(document.contains(">Edit</w:t>"));
+                    } else if mode != "full" {
+                        assert_eq!(document, xml);
+                    }
+                    let reopened = crate::s8::parse_docx_s8_projection(&saved).unwrap().body;
+                    let reopened = serde_json::to_value(reopened).unwrap();
+                    assert_eq!(
+                        reopened["content"][0]["content"],
+                        edited["content"][0]["content"]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn selective_patch_preserves_every_untouched_byte() {
         let original = concat!(
             "<?xml version=\"1.0\"?><w:document><w:body>",

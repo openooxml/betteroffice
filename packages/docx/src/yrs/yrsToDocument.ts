@@ -874,12 +874,16 @@ function opaqueDrawingRunFromPayload(
   const xml = asString(payload.xml);
   if (!kind || !xml) return null;
   const preview = asObject(payload.preview);
+  const previews = Array.isArray(payload.previews)
+    ? payload.previews.map(asObject).filter((image): image is Attrs => !!image).map(imageFromPayload)
+    : [];
   const formatting = format(attributes);
   return {
     type: 'run',
     content: [{
       type: 'opaqueDrawing', kind, xml,
       ...(preview ? { preview: imageFromPayload(preview) } : {}),
+      ...(previews.length ? { previews } : {}),
     }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };
