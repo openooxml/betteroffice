@@ -418,7 +418,7 @@ test('a collaborative worker crash reconnects once without losing edits or reusi
   const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
     registerSubstituteFont: () => 0, clearFonts() {} });
   const commandInit = yrs.ResidentEngineWorkerClient.prototype.commandInit;
-  const init = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'commandInit').mockImplementation(function (request) {
+  const init = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'commandInit').mockImplementation(function (this: yrs.ResidentEngineWorkerClient, request) {
     const at = { story: 'body', paraId: workers.at(-1)!.sessions.at(-1)!.paragraphs('body')[0]!.paraId, offset: 4 };
     return commandInit.call(this, { ...request, ...(request.incarnation === 1 ? { selection: { anchor: at, focus: at } } : {}),
       fonts: [new Uint8Array(readFileSync(resolve(import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')))],
@@ -428,15 +428,25 @@ test('a collaborative worker crash reconnects once without losing edits or reusi
   });
   const hooks = new Map<yrs.ResidentEngineWorkerClient, Set<unknown>>();
   const onCollabUpdates = yrs.ResidentEngineWorkerClient.prototype.onCollabUpdates;
-  const subscribe = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'onCollabUpdates').mockImplementation(function (listener) {
+  const subscribe = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'onCollabUpdates').mockImplementation(function (this: yrs.ResidentEngineWorkerClient, listener) {
     const listeners = hooks.get(this) ?? new Set();
     hooks.set(this, listeners); listeners.add(listener);
     const stop = onCollabUpdates.call(this, listener);
     return () => { listeners.delete(listener); stop(); };
   });
   let binding: PeerlessEditSessionBinding | undefined;
+  const canvases = new Map<string, HTMLCanvasElement>();
+  const canvasForPage = ({ pageId }: { pageId: string }) => {
+    let canvas = canvases.get(pageId);
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      Object.defineProperty(canvas, 'getContext', { value: () => ({ save() {}, restore() {}, setTransform() {}, clearRect() {}, drawImage() {} }) });
+      canvases.set(pageId, canvas);
+    }
+    return canvas;
+  };
   const surface = spyOn(paged, 'PeerlessPagedEditor').mockImplementation(function Surface({ sessionOptions, onReady }) {
-    const session = usePeerlessEditSession({ ...sessionOptions, canvasForPage: () => null, prepareGeometry: () => undefined });
+    const session = usePeerlessEditSession({ ...sessionOptions, canvasForPage });
     useLayoutEffect(() => {
       if (session.status === 'ready') { binding = session.binding; onReady?.(session.binding); }
     }, [session, onReady]);
@@ -470,7 +480,8 @@ test('a collaborative worker crash reconnects once without losing edits or reusi
   });
   const onError = mock(() => {});
   const view = render(<DocxEditor documentBuffer={bytes} showToolbar={false} collaboration={{ clientId: 9641, initialUpdate, onReplica }} onError={onError} />);
-  await waitFor(() => expect(provider?.synced && peerProvider.synced).toBe(true));
+  await waitFor(() => { expect(onError.mock.calls).toEqual([]); expect(binding).toBeDefined(); });
+  await waitFor(() => { expect(errors).toEqual([]); expect(provider?.synced && peerProvider.synced).toBe(true); });
   const original = onReplica.mock.calls[0]![0] as AsyncReplicaAdapter;
   const firstClient = [...hooks.keys()][0]!;
   for (let index = 0; index < 128; index++) {
@@ -504,7 +515,7 @@ test('a collaborative worker crash reconnects once without losing edits or reusi
   expect(await recovered.async.encodeStateVector()).toEqual(peer.encodeStateVector());
   expect(stateVectorClock(await recovered.async.encodeStateVector(), recovered.clientId)).toBeGreaterThan(
     recovered.clientId === original.clientId ? watermark : 0);
-  expect(editorWire.sent.flatMap(decodeMessages).filter(message => message.type === 'sync-step-1')).toHaveLength(2);
+  expect(editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1')).toHaveLength(2);
   expect(editorWire.listeners.size).toBe(1);
   expect(errors).toEqual([]);
   expect(onError).not.toHaveBeenCalled();
