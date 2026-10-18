@@ -19,11 +19,20 @@ test('Document callbacks require a literal sync opt-in', () => {
     { onChange } satisfies DocxEditorProps,
     // @ts-expect-error
     { experimentalWorkerOpen: true, onChange } satisfies DocxEditorProps,
+    // @ts-expect-error
+    <DocxEditor experimentalWorkerOpen={flag} onChange={onChange} />,
   ];
   const asyncProps: DocxAsyncEditorProps = { onDocumentChange() {} };
   const legacy: DocxLegacyEditorProps = { [LEGACY_SYNC_API_PROP]: true, onChange };
   const inThread: DocxInThreadEditorProps = { experimentalWorkerOpen: false, onChange };
   expect([asyncProps, legacy, inThread]).toHaveLength(3);
+  expect(check).toBeFunction();
+});
+
+test('experimentalWorkerOpen accepts a computed boolean', () => {
+  const check = (flag: boolean) => (
+    <DocxEditor experimentalWorkerOpen={flag} documentBuffer={null} onDocumentChange={() => {}} onSave={() => {}} />
+  );
   expect(check).toBeFunction();
 });
 
