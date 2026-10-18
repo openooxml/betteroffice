@@ -1,6 +1,15 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { useEffect, useLayoutEffect, useState } from 'react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
+import { preloadEditWasm } from '@betteroffice/docx/yrs/wasm/index';
+import { preloadOpcWasm } from '@betteroffice/docx/wasm/opc';
+import { CollaborationProvider, type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
+import { decodeMessages, stateVectorClock } from '@betteroffice/docx/collaboration/protocol';
+import { usePeerlessEditSession } from '../hooks/usePeerlessEditSession';
 import * as yrs from '@betteroffice/docx/yrs';
 import * as peerless from '@betteroffice/docx/peerless';
 import * as measurement from '@betteroffice/docx/layout';
@@ -364,3 +373,143 @@ test('the default editor publishes an async replica whose sync reads name the as
   expect(warn.mock.calls.map(([message]) => String(message)).filter(message => message.includes('collaboration'))).toEqual([]);
   view.unmount();
 });
+
+
+class RecoveryTransport implements CollaborationTransport {
+  peer?: RecoveryTransport;
+  readonly sent: Uint8Array[] = [];
+  readonly listeners = new Set<(event: CollaborationTransportEvent) => void>();
+  connect() {}
+  disconnect() {}
+  send(data: Uint8Array) {
+    this.sent.push(data);
+    queueMicrotask(() => this.peer?.emit({ type: 'message', data }));
+    return true;
+  }
+  onEvent(listener: (event: CollaborationTransportEvent) => void) {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  emit(event: CollaborationTransportEvent) { for (const listener of [...this.listeners]) listener(event); }
+}
+
+test('a collaborative worker crash reconnects once without losing edits or reusing clocks', async () => {
+  const generated = resolve(import.meta.dir, '../../../../../docx/src/wasm/generated');
+  await preloadEditWasm(new Uint8Array(readFileSync(resolve(generated, 'edit/docx_edit_bg.wasm'))));
+  await preloadOpcWasm(new Uint8Array(readFileSync(resolve(generated, 'opc/ooxml_opc_bg.wasm'))));
+  const start = await residentWorkerFactory({ transferBuffers: true });
+  const workers: InProcessResidentWorker[] = [];
+  const workerDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  setMissingWorkerCapabilitiesForTests([]);
+  Object.defineProperty(globalThis, 'Worker', { configurable: true, value: class {
+    constructor() { const worker = start(); workers.push(worker); return worker; }
+  } });
+  restores.push(() => {
+    for (const worker of workers) worker.terminate();
+    if (workerDescriptor) Object.defineProperty(globalThis, 'Worker', workerDescriptor);
+    else Reflect.deleteProperty(globalThis, 'Worker');
+  });
+  const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map([
+    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/document.xml', toBytes('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:sectPr/></w:body></w:document>')],
+  ])));
+  const requirements = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'fontRequirements').mockResolvedValue('[]');
+  const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
+    registerSubstituteFont: () => 0, clearFonts() {} });
+  const commandInit = yrs.ResidentEngineWorkerClient.prototype.commandInit;
+  const init = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'commandInit').mockImplementation(function (request) {
+    const at = { story: 'body', paraId: workers.at(-1)!.sessions.at(-1)!.paragraphs('body')[0]!.paraId, offset: 4 };
+    return commandInit.call(this, { ...request, ...(request.incarnation === 1 ? { selection: { anchor: at, focus: at } } : {}),
+      fonts: [new Uint8Array(readFileSync(resolve(import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')))],
+      layoutInput: JSON.stringify({ bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
+        measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, fontChains: { 'liberation sans|0|0': [0] } }, renderEnv: {} }),
+    });
+  });
+  const hooks = new Map<yrs.ResidentEngineWorkerClient, Set<unknown>>();
+  const onCollabUpdates = yrs.ResidentEngineWorkerClient.prototype.onCollabUpdates;
+  const subscribe = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'onCollabUpdates').mockImplementation(function (listener) {
+    const listeners = hooks.get(this) ?? new Set();
+    hooks.set(this, listeners); listeners.add(listener);
+    const stop = onCollabUpdates.call(this, listener);
+    return () => { listeners.delete(listener); stop(); };
+  });
+  let binding: PeerlessEditSessionBinding | undefined;
+  const surface = spyOn(paged, 'PeerlessPagedEditor').mockImplementation(function Surface({ sessionOptions, onReady }) {
+    const session = usePeerlessEditSession({ ...sessionOptions, canvasForPage: () => null, prepareGeometry: () => undefined });
+    useLayoutEffect(() => {
+      if (session.status === 'ready') { binding = session.binding; onReady?.(session.binding); }
+    }, [session, onReady]);
+    return null;
+  });
+  restores.push(() => requirements.mockRestore(), () => textEngine.mockRestore(), () => init.mockRestore(),
+    () => subscribe.mockRestore(), () => surface.mockRestore());
+  const peer = await yrs.createYrsSession({ clientId: 9642 });
+  restores.push(() => peer.destroy());
+  peer.openDocx(bytes, true);
+  const initialUpdate = peer.encodeStateAsUpdate();
+  const editorWire = new RecoveryTransport(), peerWire = new RecoveryTransport();
+  editorWire.peer = peerWire; peerWire.peer = editorWire;
+  const peerProvider = new CollaborationProvider(peer, peerWire);
+  let provider: CollaborationProvider | undefined;
+  const errors: Error[] = [];
+  peerProvider.onError(error => errors.push(error));
+  peerProvider.connect();
+  restores.push(() => { provider?.destroy(); peerProvider.destroy(); });
+  let down = false;
+  const onReplica = mock((replica: CollaborationReplica | null) => {
+    provider?.destroy(); provider = undefined;
+    if (!replica) {
+      if (down) peer.insertText({ story: 'body', paraId: peer.paragraphs('body')[0]!.paraId, offset: 0 }, 'remote ');
+      return;
+    }
+    provider = new CollaborationProvider(replica, editorWire);
+    provider.onError(error => errors.push(error));
+    provider.connect();
+    editorWire.emit({ type: 'open' }); peerWire.emit({ type: 'open' });
+  });
+  const onError = mock(() => {});
+  const view = render(<DocxEditor documentBuffer={bytes} showToolbar={false} collaboration={{ clientId: 9641, initialUpdate, onReplica }} onError={onError} />);
+  await waitFor(() => expect(provider?.synced && peerProvider.synced).toBe(true));
+  const original = onReplica.mock.calls[0]![0] as AsyncReplicaAdapter;
+  const firstClient = [...hooks.keys()][0]!;
+  for (let index = 0; index < 128; index++) {
+    await act(async () => { expect((await binding!.session.submit('insertText', { text: '.' }).ack).status).toBe('applied'); });
+  }
+  await waitFor(() => expect(workers[0]!.requests).toContain('checkpoint'));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  await act(async () => { expect((await binding!.session.submit('insertText', { text: ' acked' }).ack).status).toBe('applied'); });
+  await waitFor(() => expect(peer.paragraphs('body')[0]!.text).toContain(' acked'));
+  const watermark = stateVectorClock(await original.async.encodeStateVector(), original.clientId);
+  expect(watermark).toBeGreaterThan(0);
+  down = true;
+  await act(async () => { workers[0]!.onerror?.({ message: 'Worker crashed' } as ErrorEvent); });
+  await waitFor(() => expect(onReplica.mock.calls.filter(([replica]) => replica)).toHaveLength(2));
+  expect(onReplica.mock.calls.map(([replica]) => replica === null)).toEqual([false, true, false]);
+  expect(workers).toHaveLength(2);
+  expect(workers.map(worker => worker.requests.filter(type => type === 'openSource').length)).toEqual([1, 1]);
+  expect(workers.map(worker => worker.requests.filter(type => type === 'commandInit').length)).toEqual([1, 1]);
+  expect(hooks.get(firstClient)?.size).toBe(0);
+  await expect(original.async.encodeStateVector()).rejects.toThrow('retired');
+  await waitFor(() => expect(provider?.synced && peerProvider.synced).toBe(true));
+  const recovered = onReplica.mock.calls.at(-1)![0] as AsyncReplicaAdapter;
+  const clock = stateVectorClock(await recovered.async.encodeStateVector(), original.clientId);
+  expect(recovered.clientId !== original.clientId || clock >= watermark).toBe(true);
+  await act(async () => { expect((await binding!.session.submit('insertText', { text: ' recovered' }).ack).status).toBe('applied'); });
+  await waitFor(() => expect(peer.paragraphs('body')[0]!.text).toContain(' recovered'));
+  const engine = workers[1]!.sessions.at(-1)!;
+  expect(engine.paragraphs('body')[0]!.text).toBe(peer.paragraphs('body')[0]!.text);
+  expect(engine.paragraphs('body')[0]!.text).toContain('remote Seed');
+  expect(engine.paragraphs('body')[0]!.text).toContain(' acked');
+  expect(await recovered.async.encodeStateVector()).toEqual(peer.encodeStateVector());
+  expect(stateVectorClock(await recovered.async.encodeStateVector(), recovered.clientId)).toBeGreaterThan(
+    recovered.clientId === original.clientId ? watermark : 0);
+  expect(editorWire.sent.flatMap(decodeMessages).filter(message => message.type === 'sync-step-1')).toHaveLength(2);
+  expect(editorWire.listeners.size).toBe(1);
+  expect(errors).toEqual([]);
+  expect(onError).not.toHaveBeenCalled();
+  down = false;
+  view.unmount();
+  expect(editorWire.listeners.size).toBe(0);
+  expect([...hooks.values()].every(listeners => listeners.size === 0)).toBe(true);
+}, 20_000);
