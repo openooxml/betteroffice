@@ -1512,7 +1512,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     await act(async () => { changed = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId)); });
     if (!changed.ok) throw new Error(changed.failure.message);
     rerender({ plugins: other === 'removed' ? [a] : [a, b] });
-    await until(() => geometry()?.layout.version === changed.version);
+    await until(() => geometry()?.layout.version === changed.version && answer(a.id, 'a')?.ok === true);
     await act(async () => { await ref.current!.flushPendingInput(); await ref.current!.readParagraphs({ view: 'accepted' }); });
     const retained = answer(a.id, 'a');
     expect(retained?.ok).toBe(true);
