@@ -1982,6 +1982,227 @@ def v3_calculation_variants(task):
     return []
 
 
+def v3_minimal_replace(paragraph, old, new, prefix, drop_empty=False, insertion_side='right'):
+    import re
+    nodes = list(paragraph.iter(tag(prefix, 't')))
+    runs = {run: v3_text(run, prefix) for run in paragraph.iter(tag(prefix, 'r'))}
+    text = v3_text(paragraph, prefix)
+    leading = 0
+    while leading < min(len(old), len(new)) and old[leading] == new[leading]:
+        leading += 1
+    trailing = 0
+    while trailing < min(len(old), len(new)) - leading and old[-trailing - 1] == new[-trailing - 1]:
+        trailing += 1
+    inserted = new[leading:len(new) - trailing]
+    starts = [match.start() for match in re.finditer(re.escape(old), text)]
+    for match in reversed(starts):
+        start, end = match + leading, match + len(old) - trailing
+        offsets = [(index, offset) for index, node in enumerate(nodes) for offset in range(len(node.text or ''))]
+        if start == end:
+            if not inserted:
+                continue
+            if start and (insertion_side == 'left' or start == len(offsets)):
+                first, left = offsets[start - 1]
+                left += 1
+            else:
+                first, left = offsets[start]
+            value = nodes[first].text
+            nodes[first].text = value[:left] + inserted + value[left:]
+        else:
+            first, left = offsets[start]
+            last, right = offsets[end - 1]
+            if first == last:
+                value = nodes[first].text
+                nodes[first].text = value[:left] + inserted + value[right + 1:]
+            else:
+                nodes[first].text = nodes[first].text[:left] + inserted
+                for node in nodes[first + 1:last]:
+                    node.text = ''
+                nodes[last].text = nodes[last].text[right + 1:]
+    for node in nodes:
+        value = node.text or ''
+        if prefix == 'w' and value and (value[0].isspace() or value[-1].isspace()):
+            node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    if drop_empty:
+        parents = {child: parent for parent in paragraph.iter() for child in parent}
+        for run, before in runs.items():
+            if before and not v3_text(run, prefix) and all(child.tag in {tag(prefix, 'rPr'), tag(prefix, 't')} for child in run):
+                parents[run].remove(run)
+    return len(starts)
+
+
+def v3_fidelity_variants(task, original):
+    spec, fmt = task['expected'], task['format']
+    result = []
+    text_tasks = ('pptx-v3-14-colour-headings', 'pptx-v3-11-conference-spelling', 'docx-v3-13-review-identifier')
+    if task['id'] in text_tasks:
+        prefix = 'w' if fmt == 'docx' else 'a'
+        def text_shapes(package, drop_empty=False, mixed=False, unchanged=False):
+            count = 0
+            parts = dict.fromkeys(change['part'] for change in spec.get('edits', []))
+            if 'slide_replace' in spec:
+                parts.update(dict.fromkeys(name for name in original.parts if name.startswith('ppt/slides/slide') and name.endswith('.xml')))
+            for part in parts:
+                root = package.xml(part)
+                parents = {child: parent for parent in root.iter() for child in parent}
+                for source, target in zip(v3_paragraphs(original.xml(part), prefix), v3_paragraphs(root, prefix)):
+                    text = v3_text(source, prefix)
+                    changes = [change for change in spec.get('edits', []) if change['part'] == part
+                               and ('paragraph' not in change or change['paragraph'] == text)]
+                    if 'slide_replace' in spec and part.startswith('ppt/slides/'):
+                        changes.append(spec['slide_replace'])
+                    if not any(change['old'] in text for change in changes):
+                        continue
+                    paragraph = copy.deepcopy(source)
+                    count += 1
+                    if not (unchanged and count == 1):
+                        for change in changes:
+                            if mixed and count % 2 == 0:
+                                v3_replace(paragraph, change['old'], change['new'], prefix)
+                            else:
+                                v3_minimal_replace(paragraph, change['old'], change['new'], prefix, drop_empty)
+                    parent = parents[target]
+                    index = list(parent).index(target)
+                    parent.remove(target)
+                    parent.insert(index, paragraph)
+            assert count >= 2, 'text shape variants need multiple edited paragraphs'
+        def foreign_format(package):
+            text_shapes(package)
+            if fmt == 'pptx':
+                part = 'ppt/slides/slide7.xml' if '14-' in task['id'] else 'ppt/slides/slide1.xml'
+                old, new = ('COLOuR WHEEL', 'COLOUR WHEEL') if '14-' in task['id'] else ('Otober', 'October')
+            else:
+                part, old, new = 'word/header1.xml', 'MRID [number]', 'MRID 12345678'
+            root = package.xml(part)
+            paragraph = next(p for p in v3_paragraphs(root, prefix) if new in v3_text(p, prefix))
+            start = v3_text(paragraph, prefix).index(new)
+            leading = 0
+            while leading < min(len(old), len(new)) and old[leading] == new[leading]:
+                leading += 1
+            position = 0
+            for run in paragraph.iter(tag(prefix, 'r')):
+                value = v3_text(run, prefix)
+                if position <= start + leading < position + len(value):
+                    target, offset = run, start + leading - position
+                    break
+                position += len(value)
+            else:
+                raise ValueError('no changed character for formatting mutant')
+            target_props = ET.tostring(target.find(prefix + ':rPr', NS)) if target.find(prefix + ':rPr', NS) is not None else None
+            donor_root = package.xml('word/document.xml') if fmt == 'docx' else root
+            donor = next(run for run in donor_root.iter(tag(prefix, 'r')) if run not in set(paragraph.iter(tag(prefix, 'r')))
+                         and run.find(prefix + ':rPr', NS) is not None
+                         and ET.tostring(run.find(prefix + ':rPr', NS)) != target_props)
+            parents = {child: parent for parent in paragraph.iter() for child in parent}
+            parent = parents[target]
+            index = list(parent).index(target)
+            assert len(target.findall(prefix + ':t', NS)) == 1
+            value = v3_text(target, prefix)
+            parent.remove(target)
+            for value, foreign in ((value[:offset], False), (value[offset:offset + 1], True), (value[offset + 1:], False)):
+                if not value:
+                    continue
+                run = copy.deepcopy(target)
+                run.find(prefix + ':t', NS).text = value
+                if prefix == 'w':
+                    run.find('w:t', NS).set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                if foreign:
+                    props = run.find(prefix + ':rPr', NS)
+                    if props is not None:
+                        run.remove(props)
+                    run.insert(0, copy.deepcopy(donor.find(prefix + ':rPr', NS)))
+                parent.insert(index, run)
+                index += 1
+        result += [('minimal-span-kept-empty-runs', text_shapes, True),
+                   ('minimal-span-dropped-empty-runs', lambda p: text_shapes(p, drop_empty=True), True),
+                   ('mixed-paragraph-save-shapes', lambda p: text_shapes(p, mixed=True), True),
+                   ('minimal-span-foreign-format', foreign_format, False),
+                   ('minimal-span-one-target-unchanged', lambda p: text_shapes(p, unchanged=True), False)]
+    if task['id'] == 'pptx-v3-03-programme-grammar':
+        def reachable(package):
+            import posixpath
+            from urllib.parse import unquote
+            seen, pending = set(), ['']
+            while pending:
+                part = pending.pop()
+                if part in seen:
+                    continue
+                seen.add(part)
+                path = checker.relpath(part)
+                if path in package.parts:
+                    pending.extend(posixpath.normpath(posixpath.join(posixpath.dirname(part), unquote(link.get('Target')))).lstrip('/')
+                                   for link in package.xml(path) if link.get('TargetMode') != 'External')
+            return seen - {''}
+        def drop_parts(package, names):
+            removed = set(names) | {checker.relpath(name) for name in names}
+            for name in removed:
+                package.parts.pop(name, None)
+                package.xml_parts.pop(name, None)
+            types = package.xml('[Content_Types].xml')
+            types[:] = [node for node in types if node.get('PartName', '').lstrip('/') not in removed]
+        def drop_orphans(package, single=False):
+            names = (reachable(original) - reachable(package)) & package.parts.keys()
+            assert {'ppt/media/image22.png', 'ppt/media/image23.png'} <= names
+            drop_parts(package, {'ppt/media/image22.png'} if single else names)
+        def drop_reachable(package):
+            names = reachable(package)
+            name = next(name for name in sorted(names) if name.startswith('ppt/media/'))
+            drop_parts(package, {name})
+        result += [('deleted-slide-orphans-pruned', drop_orphans, True),
+                   ('deleted-slide-single-orphan-pruned', lambda p: drop_orphans(p, single=True), True),
+                   ('deleted-slide-reachable-part-dropped', drop_reachable, False)]
+    if task['id'] == 'xlsx-v3-04-earnings-headers':
+        def volatile(package):
+            cell = v3_cell(package, v3_sheet_map(package)['Contents'], 'B23')
+            assert cell.find('s:f', NS).get('ca') == '1' and cell.get('t') == 'str'
+            cell.find('s:v', NS).text = '© Commonwealth of Australia 2026'
+            return cell
+        def changed_formula(package):
+            volatile(package).find('s:f', NS).text += '&"changed"'
+        def changed_attributes(package):
+            volatile(package).find('s:f', NS).set('ca', '0')
+        def changed_type(package):
+            volatile(package).set('t', 'e')
+        def nonvolatile(package):
+            for part in v3_sheet_map(package).values():
+                for cell in package.xml(part).findall('s:sheetData/s:row/s:c', NS):
+                    formula, value = cell.find('s:f', NS), cell.find('s:v', NS)
+                    if formula is not None and formula.get('ca') != '1' and cell.get('t', 'n') == 'n' and value is not None and Decimal(value.text):
+                        value.text = str(Decimal(value.text) * Decimal('1.01'))
+                        return
+            raise ValueError('no nonvolatile formula cache')
+        result += [('volatile-ca1-cache', volatile, True),
+                   ('volatile-ca1-formula-changed', changed_formula, False),
+                   ('volatile-ca1-attributes-changed', changed_attributes, False),
+                   ('volatile-ca1-type-changed', changed_type, False),
+                   ('nonvolatile-formula-cache-changed', nonvolatile, False)]
+    if task['id'] == 'docx-v3-13-review-identifier':
+        def declared_ignorable(package):
+            root = package.xml('word/theme/theme1.xml')
+            root.set('xmlns:w15', 'http://schemas.microsoft.com/office/word/2012/wordml')
+            root.set(tag('mc', 'Ignorable'), 'w15')
+        def dropped_ignorable(package):
+            root = package.xml('word/document.xml')
+            tokens = root.get(tag('mc', 'Ignorable')).split()
+            assert tokens
+            root.set(tag('mc', 'Ignorable'), ' '.join(tokens[1:]))
+        def undeclared_ignorable(package):
+            root = package.xml('word/document.xml')
+            root.set(tag('mc', 'Ignorable'), root.get(tag('mc', 'Ignorable')) + ' undeclared')
+        def nested_ignorable(package):
+            undeclared_ignorable(package)
+            package.xml('word/document.xml')[0].set('xmlns:undeclared', 'urn:xt2:nested-only')
+        def uri_ignorable(package):
+            declared_ignorable(package)
+            package.xml('word/theme/theme1.xml').set(tag('mc', 'Ignorable'), 'http://schemas.microsoft.com/office/word/2012/wordml')
+        result += [('declared-w15-ignorable', declared_ignorable, True),
+                   ('ignorable-existing-token-dropped', dropped_ignorable, False),
+                   ('ignorable-undeclared-token', undeclared_ignorable, False),
+                   ('ignorable-namespace-declared-only-on-child', nested_ignorable, False),
+                   ('ignorable-uri-instead-of-prefix', uri_ignorable, False)]
+    return result
+
+
 def v3_allowances(task):
     fmt = task['format']
     def saved_metadata(package):
@@ -2267,7 +2488,7 @@ def validate_v3(directory):
                 counts[task['format']]['mutants_rejected'][1] += 1
                 failures.append(f'{task["id"]} mutant construction {name}: {error}')
                 print('FAIL ' + failures[-1], flush=True)
-        for name, mutate, accept in v3_calculation_variants(task):
+        for name, mutate, accept in [*v3_calculation_variants(task), *v3_fidelity_variants(task, original)]:
             package = Package(output)
             kind = 'accepted' if accept else 'mutants_rejected'
             try:
@@ -2277,7 +2498,7 @@ def validate_v3(directory):
                 score(task, name, path, accept, kind)
             except Exception as error:
                 counts[task['format']][kind][1] += 1
-                failures.append(f'{task["id"]} calculation variant construction {name}: {error}')
+                failures.append(f'{task["id"]} variant construction {name}: {error}')
                 print('FAIL ' + failures[-1], flush=True)
         allowances = v3_allowances(task)
         if task['format'] in checked_allowances:

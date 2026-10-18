@@ -1,6 +1,7 @@
 import argparse
 import copy
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -1096,6 +1097,8 @@ class RealPackage:
         self.parts = {name: archive.read(name) for name in archive.namelist() if not name.endswith('/')}
         self.roots = {}
         self.namespaces = {}
+        self.root_namespaces = {}
+        self.text_shapes = {}
 
     def namelist(self):
         return list(self.parts)
@@ -1107,6 +1110,11 @@ class RealPackage:
         if name not in self.roots:
             import io
             self.namespaces[name] = dict(item for _, item in ET.iterparse(io.BytesIO(self.parts[name]), events=('start-ns',)))
+            self.root_namespaces[name] = {}
+            for event, item in ET.iterparse(io.BytesIO(self.parts[name]), events=('start-ns', 'start')):
+                if event == 'start':
+                    break
+                self.root_namespaces[name][item[0]] = item[1]
             self.roots[name] = ET.fromstring(self.parts[name])
         return self.roots[name]
 
@@ -1119,22 +1127,74 @@ def node_text(node, prefix):
     return ''.join(n.text or '' for n in node.iter(f'{{{NS[prefix]}}}t'))
 
 
-def replace_xml_text(paragraph, old, new, prefix):
+def text_middle(old, new):
+    left = 0
+    while left < min(len(old), len(new)) and old[left] == new[left]:
+        left += 1
+    right = 0
+    while right < min(len(old), len(new)) - left and old[-right - 1] == new[-right - 1]:
+        right += 1
+    return left, old[left:len(old) - right], new[left:len(new) - right]
+
+
+def replace_xml_text(paragraph, old, new, prefix, minimal=False, insertion_sides=()):
     nodes = list(paragraph.iter(f'{{{NS[prefix]}}}t'))
     text = ''.join(n.text or '' for n in nodes)
     starts = [m.start() for m in re.finditer(re.escape(old), text)]
-    for start in reversed(starts):
+    leading, removed, inserted = text_middle(old, new) if minimal else (0, old, new)
+    for index, start in enumerate(reversed(starts)):
+        start += leading
         offset = 0
-        end = start + len(old)
+        end = start + len(removed)
+        if minimal and not removed:
+            if not inserted:
+                continue
+            left_node = right_node = None
+            for node in nodes:
+                length = len(node.text or '')
+                if offset < start <= offset + length:
+                    left_node = (node, start - offset)
+                if offset <= start < offset + length:
+                    right_node = (node, start - offset)
+                offset += length
+            target = (left_node or right_node) if insertion_sides and insertion_sides[index] == 'left' else (right_node or left_node)
+            require(target is not None, 'text insertion has no neighbouring run')
+            node, position = target
+            value = node.text or ''
+            node.text = value[:position] + inserted + value[position:]
+            if prefix == 'w' and (node.text[0].isspace() or node.text[-1].isspace()):
+                node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            continue
         for node in nodes:
             value = node.text or ''
             left, right = max(0, start - offset), min(len(value), end - offset)
             if left < right:
-                node.text = value[:left] + (new if offset <= start < offset + len(value) else '') + value[right:]
+                node.text = value[:left] + (inserted if offset <= start < offset + len(value) else '') + value[right:]
                 if prefix == 'w' and node.text and (node.text[0] in ' \t\r\n' or node.text[-1] in ' \t\r\n'):
                     node.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             offset += len(value)
     return len(starts)
+
+
+def real_replace_xml_text(package, paragraph, old, new, prefix):
+    if old in node_text(paragraph, prefix):
+        source, shapes = package.text_shapes.get(paragraph, (copy.deepcopy(paragraph), [copy.deepcopy(paragraph)]))
+        updated = {}
+        for shape in shapes:
+            text = node_text(shape, prefix)
+            starts = [m.start() for m in re.finditer(re.escape(old), text)]
+            leading, removed, inserted = text_middle(old, new)
+            boundaries = set(itertools.accumulate(len(n.text or '') for n in shape.iter(f'{{{NS[prefix]}}}t'))) - {0, len(text)}
+            ambiguous = [i for i, start in enumerate(reversed(starts)) if start + leading in boundaries] if not removed and inserted else []
+            for choices in itertools.product(('left', 'right'), repeat=len(ambiguous)):
+                sides = ['right'] * len(starts)
+                for index, side in zip(ambiguous, choices):
+                    sides[index] = side
+                candidate = copy.deepcopy(shape)
+                replace_xml_text(candidate, old, new, prefix, minimal=True, insertion_sides=sides)
+                updated[tuple(n.text for n in candidate.iter(f'{{{NS[prefix]}}}t'))] = candidate
+        package.text_shapes[paragraph] = (source, list(updated.values()))
+    return replace_xml_text(paragraph, old, new, prefix)
 
 
 def accept_revisions(root):
@@ -1232,14 +1292,14 @@ def real_expected_package(package, spec, fmt):
             if any(ancestor.tag == f'{{{NS[prefix]}}}p' for ancestor in ancestors(paragraph, parents)):
                 continue
             if 'paragraph' not in edit or node_text(paragraph, prefix) == edit['paragraph']:
-                matches += replace_xml_text(paragraph, edit['old'], edit['new'], prefix)
+                matches += real_replace_xml_text(package, paragraph, edit['old'], edit['new'], prefix)
         require(matches > 0, f'fixture edit does not match: {edit}')
     if 'slide_replace' in spec:
         change = spec['slide_replace']
         for name in package.namelist():
             if re.fullmatch(r'ppt/slides/slide[0-9]+.xml', name):
                 for paragraph in paragraph_nodes(package.root(name), 'a'):
-                    replace_xml_text(paragraph, change['old'], change['new'], 'a')
+                    real_replace_xml_text(package, paragraph, change['old'], change['new'], 'a')
     for change in spec.get('table_cells', []):
         root = package.root(change['part'])
         table = root.findall('.//a:tbl', NS)[change['table'] - 1]
@@ -1329,19 +1389,23 @@ def slide_parts(archive):
 
 
 class RealIdentity(NewParagraphAttributes):
-    def __init__(self, attributes, input_ids, paragraph=True):
+    def __init__(self, attributes, input_ids, paragraph=True, declared_namespaces=()):
         dict.__init__(self, attributes)
         self.input_ids = input_ids
         self.paragraph = paragraph
+        self.declared_namespaces = set(declared_namespaces)
 
     def compare(self, actual, path):
         expected = dict(self)
         ignorable = f'{{{NS["mc"]}}}Ignorable'
+        declared = getattr(actual, 'declared_namespaces', set())
         actual = dict(actual)
-        if not self.paragraph and NS['w14'] not in self.get(ignorable, '').split():
-            tokens = set(actual.get(ignorable, '').split()) - {NS['w14']}
-            if tokens:
-                actual[ignorable] = ' '.join(sorted(tokens))
+        if not self.paragraph:
+            tokens = set(actual.get(ignorable, '').split())
+            required = set(self.get(ignorable, '').split())
+            require(required <= tokens and tokens - required <= declared, f'{path}: unexpected ignorable namespaces')
+            if ignorable in self:
+                actual[ignorable] = self[ignorable]
             else:
                 actual.pop(ignorable, None)
         for key in PARAGRAPH_IDS if self.paragraph else ():
@@ -1352,6 +1416,42 @@ class RealIdentity(NewParagraphAttributes):
                 require(value.upper() not in self.input_ids, f'{path}: new identity reuses an input id')
                 expected[key] = value
         compare(expected, actual, path)
+
+
+class RealTextChoices(NewParagraphAttributes):
+    def __init__(self, shapes):
+        self.shapes = shapes
+
+    def compare(self, actual, path):
+        for shape in self.shapes:
+            try:
+                compare(shape, actual, path)
+                return
+            except ValueError:
+                pass
+        raise ValueError(f'{path}: edited paragraph differs from legacy and minimal-span shapes')
+
+
+class RealTextTokens(NewParagraphAttributes):
+    def __init__(self, tokens, optional):
+        self.tokens = tokens
+        self.optional = optional
+
+    def compare(self, actual, path):
+        require(isinstance(actual, (list, tuple)), f'{path}: invalid paragraph content')
+        positions = {0}
+        for index, token in enumerate(self.tokens):
+            following = set(positions) if index in self.optional else set()
+            for position in positions:
+                if position < len(actual):
+                    try:
+                        compare(token, actual[position], f'{path}[{position + 1}]')
+                        following.add(position + 1)
+                    except ValueError:
+                        pass
+            positions = following
+            require(positions, f'{path}: paragraph content differs')
+        require(len(actual) in positions, f'{path}: paragraph content count differs')
 
 
 def real_metadata(package):
@@ -1404,13 +1504,33 @@ def effective_run_properties(node, styles_root, paragraph_style):
 
 
 def real_xml_state(package, name, expected=False, input_ids=frozenset()):
-    root = copy.deepcopy(package.root(name))
+    source_root = package.root(name)
+    root = copy.deepcopy(source_root)
+    shapes = {after: package.text_shapes[before] for before, after in zip(source_root.iter(), root.iter())
+              if before in package.text_shapes} if expected else {}
     namespaces = package.namespaces[name]
     links = relations(package, name)
     styles_root = package.root('word/styles.xml') if 'word/styles.xml' in package.parts and name.startswith('word/') else None
     defaults = [s.get(w('styleId')) for s in styles_root.findall('w:style', NS) if s.get(w('type')) == 'paragraph' and s.get(w('default')) in ('1', 'true', 'on')] if styles_root is not None else []
     default_style = defaults[0] if defaults else None
-    def model(node, paragraph_style=None):
+    def model(node, paragraph_style=None, emptied=frozenset(), edited=False):
+        if node in shapes and not edited:
+            source, alternatives = shapes[node]
+            prefix = 'w' if node.tag == w('p') else 'a'
+            run_tag, text_tag = (f'{{{NS[prefix]}}}{kind}' for kind in ('r', 't'))
+            options = []
+            for alternative in [node, *alternatives]:
+                if node_text(alternative, prefix) != node_text(node, prefix):
+                    continue
+                candidate = copy.deepcopy(node)
+                for target, value in zip(candidate.iter(text_tag), alternative.iter(text_tag)):
+                    target.text = value.text
+                    if prefix == 'w' and target.text and (target.text[0].isspace() or target.text[-1].isspace()):
+                        target.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                optional = {after for before, after in zip(source.iter(run_tag), candidate.iter(run_tag))
+                            if node_text(before, prefix) and not node_text(after, prefix)}
+                options.append(model(candidate, paragraph_style, optional, edited=True))
+            return RealTextChoices(options)
         attrs = dict(node.attrib)
         for key, value in list(attrs.items()):
             if key.startswith(f'{{{NS["r"]}}}') and value:
@@ -1420,13 +1540,16 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
             attrs['Requires'] = ' '.join(sorted(namespaces.get(value, value) for value in attrs['Requires'].split()))
         if f'{{{NS["mc"]}}}Ignorable' in attrs:
             key = f'{{{NS["mc"]}}}Ignorable'
-            uris = {namespaces.get(value, value) for value in attrs[key].split()}
+            declared = package.root_namespaces[name] if node is root else namespaces
+            uris = {declared.get(value, value) for value in attrs[key].split()}
             if uris:
                 attrs[key] = ' '.join(sorted(uris))
             else:
                 del attrs[key]
-        if expected and node is root and name.startswith('word/'):
-            attrs = RealIdentity(attrs, input_ids, paragraph=False)
+        if node is root and name.startswith('word/'):
+            declared = package.root_namespaces[name]
+            attrs = RealIdentity(attrs, input_ids, paragraph=False,
+                                 declared_namespaces=(declared[token] for token in node.get(f'{{{NS["mc"]}}}Ignorable', '').split() if token in declared))
         if node.tag == w('p'):
             props = node.find('w:pPr', NS)
             style = props.find('w:pStyle', NS) if props is not None else None
@@ -1434,6 +1557,7 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
             if expected:
                 attrs = RealIdentity(attrs, input_ids)
         tokens = []
+        optional_tokens = set()
         for child in node:
             if child.tag == w('proofErr'):
                 continue
@@ -1443,7 +1567,7 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
                 if item is not None and item.get(w('val')) == default_style:
                     props.remove(item)
                 if props.attrib or len(props):
-                    tokens.append(model(props, paragraph_style))
+                    tokens.append(model(props, paragraph_style, emptied))
             elif child.tag in (w('r'), f'{{{NS["a"]}}}r'):
                 prefix = 'w' if child.tag == w('r') else 'a'
                 run_attrs = {k: v for k, v in child.attrib.items() if not (prefix == 'w' and k in {w('rsidR'), w('rsidRPr'), w('rsidDel')})}
@@ -1456,12 +1580,14 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
                             require(item.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve', 'significant Word whitespace lacks xml:space')
                         content.extend(('character', char, props, tuple(sorted(run_attrs.items()))) for char in text)
                     elif item.tag != f'{{{NS[prefix]}}}rPr':
-                        content.append(('run-content', model(item, paragraph_style), props, tuple(sorted(run_attrs.items()))))
+                        content.append(('run-content', model(item, paragraph_style, emptied), props, tuple(sorted(run_attrs.items()))))
+                if not content and child in emptied:
+                    optional_tokens.add(len(tokens))
                 tokens.extend(content or [('empty-run', props, tuple(sorted(run_attrs.items())))])
             else:
-                tokens.append(model(child, paragraph_style))
+                tokens.append(model(child, paragraph_style, emptied))
         return {'tag': node.tag, 'attributes': attrs, 'text': node.text if node.text and (local(node.tag) in ('t', 'instrText', 'delText') or node.text.strip()) else None,
-                'children': tokens}
+                'children': RealTextTokens(tokens, optional_tokens) if optional_tokens else tokens}
     return model(root)
 
 
@@ -1490,6 +1616,34 @@ def real_package_state(package, expected=False, input_ids=frozenset()):
         else:
             state[name] = hashlib.sha256(package.read(name)).hexdigest()
     return state
+
+
+def real_reachable_parts(package):
+    visited, pending = set(), ['']
+    while pending:
+        part = pending.pop()
+        if part in visited:
+            continue
+        visited.add(part)
+        pending.extend(link['target'] for link in relations(package, part).values()
+                       if not link['external'] and link['target'] in package.parts)
+    return visited - {''}
+
+
+def real_deleted_orphans(package, actual, reachable):
+    orphans = reachable - real_reachable_parts(package)
+    removed = set()
+    for name in orphans & package.parts.keys():
+        if name not in actual.parts:
+            require(relpath(name) not in actual.parts, f'orphan relationships retained without their part: {name}')
+            removed.update((name, relpath(name)))
+    for name in removed:
+        package.parts.pop(name, None)
+        package.roots.pop(name, None)
+    types = package.root('[Content_Types].xml')
+    for node in list(types):
+        if node.get('PartName', '').lstrip('/') in removed:
+            types.remove(node)
 
 
 def real_slide_metadata(original, actual, spec):
@@ -1563,8 +1717,13 @@ def check_real(task, source, revised):
         cell_styles, _ = styles(original, real=True)
         links = relations(original, 'xl/workbook.xml')
         sheet_parts = {n.get('name'): links[n.get(f'{{{NS["r"]}}}id')]['target'] for n in xml(original, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
+        volatile_cells = {}
         for sheet in before['sheets']:
             root = xml(original, sheet_parts[sheet['name']])
+            for cell in root.findall('s:sheetData/s:row/s:c', NS):
+                formula = cell.find('s:f', NS)
+                if formula is not None and formula.get('ca') == '1':
+                    volatile_cells[(renames.get(sheet['name'], sheet['name']), cell.get('r'))] = (formula.text, dict(formula.attrib), cell.get('t', 'n'))
             for address in spec.get('cells', {}).get(sheet['name'], {}):
                 if address in sheet['cells']:
                     continue
@@ -1608,10 +1767,20 @@ def check_real(task, source, revised):
                     require(record['rich_text'] is None, 'edited rich text cell requires explicit formatting expectation')
         found = workbook(actual, real=True)
         saved_sheets = {sheet['name']: sheet for sheet in found['sheets']}
+        saved_links = relations(actual, 'xl/workbook.xml')
+        saved_parts = {n.get('name'): saved_links[n.get(f'{{{NS["r"]}}}id')]['target']
+                       for n in xml(actual, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
         for sheet in wanted['sheets']:
             saved_cells = saved_sheets.get(sheet['name'], {}).get('cells', {})
+            saved_nodes = {cell.get('r'): cell for cell in actual.root(saved_parts[sheet['name']]).findall('s:sheetData/s:row/s:c', NS)} if sheet['name'] in saved_parts else {}
             for address, record in sheet['cells'].items():
                 saved = saved_cells.get(address, {})
+                cell = saved_nodes.get(address)
+                formula = cell.find('s:f', NS) if cell is not None else None
+                if (formula is not None and (sheet['name'], address) in volatile_cells
+                        and volatile_cells[(sheet['name'], address)] == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
+                        and record['formula'] == saved.get('formula') and record['formula_properties'] == saved.get('formula_properties')):
+                    record['value'] = saved['value']
                 if (record['formula'] is not None and saved.get('formula') is not None
                         and isinstance(record['value'], Decimal) and isinstance(saved.get('value'), Decimal)
                         and math.isclose(record['value'], saved['value'], rel_tol=1e-12, abs_tol=0.0)):
@@ -1622,7 +1791,10 @@ def check_real(task, source, revised):
     all_ids = {value for _, value in ids}
     if task['format'] == 'pptx':
         real_slide_metadata(original, actual, spec)
+    reachable = real_reachable_parts(original) if task['format'] == 'pptx' and 'delete_slide' in spec else None
     real_expected_package(original, spec, task['format'])
+    if reachable is not None:
+        real_deleted_orphans(original, actual, reachable)
     if task['format'] == 'docx':
         compare(tracked_changes(original), tracked_changes(actual), 'tracked revisions')
         after = real_ids(actual)
