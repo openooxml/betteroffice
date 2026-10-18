@@ -34,6 +34,7 @@ import { LocaleProvider, useTranslation } from '../i18n';
 import type { XlsxPluginEditorAccess, XlsxRevealAlignment } from '../plugins/createPluginClients';
 
 import { PluginOverlays } from '../plugins/PluginOverlays';
+import { frozenGridExtent } from '../plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
@@ -1296,11 +1297,12 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const at = peer.cellPosition(sheet, row, col);
     const next = peer.cellPosition(sheet, Math.min(row + 1, 1_048_575), Math.min(col + 1, 16_383));
     const zoom = zoomRef.current;
-    const frozen = sourceRef.current?.painted?.displayList.grid;
+    const frozen = frozenGridExtent(sourceRef.current?.painted?.displayList.grid,
+      info.frozenRows, info.frozenCols);
     const x = revealAxis(at.x, next.x - at.x, col < info.frozenCols, scroll.scrollLeft / zoom,
-      scroll.clientWidth / zoom - (frozen?.colOffsets[info.frozenCols] ?? 0), align);
+      scroll.clientWidth / zoom - frozen.width, align);
     const y = revealAxis(at.y, next.y - at.y, row < info.frozenRows, scroll.scrollTop / zoom,
-      scroll.clientHeight / zoom - (frozen?.rowOffsets[info.frozenRows] ?? 0), align);
+      scroll.clientHeight / zoom - frozen.height, align);
     if (x !== null) scroll.scrollLeft = x * zoom;
     if (y !== null) scroll.scrollTop = y * zoom;
     if (!owner.recovering) sourceRef.current?.schedule();

@@ -1,4 +1,4 @@
-import { expect, mock, test } from 'bun:test';
+import { expect, mock, spyOn, test } from 'bun:test';
 import { createPeerlessShellController, LEGACY_SYNC_API_PROP } from './shellController';
 import { createPeerlessViewStore } from './viewStore';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
@@ -717,3 +717,31 @@ test('table gridlines toggle as view state and report it as active', async () =>
   expect(await controller.commands.store.execute('tableGridlines', null)).toMatchObject({ ok: true });
   expect(onTableGridlines.mock.calls).toEqual([[true], [false]]);
 });
+
+for (const lifecycle of ['empty', 'dispose'] as const) {
+  test(`${lifecycle} releases unacknowledged batch commit callbacks`, async () => {
+    const { controller, binding } = fixture();
+    const applied = mock(() => {});
+    let retained: Map<unknown, unknown> | undefined;
+    const original = Map.prototype.set;
+    const set = spyOn(Map.prototype, 'set').mockImplementation(function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+      if ((value as { applied?: unknown } | null)?.applied === applied) retained = this;
+      return original.call(this, key, value);
+    });
+    let submitted!: () => void;
+    const started = new Promise<void>(resolve => { submitted = resolve; });
+    binding.commands = { submit: () => {
+      submitted();
+      return { status: 'submitted', ticket: { seq: 1, ack: new Promise(() => {}) } };
+    } } as never;
+    try {
+      controller.attach(binding);
+      void controller.applyEdits({ expectVersion: '0', steps: [] }, () => null, applied);
+      await started;
+      expect(retained?.size).toBe(1);
+      controller[lifecycle]();
+      expect(retained?.size).toBe(0);
+      expect(applied).not.toHaveBeenCalled();
+    } finally { set.mockRestore(); controller.dispose(); }
+  });
+}

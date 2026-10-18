@@ -4388,17 +4388,18 @@ fn display_lists_do_not_inherit_raster_dimension_caps() {
 }
 
 #[test]
-fn display_lists_reject_excessive_cell_spans() {
+fn display_lists_degrade_excessive_cell_spans() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
-    let error = workbook
+    let frame = workbook
         .display_list(&Viewport {
             x: 0.0,
             y: 0.0,
             width: 100.0,
             height: 6_000_000.0,
         })
-        .unwrap_err();
-    assert!(matches!(error, Error::DisplayTooLarge { .. }));
+        .unwrap();
+    assert!(frame.truncated);
+    assert!(frame.grid.row_offsets.len() <= 125_001);
 }
 
 #[cfg(feature = "raster")]

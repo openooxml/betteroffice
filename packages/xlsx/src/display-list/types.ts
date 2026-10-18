@@ -235,4 +235,6 @@ export interface DisplayList {
   grid?: GridMeta;
   hyperlinks?: HyperlinkRegion[];
   charts?: ChartRegion[];
+  /** The cell budget omitted the bottom of this viewport. */
+  truncated?: boolean;
 }

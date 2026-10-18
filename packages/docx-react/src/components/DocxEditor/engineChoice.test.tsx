@@ -202,6 +202,14 @@ test('missing capabilities fall back even with an explicit worker request', asyn
   expect(warnings()[0]).toContain('createImageBitmap');
 });
 
+test('a capability fallback with collaboration.initialUpdate warns only about capabilities', async () => {
+  setMissingWorkerCapabilitiesForTests(['OffscreenCanvas']);
+  render(editor({ collaboration: { initialUpdate } }));
+  await expectInThread();
+  expect(warnings()).toHaveLength(1);
+  expect(warnings()[0]).toContain('OffscreenCanvas');
+});
+
 const unsupportedSources: Array<[string, () => DocxEditorBaseProps]> = [
   ['mediaTokens', () => ({ mediaTokens: true })],
   ['collaboration.initialUpdate', () => ({ collaboration: { initialUpdate }, experimentalWorkerOpen: true })],

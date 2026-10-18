@@ -14,7 +14,8 @@ export function createDocxWorkerEditSession<O, X = never>(
   const connections = new WeakMap<object, ResidentCommandConnection>([[options.connection, options.connection]]);
   return createWorkerEditSession({
     ...options,
-    copyCommandForDispatch: command => command.kind === 'applyRemoteUpdate' ? command : cloneData(command),
+    copyCommandForDispatch: command =>
+      command.kind === 'applyRemoteUpdate' || command.kind === 'applyRemoteUpdateChunks' ? command : cloneData(command),
     discardFrame: discardCommandPresentation,
     sameCoverageFrames: true,
     transactionalPresentation: true,

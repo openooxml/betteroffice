@@ -29,6 +29,7 @@ import { workerRevisions, type WorkerRevisionState } from './workerRevisions';
 import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget, YrsStoryRange } from '@betteroffice/docx/yrs';
 import type { Comment } from '@betteroffice/docx/types/content';
 
+import { LAYOUT_POLL_MS, LAYOUT_REFUSALS, LAYOUT_WAIT_MS, VIEWER_LAYOUT_WAIT_MS, type WorkerPageExportResult } from '../internals/workerOpenExport';
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
@@ -71,6 +72,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   onTableGridlines?(visible: boolean): void;
   read: ResidentEngineWorkerClient['documentRead'];
   readAt?: ResidentEngineWorkerClient['documentReadAt'];
+  layoutRequest?(): string | null;
   search?: DocxHostSearch;
   save?(): Promise<ArrayBuffer>;
   loadBuffer?(buffer: DocxInput): Promise<void>;
@@ -152,7 +154,7 @@ export function createPeerlessShellController(initial: Options) {
     const selected = snapshot.view?.workerSelection;
     fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; workerMemory = null;
     unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
-    batchResults.clear(); commentResults.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
+    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
   const publish = () => { snapshot = { ...snapshot, mode: mode() }; updateAuthor(); commands.refresh(); for (const listener of listeners) listener();
@@ -599,6 +601,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   commands.attach(commandBinding);
   const batchResults = new Map<number, DocxEditResult>();
+  const appliedBatches = new Map<{ readonly seq: number | undefined }, { binding: PeerlessEditSessionBinding; applied: (view: PeerlessViewSnapshot) => void }>();
   const commentResults = new Map<number, { id?: number; comments: Comment[] }>();
   let commentTail: Promise<unknown> = Promise.resolve();
   let commentList: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; comments: Comment[] } | null = null;
@@ -775,7 +778,8 @@ export function createPeerlessShellController(initial: Options) {
     if (env.mode === 'suggesting' && stepIndex >= 0) return { ok: false as const, version: request.expectVersion, failure: { code: 'invalid-step' as const, stepIndex, message: 'Suggesting mode requires suggest metadata' } };
     return null;
   };
-  const applyEdits = async (request: DocxEditRequest, authorize: () => unknown = () => null) => {
+  /** `applied` runs with the view that first shows the batch applied, before that view is published. */
+  const applyEdits = async (request: DocxEditRequest, authorize: () => unknown = () => null, applied?: (view: PeerlessViewSnapshot) => void) => {
     const current = await flush();
     const denied = authorize();
     if (denied) return denied as DocxEditResult;
@@ -783,12 +787,91 @@ export function createPeerlessShellController(initial: Options) {
     if (policy) return policy;
     const admitted = current.commands.submit({ kind: 'applyEdits', payload: { request } }, { fence: true });
     if (admitted.status !== 'submitted') return { ok: false as const, version: request.expectVersion, failure: { code: 'read-only' as const, message: 'Worker batch was not admitted' } };
-    const outcome = await admitted.ticket.ack;
+    if (applied) appliedBatches.set(admitted.ticket, { binding: current, applied });
+    const outcome = await admitted.ticket.ack.finally(() => appliedBatches.delete(admitted.ticket));
     if (binding !== current) throw new Error('Document was replaced');
     const receipt = outcome.seq === undefined ? undefined : batchResults.get(outcome.seq);
     if (outcome.seq !== undefined) batchResults.delete(outcome.seq);
     if (receipt) return receipt;
     return { ok: false as const, version: request.expectVersion, failure: { code: (outcome.reason ?? 'unsupported') as import('@betteroffice/docx/yrs').DocxEditFailureCode, message: outcome.reason ?? 'Worker batch failed' } };
+  };
+  const whenLayoutComplete: DocxEditorRef['whenLayoutComplete'] = ({ timeoutMs = 30000 } = {}) => new Promise<number>((resolve, reject) => {
+    let current: PeerlessEditSessionBinding | null = null;
+    let flushed = false;
+    let stop: (() => void) | undefined;
+    const settle = (error: Error | null) => {
+      clearTimeout(timeout); waits.delete(check); stop?.(); stop = undefined;
+      if (error) reject(error); else resolve(current?.viewStore.getSnapshot().geometry?.pages.length ?? 0);
+    };
+    const check = () => {
+      if (closed) return settle(new Error('Editor was closed'));
+      if (snapshot.error) return settle(snapshot.error);
+      if (current) {
+        if (binding !== current) return settle(new Error('Document was replaced'));
+        const view = current.viewStore.getSnapshot();
+        if (flushed && view.geometry && view.presentedThroughSeq >= view.throughSeq && !view.geometry.layoutProvisional) settle(null);
+        return;
+      }
+      if (snapshot.status !== 'ready' || !binding) return;
+      const opened = binding;
+      current = opened;
+      void flushAdmittedInput(opened).then(() => {
+        if (!waits.has(check)) return;
+        flushed = true; stop = opened.viewStore.subscribe(check); check();
+      }, (error: unknown) => { if (waits.has(check)) settle(error instanceof Error ? error : new Error(String(error))); });
+    };
+    const timeout = setTimeout(() => settle(new Error('Layout timed out')), timeoutMs);
+    waits.add(check);
+    check();
+  });
+  const exportStructuredWithPages: DocxEditorRef['exportStructuredWithPages'] = async (config) => {
+    const current = await opened();
+    await flush();
+    const view = current.viewStore.getSnapshot();
+    let request: string | null = null;
+    let superseded = false;
+    const assertCurrent = () => { if (binding !== current) throw new WorkerReadSupersededError('Document was replaced'); };
+    const moved = (): WorkerPageExportResult => {
+      superseded = true;
+      return { ok: false, version: view.editState?.documentVersion ?? view.geometry?.documentVersion ?? '',
+        failure: { code: 'stale-document', target: null, message: 'The document changed while exporting.' } };
+    };
+    const attempt = async (): Promise<WorkerPageExportResult> => {
+      assertCurrent();
+      request = options.layoutRequest?.() ?? null;
+      if (request === null) return { ok: false, version: view.editState?.documentVersion ?? '',
+        failure: { code: 'layout-unavailable', target: null, message: 'The fonts this document uses are not loaded yet.' } };
+      try {
+        const value = await read({ kind: 'exportStructuredWithPages', options: config, currentRequest: request, workerFonts: true });
+        assertCurrent();
+        return JSON.parse(value) as WorkerPageExportResult;
+      } catch (error) {
+        assertCurrent();
+        if (error instanceof WorkerReadSupersededError) return moved();
+        throw error;
+      }
+    };
+    const showsMarkup = () => {
+      if (request === null) return false;
+      const preview = (JSON.parse(request) as { renderEnv?: { revisionPreview?: object } }).renderEnv?.revisionPreview;
+      return !preview || Object.keys(preview).length === 0;
+    };
+    let result = await attempt();
+    if (config.expectLayoutVersion !== undefined || superseded) return result;
+    if (!result.ok && (LAYOUT_REFUSALS.has(result.failure.code) ||
+      (result.failure.code === 'unsupported-revision-layout' && showsMarkup()))) {
+      await whenLayoutComplete({ timeoutMs: VIEWER_LAYOUT_WAIT_MS }).catch(() => {});
+      assertCurrent();
+      result = await attempt();
+      if (superseded) return result;
+    }
+    const deadline = Date.now() + LAYOUT_WAIT_MS;
+    while (!result.ok && LAYOUT_REFUSALS.has(result.failure.code) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, LAYOUT_POLL_MS));
+      result = await attempt();
+      if (superseded) return result;
+    }
+    return result;
   };
   const implemented = {
     commands: commands.store,
@@ -803,35 +886,8 @@ export function createPeerlessShellController(initial: Options) {
     validateEdits: async (request) => { await flush(); return batchPolicy(request) ?? read({ kind: 'validateEdits', request }); },
     applyEdits: (request) => applyEdits(request),
     readPositionAtPoint: (x, y) => options.readPositionAtPoint?.(x, y) ?? Promise.resolve(null),
-    whenLayoutComplete: ({ timeoutMs = 30000 } = {}) => new Promise<number>((resolve, reject) => {
-      let current: PeerlessEditSessionBinding | null = null;
-      let flushed = false;
-      let stop: (() => void) | undefined;
-      const settle = (error: Error | null) => {
-        clearTimeout(timeout); waits.delete(check); stop?.(); stop = undefined;
-        if (error) reject(error); else resolve(current?.viewStore.getSnapshot().geometry?.pages.length ?? 0);
-      };
-      const check = () => {
-        if (closed) return settle(new Error('Editor was closed'));
-        if (snapshot.error) return settle(snapshot.error);
-        if (current) {
-          if (binding !== current) return settle(new Error('Document was replaced'));
-          const view = current.viewStore.getSnapshot();
-          if (flushed && view.geometry && view.presentedThroughSeq >= view.throughSeq && !view.geometry.layoutProvisional) settle(null);
-          return;
-        }
-        if (snapshot.status !== 'ready' || !binding) return;
-        const opened = binding;
-        current = opened;
-        void flushAdmittedInput(opened).then(() => {
-          if (!waits.has(check)) return;
-          flushed = true; stop = opened.viewStore.subscribe(check); check();
-        }, (error: unknown) => { if (waits.has(check)) settle(error instanceof Error ? error : new Error(String(error))); });
-      };
-      const timeout = setTimeout(() => settle(new Error('Layout timed out')), timeoutMs);
-      waits.add(check);
-      check();
-    }),
+    whenLayoutComplete,
+    exportStructuredWithPages,
     flushPendingInput: async () => { await flushComments(); },
     readParagraphs: (request) => read({ kind: 'readParagraphs', request }),
     getParagraphIdentities: () => read({ kind: 'paragraphIdentities' }),
@@ -963,6 +1019,14 @@ export function createPeerlessShellController(initial: Options) {
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
           preview: ready ? null : snapshot.preview };
         syncBorderPen();
+        const batch = view.editState?.batch;
+        if (batch?.result.ok) {
+          for (const [ticket, own] of appliedBatches) {
+            if (own.binding !== next || ticket.seq !== batch.seq) continue;
+            appliedBatches.delete(ticket);
+            emit(own.applied, view);
+          }
+        }
         publish();
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {
@@ -982,7 +1046,7 @@ export function createPeerlessShellController(initial: Options) {
       replace();
       reset('empty');
     },
-    dispose() { unsubscribe?.(); binding = null; closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
+    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
   };
 }
 

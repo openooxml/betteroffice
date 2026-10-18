@@ -279,6 +279,7 @@ export interface DocxCommandStagedPresentation {
 
 export interface DocxCommandPayloads {
   applyRemoteUpdate: { update: ArrayBuffer };
+  applyRemoteUpdateChunks: { updates: ArrayBuffer[] };
   applyEdits: { request: DocxEditRequest; suggesting?: YrsAuthor };
   setRenderEnvironment: {
     themeColors: Record<string, string>;

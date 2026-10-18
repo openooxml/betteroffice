@@ -28,9 +28,15 @@ export interface AsyncCollaborationReplica {
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Promise<Uint8Array>;
   /** Optional. See `CollaborationReplica.encodeStateAsUpdateChunks`. */
   encodeStateAsUpdateChunks?(remoteStateVector: Uint8Array, maxChunkBytes: number): Promise<Uint8Array[]>;
-  /** Resolves once the worker has merged the update; the value is the typing inference, if any. */
+  /**
+   * Resolves once the worker has merged the update; the value is the typing inference, if any. The update is the
+   * replica's own: it may transfer the buffer.
+   */
   applyUpdate(update: Uint8Array): Promise<unknown>;
-  /** Optional. Resolves once the worker has merged one initial sync's updates as a single change. */
+  /**
+   * Optional. Resolves once the worker has merged one initial sync's updates as a single change. The updates are the
+   * replica's own: it may transfer their buffers.
+   */
   applyUpdateChunks?(updates: readonly Uint8Array[]): Promise<unknown>;
   onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
 }
