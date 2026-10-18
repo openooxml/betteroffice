@@ -100,15 +100,11 @@ fn fixture_covers_anchor_families_display_list_and_raster() {
 }
 
 #[test]
-fn stacked_chart_renders_beside_a_refused_3d_chart() {
+fn stacked_chart_renders_beside_a_refused_chart() {
     let mut parts = ooxml_opc::unzip_parts(UNSUPPORTED).unwrap();
     let (_, chart) = parts
         .iter_mut()
-        .find(|(name, bytes)| {
-            name.starts_with("xl/charts/")
-                && name.ends_with(".xml")
-                && std::str::from_utf8(bytes).is_ok_and(|xml| xml.contains("stacked"))
-        })
+        .find(|(name, _)| name == "xl/charts/chart2.xml")
         .expect("stacked chart part");
     let mut xml = String::from_utf8(chart.clone()).unwrap();
     let prefix = if xml.contains("<c:ser>") { "c:" } else { "" };
@@ -151,7 +147,7 @@ fn stacked_chart_renders_beside_a_refused_3d_chart() {
     assert_eq!(
         labels,
         [
-            "Chart, not shown",
+            "Revenue on one axis twice, column chart, 1 series, 4 categories, not shown",
             "Revenue stacked, bar chart, 2 series, 4 categories"
         ]
     );
@@ -224,6 +220,82 @@ fn stacked_chart_renders_beside_a_refused_3d_chart() {
             .iter()
             .any(|pixel| *pixel != [0xff, 0xff, 0xff] && *pixel != [0xf2, 0xf2, 0xf2])
     );
+}
+
+type XmlEdit = dyn Fn(&str) -> String;
+
+#[test]
+fn three_d_charts_draw_as_their_flat_families() {
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 800.0,
+    };
+    let parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    let stacked = |xml: &str| {
+        xml.replace(
+            r#"<c:grouping val="clustered"/>"#,
+            r#"<c:grouping val="stacked"/><c:overlap val="100"/>"#,
+        )
+    };
+    let depth_axis = |xml: &str| {
+        xml.replace(
+            r#"<c:axId val="1001"/><c:axId val="1002"/>"#,
+            r#"<c:axId val="1001"/><c:axId val="1002"/><c:axId val="0"/>"#,
+        )
+    };
+    let cases: [(&str, &str, &XmlEdit, &XmlEdit); 4] = [
+        (
+            "xl/charts/chart1.xml",
+            "barChart",
+            &str::to_owned,
+            &str::to_owned,
+        ),
+        ("xl/charts/chart1.xml", "barChart", &stacked, &depth_axis),
+        (
+            "xl/charts/chart2.xml",
+            "lineChart",
+            &str::to_owned,
+            &str::to_owned,
+        ),
+        (
+            "xl/charts/chart3.xml",
+            "pieChart",
+            &str::to_owned,
+            &str::to_owned,
+        ),
+    ];
+    for (part, plot, flat_edit, deep_edit) in cases {
+        let flat_xml = flat_edit(&String::from_utf8(part_of(&parts, part)).unwrap());
+        let deep = deep_edit(&flat_xml)
+            .replace(
+                &format!("c:{plot}>"),
+                &format!("c:{}>", plot.replace("Chart", "3DChart")),
+            )
+            .replacen(
+                "<c:plotArea>",
+                r#"<c:view3D><c:rotX val="15"/><c:rotY val="20"/><c:rAngAx val="1"/></c:view3D><c:plotArea>"#,
+                1,
+            );
+        assert!(
+            deep.contains("3DChart>") && deep.contains("<c:view3D>"),
+            "{part}"
+        );
+        let render = |xml: &str| {
+            Workbook::open_for_read(&fixture_with(part, xml.as_bytes()))
+                .unwrap()
+                .display_list_for(SheetId(0), &viewport)
+                .unwrap()
+        };
+        let flat = render(&flat_xml);
+        let display_list = render(&deep);
+        assert!(
+            display_list.charts.iter().all(|chart| !chart.placeholder),
+            "{deep}"
+        );
+        assert_eq!(display_list.commands, flat.commands, "{deep}");
+    }
 }
 
 fn decode_rgba(bytes: &[u8]) -> Vec<[u8; 3]> {
