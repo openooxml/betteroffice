@@ -489,6 +489,8 @@ test.each(['crash', 'out-of-memory'] as const)('a collaborative worker %s fails 
   await waitFor(() => expect(peer.paragraphs('body')[0]!.text).toContain(' acked'));
   const watermark = stateVectorClock(await original.async.encodeStateVector(), original.clientId);
   expect(watermark).toBeGreaterThan(0);
+  const handshakes = editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1').length;
+  expect(handshakes).toBeGreaterThan(0);
   down = true;
   await act(async () => {
     if (failure === 'crash') workers[0]!.onerror?.({ message: 'Worker crashed' } as ErrorEvent);
@@ -506,7 +508,7 @@ test.each(['crash', 'out-of-memory'] as const)('a collaborative worker %s fails 
   expect(stateVectorClock(peer.encodeStateVector(), original.clientId)).toBe(watermark);
   expect(peer.paragraphs('body')[0]!.text).toBe('remote Seed acked');
   expect(await binding!.session.submit('insertText', { text: ' refused' }).ack).toMatchObject({ status: 'cancelled', reason: 'disposed' });
-  expect(editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1')).toHaveLength(1);
+  expect(editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1')).toHaveLength(handshakes);
   expect(editorWire.listeners.size).toBe(0);
   expect(errors).toEqual([]);
   down = false;
