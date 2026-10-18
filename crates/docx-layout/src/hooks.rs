@@ -109,6 +109,23 @@ pub fn balance_terminal_continuous_text_columns(
     Ok(())
 }
 
+pub(crate) fn balance_terminal_continuous_text_columns_with_marks(
+    measured: &[MeasuredBlock],
+    paginator: &mut Paginator,
+    start: usize,
+    end: usize,
+    section_marks: &[bool],
+) -> Result<(), LayoutError> {
+    column_balancing::balance_terminal_continuous_text_columns_with_marks(
+        measured,
+        paginator,
+        start,
+        end,
+        section_marks,
+    );
+    Ok(())
+}
+
 /// Length of the leading run of `w:tblHeader` rows, the band that repeats on
 /// continuation fragments. Header rows after a non-header row do not count.
 fn tally_header_rows(block: &TableBlock) -> usize {
