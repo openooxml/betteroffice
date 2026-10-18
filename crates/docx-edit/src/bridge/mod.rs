@@ -568,6 +568,89 @@ fn lower_story_with_preview<T: ReadTxn>(
     result
 }
 
+fn can_omit_trailing_body_page_break<T: ReadTxn>(
+    txn: &T,
+    chunks: &[yrs::types::text::Diff<YChange>],
+    starts_at_boundary: bool,
+    local: &local::LocalLowering,
+) -> bool {
+    use crate::structured::source::InlineSource;
+
+    let Some(source) = local.source.upgrade() else {
+        return false;
+    };
+    let mut tail = chunks.iter().rev();
+    let pilcrow = loop {
+        match tail.next().map(|diff| &diff.insert) {
+            Some(Out::YMap(embed))
+                if shared_map_string(embed, txn, "_kind").as_deref() == Some("pageBreak") => {}
+            Some(Out::YMap(mark)) if is_pilcrow(mark, txn) => break mark,
+            _ => return false,
+        }
+    };
+    let empty = match tail.next().map(|diff| &diff.insert) {
+        Some(Out::YMap(embed)) => matches!(
+            shared_map_string(embed, txn, "_kind").as_deref(),
+            Some("pilcrow" | "table" | "blockSdt" | "pageBreak")
+        ),
+        None => starts_at_boundary,
+        _ => false,
+    };
+    if !empty
+        || pilcrow.contains_key(txn, "sectPr")
+        || pilcrow.contains_key(txn, "sectionBreakType")
+    {
+        return false;
+    }
+    let Some(para_id) = shared_map_string(pilcrow, txn, "paraId") else {
+        return false;
+    };
+    let read = source.read();
+    let provenance = &read.provenance;
+    if provenance
+        .block_order
+        .get("body")
+        .is_some_and(|order| order.last().and_then(Option::as_deref) != Some(para_id.as_str()))
+        || !provenance
+            .relocated
+            .iter()
+            .any(|item| item.pin.story == "body" && item.para_id == para_id)
+        || provenance.inline.iter().any(|item| {
+            item.pin.story == "body"
+                && item.para_id == para_id
+                && !matches!(
+                    item.content,
+                    InlineSource::Break {
+                        kind: crate::structured::BreakType::Page,
+                        ..
+                    }
+                )
+        })
+    {
+        return false;
+    }
+    let footnote_position = read
+        .final_section
+        .as_ref()
+        .and_then(|section| section.get("footnotePr"))
+        .and_then(|properties| properties.get("position"))
+        .or_else(|| read.settings.as_ref()?.get("footnotePr")?.get("position"))
+        .and_then(Value::as_str)
+        .unwrap_or("pageBottom");
+    !txn.get_map(crate::STORIES).is_some_and(|stories| {
+        stories.iter(txn).any(|(id, _)| {
+            let note_id = id.strip_prefix("en:").or_else(|| {
+                if matches!(footnote_position, "docEnd" | "sectEnd") {
+                    id.strip_prefix("fn:")
+                } else {
+                    None
+                }
+            });
+            note_id.is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+        })
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_story_chunks<T: ReadTxn>(
     txn: &T,
@@ -587,6 +670,8 @@ fn walk_story_chunks<T: ReadTxn>(
     mut hidden_field_blocks: BTreeSet<String>,
     mut recording: Option<&mut preview::UnitRecorder>,
 ) -> Result<(Vec<LayoutBlock>, preview::WalkPosition, BTreeSet<String>), BridgeError> {
+    let starts_at_boundary =
+        initial.at_block_boundary && initial.paragraph_start == initial.story_index;
     let preview::WalkPosition {
         story_slot,
         mut table_ordinal,
@@ -702,6 +787,13 @@ fn walk_story_chunks<T: ReadTxn>(
                     ),
                     story_index + 1 == story.len(txn),
                     local_safe
+                        && !(story_id == "body"
+                            && chunk_index + 2 == chunks.len()
+                            && chunks.get(chunk_index + 1).is_some_and(|next| {
+                                matches!(&next.insert, Out::YMap(embed)
+                                    if shared_map_string(embed, txn, "_kind").as_deref()
+                                        == Some("pageBreak"))
+                            }))
                         && reserved.is_empty()
                         && !value_string(values.get("paraId"))
                             .is_some_and(|id| hidden_field_blocks.contains(&id)),
@@ -1005,7 +1097,11 @@ fn walk_story_chunks<T: ReadTxn>(
                 // so an edit before a break leaves its block unchanged.
                 let id = BlockId::Str(format!("{story_id}:{kind}:{break_ordinal}"));
                 break_ordinal += 1;
-                if !hidden {
+                let terminal = kind == "pageBreak"
+                    && story_id == "body"
+                    && story_index + 1 == story.len(txn)
+                    && can_omit_trailing_body_page_break(txn, chunks, starts_at_boundary, local);
+                if !hidden && !terminal {
                     let (pm_start, pm_end) = (Some(pm_cursor as f64), Some((pm_cursor + 1) as f64));
                     blocks.push(if kind == "columnBreak" {
                         LayoutBlock::ColumnBreak(ColumnBreakBlock {
