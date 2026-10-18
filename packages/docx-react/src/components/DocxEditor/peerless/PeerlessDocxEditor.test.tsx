@@ -24,6 +24,7 @@ import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession
 import type { PeerlessEchoIntent } from './echoPainter';
 import type { PeerlessFrameGeometry } from './viewStore';
 import * as paged from './PeerlessPagedEditor';
+import * as sessionHook from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
 import { OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
@@ -59,6 +60,9 @@ let failPreview = false;
 let refuseCut = false;
 let holdCut = false;
 let failWholeOpen = false;
+let recoverSurface = false;
+let realSurface = false;
+let documentVersions = false;
 /** Per source preview, in order: whether its first page is built or missing. */
 let previewPages: ('built' | 'none')[] = [];
 const PREVIEW_EPOCHS = { built: 90, none: 1 } as const;
@@ -94,21 +98,36 @@ class FakeWorker {
   refused = new Set<number>();
   fontRevision = 0;
   pendingReplies: ResidentEngineWorkerResponse[] = [];
+  outOfMemory = false;
+  checkpoints: { state: Uint8Array; epoch: number; version: number; throughSeq: number }[] = [];
 
   constructor() {
     workers.push(this);
+  }
+
+  documentVersion() {
+    return documentVersions ? { documentVersion: `worker-${workers.indexOf(this) + 1}-${this.text.length}` } : {};
   }
 
   postMessage(message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule) {
     if (!('id' in message)) return;
     requests.push(message);
     let response: ResidentEngineWorkerResponse;
-    if (message.type === 'openSource' && message.source.cut && refuseCut) {
+    if (this.outOfMemory) {
+      response = { id: message.id, ok: false, error: 'Worker heap limit exceeded', terminal: true, outOfMemory: true };
+    } else if (message.type === 'checkpoint' && this.initial) {
+      const { epoch, version, throughSeq } = this.initial;
+      const checkpoint = { state: new TextEncoder().encode(this.text), epoch, version, throughSeq,
+        recoveryState: { selection: null, storedMarks: null, stickyPositions: [], cellSelection: null,
+          proposals: { previewVersion: 0, entries: [] }, selections: [] } };
+      this.checkpoints.push(checkpoint);
+      response = { id: message.id, ok: true, checkpoint: { ...checkpoint, state: checkpoint.state.slice() } };
+    } else if (message.type === 'openSource' && message.source.cut && refuseCut) {
       response = { id: message.id, ok: true, previewRefused: true };
     } else if (message.type === 'openSource' && !message.source.cut && failWholeOpen) {
       response = { id: message.id, ok: false, error: 'Whole source failed to open' };
     } else if (message.type === 'openSource') {
-      this.text = '';
+      this.text = message.source.state ? new TextDecoder().decode(message.source.state) : '';
       response = { id: message.id, ok: true, hostJson, sourceDocument: yrs.decodeDocxHostJson(hostJson, source).document, stateVector: new ArrayBuffer(0),
         ...(message.source.preview ? { frame: commandFrame(1).payload.frame, documentPreview: true,
           caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1 } : {}) };
@@ -119,7 +138,7 @@ class FakeWorker {
     } else if (message.type === 'fontRequirements') {
       response = { id: message.id, ok: true, requirementsJson: JSON.stringify(fontRequirements) };
     } else if (message.type === 'save') {
-      response = { id: message.id, ok: true, saved: Uint8Array.of(4, 5).buffer, updates: [], version: 'saved' };
+      response = { id: message.id, ok: true, saved: realSurface ? new TextEncoder().encode(this.text).buffer : Uint8Array.of(4, 5).buffer, updates: [], version: 'saved' };
     } else if (message.type === 'documentRead') {
       response = { id: message.id, ok: true, read: { version: 'worker-version', value: message.read.kind === 'clipboardSlice' ? { text: 'Selected text', fragment: null }
         : message.read.kind === 'headings'
@@ -133,18 +152,21 @@ class FakeWorker {
         : message.read.kind === 'listStories' ? { ok: true, version: 'worker-version', stories: [{ story: 'hf:rId3', kind: 'header', root: 'hf:rId3' }] }
         : message.read.kind === 'readStories' ? { ok: true, version: 'worker-version', view: 'accepted', stories: [{ story: 'hf:rId3', ok: true, paragraphs: [] }], truncated: false }
         : { ok: true, view: 'accepted', version: 'worker-version', paragraphs: [] } } };
+    } else if (message.type === 'requestFullFrame' && this.initial) {
+      response = { id: message.id, ok: true, commandAck: { ...this.initial, frame: { ...commandFrame(this.initial.throughSeq + 1), coversThroughSeq: this.initial.throughSeq } } };
     } else if (message.type === 'commandInit') {
-      const { session, incarnation, epoch, readOnly, layoutRevision } = message.request;
+      const { session, incarnation, epoch, version = 0, throughSeq = 0, readOnly, layoutRevision } = message.request;
       const initial: ResidentCommandInitReply = {
-        session, incarnation, epoch, version: 0, throughSeq: 0, outcomes: [], selection: null,
+        session, incarnation, epoch, version, throughSeq, outcomes: [], selection: null,
         editState: {
-          readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null,
+          readOnly, toolbar: null, effectiveFormatting: null, storedMarks: null, ...this.documentVersion(),
           canUndo: false, canRedo: false, hyperlink: null, tableContext: null,
         },
-        frame: {
-          coversThroughSeq: 0, revision: 1,
+        frame: realSurface ? { ...commandFrame(throughSeq + 1), coversThroughSeq: throughSeq } : {
+          coversThroughSeq: throughSeq, revision: 1,
           payload: { frame: commandFrame(1).payload.frame, caret: { frameEpoch: 1, caretRect: null }, layoutRevision,
             stagedPresentation: { frameEpoch: 1, pages: [] } },
+
         },
       };
       this.initial = initial;
@@ -171,8 +193,9 @@ class FakeWorker {
           ...(refused ? { reason: readOnlyRefusal ? 'read-only' : 'stale-version' } :
             cancelled ? { reason: 'dependency-refused' } : {}),
         }],
-        editState: { ...state.editState, readOnly },
+        editState: { ...state.editState, readOnly, ...this.documentVersion() },
         ...((command.kind === 'select' || (command.kind === 'navigate' && (command.payload as yrs.DocxCommandPayloads['navigate']).extend)) ? { selection: { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 13 } } } : {}),
+        ...(realSurface ? { frame: { ...commandFrame(command.seq + 1), coversThroughSeq: command.seq } } : {}),
       };
       this.initial = { ...state, ...ack };
       response = { id: message.id, ok: true, commandAck: ack };
@@ -234,7 +257,8 @@ function commandFrame(epoch: number, base = 0): DocxCommandFrame {
   return {
     coversThroughSeq: epoch - 1, revision: epoch,
     ...(base ? { baseRevision: base } : {}),
-    payload: { frame: bytes.buffer, caret: { frameEpoch: epoch, caretRect: null }, layoutRevision: epoch },
+    payload: { frame: bytes.buffer, caret: { frameEpoch: epoch, caretRect: null }, layoutRevision: epoch,
+      stagedPresentation: { frameEpoch: epoch, pages: [] } },
   };
 }
 
@@ -285,7 +309,9 @@ function installSurface() {
             source: sessionOptions.source,
             connection: value,
             echo: { paint() {}, drop() {}, present() {} },
-            recovery: { reopen: () => Promise.reject(new Error('unexpected recovery')) },
+            recovery: recoverSurface && sessionOptions.recovery ? sessionOptions.recovery
+              : { reopen: () => Promise.reject(new Error('unexpected recovery')) },
+            ...(recoverSurface ? { maxRecoveryAttempts: 1, checkpointPolicy: () => true } : {}),
           });
           binding = fakeBinding(session, value.initial);
           onReady?.(binding);
@@ -311,6 +337,9 @@ beforeEach(() => {
   refuseCut = false;
   holdCut = false;
   failWholeOpen = false;
+  recoverSurface = false;
+  realSurface = false;
+  documentVersions = false;
   previewPages = [];
   restorers.push(installPreviewPages());
   setMissingWorkerCapabilitiesForTests([]);
@@ -2236,3 +2265,127 @@ for (const readOnly of [false, true]) {
     expect(coreSession).not.toHaveBeenCalled();
   });
 }
+
+test('an out-of-memory worker reopens in a fresh worker from its checkpoint and replays the later edits', async () => {
+  recoverSurface = true;
+  const listening = new Set<unknown>();
+  const onMemory = peerless.ResidentSourceWorkerClient.prototype.onMemory;
+  const memory = spyOn(peerless.ResidentSourceWorkerClient.prototype, 'onMemory').mockImplementation(function (
+    this: peerless.ResidentSourceWorkerClient, listener) {
+    const stop = onMemory.call(this, listener);
+    listening.add(this);
+    return () => { listening.delete(this); stop(); };
+  });
+  restorers.push(() => memory.mockRestore());
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const current = binding!;
+  const [first] = workers;
+  const kept = current.commands.submit({ kind: 'insertText', payload: { text: 'kept' } });
+  if (kept.status !== 'submitted') throw new Error('edit not submitted');
+  expect((await kept.ticket.ack).status).toBe('applied');
+  await waitFor(() => expect(first!.checkpoints.at(-1)?.version).toBe(1));
+  await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
+  const checkpoint = first!.checkpoints.at(-1)!;
+  first!.outOfMemory = true;
+  const replayed = current.commands.submit({ kind: 'insertText', payload: { text: ' replayed' } });
+  if (replayed.status !== 'submitted') throw new Error('edit not submitted');
+  expect((await replayed.ticket.ack).status).toBe('applied');
+  expect(workers).toHaveLength(2);
+  expect(workers[1]!.text).toBe('kept replayed');
+  expect(current.session.state.version).toBe(2);
+  const opens = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'openSource' }> =>
+    request.type === 'openSource');
+  expect(opens.map(({ source }) => source.state)).toEqual([undefined, checkpoint.state]);
+  const inits = requests.filter((request): request is Extract<ResidentEngineWorkerRequest, { type: 'commandInit' }> =>
+    request.type === 'commandInit').map(({ request }) => request);
+  expect(inits).toHaveLength(2);
+  expect(inits[1]).toMatchObject({ session: inits[0]!.session, incarnation: 2, epoch: 1,
+    version: checkpoint.version, throughSeq: checkpoint.throughSeq });
+  expect(first!.terminate).toHaveBeenCalled();
+  expect(listening.size).toBe(1);
+  const options = surface.mock.calls.at(-1)![0].sessionOptions;
+  expect(options.prepareGeometry(commandFrame(1))?.identity).toEqual({ session: inits[0]!.session, incarnation: 2, epoch: 1 });
+  expect(onError).not.toHaveBeenCalled();
+  view.unmount();
+  expect(listening.size).toBe(0);
+
+});
+
+
+test('the real paged editor recovers the full checkpoint document and fails on a second crash', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} showToolbar={false} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const first = workers[0]!;
+  const expected = 'kept' + '.'.repeat(127);
+  for (let index = 0; index < 128; index++) {
+    await act(async () => {
+      const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: index === 0 ? 'kept' : '.' } });
+      if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+      expect((await submitted.ticket.ack).status).toBe('applied');
+    });
+  }
+  await waitFor(() => expect(first.checkpoints.length).toBeGreaterThan(0));
+  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  first.outOfMemory = true;
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: ' later' } });
+    if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+    expect((await submitted.ticket.ack).status).toBe('applied');
+  });
+  expect(workers).toHaveLength(2);
+  expect(workers[1]!.text).toBe(expected + ' later');
+  await waitFor(() => expect(binding!.session.state.presentedThroughSeq).toBe(129));
+  expect(new TextDecoder().decode((await ref.current!.save())!)).toBe(expected + ' later');
+  expect(first.terminate).toHaveBeenCalledTimes(1);
+  expect(onError).not.toHaveBeenCalled();
+  workers[1]!.outOfMemory = true;
+  await act(async () => { await binding!.session.submit('insertText', { text: ' second' }).ack.catch(() => {}); });
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'out-of-memory' });
+  expect(workers).toHaveLength(2);
+  expect(view.getByRole('alert')).toBeDefined();
+});
+
+test('a recovered worker receives plugin reservations versioned to its own document', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  documentVersions = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const plugin = defineDocxPlugin({ id: 'gap', createState: () => null, reservations: (context) => ({
+    version: context.snapshot.version, items: [{ id: 'gap', kind: 'block', side: 'before', height: 20,
+      anchor: { kind: 'paragraph', paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'a' } } }] }) });
+  const onError = mock((_error: Error) => {});
+  render(<DocxEditor {...peerlessProps} plugins={[plugin]} onError={onError} showToolbar={false} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const sent = () => requests.flatMap(request => request.type === 'edit' && request.command.kind === 'setRenderEnvironment'
+    ? [{ replay: !!request.command.replay, version: (request.command.payload as yrs.DocxCommandPayloads['setRenderEnvironment']).reservations?.version }] : []);
+  await waitFor(() => expect(sent().at(-1)).toEqual({ replay: false, version: 'worker-1-0' }));
+  workers[0]!.outOfMemory = true;
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: 'kept' } });
+    if (submitted.status !== 'submitted') throw new Error('edit not submitted');
+    expect((await submitted.ticket.ack).status).toBe('applied');
+  });
+  expect(workers).toHaveLength(2);
+  await waitFor(() => expect(sent().at(-1)).toEqual({ replay: false, version: 'worker-2-4' }));
+  expect(onError).not.toHaveBeenCalled();
+});

@@ -1,6 +1,15 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { useEffect, useLayoutEffect, useState } from 'react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
+import { preloadEditWasm } from '@betteroffice/docx/yrs/wasm/index';
+import { preloadOpcWasm } from '@betteroffice/docx/wasm/opc';
+import { CollaborationProvider, type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
+import { decodeMessages, stateVectorClock } from '@betteroffice/docx/collaboration/protocol';
+import { usePeerlessEditSession } from '../hooks/usePeerlessEditSession';
 import * as yrs from '@betteroffice/docx/yrs';
 import * as peerless from '@betteroffice/docx/peerless';
 import * as measurement from '@betteroffice/docx/layout';
@@ -364,3 +373,146 @@ test('the default editor publishes an async replica whose sync reads name the as
   expect(warn.mock.calls.map(([message]) => String(message)).filter(message => message.includes('collaboration'))).toEqual([]);
   view.unmount();
 });
+
+
+class RecoveryTransport implements CollaborationTransport {
+  peer?: RecoveryTransport;
+  readonly sent: Uint8Array[] = [];
+  readonly listeners = new Set<(event: CollaborationTransportEvent) => void>();
+  connect() {}
+  disconnect() {}
+  send(data: Uint8Array) {
+    this.sent.push(data);
+    queueMicrotask(() => this.peer?.emit({ type: 'message', data }));
+    return true;
+  }
+  onEvent(listener: (event: CollaborationTransportEvent) => void) {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  emit(event: CollaborationTransportEvent) { for (const listener of [...this.listeners]) listener(event); }
+}
+
+test.each(['crash', 'out-of-memory'] as const)('a collaborative worker %s fails loudly without respawning or leaking its provider', async failure => {
+  const generated = resolve(import.meta.dir, '../../../../../docx/src/wasm/generated');
+  await preloadEditWasm(new Uint8Array(readFileSync(resolve(generated, 'edit/docx_edit_bg.wasm'))));
+  await preloadOpcWasm(new Uint8Array(readFileSync(resolve(generated, 'opc/ooxml_opc_bg.wasm'))));
+  const start = await residentWorkerFactory({ transferBuffers: true });
+  const workers: InProcessResidentWorker[] = [];
+  const workerDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  setMissingWorkerCapabilitiesForTests([]);
+  Object.defineProperty(globalThis, 'Worker', { configurable: true, value: class {
+    constructor() { const worker = start(); workers.push(worker); return worker; }
+  } });
+  restores.push(() => {
+    for (const worker of workers) worker.terminate();
+    if (workerDescriptor) Object.defineProperty(globalThis, 'Worker', workerDescriptor);
+    else Reflect.deleteProperty(globalThis, 'Worker');
+  });
+  const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map([
+    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/document.xml', toBytes('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:sectPr/></w:body></w:document>')],
+  ])));
+  const requirements = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'fontRequirements').mockResolvedValue('[]');
+  const textEngine = spyOn(measurement, 'getRustTextEngine').mockResolvedValue({ registerFont: () => 0,
+    registerSubstituteFont: () => 0, clearFonts() {} });
+  const commandInit = yrs.ResidentEngineWorkerClient.prototype.commandInit;
+  const init = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'commandInit').mockImplementation(function (this: yrs.ResidentEngineWorkerClient, request) {
+    const at = { story: 'body', paraId: workers.at(-1)!.sessions.at(-1)!.paragraphs('body')[0]!.paraId, offset: 4 };
+    return commandInit.call(this, { ...request, ...(request.incarnation === 1 ? { selection: { anchor: at, focus: at } } : {}),
+      fonts: [new Uint8Array(readFileSync(resolve(import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')))],
+      layoutInput: JSON.stringify({ bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
+        measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' }, fontChains: { 'liberation sans|0|0': [0] } }, renderEnv: {} }),
+    });
+  });
+  const hooks = new Map<yrs.ResidentEngineWorkerClient, Set<unknown>>();
+  const onCollabUpdates = yrs.ResidentEngineWorkerClient.prototype.onCollabUpdates;
+  const subscribe = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'onCollabUpdates').mockImplementation(function (this: yrs.ResidentEngineWorkerClient, listener) {
+    const listeners = hooks.get(this) ?? new Set();
+    hooks.set(this, listeners); listeners.add(listener);
+    const stop = onCollabUpdates.call(this, listener);
+    return () => { listeners.delete(listener); stop(); };
+  });
+  let binding: PeerlessEditSessionBinding | undefined;
+  const canvases = new Map<string, HTMLCanvasElement>();
+  const canvasForPage = ({ pageId }: { pageId: string }) => {
+    let canvas = canvases.get(pageId);
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      Object.defineProperty(canvas, 'getContext', { value: () => ({ save() {}, restore() {}, setTransform() {}, clearRect() {}, drawImage() {} }) });
+      canvases.set(pageId, canvas);
+    }
+    return canvas;
+  };
+  const surface = spyOn(paged, 'PeerlessPagedEditor').mockImplementation(function Surface({ sessionOptions, onReady }) {
+    const session = usePeerlessEditSession({ ...sessionOptions, canvasForPage });
+    useLayoutEffect(() => {
+      if (session.status === 'ready') { binding = session.binding; onReady?.(session.binding); }
+    }, [session, onReady]);
+    return null;
+  });
+  restores.push(() => requirements.mockRestore(), () => textEngine.mockRestore(), () => init.mockRestore(),
+    () => subscribe.mockRestore(), () => surface.mockRestore());
+  const clientId = failure === 'crash' ? 9641 : 9643;
+  const peer = await yrs.createYrsSession({ clientId: clientId + 1 });
+  restores.push(() => peer.destroy());
+  peer.openDocx(bytes, true);
+  const initialUpdate = peer.encodeStateAsUpdate();
+  const editorWire = new RecoveryTransport(), peerWire = new RecoveryTransport();
+  editorWire.peer = peerWire; peerWire.peer = editorWire;
+  const peerProvider = new CollaborationProvider(peer, peerWire);
+  let provider: CollaborationProvider | undefined;
+  const errors: Error[] = [];
+  peerProvider.onError(error => errors.push(error));
+  peerProvider.connect();
+  restores.push(() => { provider?.destroy(); peerProvider.destroy(); });
+  let down = false;
+  const onReplica = mock((replica: CollaborationReplica | null) => {
+    provider?.destroy(); provider = undefined;
+    if (!replica) {
+      if (down) peer.insertText({ story: 'body', paraId: peer.paragraphs('body')[0]!.paraId, offset: 0 }, 'remote ');
+      return;
+    }
+    provider = new CollaborationProvider(replica, editorWire);
+    provider.onError(error => errors.push(error));
+    provider.connect();
+    editorWire.emit({ type: 'open' }); peerWire.emit({ type: 'open' });
+  });
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor documentBuffer={bytes} showToolbar={false} collaboration={{ clientId, initialUpdate, onReplica }} onError={onError} />);
+  await waitFor(() => { expect(onError.mock.calls).toEqual([]); expect(binding).toBeDefined(); });
+  await waitFor(() => { expect(errors).toEqual([]); expect(provider?.synced && peerProvider.synced).toBe(true); });
+  const original = onReplica.mock.calls[0]![0] as AsyncReplicaAdapter;
+  const firstClient = [...hooks.keys()][0]!;
+  await act(async () => { expect((await binding!.session.submit('insertText', { text: ' acked' }).ack).status).toBe('applied'); });
+  await waitFor(() => expect(peer.paragraphs('body')[0]!.text).toContain(' acked'));
+  const watermark = stateVectorClock(await original.async.encodeStateVector(), original.clientId);
+  expect(watermark).toBeGreaterThan(0);
+  const handshakes = editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1').length;
+  expect(handshakes).toBeGreaterThan(0);
+  down = true;
+  await act(async () => {
+    if (failure === 'crash') workers[0]!.onerror?.({ message: 'Worker crashed' } as ErrorEvent);
+    else workers[0]!.onmessage?.({ data: { id: -1, ok: false, terminal: true,
+      outOfMemory: true, error: 'Worker heap limit exceeded' } } as MessageEvent<yrs.ResidentEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toMatchObject({ code: failure });
+  expect(onReplica.mock.calls.map(([replica]) => replica === null)).toEqual([false, true]);
+  expect(workers).toHaveLength(1);
+  expect(workers[0]!.requests.filter(type => type === 'openSource')).toHaveLength(1);
+  expect(workers[0]!.requests.filter(type => type === 'commandInit')).toHaveLength(1);
+  expect(hooks.get(firstClient)?.size).toBe(0);
+  await expect(original.async.encodeStateVector()).rejects.toThrow('retired');
+  expect(stateVectorClock(peer.encodeStateVector(), original.clientId)).toBe(watermark);
+  expect(peer.paragraphs('body')[0]!.text).toBe('remote Seed acked');
+  expect(await binding!.session.submit('insertText', { text: ' refused' }).ack).toMatchObject({ status: 'cancelled', reason: 'disposed' });
+  expect(editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1')).toHaveLength(handshakes);
+  expect(editorWire.listeners.size).toBe(0);
+  expect(errors).toEqual([]);
+  down = false;
+  view.unmount();
+  expect(editorWire.listeners.size).toBe(0);
+  expect([...hooks.values()].every(listeners => listeners.size === 0)).toBe(true);
+}, 20_000);

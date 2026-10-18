@@ -8,7 +8,7 @@ import { createYrsSession } from './index';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
 import { ResidentEngineWorkerClient as DefaultWorkerClient } from './residentEngineWorkerClient';
-import type { ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandPayloads, ResidentCommandInitRequest } from './residentCommandProtocol';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 
 const TIMEOUT = 20_000;
@@ -184,6 +184,47 @@ for (const section of ['first', '0']) {
   }, TIMEOUT);
 }
 
+test('a checkpoint reopens a source in a fresh worker that resumes commands at its version and saves the same package', async () => {
+  const bytes = source(1);
+  const workers = [startWorker(), startWorker()];
+  const [first, second] = workers.map(worker => new ResidentEngineWorkerClient(worker));
+  try {
+    await first!.openSource({ bytes });
+    const initial = await first!.commandInit(init());
+    const paraId = workers[0]!.sessions[0]!.paragraphs('body')[0]!.paraId;
+    const insert = (client: ResidentEngineWorkerClient, incarnation: number, seq: number, offset: number, text: string) => client.edit({
+      session: initial.session, incarnation, seq, basis: { epoch: initial.epoch, version: seq - 1 }, kind: 'insertText',
+      payload: { text, selection: { anchor: { story: 'body', paraId, offset }, focus: { story: 'body', paraId, offset } } },
+    });
+    expect((await insert(first!, 1, 1, 0, 'One ')).outcomes[0]?.status).toBe('applied');
+    const checkpoint = await first!.checkpoint();
+    expect(checkpoint).toMatchObject({ epoch: initial.epoch, version: 1, throughSeq: 1 });
+    expect((await insert(first!, 1, 2, 4, 'Two ')).outcomes[0]?.status).toBe('applied');
+    const expected = unzipContainer(new Uint8Array((await first!.save({ comments: [] })).bytes));
+
+    await second!.openSource({ bytes, state: checkpoint.state });
+    const resumed = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+    expect(resumed).toMatchObject({ incarnation: 2, version: 1, throughSeq: 1 });
+    expect(workers[1]!.sessions[0]!.paragraphs('body').map(paragraph => [paragraph.paraId, paragraph.text]))
+      .toEqual([[paraId, 'One Paragraph 1'], expect.anything()]);
+    expect((await insert(second!, 2, 2, 4, 'Two ')).outcomes[0]).toMatchObject({ seq: 2, status: 'applied' });
+    expect(workers[1]!.sessions[0]!.paragraphs('body')[0]!.text).toBe('One Two Paragraph 1');
+    expect(unzipContainer(new Uint8Array((await second!.save({ comments: [] })).bytes))).toEqual(expected);
+  } finally {
+    first!.destroy();
+    second!.destroy();
+  }
+}, TIMEOUT);
+
+test('a source state needs whole source bytes', async () => {
+  const client = new ResidentEngineWorkerClient(startWorker());
+  try {
+    for (const invalid of [{ document: await parsed(source(1)) }, { bytes: source(1), preview: true }, { bytes: source(1), cut: { blocks: 1 } }]) {
+      await expect(client.openSource({ ...invalid, state: Uint8Array.of(0) } as never)).rejects.toThrow('Invalid DOCX source state');
+    }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('source opening adopts a warmed client and retains its worker and memory subscription', async () => {
   const worker = startWorker();
   const warmed = new DefaultWorkerClient(worker);
@@ -327,4 +368,185 @@ test('a whole source that fails after its cut failed leaves the client free for 
     await cut;
     expect(await client.openSourceCut({ bytes: source(400), cut: { blocks: 20 } })).toBeDefined();
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const dependent of [false, true]) {
+  test(`checkpoint recovery restores caret and stored marks${dependent ? ' across the predecessor boundary' : ''}`, async () => {
+    const bytes = source(1);
+    const workers = [startWorker(), startWorker()];
+    const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+    const [first, second] = clients;
+    try {
+      await first!.openSource({ bytes });
+      const initial = await first!.commandInit(init());
+      const edit = (seq: number, version: number, kind: string, payload: object) => ({
+        session: initial.session, incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload,
+      });
+      expect((await first!.edit(edit(1, 0, 'insertText', { text: 'kept' }))).outcomes[0]?.status).toBe('applied');
+      expect((await first!.edit(edit(2, 1, 'formatSelection', { delta: { bold: true } }))).outcomes[0]?.status).toBe('noop');
+      const checkpoint = await first!.checkpoint();
+      const suffix = { ...edit(3, 1, 'insertText', { text: ' later' }), ...(dependent ? { afterSeq: 1 } : {}) };
+      expect((await first!.edit(suffix)).outcomes[0]?.status).toBe('applied');
+      const expected = workers[0]!.sessions[0]!.paragraphSegments('body', [0]);
+      await second!.openSource({ bytes, state: checkpoint.state });
+      const reopened = await second!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState, replayAppliedSeqs: [3] });
+      expect(reopened.selection?.focus.offset).toBe(4);
+      expect(reopened.editState.storedMarks).toMatchObject({ delta: { bold: true }, clear: false });
+      expect((await second!.edit({ ...suffix, incarnation: 2, replay: true })).outcomes[0]?.status).toBe('applied');
+      expect(workers[1]!.sessions[0]!.paragraphs('body')[0]!.text).toBe('kept laterParagraph 1');
+      expect(workers[1]!.sessions[0]!.paragraphSegments('body', [0])).toEqual(expected);
+    } finally { clients.forEach(client => client!.destroy()); }
+  }, TIMEOUT);
+}
+
+test('previously applied typing replays after the editor becomes read-only', async () => {
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    await client.openSource({ bytes: source(1) });
+    await client.commandInit({ ...init(), incarnation: 2, readOnly: true, replayAppliedSeqs: [1] });
+    const ack = await client.edit({ session: 'source-worker', incarnation: 2, seq: 1, replay: true,
+      basis: { epoch: 1, version: 0 }, kind: 'insertText', payload: { text: 'kept' } });
+    expect(ack.outcomes[0]?.status).toBe('applied');
+    expect(worker.sessions[0]!.paragraphs('body')[0]!.text).toBe('keptParagraph 1');
+    expect(ack.editState?.readOnly).toBe(true);
+    expect((await client.edit({ session: 'source-worker', incarnation: 2, seq: 2, replay: true,
+      basis: { epoch: 1, version: 1 }, kind: 'insertText', payload: { text: 'blocked' } })).outcomes[0])
+      .toMatchObject({ status: 'refused', reason: 'read-only' });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('checkpoint recovery restores proposal records and preview decisions', async () => {
+  const bytes = source(1);
+  const workers = [startWorker(), startWorker()];
+  const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+  try {
+    await clients[0]!.openSource({ bytes });
+    await clients[0]!.commandInit(init());
+    const identities = await clients[0]!.documentRead({ kind: 'paragraphIdentities' });
+    const proposed = await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+      basis: { epoch: 1, version: 0 }, kind: 'propose', payload: { expectVersion: identities.version,
+        proposals: [{ id: 'retained', paragraph: identities.value.paragraphs[0]!.session!,
+          op: 'insertText', at: 'end', text: 'Proposal', suggest: { author: 'Writer', date: '2026-01-01' } }] } });
+    expect(proposed.outcomes[0]?.status).toBe('applied');
+    const review = await clients[0]!.documentRead({ kind: 'reviewSnapshot' });
+    expect((await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 2,
+      basis: { epoch: 1, version: proposed.version }, kind: 'setProposalStates', payload: {
+        expectVersion: review.version, expectPreviewVersion: review.value!.proposals.previewVersion,
+        changes: [{ id: 'retained', state: 'accepted' }] } })).outcomes[0]?.status).toBe('applied');
+    const checkpoint = await clients[0]!.checkpoint();
+    const before = (await clients[0]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+    await clients[1]!.openSource({ bytes, state: checkpoint.state });
+    await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version, throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+    const after = (await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+    expect(after.proposals.proposals).toEqual(before.proposals.proposals);
+    expect(after.proposals.previewVersion).toBe(before.proposals.previewVersion);
+    expect(after.revisions).toEqual(before.revisions);
+    const changed = await clients[1]!.edit({ session: 'source-worker', incarnation: 2, seq: 3,
+      basis: { epoch: 1, version: checkpoint.version }, kind: 'setProposalStates', payload: {
+        expectVersion: after.version, expectPreviewVersion: after.proposals.previewVersion,
+        changes: [{ id: 'retained', state: 'rejected' }] } });
+    expect(changed.outcomes[0]?.status).toBe('applied');
+    expect((await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!.proposals.proposals[0]?.state).toBe('rejected');
+  } finally { clients.forEach(client => client.destroy()); }
+}, TIMEOUT);
+
+
+test('checkpoint recovery retains resolved reservations and table gridlines', async () => {
+  const bytes = source(1);
+  const workers = [startWorker(), startWorker()];
+  const clients = workers.map(worker => new ResidentEngineWorkerClient(worker));
+  try {
+    await clients[0]!.openSource({ bytes });
+    const settings = { ...init(), layoutInput: JSON.stringify({ ...JSON.parse(LAYOUT), renderEnv: { showTableGridlines: true } }) };
+    await clients[0]!.commandInit(settings);
+    const identities = await clients[0]!.documentRead({ kind: 'paragraphIdentities' });
+    const environment: DocxCommandPayloads['setRenderEnvironment'] = { themeColors: {}, showHiddenText: false, showTableGridlines: true, reservations: {
+      version: identities.version, key: 'retained', sets: [{ owner: 'layout', items: [{ id: 'space', kind: 'block',
+        anchor: { kind: 'paragraph', paragraph: identities.value.paragraphs[0]!.session! }, side: 'before', height: 50 }] }],
+    } };
+    const changed = await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+      basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: environment });
+    expect(changed.outcomes[0]?.status).toBe('noop');
+    const checkpoint = await clients[0]!.checkpoint();
+    const before = (await clients[0]!.requestFullFrame()).frame!;
+    await clients[1]!.openSource({ bytes, state: checkpoint.state });
+    const layout = spyOn(workers[1]!.sessions[0]!, 'layoutDocumentWithRegionsAfterEdit');
+    const resumed = await clients[1]!.commandInit({ ...settings, incarnation: 2, version: checkpoint.version,
+      throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+    const restored = JSON.parse(layout.mock.calls.at(-1)![0]).renderEnv;
+    expect(restored.showTableGridlines).toBe(true);
+    expect(Object.values(restored.reservations ?? {})).toMatchObject([{ owner: 'layout', id: 'space', height: 50 }]);
+    expect(resumed.frame.payload.reservations).toEqual(before.payload.reservations);
+    expect(firstPage([resumed.frame.payload.frame])).toEqual(firstPage([before.payload.frame]));
+    layout.mockRestore();
+  } finally { clients.forEach(client => client.destroy()); }
+}, TIMEOUT);
+
+for (const remove of [false, true]) {
+  test(`checkpoint recovery retains source comment ${remove ? 'deletion' : 'metadata'} and revision refs`, async () => {
+    const parts = new Map(Object.entries(unzipContainer(source(1))));
+    const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml'))
+      .replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')));
+    parts.set('word/_rels/document.xml.rels', toBytes(new TextDecoder().decode(parts.get('word/_rels/document.xml.rels'))
+      .replace('</Relationships>', '<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>')));
+    parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:commentRangeStart w:id="0"/><w:r><w:t>Text</w:t></w:r><w:ins w:id="7" w:author="Writer" w:date="2026-01-01"><w:r><w:t>Revision</w:t></w:r></w:ins><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p><w:sectPr/></w:body></w:document>`));
+    parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="${w}"><w:comment w:id="0" w:author="Writer"><w:p><w:r><w:t>Original</w:t></w:r></w:p></w:comment></w:comments>`));
+    const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+    const clients = [startWorker(), startWorker()].map(worker => new ResidentEngineWorkerClient(worker));
+    try {
+      await clients[0]!.openSource({ bytes });
+      await clients[0]!.commandInit(init());
+      const review = (await clients[0]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+      expect(review.comments).toHaveLength(1);
+      expect(review.revisions).toHaveLength(1);
+      const id = review.comments[0]!.id;
+      const changed = await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+        basis: { epoch: 1, version: 0 }, kind: remove ? 'removeComment' : 'updateComment',
+        payload: remove ? { id, expectVersion: review.version } : { id, expectVersion: review.version, patch: { author: 'Editor', body: 'Changed', done: true } } });
+      expect(changed.outcomes[0]?.status).toBe('applied');
+      const checkpoint = await clients[0]!.checkpoint();
+      const before = (await clients[0]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+      await clients[1]!.openSource({ bytes, state: checkpoint.state });
+      await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version,
+        throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+      const after = (await clients[1]!.documentRead({ kind: 'reviewSnapshot' })).value!;
+      expect(after.comments).toEqual(before.comments);
+      expect(after.uiComments).toEqual(before.uiComments);
+      expect(after.commentIds).toEqual(before.commentIds);
+      expect(after.revisions).toEqual(before.revisions);
+      expect(unzipContainer(new Uint8Array((await clients[1]!.save({ comments: [] })).bytes)))
+        .toEqual(unzipContainer(new Uint8Array((await clients[0]!.save({ comments: [] })).bytes)));
+    } finally { clients.forEach(client => client.destroy()); }
+  }, TIMEOUT);
+}
+
+
+test('recovery keeps reservations from a replayed render-settings update', async () => {
+  const bytes = source(1);
+  const clients = [startWorker(), startWorker()].map(worker => new ResidentEngineWorkerClient(worker));
+  try {
+    await clients[0]!.openSource({ bytes });
+    await clients[0]!.commandInit(init());
+    const identities = await clients[0]!.documentRead({ kind: 'paragraphIdentities' });
+    const environment: DocxCommandPayloads['setRenderEnvironment'] = { themeColors: {}, showHiddenText: false, reservations: {
+      version: identities.version, key: 'retained', sets: [{ owner: 'layout', items: [{ id: 'space', kind: 'block',
+        anchor: { kind: 'paragraph', paragraph: identities.value.paragraphs[0]!.session! }, side: 'before', height: 50 }] }],
+    } };
+    await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 1,
+      basis: { epoch: 1, version: 0 }, kind: 'setRenderEnvironment', payload: environment });
+    const checkpoint = await clients[0]!.checkpoint();
+    const update = { kind: 'setRenderEnvironment', payload: { ...environment, showHiddenText: true } } as const;
+    expect((await clients[0]!.edit({ session: 'source-worker', incarnation: 1, seq: 2,
+      basis: { epoch: 1, version: checkpoint.version }, ...update })).outcomes[0]?.status).toBe('noop');
+    await clients[1]!.openSource({ bytes, state: checkpoint.state });
+    await clients[1]!.commandInit({ ...init(), incarnation: 2, version: checkpoint.version,
+      throughSeq: checkpoint.throughSeq, recoveryState: checkpoint.recoveryState });
+    const replayed = await clients[1]!.edit({ session: 'source-worker', incarnation: 2, seq: 2, replay: true,
+      basis: { epoch: 1, version: checkpoint.version }, ...update });
+    expect(replayed.outcomes[0]?.status).toBe('noop');
+    const recovered = (await clients[1]!.checkpoint()).recoveryState?.layoutReservations;
+    expect(Object.values(recovered?.values ?? {})).toMatchObject([{ owner: 'layout', id: 'space', height: 50 }]);
+  } finally { clients.forEach(client => client.destroy()); }
 }, TIMEOUT);

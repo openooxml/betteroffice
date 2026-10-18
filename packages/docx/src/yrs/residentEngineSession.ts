@@ -45,7 +45,7 @@ import type { Comment } from '../types/content';
 import type { Document, SectionProperties } from '../types/document';
 import type { DocxListStoriesResult } from './stories';
 import type { DocxCommentPatch } from './residentReview';
-import { projectResidentComments, type ResidentCommentProjection } from './residentCommentProjection';
+import { projectResidentComments, type ResidentCommentRecoveryState, type ResidentCommentProjection } from './residentCommentProjection';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -199,7 +199,9 @@ export type ResidentEngineSession = Pick<
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(fresh?: boolean): ResidentCommentProjection | null;
-  initializeComments(): void;
+  /** Seeds the opened package's comment metadata, unless the session joined from a peer's state. */
+  initializeComments(recovery?: ResidentCommentRecoveryState): void;
+  commentRecoveryState?(): ResidentCommentRecoveryState;
   mediaDataUrl(token: string): string | null;
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
@@ -233,7 +235,7 @@ export type ResidentEngineSession = Pick<
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string, seedStories?: boolean): string;
   /** With `initialUpdate`, the shared state replaces the package's stories. */
-  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): string;
+  openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array; state?: Uint8Array }): string;
   decodeFont(bytes: Uint8Array): Uint8Array;
   openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
@@ -272,6 +274,7 @@ export async function createResidentEngineSession(
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
   let commentsInitialized = false;
+  let commentsImported = false;
   let partsTouched = false;
   let marginsTouched = false;
   let sectionsTouched = false;
@@ -280,8 +283,14 @@ export async function createResidentEngineSession(
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
   let parsedFacade: YrsSession | undefined;
-  const initializeComments = () => {
-    const source = partBase?.package.document.comments ?? [];
+  const initializeComments = (recovery?: ResidentCommentRecoveryState) => {
+    if (recovery) {
+      commentAliases.clear();
+      for (const [id, alias] of recovery.aliases) commentAliases.set(id, alias);
+      commentsInitialized = recovery.initialized;
+    }
+    if (commentsInitialized) return;
+    const source = commentsImported ? partBase?.package.document.comments ?? [] : [];
     const existing = new Set<string>(JSON.parse(session.list_comments()).map((comment: { id: string }) => comment.id));
     for (const comment of source) session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
       author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
@@ -620,6 +629,7 @@ export async function createResidentEngineSession(
     },
     commentProjection: fresh => partBase ? projectResidentComments(resident, commentAliases, commentsInitialized, fresh) : null,
     initializeComments,
+    commentRecoveryState: () => ({ aliases: [...commentAliases], initialized: commentsInitialized }),
     sectionProperties,
     setSectionMargins: (section, margins) => {
       ensureUndo();
@@ -873,9 +883,10 @@ export async function createResidentEngineSession(
     decodeFont: bytes => session.decode_font(bytes),
     openSourceDocx: (bytes, options) => {
       session.set_media_tokens(options.mediaTokens === true);
-      const json = resident.openDocx(bytes, options.digest, options.generation, !options.initialUpdate);
-      if (options.initialUpdate) {
-        resident.loadState(options.initialUpdate);
+      const state = options.state ?? options.initialUpdate;
+      const json = resident.openDocx(bytes, options.digest, options.generation, state === undefined);
+      if (state) {
+        resident.loadState(state);
         partBase = keySections(partBase!);
         markProjectionStories(session.story_ids());
       }
@@ -884,6 +895,7 @@ export async function createResidentEngineSession(
     openDocument: (document, options) => {
       commentAliases.clear();
       commentsInitialized = false;
+      commentsImported = !options.initialUpdate;
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
@@ -921,6 +933,7 @@ export async function createResidentEngineSession(
     openDocx: (bytes, digest, generation, seedStories = true) => {
       commentAliases.clear();
       commentsInitialized = false;
+      commentsImported = seedStories;
       geometryStories.clear();
       projectionStories.clear();
       const json = resolveHostJsonCommentMedia(
@@ -937,6 +950,7 @@ export async function createResidentEngineSession(
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
       commentAliases.clear();
       commentsInitialized = false;
+      commentsImported = true;
       geometryStories.clear();
       projectionStories.clear();
       const json =

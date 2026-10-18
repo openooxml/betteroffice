@@ -1,11 +1,13 @@
 import type { DocxEditRequest, DocxEditResult, DocxTextRange } from './edits';
 import type { DisplayListRect } from '../layout/render/displayListQueries';
 import type { ResidentFontEnvironment, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
+import type { ResidentCommentRecoveryState } from './residentCommentProjection';
 import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
 import type {
   ApplyContext,
   ApplyResult,
   CommandAck,
+  Checkpoint,
   CommandConnection,
   CommandEnvelope,
   CommandHost,
@@ -42,7 +44,7 @@ import type { LayoutMetaV1 } from './layoutMeta';
 import type { DecodedFrameDelta } from '../layout/render/frameDelta';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
-import type { DocxProposalRegistry, DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
+import type { DocxProposalRegistry, DocxProposalRegistryState, DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 import type { DocxCommentPatch } from './residentReview';
 import type { DocxCellNavigationPlan } from './residentCommandCells';
 import type { DocxTableCommandTarget } from './residentCommandTables';
@@ -398,6 +400,24 @@ export type DocxCommandAck = CommandAck<DocxCommandSelection | null, DocxEditSta
 export type DocxCommandApplyResult = ApplyResult<DocxCommandSelection | null, DocxEditState>;
 export type DocxCommandReply = DocxCommandAck | TransferResult<DocxCommandAck>;
 
+/** @internal */
+export interface ResidentCommandRecoveryState {
+  selection: DocxCommandSelection | null;
+  storedMarks: DocxStoredMarks | null;
+  activePart?: ResidentPartTarget | null;
+  stickyPositions: [string, YrsStickyPosition][];
+  cellSelection: YrsTableRange | null;
+  proposals: DocxProposalRegistryState;
+  selections: [number, DocxCommandSelection | null][];
+  comments?: ResidentCommentRecoveryState;
+  layoutReservations?: { values: DocxResolvedReservations; set?: DocxFrameReservations };
+}
+
+/** @internal */
+export interface ResidentCommandCheckpoint extends Checkpoint {
+  recoveryState?: ResidentCommandRecoveryState;
+}
+
 export interface ResidentCommandInitRequest {
   session: string;
   incarnation: number;
@@ -406,6 +426,7 @@ export interface ResidentCommandInitRequest {
   throughSeq?: number;
   refusedSeqs?: readonly number[];
   replayAppliedSeqs?: readonly number[];
+  recoveryState?: ResidentCommandRecoveryState;
   readOnly: boolean;
   selection?: DocxCommandSelection | null;
   fonts: YrsResidentFontRegistration[];
@@ -456,6 +477,7 @@ export interface ResidentCommandHooks {
     DocxCommandFrame | TransferResult<DocxCommandFrame> |
     Promise<DocxCommandFrame | TransferResult<DocxCommandFrame>>;
   snapshot(): Uint8Array | Promise<Uint8Array>;
+  recoveryState?(): Omit<ResidentCommandRecoveryState, 'selections'>;
 }
 
 /** @internal Worker-owned layout access for ordered selection resolution. */
@@ -482,7 +504,7 @@ export type ResidentCommandHooksFactory = (
   engine: ResidentEngineSession,
   init: ResidentCommandInitRequest,
   environment?: ResidentCommandHooksEnvironment
-) => Pick<ResidentCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState'> & {
+) => Pick<ResidentCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState'> & {
   /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
   afterRemoteMerge?(context: DocxCommandApplyContext): void;
 };

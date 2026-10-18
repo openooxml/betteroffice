@@ -3,4 +3,4 @@
 '@betteroffice/xlsx': patch
 ---
 
-Enables `plugins` in `<XlsxEditor asyncApi>`, including reads, edit batches, panels, overlays, and selection events. Opt-in through `asyncApi`.
+Enables `plugins` on the default worker-only `XlsxEditor`, including reads, edit batches, panels, overlays, and selection events.

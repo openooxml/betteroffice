@@ -614,12 +614,19 @@ allocated bytes and the other modules by their memory size.
 ```
 
 `memoryBudget.workerLimitBytes` caps what the resident worker's editing core may
-allocate at once; an allocation past it fails as if the memory were full. A worker
-that runs out of memory is replaced by a fresh one once. If that one runs out too,
-the editor reports `ResidentWorkerOutOfMemoryError` from `@betteroffice/docx/yrs`
-through `onError`, with the worker's memories at that point, and stops rendering
-rather than moving the work to the main thread. Any other worker failure moves the
-work to the main thread.
+allocate at once; an allocation past it fails as if the memory were full.
+
+The worker-only editor replaces a worker that crashes, stops answering or runs out
+of memory with a fresh one, once per editor. A `documentBuffer` reopens at the last
+checkpoint the worker took and replays the edits since it, so undo reaches back only
+to that checkpoint; a `document` reopens and replays every edit. If the replacement
+fails too, the editor reports a `SessionFailure` error with its `code`, such as
+`out-of-memory`, through `onError` and stops editing.
+
+The `legacySyncApi` and `collaboration` editors replace a worker that runs out of
+memory once. If that one runs out too, they report `ResidentWorkerOutOfMemoryError`
+from `@betteroffice/docx/yrs` through `onError`, with the worker's memories at that
+point, and stop rendering. Any other worker failure moves their work to the main thread.
 
 ## Framework notes
 

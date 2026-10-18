@@ -183,6 +183,11 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   if (init.rasterScale !== undefined) setCommandRasterScale(init.rasterScale);
   init.layoutInput = resolveLayoutReservationInput(engine, init.layoutInput, true);
   const input = JSON.parse(init.layoutInput || '{}');
+  const recoveredReservations = init.recoveryState?.layoutReservations;
+  if (recoveredReservations) {
+    input.renderEnv = { ...input.renderEnv, reservations: recoveredReservations.values };
+    init.layoutInput = JSON.stringify(input);
+  }
   let layoutInput = init.layoutWithRegions ? init.layoutInput : JSON.stringify({
     ...input, measured: [], retainOnly: true,
     workerOwned: { bodyStory: 'body', renderEnv: input.renderEnv, measurement: input.measurement },
@@ -190,7 +195,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   });
   if (!init.layoutWithRegions) engine.layoutDocumentJson(layoutInput);
   let layoutDirty = !init.layoutWithRegions;
-  let appliedReservations: DocxFrameReservations | undefined;
+  let appliedReservations: DocxFrameReservations | undefined = recoveredReservations?.set;
   let laidOutReservations: DocxFrameReservations | undefined;
   sessionFonts?.dispose();
   const fonts = new ResidentSessionFonts(engine, scope.fonts);
@@ -458,8 +463,20 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return { frame, layoutRevision };
     },
   });
-  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
-  const hooks = collaboration?.wrap(baseHooks) ?? baseHooks;
+  const changes: NonNullable<typeof commandFrameChanges> = {
+    pages: new Set<number>(), updates: [], layoutPreviewVersion, layoutStale: init.recoveryState !== undefined,
+  };
+  const wrapped = collaboration?.wrap(baseHooks) ?? baseHooks;
+  const hooks = { ...wrapped, ...(wrapped.recoveryState ? {
+    recoveryState: () => ({
+      ...wrapped.recoveryState!(),
+      comments: engine.commentRecoveryState?.(),
+      layoutReservations: {
+        values: (JSON.parse(init.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.reservations ?? {},
+        set: appliedReservations,
+      },
+    }),
+  } : {}) };
   commandFrameChanges = changes;
   const prefixNavigation = {
     character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
@@ -1431,7 +1448,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       throw new Error('Resident commands require a whole opened document');
     }
     if (commandHost) throw new Error('Resident commands are already initialized');
-    session.initializeComments();
+    session.initializeComments(request.request.recoveryState?.comments);
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
     const init = { ...request.request };
     if (init.provisionalPages !== undefined &&

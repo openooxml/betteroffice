@@ -745,3 +745,17 @@ for (const lifecycle of ['empty', 'dispose'] as const) {
     } finally { set.mockRestore(); controller.dispose(); }
   });
 }
+
+test('font readiness revisions restart with the recovered worker incarnation', () => {
+  const { controller, binding, viewStore } = fixture();
+  const onFontsLoaded = mock(() => {});
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, onFontsLoaded });
+  controller.attach(binding);
+  const state = viewStore.getSnapshot();
+  controller.fontEnvironment({ ...state.identity, phase: 'ready', revision: 8, families: ['Old face'] });
+  const identity = { ...state.identity, incarnation: 2 };
+  viewStore.acceptWorkerState(identity, { ...state, epoch: 1, selection: null });
+  controller.fontEnvironment({ ...identity, phase: 'ready', revision: 1, families: ['Recovered face'] });
+  controller.fontEnvironment({ ...identity, phase: 'ready', revision: 1, families: ['Recovered face'] });
+  expect(onFontsLoaded).toHaveBeenCalledTimes(2);
+});

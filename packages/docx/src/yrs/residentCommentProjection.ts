@@ -3,6 +3,11 @@ import type { DocxEditFailureCode } from './edits';
 import type { YrsCommentInfo, YrsStoryRange } from './index';
 import type { ResidentEngineSession } from './residentEngineSession';
 
+export interface ResidentCommentRecoveryState {
+  aliases: [string, number][];
+  initialized: boolean;
+}
+
 export interface ResidentCommentProjection {
   comments: Comment[];
   ids: Record<string, number>;
