@@ -1045,7 +1045,7 @@ fn value_from_map(value: &JsonObject) -> Value {
     )
 }
 
-fn any_from_value(value: Value) -> Result<Any, String> {
+pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
     match value {
         Value::Null => Ok(Any::Null),
         Value::Bool(value) => Ok(Any::Bool(value)),

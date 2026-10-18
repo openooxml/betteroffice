@@ -10,12 +10,16 @@ const ANCHOR: &str = r#"<wp:anchor distT="0" distB="0" distL="0" distR="0" simpl
 
 fn document(content: &str, boxed: bool) -> Vec<u8> {
     let paragraph = format!("<w:p><w:r>{content}</w:r></w:p>");
+    document_paragraphs(&paragraph, boxed)
+}
+
+fn document_paragraphs(paragraphs: &str, boxed: bool) -> Vec<u8> {
     let body = if boxed {
         format!(
-            r#"<w:p><w:r><w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+            r#"<w:p><w:r><w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>{paragraphs}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
         )
     } else {
-        paragraph
+        paragraphs.to_owned()
     };
     let parts = [
         ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned()),
@@ -40,6 +44,15 @@ fn document(content: &str, boxed: bool) -> Vec<u8> {
 
 fn primitives(content: &str, boxed: bool, media_tokens: bool) -> Vec<Value> {
     let display = display(&document(content, boxed), media_tokens);
+    assert_eq!(display["pages"].as_array().unwrap().len(), 1);
+    display["pages"][0]["primitives"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn primitives_for_paragraphs(paragraphs: &str, boxed: bool, media_tokens: bool) -> Vec<Value> {
+    let display = display(&document_paragraphs(paragraphs, boxed), media_tokens);
     assert_eq!(display["pages"].as_array().unwrap().len(), 1);
     display["pages"][0]["primitives"]
         .as_array()
@@ -88,6 +101,33 @@ fn text(primitives: &[Value]) -> String {
         .filter(|primitive| matches!(primitive["kind"].as_str(), Some("text" | "glyphRun")))
         .filter_map(|primitive| primitive["text"].as_str())
         .collect()
+}
+
+fn text_primitive<'a>(primitives: &'a [Value], word: &str) -> &'a Value {
+    let first = &word[..1];
+    primitives
+        .iter()
+        .find(|p| {
+            matches!(p["kind"].as_str(), Some("text" | "glyphRun"))
+                && p["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(first))
+        })
+        .unwrap_or_else(|| panic!("no text starting with {first}"))
+}
+
+fn baseline_y(primitive: &Value) -> f64 {
+    primitive["baselineY"]
+        .as_f64()
+        .or_else(|| primitive["glyphs"][0]["y"].as_f64())
+        .unwrap()
+}
+
+fn start_x(primitive: &Value) -> f64 {
+    primitive["x"]
+        .as_f64()
+        .or_else(|| primitive["glyphs"][0]["x"].as_f64())
+        .unwrap()
 }
 
 fn shown_anchor_pages(display: &Value, layout: &Value, anchor_text: &str) -> Vec<usize> {
@@ -217,6 +257,82 @@ fn text_only_text_box_still_paints() {
     let display = primitives("<w:t>Plain text</w:t>", true, true);
     assert!(images(&display).is_empty());
     assert_eq!(text(&display), "Plain text");
+}
+
+#[test]
+fn text_box_paragraph_spacing_collapses_between_paragraphs() {
+    let unspaced = primitives_for_paragraphs(
+        "<w:p><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p>",
+        true,
+        true,
+    );
+    let spaced = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:before="240" w:after="240"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>"#,
+        true,
+        true,
+    );
+    let unspaced_first = baseline_y(text_primitive(&unspaced, "First"));
+    let spaced_first = baseline_y(text_primitive(&spaced, "First"));
+    let unspaced_second = baseline_y(text_primitive(&unspaced, "Second"));
+    let spaced_second = baseline_y(text_primitive(&spaced, "Second"));
+    assert!(spaced_second > unspaced_second);
+    assert!((spaced_first - unspaced_first - 16.0).abs() < 1e-3);
+    assert!((spaced_second - unspaced_second - 32.0).abs() < 1e-3);
+}
+
+#[test]
+fn text_box_paragraph_exact_line_spacing_gives_32px_line_pitch() {
+    let display = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>First</w:t><w:br/><w:t>Second</w:t></w:r></w:p>"#,
+        true,
+        true,
+    );
+    let first = baseline_y(text_primitive(&display, "First"));
+    let second = baseline_y(text_primitive(&display, "Second"));
+    assert!((second - first - 32.0).abs() < 1e-3);
+}
+
+#[test]
+fn text_box_paragraph_before_lines_spacing_lowers_first_baseline() {
+    let unspaced = primitives_for_paragraphs("<w:p><w:r><w:t>First</w:t></w:r></w:p>", true, true);
+    let twips = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>"#,
+        true,
+        true,
+    );
+    let lines = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:beforeLines="100"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>"#,
+        true,
+        true,
+    );
+    let both = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:before="240" w:beforeLines="100"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>"#,
+        true,
+        true,
+    );
+    let unspaced_y = baseline_y(text_primitive(&unspaced, "First"));
+    let twips_y = baseline_y(text_primitive(&twips, "First"));
+    let lines_y = baseline_y(text_primitive(&lines, "First"));
+    let both_y = baseline_y(text_primitive(&both, "First"));
+    assert!((lines_y - unspaced_y - 16.0).abs() < 1e-3);
+    assert!((lines_y - twips_y).abs() < 1e-3);
+    assert!((both_y - lines_y).abs() < 1e-3);
+}
+
+#[test]
+fn text_box_paragraph_hanging_indent_offsets_first_and_following_lines() {
+    let lines = "<w:r><w:t>First</w:t><w:br/><w:t>Second</w:t></w:r>";
+    let plain = primitives_for_paragraphs(&format!("<w:p>{lines}</w:p>"), true, true);
+    let indented = primitives_for_paragraphs(
+        &format!(r#"<w:p><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>{lines}</w:p>"#),
+        true,
+        true,
+    );
+    let shift = |needle: &str| {
+        start_x(text_primitive(&indented, needle)) - start_x(text_primitive(&plain, needle))
+    };
+    assert!((shift("First") - 24.0).abs() < 1e-3, "{}", shift("First"));
+    assert!((shift("Second") - 48.0).abs() < 1e-3, "{}", shift("Second"));
 }
 
 pub(super) fn table_boundary_document(
