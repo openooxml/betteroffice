@@ -505,7 +505,7 @@ test.each(['crash', 'out-of-memory'] as const)('a collaborative worker %s fails 
   await expect(original.async.encodeStateVector()).rejects.toThrow('retired');
   expect(stateVectorClock(peer.encodeStateVector(), original.clientId)).toBe(watermark);
   expect(peer.paragraphs('body')[0]!.text).toBe('remote Seed acked');
-  await expect(binding!.session.submit('insertText', { text: ' refused' }).ack).rejects.toMatchObject({ code: failure });
+  expect(await binding!.session.submit('insertText', { text: ' refused' }).ack).toMatchObject({ status: 'cancelled', reason: 'disposed' });
   expect(editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1')).toHaveLength(1);
   expect(editorWire.listeners.size).toBe(0);
   expect(errors).toEqual([]);
