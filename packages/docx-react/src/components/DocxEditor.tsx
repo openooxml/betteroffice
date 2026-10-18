@@ -483,10 +483,9 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   measurementFontProvider?: BundledFontProvider;
 }
 
-export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange' | 'experimentalWorkerOpen'> {
+export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange'> {
   /** @deprecated Removed in 0.6.0. Omit for the async editor. */
   [LEGACY_SYNC_API_PROP]?: false;
-  experimentalWorkerOpen?: true;
   onChange?: undefined;
 }
 
