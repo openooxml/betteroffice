@@ -332,8 +332,8 @@ export type PptxWorkerViewerProps = Omit<
   plugins?: readonly [];
   onChange?: undefined;
   readOnly: true;
-  /** Keeps worker opening enabled in the legacy runtime. */
-  experimentalWorkerOpen?: true;
+  /** Opens in the worker; without it the legacy runtime runs in-thread. */
+  experimentalWorkerOpen: true;
   /** Without `Worker`, falls back to the in-thread engine and passes `PptxEditorApi`. */
   onReady?: (api: PptxWorkerViewerApi) => void;
 };
@@ -573,7 +573,7 @@ const initialStyle: EffectiveTextStyle = {
 };
 
 type WorkerSessionProps = Omit<PptxWorkerEditorProps, 'readOnly' | 'onReady' | 'experimentalWorkerOpen'> & {
-  experimentalWorkerOpen?: true;
+  experimentalWorkerOpen: true;
   readOnly?: boolean;
   onReady?: (api: PptxWorkerEditorApi | PptxWorkerViewerApi) => void;
 };
@@ -591,7 +591,7 @@ type GeneralEditorSessionProps = Omit<PptxLegacyEditorProps, 'experimentalWorker
 export type PptxEditorProps = PptxAsyncEditorProps | GeneralEditorSessionProps;
 
 export function PptxEditor(props: PptxAsyncEditorProps): JSX.Element;
-export function PptxEditor(props: PptxLegacyEditorProps & { experimentalWorkerOpen: false }): JSX.Element;
+export function PptxEditor(props: PptxLegacyEditorProps): JSX.Element;
 export function PptxEditor(props: CollaborationSessionProps): JSX.Element;
 export function PptxEditor(props: PptxWorkerEditorProps): JSX.Element;
 export function PptxEditor(props: WorkerEditorSessionProps & { onChange: NonNullable<PptxInThreadEditorProps['onChange']> }): JSX.Element;
@@ -635,9 +635,10 @@ function PptxAsyncEditorSession(props: PptxAsyncEditorProps) {
   </PeerlessEditorBoundary>;
 }
 
-function choosePptxEngine(inThread: boolean, collaboration: PptxEditorCollaborationOptions | undefined,
-  workerAvailable: boolean): PptxEngineWarning | undefined {
-  if (inThread) return 'deprecated';
+function choosePptxEngine(workerOpen: boolean | undefined, collaboration: PptxEditorCollaborationOptions | undefined,
+  workerAvailable: boolean): PptxEngineWarning | 'in-thread' | undefined {
+  if (workerOpen === false) return 'deprecated';
+  if (workerOpen !== true) return 'in-thread';
   if (collaboration != null) return 'collaboration';
   if (!workerAvailable) return 'no-worker';
 }
@@ -645,11 +646,11 @@ function choosePptxEngine(inThread: boolean, collaboration: PptxEditorCollaborat
 function PptxEditorSession(props: WorkerEditorSessionProps | PptxWorkerViewerProps | WorkerSessionProps | CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps) {
   useEffect(() => { warnPptxEngine('legacy-sync-api'); }, []);
   const fonts = useStableFontFaces(props.fonts);
-  const inThread = props.experimentalWorkerOpen === false;
-  const identity = useMemo(() => ({}), [props.file, fonts, props.clientId, props.collaboration, inThread]);
-  const engineIdentity = useMemo(() => ({}), [props.file, props.collaboration, inThread]);
+  const workerOpen = props.experimentalWorkerOpen;
+  const identity = useMemo(() => ({}), [props.file, fonts, props.clientId, props.collaboration, workerOpen]);
+  const engineIdentity = useMemo(() => ({}), [props.file, props.collaboration, workerOpen]);
   const startEngine = () => ({ identity: engineIdentity,
-    reason: choosePptxEngine(inThread, props.collaboration, typeof Worker === 'function') });
+    reason: choosePptxEngine(workerOpen, props.collaboration, typeof Worker === 'function') });
   const [engineChoice, setEngineChoice] = useState(startEngine);
   const engine = engineChoice.identity === engineIdentity ? engineChoice : startEngine();
   if (engineChoice !== engine) setEngineChoice(engine);
@@ -659,7 +660,7 @@ function PptxEditorSession(props: WorkerEditorSessionProps | PptxWorkerViewerPro
   const session = choice.identity === identity ? choice : start();
   const editable = session.editable || needsEditor;
   if (choice !== session || choice.editable !== editable) setChoice({ ...session, editable });
-  useEffect(() => { if (engine.reason) warnPptxEngine(engine.reason); }, [engine.reason]);
+  useEffect(() => { if (engine.reason && engine.reason !== 'in-thread') warnPptxEngine(engine.reason); }, [engine.reason]);
   const Editor = PptxWorkerEditor as (props: WorkerEditorSessionProps) => JSX.Element;
   return engine.reason ? (
     <PptxEditorContent {...props as PptxInThreadEditorProps} />

@@ -187,7 +187,7 @@ test('starts_readOnly_with_plugins_and_refuses_every_write_path', async () => {
   let api!: PptxWorkerEditorApi;
   let context!: PptxPluginContext<null>;
   const plugin = definePptxPlugin({ id: 'writer', createState: () => null, initialize(ctx) { context = ctx; } });
-  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} readOnly plugins={[plugin]}
+  const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly plugins={[plugin]}
     pluginGrants={{ writer: { document: 'write', editBatches: true } }}
     onReady={(opened: PptxWorkerEditorApi | PptxWorkerViewerApi) => {
       if ('handleAsync' in opened) api = opened;
