@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-The default worker-only editor replaces a crashed or out-of-memory worker once, restoring its checkpoint and replaying later edits. A second failure or a refused replay reaches `onError`; replacement-worker OOM errors retain their classification and memory diagnostics.
+The default worker-only editor restores checkpoints and replays edits once after a crash or out-of-memory failure outside collaborative sessions. Collaborative failures, second failures and refused replays reach `onError`; replacement-worker OOM errors retain their classification and memory diagnostics.

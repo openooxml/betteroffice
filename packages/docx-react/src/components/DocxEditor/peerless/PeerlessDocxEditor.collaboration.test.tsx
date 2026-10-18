@@ -393,7 +393,7 @@ class RecoveryTransport implements CollaborationTransport {
   emit(event: CollaborationTransportEvent) { for (const listener of [...this.listeners]) listener(event); }
 }
 
-test('a collaborative worker crash reconnects once without losing edits or reusing clocks', async () => {
+test.each(['crash', 'out-of-memory'] as const)('a collaborative worker %s fails loudly without respawning or leaking its provider', async failure => {
   const generated = resolve(import.meta.dir, '../../../../../docx/src/wasm/generated');
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(generated, 'edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(generated, 'opc/ooxml_opc_bg.wasm'))));
@@ -454,7 +454,8 @@ test('a collaborative worker crash reconnects once without losing edits or reusi
   });
   restores.push(() => requirements.mockRestore(), () => textEngine.mockRestore(), () => init.mockRestore(),
     () => subscribe.mockRestore(), () => surface.mockRestore());
-  const peer = await yrs.createYrsSession({ clientId: 9642 });
+  const clientId = failure === 'crash' ? 9641 : 9643;
+  const peer = await yrs.createYrsSession({ clientId: clientId + 1 });
   restores.push(() => peer.destroy());
   peer.openDocx(bytes, true);
   const initialUpdate = peer.encodeStateAsUpdate();
@@ -478,47 +479,36 @@ test('a collaborative worker crash reconnects once without losing edits or reusi
     provider.connect();
     editorWire.emit({ type: 'open' }); peerWire.emit({ type: 'open' });
   });
-  const onError = mock(() => {});
-  const view = render(<DocxEditor documentBuffer={bytes} showToolbar={false} collaboration={{ clientId: 9641, initialUpdate, onReplica }} onError={onError} />);
+  const onError = mock((_error: Error) => {});
+  const view = render(<DocxEditor documentBuffer={bytes} showToolbar={false} collaboration={{ clientId, initialUpdate, onReplica }} onError={onError} />);
   await waitFor(() => { expect(onError.mock.calls).toEqual([]); expect(binding).toBeDefined(); });
   await waitFor(() => { expect(errors).toEqual([]); expect(provider?.synced && peerProvider.synced).toBe(true); });
   const original = onReplica.mock.calls[0]![0] as AsyncReplicaAdapter;
   const firstClient = [...hooks.keys()][0]!;
-  for (let index = 0; index < 128; index++) {
-    await act(async () => { expect((await binding!.session.submit('insertText', { text: '.' }).ack).status).toBe('applied'); });
-  }
-  await waitFor(() => expect(workers[0]!.requests).toContain('checkpoint'));
-  await act(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
   await act(async () => { expect((await binding!.session.submit('insertText', { text: ' acked' }).ack).status).toBe('applied'); });
   await waitFor(() => expect(peer.paragraphs('body')[0]!.text).toContain(' acked'));
   const watermark = stateVectorClock(await original.async.encodeStateVector(), original.clientId);
   expect(watermark).toBeGreaterThan(0);
   down = true;
-  await act(async () => { workers[0]!.onerror?.({ message: 'Worker crashed' } as ErrorEvent); });
-  await waitFor(() => expect(onReplica.mock.calls.filter(([replica]) => replica)).toHaveLength(2));
-  expect(onReplica.mock.calls.map(([replica]) => replica === null)).toEqual([false, true, false]);
-  expect(workers).toHaveLength(2);
-  expect(workers.map(worker => worker.requests.filter(type => type === 'openSource').length)).toEqual([1, 1]);
-  expect(workers.map(worker => worker.requests.filter(type => type === 'commandInit').length)).toEqual([1, 1]);
+  await act(async () => {
+    if (failure === 'crash') workers[0]!.onerror?.({ message: 'Worker crashed' } as ErrorEvent);
+    else workers[0]!.onmessage?.({ data: { id: -1, ok: false, terminal: true,
+      outOfMemory: true, error: 'Worker heap limit exceeded' } } as MessageEvent<yrs.ResidentEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  expect(onError.mock.calls[0]![0]).toMatchObject({ code: failure });
+  expect(onReplica.mock.calls.map(([replica]) => replica === null)).toEqual([false, true]);
+  expect(workers).toHaveLength(1);
+  expect(workers[0]!.requests.filter(type => type === 'openSource')).toHaveLength(1);
+  expect(workers[0]!.requests.filter(type => type === 'commandInit')).toHaveLength(1);
   expect(hooks.get(firstClient)?.size).toBe(0);
   await expect(original.async.encodeStateVector()).rejects.toThrow('retired');
-  await waitFor(() => expect(provider?.synced && peerProvider.synced).toBe(true));
-  const recovered = onReplica.mock.calls.at(-1)![0] as AsyncReplicaAdapter;
-  const clock = stateVectorClock(await recovered.async.encodeStateVector(), original.clientId);
-  expect(recovered.clientId !== original.clientId || clock >= watermark).toBe(true);
-  await act(async () => { expect((await binding!.session.submit('insertText', { text: ' recovered' }).ack).status).toBe('applied'); });
-  await waitFor(() => expect(peer.paragraphs('body')[0]!.text).toContain(' recovered'));
-  const engine = workers[1]!.sessions.at(-1)!;
-  expect(engine.paragraphs('body')[0]!.text).toBe(peer.paragraphs('body')[0]!.text);
-  expect(engine.paragraphs('body')[0]!.text).toContain('remote Seed');
-  expect(engine.paragraphs('body')[0]!.text).toContain(' acked');
-  expect(await recovered.async.encodeStateVector()).toEqual(peer.encodeStateVector());
-  expect(stateVectorClock(await recovered.async.encodeStateVector(), recovered.clientId)).toBeGreaterThan(
-    recovered.clientId === original.clientId ? watermark : 0);
-  expect(editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1')).toHaveLength(2);
-  expect(editorWire.listeners.size).toBe(1);
+  expect(stateVectorClock(peer.encodeStateVector(), original.clientId)).toBe(watermark);
+  expect(peer.paragraphs('body')[0]!.text).toBe('remote Seed acked');
+  await expect(binding!.session.submit('insertText', { text: ' refused' }).ack).rejects.toMatchObject({ code: failure });
+  expect(editorWire.sent.flatMap(frame => decodeMessages(frame)).filter(message => message.type === 'sync-step-1')).toHaveLength(1);
+  expect(editorWire.listeners.size).toBe(0);
   expect(errors).toEqual([]);
-  expect(onError).not.toHaveBeenCalled();
   down = false;
   view.unmount();
   expect(editorWire.listeners.size).toBe(0);

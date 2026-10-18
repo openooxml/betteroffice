@@ -780,9 +780,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     },
   }), [source, openResident, updateReadOnly, updateRenderEnvironment, updateFontEnvironment]);
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
-    source, openConnection, recovery, canvasForPage, prepareGeometry, onError: reportError,
+    source, openConnection, recovery: workerCollaboration.openOptions ? undefined : recovery, canvasForPage, prepareGeometry, onError: reportError,
     onRecoverableError: error => { controller.stalled(error); reportRecoverableError(error); },
-  } : null, [source, openConnection, recovery, canvasForPage, prepareGeometry, reportError, reportRecoverableError, controller]);
+  } : null, [source, openConnection, recovery, workerCollaboration.openOptions, canvasForPage, prepareGeometry, reportError, reportRecoverableError, controller]);
   useEffect(() => {
     if (shellState.status !== 'ready' || !previewJob) return;
     setPreviewJob(null);
