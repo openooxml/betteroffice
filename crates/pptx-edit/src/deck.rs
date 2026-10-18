@@ -489,7 +489,7 @@ impl DeckSession {
         }
         let read = self.doc.transact();
         let slide = slide_ref(&read, slide_id)?;
-        let (before, _) = slide_background(&slide, &read, &self.package)?;
+        let (before, _) = slide_background(&slide, &read, &self.package);
         drop(read);
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
@@ -2040,7 +2040,7 @@ fn snapshot_slide<T: ReadTxn>(
     } = slide_parts(slides, package, txn, slide_id)?;
     let slide = slide_ref(txn, slide_id)?;
     snapshot.notes = slide_notes(&slide, txn, package);
-    (snapshot.background, snapshot.background_edited) = slide_background(&slide, txn, package)?;
+    (snapshot.background, snapshot.background_edited) = slide_background(&slide, txn, package);
     for shape_id in shape_ids {
         snapshot.shapes.push(snapshot_shape(
             shapes,
@@ -2193,28 +2193,36 @@ pub(crate) fn slide_notes<T: ReadTxn>(slide: &MapRef, txn: &T, package: &PptxPac
 }
 
 /// The slide's effective background: a stored override, an explicit clear, or
-/// the declaration on the source part, and whether an edit decided it. A stored
-/// fill the writer could not serialize, as a peer may send, is ignored.
+/// the declaration on the source part, and whether an edit changed it from that
+/// declaration. A stored fill the writer cannot read or serialize, as a peer may
+/// send, is ignored.
 pub(crate) fn slide_background<T: ReadTxn>(
     slide: &MapRef,
     txn: &T,
     package: &PptxPackage,
-) -> EditResult<(Option<ShapeFill>, bool)> {
-    if let Some(background) = optional_json::<ShapeFill, _>(slide, txn, "backgroundJson")?
-        && validate_background(&background).is_ok()
-    {
-        return Ok((Some(background), true));
-    }
-    if map_bool(slide, txn, "backgroundCleared") == Some(true) {
-        return Ok((None, true));
-    }
+) -> (Option<ShapeFill>, bool) {
     let source_part_path = map_string(slide, txn, "sourcePartPath");
-    let source = package
+    let declared = package
         .slides
         .iter()
         .find(|source| Some(&source.part_path) == source_part_path.as_ref())
         .and_then(|source| source.background.clone());
-    Ok((source, false))
+    let stored = map_string(slide, txn, "backgroundJson")
+        .and_then(|json| serde_json::from_str::<ShapeFill>(&json).ok())
+        .filter(|fill| validate_background(fill).is_ok());
+    if let Some(background) = stored {
+        let edited = declared.as_ref() != Some(&background);
+        return (Some(background), edited);
+    }
+    if map_bool(slide, txn, "backgroundCleared") == Some(true) {
+        let declares = declared.is_some()
+            || source_part_path
+                .as_deref()
+                .and_then(|path| package.slide_source(path))
+                .is_some_and(|source| source.declares_background);
+        return (None, declares);
+    }
+    (declared, false)
 }
 
 /// Rejects backgrounds the writer cannot serialize; `theme` fills only come

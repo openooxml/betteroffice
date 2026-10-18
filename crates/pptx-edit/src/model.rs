@@ -195,8 +195,8 @@ pub struct SlideSnapshot {
     pub notes: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<ShapeFill>,
-    /// An edit set or cleared the background, so `background` stands for the
-    /// slide whatever `p:bg` its source part declares.
+    /// An edit changed the background from what the source part declares, so
+    /// `background` stands for the slide whatever `p:bg` that part holds.
     #[serde(default, skip_serializing_if = "is_false")]
     pub background_edited: bool,
     pub shapes: Vec<ShapeSnapshot>,

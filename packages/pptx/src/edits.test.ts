@@ -196,7 +196,17 @@ describe('version-checked edit batches', () => {
       expect(deck.snapshot().slides[0].background).toBeUndefined();
       const inherited = deck.layoutSlide(0).background;
       expect(inherited).not.toEqual(declared);
-      expect(inherited).not.toEqual({ kind: 'solid', color: '#0F1720' });
+      expect(inherited).toEqual({ kind: 'solid', color: '#FFFFFF' });
+      const reopened = openPresentation(deck.save(), {
+        clientId: 9307,
+        fonts: [{ family: 'Liberation Sans', bytes: font }],
+      });
+      try {
+        expect(reopened.snapshot().slides[0].background).toBeUndefined();
+        expect(reopened.layoutSlide(0).background).toEqual(inherited);
+      } finally {
+        reopened.dispose();
+      }
     }, true);
   });
 
