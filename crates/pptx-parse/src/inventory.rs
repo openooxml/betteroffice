@@ -12,8 +12,6 @@ use crate::xml::{XmlElement, alternate_content_branch};
 pub struct SlideSource {
     pub shapes: Vec<SourceShape>,
     pub omitted: Vec<OmittedElement>,
-    /// `p:cSld` declares `p:bg`, whatever fill it holds.
-    pub declares_background: bool,
 }
 
 /// Where one modeled shape sits in its part, and the source metadata the model does not keep.
@@ -98,7 +96,6 @@ pub(crate) fn slide_source(
     let Some((common_index, common)) = child_named(root, "cSld") else {
         return source;
     };
-    source.declares_background = child_named(common, "bg").is_some();
     let Some((tree_index, tree)) = child_named(common, "spTree") else {
         return source;
     };

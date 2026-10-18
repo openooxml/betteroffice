@@ -7468,6 +7468,35 @@ mod tests {
         assert_eq!(painted(&session), inherited);
     }
 
+    #[test]
+    fn a_scheme_alias_background_paints_its_theme_colour() {
+        let session = DeckSession::open(FIXTURE, 8_304).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        session
+            .set_slide_background(
+                &EditCtx::local("background"),
+                &slide_id,
+                Some(&ShapeFill {
+                    fill_type: "solid".to_owned(),
+                    color: Some(ColorValue {
+                        theme_color: Some("bg1".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    gradient: None,
+                }),
+            )
+            .unwrap();
+        let rendered = renderer()
+            .layout_scoped_slide(session.package(), &session.slide_scope(0).unwrap())
+            .unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#FFFFFF".to_owned()
+            })
+        );
+    }
+
     /// a deck whose master fills the slide at alpha 0 still renders on paper.
     #[test]
     fn a_fully_transparent_background_renders_as_white_paper() {

@@ -487,16 +487,16 @@ impl DeckSession {
         if let Some(background) = background {
             validate_background(background)?;
         }
+        let background = background.map(normalized_background);
         let read = self.doc.transact();
         let slide = slide_ref(&read, slide_id)?;
         let (before, _) = slide_background(&slide, &read, &self.package);
         drop(read);
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        match background {
+        match &background {
             Some(background) => {
                 insert_json(&slide, &mut txn, "backgroundJson", Some(background))?;
-                slide.remove(&mut txn, "backgroundCleared");
             }
             None => {
                 slide.remove(&mut txn, "backgroundJson");
@@ -508,7 +508,7 @@ impl DeckSession {
         Ok(SlideBackgroundReceipt {
             slide_id: slide_id.to_owned(),
             before,
-            after: background.cloned(),
+            after: background,
         })
     }
 
@@ -1318,6 +1318,10 @@ pub(crate) fn import_source_render_data(
         }
         if slide.background != source.background {
             slide.background.clone_from(&source.background);
+            changed = true;
+        }
+        if slide.declares_background != source.declares_background {
+            slide.declares_background = source.declares_background;
             changed = true;
         }
     }
@@ -2202,27 +2206,58 @@ pub(crate) fn slide_background<T: ReadTxn>(
     package: &PptxPackage,
 ) -> (Option<ShapeFill>, bool) {
     let source_part_path = map_string(slide, txn, "sourcePartPath");
-    let declared = package
-        .slides
-        .iter()
-        .find(|source| Some(&source.part_path) == source_part_path.as_ref())
-        .and_then(|source| source.background.clone());
+    let source = source_slide(package, source_part_path.as_deref());
+    let declared = source.and_then(|source| source.background.clone());
     let stored = map_string(slide, txn, "backgroundJson")
         .and_then(|json| serde_json::from_str::<ShapeFill>(&json).ok())
-        .filter(|fill| validate_background(fill).is_ok());
+        .filter(|fill| validate_background(fill).is_ok())
+        .map(|fill| normalized_background(&fill));
     if let Some(background) = stored {
-        let edited = declared.as_ref() != Some(&background);
-        return (Some(background), edited);
+        if declared.as_ref().map(normalized_background).as_ref() == Some(&background) {
+            return (declared, false);
+        }
+        return (Some(background), true);
     }
     if map_bool(slide, txn, "backgroundCleared") == Some(true) {
-        let declares = declared.is_some()
-            || source_part_path
-                .as_deref()
-                .and_then(|path| package.slide_source(path))
-                .is_some_and(|source| source.declares_background);
+        let declares =
+            declared.is_some() || source.is_some_and(|source| source.declares_background);
         return (None, declares);
     }
     (declared, false)
+}
+
+pub(crate) fn source_slide<'a>(
+    package: &'a PptxPackage,
+    part_path: Option<&str>,
+) -> Option<&'a pptx_parse::Slide> {
+    package
+        .slides
+        .iter()
+        .find(|source| Some(source.part_path.as_str()) == part_path)
+}
+
+/// `fill` with scheme aliases spelled the way the parser reads them and hex
+/// digits in upper case, so equal fills compare equal.
+pub(crate) fn normalized_background(fill: &ShapeFill) -> ShapeFill {
+    let mut fill = fill.clone();
+    let stops = fill
+        .gradient
+        .iter_mut()
+        .flat_map(|gradient| gradient.stops.iter_mut().map(|stop| &mut stop.color));
+    for color in fill.color.iter_mut().chain(stops) {
+        if let Some(rgb) = &mut color.rgb {
+            rgb.make_ascii_uppercase();
+        }
+        let canonical = match color.theme_color.as_deref() {
+            Some("bg1") => "background1",
+            Some("tx1") => "text1",
+            Some("bg2") => "background2",
+            Some("tx2") => "text2",
+            _ => continue,
+        };
+        color.theme_color = Some(canonical.to_owned());
+    }
+    fill
 }
 
 /// Rejects backgrounds the writer cannot serialize; `theme` fills only come
@@ -2248,7 +2283,7 @@ pub(crate) fn validate_background(fill: &ShapeFill) -> EditResult<()> {
                 ));
             }
             if let Some(angle) = gradient.angle
-                && !(0.0..21_600_000.0).contains(&(angle * 60_000.0).round())
+                && !(angle >= 0.0 && (angle * 60_000.0).round() < 21_600_000.0)
             {
                 return Err(EditError::InvalidFill(format!(
                     "gradient angle {angle} is outside 0..360 degrees"
@@ -2330,7 +2365,6 @@ fn known_scheme_color(color: &str) -> bool {
             | "accent6"
             | "hlink"
             | "folHlink"
-            | "phClr"
     )
 }
 

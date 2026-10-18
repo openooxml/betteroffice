@@ -638,10 +638,7 @@ impl<'a> Deck<'a> {
     /// Whether the slide's source part declares `p:bg`, fills the model cannot
     /// hold included.
     pub fn declares_source_background(&self, slide: &SlideSnapshot) -> bool {
-        slide
-            .source_part_path
-            .as_deref()
-            .and_then(|path| self.package.slide_source(path))
+        crate::deck::source_slide(self.package, slide.source_part_path.as_deref())
             .is_some_and(|source| source.declares_background)
     }
 

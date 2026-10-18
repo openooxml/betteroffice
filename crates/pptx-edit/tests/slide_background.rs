@@ -89,7 +89,8 @@ fn with_pattern_background() -> Vec<u8> {
     )
 }
 
-/// The deck state after a peer stores `json` as the slide's background.
+/// The deck state after a peer stores `json` as the slide's background the way
+/// `DeckSession::set_slide_background` does.
 fn remote_background(session: &DeckSession, client: u64, slide_id: &str, json: &str) -> Vec<u8> {
     let doc = Doc::with_client_id(client);
     doc.transact_mut()
@@ -303,6 +304,10 @@ fn invalid_backgrounds_are_refused_before_saving() {
             vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")],
         ),
         angled(400.0, vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")]),
+        angled(
+            -0.000_000_1,
+            vec![stop(0.0, "0F1720"), stop(100_000.0, "0F766E")],
+        ),
     ];
     for fill in cases {
         let error = session
@@ -377,27 +382,142 @@ fn a_duplicated_slide_keeps_its_background() {
 
 #[test]
 fn every_scheme_slot_is_a_settable_background_colour() {
-    for (client, slot) in [
-        "dk1",
-        "lt1",
-        "dk2",
-        "lt2",
-        "background1",
-        "text2",
-        "accent6",
-        "folHlink",
+    for (client, (slot, canonical)) in [
+        ("bg1", "background1"),
+        ("tx1", "text1"),
+        ("bg2", "background2"),
+        ("tx2", "text2"),
+        ("background1", "background1"),
+        ("text1", "text1"),
+        ("background2", "background2"),
+        ("text2", "text2"),
+        ("dk1", "dk1"),
+        ("lt1", "lt1"),
+        ("dk2", "dk2"),
+        ("lt2", "lt2"),
+        ("accent1", "accent1"),
+        ("accent2", "accent2"),
+        ("accent3", "accent3"),
+        ("accent4", "accent4"),
+        ("accent5", "accent5"),
+        ("accent6", "accent6"),
+        ("hlink", "hlink"),
+        ("folHlink", "folHlink"),
     ]
     .into_iter()
     .enumerate()
     {
-        let session = DeckSession::open(FIXTURE, 40 + client as u64 * 2).unwrap();
+        let session = DeckSession::open(FIXTURE, 200 + client as u64 * 2).unwrap();
         let slide_id = session.snapshot().unwrap().slides[0].id.clone();
-        session
+        let receipt = session
             .set_slide_background(&context(), &slide_id, Some(&scheme(slot)))
             .unwrap();
-        let reopened = DeckSession::open(&session.save().unwrap(), 41 + client as u64 * 2).unwrap();
-        assert_eq!(background_of(&reopened, 0), Some(scheme(slot)), "{slot}");
+        assert_eq!(receipt.after, Some(scheme(canonical)), "{slot}");
+        assert_eq!(
+            background_of(&session, 0),
+            Some(scheme(canonical)),
+            "{slot}"
+        );
+        let reopened =
+            DeckSession::open(&session.save().unwrap(), 201 + client as u64 * 2).unwrap();
+        assert_eq!(
+            background_of(&reopened, 0),
+            Some(scheme(canonical)),
+            "{slot}"
+        );
     }
+    let session = DeckSession::open(FIXTURE, 250).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let error = session
+        .set_slide_background(&context(), &slide_id, Some(&scheme("phClr")))
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidFill(_)), "{error}");
+}
+
+#[test]
+fn restating_the_declared_background_in_another_spelling_is_no_edit() {
+    for (client, declared, restated) in [
+        (
+            251,
+            r#"<p:bg><p:bgPr><a:solidFill><a:srgbClr val="F8F7F2"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>"#,
+            solid("f8f7f2"),
+        ),
+        (
+            253,
+            r#"<p:bg><p:bgPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>"#,
+            scheme("bg1"),
+        ),
+    ] {
+        let source = with_slide_background(declared);
+        let session = DeckSession::open(&source, client).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        let snapshot = session.snapshot().unwrap();
+        let saved = session.save().unwrap();
+        session
+            .set_slide_background(&context(), &slide_id, Some(&restated))
+            .unwrap();
+        assert_eq!(session.snapshot().unwrap(), snapshot, "{declared}");
+        assert_eq!(session.save().unwrap(), saved, "{declared}");
+
+        let request: EditRequest = serde_json::from_value(json!({
+            "expectVersion": session.version(),
+            "steps": [{
+                "op": "setSlideBackground",
+                "target": {"slideId": slide_id},
+                "background": restated
+            }]
+        }))
+        .unwrap();
+        let application = session.apply_edits(&request).unwrap().unwrap();
+        assert!(application.changed_slides.is_empty(), "{declared}");
+    }
+}
+
+#[test]
+fn a_peer_opened_from_an_update_clears_a_background_the_model_cannot_hold() {
+    let source = with_pattern_background();
+    let origin = DeckSession::open(&source, 260).unwrap();
+    let peer = DeckSession::open_from_update(&origin.encode_state_as_update_v1(), 261).unwrap();
+    let slide_id = peer.snapshot().unwrap().slides[0].id.clone();
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": peer.version(),
+        "steps": [{
+            "op": "setSlideBackground",
+            "target": {"slideId": slide_id},
+            "background": null
+        }]
+    }))
+    .unwrap();
+    let application = peer.apply_edits(&request).unwrap().unwrap();
+    assert_eq!(application.changed_slides, vec![slide_id.clone()]);
+
+    origin
+        .apply_update_v1(
+            &peer
+                .encode_diff_v1(&origin.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(origin.snapshot().unwrap(), peer.snapshot().unwrap());
+    let saved = origin.save().unwrap();
+    assert!(!part_text(&saved, &slide_part(&origin, 0)).contains("<p:bg>"));
+}
+
+#[test]
+fn an_unusable_background_over_a_set_one_keeps_an_earlier_clear() {
+    let session = DeckSession::open(FIXTURE, 262).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_background(&context(), &slide_id, None)
+        .unwrap();
+    session
+        .set_slide_background(&context(), &slide_id, Some(&solid("0F1720")))
+        .unwrap();
+    assert_eq!(background_of(&session, 0), Some(solid("0F1720")));
+    let update = remote_background(&session, 263, &slide_id, "{");
+    session.apply_update_v1(&update).unwrap();
+    assert_eq!(background_of(&session, 0), None);
+    assert!(!part_text(&session.save().unwrap(), &slide_part(&session, 0)).contains("<p:bg>"));
 }
 
 #[test]
