@@ -42,9 +42,8 @@ export interface ResidentReviewSnapshot {
 }
 
 function rangeHighlightGeometry(
-  engine: ResidentEngineSession, queries: DisplayListQueries, ranges: readonly YrsStoryRange[], anchorCollapsed = false
+  index: DisplayPositionIndex, queries: DisplayListQueries, ranges: readonly YrsStoryRange[], anchorCollapsed = false
 ): DisplayListRect[][] {
-  const index = new DisplayPositionIndex({ ...engine.geometryReader, selectionText: engine.selectionText });
   return ranges.map(range => {
     const root = range.story === 'body' || range.story.startsWith('body:') ? 'body'
       : range.story.split(':').slice(0, 2).join(':');
@@ -99,11 +98,21 @@ export function readReviewTarget(engine: ResidentEngineSession, target: Resident
   }) };
 }
 
+const reviewSnapshots = new WeakMap<RetainedFrame, { engine: ResidentEngineSession; key: string; snapshot: ResidentReviewSnapshot }>();
+
 export async function readResidentReviewSnapshot(
-  engine: ResidentEngineSession, registry: DocxProposalRegistry, frame: RetainedFrame, layoutRevision: number
+  engine: ResidentEngineSession, registry: DocxProposalRegistry, frame: RetainedFrame, layoutRevision: number,
+  reads?: { queries?: (frame: RetainedFrame, version: string) => DisplayListQueries | undefined; index?: DisplayPositionIndex }
 ): Promise<ResidentReviewSnapshot> {
   const native = await loadRustDisplayListQueryEngine();
-  const queries = createDisplayListQueries(frame.displayList, native);
+  const keyOf = () => engine.commentRecoveryState && JSON.stringify([
+    engine.proposalEngine.version(), frame.frameEpoch, layoutRevision, registry.snapshot(), engine.commentRecoveryState(),
+  ]);
+  const cached = reviewSnapshots.get(frame);
+  if (cached?.engine === engine && cached.key === keyOf()) return cached.snapshot;
+  const borrowed = reads?.queries?.(frame, engine.proposalEngine.version());
+  const queries = borrowed ?? createDisplayListQueries(frame.displayList, native);
+  const index = reads?.index ?? new DisplayPositionIndex({ ...engine.geometryReader, selectionText: engine.selectionText });
   try {
     const proposals = registry.snapshot();
     const comments = engine.listComments();
@@ -118,11 +127,11 @@ export async function readResidentReviewSnapshot(
         const end = locationAt(engine, anchor.story, anchor.end);
         return start && end ? [{ story: anchor.story, start, end }] : [];
       });
-      return [id, rangeHighlightGeometry(engine, queries, ranges).flat()];
+      return [id, rangeHighlightGeometry(index, queries, ranges).flat()];
     }));
     const revisionGeometry: Record<string, DisplayListRect[]> = {};
     for (const revision of revisions) {
-      (revisionGeometry[revision.revisionId] ??= []).push(...rangeHighlightGeometry(engine, queries, [revision.range], true).flat());
+      (revisionGeometry[revision.revisionId] ??= []).push(...rangeHighlightGeometry(index, queries, [revision.range], true).flat());
     }
     const proposalGeometry = computeProposalGeometryMirror(engine.geometryReader, proposals);
     const proposalHighlights = Object.fromEntries(Object.entries(proposalGeometry.targets).map(([id, target]) => [
@@ -130,11 +139,15 @@ export async function readResidentReviewSnapshot(
     ]));
     const state = queries.sourceState();
     if (state.status === 'error') throw new Error(`Review highlight layout is unavailable: ${String(state.error)}`);
-    return {
+    const snapshot: ResidentReviewSnapshot = {
       version: proposals.version, previewVersion: proposals.previewVersion, layoutRevision,
       frameEpoch: frame.frameEpoch, comments, ...(projection ? { uiComments: projection.comments, commentIds: projection.ids } : {}),
       revisions, proposals, proposalGeometry,
       commentGeometry, revisionGeometry, proposalHighlights,
     };
-  } finally { queries.dispose(); }
+    // Keyed after the compute: the comment projection assigns aliases for new comments.
+    const key = keyOf();
+    if (key) reviewSnapshots.set(frame, { engine, key, snapshot });
+    return snapshot;
+  } finally { if (!borrowed) queries.dispose(); }
 }

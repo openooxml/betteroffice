@@ -131,6 +131,7 @@ let session: ResidentEngineSession | null = null;
 let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
 let commandHost: ResidentCommandHost | null = null;
 let releaseCommandHost: (() => void) | null = null;
+let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
@@ -955,7 +956,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   commandInit = init;
+  commandQueries = queriesFor;
   releaseCommandHost = () => {
+    commandQueries = null;
     selectionQueries?.queries.dispose();
     selectionQueries = undefined;
     releaseResidentSelectionReads(engine);
@@ -2043,7 +2046,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         const review = !frame || layoutVersion !== engine.version() ||
           (commandHost && (published?.frameEpoch !== frame.frameEpoch || published?.previewVersion !== previewVersion)) ||
           (request.read.expectPreviewVersion !== undefined && request.read.expectPreviewVersion !== previewVersion)
-          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision);
+          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision, {
+            queries: (at, version) => commandQueries?.(at, version), index: displayPositionIndex(session),
+          });
         value = commandHost && review && (review.previewVersion !== previewVersion || review.version !== layoutVersion ||
           registry.snapshot().previewVersion !== previewVersion || engine.version() !== layoutVersion || retainedFrame?.frameEpoch !== frame?.frameEpoch)
           ? null : review;
