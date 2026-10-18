@@ -1859,6 +1859,88 @@ test('round two page release retains a matching review preview frame', async () 
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('a proposal decision computes its review once for all the reads of its frame', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!,
+      search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
+    const computed = spyOn(engine, 'commentProjection');
+    try {
+      for (const [seq, state] of [[2, 'rejected'], [3, 'proposed']] as const) {
+        computed.mockClear();
+        const decided = await client.edit(intent(seq, seq - 1, 'setProposalStates', {
+          expectVersion: before.version, expectPreviewVersion: before.previewVersion + seq - 2, changes: [{ id: 'one', state }],
+        }));
+        expect(decided.outcomes[0]?.status).toBe('applied');
+        const reads = await Promise.all([
+          client.documentRead({ kind: 'reviewSnapshot' }),
+          client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion + seq - 1 }),
+          client.documentRead({ kind: 'reviewSnapshot' }),
+        ]);
+        expect(reads.map(read => read.value?.proposals.proposals[0]?.state)).toEqual([state, state, state]);
+        expect(computed.mock.calls.length).toBeLessThanOrEqual(new Set(reads.map(read => read.value!.frameEpoch)).size);
+      }
+    } finally { computed.mockRestore(); }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('repeated review reads follow proposal decisions, comments, edits and undo', async () => {
+  const { client, engine } = await openWorker({ bodyXml: syntheticParagraphs(2) });
+  try {
+    const review = async () => {
+      const [first, second] = await Promise.all([
+        client.documentRead({ kind: 'reviewSnapshot' }), client.documentRead({ kind: 'reviewSnapshot' }),
+      ]);
+      expect(second.value).toEqual(first.value);
+      expect(first.value!.version).toBe(engine.proposalEngine.version());
+      expect(first.value!.comments).toEqual(engine.listComments());
+      expect(first.value!.revisions).toEqual(engine.geometryReader.listRevisions());
+      return first.value!;
+    };
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!,
+      search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const proposed = await review();
+    expect(proposed.proposals.proposals[0]?.state).toBe('proposed');
+    await client.edit(intent(2, 1, 'setProposalStates', {
+      expectVersion: proposed.version, expectPreviewVersion: proposed.previewVersion, changes: [{ id: 'one', state: 'rejected' }],
+    }));
+    const rejected = await review();
+    expect(rejected.version).toBe(proposed.version);
+    expect(rejected.previewVersion).toBe(proposed.previewVersion + 1);
+    expect(rejected.proposals.proposals[0]?.state).toBe('rejected');
+    const paraId = engine.geometryReader.paragraphSpans('body')[1]!.paraId;
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } };
+    await client.edit(intent(3, 2, 'addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Note', expectVersion: rejected.version }));
+    const commented = await review();
+    expect(commented.comments).toHaveLength(1);
+    expect(commented.uiComments).toHaveLength(1);
+    const id = commented.comments[0]!.id;
+    expect(commented.commentGeometry[id]!.length).toBeGreaterThan(0);
+    await client.edit(intent(4, 3, 'updateComment', { id, patch: { done: true }, expectVersion: commented.version }));
+    const resolved = await review();
+    expect(resolved.comments[0]).toMatchObject({ id, done: true });
+    expect(resolved.uiComments?.[0]?.done).toBe(true);
+    const at = { story: 'body', paraId, offset: 0 };
+    await client.edit(intent(5, 4, 'insertText', {
+      text: 'New ', selection: { anchor: at, focus: at }, suggesting: { name: 'Ada', date: '2026-01-01' },
+    }));
+    const edited = await review();
+    expect(edited.version).not.toBe(resolved.version);
+    expect(edited.revisions.length).toBeGreaterThan(resolved.revisions.length);
+    expect((await client.edit(intent(6, 5, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    const undone = await review();
+    expect(undone.version).not.toBe(edited.version);
+    expect(undone.revisions.length).toBeLessThan(edited.revisions.length);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('round two rejected inner table repairs to the nearest live cell story', async () => {
   const { client, engine } = await openWorker({ bodyXml: OUTER_TABLE, prepare(engine) {
     const story = 'body:t0:r0c0';
