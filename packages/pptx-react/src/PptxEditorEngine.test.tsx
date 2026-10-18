@@ -88,6 +88,15 @@ for (const experimentalWorkerOpen of [undefined, true] as const) {
   });
 }
 
+test('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', () => {
+  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} />);
+  expectInThread(view);
+  view.rerender(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly />);
+  expectInThread(view);
+  expect(editorMounts).toBe(0);
+  expect(warn.mock.calls).toEqual([[warnings.legacy]]);
+});
+
 test('warns once for the deprecated engine across mounts and rerenders', () => {
   const editor = <PptxEditor legacySyncApi file={file} fonts={[]} experimentalWorkerOpen={false} />;
   const first = render(editor);
