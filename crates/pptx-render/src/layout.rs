@@ -495,6 +495,10 @@ impl SlideRenderer {
             media_parts: None,
             chart_parts: None,
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
+            slide_width: width,
+            slide_height: height,
+            background_paint: background.clone(),
+            background_picture: background_picture.cloned(),
         };
         let root_space = Space::root();
         if let Some(picture) = background_picture
@@ -751,6 +755,10 @@ struct LayoutBuilder<'a> {
     chart_parts: Option<HashMap<(&'a str, Option<&'a str>), &'a ChartPart>>,
     /// The number a `slidenum` field resolves to on this slide.
     slide_number: i64,
+    slide_width: f32,
+    slide_height: f32,
+    background_paint: Option<Paint>,
+    background_picture: Option<PictureFill>,
 }
 
 impl<'a> LayoutBuilder<'a> {
@@ -831,7 +839,7 @@ impl<'a> LayoutBuilder<'a> {
                 .or_else(|| layout_node.and_then(node_group_transform))
                 .or_else(|| master_node.and_then(node_group_transform));
             let child_space = group_transform
-                .map(|transform| Space::for_group(rect, transform))
+                .map(|transform| space.for_group(rect, transform))
                 .unwrap_or(space);
             for child in &shape.children {
                 self.render_snapshot_shape(child, child_space)?;
@@ -846,7 +854,20 @@ impl<'a> LayoutBuilder<'a> {
         let picture = effective_fill
             .filter(|fill| fill.fill_type == PICTURE_FILL)
             .and_then(|_| picture_fill(&inherited));
-        let fill = effective_fill.and_then(|fill| paint(fill, self.theme));
+        let use_bg_fill = shape.kind == ShapeKind::Shape && node_use_bg_fill(original);
+        let background_picture = use_bg_fill
+            .then(|| self.background_picture.clone())
+            .flatten();
+        let picture = if use_bg_fill {
+            background_picture.as_ref()
+        } else {
+            picture
+        };
+        let fill = if use_bg_fill {
+            self.background_paint.clone()
+        } else {
+            effective_fill.and_then(|fill| paint(fill, self.theme))
+        };
         let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
             inherited_outline
         } else {
@@ -900,33 +921,34 @@ impl<'a> LayoutBuilder<'a> {
                 if shape.geometry == "custom" && !paths.is_empty() {
                     geometry_fallback = false;
                 }
-                self.push_shape(
-                    Primitive::Shape {
-                        clip: None,
-                        even_odd: false,
-                        object_id: shape.source_id,
-                        shape_id: Some(stable_id.clone()),
-                        name: shape.name.clone(),
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                        geometry: shape.geometry.clone(),
-                        path,
-                        geometry_fallback,
-                        adjust_values: shape
-                            .adjust_values
-                            .iter()
-                            .map(|(name, value)| (name.clone(), *value as f32))
-                            .collect(),
-                        fill,
-                        stroke: outline,
-                        shadow,
-                        transform,
-                    },
-                    paths,
-                    picture,
-                )?;
+                let primitive = Primitive::Shape {
+                    clip: None,
+                    even_odd: false,
+                    object_id: shape.source_id,
+                    shape_id: Some(stable_id.clone()),
+                    name: shape.name.clone(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    geometry: shape.geometry.clone(),
+                    path,
+                    geometry_fallback,
+                    adjust_values: shape
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
+                    fill,
+                    stroke: outline,
+                    shadow,
+                    transform,
+                };
+                if use_bg_fill {
+                    self.push_background_shape(primitive, paths, picture)?;
+                } else {
+                    self.push_shape(primitive, paths, picture)?;
+                }
             }
             ShapeKind::Picture => {
                 let source = picture_source(original);
@@ -1013,7 +1035,7 @@ impl<'a> LayoutBuilder<'a> {
         }
         if let ShapeNode::Group(group) = shape {
             let rect = space.map_transform(&group.base.transform);
-            let child_space = Space::for_group(rect, &group.base.transform);
+            let child_space = space.for_group(rect, &group.base.transform);
             for (index, child) in group.children.iter().enumerate() {
                 self.render_parsed_shape(child, &format!("{stable_id}:{index}"), child_space)?;
             }
@@ -1029,16 +1051,28 @@ impl<'a> LayoutBuilder<'a> {
         match shape {
             ShapeNode::Shape(value) => {
                 let resolved_fill = self.resolved_fill(&[Some(shape)]);
-                let fill = resolved_fill
-                    .as_ref()
-                    .and_then(|fill| paint(fill, self.theme));
+                let use_bg_fill = value.use_bg_fill;
+                let background_picture = use_bg_fill
+                    .then(|| self.background_picture.clone())
+                    .flatten();
+                let fill = if use_bg_fill {
+                    self.background_paint.clone()
+                } else {
+                    resolved_fill
+                        .as_ref()
+                        .and_then(|fill| paint(fill, self.theme))
+                };
                 let outline = self
                     .resolved_outline(&[Some(shape)])
                     .and_then(|outline| stroke(&outline, self.theme));
-                let picture = resolved_fill
-                    .as_ref()
-                    .filter(|fill| fill.fill_type == PICTURE_FILL)
-                    .and(value.picture_fill.as_deref());
+                let picture = if use_bg_fill {
+                    background_picture.as_ref()
+                } else {
+                    resolved_fill
+                        .as_ref()
+                        .filter(|fill| fill.fill_type == PICTURE_FILL)
+                        .and(value.picture_fill.as_deref())
+                };
                 let shadow = value
                     .effects
                     .as_ref()
@@ -1062,33 +1096,34 @@ impl<'a> LayoutBuilder<'a> {
                 if value.geometry == "custom" && !value.paths.is_empty() {
                     geometry_fallback = false;
                 }
-                self.push_shape(
-                    Primitive::Shape {
-                        clip: None,
-                        even_odd: false,
-                        object_id: base.id,
-                        shape_id: Some(stable_id.to_owned()),
-                        name: base.name.clone(),
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                        geometry: value.geometry.clone(),
-                        path,
-                        geometry_fallback,
-                        adjust_values: value
-                            .adjust_values
-                            .iter()
-                            .map(|(name, value)| (name.clone(), *value as f32))
-                            .collect(),
-                        fill,
-                        stroke: outline,
-                        shadow,
-                        transform,
-                    },
-                    &value.paths,
-                    picture,
-                )?;
+                let primitive = Primitive::Shape {
+                    clip: None,
+                    even_odd: false,
+                    object_id: base.id,
+                    shape_id: Some(stable_id.to_owned()),
+                    name: base.name.clone(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    geometry: value.geometry.clone(),
+                    path,
+                    geometry_fallback,
+                    adjust_values: value
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
+                    fill,
+                    stroke: outline,
+                    shadow,
+                    transform,
+                };
+                if use_bg_fill {
+                    self.push_background_shape(primitive, &value.paths, picture)?;
+                } else {
+                    self.push_shape(primitive, &value.paths, picture)?;
+                }
             }
             ShapeNode::Picture(value) => {
                 let outline = self
@@ -1404,6 +1439,126 @@ impl<'a> LayoutBuilder<'a> {
                 .push(picture_filled(primitive, picture, dpi));
         }
         Ok(())
+    }
+
+    fn push_background_shape(
+        &mut self,
+        primitive: Primitive,
+        paths: &[CustomGeometryPath],
+        picture: Option<&PictureFill>,
+    ) -> Result<(), RenderError> {
+        let start = self.primitives.len();
+        self.push_shape(primitive, paths, None)?;
+        let parts = self.primitives.split_off(start);
+        let picture = picture.filter(|fill| fill.media_part_path.is_some());
+        let dpi = picture
+            .and_then(|fill| fill.media_part_path.as_deref())
+            .and_then(|path| self.media_part(path))
+            .and_then(|part| image_dpi(&part.bytes));
+        for mut part in parts {
+            if self.slide_width > 0.0
+                && self.slide_height > 0.0
+                && matches!(&part, Primitive::Shape { fill, shadow, .. } if fill.is_some() || shadow.is_some())
+            {
+                self.charge_shape()?;
+                let slide = self.slide_background_primitive(part.clone(), picture, dpi);
+                self.primitives.push(slide);
+            }
+            if let Primitive::Shape { fill, shadow, .. } = &mut part {
+                *fill = None;
+                *shadow = None;
+            }
+            self.primitives.push(part);
+        }
+        Ok(())
+    }
+
+    fn slide_background_primitive(
+        &self,
+        primitive: Primitive,
+        picture: Option<&PictureFill>,
+        dpi: Option<f32>,
+    ) -> Primitive {
+        let Primitive::Shape {
+            object_id,
+            name,
+            geometry,
+            path,
+            geometry_fallback,
+            adjust_values,
+            fill,
+            stroke,
+            shadow,
+            even_odd,
+            x,
+            y,
+            w,
+            h,
+            transform,
+            ..
+        } = primitive
+        else {
+            return primitive;
+        };
+        let placement = BackgroundTransform::for_shape(PxRect { x, y, w, h }, transform);
+        let shadow = shadow.map(|mut shadow| {
+            if shadow.paths.is_empty() {
+                shadow.paths.push(crate::ShadowPath {
+                    path: path.clone(),
+                    fill: fill.is_some(),
+                    stroke,
+                });
+            }
+            for part in &mut shadow.paths {
+                part.path = slide_background_path(
+                    &part.path,
+                    placement,
+                    self.slide_width,
+                    self.slide_height,
+                );
+            }
+            shadow
+        });
+        let path = slide_background_path(&path, placement, self.slide_width, self.slide_height);
+        if let Some(picture) = picture.filter(|_| fill.is_some()) {
+            return Primitive::Image {
+                object_id,
+                shape_id: None,
+                name,
+                x: 0.0,
+                y: 0.0,
+                w: self.slide_width,
+                h: self.slide_height,
+                asset_id: picture.media_part_path.clone(),
+                effects: Vec::new(),
+                crop: picture_fill_crop(picture),
+                tile: picture_fill_tile(picture, dpi),
+                path: Some(path),
+                geometry_fallback,
+                stroke: None,
+                shadow,
+                transform: Transform::default(),
+            };
+        }
+        Primitive::Shape {
+            clip: None,
+            even_odd,
+            object_id,
+            shape_id: None,
+            name,
+            x: 0.0,
+            y: 0.0,
+            w: self.slide_width,
+            h: self.slide_height,
+            geometry,
+            path,
+            geometry_fallback,
+            adjust_values,
+            fill,
+            stroke: None,
+            shadow,
+            transform: Transform::default(),
+        }
     }
 
     /// Plots a chart or table frame, or keeps the placeholder for graphics
@@ -4435,6 +4590,43 @@ impl PxRect {
 }
 
 #[derive(Clone, Copy)]
+struct BackgroundTransform {
+    xx: f64,
+    xy: f64,
+    yx: f64,
+    yy: f64,
+    tx: f64,
+    ty: f64,
+}
+
+impl BackgroundTransform {
+    fn for_shape(rect: PxRect, transform: Transform) -> Self {
+        let (sin, cos) = f64::from(transform.rotation_deg).to_radians().sin_cos();
+        let width = f64::from(rect.w);
+        let height = f64::from(rect.h);
+        let flipped_width = if transform.flip_h { -width } else { width };
+        let flipped_height = if transform.flip_v { -height } else { height };
+        let (xx, xy) = (cos * flipped_width, -sin * flipped_height);
+        let (yx, yy) = (sin * flipped_width, cos * flipped_height);
+        Self {
+            xx,
+            xy,
+            yx,
+            yy,
+            tx: f64::from(rect.x) + width / 2.0 - (xx + xy) / 2.0,
+            ty: f64::from(rect.y) + height / 2.0 - (yx + yy) / 2.0,
+        }
+    }
+
+    fn point(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.xx * x + self.xy * y + self.tx,
+            self.yx * x + self.yy * y + self.ty,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Space {
     origin_x: f32,
     origin_y: f32,
@@ -4461,7 +4653,7 @@ impl Space {
         }
     }
 
-    fn for_group(rect: PxRect, transform: &ShapeTransform) -> Self {
+    fn for_group(self, rect: PxRect, transform: &ShapeTransform) -> Self {
         let child_width = transform.child_width.unwrap_or(transform.width);
         let child_height = transform.child_height.unwrap_or(transform.height);
         if child_width == 0 || child_height == 0 {
@@ -4471,9 +4663,11 @@ impl Space {
         let scale_y = safe_geometry(rect.h / child_height as f32);
         let child_x = transform.child_x.unwrap_or_default() as f32;
         let child_y = transform.child_y.unwrap_or_default() as f32;
+        let origin_x = safe_geometry(rect.x - child_x * scale_x);
+        let origin_y = safe_geometry(rect.y - child_y * scale_y);
         Self {
-            origin_x: safe_geometry(rect.x - child_x * scale_x),
-            origin_y: safe_geometry(rect.y - child_y * scale_y),
+            origin_x,
+            origin_y,
             scale_x,
             scale_y,
         }
@@ -5116,6 +5310,63 @@ fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
         path: (!path.is_empty()).then_some(path),
         geometry_fallback,
     }
+}
+
+fn node_use_bg_fill(node: Option<&ShapeNode>) -> bool {
+    matches!(node, Some(ShapeNode::Shape(shape)) if shape.use_bg_fill)
+}
+
+fn slide_background_path(
+    path: &[GeometryPathCommand],
+    placement: BackgroundTransform,
+    slide_width: f32,
+    slide_height: f32,
+) -> Vec<GeometryPathCommand> {
+    if slide_width <= 0.0 || slide_height <= 0.0 {
+        return path.to_vec();
+    }
+    let map = |x: f64, y: f64| {
+        let (x, y) = placement.point(x, y);
+        (x / f64::from(slide_width), y / f64::from(slide_height))
+    };
+    path.iter()
+        .map(|command| match *command {
+            GeometryPathCommand::Move { x, y } => {
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Move { x, y }
+            }
+            GeometryPathCommand::Line { x, y } => {
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Line { x, y }
+            }
+            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+                let (cpx, cpy) = map(cpx, cpy);
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Quad { cpx, cpy, x, y }
+            }
+            GeometryPathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                let (cp1x, cp1y) = map(cp1x, cp1y);
+                let (cp2x, cp2y) = map(cp2x, cp2y);
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Cubic {
+                    cp1x,
+                    cp1y,
+                    cp2x,
+                    cp2y,
+                    x,
+                    y,
+                }
+            }
+            GeometryPathCommand::Close => GeometryPathCommand::Close,
+        })
+        .collect()
 }
 
 fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
@@ -7935,6 +8186,7 @@ mod tests {
                 },
                 geometry: "rect".to_owned(),
                 adjust_values: BTreeMap::new(),
+                use_bg_fill: false,
                 paths: Vec::new(),
                 style: None,
                 fill: None,
@@ -9531,6 +9783,7 @@ mod tests {
             },
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
+            use_bg_fill: false,
             fill: None,
             picture_fill: None,
             outline: None,

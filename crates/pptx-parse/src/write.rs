@@ -3875,6 +3875,51 @@ mod tests {
     }
 
     #[test]
+    fn a_patched_use_bg_fill_shape_keeps_the_attribute() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    fill: Some(ShapeFill {
+                        color: Some(ColorValue::from_attribute("DC2626")),
+                        ..ShapeFill::named("solid")
+                    }),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+
+        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
+        assert!(xml.contains(r#"useBgFill="1""#), "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    #[test]
     fn an_added_slide_background_precedes_the_shape_tree() {
         let package = PptxPackage::default();
         let mut replacements = HashMap::new();

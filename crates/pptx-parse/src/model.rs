@@ -396,6 +396,8 @@ pub struct Shape {
     pub style: Option<Box<ShapeStyle>>,
     #[serde(default)]
     pub adjust_values: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_bg_fill: bool,
     pub fill: Option<ShapeFill>,
     /// The image behind an `a:blipFill`, when the fill is a stretched picture.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -251,6 +251,7 @@ fn parse_shape(
         ),
         geometry: parse_geometry(properties),
         has_preset_geometry: properties.is_some_and(|value| value.child("prstGeom").is_some()),
+        use_bg_fill: element.attribute("useBgFill").is_some_and(parse_bool),
         adjust_values: parse_adjust_values(properties, parse_shape_extent(transform)),
         fill: properties.and_then(parse_fill),
         picture_fill: properties
@@ -1825,6 +1826,39 @@ mod tests {
             picture.media_part_path.as_deref(),
             Some("ppt/media/vector.svg")
         );
+    }
+
+    #[test]
+    fn a_use_bg_fill_shape_records_the_attribute() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="Background"/><p:nvPr/></p:nvSpPr><p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style></p:sp><p:sp useBgFill="0"><p:nvSpPr><p:cNvPr id="3" name="Plain"/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="Unmarked"/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let values: Vec<serde_json::Value> = data
+            .shapes
+            .iter()
+            .map(|node| {
+                let ShapeNode::Shape(shape) = node else {
+                    panic!("expected a shape");
+                };
+                serde_json::to_value(shape).unwrap()
+            })
+            .collect();
+        assert_eq!(values[0]["useBgFill"], serde_json::json!(true));
+        assert_eq!(values[1]["useBgFill"], serde_json::Value::Null);
+        assert_eq!(values[2]["useBgFill"], serde_json::Value::Null);
     }
 
     #[test]
