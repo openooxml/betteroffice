@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SelectionDirection {
     Up,
     Down,
