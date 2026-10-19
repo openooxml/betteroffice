@@ -1548,14 +1548,14 @@ def real_xml_state(package, name, expected=False, input_ids=frozenset()):
             attrs['Requires'] = ' '.join(sorted(namespaces.get(value, value) for value in attrs['Requires'].split()))
         if f'{{{NS["mc"]}}}Ignorable' in attrs:
             key = f'{{{NS["mc"]}}}Ignorable'
-            declared = package.root_namespaces[name] if node is root else namespaces
+            declared = package.root_namespaces.get(name, namespaces) if node is root else namespaces
             uris = {declared.get(value, value) for value in attrs[key].split()}
             if uris:
                 attrs[key] = ' '.join(sorted(uris))
             else:
                 del attrs[key]
         if node is root and name.startswith('word/'):
-            declared = package.root_namespaces[name]
+            declared = package.root_namespaces.get(name, namespaces)
             attrs = RealIdentity(attrs, input_ids, paragraph=False,
                                  declared_namespaces=(declared[token] for token in node.get(f'{{{NS["mc"]}}}Ignorable', '').split() if token in declared))
         if node.tag == w('p'):
