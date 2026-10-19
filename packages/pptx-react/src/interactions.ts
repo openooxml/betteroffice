@@ -374,9 +374,10 @@ export function resizedBounds(
   aspectRatioLocked = false
 ): FrameBounds {
   if (aspectRatioLocked && handle.length === 2 && bounds.width > 0 && bounds.height > 0) {
-    const dx = (handle.includes('w') ? -delta.x : delta.x) / bounds.width;
-    const dy = (handle.startsWith('n') ? -delta.y : delta.y) / bounds.height;
-    const scale = Math.max(1 + (Math.abs(dx) >= Math.abs(dy) ? dx : dy),
+    const dx = handle.includes('w') ? -delta.x : delta.x;
+    const dy = handle.startsWith('n') ? -delta.y : delta.y;
+    const scale = Math.max(1 + (dx * bounds.width + dy * bounds.height) /
+      (bounds.width ** 2 + bounds.height ** 2),
       minimum / bounds.width, minimum / bounds.height);
     const width = Math.round(bounds.width * scale);
     const height = Math.round(bounds.height * scale);
