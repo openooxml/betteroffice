@@ -257,7 +257,8 @@ export function registerPresentationCommandHandlers(
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
       canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
-      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape),
+      aspectRatioLocked: shape.aspectRatioLocked ?? false, units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {

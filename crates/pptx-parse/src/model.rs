@@ -449,6 +449,8 @@ pub struct CustomGeometryPath {
 pub struct Picture {
     #[serde(flatten)]
     pub base: ShapeBase,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,

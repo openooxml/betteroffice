@@ -132,6 +132,8 @@ pub struct ShapeSnapshot {
     /// Hides this shape and its descendants.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub geometry: String,
     pub adjust_values: BTreeMap<String, f64>,
     pub placeholder: Option<Placeholder>,

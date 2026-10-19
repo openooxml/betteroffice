@@ -190,6 +190,9 @@ fn seed_shape(
         }
         ShapeNode::Picture(picture) => {
             shape_map.insert(txn, "kind", "picture");
+            if picture.aspect_ratio_locked {
+                shape_map.insert(txn, "aspectRatioLocked", true);
+            }
             shape_map.insert(txn, "geometry", "rect");
             insert_json(&shape_map, txn, "fillJson", picture.fill.as_ref())?;
             insert_json(&shape_map, txn, "outlineJson", picture.outline.as_ref())?;
@@ -767,6 +770,7 @@ impl DeckSession {
         shape.insert(&mut txn, "id", shape_id.as_str());
         shape.insert(&mut txn, "sourceId", 0_f64);
         shape.insert(&mut txn, "kind", "picture");
+        shape.insert(&mut txn, "aspectRatioLocked", true);
         shape.insert(&mut txn, "name", draft.name.as_str());
         shape.insert(&mut txn, "x", draft.rect.x as f64);
         shape.insert(&mut txn, "y", draft.rect.y as f64);
@@ -2411,6 +2415,7 @@ pub(crate) fn shape_parts<T: ReadTxn>(
         flip_v: map_bool(&shape, txn, "flipV").unwrap_or_default(),
         inherited: None,
         hidden: map_bool(&shape, txn, "hidden").unwrap_or_default(),
+        aspect_ratio_locked: map_bool(&shape, txn, "aspectRatioLocked").unwrap_or_default(),
         geometry: required_string(&shape, txn, "geometry")?,
         adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
         placeholder: optional_json(&shape, txn, "placeholderJson")?,
@@ -2613,6 +2618,7 @@ fn baseline_shape(
         flip_v: transform.flip_v,
         inherited: None,
         hidden: base.hidden,
+        aspect_ratio_locked: matches!(shape, ShapeNode::Picture(picture) if picture.aspect_ratio_locked),
         geometry,
         adjust_values,
         placeholder: baseline_json_option(&base.placeholder)?,

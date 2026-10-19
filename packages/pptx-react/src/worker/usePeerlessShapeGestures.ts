@@ -39,7 +39,7 @@ export function peerlessGestureRect(object: PresentationCommandObjectSelection, 
   if (!object.rect || !object.canMove || handle && !object.canResize) return null;
   const emu = { x: Math.round(delta.x * object.units.x), y: Math.round(delta.y * object.units.y) };
   if (emu.x === 0 && emu.y === 0) return { ...object.rect };
-  return handle ? resizedBounds(object.rect, handle, emu, MIN_SHAPE_SIZE_EMU)
+  return handle ? resizedBounds(object.rect, handle, emu, MIN_SHAPE_SIZE_EMU, object.aspectRatioLocked)
     : { ...object.rect, x: object.rect.x + emu.x, y: object.rect.y + emu.y };
 }
 
