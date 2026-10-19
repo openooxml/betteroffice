@@ -21,7 +21,7 @@ mod xml;
 pub use axis::SheetAxes;
 pub use chart::{ChartRefresh, ChartRefreshPlan, chart_space, preserved_chart_space};
 #[cfg(feature = "test-counters")]
-pub use chart::{chart_counters, reset_chart_counters};
+pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
