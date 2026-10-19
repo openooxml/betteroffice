@@ -1,4 +1,4 @@
-use pptx_edit::DeckSession;
+use pptx_edit::{DeckSession, EditCtx, TextStyle};
 use pptx_parse::{ShapeNode, TextAutofit};
 use pptx_render::{PositionedTextLine, Primitive, SlideRenderer};
 
@@ -59,4 +59,87 @@ fn unscaled_text_keeps_its_authored_fractional_size() {
     let (size, lines) = render("Arial", 27.5, 1.0);
     assert_eq!(size, 27.5);
     assert!((lines[0].runs[0].font_size_px - 27.5 * 4.0 / 3.0).abs() < 0.001);
+}
+
+fn assert_unwrapped_autofit_fits(margin: i64, indent: i64) {
+    let mut package = pptx_parse::parse_pptx(DECK).unwrap();
+    let source = format!(
+        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld><p:spTree><p:sp>
+<p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="476250" y="476250"/><a:ext cx="1143000" cy="952500"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr wrap="none" lIns="95250" rIns="95250" tIns="0" bIns="0"><a:normAutofit fontScale="100000"/></a:bodyPr>
+<a:lstStyle/><a:p><a:pPr algn="l" marL="{margin}" marR="0" indent="{indent}"><a:buNone/></a:pPr>
+<a:r><a:rPr sz="2400"><a:latin typeface="Arial"/></a:rPr><a:t>WW</a:t></a:r>
+<a:endParaRPr sz="2400"/></a:p></p:txBody>
+</p:sp></p:spTree></p:cSld></p:sld>"#
+    );
+    assert!(package.replace_part("ppt/slides/slide1.xml", source.into_bytes()));
+    let bytes = pptx_parse::write_pptx(&package).unwrap();
+    let session = DeckSession::open(&bytes, 8_022).unwrap();
+    let story = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0].clone();
+    let mut renderer = SlideRenderer::new();
+    renderer.register_font("Arial", false, false, FONT).unwrap();
+    let text = |session: &DeckSession| {
+        renderer
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list
+            .primitives
+            .into_iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    object_id: 2,
+                    x,
+                    w,
+                    lines,
+                    ..
+                } => Some((x + 10.0, w - 20.0, lines)),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let (_, _, before) = text(&session);
+    assert_eq!(before[0].runs[0].font_size_px, 32.0);
+    session
+        .insert_text(
+            &EditCtx::local("test"),
+            &story.id,
+            story.length - 1,
+            "W",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let (x, width, lines) = text(&session);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].width < width);
+    assert!(
+        lines[0].x >= x && lines[0].x + lines[0].width <= x + width + 0.01,
+        "positioned line must fit: x={}, width={}, content=[{}, {}]",
+        lines[0].x,
+        lines[0].width,
+        x,
+        x + width
+    );
+    assert!(lines[0].runs[0].font_size_px < 32.0);
+    let saved = renderer.save(&session).unwrap();
+    let reopened = DeckSession::open(&saved, 8_023).unwrap();
+    let ShapeNode::Shape(shape) = &reopened.package().slides[0].shapes[0] else {
+        panic!("text shape");
+    };
+    assert!(matches!(
+        shape.text.as_ref().unwrap().autofit,
+        Some(TextAutofit::Normal { font_scale: Some(scale), .. }) if scale < 1.0
+    ));
+    assert_eq!(text(&reopened), (x, width, lines));
+}
+
+#[test]
+fn edited_unwrapped_autofit_includes_paragraph_margin() {
+    assert_unwrapped_autofit_fits(285_750, 0);
+}
+
+#[test]
+fn edited_unwrapped_autofit_includes_first_line_indent() {
+    assert_unwrapped_autofit_fits(0, 285_750);
 }

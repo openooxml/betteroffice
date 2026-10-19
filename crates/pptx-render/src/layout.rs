@@ -1982,7 +1982,10 @@ impl<'a> LayoutBuilder<'a> {
                     cascade.wraps(),
                 )?;
                 if text.total_height <= content_rect.h
-                    && text.lines.iter().all(|line| line.width <= content_rect.w)
+                    && text.lines.iter().all(|line| {
+                        line.x >= content_rect.x
+                            && line.x + line.width <= content_rect.x + content_rect.w
+                    })
                 {
                     high = mid;
                 } else {
