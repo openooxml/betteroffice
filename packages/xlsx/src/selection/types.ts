@@ -40,11 +40,7 @@ export interface CellRange {
  */
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
-/**
- * Grid bounds a move must stay inside: the used range is `[0, rows)` × `[0,
- * cols)`, and `rowsPerPage` is the viewport height in whole rows for
- * PageUp/PageDown steps.
- */
+/** Sheet bounds and the viewport height in whole rows. */
 export interface SelectionLimits {
   rows: number;
   cols: number;
@@ -90,6 +86,7 @@ export type SelectionAction =
 export interface SelectionData {
   edge?: CellAddr | null;
   region?: CellRange | null;
+  usedRange?: CellRange | null;
 }
 
 export interface SelectionHidden {

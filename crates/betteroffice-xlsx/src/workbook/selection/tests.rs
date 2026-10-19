@@ -38,6 +38,143 @@ fn edge(workbook: &Workbook, row: u32, col: u32, direction: SelectionDirection) 
 }
 
 #[test]
+fn used_range_includes_an_empty_bottom_right_cell() {
+    let mut sheet = Sheet::new("Data");
+    for cell in [CellRef::new(9_999, 0), CellRef::new(0, 701)] {
+        sheet.set_cell(
+            cell,
+            Cell {
+                value: CellValue::Bool { value: true },
+                ..Cell::default()
+            },
+        );
+    }
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet, Sheet::new("Empty")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let before = workbook.save().unwrap();
+    for at in [CellRef::new(0, 0), CellRef::new(50_000, 2_000)] {
+        let data = workbook
+            .selection_data(SheetId(0), at, Some(SelectionDirection::UsedRange))
+            .unwrap();
+        assert!(data.region.is_none());
+        assert!(data.edge.is_none());
+        assert_eq!(
+            data.used_range,
+            Some(SelectionRegion {
+                top: 0,
+                left: 0,
+                bottom: 9_999,
+                right: 701,
+            })
+        );
+    }
+    assert!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(CellRef::new(9_999, 701))
+            .is_none()
+    );
+    assert!(
+        workbook
+            .selection_data(
+                SheetId(1),
+                CellRef::new(0, 0),
+                Some(SelectionDirection::UsedRange),
+            )
+            .unwrap()
+            .used_range
+            .is_none()
+    );
+    assert_eq!(workbook.save().unwrap(), before);
+}
+
+#[test]
+fn used_range_follows_edits_on_the_requested_sheet() {
+    let mut workbook = workbook();
+    workbook
+        .edit_cell(
+            SheetId(1),
+            CellRef::new(9_999, 701),
+            "Far corner",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook
+            .selection_data(
+                SheetId(1),
+                CellRef::new(0, 0),
+                Some(SelectionDirection::UsedRange),
+            )
+            .unwrap()
+            .used_range,
+        Some(SelectionRegion {
+            top: 9_999,
+            left: 701,
+            bottom: 9_999,
+            right: 701,
+        })
+    );
+    assert_eq!(
+        workbook
+            .selection_data(
+                SheetId(0),
+                CellRef::new(0, 0),
+                Some(SelectionDirection::UsedRange),
+            )
+            .unwrap()
+            .used_range,
+        Some(SelectionRegion {
+            top: 0,
+            left: 0,
+            bottom: 179,
+            right: 39,
+        })
+    );
+    assert_eq!(workbook.active_sheet(), SheetId(0));
+}
+
+#[test]
+fn used_range_includes_a_merge_without_cell_keys() {
+    let mut sheet = Sheet::new("Data");
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(9, 3), CellRef::new(19, 5)));
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let data = workbook
+        .selection_data(
+            SheetId(0),
+            CellRef::new(0, 0),
+            Some(SelectionDirection::UsedRange),
+        )
+        .unwrap();
+    assert_eq!(
+        data.used_range,
+        Some(SelectionRegion {
+            top: 9,
+            left: 3,
+            bottom: 19,
+            right: 5,
+        })
+    );
+    assert!(data.region.is_none());
+    assert!(data.edge.is_none());
+    let region = workbook
+        .selection_data(SheetId(0), CellRef::new(9, 3), None)
+        .unwrap();
+    assert_eq!(region.region, data.used_range);
+    assert!(region.used_range.is_none());
+}
+
+#[test]
 fn contiguous_runs_gaps_and_empty_starts_in_all_directions() {
     use SelectionDirection::*;
     let workbook = workbook();

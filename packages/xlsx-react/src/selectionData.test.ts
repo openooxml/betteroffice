@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from 'bun:test';
 import { normalizeRange, selectionAt } from '@betteroffice/xlsx';
 import type { KeyInput, Selection, SelectionData } from '@betteroffice/xlsx';
 import { deriveLimits } from './viewer/sessionGeometry';
-import { createSelectionDataNavigation, sameSelection, selectionHidden } from './selectionData';
+import { createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from './selectionData';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -36,6 +36,63 @@ function navigation(anchorActive = false) {
 }
 
 describe('selection data navigation', () => {
+  it('requests the used range for Ctrl/Meta End and leaves plain End synchronous', () => {
+    expect(selectionDataRequest({ key: 'End' })).toBeNull();
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+      expect(selectionDataRequest({ key: 'End', ...modifier })).toBe('usedRange');
+      expect(selectionDataRequest({ key: 'End', shiftKey: true, ...modifier })).toBe('usedRange');
+    }
+  });
+
+  it('chains a used-range jump and a data-edge jump through one asynchronous batch', async () => {
+    const nav = navigation();
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ edge: { row: 79, col: 0 } });
+    nav.press({ key: 'End', ctrlKey: true });
+    nav.press({ key: 'ArrowLeft', ctrlKey: true });
+    expect(nav.query.mock.calls[0]![1]).toBe('usedRange');
+    first.resolve({ usedRange: { top: 0, left: 0, bottom: 79, right: 15 }, region: null });
+    await tick();
+    expect(nav.apply.mock.calls[0]![0]).toEqual(selectionAt({ row: 79, col: 15 }));
+    expect(nav.query.mock.calls[1]![0].selection.focus).toEqual({ row: 79, col: 15 });
+    expect(nav.query.mock.calls[1]![1]).toBe('left');
+    expect(nav.current.selection).toEqual(selectionAt({ row: 79, col: 0 }));
+  });
+
+  it('refreshes a pending used-range answer after edits and preserves Shift extension', async () => {
+    const nav = navigation(true);
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise).mockResolvedValueOnce({
+      usedRange: { top: 0, left: 0, bottom: 99, right: 19 },
+    });
+    nav.press({ key: 'End', metaKey: true, shiftKey: true });
+    nav.update({ version: 'v2' });
+    first.resolve({ usedRange: { top: 0, left: 0, bottom: 79, right: 15 } });
+    await tick();
+    expect(nav.query).toHaveBeenCalledTimes(2);
+    expect(nav.apply).toHaveBeenCalledTimes(1);
+    expect(nav.current.selection).toEqual({ anchor: { row: 1, col: 1 }, focus: { row: 99, col: 19 } });
+  });
+
+  it('leaves selection unchanged after a failed or unavailable used-range query', async () => {
+    for (const answer of [Promise.reject(new Error('Query failed')), Promise.resolve({ region: null })]) {
+      const nav = navigation();
+      nav.query.mockReturnValueOnce(answer);
+      nav.press({ key: 'End', ctrlKey: true });
+      await tick();
+      expect(nav.apply).not.toHaveBeenCalled();
+      expect(nav.current.selection).toEqual(selectionAt({ row: 1, col: 1 }));
+    }
+  });
+
+  it('returns to A1 only after a successful empty used-range query', async () => {
+    const nav = navigation();
+    nav.query.mockResolvedValueOnce({ usedRange: null });
+    nav.press({ key: 'End', ctrlKey: true });
+    await tick();
+    expect(nav.current.selection).toEqual(selectionAt({ row: 0, col: 0 }));
+  });
+
   it('extends from the focus then jumps from the active anchor in one queued batch', async () => {
     const nav = navigation(true);
     nav.update({ selection: { anchor: { row: 1, col: 1 }, focus: { row: 4, col: 3 } } });
@@ -201,6 +258,6 @@ it('keeps sheet indices reachable when hidden spans collapse the pixel extent', 
   const limits = deriveLimits({ width: 96, height: 48, commands: [], grid: {
     startRow: 0, startCol: 0, rowOffsets: [0, 24, 48], colOffsets: [0, 96],
     hiddenRowSpans: [[1, 899_999], [900_001, 1_048_575]], hiddenColSpans: [[1, 16_383]],
-  } }, { contentHeight: 48, contentWidth: 96 }, 48);
+  } }, 48);
   expect(limits).toEqual({ rows: 1_048_576, cols: 16_384, rowsPerPage: 2 });
 });

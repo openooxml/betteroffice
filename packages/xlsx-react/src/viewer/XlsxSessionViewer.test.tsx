@@ -178,6 +178,68 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook session viewer', () => {
+  it('uses model bounds for Ctrl+End and grows the viewport extent before scrolling', async () => {
+    const { viewer, call } = session();
+    call.selectionData.mockResolvedValue({ usedRange: { top: 0, left: 0, bottom: 9_999, right: 701 } });
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'End', ctrlKey: true }); });
+    expect(call.selectionData).toHaveBeenCalledWith(0, 0, 0, 'usedRange');
+    expect(call.cellGeometry).toHaveBeenCalledWith(0, 9_999, 701);
+    const extent = scroll.firstElementChild as HTMLElement;
+    expect(extent.style.width).toBe('67392px');
+    expect(extent.style.height).toBe('240000px');
+    expect(scroll.scrollLeft).toBe(702 * 96 - 800);
+    expect(scroll.scrollTop).toBe(10_000 * 24 - 600);
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'Home', ctrlKey: true }); });
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+    expect(call.command).not.toHaveBeenCalled();
+  });
+
+  it('keeps visible plain moves local and preserves the viewport through zoom', async () => {
+    const { viewer, call } = session();
+    open(viewer);
+    let api!: XlsxWorkerViewerApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen
+      onReady={(ready) => { api = ready; }} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    for (const key of ['ArrowRight', 'ArrowDown', 'Tab', 'Enter']) {
+      await act(async () => { fireEvent.keyDown(scroll, { key }); });
+      expect(scroll.scrollLeft).toBe(0);
+      expect(scroll.scrollTop).toBe(0);
+    }
+    expect(call.cellGeometry).not.toHaveBeenCalled();
+    expect(call.sheetView).toHaveBeenCalledTimes(1);
+    await act(async () => { await api.commands.execute('zoom', { scale: 1.5 }); });
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+    expect(call.cellGeometry).not.toHaveBeenCalled();
+  });
+
+  it('reveals a laid-out cell at the viewport edge by the nearest amount without geometry RPCs', async () => {
+    const { viewer, call } = session();
+    call.frame.mockImplementation(async (viewport, options) => {
+      const next = frame(options?.sheet ?? 0, viewport);
+      next.displayList.grid!.colOffsets = [0, 300, 600, 900];
+      return next;
+    });
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+    });
+    expect(scroll.scrollLeft).toBe(100);
+    expect(scroll.scrollTop).toBe(0);
+    expect(call.cellGeometry).not.toHaveBeenCalled();
+  });
+
   it('uses model region bounds while retaining the active cell', async () => {
     const { viewer, call } = session();
     call.selectionData.mockResolvedValue({ region: { top: 0, left: 0, bottom: 2, right: 2 } });
@@ -269,7 +331,7 @@ describe('workbook session viewer', () => {
     const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
     await opened();
     await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight', ctrlKey: true }); });
-    expect(call.cellGeometry).toHaveBeenCalledWith(0, 0, 42);
+    expect(call.cellGeometry).toHaveBeenCalledWith(0, 0, 16_383);
     expect(view.queryByTestId('xlsx-error')).toBeNull();
   });
 

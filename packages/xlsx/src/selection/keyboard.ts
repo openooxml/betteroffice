@@ -126,8 +126,15 @@ export function selectionKeyReducer(
     case 'Home':
       return moveAction(corner(state, false, mod(key), limits, hidden));
 
-    case 'End':
-      return moveAction(corner(state, true, mod(key), limits, hidden));
+    case 'End': {
+      if (!mod(key)) return moveAction(corner(state, true, false, limits, hidden));
+      if (data?.usedRange === undefined) return { type: 'none' };
+      const target = {
+        row: Math.max(0, Math.min(data?.usedRange?.bottom ?? 0, limits.rows - 1)),
+        col: Math.max(0, Math.min(data?.usedRange?.right ?? 0, limits.cols - 1)),
+      };
+      return moveAction(key.shiftKey ? extendTo(state, target, limits) : selectionAt(target));
+    }
 
     case 'PageDown':
       return moveAction(

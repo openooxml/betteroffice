@@ -42,7 +42,7 @@ import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost, type XlsxPluginHostBinding } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
-import { deriveLimits } from '../viewer/sessionGeometry';
+import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { XlsxAsyncExportBridge } from './createAsyncEditorApi';
 import { PeerlessWorkbookSession, type PeerlessSessionWorkbookProps } from './usePeerlessSessionWorkbook';
@@ -233,7 +233,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       ? rangeTarget(activeRef.current, selectionRef.current) : undefined;
   };
   const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
-  const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null, viewRef.current!,
+  const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const predict = (sheet: number, next: Selection) => {
     if (sheet === activeRef.current && sameSelection(selectionRef.current, next)) return;
@@ -244,11 +244,19 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     draftController.selectionChanged();
     commands.refresh();
   };
-  const reveal = (sheet: number, cell: CellAddr) => {
+  const reveal = (sheet: number, cell: CellAddr, previousZoom?: number) => {
     const owner = ownerRef.current;
     const frame = sourceRef.current?.painted;
-    if (!owner?.current || owner.failure || frame?.geometry && frame.request.sheet === sheet &&
-      cellRect(frame.geometry, cell.row, cell.col)) return;
+    if (!owner?.current || owner.failure) return;
+    const scroll = scrollRef.current;
+    const rect = frame?.geometry && frame.request.sheet === sheet ? cellRect(frame.geometry, cell.row, cell.col) : null;
+    const scale = zoomRef.current;
+    const padding = 2 / scale;
+    if (previousZoom === undefined && rect && scroll && frame?.request.zoom === scale &&
+      frame.request.viewport.x === scroll.scrollLeft / scale && frame.request.viewport.y === scroll.scrollTop / scale &&
+      (rect.x === 0 || rect.x >= padding) && (rect.y === 0 || rect.y >= padding) &&
+      rect.x + rect.w + padding <= scroll.clientWidth / scale &&
+      rect.y + rect.h + padding <= scroll.clientHeight / scale) return;
     const at = navigation.current;
     if (revealing.current?.generation === owner.generation && revealing.current.navigation === at) return;
     const request = { generation: owner.generation, navigation: at };
@@ -256,13 +264,33 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     void owner.session.call.cellGeometry(sheet, cell.row, cell.col).then((geometry) => {
       const scroll = scrollRef.current;
       if (!owner.current || ownerRef.current !== owner || navigation.current !== at || !scroll) return;
-      scroll.scrollLeft = geometry.scrollPosition.x * zoomRef.current;
-      scroll.scrollTop = geometry.scrollPosition.y * zoomRef.current;
+      if (previousZoom !== undefined && !cellInViewport(scroll, geometry.rect, previousZoom)) return;
+      const view = viewRef.current;
+      if (!view || view.sheet !== sheet) return;
+      const scale = zoomRef.current;
+      const padding = 2 / scale;
+      setView(extendScrollExtent(scroll, view, {
+        ...geometry.rect, w: geometry.rect.w + padding, h: geometry.rect.h + padding,
+      }, scale));
+      const target = nearestCellScroll(geometry.rect, cell, view, {
+        x: scroll.scrollLeft / scale, y: scroll.scrollTop / scale,
+        width: scroll.clientWidth / scale, height: scroll.clientHeight / scale,
+      }, padding);
+      scroll.scrollLeft = target.x * scale;
+      scroll.scrollTop = target.y * scale;
       sourceRef.current?.schedule();
     }).catch((error) => {
       if (owner.current && ownerRef.current === owner && navigation.current === at) owner.fail(error);
     }).finally(() => { if (revealing.current === request) revealing.current = null; });
   };
+  const revealedZoom = useRef(zoom);
+  useLayoutEffect(() => {
+    if (revealedZoom.current === zoom) return;
+    const previousZoom = revealedZoom.current;
+    revealedZoom.current = zoom;
+    const selected = selectionRef.current;
+    if (selected && !chartRef.current) reveal(activeRef.current, selected.anchor, previousZoom);
+  }, [zoom]);
   const requests = useMemo(() => new Map<number, WorkerPaintRequest>(), [run]);
   const selectionCommands = useMemo(() => new Set<number>(), [run]);
   const selectionRevisions = useMemo(() => new Map<number, number>(), [run]);

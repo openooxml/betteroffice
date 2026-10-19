@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { XlsxInThreadEditorProps, XlsxPointPosition, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
-import { expandRangeToMergedCells } from './sessionGeometry';
+import { expandRangeToMergedCells, nearestCellScroll } from './sessionGeometry';
 
 export const workbookSessionOpener = { open: openWorkbookSession };
 
@@ -113,26 +113,33 @@ export class ViewerSession {
     }
   }
 
-  async selectCellsAsync(sheet: number, selection: Selection): Promise<boolean> {
+  async selectCellsAsync(sheet: number, selection: Selection, align: 'start' | 'nearest' = 'start'): Promise<boolean> {
     if (!this.current || !this.validSheet(sheet) || !validSelection(selection)) return false;
     const next = structuredClone(selection);
     const navigation = this.beginNavigation();
     this.viewRequest += 1;
+    if (align === 'nearest' && sheet === this.active) {
+      this.selection = next;
+      this.changed();
+    }
     try {
       const [view, anchor, geometry] = await Promise.all([
         this.view?.sheet === sheet ? Promise.resolve(this.view) : this.session.call.sheetView(sheet),
-        this.session.call.cellGeometry(sheet, next.anchor.row, next.anchor.col),
+        next.anchor.row === next.focus.row && next.anchor.col === next.focus.col
+          ? Promise.resolve(null) : this.session.call.cellGeometry(sheet, next.anchor.row, next.anchor.col),
         this.session.call.cellGeometry(sheet, next.focus.row, next.focus.col),
       ]);
       if (!this.current || navigation !== this.navigation) return false;
       this.active = sheet;
       this.selection = next;
       const painted = new Promise<boolean>((resolve) => this.waiters.add({ request: null, resolve }));
+      const currentViewport = this.surface?.capture()?.viewport;
       this.presentView({
         ...view,
-        contentWidth: Math.max(view.contentWidth, anchor.rect.x + anchor.rect.w, geometry.rect.x + geometry.rect.w),
-        contentHeight: Math.max(view.contentHeight, anchor.rect.y + anchor.rect.h, geometry.rect.y + geometry.rect.h),
-      }, geometry.scrollPosition);
+        contentWidth: Math.max(view.contentWidth, anchor ? anchor.rect.x + anchor.rect.w : 0, geometry.rect.x + geometry.rect.w),
+        contentHeight: Math.max(view.contentHeight, anchor ? anchor.rect.y + anchor.rect.h : 0, geometry.rect.y + geometry.rect.h),
+      }, align === 'nearest' && currentViewport
+        ? nearestCellScroll(geometry.rect, next.focus, view, currentViewport) : geometry.scrollPosition);
       if (!await painted || !this.current || navigation !== this.navigation) return false;
       const paintedFrame = this.painted;
       if (!paintedFrame || !sameRequest(this.surface?.capture() ?? null, paintedFrame.request)) return false;

@@ -1,8 +1,7 @@
-import type { CellRange, DisplayList, MergedRange, SelectionLimits, SheetInfo } from '@betteroffice/xlsx';
-import { cellAtPoint, chartRegionAtPoint } from '@betteroffice/xlsx';
+import type { CellAddr, CellRange, DisplayList, MergedRange, Rect, SelectionLimits, SheetInfo, Viewport, WorkbookSheetView } from '@betteroffice/xlsx';
+import { cellAtPoint, cellRect, chartRegionAtPoint } from '@betteroffice/xlsx';
 import type { XlsxPointPosition } from '../XlsxEditor';
 
-const COL_W = 96;
 const ROW_H = 24;
 
 export function positionAtPoint(
@@ -28,26 +27,64 @@ function medianTrack(offsets: number[] | undefined, fallback: number): number {
   return mid > 0 ? mid : fallback;
 }
 
-function trackCount(count: number, spans: [number, number][] | undefined, limit: number): number {
-  let last = count - 1;
-  for (const [start, end] of spans ?? []) {
-    if (start > last) break;
-    last += end - start + 1;
-  }
-  return Math.min(last + 1, limit);
-}
-
 export function deriveLimits(
   dl: DisplayList | null,
-  info: Pick<SheetInfo, 'contentWidth' | 'contentHeight'>,
   viewportHeight: number
 ): SelectionLimits {
   const rowH = medianTrack(dl?.grid?.rowOffsets, ROW_H);
-  const colW = medianTrack(dl?.grid?.colOffsets, COL_W);
-  const rows = trackCount(Math.max(1, Math.round(info.contentHeight / rowH)) + 1, dl?.grid?.hiddenRowSpans, 1_048_576);
-  const cols = trackCount(Math.max(1, Math.round(info.contentWidth / colW)) + 1, dl?.grid?.hiddenColSpans, 16_384);
   const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
-  return { rows, cols, rowsPerPage };
+  return { rows: 1_048_576, cols: 16_384, rowsPerPage };
+}
+
+export function extendScrollExtent<T extends Pick<SheetInfo, 'contentWidth' | 'contentHeight'>>(
+  scroll: HTMLElement, info: T, rect: Rect, zoom: number
+): T {
+  const next = {
+    ...info,
+    contentWidth: Math.max(info.contentWidth, rect.x + rect.w),
+    contentHeight: Math.max(info.contentHeight, rect.y + rect.h),
+  };
+  const content = scroll.firstElementChild as HTMLElement | null;
+  if (content) {
+    content.style.width = `${next.contentWidth * zoom}px`;
+    content.style.height = `${next.contentHeight * zoom}px`;
+  }
+  return next;
+}
+
+export function cellInViewport(scroll: HTMLElement, rect: Rect, zoom: number): boolean {
+  const left = scroll.scrollLeft / zoom;
+  const top = scroll.scrollTop / zoom;
+  return rect.x + rect.w > left && rect.y + rect.h > top &&
+    rect.x < left + scroll.clientWidth / zoom && rect.y < top + scroll.clientHeight / zoom;
+}
+
+export function laidOutCellRect(
+  frame: DisplayList, viewport: Viewport, view: WorkbookSheetView, cell: CellAddr
+): Rect | null {
+  const rect = cellRect(frame.grid, cell.row, cell.col);
+  return rect ? {
+    ...rect,
+    x: rect.x + (cell.col < view.frozenCols ? 0 : viewport.x),
+    y: rect.y + (cell.row < view.frozenRows ? 0 : viewport.y),
+  } : null;
+}
+
+export function nearestCellScroll(
+  rect: Rect, cell: CellAddr, view: WorkbookSheetView, viewport: Viewport, padding = 0
+): { x: number; y: number } {
+  const axis = (position: number, size: number, frozen: boolean, extent: number, scroll: number, body: number) => {
+    if (frozen) return scroll;
+    const start = position - extent;
+    const available = Math.max(0, body - extent);
+    if (start >= scroll + padding && start + size <= scroll + available - padding) return scroll;
+    if (start < scroll + padding || size + padding * 2 >= available) return Math.max(0, start - padding);
+    return Math.max(0, start + size - available + padding);
+  };
+  return {
+    x: axis(rect.x, rect.w, cell.col < view.frozenCols, view.frozenWidth, viewport.x, viewport.width),
+    y: axis(rect.y, rect.h, cell.row < view.frozenRows, view.frozenHeight, viewport.y, viewport.height),
+  };
 }
 
 export function scaledRect(rect: { x: number; y: number; w: number; h: number }, zoom: number) {

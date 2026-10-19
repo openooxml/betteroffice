@@ -169,7 +169,7 @@ export type WorkbookSessionMethods = {
   sheetView(sheet: number): WorkbookSheetView;
   cellGeometry(sheet: number, row: number, col: number): WorkbookCellGeometry;
   cellInputs(sheet: number, range: string): WorkbookCellInputs;
-  selectionData(sheet: number, row: number, col: number, direction?: Direction): SelectionData;
+  selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange'): SelectionData;
   captureFormat(sheet: number, range: string): CapturedFormat;
   sheets(): WorkbookSheetSummary[];
   calculationStatus(): CalculationStatus;

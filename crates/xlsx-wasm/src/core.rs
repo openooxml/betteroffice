@@ -1685,6 +1685,17 @@ mod tests {
                 "top": 900000, "left": 50, "bottom": 900000, "right": 50,
             })
         );
+        assert!(region["usedRange"].is_null());
+        let used: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":0,"col":0,"direction":"usedRange"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(used["usedRange"]["bottom"], 900000);
+        assert_eq!(used["usedRange"]["right"], 50);
+        assert!(used["region"].is_null());
+        assert!(used["edge"].is_null());
         assert!(
             session
                 .selection_data_json(r#"{"sheet":2,"row":0,"col":0}"#)

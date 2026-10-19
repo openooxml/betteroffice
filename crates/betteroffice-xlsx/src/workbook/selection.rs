@@ -8,6 +8,8 @@ pub enum SelectionDirection {
     Down,
     Left,
     Right,
+    #[serde(rename = "usedRange")]
+    UsedRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -22,6 +24,8 @@ pub struct SelectionRegion {
 pub struct SelectionData {
     pub edge: Option<CellRef>,
     pub region: Option<SelectionRegion>,
+    #[serde(rename = "usedRange")]
+    pub used_range: Option<SelectionRegion>,
 }
 
 fn filled(cell: &xlsx_model::Cell) -> bool {
@@ -242,13 +246,25 @@ impl Workbook {
         validate_cell_ref(at)?;
         let sheet = self.sheet(sheet)?;
         Ok(match direction {
+            Some(SelectionDirection::UsedRange) => SelectionData {
+                edge: None,
+                region: None,
+                used_range: sheet.used_range().map(|range| SelectionRegion {
+                    top: range.start.row,
+                    left: range.start.col,
+                    bottom: range.end.row,
+                    right: range.end.col,
+                }),
+            },
             Some(direction) => SelectionData {
                 edge: data_edge(sheet, at, direction),
                 region: None,
+                used_range: None,
             },
             None => SelectionData {
                 edge: None,
                 region: current_region(sheet, at),
+                used_range: None,
             },
         })
     }

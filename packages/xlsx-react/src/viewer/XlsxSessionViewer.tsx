@@ -21,7 +21,7 @@ import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { FormulaBarContext } from '../components/toolbar/FormulaBar';
 import type { FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import { useTranslation } from '../i18n';
-import { deriveLimits, expandRangeToMergedCells, positionAtPoint, scaledRect } from './sessionGeometry';
+import { cellInViewport, deriveLimits, expandRangeToMergedCells, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from './sessionGeometry';
 import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
 
@@ -138,6 +138,58 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
       scroll.removeEventListener('scroll', schedule);
       observer.disconnect();
     };
+  }, [run, zoom]);
+
+  const moveSelection = (owner: ViewerSession, selection: Selection, previousZoom?: number): Promise<boolean> => {
+    const scroll = scrollRef.current;
+    const view = owner.view;
+    const painted = owner.painted;
+    if (!owner.current || !view || !scroll) return Promise.resolve(false);
+    const cell = selection.focus;
+    const rect = painted?.frame.sheet === owner.active && painted.frame.version === owner.session.confirmedBasis.version
+      ? laidOutCellRect(painted.frame.displayList, painted.request.viewport, view, cell) : null;
+    if (!rect) return owner.selectCellsAsync(owner.active, selection, 'nearest');
+    if (previousZoom !== undefined && !cellInViewport(scroll, rect, previousZoom)) return Promise.resolve(false);
+    if (previousZoom === undefined) owner.setSelection(selection);
+    const scale = zoomRef.current;
+    const target = nearestCellScroll(rect, cell, view, {
+      x: scroll.scrollLeft / scale, y: scroll.scrollTop / scale,
+      width: scroll.clientWidth / scale, height: scroll.clientHeight / scale,
+    });
+    scroll.scrollLeft = target.x * scale;
+    scroll.scrollTop = target.y * scale;
+    owner.schedule();
+    return Promise.resolve(true);
+  };
+
+  const revealedZoom = useRef(zoom);
+  useLayoutEffect(() => {
+    if (revealedZoom.current === zoom) return;
+    const previousZoom = revealedZoom.current;
+    revealedZoom.current = zoom;
+    if (!run?.current || !run.selection || selectedChart) return;
+    const selection = run.selection;
+    const navigation = run.navigation;
+    const painted = run.painted;
+    const rect = painted && run.view && painted.frame.version === run.session.confirmedBasis.version
+      ? laidOutCellRect(painted.frame.displayList, painted.request.viewport, run.view, selection.focus) : null;
+    if (rect) { void moveSelection(run, selection, previousZoom); return; }
+    const sheet = run.active;
+    void run.session.call.cellGeometry(sheet, selection.focus.row, selection.focus.col).then((geometry) => {
+      const scroll = scrollRef.current;
+      if (run.current && latest.current.run === run && run.navigation === navigation &&
+        zoomRef.current === zoom && scroll && cellInViewport(scroll, geometry.rect, previousZoom)) {
+        const scale = zoomRef.current;
+        const viewport = {
+          x: scroll.scrollLeft / scale, y: scroll.scrollTop / scale,
+          width: scroll.clientWidth / scale, height: scroll.clientHeight / scale,
+        };
+        const target = run.view && nearestCellScroll(geometry.rect, selection.focus, run.view, viewport);
+        if (target && (target.x !== viewport.x || target.y !== viewport.y)) {
+          void run.selectCellsAsync(sheet, selection, 'nearest');
+        }
+      }
+    }).catch(reportError);
   }, [run, zoom]);
 
   useEffect(() => {
@@ -264,7 +316,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
     onCompositionStart: () => {}, onCompositionEnd: () => {},
   };
 
-  const limits = () => deriveLimits(frame ?? null, run!.view!,
+  const limits = () => deriveLimits(frame ?? null,
     (scrollRef.current?.clientHeight ?? 0) / paintedZoom);
   const point = (event: MouseEvent): { cell: CellAddr | null; chart: string | null } => {
     if (!frame || !canvasRef.current) return { cell: null, chart: null };
@@ -327,6 +379,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
     } catch {}
   };
   const onKeyDown = (event: KeyboardEvent) => {
+    const selection = run?.selection;
     if (!run?.view || !selection || commandForEvent(event)) return;
     if (selectedChart) {
       if (event.key === 'Escape') setSelectedChart(null);
@@ -350,21 +403,23 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
           return { owner: run, sheet, selection: run.selection, navigation: run.navigation,
             version: `${basis.epoch}:${basis.version}:${run.session.state.version}` };
         },
-        limits: () => deriveLimits(run.painted?.frame.displayList ?? null, run.view!,
+        limits: () => deriveLimits(run.painted?.frame.displayList ?? null,
           (scrollRef.current?.clientHeight ?? 0) / zoomRef.current),
         hidden: () => selectionHidden(run.painted?.frame.displayList.grid),
         query: (context, direction) => run.session.call.selectionData(sheet,
           context.selection.focus.row, context.selection.focus.col, direction),
         apply: async (next) => {
           const navigation = run.navigation + 1;
-          await run.selectCellsAsync(sheet, next);
+          await moveSelection(run, next);
           return run.current && run.navigation === navigation && run.active === sheet;
         },
       });
       return;
     }
     const action = selectionKeyReducer(selection, event, limits(), undefined, selectionHidden(frame?.grid));
-    if (action.type === 'move') run.setSelection(action.selection);
+    if (action.type === 'move') {
+      void moveSelection(run, action.selection);
+    }
     if (action.type !== 'none') event.preventDefault();
   };
 

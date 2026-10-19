@@ -46,6 +46,7 @@ import type {
   MergedRange,
   Proposal,
   Selection,
+  SelectionData,
   SelectionLimits,
   SheetInfo,
   Viewport,
@@ -101,7 +102,7 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { deriveLimits, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
+import { cellInViewport, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
 import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
@@ -437,9 +438,6 @@ function covers(painted: PaintMark, wanted: PaintMark): boolean {
   );
 }
 
-const LAST_ROW = 1_048_575;
-const LAST_COL = 16_383;
-
 /** Where one axis should scroll to reveal a track of `size` at `position`; null to stay. */
 function revealAxis(
   position: number,
@@ -474,7 +472,7 @@ function revealScroll(
 ): { x: number | null; y: number | null } {
   const info = handle.sheetInfo();
   const at = handle.cellPosition(sheet, row, col);
-  const next = handle.cellPosition(sheet, Math.min(row + 1, LAST_ROW), Math.min(col + 1, LAST_COL));
+  const rect = handle.cellRect(sheet, row, col);
   const frozen =
     info.frozenRows > 0 || info.frozenCols > 0
       ? frozenExtent(handle, info, viewport)
@@ -482,7 +480,7 @@ function revealScroll(
   return {
     x: revealAxis(
       at.x,
-      next.x - at.x,
+      rect.w,
       col < info.frozenCols,
       viewport.x,
       Math.max(0, viewport.width - frozen.width),
@@ -490,7 +488,7 @@ function revealScroll(
     ),
     y: revealAxis(
       at.y,
-      next.y - at.y,
+      rect.h,
       row < info.frozenRows,
       viewport.y,
       Math.max(0, viewport.height - frozen.height),
@@ -925,6 +923,8 @@ function XlsxEditorContent({
         }
         try {
           const zoom = zoomRef.current;
+          const info = sheetInfoRef.current;
+          if (info) setSheetInfo(extendScrollExtent(scroll, info, handle.cellRect(sheet, row, col), zoom));
           const target = revealScroll(handle, sheet, row, col, align, {
             x: scroll.scrollLeft / zoom,
             y: scroll.scrollTop / zoom,
@@ -938,6 +938,21 @@ function XlsxEditorContent({
     },
     [activeSheetRef]
   );
+
+  const revealedZoom = useRef(zoom);
+  useEffect(() => {
+    if (revealedZoom.current === zoom) return;
+    const previousZoom = revealedZoom.current;
+    revealedZoom.current = zoom;
+    const selected = selectionRef.current;
+    const scroll = scrollRef.current;
+    const handle = handleRef.current;
+    if (!selected || !scroll || !handle) return;
+    const { row, col } = selected.focus;
+    if (cellInViewport(scroll, handle.cellRect(activeSheetRef.current, row, col), previousZoom)) {
+      revealCell(activeSheetRef.current, row, col, 'nearest', () => selectionRef.current === selected);
+    }
+  }, [zoom, revealCell]);
 
   useEffect(() => {
     if (!readOnly) return;
@@ -1574,10 +1589,9 @@ function XlsxEditorContent({
   const limits = useCallback((): SelectionLimits => {
     return deriveLimits(
       frameRef.current,
-      sheetInfo!,
       (scrollRef.current?.clientHeight ?? 0) / zoom
     );
-  }, [sheetInfo, zoom]);
+  }, [zoom]);
 
   // map a viewport-local pointer event to a sheet cell via the frame geometry.
   const pointToCell = useCallback(
@@ -2024,8 +2038,15 @@ function XlsxEditorContent({
       }
 
       const request = selectionDataRequest(e);
-      const data = request ? handle.selectionData(activeSheetRef.current, selection.focus.row,
-        selection.focus.col, request === 'region' ? undefined : request) : undefined;
+      let data: SelectionData | undefined;
+      try {
+        data = request ? handle.selectionData(activeSheetRef.current, selection.focus.row,
+          selection.focus.col, request === 'region' ? undefined : request) : undefined;
+      } catch (error) {
+        if (request !== 'usedRange') throw error;
+        e.preventDefault();
+        return;
+      }
       const action = selectionKeyReducer(
         selection,
         {
@@ -2042,7 +2063,7 @@ function XlsxEditorContent({
       switch (action.type) {
         case 'move':
           setSelection(action.selection);
-          if (request) revealCell(activeSheetRef.current, action.selection.focus.row, action.selection.focus.col, 'nearest',
+          revealCell(activeSheetRef.current, action.selection.focus.row, action.selection.focus.col, 'nearest',
             () => selectionRef.current === action.selection);
           e.preventDefault();
           break;

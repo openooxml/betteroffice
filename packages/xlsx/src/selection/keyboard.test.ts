@@ -80,7 +80,8 @@ describe('home/end and paging', () => {
 
   it('end goes to the row end, ctrl+end to the last used cell', () => {
     expect(moved(press(sel, { key: 'End' }))).toEqual(selectionAt({ row: 40, col: 25 }));
-    expect(moved(press(sel, { key: 'End', ctrlKey: true }))).toEqual(
+    expect(moved(selectionKeyReducer(sel, { key: 'End', ctrlKey: true }, limits,
+      { usedRange: { top: 0, left: 0, bottom: 99, right: 25 } }))).toEqual(
       selectionAt({ row: 99, col: 25 })
     );
   });
@@ -284,7 +285,7 @@ describe('hidden-track navigation', () => {
     const state = selectionAt({ row: 2, col: 2 });
     expect(reduce(state, { key: 'Home' }, tracks)).toEqual(selectionAt({ row: 2, col: 1 }));
     expect(reduce(state, { key: 'Home', ctrlKey: true }, tracks)).toEqual(selectionAt({ row: 1, col: 1 }));
-    expect(reduce(state, { key: 'End', metaKey: true }, tracks)).toEqual(selectionAt({ row: 4, col: 4 }));
+    expect(reduce(state, { key: 'End' }, tracks)).toEqual(selectionAt({ row: 2, col: 4 }));
   });
 
   for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
@@ -314,5 +315,67 @@ describe('hidden-track navigation', () => {
     for (const key of ['ArrowRight', 'ArrowDown']) {
       expect(reduce(state, { key, ctrlKey: true, shiftKey: true }, tracks)).toEqual(state);
     }
+  });
+});
+
+describe('sheet bounds and used range', () => {
+  const bounds = { rows: 1_048_576, cols: 16_384, rowsPerPage: 20 };
+  const state = selectionAt({ row: 9_999, col: 701 });
+  const usedRange = { top: 0, left: 0, bottom: 9_999, right: 701 };
+
+  for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+    it(`uses the used rectangle for ${Object.keys(modifier)[0]}+End independently of the current region`, () => {
+      const start = selectionAt({ row: 50_000, col: 2_000 });
+      const data = { usedRange, region: { top: 0, left: 0, bottom: 0, right: 0 } };
+      expect(moved(selectionKeyReducer(start, { key: 'End', ...modifier }, bounds, data))).toEqual(state);
+      expect(moved(selectionKeyReducer(start, { key: 'End', ...modifier, shiftKey: true }, bounds, data)))
+        .toEqual({ anchor: start.anchor, focus: state.focus });
+      expect(moved(selectionKeyReducer(start, { key: 'Home', ...modifier }, bounds, data)))
+        .toEqual(selectionAt({ row: 0, col: 0 }));
+    });
+
+    it('uses A1 for an empty used range and ignores unavailable data', () => {
+      expect(moved(selectionKeyReducer(state, { key: 'End', ...modifier }, bounds, { usedRange: null })))
+        .toEqual(selectionAt({ row: 0, col: 0 }));
+      for (const data of [undefined, {}, { region: null }]) {
+        expect(selectionKeyReducer(state, { key: 'End', ...modifier }, bounds, data)).toEqual({ type: 'none' });
+      }
+    });
+
+    it('continues from the last data cell to the real sheet edge', () => {
+      for (const [key, focus] of [
+        ['ArrowDown', { row: 1_048_575, col: 701 }],
+        ['ArrowRight', { row: 9_999, col: 16_383 }],
+      ] as const) {
+        expect(moved(selectionKeyReducer(state, { key, ...modifier }, bounds, { edge: null, usedRange })))
+          .toEqual(selectionAt(focus));
+      }
+    });
+  }
+
+  it('allows arrows, Shift arrows, paging and End beyond the used range', () => {
+    for (const [key, focus] of [
+      ['ArrowDown', { row: 10_000, col: 701 }],
+      ['ArrowRight', { row: 9_999, col: 702 }],
+      ['PageDown', { row: 10_019, col: 701 }],
+      ['End', { row: 9_999, col: 16_383 }],
+    ] as const) {
+      expect(moved(selectionKeyReducer(state, { key }, bounds))).toEqual(selectionAt(focus));
+      if (key !== 'End') expect(moved(selectionKeyReducer(state, { key, shiftKey: true }, bounds)))
+        .toEqual({ anchor: state.anchor, focus });
+    }
+    const last = selectionAt({ row: bounds.rows - 1, col: bounds.cols - 1 });
+    for (const key of ['ArrowDown', 'ArrowRight', 'PageDown', 'End']) {
+      expect(moved(selectionKeyReducer(last, { key }, bounds))).toEqual(last);
+    }
+  });
+
+  it('keeps a hidden used-range corner and clamps malformed range bounds to the sheet', () => {
+    const hidden = { isRowHidden: () => true, isColHidden: () => true };
+    expect(moved(selectionKeyReducer(selectionAt({ row: 0, col: 0 }), { key: 'End', ctrlKey: true },
+      bounds, { usedRange }, hidden))).toEqual(state);
+    expect(moved(selectionKeyReducer(state, { key: 'End', ctrlKey: true }, bounds,
+      { usedRange: { ...usedRange, bottom: bounds.rows, right: bounds.cols } })))
+      .toEqual(selectionAt({ row: bounds.rows - 1, col: bounds.cols - 1 }));
   });
 });

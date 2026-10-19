@@ -18,13 +18,14 @@ export function selectionHidden(grid: GridMeta | undefined): SelectionHidden {
   };
 }
 
-export function selectionDataRequest(key: KeyInput): Direction | 'region' | null {
+export function selectionDataRequest(key: KeyInput): Direction | 'region' | 'usedRange' | null {
   if (!key.ctrlKey && !key.metaKey) return null;
   switch (key.key) {
     case 'ArrowUp': return 'up';
     case 'ArrowDown': return 'down';
     case 'ArrowLeft': return 'left';
     case 'ArrowRight': return 'right';
+    case 'End': return 'usedRange';
     case 'a':
     case 'A': return 'region';
     default: return null;
@@ -53,7 +54,7 @@ interface NavigationOptions {
   activeCell?(selection: Selection): CellAddr;
   limits(): SelectionLimits;
   hidden?(): SelectionHidden;
-  query(context: NavigationContext, direction: Direction | undefined): SelectionData | Promise<SelectionData>;
+  query(context: NavigationContext, direction: Direction | 'usedRange' | undefined): SelectionData | Promise<SelectionData>;
   apply(selection: Selection): boolean | Promise<boolean>;
 }
 

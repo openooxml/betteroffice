@@ -514,7 +514,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** Absolute sheet rectangle in unzoomed pixels. */
   cellRect(sheet: number, row: number, col: number): Rect;
-  selectionData(sheet: number, row: number, col: number, direction?: Direction): SelectionData;
+  selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange'): SelectionData;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -1072,7 +1072,7 @@ function wrapWorkbookDocument(
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
     },
-    selectionData(sheet: number, row: number, col: number, direction?: Direction): SelectionData {
+    selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange'): SelectionData {
       return parseJson(() => doc.selectionDataJson(JSON.stringify({ sheet, row, col, direction })));
     },
     cellRect(sheet: number, row: number, col: number): Rect {
