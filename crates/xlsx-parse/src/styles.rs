@@ -617,7 +617,7 @@ fn parse_alignment(e: &BytesStart) -> Result<Alignment, ParseError> {
 
 /// parse a `CT_Color` element (`rgb`/`theme`+`tint`/`indexed`/`auto`) into a
 /// `Color`; `None` for an empty color element.
-fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
+pub(crate) fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
     if let Some(rgb) = attr(e, b"rgb")? {
         return Ok(normalize_rgb(&rgb).map(Color::Rgb));
     }

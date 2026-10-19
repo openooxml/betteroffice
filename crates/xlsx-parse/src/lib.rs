@@ -11,6 +11,9 @@ mod package_facts;
 mod patch;
 mod read;
 mod reference;
+mod rich_text;
+#[cfg(test)]
+mod rich_text_tests;
 #[cfg(any(test, feature = "test-oracle"))]
 mod save_oracle;
 mod styles;
@@ -31,6 +34,7 @@ pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::keeps_source;
 pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
 pub use reference::UnpatchableReference;
+pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TEXT_STYLE_BYTES};
 #[cfg(any(test, feature = "test-oracle"))]
 #[doc(hidden)]
 pub use save_oracle::with_legacy_save_path;
