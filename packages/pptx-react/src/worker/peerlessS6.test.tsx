@@ -31,7 +31,7 @@ function bounded<T>(promise: Promise<T>): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-async function deck(small = false): Promise<Uint8Array> {
+async function deck(small = false, table: boolean | 'empty' = false): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -40,6 +40,13 @@ async function deck(small = false): Promise<Uint8Array> {
   zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="5143500"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
   zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
   zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="2400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${['alpha beta', 'x', 'alpha beta'].map((text) => `<a:p><a:r><a:rPr sz="2400"><a:latin typeface="Liberation Sans"/></a:rPr><a:t>${text}</a:t></a:r></a:p>`).join('')}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`);
+  if (table) {
+    const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const rows = [['A1', 'B1'], ['A2', table === 'empty' ? '' : 'B2']].map((row) => `<a:tr h="857250">${row.map((text) =>
+      `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="2400"><a:latin typeface="Liberation Sans"/></a:defRPr></a:pPr><a:r><a:rPr sz="2400"><a:latin typeface="Liberation Sans"/></a:rPr><a:t>${text}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>`).join('')}</a:tr>`).join('');
+    zip.file('ppt/slides/slide1.xml', slide.replace(/<p:sp>.*?<\/p:sp>/,
+      `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="952500" y="952500"/><a:ext cx="5715000" cy="1714500"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="2857500"/><a:gridCol w="2857500"/></a:tblGrid>${rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`));
+  }
   if (small) {
     const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
     zip.file('ppt/slides/slide1.xml', slide.replace('cx="6000000" cy="2400000"', 'cx="40000" cy="40000"'));
@@ -111,13 +118,14 @@ afterEach(async () => {
 });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
-async function open(small = false) {
+async function open(small = false, table: boolean | 'empty' = false) {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await bounded(deck(small))} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={await bounded(deck(small, table))} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
-  const box = list.primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;
+  const primitives = list.primitives.flatMap((primitive) => primitive.kind === 'table' ? primitive.primitives : [primitive]);
+  const box = primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;
   const bounds = spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0,
     right: list.width, bottom: list.height, width: list.width, height: list.height, toJSON: () => ({}) });
   restorers.push(() => bounds.mockRestore());
@@ -372,4 +380,85 @@ test('released_shape_drag_precedes_immediate_text_click_and_typing', async () =>
   if (!saved.ok) throw new Error(saved.failure.message);
   expect(saved.stories[0]!.text).toBe('al!pha beta\nx\nalpha beta');
   expect(saved.slides[0]!.shapes[0]!.x).toBe(100000 + Math.round(30 * 9144000 / list.width));
+});
+
+for (const cellIndex of [0, 1, 2, 3]) {
+  test(`table cell ${cellIndex} accepts a click at the caret and saves only its story`, async () => {
+    const { view, stage, canvas, point, list } = await open(false, true);
+    const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+    if (table.kind !== 'table') throw new Error('Expected table');
+    const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+    const cell = cells[cellIndex]!;
+    const line = cell.lines[0]!;
+    const stop = line.caretStops.find((stop) => stop.position === 1)!;
+    const at = point(stop.x, line.y + line.height / 2);
+    act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+    await bounded(client.flush());
+    expect(client.state.selection).toMatchObject({ shapeId: cell.shapeId, storyId: cell.storyId, anchor: 1, focus: 1 });
+    const input = view.getByRole('textbox', { name: 'Slide text' });
+    expect(document.activeElement).toBe(input);
+    act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: '!',
+      bubbles: true, cancelable: true })); });
+    await bounded(client.flush());
+    const zip = await JSZip.loadAsync(await client.save());
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const texts = [...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+      [...match[1]!.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join(''));
+    expect(texts).toEqual(['A1', 'B1', 'A2', 'B2'].map((text, index) =>
+      index === cellIndex ? `${text[0]}!${text[1]}` : text));
+  });
+}
+
+for (const empty of [true, false]) {
+  test(`table ${empty ? 'empty cell' : 'cell padding'} click places the caret and saves only its story`, async () => {
+    const { view, stage, canvas, point, list } = await open(false, empty ? 'empty' : true);
+    const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+    if (table.kind !== 'table') throw new Error('Expected table');
+    const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+    const cell = cells[empty ? 3 : 0]!;
+    const line = cell.lines[0]!;
+    const position = empty ? 0 : 1;
+    const stop = line.caretStops.find((stop) => stop.position === position)!;
+    const y = cell.y + cell.h - 12;
+    expect(y).toBeGreaterThan(line.y + line.height);
+    const at = point(stop.x, y);
+    act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+    await bounded(client.flush());
+    expect(client.state.selection?.kind).not.toBe('object');
+    expect(client.state.selection).toMatchObject({ shapeId: cell.shapeId, storyId: cell.storyId,
+      anchor: position, focus: position });
+    const input = view.getByRole('textbox', { name: 'Slide text' });
+    expect(document.activeElement).toBe(input);
+    act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: '!',
+      bubbles: true, cancelable: true })); });
+    await bounded(client.flush());
+    const zip = await JSZip.loadAsync(await client.save());
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const texts = [...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+      [...match[1]!.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join(''));
+    expect(texts).toEqual(empty ? ['A1', 'B1', 'A2', '!'] : ['A!1', 'B1', 'A2', 'B2']);
+  });
+}
+
+test('table frame border selects the table before a cell click inserts a paragraph', async () => {
+  const { view, stage, canvas, box, point, select } = await open(false, true);
+  await select();
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 2)!;
+  const at = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ shapeId: box.shapeId, storyId: box.storyId, focus: 2 });
+  expect(view.queryByTestId('pptx-resize-nw')).toBeNull();
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertParagraph',
+    bubbles: true, cancelable: true })); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 3 });
+  const zip = await JSZip.loadAsync(await client.save());
+  const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+  const paragraphs = [...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+    [...match[1]!.matchAll(/<a:p(?:\s[^>]*)?>(.*?)<\/a:p>|<a:p\s*\/>/gs)].map((paragraph) =>
+      [...(paragraph[1] ?? '').matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join('')));
+  expect(paragraphs).toEqual([['A1', ''], ['B1'], ['A2'], ['B2']]);
 });
