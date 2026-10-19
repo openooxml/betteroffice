@@ -1869,7 +1869,15 @@ impl<'a> LayoutBuilder<'a> {
                     .collect(),
             })
             .collect();
-        let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
+        let (left, right) = (text_rect.x - 0.5, text_rect.x + text_rect.w + 0.5);
+        let horizontal_overflow = laid_out.lines.iter().any(|line| {
+            line.runs
+                .iter()
+                .filter(|run| !run.text.trim().is_empty())
+                .any(|run| run.x < left || run.x + run.width > right)
+        });
+        let overflow = !cascade.clips_overflow()
+            && (laid_out.total_height > content_rect.h || horizontal_overflow);
         let text_shadow = cascade.text_shadow().and_then(|effects| {
             shadow(
                 effects,
