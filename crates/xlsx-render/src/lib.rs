@@ -770,6 +770,8 @@ where
     let grid = GridMeta {
         start_row: rows.start(),
         start_col: cols.start(),
+        hidden_row_spans: sheet_ref.hidden_row_spans(0..=MAX_ROWS - 1).collect(),
+        hidden_col_spans: sheet_ref.hidden_col_spans(0..=MAX_COLS - 1).collect(),
         row_indices: rows.indices(),
         col_indices: cols.indices(),
         row_offsets: rows.offsets(),

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import type { PresentationCommandFrameTag, PresentationCommandObjectSelection, ShapeRect } from '@betteroffice/pptx';
-import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, pointerTargetAtPoint, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
+import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
   slidePoint, type ResizeHandle, type SlidePoint } from '../interactions';
 import { hitConfirmedGeometry, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
@@ -39,7 +39,7 @@ export function peerlessGestureRect(object: PresentationCommandObjectSelection, 
   if (!object.rect || !object.canMove || handle && !object.canResize) return null;
   const emu = { x: Math.round(delta.x * object.units.x), y: Math.round(delta.y * object.units.y) };
   if (emu.x === 0 && emu.y === 0) return { ...object.rect };
-  return handle ? resizedBounds(object.rect, handle, emu, MIN_SHAPE_SIZE_EMU)
+  return handle ? resizedBounds(object.rect, handle, emu, MIN_SHAPE_SIZE_EMU, object.aspectRatioLocked)
     : { ...object.rect, x: object.rect.x + emu.x, y: object.rect.y + emu.y };
 }
 
@@ -132,10 +132,9 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     if (handle && !RESIZE_HANDLES.includes(handle)) return false;
     const selected = store.getSnapshot().selection;
     const scale = canvas.current.getBoundingClientRect().width / confirmed.displayList.width;
-    if (!handle && pointerTargetAtPoint(confirmed.displayList, start, scale) !== 'shape') return false;
     if (handle && (selected?.kind !== 'object' || !selected.canResize || store.getSnapshot().editState.readOnly)) return true;
-    const hit = handle ? null : hitConfirmedGeometry(store, start);
-    if (!handle && !hit) return false;
+    const hit = handle ? null : hitConfirmedGeometry(store, start, scale);
+    if (!handle && hit?.kind !== 'shape') return false;
     const shapeId = handle && selected?.kind === 'object' ? selected.shapeId : hit!.shapeId;
     const previous = recent.current;
     const repeated = !handle && previous?.slideId === confirmed.frame.slideId && previous.shapeId === shapeId &&

@@ -1449,6 +1449,7 @@ mod tests {
         let mut changed = package.clone();
         changed.diagram_drawings.push(pptx_parse::DiagramDrawing {
             part_path: "ppt/diagrams/extra.xml".to_owned(),
+            synthesis_extent: None,
             shapes: Vec::new(),
         });
         packages.push(changed);

@@ -70,6 +70,7 @@ export const xlsxdocument_renderPng: (a: number, b: number, c: number) => [numbe
 export const xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
 export const xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
 export const xlsxdocument_setCalculationContextJson: (a: number, b: number, c: number) => [number, number];

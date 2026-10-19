@@ -12,6 +12,7 @@ import initWasmModule, {
   exportXlsxStructuredJson,
   renderXlsxMarkdownJson,
 } from './generated/xlsx_wasm.js';
+import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import * as xlsxWasm from './generated/xlsx_wasm.js';
 import { wasmAssetUrl } from './asset';
@@ -513,6 +514,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** Absolute sheet rectangle in unzoomed pixels. */
   cellRect(sheet: number, row: number, col: number): Rect;
+  selectionData(sheet: number, row: number, col: number, direction?: Direction): SelectionData;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -1069,6 +1071,9 @@ function wrapWorkbookDocument(
     },
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
+    },
+    selectionData(sheet: number, row: number, col: number, direction?: Direction): SelectionData {
+      return parseJson(() => doc.selectionDataJson(JSON.stringify({ sheet, row, col, direction })));
     },
     cellRect(sheet: number, row: number, col: number): Rect {
       return parseJson(() => doc.cellRectJson(JSON.stringify({ sheet, row, col })));

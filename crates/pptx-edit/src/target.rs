@@ -635,6 +635,13 @@ impl<'a> Deck<'a> {
             })
     }
 
+    /// Whether the slide's source part declares `p:bg`, fills the model cannot
+    /// hold included.
+    pub fn declares_source_background(&self, slide: &SlideSnapshot) -> bool {
+        crate::deck::source_slide(self.package, slide.source_part_path.as_deref())
+            .is_some_and(|source| source.declares_background)
+    }
+
     /// Resolves a shape through its slide; the flag marks a shape at the top of the slide.
     pub fn shape(
         &self,

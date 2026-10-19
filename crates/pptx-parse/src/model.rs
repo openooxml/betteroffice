@@ -171,6 +171,10 @@ pub struct Slide {
     pub background_picture: Option<Box<PictureFill>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
+    /// `p:cSld` declares `p:bg`, whatever fill it holds; `false` in packages
+    /// stored before it was read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declares_background: bool,
     pub shapes: Vec<ShapeNode>,
     /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,6 +456,8 @@ pub struct CustomGeometryPath {
 pub struct Picture {
     #[serde(flatten)]
     pub base: ShapeBase,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,
@@ -579,6 +585,8 @@ pub enum GraphicFrameData {
 #[serde(rename_all = "camelCase")]
 pub struct DiagramDrawing {
     pub part_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_extent: Option<[i64; 2]>,
     pub shapes: Vec<ShapeNode>,
 }
 
