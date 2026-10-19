@@ -32,14 +32,16 @@ use xlsx_calc::{
 };
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
-    FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
-    SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
+    FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId,
+    Stylesheet, VAlign, Workbook as WorkbookModel,
 };
+#[cfg(test)]
+use xlsx_ops::cell_state_for_input_no_eval;
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
     NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
-    cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
+    insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
 use xlsx_render::chart::chart_regions_with_geometry;
@@ -1703,19 +1705,22 @@ impl Workbook {
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
-        let state = edit_cell_state(&self.model, sheet, cell, input);
+        let (state, format) = edit_cell_state(&self.model, sheet, cell, input, options.now_serial);
         validate_cell_state(&state)?;
-        if cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state) {
+        if format.is_none()
+            && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
+        {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
-        let ops = vec![Op::SetCell {
+        let mut ops = vec![Op::SetCell {
             sheet,
             at: cell,
             cell: state,
         }];
+        ops.extend(format);
         let update = self.commit_user(&ops)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
@@ -1753,27 +1758,25 @@ impl Workbook {
         let mut per_op = Vec::with_capacity(edits.len());
         for edit in edits {
             self.validate_cell(edit.cell)?;
-            let state = edit_cell_state(&preview, sheet, edit.cell, &edit.input);
+            let (state, format) =
+                edit_cell_state(&preview, sheet, edit.cell, &edit.input, options.now_serial);
             validate_cell_state(&state)?;
             let old = current_cell_state(&preview, sheet, edit.cell);
-            if cell_states_semantically_equal(&old, &state) {
+            if format.is_none() && cell_states_semantically_equal(&old, &state) {
                 continue;
             }
-            preview
-                .sheet_mut(sheet)
-                .expect("sheet validated")
-                .set_cell(edit.cell, state.clone().into());
             touched.push((sheet, edit.cell, state.formula.clone()));
-            per_op.push(vec![Op::SetCell {
-                sheet,
-                at: edit.cell,
-                cell: old,
-            }]);
-            ops.push(Op::SetCell {
+            let op = Op::SetCell {
                 sheet,
                 at: edit.cell,
                 cell: state,
-            });
+            };
+            per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+            ops.push(op);
+            if let Some(format) = format {
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &format)?.0);
+                ops.push(format);
+            }
         }
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
             return Ok(MutationResult::default());
@@ -2226,12 +2229,21 @@ impl Workbook {
         let mut preview = self.model.clone();
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
-            let state = edit_cell_state(&preview, edit.sheet, edit.cell, &edit.input);
+            let (state, format) = edit_cell_state(
+                &preview,
+                edit.sheet,
+                edit.cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             preview
                 .sheet_mut(edit.sheet)
                 .ok_or(Error::SheetOutOfRange(edit.sheet))?
                 .set_cell(edit.cell, state.into());
+            if let Some(format) = format {
+                xlsx_ops::apply_in_place(&mut preview, &format)?;
+            }
             if let Some(format) = &edit.number_format {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
@@ -2314,7 +2326,8 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            let state = edit_cell_state(&preview, sheet, cell, &edit.input);
+            let (state, format) =
+                edit_cell_state(&preview, sheet, cell, &edit.input, options.now_serial);
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 touched.push((sheet, cell, state.formula.clone()));
@@ -2325,6 +2338,10 @@ impl Workbook {
                 };
                 per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
                 ops.push(op);
+            }
+            if let Some(format) = format {
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &format)?.0);
+                ops.push(format);
             }
             if let Some(format) = &edit.number_format {
                 let op = Op::SetRangeNumberFormat {
@@ -4440,7 +4457,8 @@ fn edit_cell_state(
     sheet: SheetId,
     cell: CellRef,
     input: &str,
-) -> CellState {
+    now_serial: Option<f64>,
+) -> (CellState, Option<Op>) {
     let style = workbook
         .sheet(sheet)
         .and_then(|sheet| sheet.effective_style(cell));
@@ -4448,22 +4466,31 @@ fn edit_cell_state(
         .styles
         .resolved_format(Some(style.unwrap_or(0)))
         .number_format;
-    let mut state = if !input.is_empty()
-        && matches!(
-            number_format,
-            FormatCode::Builtin(49) | FormatCode::Custom("@")
-        ) {
-        CellState {
-            value: CellValue::Text {
-                value: input.strip_prefix('\'').unwrap_or(input).to_string(),
-            },
-            ..Default::default()
-        }
-    } else {
-        cell_state_for_input_no_eval(input)
-    };
+    let (parsed, inferred) =
+        xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
+    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
-    state
+    let format = inferred.map(|id| {
+        let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));
+        format.number_format = NumberFormat::Builtin { id };
+        Op::ApplyRangeFormat {
+            sheet,
+            range: CellRange::new(cell, cell),
+            format: CapturedFormat {
+                rows: 1,
+                columns: 1,
+                source_formats: vec![xlsx_ops::PreservedCellFormat {
+                    format: format.clone(),
+                    source_xf: None,
+                    derived_from: Some(style.unwrap_or(0)),
+                }],
+                formats: vec![format],
+                kept: Vec::new(),
+                source_styles: Vec::new(),
+            },
+        }
+    });
+    (state, format)
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {

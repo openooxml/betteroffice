@@ -537,6 +537,59 @@ pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
     date_to_serial(y, m, d)
 }
 
+/// Parse a cell-entry date using the workbook epoch and injected clock.
+pub fn parse_entry_date(
+    raw: &str,
+    day_first: bool,
+    date_system: xlsx_model::DateSystem,
+    now_serial: Option<f64>,
+) -> Option<f64> {
+    let mut fields = date_fields(raw)?;
+    if day_first
+        && fields
+            .iter()
+            .all(|field| field.bytes().all(|b| b.is_ascii_digit()))
+        && fields[0].len() != 4
+    {
+        fields.swap(0, 1);
+    }
+    let (year, month, day) = match fields.as_slice() {
+        [a, b, c] => three_fields(a, b, c)?,
+        [a, b] => (None, a.parse().ok()?, b.parse().ok()?),
+        _ => return None,
+    };
+    let year = match year {
+        Some(year) => year,
+        None => {
+            let now = now_serial
+                .filter(|value| value.is_finite() && (0.0..=MAX_SERIAL as f64).contains(value))?;
+            match date_system {
+                xlsx_model::DateSystem::V1900 => serial_to_ymd(now.floor() as i64)?.0,
+                xlsx_model::DateSystem::V1904 => {
+                    civil_from_days(date_system.serial_to_unix_days(now)?).0
+                }
+            }
+        }
+    };
+    if !(1900..=9999).contains(&year) || !(1..=12).contains(&month) || day < 1 {
+        return None;
+    }
+    let phantom = (year, month, day) == (1900, 2, 29);
+    if !phantom && day > days_in_month(year, month) {
+        return None;
+    }
+    let serial = date_to_serial(year, month, day)?;
+    match date_system {
+        xlsx_model::DateSystem::V1900 => Some(serial as f64),
+        xlsx_model::DateSystem::V1904 if phantom => None,
+        xlsx_model::DateSystem::V1904 => {
+            let unix = xlsx_model::DateSystem::V1900.serial_to_unix_days(serial as f64)?;
+            let epoch = date_system.serial_to_unix_days(0.0)?;
+            (unix >= epoch).then_some((unix - epoch) as f64)
+        }
+    }
+}
+
 /// whether `raw` reads as a date in month-first or day-first order.
 pub(crate) fn is_date_text(raw: &str) -> bool {
     let Some(mut fields) = date_fields(raw) else {
