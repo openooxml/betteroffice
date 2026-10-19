@@ -8,6 +8,8 @@ use thiserror::Error;
 /// Maximum block and inline nesting depth.
 pub const MAX_NESTING_DEPTH: usize = 64;
 
+const MAX_GROUP_TEXT_BOX_BYTES: usize = 8 * 1024 * 1024;
+
 /// OOXML namespace URIs.
 pub mod namespaces {
     pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -92,6 +94,7 @@ pub struct ParseBudget<'a> {
     source_ordinals: bool,
     media: Option<&'a crate::media::MediaTable>,
     media_error: Option<String>,
+    group_text_box_bytes: Option<usize>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -113,6 +116,7 @@ impl<'a> ParseBudget<'a> {
             source_ordinals: false,
             media: None,
             media_error: None,
+            group_text_box_bytes: None,
         }
     }
 
@@ -157,6 +161,42 @@ impl<'a> ParseBudget<'a> {
 
     pub(crate) fn limits(&self) -> &ParseLimits {
         self.limits
+    }
+
+    pub(crate) fn begin_group_text_box_materialization(&mut self) -> bool {
+        if self.group_text_box_bytes.is_some() {
+            false
+        } else {
+            self.group_text_box_bytes = Some(0);
+            true
+        }
+    }
+
+    pub(crate) fn end_group_text_box_materialization(&mut self, outermost: bool) {
+        if outermost {
+            self.group_text_box_bytes = None;
+        }
+    }
+
+    pub(crate) fn charge_group_text_box_materialization<T: serde::Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+        part: &str,
+    ) -> Result<(), ParseError> {
+        let Some(used) = self.group_text_box_bytes.as_mut() else {
+            return Ok(());
+        };
+        let mut meter = GroupTextBoxMeter {
+            used,
+            limit: self.limits.max_xml_bytes.min(MAX_GROUP_TEXT_BOX_BYTES),
+            part,
+            error: None,
+        };
+        let result = serde_json::to_writer(&mut meter, value);
+        if let Some(error) = meter.error {
+            return Err(error);
+        }
+        result.map_err(|error| ParseError::Canonical(error.to_string()))
     }
 
     /// XML events charged so far.
@@ -275,6 +315,35 @@ impl<'a> ParseBudget<'a> {
                 part: part.to_owned(),
             });
         }
+        Ok(())
+    }
+}
+
+struct GroupTextBoxMeter<'a> {
+    used: &'a mut usize,
+    limit: usize,
+    part: &'a str,
+    error: Option<ParseError>,
+}
+
+impl std::io::Write for GroupTextBoxMeter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Err(error) = charge(
+            self.used,
+            bytes.len(),
+            self.limit,
+            "groupTextBoxBytes",
+            self.part,
+        ) {
+            self.error = Some(error);
+            return Err(std::io::Error::other(
+                "group text box materialization limit",
+            ));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }

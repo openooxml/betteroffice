@@ -2469,8 +2469,28 @@ fn measure_shape(
     shape: &mut ShapeBlock,
     config: &MeasurementConfig,
 ) -> Result<ShapeExtent, String> {
-    let inner_width =
-        (shape.width - text_body_inset(shape, "left") - text_body_inset(shape, "right")).max(1.0);
+    let vertical = shape
+        .text_body_properties
+        .as_ref()
+        .and_then(|properties| properties.get("vertical"))
+        .and_then(Value::as_str);
+    let inner_width = if matches!(vertical, Some("vertical" | "vertical270")) {
+        shape.height - text_body_inset(shape, "top") - text_body_inset(shape, "bottom")
+    } else {
+        shape.width - text_body_inset(shape, "left") - text_body_inset(shape, "right")
+    }
+    .max(1.0);
+    let inner_width = if shape
+        .text_body_properties
+        .as_ref()
+        .and_then(|properties| properties.get("wrap"))
+        .and_then(Value::as_str)
+        == Some("none")
+    {
+        1_000_000.0
+    } else {
+        inner_width
+    };
     let inner_measures = shape
         .inner_text
         .as_ref()

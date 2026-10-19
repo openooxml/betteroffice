@@ -57,6 +57,7 @@ use crate::list_marker::{ListState, compute_list_marker};
 use crate::seed::synthesized_cell_width;
 
 pub(crate) mod group_pictures;
+mod group_transforms;
 pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
@@ -2404,7 +2405,8 @@ fn lower_shape_block<T: ReadTxn>(
         .and_then(|value| {
             let projected =
                 group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
-            shapes::lower_shape_json(projected.as_ref().unwrap_or(&value), pm_start, env)
+            let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
+            shapes::lower_shape_json(&rendered, pm_start, env)
         })
     {
         return Some(block);

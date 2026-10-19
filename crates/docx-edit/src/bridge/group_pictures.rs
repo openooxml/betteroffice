@@ -62,9 +62,9 @@ pub(crate) fn source_shapes(
         let Some(bytes) = parts.get(path).and_then(|index| package.read(*index).ok()) else {
             continue;
         };
-        if !bytes
-            .windows(4)
-            .any(|window| window == b":pic" || window == b"<pic")
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
+        if !(has(b":pic") || has(b"<pic") || has(b"txbx"))
+            || !(has(b"wgp") || has(b"wpc") || has(b"grpSp") || has(b"spTree"))
         {
             continue;
         }
@@ -121,18 +121,16 @@ fn collect(
                 .scene
                 .as_ref()
                 .and_then(|scene| scene.root.as_ref())
-                .is_some_and(has_picture)
+                .is_some_and(has_picture_or_text)
             && let Some(mut projected) = shape_for_rendering(node)
         {
             resolve_shape_fill_pictures(&mut baseline, Some(relationships), Some(media));
             resolve_shape_fill_pictures(&mut projected, Some(relationships), Some(media));
             apply_shape_metadata(&mut baseline, node);
-            if let Some(id) = &baseline.id {
-                shapes
-                    .entry(id.clone())
-                    .or_default()
-                    .push(serde_json::json!({"baseline": baseline, "projected": projected}));
-            }
+            shapes
+                .entry(baseline.id.clone().unwrap_or_default())
+                .or_default()
+                .push(serde_json::json!({"baseline": baseline, "projected": projected}));
         }
         return;
     }
@@ -149,17 +147,27 @@ fn collect(
     }
 }
 
-fn has_picture(node: &docx_parse::shape::DrawingSceneNode) -> bool {
+fn has_picture_or_text(node: &docx_parse::shape::DrawingSceneNode) -> bool {
     node.kind.as_deref() == Some("picture")
+        || node
+            .shape
+            .as_ref()
+            .is_some_and(|shape| shape.text_body.is_some())
         || node
             .children
             .as_ref()
-            .is_some_and(|children| children.iter().any(has_picture))
+            .is_some_and(|children| children.iter().any(has_picture_or_text))
 }
 
 fn same_model(left: Option<&Value>, right: Option<&Value>) -> bool {
     match (left, right) {
-        (Some(Value::Number(left)), Some(Value::Number(right))) => left.as_f64() == right.as_f64(),
+        (Some(Value::Number(left)), Some(Value::Number(right))) => left
+            .as_f64()
+            .zip(right.as_f64())
+            .is_some_and(|(left, right)| {
+                left == right
+                    || (left - right).abs() <= 2.0 * f64::EPSILON * left.abs().max(right.abs())
+            }),
         (Some(Value::Array(left)), Some(Value::Array(right))) => {
             left.len() == right.len()
                 && left
@@ -172,12 +180,73 @@ fn same_model(left: Option<&Value>, right: Option<&Value>) -> bool {
                 && left.iter().all(|(key, value)| {
                     if key == "src" && left.get("type").and_then(Value::as_str) == Some("image") {
                         right.contains_key(key)
+                    } else if key == "textBody" {
+                        same_text_body(value, right.get(key))
                     } else {
                         same_model(Some(value), right.get(key))
                     }
                 })
         }
         _ => left == right,
+    }
+}
+
+fn same_text_body(left: &Value, right: Option<&Value>) -> bool {
+    let (Some(left), Some(right)) = (left.as_object(), right.and_then(Value::as_object)) else {
+        return Some(left) == right;
+    };
+    left.keys()
+        .filter(|key| key.as_str() != "content")
+        .eq(right.keys().filter(|key| key.as_str() != "content"))
+        && left
+            .iter()
+            .all(|(key, value)| key == "content" || same_model(Some(value), right.get(key)))
+}
+
+type TextBodyKey = (Option<String>, usize);
+
+fn text_bodies(value: &Value, bodies: &mut BTreeMap<TextBodyKey, Value>) {
+    if let Some(children) = value.as_array() {
+        for child in children {
+            text_bodies(child, bodies);
+        }
+    } else if value.is_object() {
+        if let Some(body) = value.get("textBody") {
+            let key = (
+                value.get("id").and_then(Value::as_str).map(str::to_owned),
+                bodies.len(),
+            );
+            bodies.insert(key, body.clone());
+        }
+        if let Some(children) = value.get("children") {
+            text_bodies(children, bodies);
+        }
+    }
+}
+
+fn apply_text_bodies(
+    value: &mut Value,
+    bodies: &BTreeMap<TextBodyKey, Value>,
+    ordinal: &mut usize,
+) {
+    if let Some(children) = value.as_array_mut() {
+        for child in children {
+            apply_text_bodies(child, bodies, ordinal);
+        }
+    } else if value.is_object() {
+        if value.get("textBody").is_some() {
+            let key = (
+                value.get("id").and_then(Value::as_str).map(str::to_owned),
+                *ordinal,
+            );
+            if let Some(body) = bodies.get(&key) {
+                value["textBody"] = body.clone();
+            }
+            *ordinal += 1;
+        }
+        if let Some(children) = value.get_mut("children") {
+            apply_text_bodies(children, bodies, ordinal);
+        }
     }
 }
 
@@ -198,7 +267,7 @@ pub(super) fn project(
         })
         .max_by_key(|(root, _)| root.len())?;
     let source = shapes
-        .get(shape.get("id")?.as_str()?)?
+        .get(shape.get("id").and_then(Value::as_str).unwrap_or_default())?
         .iter()
         .find(|source| {
             let baseline = &source["baseline"];
@@ -208,10 +277,24 @@ pub(super) fn project(
         })?;
     let mut projected = shape.clone();
     projected["children"] = source["projected"]["children"].clone();
+    let mut bodies = BTreeMap::new();
+    text_bodies(&shape["children"], &mut bodies);
+    let mut targets = BTreeMap::new();
+    text_bodies(&projected["children"], &mut targets);
+    if !bodies.keys().eq(targets.keys()) {
+        return None;
+    }
+    apply_text_bodies(&mut projected["children"], &bodies, &mut 0);
     if !media_tokens && let Some(table) = &sources.media {
         resolve_data_urls(&mut projected["children"], table);
     }
     Some(projected)
+}
+
+pub(super) fn raw_projection(shape: &Value) -> Value {
+    let mut shape = shape.clone();
+    super::group_transforms::project(&mut shape);
+    shape
 }
 
 fn resolve_data_urls(value: &mut Value, table: &MediaTable) {

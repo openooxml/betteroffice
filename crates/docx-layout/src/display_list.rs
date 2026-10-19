@@ -8518,6 +8518,50 @@ fn emit_shape_fragment(
     block: &ShapeBlockIn,
     ctx: &RenderCtx<'_>,
 ) {
+    let clip = block.scene.as_ref().and_then(|scene| {
+        matches!(
+            scene.pointer("/root/kind").and_then(Value::as_str),
+            Some("group" | "canvas")
+        )
+        .then(|| shape_text_bounds(frag, block))
+    });
+    emit_shape_fragment_with_clip(prims, frag, block, ctx, clip);
+}
+
+fn shape_text_bounds(frag: &ShapeFragmentIn, block: &ShapeBlockIn) -> ClipRect {
+    let rotation = block
+        .transform
+        .as_ref()
+        .and_then(|transform| transform.rotation)
+        .unwrap_or(0.0);
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let width = frag.width * cos.abs() + frag.height * sin.abs();
+    let height = frag.width * sin.abs() + frag.height * cos.abs();
+    ClipRect {
+        x: Some(px(frag.x + (frag.width - width) / 2.0)),
+        y: Some(px(frag.y + (frag.height - height) / 2.0)),
+        w: Some(px(width)),
+        h: Some(px(height)),
+    }
+}
+
+fn emit_shape_fragment_with_clip(
+    prims: &mut Vec<Primitive>,
+    frag: &ShapeFragmentIn,
+    block: &ShapeBlockIn,
+    ctx: &RenderCtx<'_>,
+    group_clip: Option<ClipRect>,
+) {
+    let group_clip = if !block.children.is_empty() {
+        group_clip.map(|clip| {
+            let mut attrs = DocAttrs::default();
+            apply_clip_group(&mut attrs, String::new(), clip);
+            apply_clip_group(&mut attrs, String::new(), shape_text_bounds(frag, block));
+            attrs.clip_group.unwrap().clip.unwrap()
+        })
+    } else {
+        group_clip
+    };
     let stamp_from = prims.len();
     let block_ref = BlockRef::of(&frag.block_id);
     let mut attrs = block_ref.attrs();
@@ -8597,7 +8641,22 @@ fn emit_shape_fragment(
             .iter()
             .map(|measure| measure.total_height)
             .sum();
-        let available_height = (frag.height - margin_top - margin_bottom).max(0.0);
+        let properties = block.text_body_properties.as_ref();
+        let vertical = properties
+            .and_then(|properties| properties.get("vertical"))
+            .and_then(Value::as_str);
+        let vertical_rotation = match vertical {
+            Some("vertical") => 90.0,
+            Some("vertical270") => -90.0,
+            _ => 0.0,
+        };
+        let body_width = (frag.width - margin_left - margin_right).max(0.0);
+        let body_height = (frag.height - margin_top - margin_bottom).max(0.0);
+        let (content_width, available_height) = if vertical_rotation != 0.0 {
+            (body_height, body_width)
+        } else {
+            (body_width, body_height)
+        };
         let anchor = block
             .text_body_properties
             .as_ref()
@@ -8608,14 +8667,40 @@ fn emit_shape_fragment(
             Some("bottom") => (available_height - content_height).max(0.0),
             _ => 0.0,
         };
-        let content_x = frag.x + margin_left;
-        let content_width = (frag.width - margin_left - margin_right).max(0.0);
-        let mut y_offset = margin_top + anchor_offset;
+        let content_x = frag.x + margin_left + (body_width - content_width) / 2.0;
+        let content_y = frag.y + margin_top + (body_height - available_height) / 2.0;
+        let mut y_offset = anchor_offset;
+        let text_start = prims.len();
+        let bounded = group_clip.is_some()
+            && properties
+                .and_then(|properties| properties.get("autoFit"))
+                .and_then(Value::as_str)
+                != Some("shape")
+            && properties
+                .and_then(|properties| properties.get("verticalOverflow"))
+                .and_then(Value::as_str)
+                != Some("overflow");
         for (i, para) in block.inner_text.iter().enumerate() {
             let Some(pm) = block.inner_measures.get(i) else {
                 continue;
             };
-            let para_y = frag.y + y_offset;
+            let para_y = content_y + y_offset;
+            let mut line_y = y_offset;
+            let to_line = if bounded {
+                pm.lines
+                    .iter()
+                    .take_while(|line| {
+                        let fits = line_y + line.ascent <= available_height + 1e-6;
+                        line_y += line.line_height;
+                        fits
+                    })
+                    .count()
+            } else {
+                pm.lines.len()
+            };
+            if to_line == 0 {
+                break;
+            }
             let synthetic = ParagraphFragmentIn {
                 block_id: para.id.clone(),
                 x: content_x,
@@ -8623,7 +8708,7 @@ fn emit_shape_fragment(
                 width: content_width,
                 height: pm.total_height,
                 from_line: 0,
-                to_line: pm.lines.len(),
+                to_line,
                 pm_start: para.pm_start,
                 pm_end: para.pm_end,
                 carried_from_prev: None,
@@ -8633,6 +8718,51 @@ fn emit_shape_fragment(
                 prims, &synthetic, para, pm, ctx, content_x, para_y, None, None, true, true,
             );
             y_offset += pm.total_height;
+        }
+        let shape_rotation = if properties
+            .and_then(|properties| properties.get("upright"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            0.0
+        } else {
+            block
+                .transform
+                .as_ref()
+                .and_then(|transform| transform.rotation)
+                .unwrap_or(0.0)
+        };
+        let rotation = shape_rotation
+            + vertical_rotation
+            + properties
+                .and_then(|properties| properties.get("rotation"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+        rotate_shape_text(
+            &mut prims[text_start..],
+            (frag.x + frag.width / 2.0, frag.y + frag.height / 2.0),
+            rotation,
+        );
+        if let Some(group_clip) = &group_clip {
+            let clip = if bounded {
+                shape_text_bounds(frag, block)
+            } else {
+                group_clip.clone()
+            };
+            for primitive in &mut prims[text_start..] {
+                if let Some(attrs) = doc_attrs_mut(primitive) {
+                    apply_clip_group(
+                        attrs,
+                        format!("shape-text:{}", block_key(&block.id)),
+                        group_clip.clone(),
+                    );
+                    apply_clip_group(
+                        attrs,
+                        format!("shape-text:{}", block_key(&block.id)),
+                        clip.clone(),
+                    );
+                }
+            }
         }
     }
 
@@ -8650,10 +8780,70 @@ fn emit_shape_fragment(
             is_anchored: None,
             z_index: None,
         };
-        emit_shape_fragment(prims, &child_frag, child, ctx);
+        emit_shape_fragment_with_clip(prims, &child_frag, child, ctx, group_clip.clone());
     }
 
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
+}
+
+fn rotate_shape_text(primitives: &mut [Primitive], center: (f64, f64), rotation: f64) {
+    if rotation == 0.0 {
+        return;
+    }
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let delta = |x: f64, y: f64| {
+        let dx = x - center.0;
+        let dy = y - center.1;
+        (
+            center.0 + cos * dx - sin * dy - x,
+            center.1 + sin * dx + cos * dy - y,
+        )
+    };
+    for primitive in primitives {
+        match primitive {
+            Primitive::Text(text) => {
+                let size = text
+                    .font
+                    .split_whitespace()
+                    .find_map(|part| {
+                        part.strip_suffix("px")
+                            .and_then(|size| size.parse::<f64>().ok())
+                    })
+                    .unwrap_or(11.0 * 96.0 / 72.0);
+                let (dx, dy) = delta(
+                    num_f64(&text.x) + num_f64(&text.width) / 2.0,
+                    num_f64(&text.baseline_y) - size * 0.2,
+                );
+                text.x = px(num_f64(&text.x) + dx);
+                text.baseline_y = px(num_f64(&text.baseline_y) + dy);
+                text.rotation_deg = Some(px(rotation));
+                text.paint_clip = None;
+            }
+            Primitive::GlyphRun(run) => {
+                let Some(first) = run.glyphs.first() else {
+                    continue;
+                };
+                let left = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x)
+                    .fold(f64::INFINITY, f64::min);
+                let right = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x + glyph.advance)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let (dx, dy) = delta((left + right) / 2.0, first.y - run.size * 0.2);
+                for glyph in &mut run.glyphs {
+                    glyph.x += dx;
+                    glyph.y += dy;
+                }
+                run.rotation_deg = Some(px(rotation));
+                run.paint_clip = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 fn shape_fill_color(fill: Option<&ShapeFillIn>) -> Option<String> {
