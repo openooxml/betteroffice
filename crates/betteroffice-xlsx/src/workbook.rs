@@ -9,6 +9,7 @@ mod geometry;
 mod recovery;
 #[cfg(test)]
 mod save_oracle_tests;
+pub mod selection;
 #[path = "snapshot/assembly.rs"]
 pub(crate) mod snapshot_assembly;
 mod staging;
