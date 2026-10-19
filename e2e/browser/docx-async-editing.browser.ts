@@ -311,6 +311,7 @@ test('typing across a paragraph boundary keeps the unselected prefix and suffix'
 
 for (const { title, key, edited } of [
   { title: 'Enter splits a paragraph at the caret', key: 'Enter', edited: ['Alpha', 'Beta'] },
+  { title: 'Shift Enter inserts a wrapping break within the same paragraph', key: 'Shift+Enter', edited: ['Alpha\nBeta'] },
 ]) {
   test(title, async ({ page }) => {
     const original = ['AlphaBeta'];
