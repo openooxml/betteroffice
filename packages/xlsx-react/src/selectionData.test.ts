@@ -31,6 +31,7 @@ function navigation() {
     press: (key = right) => queue.enqueue(key, {
       context: () => current, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), query, apply,
     }),
+    defer: (task: () => void, behindActions?: boolean) => queue.defer(current, task, behindActions),
   };
 }
 
@@ -47,6 +48,46 @@ describe('selection data navigation', () => {
     expect(nav.query.mock.calls[1]![0].selection.focus).toEqual({ row: 1, col: 4 });
     expect(nav.current.selection.focus).toEqual({ row: 1, col: 9 });
     expect(nav.apply).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs later actions in order on the selection each pending jump lands on', async () => {
+    const nav = navigation();
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ edge: { row: 1, col: 9 } });
+    const seen: unknown[] = [];
+    nav.press();
+    expect(nav.defer(() => seen.push(nav.current.selection.focus))).toBe(true);
+    nav.press();
+    expect(nav.defer(() => seen.push(nav.current.selection.focus))).toBe(true);
+    expect(seen).toEqual([]);
+    first.resolve({ edge: { row: 1, col: 4 } });
+    await tick();
+    expect(seen).toEqual([{ row: 1, col: 4 }, { row: 1, col: 9 }]);
+    expect(nav.defer(() => seen.push('idle'))).toBe(false);
+  });
+
+  it('queues later moves only behind an already deferred action', async () => {
+    const nav = navigation();
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise);
+    nav.press();
+    expect(nav.defer(() => {}, true)).toBe(false);
+    expect(nav.defer(() => {})).toBe(true);
+    expect(nav.defer(() => {}, true)).toBe(true);
+    first.resolve({ edge: null });
+    await tick();
+  });
+
+  it('runs a later action at once when the selection moved away from a pending jump', async () => {
+    const nav = navigation();
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise);
+    nav.press();
+    nav.update({ navigation: 1, selection: selectionAt({ row: 7, col: 7 }) });
+    expect(nav.defer(() => {})).toBe(false);
+    first.resolve({ edge: { row: 1, col: 4 } });
+    await tick();
+    expect(nav.current.selection.focus).toEqual({ row: 7, col: 7 });
   });
 
   it('chains rapid select-all presses from the region to the full extent', async () => {

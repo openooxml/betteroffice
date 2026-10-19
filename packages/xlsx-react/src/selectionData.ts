@@ -58,13 +58,19 @@ interface NavigationOptions {
 
 interface NavigationBatch {
   context: NavigationContext;
-  keys: KeyInput[];
+  keys: (KeyInput | (() => void))[];
   target?: Selection;
 }
 
 function samePosition(first: NavigationContext, second: NavigationContext | null): boolean {
   return second !== null && first.owner === second.owner && first.sheet === second.sheet &&
     first.selection === second.selection && first.navigation === second.navigation;
+}
+
+function joins(batch: NavigationBatch, context: NavigationContext): boolean {
+  return samePosition(batch.context, context) || Boolean(batch.target) &&
+    batch.context.owner === context.owner && batch.context.sheet === context.sheet &&
+    batch.context.navigation === context.navigation && sameSelection(batch.target!, context.selection);
 }
 
 export function createSelectionDataNavigation() {
@@ -75,6 +81,14 @@ export function createSelectionDataNavigation() {
         const key = batch.keys[0]!;
         const selected = options.context();
         if (!samePosition(batch.context, selected) || !selected) return;
+        if (typeof key === 'function') {
+          batch.keys.shift();
+          key();
+          const after = options.context();
+          if (!after) return;
+          batch.context = after;
+          continue;
+        }
         const request = selectionDataRequest(key);
         let data: SelectionData | undefined;
         try {
@@ -107,15 +121,19 @@ export function createSelectionDataNavigation() {
       const context = options.context();
       if (!context) return;
       const input = { key: key.key, ctrlKey: key.ctrlKey, metaKey: key.metaKey, shiftKey: key.shiftKey };
-      if (pending && (samePosition(pending.context, context) || pending.target &&
-        pending.context.owner === context.owner && pending.context.sheet === context.sheet &&
-        pending.context.navigation === context.navigation && sameSelection(pending.target, context.selection))) {
+      if (pending && joins(pending, context)) {
         pending.keys.push(input);
         return;
       }
       const batch = { context, keys: [input] };
       pending = batch;
       void drain(batch, options);
+    },
+    defer(context: NavigationContext | null, task: () => void, behindActions = false): boolean {
+      if (!pending || !context || !joins(pending, context)) return false;
+      if (behindActions && !pending.keys.some((key) => typeof key === 'function')) return false;
+      pending.keys.push(task);
+      return true;
     },
   };
 }

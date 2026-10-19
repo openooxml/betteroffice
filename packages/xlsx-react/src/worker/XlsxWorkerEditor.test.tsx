@@ -699,6 +699,27 @@ for (const change of ['selection', 'sheet', 'replacement']) {
   });
 }
 
+it('clears the cell a pending peerless data jump lands on, then applies later arrows in order', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  const before = host.sent.length;
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'Delete' });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+  await act(async () => {});
+  expect(host.sent).toHaveLength(before);
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  const sent = host.sent.slice(before);
+  expect(sent.map((command) => command.kind)).toEqual(['select', 'applyOps', 'select']);
+  expect(sent[1]).toMatchObject({ payload: { toolbar: { id: 'clear', target: { range: {
+    start: { row: 3, col: 0 }, end: { row: 3, col: 0 },
+  } } } } });
+  expect(sent[2]).toMatchObject({ payload: { selection: { activeCell: { row: 3, col: 1 } } } });
+});
+
 it('chains rapid peerless data jumps from the latest accepted target', async () => {
   const host = peerlessHarness();
   const first = deferred<xlsx.SelectionData>();

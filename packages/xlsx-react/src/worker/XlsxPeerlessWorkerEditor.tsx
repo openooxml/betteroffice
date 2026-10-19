@@ -1124,24 +1124,29 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       }
       return;
     }
+    const owner = run;
+    const sheet = activeRef.current;
+    const navigationContext = () => {
+      if (!owner.current || owner.retiring || owner.failure || ownerRef.current !== owner ||
+        activeRef.current !== sheet || chartRef.current || draftController.getSnapshot().cell ||
+        !selectionRef.current) return null;
+      const basis = owner.session.confirmedBasis;
+      return { owner, sheet, selection: selectionRef.current, navigation: navigation.current,
+        version: `${basis.epoch}:${basis.version}:${owner.session.state.version}` };
+    };
+    const afterNavigation = (task: () => void) => {
+      if (!selectionNavigation.defer(navigationContext(), task)) task();
+    };
     if (mod && ['c', 'x', 'v'].includes(event.key.toLowerCase())) {
-      clipboard(event.key.toLowerCase() === 'c' ? 'copy' : event.key.toLowerCase() === 'x' ? 'cut' : 'paste');
+      const kind = event.key.toLowerCase() === 'c' ? 'copy' : event.key.toLowerCase() === 'x' ? 'cut' : 'paste';
+      afterNavigation(() => clipboard(kind));
       event.preventDefault(); return;
     }
     const request = selectionDataRequest(event);
     if (request) {
       event.preventDefault();
-      const owner = run;
-      const sheet = activeRef.current;
       selectionNavigation.enqueue(event, {
-        context: () => {
-          if (!owner.current || owner.retiring || owner.failure || ownerRef.current !== owner ||
-            activeRef.current !== sheet || chartRef.current || draftController.getSnapshot().cell ||
-            !selectionRef.current) return null;
-          const basis = owner.session.confirmedBasis;
-          return { owner, sheet, selection: selectionRef.current, navigation: navigation.current,
-            version: `${basis.epoch}:${basis.version}:${owner.session.state.version}` };
-        },
+        context: navigationContext,
         limits,
         hidden,
         query: (context, direction) => owner.session.call.selectionData(sheet,
@@ -1155,14 +1160,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       });
       return;
     }
-    const action = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden());
-    if (action.type === 'move') {
-      predict(activeRef.current, action.selection);
-      reveal(activeRef.current, action.selection.focus);
-      command({ kind: 'select', payload: { selection: rangeTarget(activeRef.current, action.selection) } });
-    } else if (action.type === 'startEdit') openCell(action.initialInput);
-    else if (action.type === 'clear') clear();
-    if (action.type !== 'none') event.preventDefault();
+    const key = { key: event.key, shiftKey: event.shiftKey, metaKey: event.metaKey, ctrlKey: event.ctrlKey,
+      altKey: event.altKey };
+    const act = () => {
+      const selected = selectionRef.current;
+      if (!selected || chartRef.current || draftController.getSnapshot().cell) return;
+      const action = selectionKeyReducer(selected, key, limits(), undefined, hidden());
+      if (action.type === 'move') {
+        predict(activeRef.current, action.selection);
+        reveal(activeRef.current, action.selection.focus);
+        command({ kind: 'select', payload: { selection: rangeTarget(activeRef.current, action.selection) } });
+      } else if (action.type === 'startEdit') openCell(action.initialInput);
+      else if (action.type === 'clear') clear();
+    };
+    const type = selectionKeyReducer(selectionRef.current, key, limits(), undefined, hidden()).type;
+    if (type === 'none') return;
+    event.preventDefault();
+    if (!selectionNavigation.defer(navigationContext(), act, type !== 'clear')) act();
   };
 
   const sheets = catalog;
