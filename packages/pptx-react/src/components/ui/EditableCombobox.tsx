@@ -50,8 +50,12 @@ export function EditableCombobox({
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const editedRef = useRef(false);
 
-  useEffect(() => setDraft(value), [value]);
+  useEffect(() => {
+    editedRef.current = false;
+    setDraft(value);
+  }, [value]);
 
   const close = useCallback(() => setOpen(false), []);
 
@@ -73,6 +77,7 @@ export function EditableCombobox({
     };
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') {
+        editedRef.current = false;
         setDraft(value);
         close();
       }
@@ -86,6 +91,8 @@ export function EditableCombobox({
   }, [open, close, value]);
 
   const commit = useCallback(() => {
+    if (!editedRef.current) return;
+    editedRef.current = false;
     if (!disabled && onCommit && draft.trim()) onCommit(draft.trim());
     setDraft(value);
   }, [disabled, onCommit, draft, value]);
@@ -124,13 +131,19 @@ export function EditableCombobox({
           setOpen(true);
           event.currentTarget.select();
         }}
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => {
+          editedRef.current = true;
+          setDraft(event.target.value);
+        }}
         onKeyDown={(event) => {
           if (disabled) return;
           if (event.key === 'Enter') {
             commit();
             close();
             event.currentTarget.blur();
+          } else if (event.key === 'Escape') {
+            editedRef.current = false;
+            setDraft(value);
           } else if (event.key === 'ArrowDown') {
             setOpen(true);
             event.preventDefault();
@@ -138,7 +151,11 @@ export function EditableCombobox({
         }}
         onBlur={(event) => {
           focus.focusProps.onBlur(event);
-          if (disabled) return;
+          if (disabled) {
+            editedRef.current = false;
+            setDraft(value);
+            return;
+          }
           requestAnimationFrame(() => {
             if (!menuRef.current?.contains(document.activeElement)) commit();
           });
@@ -209,6 +226,7 @@ export function EditableCombobox({
               aria-selected={option.value === value}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
+                editedRef.current = false;
                 setDraft(option.label);
                 onCommit?.(option.value);
                 close();

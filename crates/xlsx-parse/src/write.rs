@@ -14,8 +14,8 @@ use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
-    Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart, SheetId,
-    Workbook,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart,
+    SheetId, Workbook,
 };
 
 use crate::ParseError;
@@ -2682,6 +2682,27 @@ fn worksheet_xml_with_template(
         ("mergeCells", merges),
     ];
 
+    let extent = cell_extent(sheet);
+    let authored = source_extent(template, sheet_axes);
+    if template.child("dimension").is_some()
+        && template.require_unwrapped_child("dimension").is_ok()
+        && (original.is_none_or(|original| cell_extent(original) != extent)
+            || authored != source_extent(template, None))
+    {
+        let reference =
+            union_extent(extent, authored).map_or_else(|| "A1".to_owned(), |range| range.to_a1());
+        replacements.push((
+            "dimension",
+            Some(fragment(|writer| {
+                writer
+                    .create_element("dimension")
+                    .with_attribute(("ref", reference.as_str()))
+                    .write_empty()
+                    .map(|_| ())
+            })?),
+        ));
+    }
+
     if original.is_none_or(|original| original.freeze_pane != sheet.freeze_pane) {
         replacements.push(("sheetViews", patched_sheet_views(template, sheet)?));
     }
@@ -2709,6 +2730,57 @@ fn worksheet_xml_with_template(
         bytes: template.render(replacements, worksheet_child_rank)?,
         relationships,
     })
+}
+
+fn cell_extent(sheet: &Sheet) -> Option<CellRange> {
+    let mut cells = sheet.iter_cells().map(|(at, _)| at);
+    let first = cells.next()?;
+    let (mut last_row, mut min_col, mut max_col) = (first.row, first.col, first.col);
+    for at in cells {
+        last_row = at.row;
+        min_col = min_col.min(at.col);
+        max_col = max_col.max(at.col);
+    }
+    Some(CellRange::new(
+        CellRef::new(first.row, min_col),
+        CellRef::new(last_row, max_col),
+    ))
+}
+
+/// The source `<dimension>` moved through the sheet's row and column edits;
+/// it still covers source cells the model does not hold.
+fn source_extent(template: &XmlTemplate, axes: Option<&SheetAxes>) -> Option<CellRange> {
+    let attributes = attributes_from_fragment(&template.child("dimension")?.bytes).ok()?;
+    let reference = attributes
+        .iter()
+        .find(|attribute| attribute.local_name() == "ref")?;
+    let range = CellRange::parse_a1(&reference.value).ok()?;
+    let Some(axes) = axes else {
+        return Some(range);
+    };
+    let span = |ranges: Vec<Range<u32>>| Some(ranges.first()?.start..ranges.last()?.end);
+    let rows = span(
+        axes.rows
+            .current_ranges(range.start.row..range.end.row.saturating_add(1)),
+    )?;
+    let cols = span(
+        axes.cols
+            .current_ranges(range.start.col..range.end.col.saturating_add(1)),
+    )?;
+    Some(CellRange::new(
+        CellRef::new(rows.start, cols.start),
+        CellRef::new(rows.end - 1, cols.end - 1),
+    ))
+}
+
+fn union_extent(a: Option<CellRange>, b: Option<CellRange>) -> Option<CellRange> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(CellRange::new(
+            CellRef::new(a.start.row.min(b.start.row), a.start.col.min(b.start.col)),
+            CellRef::new(a.end.row.max(b.end.row), a.end.col.max(b.end.col)),
+        )),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Rewrites each `<sheetView>`'s pane while its zoom, selection and view flags
