@@ -305,7 +305,12 @@ pub fn apply_section_break(
 
     // continuous: only a column change forces a new region on the current page
     let columns_differ = incoming_columns.count != updated.in_force.columns.count
-        || incoming_columns.gap != updated.in_force.columns.gap;
+        || incoming_columns.gap != updated.in_force.columns.gap
+        || (incoming_columns.count > 1.0
+            && (incoming_columns.equal_width == Some(false)
+                || updated.in_force.columns.equal_width == Some(false))
+            && (incoming_columns.equal_width != updated.in_force.columns.equal_width
+                || incoming_columns.columns != updated.in_force.columns.columns));
     if columns_differ {
         updated.queued.columns = Some(incoming_columns);
         return ApplySectionBreakResult {
