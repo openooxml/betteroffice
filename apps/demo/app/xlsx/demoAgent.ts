@@ -22,6 +22,7 @@ function columnLetter(col: number): string {
 interface GridCell {
   input: string;
   isFormula: boolean;
+  isNumber: boolean;
 }
 
 function cellPosition(a1: string): { row: number; col: number } | null {
@@ -33,7 +34,7 @@ function cellPosition(a1: string): { row: number; col: number } | null {
 }
 
 function cellInput(cell: XlsxExportCell): GridCell {
-  if (cell.formula !== null) return { input: `=${cell.formula}`, isFormula: true };
+  if (cell.formula !== null) return { input: `=${cell.formula}`, isFormula: true, isNumber: false };
   const value = cell.value;
   const input =
     value.kind === "number" || value.kind === "text"
@@ -41,12 +42,12 @@ function cellInput(cell: XlsxExportCell): GridCell {
       : value.kind === "bool"
         ? (value.value ? "TRUE" : "FALSE")
         : "";
-  return { input, isFormula: false };
+  return { input, isFormula: false, isNumber: value.kind === "number" };
 }
 
 function sheetGrid(sheet: XlsxExportSheet): GridCell[][] {
   const rows = Array.from({ length: SCAN_ROWS }, () =>
-    Array.from({ length: SCAN_COLS }, () => ({ input: "", isFormula: false })),
+    Array.from({ length: SCAN_COLS }, () => ({ input: "", isFormula: false, isNumber: false })),
   );
   for (const cell of sheet.cells) {
     if (cell.anchor.kind !== "cell") continue;
@@ -56,11 +57,6 @@ function sheetGrid(sheet: XlsxExportSheet): GridCell[][] {
     }
   }
   return rows;
-}
-
-function isNumericLiteral(cell: GridCell): boolean {
-  const text = cell.input.trim();
-  return text !== "" && !cell.isFormula && Number.isFinite(Number(text));
 }
 
 interface ColumnSpan {
@@ -91,8 +87,8 @@ function dashboardEdits(rows: GridCell[][], sheet: number): ProposalEdit[] | nul
   const dataRows = rows
     .map((row, index) => ({ row, index }))
     .filter(({ row, index }) => index > headerRow && index < totalRow && row[0]?.input.trim());
-  const unitsCell = dataRows.find(({ row }) => isNumericLiteral(row[units]));
-  const revenueCell = dataRows.find(({ row }) => isNumericLiteral(row[revenue]));
+  const unitsCell = dataRows.find(({ row }) => row[units].isNumber);
+  const revenueCell = dataRows.find(({ row }) => row[revenue].isNumber);
   if (!unitsCell || !revenueCell) return null;
 
   const edits: ProposalEdit[] = [
@@ -139,7 +135,7 @@ function genericTotals(rows: GridCell[][], sheet: number): ProposalEdit[] {
   let lastDataRow = -1;
   rows.forEach((row, rowIndex) => {
     row.forEach((cell, col) => {
-      if (!isNumericLiteral(cell)) return;
+      if (!cell.isNumber) return;
       const span = columns.get(col) ?? { first: rowIndex, last: rowIndex, count: 0 };
       span.first = Math.min(span.first, rowIndex);
       span.last = Math.max(span.last, rowIndex);
@@ -156,7 +152,7 @@ function genericTotals(rows: GridCell[][], sheet: number): ProposalEdit[] {
     if (span.count < MIN_NUMERIC) continue;
     const letter = columnLetter(col);
     const input = `=SUM(${letter}${span.first + 1}:${letter}${span.last + 1})`;
-    if (rows[totalRow]?.[col]?.input === input) continue;
+    if (totalRow >= SCAN_ROWS || rows[totalRow][col].input !== "") continue;
     edits.push({ sheet, row: totalRow, col, input });
   }
   return edits;
@@ -165,7 +161,7 @@ function genericTotals(rows: GridCell[][], sheet: number): ProposalEdit[] {
 /** Build the demo's tracked totals proposal from the first worksheet that yields one. */
 export function buildTotalsEdits(content: XlsxStructuredContent): ProposalEdit[] {
   const sheets = content.sheets.flatMap((sheet, position) => {
-    if (sheet.kind !== "worksheet") return [];
+    if (sheet.kind !== "worksheet" || sheet.truncated) return [];
     const index = sheet.anchor.kind === "sheet" ? sheet.anchor.sheet.index : position;
     return [{ rows: sheetGrid(sheet), index }];
   });
