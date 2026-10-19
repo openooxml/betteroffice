@@ -225,6 +225,134 @@ test('d1a_unicode_delete_and_paragraph_merge_return_selection', async () => {
   expectCaret(crossedDelete, { story: 'body', paraId: crossedParagraphs[0]!.paraId, offset: 1 });
 }, TIMEOUT);
 
+test('suggesting forward deletes advance past each retained character', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  for (const offset of [1, 2]) {
+    const result = execute(arm, command(arm, 'deleteForward', { suggesting }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset });
+    expect(texts(arm)).toEqual(['hat']);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe('hat'.slice(0, offset));
+  }
+}, TIMEOUT);
+
+test('suggesting selection deletes keep the caret at the start', async () => {
+  for (const kind of ['deleteForward', 'deleteBackward'] as const) {
+    for (const [anchor, focus] of [[0, 3], [3, 0]] as const) {
+      const arm = await openCommandEngine(['hat']);
+      const id = arm.engine.paragraphs('body')[0]!.paraId;
+      const result = execute(arm, command(arm, kind, {
+        selection: selection(id, anchor, focus),
+        suggesting: { name: 'Writer', date: '2026-01-01T00:00:00Z' },
+      }));
+      expect(result.status).toBe('applied');
+      expectCaret(result, { story: 'body', paraId: id, offset: 0 });
+      expect(texts(arm)).toEqual(['hat']);
+      expect(arm.engine.storySegments('body').flatMap(segment =>
+        segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+      ).join('')).toBe('hat');
+    }
+  }
+}, TIMEOUT);
+
+test('suggesting forward delete skips existing deletions without counting or replacing them', async () => {
+  for (const [prefix, retained, suffix, offset, count, caret, deleted] of [
+    ['', 'ha', 'ts', 0, 1, 3, 'hat'],
+    ['', 'ha', 'ts', 1, 1, 3, 'hat'],
+    ['', 'ha', 'ts', 0, 2, 4, 'hats'],
+    ['h', 'a', 'ts', 0, 2, 3, 'hat'],
+    ['', 'ha', '😀t', 0, 1, 4, 'ha😀'],
+  ] as const) {
+    const arm = await openCommandEngine([], {
+      bodyXml: `<w:p><w:r><w:t>${prefix}</w:t></w:r><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>${retained}</w:delText></w:r></w:del><w:r><w:t>${suffix}</w:t></w:r></w:p>`,
+    });
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    const before = arm.engine.storySegments('body').find(segment => segment.kind === 'text' && segment.attributes.del != null);
+    const result = execute(arm, command(arm, 'deleteForward', {
+      selection: selection(id, offset), count,
+      suggesting: { name: 'Writer', date: '2026-01-02T00:00:00Z' },
+    }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset: caret });
+    expect(texts(arm)).toEqual([prefix + retained + suffix]);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe(deleted);
+    expect(arm.engine.storySegments('body').find(segment => segment.kind === 'text' && segment.text === retained)).toEqual(before);
+  }
+}, TIMEOUT);
+
+test('suggesting forward delete skips an imported deleted paragraph mark without replacing its revision', async () => {
+  const arm = await openCommandEngine([], {
+    bodyXml: '<w:p><w:pPr><w:rPr><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>Alpha</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p>',
+  });
+  const [first, second] = arm.engine.paragraphs('body');
+  const before = arm.engine.storySegments('body').find(segment => segment.kind === 'pilcrow' && segment.paraId === first!.paraId);
+  expect(before).toMatchObject({ kind: 'pilcrow', properties: {
+    pPrDel: { revisionId: 7, author: 'Reader', date: '2026-01-01T00:00:00Z' },
+  } });
+  expect(before!.attributes.del).toBeUndefined();
+  const result = execute(arm, command(arm, 'deleteForward', {
+    selection: selection(first!.paraId, first!.text.length),
+    suggesting: { name: 'Writer', date: '2026-01-02T00:00:00Z' },
+  }));
+  expect(result.status).toBe('applied');
+  expectCaret(result, { story: 'body', paraId: second!.paraId, offset: 1 });
+  expect(texts(arm)).toEqual(['Alpha', 'Second']);
+  const segments = arm.engine.storySegments('body');
+  expect(segments.find(segment => segment.kind === 'pilcrow' && segment.paraId === first!.paraId)).toEqual(before);
+  expect(segments.flatMap(segment =>
+    segment.kind === 'text' && segment.attributes.del != null ? [segment] : []
+  )).toMatchObject([{ text: 'S', attributes: {
+    del: { author: 'Writer', date: '2026-01-02T00:00:00Z' },
+  } }]);
+}, TIMEOUT);
+
+test('suggesting forward delete uses the receipt end when removing the authors insertion', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  expect(execute(arm, command(arm, 'insertText', { text: 'x', suggesting })).status).toBe('applied');
+  const result = execute(arm, command(arm, 'deleteForward', { selection: selection(id, 0), count: 2, suggesting }));
+  expect(result.status).toBe('applied');
+  expect(texts(arm)).toEqual(['hat']);
+  expectCaret(result, { story: 'body', paraId: id, offset: 1 });
+  expect(arm.engine.storySegments('body').flatMap(segment =>
+    segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+  ).join('')).toBe('h');
+}, TIMEOUT);
+
+test('suggesting backward deletes keep the caret before retained text', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  execute(arm, command(arm, 'select', { selection: selection(id, 2) }));
+  for (const offset of [1, 0]) {
+    const result = execute(arm, command(arm, 'deleteBackward', { suggesting }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset });
+    expect(texts(arm)).toEqual(['hat']);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe('hat'.slice(offset, 2));
+  }
+}, TIMEOUT);
+
+test('plain forward deletes remove retained tracked text at the original caret', async () => {
+  const arm = await openCommandEngine([], {
+    bodyXml: '<w:p><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>ha</w:delText></w:r></w:del><w:r><w:t>t</w:t></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const result = execute(arm, command(arm, 'deleteForward', {}));
+  expect(result.status).toBe('applied');
+  expect(texts(arm)).toEqual(['at']);
+  expectCaret(result, { story: 'body', paraId: id, offset: 0 });
+}, TIMEOUT);
+
 test('d1a_formatting_and_stored_marks_apply_in_worker', async () => {
   const arm = await openCommandEngine(['abc']);
   const id = arm.engine.paragraphs('body')[0]!.paraId;
