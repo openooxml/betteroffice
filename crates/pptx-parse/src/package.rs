@@ -15,7 +15,7 @@ use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::table_style::parse_table_styles;
 use crate::theme::{parse_background_pictures, parse_format_scheme, parse_theme};
-use crate::xml::{ParseBudget, XmlElement, parse_xml};
+use crate::xml::{PRESENTATIONML_NS, ParseBudget, XmlElement, parse_xml};
 use crate::{ParseLimits, PptxError};
 
 pub fn parse_pptx(data: &[u8]) -> Result<PptxPackage, PptxError> {
@@ -56,7 +56,14 @@ fn parse_package(
         })
         .and_then(|relationship| relationship.resolved_target.clone())
         .unwrap_or_else(|| "ppt/presentation.xml".to_owned());
-    let presentation_root = parse_part(&parts, &presentation_path, &mut budget)?;
+    let presentation_bytes =
+        parts
+            .get(presentation_path.as_str())
+            .ok_or_else(|| PptxError::NotAPresentation {
+                message: format!("main presentation part is missing: {presentation_path}"),
+            })?;
+    let presentation_root = parse_xml(presentation_bytes, &presentation_path, &mut budget)?;
+    check_presentation_root(&presentation_root, &presentation_path)?;
     let presentation_relationships = relationships
         .get(&presentation_path)
         .map(Vec::as_slice)
@@ -394,6 +401,33 @@ fn relationship_source(path: &str) -> Option<String> {
     let (directory, filename) = path.rsplit_once("/_rels/")?;
     let source_filename = filename.strip_suffix(".rels")?;
     Some(format!("{directory}/{source_filename}"))
+}
+
+const STRICT_PRESENTATIONML_NS: &str = "http://purl.oclc.org/ooxml/presentationml/main";
+
+fn check_presentation_root(root: &XmlElement, path: &str) -> Result<(), PptxError> {
+    if root.local_name() != "presentation" {
+        return Err(PptxError::NotAPresentation {
+            message: format!("invalid main root in {path}: {}", root.name),
+        });
+    }
+    let declaration = match root.name.split_once(':') {
+        Some((prefix, _)) => format!("xmlns:{prefix}"),
+        None => "xmlns".to_owned(),
+    };
+    let namespace = root.attribute(&declaration);
+    if !matches!(
+        namespace,
+        Some(PRESENTATIONML_NS | STRICT_PRESENTATIONML_NS)
+    ) {
+        return Err(PptxError::NotAPresentation {
+            message: format!(
+                "unsupported main namespace in {path}: {}",
+                namespace.unwrap_or("(missing)")
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn parse_part(
@@ -1007,6 +1041,100 @@ mod tests {
     const CHART_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/chart-deck.pptx");
     const NUMBERED_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/slide-number-fields.pptx");
     const CHART_PART: &str = "ppt/charts/chart1.xml";
+
+    fn rezip_with(edit: impl FnOnce(&mut Vec<(String, Vec<u8>)>)) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        edit(&mut parts);
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn set_part(parts: &mut Vec<(String, Vec<u8>)>, path: &str, xml: &str) {
+        parts.retain(|(name, _)| name != path);
+        parts.push((path.to_owned(), xml.as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn refuses_packages_that_are_not_presentations() {
+        let presentation = |parts: &Vec<(String, Vec<u8>)>| {
+            String::from_utf8(
+                parts
+                    .iter()
+                    .find(|(path, _)| path == "ppt/presentation.xml")
+                    .unwrap()
+                    .1
+                    .clone(),
+            )
+            .unwrap()
+        };
+        let cases = [
+            (
+                "missing main part",
+                rezip_with(|parts| parts.retain(|(path, _)| path != "ppt/presentation.xml")),
+            ),
+            (
+                "unsupported namespace",
+                rezip_with(|parts| {
+                    let xml = presentation(parts).replace(PRESENTATIONML_NS, "urn:unsupported-ooxml:main");
+                    set_part(parts, "ppt/presentation.xml", &xml);
+                }),
+            ),
+            (
+                "missing namespace",
+                rezip_with(|parts| {
+                    set_part(parts, "ppt/presentation.xml", "<p:presentation><p:sldIdLst/></p:presentation>");
+                }),
+            ),
+            (
+                "word document",
+                ooxml_opc::rezip_parts(&[
+                    (
+                        "[Content_Types].xml".to_owned(),
+                        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                    ),
+                    (
+                        "_rels/.rels".to_owned(),
+                        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                    ),
+                    (
+                        "word/document.xml".to_owned(),
+                        br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#.to_vec(),
+                    ),
+                ])
+                .unwrap(),
+            ),
+            (
+                "ordinary archive",
+                ooxml_opc::rezip_parts(&[("readme.txt".to_owned(), b"Archive contents".to_vec())])
+                    .unwrap(),
+            ),
+        ];
+        for (title, bytes) in cases {
+            for result in [parse_pptx(&bytes), parse_pptx_without_connectors(&bytes)] {
+                assert!(
+                    matches!(result, Err(PptxError::NotAPresentation { .. })),
+                    "{title}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opens_strict_presentation_roots() {
+        let strict = rezip_with(|parts| {
+            let xml = String::from_utf8(
+                parts
+                    .iter()
+                    .find(|(path, _)| path == "ppt/presentation.xml")
+                    .unwrap()
+                    .1
+                    .clone(),
+            )
+            .unwrap()
+            .replace(PRESENTATIONML_NS, STRICT_PRESENTATIONML_NS);
+            set_part(parts, "ppt/presentation.xml", &xml);
+        });
+        assert_eq!(parse_pptx(&strict).unwrap().slides.len(), 3);
+    }
 
     #[test]
     fn parses_betteroffice_demo_deck_surface() {
