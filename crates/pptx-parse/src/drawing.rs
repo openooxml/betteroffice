@@ -538,7 +538,7 @@ fn layout_linear(
     let count = items.len() as f64;
     let gap = (frame_width * 0.04)
         .min(182_880.0)
-        .min(frame_width / (count + 1.0));
+        .min(frame_width * 0.5 / (count + 1.0));
     let width = ((frame_width - gap * (count + 1.0)) / count).max(1.0);
     let height = (frame_height * 0.45).max(1.0);
     let y = ((frame_height - height) / 2.0).max(0.0);
@@ -594,7 +594,7 @@ fn layout_hierarchy(
     let count = children.len() as f64;
     let gap = (frame_width * 0.04)
         .min(182_880.0)
-        .min(frame_width / (count + 1.0));
+        .min(frame_width * 0.5 / (count + 1.0));
     let child_width = ((frame_width - gap * (count + 1.0)) / count).max(1.0);
     let y = frame_height * 0.58;
     for (index, child) in children.iter().enumerate() {
