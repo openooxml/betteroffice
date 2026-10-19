@@ -488,7 +488,7 @@ test('Tab and Shift Tab at a list text start use list indentation', async () => 
     await act(async () => { input.textarea.dispatchEvent(tab); });
     expect(tab.defaultPrevented).toBe(true);
     expect(input.submitted).toEqual(['changeIndent']);
-    expect(input.entries[0]!.payload).toEqual({ direction: shiftKey ? 'decrease' : 'increase' });
+    expect(input.entries[0]!.payload).toEqual(shiftKey ? { direction: 'decrease', preserveNumbering: true } : { direction: 'increase' });
     expect(input.entries[0]!.options.fence).toBe(true);
     input.unmount();
   }
@@ -510,7 +510,7 @@ test('Tab inserts text within a list or over a body selection and ignores cancel
 
 test('Tab and Shift Tab change the level of selected list paragraphs in either selection direction', async () => {
   for (const shiftKey of [false, true]) {
-    for (const multiple of [false, true]) {
+    for (const [multiple, ilvl] of [[false, 1], [true, 0], [true, 1]] as const) {
       for (const backward of [false, true]) {
         const input = mount();
         const start = { story: 'body', paraId: 'p1', offset: multiple ? 1 : 0 };
@@ -518,10 +518,10 @@ test('Tab and Shift Tab change the level of selected list paragraphs in either s
         input.snapshot.workerSelection = input.session.state.selection = {
           anchor: backward ? end : start, focus: backward ? start : end,
         };
-        input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl: 1 } } };
+        input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl } } };
         await act(async () => { fireEvent.keyDown(input.textarea, { key: 'Tab', shiftKey }); });
         expect(input.submitted).toEqual(['changeIndent']);
-        expect(input.entries[0]!.payload).toEqual({ direction: shiftKey ? 'decrease' : 'increase' });
+        expect(input.entries[0]!.payload).toEqual(shiftKey ? { direction: 'decrease', preserveNumbering: true } : { direction: 'increase' });
         input.unmount();
       }
     }
@@ -591,6 +591,40 @@ test('Tab resolves the list caret after pending typing or navigation', async () 
     expect(input.entries[1]!.payload).toEqual(typing ? { text: '\t' } : { direction: 'increase' });
     expect(input.entries[1]!.options.after).toBe(input.entries[0]!.ticket);
     input.unmount();
+  }
+});
+
+test('Shift Tab waits for pending navigation from a body paragraph into a nested list', async () => {
+  const input = mount();
+  try {
+    const point = { story: 'body', paraId: 'body', offset: 0 };
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: point, focus: point };
+    input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'body' };
+    act(() => { input.viewStore.installFrameGeometry({
+      identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+      pages: [], caret: { x: 4, y: 10, width: 1, height: 12 }, selectionRects: [],
+    }); });
+    fireEvent.keyDown(input.textarea, { key: 'ArrowDown' });
+    fireEvent.keyUp(input.textarea, { key: 'ArrowDown' });
+    await input.waitForSubmitted(1);
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+    act(() => { input.textarea.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(true);
+    expect(input.submitted).toEqual(['navigate']);
+    await act(async () => {
+      const nested = { story: 'body', paraId: 'nested', offset: 0 };
+      input.session.state.editState = { ...input.snapshot.editState!, toolbar: {
+        ...PLAIN_CONTEXT, paraId: 'nested', paragraphProperties: { numPr: { numId: 1, ilvl: 1 } },
+      } };
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, { anchor: nested, focus: nested });
+      await input.entries[0]!.ticket.ack;
+    });
+    expect(input.submitted).toEqual(['navigate', 'changeIndent']);
+    expect(input.entries[1]!.payload).toEqual({ direction: 'decrease', preserveNumbering: true });
+    expect(input.entries[1]!.options.after).toBe(input.entries[0]!.ticket);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
   }
 });
 

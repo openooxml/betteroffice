@@ -121,7 +121,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const editState = viewStore.getSnapshot().editState ?? admission.session.state.editState;
       const tableTab = tab && !!editState?.tableContext;
       const numPr = editState?.toolbar?.paragraphProperties.numPr as { numId?: number } | null | undefined;
-      if (tab && event.shiftKey && !tableTab && !(numPr?.numId && numPr.numId > 0)) { active = null; return; }
+      if (tab && event.shiftKey && !tableTab && !admission.getSnapshot().tail && !(numPr?.numId && numPr.numId > 0)) { active = null; return; }
       const inputType = tab ? 'insertText' : event.key === 'Backspace' ? 'deleteContentBackward'
         : event.key === 'Delete' ? 'deleteContentForward'
         : event.key === 'Enter' ? 'insertParagraph' : null;

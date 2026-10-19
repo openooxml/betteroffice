@@ -308,7 +308,7 @@ export interface DocxCommandPayloads {
   formatSelection: DocxSelectionIntent & { delta: YrsInlineFormatDelta };
   toggleStrike: DocxSelectionIntent;
   toggleList: DocxSelectionIntent & { kind: 'bullet' | 'numbered' };
-  changeIndent: DocxSelectionIntent & { direction: 'increase' | 'decrease' };
+  changeIndent: DocxSelectionIntent & { direction: 'increase' | 'decrease'; preserveNumbering?: boolean };
   insertImage: DocxSelectionIntent & { image: Readonly<Record<string, unknown>> };
   insertTable: DocxSelectionIntent & { rows: number; columns: number };
   insertTableRow: DocxSelectionIntent & { side: 'above' | 'below' };

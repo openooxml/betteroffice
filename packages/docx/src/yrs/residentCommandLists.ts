@@ -3,7 +3,7 @@ import type { ResidentDocxCommandEngine } from './residentCommandProtocol';
 
 export function planResidentListChanges(
   engine: ResidentDocxCommandEngine, range: YrsStoryRange,
-  action: { kind: 'bullet' | 'numbered' } | { direction: 'increase' | 'decrease' }
+  action: { kind: 'bullet' | 'numbered' } | { direction: 'increase' | 'decrease'; preserveNumbering?: boolean }
 ): Array<{ range: YrsStoryRange; attrs: YrsParagraphAttrs }> {
   const paragraphs = engine.paragraphs(range.story);
   const start = paragraphs.findIndex(p => p.paraId === range.start.paraId);
@@ -21,6 +21,7 @@ export function planResidentListChanges(
     } else if (numPr?.numId) {
       const level = numPr.ilvl ?? 0;
       if (action.direction === 'increase' && level >= 8) return [];
+      if (action.direction === 'decrease' && level === 0 && action.preserveNumbering) return [];
       attrs = action.direction === 'decrease' && level === 0 ? clear
         : { numPr: { numId: numPr.numId, ilvl: level + (action.direction === 'increase' ? 1 : -1) } };
       attrs = { ...attrs, indentLeft: null, indentFirstLine: null, other: { hangingIndent: null } };

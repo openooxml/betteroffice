@@ -206,7 +206,7 @@ const DOCX_COMMAND_POLICIES = {
   setSectionMargins: { keys: ['section', 'margins', 'expectVersion'] },
   setTabStops: { keys: ['tabs', 'expectVersion'] }, removeTabStop: { keys: ['positionTwips', 'expectVersion'] },
   formatSelection: { keys: ['delta'] }, toggleStrike: { keys: [] }, toggleList: { keys: ['kind'] },
-  changeIndent: { keys: ['direction'] },
+  changeIndent: { keys: ['direction', 'preserveNumbering'] },
   insertImage: { keys: ['image'] }, insertTable: { keys: ['rows', 'columns'] }, pasteFragment: { keys: ['fragment'] },
   insertPageBreak: { keys: [] }, insertSectionBreak: { keys: ['type'] },
   insertTableRow: { keys: ['side'] }, insertTableColumn: { keys: ['side'] },
@@ -360,7 +360,8 @@ function validCommandIntent(
       if (!oneOf('bullet', 'numbered')(payload.kind)) return refuse('invalid-payload');
       break;
     case 'changeIndent':
-      if (!oneOf('increase', 'decrease')(payload.direction)) return refuse('invalid-payload');
+      if (!oneOf('increase', 'decrease')(payload.direction) ||
+        (payload.preserveNumbering !== undefined && !boolean(payload.preserveNumbering))) return refuse('invalid-payload');
       break;
     case 'insertTable':
       if (![payload.rows, payload.columns].every(entry => typeof entry === 'number' && Number.isSafeInteger(entry) && entry > 0 && entry <= 1000) || Number(payload.rows) * Number(payload.columns) > 10_000) return refuse('invalid-table-size');

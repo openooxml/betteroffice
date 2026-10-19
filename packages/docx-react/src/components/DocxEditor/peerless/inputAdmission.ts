@@ -278,10 +278,11 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
           const numPr = toolbar?.paragraphProperties.numPr as { numId?: number; ilvl?: number } | null | undefined;
           if (selection && (!isCollapsed(selection) || selection.focus.offset === 0) &&
             (toolbar?.paraId === selection.focus.paraId || toolbar?.paraId === selection.anchor.paraId) && numPr?.numId && numPr.numId > 0) {
-            if (tabDirection === 'backward' && (numPr.ilvl ?? 0) === 0) return;
+            if (tabDirection === 'backward' && isCollapsed(selection) && (numPr.ilvl ?? 0) === 0) return;
             const suggesting = 'suggesting' in intent.payload ? intent.payload.suggesting : undefined;
             intent = { kind: 'changeIndent', payload: {
               direction: tabDirection === 'backward' ? 'decrease' : 'increase',
+              ...(tabDirection === 'backward' ? { preserveNumbering: true } : {}),
               ...(suggesting ? { suggesting } : {}),
             } };
           } else if (tabDirection === 'backward') return;
