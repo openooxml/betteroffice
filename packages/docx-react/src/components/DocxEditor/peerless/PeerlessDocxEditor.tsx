@@ -757,6 +757,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         pages,
         caret: caret.caretRect ? { ...caret.caretRect,
           x: caret.caretRect.x + (pages[caret.caretRect.pageIndex]?.bounds.x ?? 0), y: caret.caretRect.y + (pages[caret.caretRect.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
+        selectionFocus: frame.payload.selectionFocus ? { ...frame.payload.selectionFocus,
+          x: frame.payload.selectionFocus.x + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.x ?? 0),
+          y: frame.payload.selectionFocus.y + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
         parts: frame.payload.parts,
         selectionRects: (frame.payload.selectionRects ?? []).map(({ pageIndex, x, y, width, height }) => ({
           x: x + (pages[pageIndex]?.bounds.x ?? 0), y: y + (pages[pageIndex]?.bounds.y ?? 0), width, height,

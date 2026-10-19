@@ -13,7 +13,7 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './residentCommandFrame';
 import { createResidentCommandHost } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
-import { releaseResidentSelectionReads } from './residentCommandSelection';
+import { readDocxSelectionFocus, releaseResidentSelectionReads } from './residentCommandSelection';
 import { currentSelectionRange, readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
@@ -43,6 +43,7 @@ import type {
 import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import { createDisplayListQueries } from '../layout/render/displayListQueries';
+import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
 import {
   createResidentEngineSession,
   type ResidentEngineSession,
@@ -75,7 +76,7 @@ import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
 import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
-import { readCellSelection } from './residentCommandTableSelection';
+import { cellSelectionHeadPosition, readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveBookmarkTarget,
@@ -284,7 +285,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   let selectionLayout: { version: string; frame: RetainedFrame } | undefined;
   let selectionPage: DocxCommandPageIdentity | undefined;
   let selectionNavigation: {
-    focus: YrsLoc; direction: 'up' | 'down'; queryFrame?: { frame: RetainedFrame; version: string };
+    focus: YrsLoc; direction: 'up' | 'down'; distance?: number; queryFrame?: { frame: RetainedFrame; version: string };
   } | undefined;
   let selectionQueries: {
     frame: RetainedFrame; frameEpoch: number; layoutRevision: number; version: string;
@@ -387,7 +388,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (page?.page.unbuilt) pages.add(page.pageIndex);
       }
       if (selectionNavigation) {
-        const { focus, direction } = selectionNavigation;
+        const { focus, direction, distance } = selectionNavigation;
         const root = focus.story === 'body' || focus.story.startsWith('body:') ? 'body'
           : focus.story.split(':').slice(0, 2).join(':');
         const position = displayPositionIndex(engine).positionOf(focus, root);
@@ -454,8 +455,25 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             }
           }
           if (caret && caret.height > 0 && !frame.pages[caret.pageIndex]?.page.unbuilt) {
-            const neighbour = caret.pageIndex + (direction === 'up' ? -1 : 1);
-            if (frame.pages[neighbour]?.page.unbuilt) pages.add(neighbour);
+            if (distance !== undefined) {
+              let top = 0;
+              const entries = frame.pages.map(({ page, pageIndex }) => {
+                const entry = { pageIndex, top, bottom: top + page.height };
+                top += page.height + CANVAS_PAGE_GAP_PX;
+                return entry;
+              });
+              const origin = entries[caret.pageIndex]!.top + caret.y + caret.height / 2;
+              const target = origin + (direction === 'down' ? distance : -distance);
+              const gap = (entry: typeof entries[number]) => Math.max(entry.top - target, 0, target - entry.bottom);
+              const targetPage = entries.reduce((nearest, entry) => gap(entry) < gap(nearest) ? entry : nearest);
+              const lookahead = targetPage.pageIndex + (direction === 'down' ? 1 : -1);
+              for (const pageIndex of [targetPage.pageIndex, lookahead]) {
+                if (frame.pages[pageIndex]?.page.unbuilt) pages.add(pageIndex);
+              }
+            } else {
+              const neighbour = caret.pageIndex + (direction === 'up' ? -1 : 1);
+              if (frame.pages[neighbour]?.page.unbuilt) pages.add(neighbour);
+            }
           }
         }
       }
@@ -483,6 +501,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
     word: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
     line: { backward: 'result', forward: 'result', up: 'interior', down: 'interior' },
+    page: { backward: 'complete', forward: 'complete', up: 'complete', down: 'complete' },
     paragraph: { backward: 'interior', forward: 'interior', up: 'complete', down: 'complete' },
     'document-boundary': { backward: 'result', forward: 'complete', up: 'complete', down: 'complete' },
   } satisfies Record<DocxNavigationIntent['unit'], Record<DocxNavigationIntent['direction'], 'result' | 'interior' | 'complete'>>;
@@ -549,12 +568,15 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         selectionPage = command.kind === 'selectPoint' || command.kind === 'extendSelection'
           ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
         const navigation = command.kind === 'navigate' ? command.payload as DocxNavigationIntent : undefined;
-        if (navigation?.unit === 'line' && (navigation.direction === 'up' || navigation.direction === 'down')) {
+        if ((navigation?.unit === 'line' || navigation?.unit === 'page') && (navigation.direction === 'up' || navigation.direction === 'down')) {
           const selected = context.predecessorSelection?.focus;
           const focus = selected?.sticky
             ? engine.resolveStickyPosition({ story: selected.story, encoded: selected.sticky })
             : selected ?? engine.selection()?.head;
-          if (focus) selectionNavigation = { focus, direction: navigation.direction };
+          if (focus) selectionNavigation = {
+            focus: navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus,
+            direction: navigation.direction,
+            ...(navigation.unit === 'page' ? { distance: navigation.distance } : {}) };
         }
         const queryEngine = selectionNavigation ? loadedRustDisplayListQueryEngine() : null;
         const verticalMove = queryEngine?.verticalMoveJson;
@@ -939,6 +961,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           pageFrames: preceding, coversThroughSeq, caret: finalized.caret,
           layoutRevision, documentVersion: engine.proposalEngine.version(),
           selectionRects,
+          selectionFocus: selected && !shown.layoutProvisional && !cellRects && !finalized.caret.caretRect
+            ? readDocxSelectionFocus(engine, selected, layout) ?? undefined : undefined,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
           parts: shown.layoutProvisional ? [] : engine.partGeometry(retainedFrame!),
           geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined

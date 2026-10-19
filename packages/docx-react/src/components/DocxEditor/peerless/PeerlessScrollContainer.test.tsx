@@ -45,7 +45,7 @@ function frame(): DocxCommandFrame {
   } };
 }
 
-async function mount() {
+async function mount(withCaret = false) {
   let scroller: HTMLElement | undefined;
   const rect = spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
     const top = this === scroller ? 0 : -(scroller?.scrollTop ?? 0);
@@ -79,7 +79,7 @@ async function mount() {
         pages: Array.from({ length: 20 }, (_, pageIndex): PeerlessFrameGeometry['pages'][number] => ({
           page: { pageId: String(pageIndex + 1), pageIndex },
           bounds: { x: 0, y: pageIndex * stride, width: 200, height: 100 }, transform: [1, 0, 0, 1, 0, 0],
-        })), caret: null, selectionRects: [],
+        })), caret: withCaret ? { x: 20, y: 30, width: 1, height: 12 } : null, selectionRects: [],
       };
     },
   };
@@ -136,6 +136,20 @@ test('page_keys_scroll_peerless_container_without_blurring_document_input', asyn
   expect(editor.scroller.scrollTop).toBe(before);
   expect(up.defaultPrevented).toBe(true);
   expect(document.activeElement).toBe(input);
+});
+
+test('admitted_page_keys_do_not_also_scroll_the_peerless_container', async () => {
+  const editor = await mount(true);
+  const input = editor.getByRole('textbox', { name: 'Document input' });
+  act(() => { input.focus(); });
+  const before = editor.scroller.scrollTop;
+  for (const key of ['PageDown', 'PageUp']) {
+    const event = new KeyboardEvent('keydown', { key, shiftKey: true, bubbles: true, cancelable: true });
+    act(() => { fireEvent(input, event); });
+    expect(event.defaultPrevented).toBe(true);
+    expect(editor.scroller.scrollTop).toBe(before);
+    expect(document.activeElement).toBe(input);
+  }
 });
 
 test('scrolling_peerless_container_updates_display_window', async () => {

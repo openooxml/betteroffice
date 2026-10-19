@@ -227,7 +227,7 @@ const DOCX_COMMAND_POLICIES = {
   setProposalStates: { keys: reviewCommandKeys.setProposalStates, exact: true },
   withdrawProposals: { keys: reviewCommandKeys.withdrawProposals, exact: true },
   select: { keys: ['selection'] }, insertText: { keys: ['text'] }, replaceSelection: { keys: ['text'] },
-  navigate: { keys: ['unit', 'direction', 'extend', 'goalX'], exact: true },
+  navigate: { keys: ['unit', 'direction', 'extend', 'goalX', 'distance'], exact: true },
   navigateCell: { keys: ['direction', 'extend', 'createLastRow'] },
   selectTableCells: { keys: ['target'] },
   selectPoint: { keys: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'], exact: true },
@@ -319,9 +319,11 @@ function validCommandIntent(
       if (!oneOf('table', 'row', 'column')(payload.target)) return refuse('invalid-payload');
       break;
     case 'navigate':
-      if (!oneOf('character', 'word', 'line', 'paragraph', 'document-boundary')(payload.unit) ||
+      if (!oneOf('character', 'word', 'line', 'page', 'paragraph', 'document-boundary')(payload.unit) ||
         !boolean(payload.extend) || !oneOf('backward', 'forward', 'up', 'down')(payload.direction) ||
-        (['up', 'down'].includes(String(payload.direction)) && (payload.unit !== 'line' || !number(payload.goalX)))) {
+        (['up', 'down'].includes(String(payload.direction)) && (!oneOf('line', 'page')(payload.unit) || !number(payload.goalX))) ||
+        (payload.unit !== 'page' && payload.distance !== undefined) ||
+        (payload.unit === 'page' && (!oneOf('up', 'down')(payload.direction) || !number(payload.distance) || Number(payload.distance) <= 0))) {
         return refuse('invalid-payload');
       }
       break;

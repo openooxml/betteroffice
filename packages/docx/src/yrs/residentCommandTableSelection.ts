@@ -71,6 +71,18 @@ export function cellStart(engine: ResidentDocxCommandEngine, story: string): Yrs
   return first ? { story, paraId: first.paraId, offset: 0 } : null;
 }
 
+export function cellSelectionHeadPosition(engine: ResidentDocxCommandEngine, focus: YrsLoc): YrsLoc | null {
+  const active = readCellSelection(engine);
+  if (!active || (active.anchor.row === active.head.row && active.anchor.column === active.head.column)) return null;
+  const caret = resolveLiveCell(engine, focus.story);
+  if (!caret || active.anchor.story !== caret.story || active.anchor.tableIndex !== caret.tableIndex ||
+    active.head.story !== caret.story || active.head.tableIndex !== caret.tableIndex) return null;
+  const resolved = anchorsOf(engine, caret.story, caret.tableIndex);
+  const head = resolved?.anchors.find((entry) => entry.row <= active.head.row && active.head.row < entry.row + entry.rowspan &&
+    entry.column <= active.head.column && active.head.column < entry.column + entry.colspan);
+  return head ? cellStart(engine, head.story) : null;
+}
+
 export function cellsForCaret(engine: ResidentDocxCommandEngine, story: string): YrsTableRange | null {
   const cell = resolveLiveCell(engine, story);
   return cell ? { anchor: cell, head: { ...cell } } : null;
@@ -164,6 +176,27 @@ export function resolveShiftArrowCellRange(
   direction: string,
   goalX?: number
 ): ShiftArrowCellRange | null {
+  if (unit === 'page') {
+    let pointer = resolvePointerCellRange(engine, base.anchor, moved);
+    if (!pointer && base.anchor.story !== moved.story) {
+      const cell = resolveLiveCell(engine, moved.story);
+      const resolved = cell && base.anchor.story === cell.story ? anchorsOf(engine, cell.story, cell.tableIndex) : null;
+      const edge = direction === 'down' ? resolved?.anchors[0] : resolved?.anchors.at(-1);
+      const at = edge ? cellStart(engine, edge.story) : null;
+      if (cell && edge && at) {
+        pointer = {
+          textAnchor: at,
+          cells: {
+            anchor: { story: cell.story, tableIndex: cell.tableIndex, row: edge.row, column: edge.column },
+            head: cell,
+          },
+        };
+      }
+    }
+    return pointer ? {
+      selection: { anchor: pointer.textAnchor, focus: pointer.textAnchor }, cells: pointer.cells, goalX,
+    } : null;
+  }
   const delta = shiftArrowCellDelta(unit, direction);
   const caret = delta ? resolveLiveCell(engine, base.focus.story) : null;
   if (!delta || !caret) return null;

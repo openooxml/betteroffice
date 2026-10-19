@@ -950,6 +950,37 @@ test('evicted_page_repaints_after_scroll_back', async ({ page }) => {
   expect(await pageCanvas.evaluate((canvas) => (canvas as HTMLCanvasElement).toDataURL())).toBe(original.pixels);
 });
 
+test('peerless_shift_page_down_selects_text_across_the_viewport', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>abcd</w:t></w:r></w:p>',
+    Array.from({ length: 180 }, (_, index) => `<w:p><w:r><w:t>Line ${index + 1} has text to select.</w:t></w:r></w:p>`).join('')));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
+  const initial = await page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)!.selection!);
+  const before = await input.boundingBox();
+  const height = await scroller.evaluate(element => element.clientHeight);
+  const scrollTop = await scroller.evaluate(element => element.scrollTop);
+  const start = await commandCount(page);
+  await input.press('Shift+PageDown');
+  await expect.poll(() => commandCount(page)).toBeGreaterThan(start);
+  await settled(page);
+  const selected = await page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)!.selection!);
+  expect(selected.anchor).toMatchObject({ story: initial.anchor.story, paraId: initial.anchor.paraId, offset: initial.anchor.offset });
+  expect(selected.focus.paraId).not.toBe(initial.focus.paraId);
+  const after = await input.boundingBox();
+  const distance = after!.y - before!.y + await scroller.evaluate(element => element.scrollTop) - scrollTop;
+  expect(distance).toBeGreaterThan(height * 0.8);
+  expect(distance).toBeLessThan(height * 1.2);
+  await expect(input).toBeFocused();
+  await input.press('Backspace');
+  await settled(page);
+  const text = await savedText(page);
+  expect(text).not.toContain('Line 1 has text to select.');
+  expect(text).toContain('Line 180 has text to select.');
+});
+
 test('peerless_document_scrolls_with_wheel_and_page_down', async ({ page }) => {
   await open(page, true, null, 40);
   const input = await focusDocument(page);
@@ -977,8 +1008,8 @@ test('peerless_document_scrolls_with_wheel_and_page_down', async ({ page }) => {
   await page.keyboard.press('PageDown');
   await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(afterWheel);
   await paintTurns(page);
-  await expect(input).toBeFocused();
   await expect(laterCanvas).toBeInViewport();
+  await expect(input).toBeFocused();
   const afterPageDown = await scroller.evaluate((element) => element.scrollTop);
   await page.keyboard.press('PageUp');
   await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeLessThan(afterPageDown);

@@ -41,6 +41,7 @@ export interface PeerlessFrameGeometry {
     displayPage?: DisplayPage;
   }[];
   caret: DocxEchoRect | null;
+  selectionFocus?: DocxEchoRect | null;
   selectionRects: readonly DocxEchoRect[];
   parts?: DocxCommandFrame['payload']['parts'];
   objects?: DocxCommandFrame['payload']['geometry'];
