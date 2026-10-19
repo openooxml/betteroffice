@@ -656,6 +656,8 @@ pub struct TableCell {
     pub merged: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_fill: Option<PictureFill>,
     #[serde(default, skip_serializing_if = "TableCellBorders::is_empty")]
     pub borders: TableCellBorders,
 }
@@ -683,6 +685,7 @@ impl Default for TableCell {
             row_span: 1,
             merged: false,
             fill: None,
+            picture_fill: None,
             borders: TableCellBorders::default(),
         }
     }

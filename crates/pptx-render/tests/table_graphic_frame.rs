@@ -1,4 +1,5 @@
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
+use pptx_parse::{GraphicFrameData, PictureCrop, ShapeNode};
 use pptx_render::{Paint, Primitive, SlideRenderer, SurfaceDisplayList};
 
 const DECK: &[u8] = include_bytes!("fixtures/table-basic.pptx");
@@ -19,6 +20,182 @@ fn display_list(session: &DeckSession) -> SurfaceDisplayList {
 
 fn round(value: f32) -> f32 {
     (value * 100.0).round() / 100.0
+}
+
+#[test]
+fn table_cell_picture_fills_are_clipped_to_spans_below_borders_and_text() {
+    let session =
+        DeckSession::open(include_bytes!("fixtures/table-picture-fill.pptx"), 4102).unwrap();
+    let rendered = table(&display_list(&session));
+    let images: Vec<_> = rendered
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(index, primitive)| {
+            if let Primitive::Image {
+                x,
+                y,
+                w,
+                h,
+                asset_id,
+                crop,
+                tile,
+                path,
+                effects,
+                ..
+            } = primitive
+            {
+                Some((index, (*x, *y, *w, *h), asset_id, crop, tile, path, effects))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(images.len(), 2, "both origin cells paint their pictures");
+    let rounded =
+        |rect: (f32, f32, f32, f32)| (round(rect.0), round(rect.1), round(rect.2), round(rect.3));
+    assert_eq!(rounded(images[0].1), (64.0, 64.0, 320.0, 38.93));
+    assert_eq!(rounded(images[1].1), (64.0, 102.93, 192.0, 77.87));
+    for image in &images {
+        assert_eq!(image.2.as_deref(), Some("ppt/media/image1.png"));
+        assert!(image.5.is_none(), "rectangular images clip to their bounds");
+    }
+    let crop = images[0].3;
+    assert!((crop.left - 1.42558 / 3.44418).abs() < 1e-6);
+    assert!((crop.top - 2.14634 / 22.60975).abs() < 1e-6);
+    assert!((crop.right - 1.01860 / 3.44418).abs() < 1e-6);
+    assert!((crop.bottom - 19.46341 / 22.60975).abs() < 1e-6);
+    assert_eq!(images[0].6, &[pptx_render::ImageEffect::Grayscale]);
+    let tile = images[1].4.as_ref().expect("the row span uses a tile");
+    assert_eq!((tile.scale_x, tile.scale_y), (0.5, 2.0));
+    let last_image = images.last().unwrap().0;
+    assert!(rendered.cells.iter().enumerate().all(|(index, primitive)| {
+        !matches!(
+            primitive,
+            Primitive::TextBox { .. }
+                | Primitive::Shape {
+                    stroke: Some(_),
+                    ..
+                }
+        ) || index > last_image
+    }));
+    let restored =
+        DeckSession::open_from_update(&session.encode_state_as_update_v1(), 4103).unwrap();
+    assert_eq!(display_list(&session), display_list(&restored));
+}
+
+fn cell_picture(fill_rect: PictureCrop, crop: PictureCrop) -> Primitive {
+    const FIXTURE: &[u8] = include_bytes!("fixtures/table-picture-fill.pptx");
+    let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+    let ShapeNode::GraphicFrame(frame) = &mut package.slides[0].shapes[0] else {
+        panic!("expected a table frame")
+    };
+    let GraphicFrameData::Table(model) = &mut frame.data else {
+        panic!("expected a table")
+    };
+    let picture = model.rows[0].cells[0].picture_fill.as_mut().unwrap();
+    picture.fill_rect = fill_rect;
+    picture.crop = crop;
+    let session = DeckSession::from_package_with_source(package, FIXTURE, 4104).unwrap();
+    table(&display_list(&session))
+        .cells
+        .into_iter()
+        .find(|primitive| matches!(primitive, Primitive::Image { .. }))
+        .unwrap()
+}
+
+#[test]
+fn table_cell_picture_positive_fill_insets_letterbox_the_destination() {
+    let Primitive::Image {
+        x, y, w, h, crop, ..
+    } = cell_picture(
+        PictureCrop {
+            left: 25_000,
+            right: 25_000,
+            ..PictureCrop::default()
+        },
+        PictureCrop::default(),
+    )
+    else {
+        panic!("expected a cell image")
+    };
+    assert_eq!(
+        (round(x), round(y), round(w), round(h)),
+        (144.0, 64.0, 160.0, 38.93)
+    );
+    assert!(crop.is_whole());
+
+    let Primitive::Image {
+        x, y, w, h, crop, ..
+    } = cell_picture(
+        PictureCrop {
+            top: 25_000,
+            bottom: 25_000,
+            ..PictureCrop::default()
+        },
+        PictureCrop::default(),
+    )
+    else {
+        panic!("expected a cell image")
+    };
+    assert_eq!(
+        (round(x), round(y), round(w), round(h)),
+        (64.0, 73.73, 320.0, 19.47)
+    );
+    assert!(crop.is_whole());
+}
+
+#[test]
+fn table_cell_picture_mixed_fill_insets_letterbox_and_crop_the_source() {
+    for (fill_rect, expected_rect, expected_crop) in [
+        (
+            PictureCrop {
+                left: 25_000,
+                top: -50_000,
+                right: -25_000,
+                bottom: 25_000,
+            },
+            (144.0, 64.0, 240.0, 29.2),
+            (0.1, 0.41, 0.375, 0.05),
+        ),
+        (
+            PictureCrop {
+                left: -25_000,
+                top: 25_000,
+                right: 25_000,
+                bottom: -50_000,
+            },
+            (64.0, 73.73, 240.0, 29.2),
+            (0.275, 0.05, 0.2, 0.41),
+        ),
+    ] {
+        let Primitive::Image {
+            x, y, w, h, crop, ..
+        } = cell_picture(
+            fill_rect,
+            PictureCrop {
+                left: 10_000,
+                top: 5_000,
+                right: 20_000,
+                bottom: 5_000,
+            },
+        )
+        else {
+            panic!("expected a cell image")
+        };
+        assert_eq!((round(x), round(y), round(w), round(h)), expected_rect);
+        for (actual, expected) in [crop.left, crop.top, crop.right, crop.bottom]
+            .into_iter()
+            .zip([
+                expected_crop.0,
+                expected_crop.1,
+                expected_crop.2,
+                expected_crop.3,
+            ])
+        {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
+    }
 }
 
 struct RenderedTable {

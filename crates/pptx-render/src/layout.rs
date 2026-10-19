@@ -1642,6 +1642,7 @@ impl<'a> LayoutBuilder<'a> {
                 }
                 plans.push(CellPlan {
                     text: &cell.text,
+                    picture_fill: cell.picture_fill.as_ref(),
                     inherited,
                     content,
                     style,
@@ -1668,13 +1669,23 @@ impl<'a> LayoutBuilder<'a> {
         let start = self.primitives.len();
         for plan in &plans {
             let cell = plan.rect(&columns, &rows);
-            if let Some(paint) = plan
+            let paint = plan
                 .style
                 .fill
                 .as_ref()
-                .and_then(|fill| paint(fill, self.theme))
-            {
-                self.primitives.push(cell_fill(object_id, cell, paint));
+                .and_then(|fill| paint(fill, self.theme));
+            if plan.picture_fill.is_some() || paint.is_some() {
+                let dpi = plan
+                    .picture_fill
+                    .and_then(|fill| fill.media_part_path.as_deref())
+                    .and_then(|path| self.media_part(path))
+                    .and_then(|part| image_dpi(&part.bytes));
+                self.primitives.push(cell_picture_filled(
+                    cell_fill(object_id, cell, paint),
+                    plan.picture_fill,
+                    dpi,
+                    self.theme,
+                ));
             }
         }
         for plan in &plans {
@@ -1944,6 +1955,7 @@ impl<'a> LayoutBuilder<'a> {
 /// One cell of a table, measured and ready to paint.
 struct CellPlan<'a> {
     text: &'a TextBody,
+    picture_fill: Option<&'a PictureFill>,
     inherited: TextBody,
     content: TextContent,
     style: ResolvedCellStyle,
@@ -2039,7 +2051,7 @@ fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<
     }
 }
 
-fn cell_fill(object_id: u32, rect: PxRect, fill: Paint) -> Primitive {
+fn cell_fill(object_id: u32, rect: PxRect, fill: Option<Paint>) -> Primitive {
     Primitive::Shape {
         clip: None,
         even_odd: false,
@@ -2058,7 +2070,7 @@ fn cell_fill(object_id: u32, rect: PxRect, fill: Paint) -> Primitive {
         ),
         geometry_fallback: false,
         adjust_values: BTreeMap::new(),
-        fill: Some(fill),
+        fill,
         stroke: None,
         shadow: None,
         transform: Transform::default(),
@@ -5226,6 +5238,29 @@ fn picture_filled(
         },
         other => other,
     }
+}
+
+fn cell_picture_filled(
+    primitive: Primitive,
+    picture: Option<&PictureFill>,
+    dpi: Option<f32>,
+    theme: &Theme,
+) -> Primitive {
+    let mut primitive = picture_filled(primitive, picture, dpi, theme);
+    if let Some(picture) = picture.filter(|picture| picture.tile.is_none())
+        && let Primitive::Image { x, y, w, h, .. } = &mut primitive
+    {
+        let inset = |value: i32| value.max(0) as f32 / 100_000.0;
+        let left = inset(picture.fill_rect.left);
+        let top = inset(picture.fill_rect.top);
+        let right = inset(picture.fill_rect.right);
+        let bottom = inset(picture.fill_rect.bottom);
+        *x += *w * left;
+        *y += *h * top;
+        *w *= (1.0 - left - right).max(0.0);
+        *h *= (1.0 - top - bottom).max(0.0);
+    }
+    primitive
 }
 
 /// Folds `a:srcRect` and the `a:stretch/a:fillRect` band into source fractions.

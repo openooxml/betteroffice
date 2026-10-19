@@ -381,7 +381,7 @@ fn parse_graphic_frame(
         .child("graphic")
         .and_then(|value| value.child("graphicData"));
     let frame_data = if let Some(table) = data.and_then(|value| value.child("tbl")) {
-        GraphicFrameData::Table(parse_table(table, part, budget)?)
+        GraphicFrameData::Table(parse_table(table, relationships, part, budget)?)
     } else if let Some(chart) =
         data.and_then(|value| value.descendants_named("chart").first().copied())
     {
@@ -458,6 +458,7 @@ fn parse_graphic_frame(
 
 fn parse_table(
     table: &XmlElement,
+    relationships: &[Relationship],
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Table, PptxError> {
@@ -465,7 +466,7 @@ fn parse_table(
     for row in table.children_named("tr") {
         let mut cells = Vec::new();
         for cell in row.children_named("tc") {
-            cells.push(parse_table_cell(cell, part, budget)?);
+            cells.push(parse_table_cell(cell, relationships, part, budget)?);
         }
         rows.push(TableRow {
             height: numeric_attribute(Some(row), "h").unwrap_or_default().max(0),
@@ -510,6 +511,7 @@ fn parse_table_properties(properties: Option<&XmlElement>) -> TableProperties {
 
 fn parse_table_cell(
     cell: &XmlElement,
+    relationships: &[Relationship],
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<TableCell, PptxError> {
@@ -529,6 +531,7 @@ fn parse_table_cell(
         row_span: span_attribute(cell, "rowSpan"),
         merged,
         fill: properties.and_then(parse_fill),
+        picture_fill: properties.and_then(|value| parse_picture_fill(value, relationships)),
         borders: parse_cell_borders(properties),
     })
 }

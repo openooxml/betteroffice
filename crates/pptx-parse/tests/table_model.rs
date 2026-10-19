@@ -14,6 +14,59 @@ fn table() -> Table {
 }
 
 #[test]
+fn parses_table_cell_picture_fills_with_relationships_and_insets() {
+    let package = parse_pptx(include_bytes!(
+        "../../pptx-render/tests/fixtures/table-picture-fill.pptx"
+    ))
+    .unwrap();
+    let ShapeNode::GraphicFrame(frame) = &package.slides[0].shapes[0] else {
+        panic!("expected a table frame")
+    };
+    let GraphicFrameData::Table(table) = &frame.data else {
+        panic!("expected a table")
+    };
+    let cell = serde_json::to_value(&table.rows[0].cells[0]).unwrap();
+    let picture = &cell["pictureFill"];
+    assert_eq!(picture["relationshipId"], "rId2");
+    assert_eq!(picture["mediaPartPath"], "ppt/media/image1.png");
+    assert_eq!(
+        picture["fillRect"],
+        serde_json::json!({"left": -142558, "top": -214634, "right": -101860, "bottom": -1946341})
+    );
+    assert_eq!(
+        picture["effects"],
+        serde_json::json!([{"type": "grayscale"}])
+    );
+    let json = serde_json::to_string(table).unwrap();
+    assert_eq!(serde_json::from_str::<Table>(&json).unwrap(), *table);
+    assert!(
+        package
+            .media
+            .iter()
+            .any(|part| part.part_path == "ppt/media/image1.png")
+    );
+}
+
+#[test]
+fn a_picture_only_cell_keeps_its_full_json_encoding() {
+    let mut value = serde_json::to_value(pptx_parse::TableCell::default()).unwrap();
+    value["pictureFill"] = serde_json::json!({"mediaPartPath": "ppt/media/image1.png"});
+    let cell = serde_json::from_value(value).unwrap();
+    let table = Table {
+        rows: vec![pptx_parse::TableRow {
+            cells: vec![cell],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let encoded = serde_json::to_value(&table).unwrap();
+    assert_eq!(
+        encoded["rows"][0]["cells"][0]["pictureFill"]["mediaPartPath"],
+        "ppt/media/image1.png"
+    );
+}
+
+#[test]
 fn parses_the_grid_row_heights_and_table_properties() {
     let table = table();
     assert_eq!(table.grid, [1_828_800, 1_219_200, 2_667_000]);
