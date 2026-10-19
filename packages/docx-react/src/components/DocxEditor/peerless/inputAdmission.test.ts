@@ -629,6 +629,25 @@ test('history_intents_share_the_composition_and_typing_admission_tail', () => {
   admission.dispose();
 });
 
+test('line breaks and paragraph breaks normalize into distinct fenced commands', () => {
+  const state = { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null };
+  for (const [inputType, kind] of [['insertLineBreak', 'lineBreak'], ['insertParagraph', 'paragraphBreak']] as const) {
+    for (const source of ['beforeinput', 'input'] as const) {
+      const event = { eventId: 1, inputTime: 0, inputType, isComposing: false };
+      expect(normalizeInputEvent(source === 'beforeinput'
+        ? { ...event, source, data: null } : { ...event, source, value: '' }, state)).toMatchObject({
+        intents: [{ kind, payload: {} }], fence: true, preventDefault: true,
+      });
+    }
+  }
+  for (const [shift, kind] of [[true, 'lineBreak'], [false, 'paragraphBreak']] as const) {
+    expect(normalizeInputEvent({ source: 'keydown', eventId: 1, inputTime: 0,
+      key: 'Enter', code: 'Enter', shift, alt: false, ctrl: false, meta: false }, state)).toMatchObject({
+      intents: [{ kind, payload: {} }], fence: true, preventDefault: true,
+    });
+  }
+});
+
 test('history_shortcuts_and_beforeinput_normalize_into_fenced_commands', () => {
   const state = { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null };
   for (const [inputType, kind] of [['historyUndo', 'undo'], ['historyRedo', 'redo']] as const) {

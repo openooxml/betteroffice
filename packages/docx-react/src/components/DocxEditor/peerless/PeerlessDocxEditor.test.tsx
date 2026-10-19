@@ -2064,6 +2064,21 @@ test('shell find opens its dialog and exposes worker host search methods', async
   expect(ref.current!.getSearchState()).toBeNull();
 });
 
+test.each(['Escape', 'close button'])('closing find with %s restores document input focus', async method => {
+  surface.mockRestore();
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} showToolbar={false} />);
+  const input = await view.findByRole('textbox', { name: 'Document input' }, { timeout: 500 });
+  await act(async () => { await ref.current!.commands.execute('find', null); });
+  const searchInput = view.getByRole('textbox', { name: 'Find text' });
+  act(() => { searchInput.focus(); });
+  expect(searchInput.ownerDocument.activeElement === searchInput).toBe(true);
+  if (method === 'Escape') fireEvent.keyDown(searchInput, { key: 'Escape' });
+  else fireEvent.click(view.getByRole('button', { name: 'Close dialog' }));
+  expect(view.queryByRole('dialog')).toBeNull();
+  expect(input.ownerDocument.activeElement === input).toBe(true);
+});
+
 test('shell surface receives controller table navigation', async () => {
   render(<DocxEditor {...peerlessProps} />);
   await waitFor(() => expect(binding).toBeDefined());

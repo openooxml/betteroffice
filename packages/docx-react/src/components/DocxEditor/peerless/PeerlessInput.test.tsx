@@ -147,6 +147,34 @@ test('d2b_overlapping_browser_events_commit_once', () => {
   expect(textarea.value).toBe('');
 });
 
+test('Shift+Enter inserts one line break across overlapping browser events', () => {
+  for (const inputType of ['insertLineBreak', 'insertParagraph']) {
+    const input = mount();
+    beforeinput(input.textarea, 'insertText', 'a');
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', shiftKey: true, bubbles: true, cancelable: true,
+    });
+    act(() => { input.textarea.dispatchEvent(enter); });
+    expect(enter.defaultPrevented).toBe(true);
+    beforeinput(input.textarea, inputType);
+    fireEvent.input(input.textarea, { inputType, target: { value: '\n' } });
+    fireEvent.keyUp(input.textarea, { key: 'Enter', shiftKey: true });
+    beforeinput(input.textarea, 'insertText', 'b');
+    fireEvent.keyDown(input.textarea, { key: 'Enter' });
+    beforeinput(input.textarea, 'insertParagraph');
+    fireEvent.input(input.textarea, { inputType: 'insertParagraph', target: { value: '\n' } });
+    fireEvent.keyUp(input.textarea, { key: 'Enter' });
+    expect(input.submitted).toEqual(['insertText', 'lineBreak', 'insertText', 'paragraphBreak']);
+    expect(input.entries[1]!.payload).toEqual({});
+    expect(input.entries[1]!.options.fence).toBe(true);
+    for (let i = 1; i < input.entries.length; i += 1) {
+      expect(input.entries[i]!.options.after).toBe(input.entries[i - 1]!.ticket);
+    }
+    input.unmount();
+    input.admission.dispose();
+  }
+});
+
 test('d2b_identical_input_after_trailing_composition_is_admitted', () => {
   for (const trailingBeforeinput of [true, false]) {
     const input = mount();

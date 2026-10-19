@@ -413,6 +413,24 @@ fn parse_s9_package(
     .map(|preview| preview.map(|(envelope, _)| envelope))
 }
 
+fn validate_main_root(name: &str, namespace: Option<&str>, path: &str) -> Result<(), ParseError> {
+    if crate::xml::local_name(name) != "document" {
+        return Err(ParseError::Container(format!(
+            "not a Word document: invalid main root in {path}: {name}"
+        )));
+    }
+    if !matches!(
+        namespace,
+        Some(crate::xml::namespaces::W | "http://purl.oclc.org/ooxml/wordprocessingml/main")
+    ) {
+        return Err(ParseError::Container(format!(
+            "not a Word document: unsupported main namespace in {path}: {}",
+            namespace.unwrap_or("(missing)")
+        )));
+    }
+    Ok(())
+}
+
 fn parse_s9_package_impl(
     parts: &[(String, Vec<u8>)],
     data: &[u8],
@@ -503,7 +521,7 @@ fn parse_s9_package_impl(
 
     let document_part = find_part(parts, &document_path);
     let mut warnings = crate::package_integrity::package_warnings(parts, media_table, limits);
-    let (mut body, budget_stopped) = match document_part.filter(|(_, xml)| !xml.is_empty()) {
+    let (mut body, budget_stopped) = match document_part {
         Some((path, xml)) => {
             let mut scanned_budget = body_blocks
                 .filter(|_| prefix_preview)
@@ -515,11 +533,16 @@ fn parse_s9_package_impl(
                     scanned_budget.as_mut().unwrap(),
                     body_blocks.filter(|_| paragraph_budget.is_some()),
                 ) {
-                    Ok((refused, partial)) => {
-                        if refused {
+                    Ok(cut) => {
+                        if cut.refused {
+                            validate_main_root(
+                                cut.root_name.as_deref().unwrap_or_default(),
+                                cut.root_namespace.as_deref(),
+                                path,
+                            )?;
                             return Ok(None);
                         }
-                        legacy_partial = paragraph_budget.map(|_| partial);
+                        legacy_partial = paragraph_budget.map(|_| cut.partial);
                         let keep = blocks.saturating_mul(2).max(blocks.saturating_add(64));
                         crate::document::body_prefix(xml, keep).map(|xml| (xml, keep))
                     }
@@ -538,6 +561,12 @@ fn parse_s9_package_impl(
             }
             match parsed.root() {
                 Some(root) => {
+                    let namespace = match root.namespace_prefix() {
+                        Some(prefix) => root.attributes.get(&format!("xmlns:{prefix}")),
+                        None => root.attributes.get("xmlns"),
+                    }
+                    .map(String::as_str);
+                    validate_main_root(&root.name, namespace, path)?;
                     if body_blocks.is_some() && crate::document::refuses_a_body_cut(root) {
                         return Ok(None);
                     }
@@ -599,12 +628,17 @@ fn parse_s9_package_impl(
                         )?
                     }
                 }
-                None => (DocumentBody::default(), false),
+                None => {
+                    return Err(ParseError::Container(format!(
+                        "not a Word document: main document root is missing in {path}"
+                    )));
+                }
             }
         }
         None => {
-            warnings.push("No document.xml found in DOCX".to_owned());
-            (DocumentBody::default(), false)
+            return Err(ParseError::Container(format!(
+                "not a Word document: main document part is missing: {document_path}"
+            )));
         }
     };
 
@@ -1067,7 +1101,7 @@ mod tests {
         let parts = vec![
             (
                 "word/document.xml".to_owned(),
-                br#"<w:document xmlns:w="w" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>{name}</w:t></w:r></w:p><w:p w14:paraId="00000001"/></w:body></w:document>"#.to_vec(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>{name}</w:t></w:r></w:p><w:p w14:paraId="00000001"/></w:body></w:document>"#.to_vec(),
             ),
             (
                 "word/header1.xml".to_owned(),

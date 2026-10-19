@@ -12,6 +12,31 @@ const TOLERANCE: f64 = 1e-9;
 
 /// Preset names covered by geometry properties.
 const PRESETS: &[&str] = &[
+    "accentCallout3",
+    "accentBorderCallout1",
+    "accentBorderCallout2",
+    "accentBorderCallout3",
+    "borderCallout2",
+    "borderCallout3",
+    "callout2",
+    "callout3",
+    "leftArrowCallout",
+    "rightArrowCallout",
+    "upDownArrowCallout",
+    "leftRightArrowCallout",
+    "quadArrowCallout",
+    "actionButtonBlank",
+    "actionButtonHome",
+    "actionButtonHelp",
+    "actionButtonInformation",
+    "actionButtonForwardNext",
+    "actionButtonBackPrevious",
+    "actionButtonEnd",
+    "actionButtonBeginning",
+    "actionButtonReturn",
+    "actionButtonSound",
+    "actionButtonDocument",
+    "actionButtonMovie",
     "rect",
     "roundRect",
     "ellipse",
@@ -173,6 +198,14 @@ const CURVE_SAMPLES: usize = 24;
 
 /// These presets can exceed their frames at valid adjustments or aspect ratios.
 const SPEC_OVERRUNS_FRAME: &[&str] = &[
+    "accentCallout3",
+    "accentBorderCallout1",
+    "accentBorderCallout2",
+    "accentBorderCallout3",
+    "borderCallout2",
+    "borderCallout3",
+    "callout2",
+    "callout3",
     "mathMultiply",
     "swooshArrow",
     "teardrop",
@@ -1926,6 +1959,25 @@ fn assert_ecma_endpoints(actual: &[(f64, f64)], expected: &[(f64, f64)]) {
 #[test]
 fn single_path_consumers_do_not_receive_partial_layered_presets() {
     for shape in [
+        "accentCallout3",
+        "accentBorderCallout1",
+        "accentBorderCallout2",
+        "accentBorderCallout3",
+        "borderCallout2",
+        "borderCallout3",
+        "callout2",
+        "callout3",
+        "actionButtonBackPrevious",
+        "actionButtonBeginning",
+        "actionButtonDocument",
+        "actionButtonEnd",
+        "actionButtonForwardNext",
+        "actionButtonHelp",
+        "actionButtonHome",
+        "actionButtonInformation",
+        "actionButtonMovie",
+        "actionButtonReturn",
+        "actionButtonSound",
         "arc",
         "cube",
         "leftBrace",
@@ -2358,5 +2410,867 @@ fn irregular_seal1_follows_ecma_vertices() {
         let path = draw("irregularSeal1", &HashMap::new(), aspect);
         assert_points(&coordinates(&path), &expected);
         assert!(matches!(path.last(), Some(GeometryPathCommand::Close)));
+    }
+}
+
+#[test]
+fn remaining_line_callouts_follow_ecma_paths() {
+    use ooxml_drawingml::PresetPathFill;
+    for (shape, segments, border, accent) in [
+        ("accentCallout3", 3, false, true),
+        ("accentBorderCallout1", 1, true, true),
+        ("accentBorderCallout2", 2, true, true),
+        ("accentBorderCallout3", 3, true, true),
+        ("borderCallout2", 2, true, false),
+        ("borderCallout3", 3, true, false),
+        ("callout2", 2, false, false),
+        ("callout3", 3, false, false),
+    ] {
+        let expected = match segments {
+            1 => vec![(-0.08333, 0.1875), (-0.38333, 1.125)],
+            2 => vec![(-0.08333, 0.1875), (-0.16667, 0.1875), (-0.46667, 1.125)],
+            _ => vec![
+                (-0.08333, 0.1875),
+                (-0.16667, 0.1875),
+                (-0.16667, 1.0),
+                (-0.08333, 1.12963),
+            ],
+        };
+        let defaults: HashMap<_, _> = expected
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &(x, y))| {
+                [
+                    (format!("adj{}", 2 * i + 1), y),
+                    (format!("adj{}", 2 * i + 2), x),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            preset_geometry_default_adjustments(shape),
+            defaults,
+            "{shape}"
+        );
+        for aspect in [2.0, 0.5] {
+            let layers = preset_geometry_layers(shape, &HashMap::new(), aspect).unwrap();
+            assert_eq!(layers.len(), 2, "{shape}");
+            assert_eq!(layers[0].fill, PresetPathFill::Normal);
+            assert_eq!(layers[0].stroke, border);
+            assert_points(
+                &vertices(&layers[0].commands),
+                &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+            );
+            assert_eq!(layers[1].fill, PresetPathFill::None);
+            assert!(layers[1].stroke);
+            let mut leader = Vec::new();
+            if accent {
+                leader.extend([(-0.08333, 0.0), (-0.08333, 1.0)]);
+                assert_eq!(layers[1].commands[1], GeometryPathCommand::Close);
+            }
+            leader.extend(&expected);
+            assert_points(&vertices(&layers[1].commands), &leader);
+            let custom = named(&[
+                ("adj1", 0.3),
+                ("adj2", -0.2),
+                ("adj3", 0.4),
+                ("adj4", -0.4),
+                ("adj5", 0.7),
+                ("adj6", -0.6),
+                ("adj7", 1.2),
+                ("adj8", -0.8),
+            ]);
+            let layers = preset_geometry_layers(shape, &custom, aspect).unwrap();
+            let mut leader = Vec::new();
+            if accent {
+                leader.extend([(-0.2, 0.0), (-0.2, 1.0)]);
+            }
+            leader.extend(&[(-0.2, 0.3), (-0.4, 0.4), (-0.6, 0.7), (-0.8, 1.2)][..segments + 1]);
+            assert_points(&vertices(&layers[1].commands), &leader);
+        }
+    }
+}
+
+#[test]
+fn remaining_arrow_callouts_follow_ecma_vertices() {
+    for (shape, expected) in [
+        (
+            "leftArrowCallout",
+            &[
+                (0.0, 0.5),
+                (0.125, 0.25),
+                (0.125, 0.375),
+                (0.35023, 0.375),
+                (0.35023, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.35023, 1.0),
+                (0.35023, 0.625),
+                (0.125, 0.625),
+                (0.125, 0.75),
+            ][..],
+        ),
+        (
+            "rightArrowCallout",
+            &[
+                (0.0, 0.0),
+                (0.64977, 0.0),
+                (0.64977, 0.375),
+                (0.875, 0.375),
+                (0.875, 0.25),
+                (1.0, 0.5),
+                (0.875, 0.75),
+                (0.875, 0.625),
+                (0.64977, 0.625),
+                (0.64977, 1.0),
+                (0.0, 1.0),
+            ][..],
+        ),
+        (
+            "upDownArrowCallout",
+            &[
+                (0.0, 0.259385),
+                (0.4375, 0.259385),
+                (0.4375, 0.25),
+                (0.375, 0.25),
+                (0.5, 0.0),
+                (0.625, 0.25),
+                (0.5625, 0.25),
+                (0.5625, 0.259385),
+                (1.0, 0.259385),
+                (1.0, 0.740615),
+                (0.5625, 0.740615),
+                (0.5625, 0.75),
+                (0.625, 0.75),
+                (0.5, 1.0),
+                (0.375, 0.75),
+                (0.4375, 0.75),
+                (0.4375, 0.740615),
+                (0.0, 0.740615),
+            ][..],
+        ),
+        (
+            "leftRightArrowCallout",
+            &[
+                (0.0, 0.5),
+                (0.125, 0.25),
+                (0.125, 0.375),
+                (0.259385, 0.375),
+                (0.259385, 0.0),
+                (0.740615, 0.0),
+                (0.740615, 0.375),
+                (0.875, 0.375),
+                (0.875, 0.25),
+                (1.0, 0.5),
+                (0.875, 0.75),
+                (0.875, 0.625),
+                (0.740615, 0.625),
+                (0.740615, 1.0),
+                (0.259385, 1.0),
+                (0.259385, 0.625),
+                (0.125, 0.625),
+                (0.125, 0.75),
+            ][..],
+        ),
+        (
+            "quadArrowCallout",
+            &[
+                (0.0, 0.5),
+                (0.092575, 0.31485),
+                (0.092575, 0.407425),
+                (0.259385, 0.407425),
+                (0.259385, 0.259385),
+                (0.4537125, 0.259385),
+                (0.4537125, 0.18515),
+                (0.407425, 0.18515),
+                (0.5, 0.0),
+                (0.592575, 0.18515),
+                (0.5462875, 0.18515),
+                (0.5462875, 0.259385),
+                (0.740615, 0.259385),
+                (0.740615, 0.407425),
+                (0.907425, 0.407425),
+                (0.907425, 0.31485),
+                (1.0, 0.5),
+                (0.907425, 0.68515),
+                (0.907425, 0.592575),
+                (0.740615, 0.592575),
+                (0.740615, 0.740615),
+                (0.5462875, 0.740615),
+                (0.5462875, 0.81485),
+                (0.592575, 0.81485),
+                (0.5, 1.0),
+                (0.407425, 0.81485),
+                (0.4537125, 0.81485),
+                (0.4537125, 0.740615),
+                (0.259385, 0.740615),
+                (0.259385, 0.592575),
+                (0.092575, 0.592575),
+                (0.092575, 0.68515),
+            ][..],
+        ),
+    ] {
+        let defaults = if shape == "quadArrowCallout" {
+            [0.18515, 0.18515, 0.18515, 0.48123]
+        } else if matches!(shape, "leftArrowCallout" | "rightArrowCallout") {
+            [0.25, 0.25, 0.25, 0.64977]
+        } else {
+            [0.25, 0.25, 0.25, 0.48123]
+        };
+        assert_eq!(
+            preset_geometry_default_adjustments(shape),
+            named(&[
+                ("adj1", defaults[0]),
+                ("adj2", defaults[1]),
+                ("adj3", defaults[2]),
+                ("adj4", defaults[3])
+            ])
+        );
+        assert_points(&vertices(&draw(shape, &HashMap::new(), 2.0)), expected);
+    }
+}
+
+#[test]
+fn arrow_callouts_apply_ecma_adjustment_pins() {
+    let over = named(&[("adj1", 9.0), ("adj2", 9.0), ("adj3", 9.0), ("adj4", 9.0)]);
+    assert_points(
+        &vertices(&draw("leftArrowCallout", &over, 2.0)),
+        &[
+            (0.0, 0.5),
+            (1.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 1.0),
+        ],
+    );
+    assert_points(
+        &vertices(&draw("rightArrowCallout", &over, 2.0)),
+        &[
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.5),
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (0.0, 1.0),
+        ],
+    );
+    let quad = draw(
+        "quadArrowCallout",
+        &named(&[("adj1", 0.2), ("adj2", 0.25), ("adj3", 0.2), ("adj4", -0.4)]),
+        2.0,
+    );
+    let v = vertices(&quad);
+    assert!(near(v[3], (0.4, 0.4)));
+    assert!(near(v[4], (0.4, 0.4)));
+    assert!(near(v[20], (0.6, 0.6)));
+    let quad = draw(
+        "quadArrowCallout",
+        &named(&[("adj1", 0.2), ("adj2", 0.25), ("adj3", 9.0), ("adj4", 9.0)]),
+        2.0,
+    );
+    let v = vertices(&quad);
+    assert!(near(v[1], (0.125, 0.25)));
+    assert!(near(v[4], (0.25, 0.25)));
+}
+
+#[test]
+fn action_buttons_follow_ecma_icon_coordinates_and_layers() {
+    use ooxml_drawingml::PresetPathFill;
+    let rectangle = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+    assert_points(
+        &vertices(&draw("actionButtonBlank", &HashMap::new(), 2.0)),
+        &rectangle,
+    );
+    for (shape, first, fills) in [
+        (
+            "actionButtonHome",
+            (0.6171875, 0.359375),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::DarkenLess,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonHelp",
+            (11.0 / 28.0, 19.0 / 56.0),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonInformation",
+            (0.5, 0.125),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::Lighten,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonForwardNext",
+            (0.6875, 0.5),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonBackPrevious",
+            (0.3125, 0.5),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonEnd",
+            (0.59375, 0.5),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonBeginning",
+            (0.40625, 0.5),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonReturn",
+            (0.6875, 0.3125),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonSound",
+            (0.3125, 0.359375),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonDocument",
+            (0.359375, 0.125),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::DarkenLess,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+        (
+            "actionButtonMovie",
+            (0.3125, 37.0 / 120.0),
+            &[
+                PresetPathFill::Normal,
+                PresetPathFill::Darken,
+                PresetPathFill::None,
+            ][..],
+        ),
+    ] {
+        assert!(preset_geometry_default_adjustments(shape).is_empty());
+        let layers = preset_geometry_layers(shape, &HashMap::new(), 2.0).unwrap();
+        assert_eq!(layers.len(), fills.len(), "{shape}");
+        for (layer, fill) in layers.iter().zip(fills) {
+            assert_eq!(layer.fill, *fill, "{shape}");
+            assert_eq!(layer.stroke, layer.fill == PresetPathFill::None, "{shape}");
+        }
+        assert_points(&vertices(&layers[0].commands)[..4], &rectangle);
+        assert!(near(endpoints(&layers[1].commands)[0], first), "{shape}");
+        let outline = subpaths(&layers.last().unwrap().commands);
+        assert_points(&vertices(outline.last().unwrap()), &rectangle);
+    }
+}
+
+#[test]
+fn action_button_back_previous_follows_ecma_endpoints() {
+    let path0 = [(0.3125, 0.5), (0.6875, 0.125), (0.6875, 0.875)];
+    assert_action_button_endpoints("actionButtonBackPrevious", 2.0, &[&path0, &path0, &path0]);
+}
+
+#[test]
+fn action_button_beginning_follows_ecma_endpoints() {
+    let path0 = [
+        (0.40625, 0.5),
+        (0.6875, 0.125),
+        (0.6875, 0.875),
+        (0.359375, 0.125),
+        (0.3125, 0.125),
+        (0.3125, 0.875),
+        (0.359375, 0.875),
+    ];
+    let path1 = [
+        (0.40625, 0.5),
+        (0.6875, 0.125),
+        (0.6875, 0.875),
+        (0.359375, 0.125),
+        (0.359375, 0.875),
+        (0.3125, 0.875),
+        (0.3125, 0.125),
+    ];
+    assert_action_button_endpoints("actionButtonBeginning", 2.0, &[&path0, &path0, &path1]);
+}
+
+#[test]
+fn action_button_document_follows_ecma_endpoints() {
+    let path0 = [
+        (0.359375, 0.125),
+        (0.546875, 0.125),
+        (0.640625, 0.3125),
+        (0.640625, 0.875),
+        (0.359375, 0.875),
+    ];
+    let path1 = [
+        (0.359375, 0.125),
+        (0.546875, 0.125),
+        (0.546875, 0.3125),
+        (0.640625, 0.3125),
+        (0.640625, 0.875),
+        (0.359375, 0.875),
+    ];
+    let path2 = [(0.546875, 0.125), (0.546875, 0.3125), (0.640625, 0.3125)];
+    let path3 = [
+        (0.359375, 0.125),
+        (0.546875, 0.125),
+        (0.640625, 0.3125),
+        (0.640625, 0.875),
+        (0.359375, 0.875),
+        (0.640625, 0.3125),
+        (0.546875, 0.3125),
+        (0.546875, 0.125),
+    ];
+    assert_action_button_endpoints(
+        "actionButtonDocument",
+        2.0,
+        &[&path0, &path1, &path2, &path3],
+    );
+}
+
+#[test]
+fn action_button_end_follows_ecma_endpoints() {
+    let path0 = [
+        (0.59375, 0.5),
+        (0.3125, 0.125),
+        (0.3125, 0.875),
+        (0.640625, 0.125),
+        (0.6875, 0.125),
+        (0.6875, 0.875),
+        (0.640625, 0.875),
+    ];
+    let path1 = [
+        (0.59375, 0.5),
+        (0.3125, 0.875),
+        (0.3125, 0.125),
+        (0.640625, 0.125),
+        (0.6875, 0.125),
+        (0.6875, 0.875),
+        (0.640625, 0.875),
+    ];
+    assert_action_button_endpoints("actionButtonEnd", 2.0, &[&path0, &path0, &path1]);
+}
+
+#[test]
+fn action_button_forward_next_follows_ecma_endpoints() {
+    let path0 = [(0.6875, 0.5), (0.3125, 0.125), (0.3125, 0.875)];
+    let path1 = [(0.6875, 0.5), (0.3125, 0.875), (0.3125, 0.125)];
+    assert_action_button_endpoints("actionButtonForwardNext", 2.0, &[&path0, &path0, &path1]);
+}
+
+#[test]
+fn action_button_help_follows_ecma_endpoints() {
+    let path0 = [
+        (11.0 / 28.0, 19.0 / 56.0),
+        (17.0 / 28.0, 19.0 / 56.0),
+        (31.0 / 56.0, 0.5),
+        (59.0 / 112.0, 65.0 / 112.0),
+        (59.0 / 112.0, 0.6875),
+        (53.0 / 112.0, 0.6875),
+        (53.0 / 112.0, 65.0 / 112.0),
+        (59.0 / 112.0, 47.0 / 112.0),
+        (31.0 / 56.0, 19.0 / 56.0),
+        (25.0 / 56.0, 19.0 / 56.0),
+        (0.5, 5.0 / 7.0),
+        (0.5, 5.0 / 7.0),
+    ];
+    assert_action_button_endpoints("actionButtonHelp", 2.0, &[&path0, &path0, &path0]);
+}
+
+#[test]
+fn action_button_home_follows_ecma_endpoints() {
+    let path0 = [
+        (0.5, 0.125),
+        (0.3125, 0.5),
+        (0.359375, 0.5),
+        (0.359375, 0.875),
+        (0.640625, 0.875),
+        (0.640625, 0.5),
+        (0.6875, 0.5),
+        (0.6171875, 0.359375),
+        (0.6171875, 0.171875),
+        (0.5703125, 0.171875),
+        (0.5703125, 0.265625),
+    ];
+    let path1 = [
+        (0.6171875, 0.359375),
+        (0.6171875, 0.171875),
+        (0.5703125, 0.171875),
+        (0.5703125, 0.265625),
+        (0.359375, 0.5),
+        (0.359375, 0.875),
+        (0.4765625, 0.875),
+        (0.4765625, 0.6875),
+        (0.5234375, 0.6875),
+        (0.5234375, 0.875),
+        (0.640625, 0.875),
+        (0.640625, 0.5),
+    ];
+    let path2 = [
+        (0.5, 0.125),
+        (0.3125, 0.5),
+        (0.6875, 0.5),
+        (0.4765625, 0.6875),
+        (0.5234375, 0.6875),
+        (0.5234375, 0.875),
+        (0.4765625, 0.875),
+    ];
+    let path3 = [
+        (0.5, 0.125),
+        (0.5703125, 0.265625),
+        (0.5703125, 0.171875),
+        (0.6171875, 0.171875),
+        (0.6171875, 0.359375),
+        (0.6875, 0.5),
+        (0.640625, 0.5),
+        (0.640625, 0.875),
+        (0.359375, 0.875),
+        (0.359375, 0.5),
+        (0.3125, 0.5),
+        (0.5703125, 0.265625),
+        (0.6171875, 0.359375),
+        (0.640625, 0.5),
+        (0.359375, 0.5),
+        (0.4765625, 0.875),
+        (0.4765625, 0.6875),
+        (0.5234375, 0.6875),
+        (0.5234375, 0.875),
+    ];
+    assert_action_button_endpoints("actionButtonHome", 2.0, &[&path0, &path1, &path2, &path3]);
+}
+
+#[test]
+fn action_button_information_follows_ecma_endpoints() {
+    let path0 = [(0.5, 0.125), (0.5, 0.125)];
+    let path1 = [
+        (0.5, 0.125),
+        (0.5, 0.125),
+        (0.5, 0.1484375),
+        (0.5, 0.1484375),
+        (0.4296875, 0.359375),
+        (0.4296875, 0.40625),
+        (0.46484375, 0.40625),
+        (0.46484375, 0.734375),
+        (0.4296875, 0.734375),
+        (0.4296875, 0.78125),
+        (0.5703125, 0.78125),
+        (0.5703125, 0.734375),
+        (0.53515625, 0.734375),
+        (0.53515625, 0.359375),
+    ];
+    let path2 = [
+        (0.5, 0.1484375),
+        (0.5, 0.1484375),
+        (0.4296875, 0.359375),
+        (0.53515625, 0.359375),
+        (0.53515625, 0.734375),
+        (0.5703125, 0.734375),
+        (0.5703125, 0.78125),
+        (0.4296875, 0.78125),
+        (0.4296875, 0.734375),
+        (0.46484375, 0.734375),
+        (0.46484375, 0.40625),
+        (0.4296875, 0.40625),
+    ];
+    let path3 = [
+        (0.5, 0.125),
+        (0.5, 0.125),
+        (0.5, 0.1484375),
+        (0.5, 0.1484375),
+        (0.4296875, 0.359375),
+        (0.53515625, 0.359375),
+        (0.53515625, 0.734375),
+        (0.5703125, 0.734375),
+        (0.5703125, 0.78125),
+        (0.4296875, 0.78125),
+        (0.4296875, 0.734375),
+        (0.46484375, 0.734375),
+        (0.46484375, 0.40625),
+        (0.4296875, 0.40625),
+    ];
+    assert_action_button_endpoints(
+        "actionButtonInformation",
+        2.0,
+        &[&path0, &path1, &path2, &path3],
+    );
+}
+
+#[test]
+fn action_button_movie_follows_ecma_endpoints() {
+    let path0 = [
+        (0.3125, 37.0 / 120.0),
+        (0.3125, 877.0 / 1920.0),
+        (1297.0 / 3840.0, 877.0 / 1920.0),
+        (1327.0 / 3840.0, 12667.0 / 28800.0),
+        (271.0 / 768.0, 12667.0 / 28800.0),
+        (271.0 / 768.0, 2399.0 / 3600.0),
+        (0.6078125, 2399.0 / 3600.0),
+        (0.6078125, 8471.0 / 14400.0),
+        (2489.0 / 3840.0, 8471.0 / 14400.0),
+        (2573.0 / 3840.0, 0.63125),
+        (0.6875, 0.63125),
+        (0.6875, 341.0 / 960.0),
+        (2573.0 / 3840.0, 341.0 / 960.0),
+        (503.0 / 768.0, 2773.0 / 7200.0),
+        (0.6078125, 2773.0 / 7200.0),
+        (0.6078125, 341.0 / 960.0),
+        (0.59296875, 311.0 / 960.0),
+        (1327.0 / 3840.0, 311.0 / 960.0),
+        (1297.0 / 3840.0, 37.0 / 120.0),
+    ];
+    let path1 = [
+        (0.3125, 37.0 / 120.0),
+        (1297.0 / 3840.0, 37.0 / 120.0),
+        (1327.0 / 3840.0, 311.0 / 960.0),
+        (0.59296875, 311.0 / 960.0),
+        (0.6078125, 341.0 / 960.0),
+        (0.6078125, 2773.0 / 7200.0),
+        (503.0 / 768.0, 2773.0 / 7200.0),
+        (2573.0 / 3840.0, 341.0 / 960.0),
+        (0.6875, 341.0 / 960.0),
+        (0.6875, 0.63125),
+        (2573.0 / 3840.0, 0.63125),
+        (2489.0 / 3840.0, 8471.0 / 14400.0),
+        (0.6078125, 8471.0 / 14400.0),
+        (0.6078125, 2399.0 / 3600.0),
+        (271.0 / 768.0, 2399.0 / 3600.0),
+        (271.0 / 768.0, 12667.0 / 28800.0),
+        (1327.0 / 3840.0, 12667.0 / 28800.0),
+        (1297.0 / 3840.0, 877.0 / 1920.0),
+        (0.3125, 877.0 / 1920.0),
+    ];
+    assert_action_button_endpoints("actionButtonMovie", 2.0, &[&path0, &path0, &path1]);
+}
+
+#[test]
+fn action_button_return_follows_ecma_endpoints() {
+    let path0 = [
+        (0.6875, 0.3125),
+        (0.59375, 0.125),
+        (0.5, 0.3125),
+        (0.546875, 0.3125),
+        (0.546875, 0.59375),
+        (0.5, 0.6875),
+        (0.453125, 0.6875),
+        (0.40625, 0.59375),
+        (0.40625, 0.3125),
+        (0.3125, 0.3125),
+        (0.3125, 0.59375),
+        (0.453125, 0.875),
+        (0.5, 0.875),
+        (0.640625, 0.59375),
+        (0.640625, 0.3125),
+    ];
+    let path1 = [
+        (0.6875, 0.3125),
+        (0.640625, 0.3125),
+        (0.640625, 0.59375),
+        (0.5, 0.875),
+        (0.453125, 0.875),
+        (0.3125, 0.59375),
+        (0.3125, 0.3125),
+        (0.40625, 0.3125),
+        (0.40625, 0.59375),
+        (0.453125, 0.6875),
+        (0.5, 0.6875),
+        (0.546875, 0.59375),
+        (0.546875, 0.3125),
+        (0.5, 0.3125),
+        (0.59375, 0.125),
+    ];
+    assert_action_button_endpoints("actionButtonReturn", 2.0, &[&path0, &path0, &path1]);
+}
+
+#[test]
+fn action_button_sound_follows_ecma_endpoints() {
+    let path0 = [
+        (0.3125, 0.359375),
+        (0.3125, 0.640625),
+        (0.4296875, 0.640625),
+        (0.546875, 0.875),
+        (0.546875, 0.125),
+        (0.4296875, 0.359375),
+    ];
+    let path1 = [
+        (0.3125, 0.359375),
+        (0.4296875, 0.359375),
+        (0.546875, 0.125),
+        (0.546875, 0.875),
+        (0.4296875, 0.640625),
+        (0.3125, 0.640625),
+        (0.59375, 0.359375),
+        (0.6875, 0.21875),
+        (0.59375, 0.5),
+        (0.6875, 0.5),
+        (0.59375, 0.640625),
+        (0.6875, 0.78125),
+    ];
+    assert_action_button_endpoints("actionButtonSound", 2.0, &[&path0, &path0, &path1]);
+}
+
+fn assert_action_button_endpoints(shape: &str, aspect: f64, expected: &[&[(f64, f64)]]) {
+    let layers = preset_geometry_layers(shape, &HashMap::new(), aspect).unwrap();
+    let rectangle = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+    assert_eq!(layers.len(), expected.len(), "{shape}");
+    for (index, (layer, expected)) in layers.iter().zip(expected).enumerate() {
+        let mut points = Vec::new();
+        if index == 0 {
+            points.extend(rectangle);
+        }
+        points.extend_from_slice(expected);
+        if index == layers.len() - 1 {
+            points.extend(rectangle);
+        }
+        assert_ecma_endpoints(&endpoints(&layer.commands), &points);
+    }
+}
+
+#[test]
+fn action_button_home_follows_ecma_endpoints_at_tall_aspect() {
+    let layers = preset_geometry_layers("actionButtonHome", &HashMap::new(), 0.5).unwrap();
+    assert_points(
+        &endpoints(&layers[1].commands),
+        &[
+            (0.734375, 0.4296875),
+            (0.734375, 0.3359375),
+            (0.640625, 0.3359375),
+            (0.640625, 0.3828125),
+            (0.21875, 0.5),
+            (0.21875, 0.6875),
+            (0.453125, 0.6875),
+            (0.453125, 0.59375),
+            (0.546875, 0.59375),
+            (0.546875, 0.6875),
+            (0.78125, 0.6875),
+            (0.78125, 0.5),
+        ],
+    );
+}
+
+#[test]
+fn up_down_arrow_callout_applies_ecma_adjustment_pins() {
+    let over = named(&[("adj1", 9.0), ("adj2", 9.0), ("adj3", 9.0), ("adj4", 9.0)]);
+    assert_points(
+        &vertices(&draw("upDownArrowCallout", &over, 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.0, 0.5),
+            (0.0, 0.5),
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (1.0, 0.5),
+            (1.0, 0.5),
+            (1.0, 0.5),
+            (1.0, 0.5),
+            (1.0, 0.5),
+            (1.0, 0.5),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.0, 0.5),
+            (0.0, 0.5),
+            (0.0, 0.5),
+            (0.0, 0.5),
+        ],
+    );
+}
+
+#[test]
+fn left_right_arrow_callout_applies_ecma_adjustment_pins() {
+    let over = named(&[("adj1", 9.0), ("adj2", 9.0), ("adj3", 9.0), ("adj4", 9.0)]);
+    assert_points(
+        &vertices(&draw("leftRightArrowCallout", &over, 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (0.5, 0.0),
+            (0.5, 0.0),
+            (0.5, 0.0),
+            (0.5, 0.0),
+            (0.5, 0.0),
+            (0.5, 0.0),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.5, 1.0),
+            (0.5, 1.0),
+            (0.5, 1.0),
+            (0.5, 1.0),
+            (0.5, 1.0),
+            (0.5, 1.0),
+            (0.5, 1.0),
+        ],
+    );
+}
+
+proptest! {
+    #[test]
+    fn line_callouts_keep_all_eight_adjustments_finite(
+        offsets in prop::array::uniform8(any_adjust()),
+        aspect in any_aspect(),
+    ) {
+        let adjustments = offsets.into_iter().enumerate()
+            .map(|(i, value)| (format!("adj{}", i + 1), value))
+            .collect();
+        for shape in [
+            "accentCallout3", "accentBorderCallout1", "accentBorderCallout2",
+            "accentBorderCallout3", "borderCallout2", "borderCallout3", "callout2", "callout3",
+        ] {
+            let layers = preset_geometry_layers(shape, &adjustments, aspect).unwrap();
+            for layer in &layers {
+                for (x, y) in coordinates(&layer.commands) {
+                    prop_assert!(x.is_finite() && y.is_finite(), "{shape} emitted ({x}, {y})");
+                }
+            }
+            for (x, y) in coordinates(&layers[0].commands) {
+                prop_assert!((-TOLERANCE..=1.0 + TOLERANCE).contains(&x)
+                    && (-TOLERANCE..=1.0 + TOLERANCE).contains(&y), "{shape} body left its frame");
+            }
+        }
     }
 }

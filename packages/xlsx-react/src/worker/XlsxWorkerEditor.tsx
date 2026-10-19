@@ -1,3 +1,4 @@
+import { createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
   extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
@@ -193,6 +194,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
   const mutationRef = useRef(0);
   const navigationRef = useRef(0);
+  const [selectionNavigation] = useState(createSelectionDataNavigation);
   const sourceRef = useRef<WorkerPaintSource | null>(null);
   const dragging = useRef(false);
   const clickStart = useRef<CellAddr | null>(null);
@@ -861,6 +863,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return () => { cancelled = true; };
   }, [run, run?.peer, selection, active, selectedChart, painted]);
 
+  const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null, viewRef.current!,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const draftFor = (source: InputDraft['source'], cell: CellAddr, value: string): WorkerCellDraft => ({
@@ -1006,7 +1009,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (source === 'cell') { suppressBlur.current = true; setEditing(null); }
     else setFormulaDraft(null);
     const base = selectionAt({ row: draft.row, col: draft.col });
-    setSelection(move ? moveFocus(base, move, { limits: limits() }) : base);
+    setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: hidden() }) : base);
     focus();
   };
   const cancelDraft = () => {
@@ -1281,7 +1284,43 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         clipboard(key === 'c' ? 'copy' : key === 'x' ? 'cut' : 'paste'); event.preventDefault(); return;
       }
     }
-    const action = selectionKeyReducer(selectionRef.current, event, limits());
+    const request = selectionDataRequest(event);
+    if (request) {
+      event.preventDefault();
+      const owner = runRef.current;
+      const sheet = activeRef.current;
+      if (!owner?.current) return;
+      selectionNavigation.enqueue(event, {
+        context: () => {
+          if (!owner.current || owner.retiring || owner.failure || runRef.current !== owner ||
+            activeRef.current !== sheet || editingRef.current || chartRef.current || !selectionRef.current) return null;
+          const basis = owner.session.confirmedBasis;
+          return { owner, sheet, selection: selectionRef.current, navigation: navigationRef.current,
+            version: `${basis.epoch}:${basis.version}:${owner.peer?.version() ?? basis.version}:${owner.session.state.version}` };
+        },
+        limits,
+        hidden,
+        query: (context, direction) => (owner.peer ?? owner.session.call).selectionData(sheet,
+          context.selection.focus.row, context.selection.focus.col, direction),
+        apply: (next) => {
+          setSelection(next);
+          if (owner.peer) reveal(owner.peer, sheet, next.focus.row, next.focus.col,
+            'nearest', () => owner.current && runRef.current === owner);
+          else void owner.session.call.cellGeometry(sheet, next.focus.row, next.focus.col)
+            .then((geometry) => {
+              const scroll = scrollRef.current;
+              if (!owner.current || runRef.current !== owner || activeRef.current !== sheet ||
+                selectionRef.current !== next || !scroll) return;
+              scroll.scrollLeft = geometry.scrollPosition.x * zoomRef.current;
+              scroll.scrollTop = geometry.scrollPosition.y * zoomRef.current;
+              sourceRef.current?.schedule();
+            }).catch(reportInputError);
+          return true;
+        },
+      });
+      return;
+    }
+    const action = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden());
     if (action.type === 'move') setSelection(action.selection);
     else if (action.type === 'startEdit') openEditor(action.initialInput);
     else if (action.type === 'clear') clearCells();

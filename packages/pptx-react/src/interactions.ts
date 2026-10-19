@@ -370,8 +370,22 @@ export function resizedBounds(
   bounds: FrameBounds,
   handle: ResizeHandle,
   delta: SlidePoint,
-  minimum: number
+  minimum: number,
+  aspectRatioLocked = false
 ): FrameBounds {
+  if (aspectRatioLocked && handle.length === 2 && bounds.width > 0 && bounds.height > 0) {
+    const dx = (handle.includes('w') ? -delta.x : delta.x) / bounds.width;
+    const dy = (handle.startsWith('n') ? -delta.y : delta.y) / bounds.height;
+    const scale = Math.max(1 + (Math.abs(dx) >= Math.abs(dy) ? dx : dy),
+      minimum / bounds.width, minimum / bounds.height);
+    const width = Math.round(bounds.width * scale);
+    const height = Math.round(bounds.height * scale);
+    return {
+      x: handle.includes('w') ? bounds.x + bounds.width - width : bounds.x,
+      y: handle.startsWith('n') ? bounds.y + bounds.height - height : bounds.y,
+      width, height,
+    };
+  }
   let { x, y, width, height } = bounds;
   if (handle.includes('w')) {
     const dx = Math.min(delta.x, width - minimum);
@@ -416,7 +430,7 @@ export function resizedShapeBox(
   };
   const rect = effectiveShapeRect(shape);
   if (!rect) return null;
-  const box = resizedBounds(rect, handle, emu, MIN_SHAPE_SIZE_EMU);
+  const box = resizedBounds(rect, handle, emu, MIN_SHAPE_SIZE_EMU, shape.aspectRatioLocked);
   return { x: box.x, y: box.y, width: box.width, height: box.height };
 }
 

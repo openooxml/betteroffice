@@ -1334,6 +1334,7 @@ export interface YrsSession extends CollaborationReplica {
   setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
   insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
+  insertLineBreak(at: YrsLoc, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
