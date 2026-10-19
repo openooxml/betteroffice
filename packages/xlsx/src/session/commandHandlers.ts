@@ -419,6 +419,7 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   }
   if ((method === 'applyOps' && /^bad ops: /.test(error.message)) ||
     (method === 'applyFormat' && /^bad format args: /.test(error.message)) ||
+    (method === 'editCells' && /^bad edit args: /.test(error.message)) ||
     (method === 'moveRange' && /^bad (?:move range args|range|move destination): /.test(error.message)) ||
     (method === 'applyEdits' && /^malformed request: /.test(error.message))) {
     return new WorkbookCommandRefusal('invalid-command');

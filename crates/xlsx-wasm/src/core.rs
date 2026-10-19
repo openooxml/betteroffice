@@ -96,10 +96,12 @@ struct MoveRangeArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CellEditInput {
     row: u32,
     col: u32,
     input: String,
+    copy_from: Option<CellRef>,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +226,8 @@ struct CellEdit {
     a1: String,
     input: String,
     is_formula: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_array_formula: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -716,11 +720,24 @@ impl Session {
         let edits = args
             .edits
             .into_iter()
-            .map(|edit| WorkbookCellInput {
-                cell: CellRef::new(edit.row, edit.col),
-                input: edit.input,
+            .map(|edit| {
+                let cell = CellRef::new(edit.row, edit.col);
+                let input = match (edit.copy_from, edit.input.strip_prefix('=')) {
+                    (Some(origin), Some(formula)) => {
+                        if origin.row >= betteroffice_xlsx::MAX_ROWS
+                            || origin.col >= betteroffice_xlsx::MAX_COLS
+                        {
+                            return Err("bad edit args: copy origin is outside the grid".to_owned());
+                        }
+                        let formula = betteroffice_xlsx::translate_formula(formula, origin, cell)
+                            .map_err(|_| "formula exceeds the length limit".to_owned())?;
+                        format!("={formula}")
+                    }
+                    _ => edit.input,
+                };
+                Ok(WorkbookCellInput { cell, input })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let result = self
             .workbook
             .edit_cells(
@@ -811,6 +828,13 @@ impl Session {
             a1: cell.cell.to_a1(),
             input: cell.input,
             is_formula: cell.is_formula,
+            is_array_formula: self
+                .workbook
+                .sheet(SheetId(args.sheet))
+                .map_err(|error| error.to_string())?
+                .array_formulas()
+                .any(|(_, range)| range.contains(cell.cell))
+                .then_some(true),
         })
         .map_err(|error| error.to_string())
     }
@@ -871,6 +895,13 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
         let range =
             CellRange::parse_a1(&args.range).map_err(|error| format!("bad range: {error}"))?;
+        let arrays: Vec<_> = self
+            .workbook
+            .sheet(SheetId(args.sheet))
+            .map_err(|error| error.to_string())?
+            .array_formulas()
+            .filter_map(|(_, array)| array.overlaps(&range).then_some(array))
+            .collect();
         let cells = self
             .workbook
             .range_cells(SheetId(args.sheet), range)
@@ -882,6 +913,10 @@ impl Session {
                         a1: cell.cell.to_a1(),
                         input: cell.input,
                         is_formula: cell.is_formula,
+                        is_array_formula: arrays
+                            .iter()
+                            .any(|range| range.contains(cell.cell))
+                            .then_some(true),
                     })
                     .collect()
             })
@@ -1716,6 +1751,85 @@ mod tests {
                 .unwrap()
                 .contains(r#""isFormula":true"#)
         );
+    }
+
+    #[test]
+    fn copied_cell_inputs_rebase_only_internal_formulas_and_undo_as_a_batch() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        session.edit_cells_json(
+            r#"{"sheet":0,"edits":[{"row":42,"col":3,"input":"=A1+$B$1+A$2+$B2","copyFrom":{"row":40,"col":3}},{"row":43,"col":3,"input":"=A1","copyFrom":{"row":40,"col":3}},{"row":42,"col":4,"input":"=A1"}]}"#,
+            None,
+        ).unwrap();
+        for (row, col, expected) in [(42, 3, "=A3+$B$1+A$2+$B4"), (43, 3, "=A4"), (42, 4, "=A1")] {
+            assert_eq!(
+                session
+                    .workbook
+                    .cell(SheetId(0), CellRef::new(row, col))
+                    .unwrap()
+                    .input,
+                expected
+            );
+        }
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        session.undo_json(None).unwrap();
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(42, 3))
+                .unwrap()
+                .input,
+            ""
+        );
+        session.redo_json(None).unwrap();
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(42, 3))
+                .unwrap()
+                .input,
+            "=A3+$B$1+A$2+$B4"
+        );
+    }
+
+    #[test]
+    fn range_inputs_mark_array_anchors_and_spill_members() {
+        for formula in ["SUM(A1:A2)", "_xlfn.SEQUENCE(2)"] {
+            let mut sheet = Sheet::new("Data");
+            let anchor = CellRef::new(0, 1);
+            sheet.set_cell(
+                anchor,
+                Cell {
+                    formula: Some(formula.into()),
+                    ..Cell::default()
+                },
+            );
+            sheet.set_array_formula(anchor, CellRange::new(anchor, CellRef::new(1, 1)));
+            let mut model = WorkbookModel::default();
+            model.sheets.push(sheet);
+            let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+            let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+            let session = Session::open(&bytes, None).unwrap();
+            let before = session.workbook.save().unwrap();
+            let result = session
+                .range_cells_json(r#"{"sheet":0,"range":"A1:B2"}"#)
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(result["cells"][0][1]["isArrayFormula"], true);
+            assert_eq!(result["cells"][1][1]["isArrayFormula"], true);
+            assert!(result["cells"][0][0].get("isArrayFormula").is_none());
+            let member = session
+                .range_cells_json(r#"{"sheet":0,"range":"B2"}"#)
+                .unwrap();
+            assert!(member.contains(r#""isArrayFormula":true"#));
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":1,"col":1}"#)
+                    .unwrap()
+                    .contains(r#""isArrayFormula":true"#)
+            );
+            assert_eq!(session.workbook.save().unwrap(), before);
+        }
     }
 
     #[test]

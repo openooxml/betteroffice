@@ -305,6 +305,7 @@ export interface CellEdit {
   a1: string;
   input: string;
   isFormula: boolean;
+  isArrayFormula?: boolean;
 }
 
 export interface XlsxTextSearchOptions {
@@ -331,6 +332,7 @@ export interface CellInputEdit {
   row: number;
   col: number;
   input: string;
+  copyFrom?: CellPoint;
 }
 
 /**

@@ -9,7 +9,7 @@ import type {
   WorkbookAck, WorkbookCommand, WorkbookCommandPayload, WorkbookFormatTokenResult, WorkbookToolbarPayload,
 } from './commandProtocol';
 import type { WorkbookSession } from './client';
-import { createWorkbookCommandState } from './commandHandlers';
+import { classifyRefusal, createWorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import * as toolbarCommands from './commandToolbar';
 import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod } from './replay';
@@ -1906,6 +1906,50 @@ describe('workbook commands', () => {
       expect(session.failure?.code).toBe('crash');
       await expect(session.save()).rejects.toBeInstanceOf(SessionFailure);
     } finally { failing.mockRestore(); await session.dispose(); }
+  });
+
+  test('copy origin errors from batch edits are classified as invalid commands', () => {
+    expect(classifyRefusal(new Error('bad edit args: copy origin is outside the grid'), 'editCells'))
+      .toMatchObject({ reason: 'invalid-command' });
+  });
+
+  test('out-of-grid copy origins are classified refusals without changing state', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      const before = await session.save();
+      for (const [index, copyFrom] of [
+        { row: 1_048_576, col: 0 }, { row: 0, col: 16_384 },
+        { row: Number.MAX_SAFE_INTEGER, col: 0 },
+      ].entries()) {
+        expect(await session.submit(command(session, index + 1, 'editCells', {
+          args: [0, [{ row: 2, col: 2, input: '=A1', copyFrom }]],
+        }))).toMatchObject({ status: 'refused', reason: 'invalid-command', committed: false });
+        expect(await session.save()).toEqual(before);
+        expect(session.failure).toBeUndefined();
+      }
+      expect(await session.submit(command(session, 4, 'editCell', { args: [0, 2, 2, 'valid'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+    } finally { await session.dispose(); }
+  });
+
+  test('copied formula origins survive worker command validation and undo', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'editCells', {
+        args: [0, [
+          { row: 2, col: 2, input: '=A1+$B$1+$A1+A$1', copyFrom: { row: 0, col: 2 } },
+          { row: 3, col: 2, input: '=SUM(A1:B2)', copyFrom: { row: 0, col: 2 } },
+          { row: 2, col: 3, input: '=A1' },
+        ]],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      const inputs = await session.call.cellInputs(0, 'C3:D4');
+      expect(inputs.cells.map((row) => row.map((cell) => cell.input))).toEqual([
+        ['=A3+$B$1+$A3+A$1', '=A1'], ['=SUM(A4:B5)', ''],
+      ]);
+      expect(await session.submit(command(session, 2, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'C3')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
   });
 
   test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {

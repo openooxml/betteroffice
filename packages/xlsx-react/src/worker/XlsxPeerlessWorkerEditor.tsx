@@ -1,5 +1,5 @@
 import {
-  cellAtPoint, cellRect, chartRegionAtPoint, extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable,
+  cellAtPoint, cellRect, chartRegionAtPoint, extendTo, hyperlinkAtCell, isProposalsAvailable,
   moveFocus, normalizeRange, paintDisplayList, parseHyperlinkLocation, safeExternalHyperlink, selectionAt,
   selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
@@ -48,6 +48,7 @@ import { PeerlessWorkbookSession, type PeerlessSessionWorkbookProps } from './us
 import { usePeerlessSessionWorkbook } from './usePeerlessSessionWorkbook';
 import { PeerlessWorkerPaintSource, type WorkerPaintRequest, type WorkerPaintResult } from './PeerlessWorkerPaintSource';
 
+import { CellClipboard, clipboardHtml, parseCellClipboardText, readCellClipboard, type CellPaste } from '../clipboard';
 import { WorkerCellEcho } from './WorkerCellEcho';
 import { WorkerDraftController, type WorkerNativeDraft } from './WorkerDraftController';
 import { PeerlessWorkerInputs } from './PeerlessWorkerInputs';
@@ -138,6 +139,7 @@ const PeerlessDefaultToolbar = memo(function PeerlessDefaultToolbar() {
 
 export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const { t } = useTranslation();
+  const [cellClipboard] = useState(() => new CellClipboard());
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -205,7 +207,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const report = useCallback((error: unknown) => {
     if (error instanceof PeerlessWorkerCommandRefusal && error.status.reason === 'read-only') {
       setRefusal({ code: 'read-only' });
-    } else if (error instanceof XlsxCommandAdmissionError) setRefusal({ code: error.code });
+    } else if (error instanceof WorkerInputRefusal) setRefusal({ code: error.code, detail: error.message });
+    else if (error instanceof XlsxCommandAdmissionError) setRefusal({ code: error.code });
     else setRefusal({ code: 'input-failed', detail: error instanceof Error ? error.message : String(error) });
   }, []);
   const rangeTarget = (sheet: number, selected: Selection): WorkbookCommandSelection => {
@@ -474,6 +477,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     }
     if (event.type === 'accepted' && event.seq !== null) {
       const command = issued.get(event.seq);
+      if (event.status?.committed) cellClipboard.changed();
       issued.delete(event.seq);
       const refreshed = command?.kind === 'applyOps' && 'toolbar' in command.payload && command.payload.toolbar.id === 'refreshProposals';
       if (command && !refreshed && command.kind !== 'select' && command.kind !== 'setActiveSheet' &&
@@ -513,6 +517,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     for (const status of ack.statuses) {
       const result = status.result as { remoteUpdate?: boolean; proposals?: Proposal[] } | undefined;
       if (!result?.remoteUpdate) continue;
+      cellClipboard.changed();
       proposalsMutation.current = Math.max(proposalsMutation.current, status.seq);
       if (result.proposals) {
         setProposals(result.proposals);
@@ -845,24 +850,36 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const target = rangeTarget(sheet, selected);
     const range = normalizeRange(selected);
     if (kind === 'paste') {
-      const ticket = coordinator.clipboard(() => navigator.clipboard.readText(), (text) => {
-        const rows = fromTsv(text);
-        const edits: CellInputEdit[] = [];
+      let pasted: CellPaste | null = null;
+      const ticket = coordinator.clipboard(() => {
+        const reading = readCellClipboard();
+        const writing = cellClipboard.pending;
+        return coordinator.runAfterPendingInput(async () => { await writing; return reading; }, true);
+      }, ({ text, html }) => {
+        pasted = cellClipboard.paste(owner, text, range, html, sheet);
+        const rows = pasted ? [] : parseCellClipboardText(text);
+        const edits: CellInputEdit[] = pasted?.edits ?? [];
         let lastCol = 0;
-        rows.forEach((row, dr) => {
+        if (!pasted) rows.forEach((row, dr) => {
           lastCol = Math.max(lastCol, row.length - 1);
           row.forEach((input, dc) => edits.push({ row: range.top + dr, col: range.left + dc, input }));
         });
         const next: Selection = { anchor: { row: range.top, col: range.left }, focus: {
-          row: range.top + Math.max(0, rows.length - 1),
-          col: range.left + lastCol,
+          row: pasted?.bottom ?? range.top + Math.max(0, rows.length - 1),
+          col: pasted?.right ?? range.left + lastCol,
         } };
         if (ownerRef.current === owner && navigation.current === at && !draftController.ownsFocus) predict(sheet, next);
+        if (pasted?.cut) return { kind: 'moveRange', payload: {
+          args: [sheet, selectedRange({ anchor: { row: pasted.range.top, col: pasted.range.left },
+            focus: { row: pasted.range.bottom, col: pasted.range.right } }), address(next.anchor)],
+          target, selection: rangeTarget(sheet, next),
+        } };
         return { kind: 'editCells', payload: { args: [sheet, edits], target, selection: rangeTarget(sheet, next) } };
       });
-      void ticket.result.catch(report);
+      void ticket.result.then((status) => { if (pasted) cellClipboard.consume(pasted, status.status === 'applied' && status.committed === true); }).catch(report);
       return;
     }
+    const token = cellClipboard.begin();
     const checkOwner = () => {
       if (ownerRef.current !== owner || !owner.current || owner.retiring) throw new XlsxCommandAdmissionError('document-replaced');
       if (owner.failure) throw owner.failure;
@@ -874,9 +891,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     let write: Promise<void> | undefined;
     try {
       if (typeof ClipboardItem === 'function' && typeof navigator.clipboard?.write === 'function') {
-        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload })]);
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload, 'text/html': clipboardHtml(token, payload) })]);
         void write.catch(() => {});
-      } else if (kind === 'cut' && typeof navigator.clipboard?.writeText !== 'function') {
+      } else if (kind === 'cut') {
         throw new WorkerInputRefusal('Cut requires clipboard write access');
       }
     } catch (error) { reject(error); report(error); return; }
@@ -884,20 +901,21 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       checkOwner();
       const result = await owner.session.call.cellInputs(sheet, selectedRange(selected));
       checkOwner();
-      return toTsv(result.cells);
+      if (kind === 'cut') cellClipboard.watch(token);
+      return result.cells;
     }, kind === 'cut' ? true : 'posted');
-    const written = copied.then(async (text) => {
+    const written = copied.then(async (cells) => {
       checkOwner();
+      const text = toTsv(cells);
       if (write) { resolve(new Blob([text], { type: 'text/plain' })); await write; }
       else await navigator.clipboard.writeText(text);
       checkOwner();
+      if (kind === 'cut' && !editable()) return;
+      cellClipboard.capture(token, { owner, sheet, range, cells, cut: kind === 'cut' }, Boolean(write));
     });
-    if (kind === 'cut') {
-      const ticket = coordinator.clipboard(() => written, () => ({ kind: 'applyOps', payload: {
-        toolbar: { id: 'clear', args: null, target }, selection: target,
-      } }));
-      void ticket.result.catch((error) => { reject(error); report(error); });
-    } else void written.catch((error) => { reject(error); report(error); });
+    cellClipboard.pending = written.catch(() => {});
+    const completion = kind === 'cut' ? coordinator.runAfterPendingInput(() => written, true) : written;
+    void completion.catch((error) => { reject(error); report(error); });
   };
   const navigate = (sheet: number, next: Selection) => {
     if (!run?.ready || run.failure || draftController.isComposing('cell') || draftController.isComposing('formula')) return;
@@ -1144,7 +1162,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       selectedChart={selectedChart !== null} error={Boolean(error)} readOnly={Boolean(props.readOnly)} navigation={navigation}>
       <div ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
         onKeyDownCapture={(event) => {
-          if (!fromPlugin(event) && event.key === 'Escape') { setFormatToken(null); commands.refresh(); }
+          if (!fromPlugin(event) && event.key === 'Escape') { cellClipboard.cancelCut(); setFormatToken(null); commands.refresh(); }
         }}
         style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
           minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>

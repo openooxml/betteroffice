@@ -1599,12 +1599,20 @@ describe('XlsxEditor commands', () => {
     }
   });
 
-  function holdClipboardWrite() {
+  function holdClipboardWrite(marked = false) {
+    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    class Item {
+      constructor(readonly data: Record<string, Blob>) {}
+    }
+    if (marked) Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     const writes: { text: string; resolve: () => void }[] = [];
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: {
+        ...(marked ? { write: (items: Item[]) => new Promise<void>((resolve) => {
+          void items[0].data['text/plain'].text().then((text) => writes.push({ text, resolve }));
+        }) } : {}),
         writeText: (text: string) =>
           new Promise<void>((resolve) => writes.push({ text, resolve })),
       },
@@ -1612,14 +1620,18 @@ describe('XlsxEditor commands', () => {
     return {
       writes,
       restore: () => {
+        if (marked) {
+          if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+          else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+        }
         if (original) Object.defineProperty(navigator, 'clipboard', original);
         else Reflect.deleteProperty(navigator, 'clipboard');
       },
     };
   }
 
-  it('clears only the range and sheet a cut started on', async () => {
-    const clipboard = holdClipboardWrite();
+  it('keeps cut ranges intact when selection and sheets change', async () => {
+    const clipboard = holdClipboardWrite(true);
     try {
       const editor = await mountCommands();
       const api = editor.api();
@@ -1636,18 +1648,22 @@ describe('XlsxEditor commands', () => {
       await act(async () => {
         api.selectCells(0, selectionAt({ row: 3, col: 1 }));
       });
+      expect(api.handle.cell(0, 0, 0).input).toBe('Cut me');
+      expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
       await act(async () => clipboard.writes[0].resolve());
       expect(clipboard.writes[0].text).toBe('Cut me');
-      expect(api.handle.cell(0, 0, 0).input).toBe('');
+      expect(api.handle.cell(0, 0, 0).input).toBe('Cut me');
       expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
 
       fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
       await act(async () => {
         api.selectCells(1, selectionAt({ row: 0, col: 0 }));
       });
+      expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
+      expect(api.handle.cell(1, 0, 0).input).toBe('Other sheet');
       await act(async () => clipboard.writes[1].resolve());
       expect(clipboard.writes[1].text).toBe('Keep me');
-      expect(api.handle.cell(0, 3, 1).input).toBe('');
+      expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
       expect(api.handle.cell(1, 0, 0).input).toBe('Other sheet');
     } finally {
       clipboard.restore();
@@ -2617,7 +2633,7 @@ describe('XlsxEditor edit batches', () => {
     };
   }
 
-  it('clears the accepted cut target once the clipboard write settles', async () => {
+  it('keeps cut nonmutating when a later batch edit is queued', async () => {
     const clipboard = deferredClipboardWrite();
     try {
       const { view, api } = await mountApi();
@@ -2634,9 +2650,8 @@ describe('XlsxEditor edit batches', () => {
         clipboard.settle();
         return pending;
       });
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.failure.code).toBe('stale-version');
-      expect(api.handle.cell(0, 2, 1).input).toBe('');
+      expect(result.ok).toBe(true);
+      expect(api.handle.cell(0, 2, 1).input).toBe('batch');
       expect(api.handle.cell(0, 3, 1).input).toBe('200');
     } finally {
       clipboard.restore();
@@ -2958,3 +2973,63 @@ describe('clipboard access failure recovery', () => {
     } finally { navigator.clipboard.writeText = write; }
   });
 });
+
+function markedCellClipboard() {
+  const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  class Item {
+    constructor(readonly data: Record<string, Blob | Promise<Blob>>) {}
+  }
+  let current: Item;
+  Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+    write: async (items: Item[]) => { current = items[0]; },
+    readText: async () => (await current.data['text/plain']).text(),
+    read: async () => [{ types: ['text/plain', 'text/html'], getType: async (type: string) => current.data[type] }],
+  } });
+  return () => {
+    if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+  };
+}
+
+for (const outcome of ['refused', 'noop'] as const) {
+  it(`in-thread editor retains a cut after a ${outcome} move`, async () => {
+    const restore = markedCellClipboard();
+    let restoreMove = () => {};
+    try {
+      let api!: XlsxEditorApi;
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const before = api.handle.cell(0, 0, 0).input;
+      const moving = spyOn(api.handle, 'moveRange').mockImplementation(() => {
+        if (outcome === 'refused') throw new Error('Move refused');
+        return { applied: false, sheetInfo: api.handle.sheetInfo() };
+      });
+      restoreMove = () => moving.mockRestore();
+      const scroll = view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true });
+      await act(async () => { await api.flushPendingInput(); });
+      fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
+      await act(async () => {
+        await api.flushPendingInput().catch((error) => {
+          expect(outcome).toBe('refused');
+          expect(error).toMatchObject({ code: 'input-failed' });
+        });
+      });
+      expect(moving).toHaveBeenCalledTimes(1);
+      fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
+      await act(async () => {
+        await api.flushPendingInput().catch((error) => {
+          expect(outcome).toBe('refused');
+          expect(error).toMatchObject({ code: 'input-failed' });
+        });
+      });
+      expect(moving).toHaveBeenCalledTimes(2);
+      expect(api.handle.cell(0, 0, 0).input).toBe(before);
+    } finally { restoreMove(); restore(); }
+  });
+}

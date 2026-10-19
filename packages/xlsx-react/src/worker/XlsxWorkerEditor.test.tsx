@@ -2,7 +2,6 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { createAsyncCollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { Profiler, StrictMode } from 'react';
-import { flushSync } from 'react-dom';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
 import type { DisplayList, EditResult, WorkbookEditPeer, WorkbookHandle, WorkbookSession, XlsxEditRequest } from '@betteroffice/xlsx';
@@ -170,6 +169,7 @@ function harness(realFacade = false, normalizeInput = false) {
       return { ok: true, applied: true, baseVersion: 'v1', version: `v${version}`, source: 'host', receipts: [],
         changedSheets: [], calculation: { changed: [], cycleCells: [], limitedCells: [], truncated: false } };
     }),
+    moveRange: mock((_sheet: number, _source: string, _destination: string): EditResult => ({ applied: false, sheetInfo: info() })),
     setActiveSheet: mock((sheet: number) => { active = sheet; sequence += 1; log.push(`sheet:${sheet}`); }),
     moveChart: mock((_sheet: number, id: string, dx: number, dy: number) => {
       sequence += 1; log.push(`chart:${id}:${dx}:${dy}`); return result();
@@ -242,6 +242,7 @@ function harness(realFacade = false, normalizeInput = false) {
       if (op.method === 'applyEdits') return editMethods.applyEdits(op.args[0]);
       if (op.method === 'editCell') return editMethods.editCell(...op.args);
       if (op.method === 'editCells') return editMethods.editCells(...op.args);
+      if (op.method === 'moveRange') return editMethods.moveRange(...op.args);
       throw new Error('Unexpected mock operation');
     },
     applyRecoveryOp: (op) => {
@@ -274,7 +275,9 @@ function promisedClipboard(completion?: Promise<void>) {
   const payloads: Promise<Blob>[] = [];
   const writes: Promise<void>[] = [];
   const copied: string[] = [];
+  const itemsWritten: Item[] = [];
   const write = mock((items: Item[]) => {
+    itemsWritten.push(items[0]);
     const payload = items[0].data['text/plain'];
     payloads.push(payload);
     const writing = payload.then(async (blob) => {
@@ -293,7 +296,20 @@ function promisedClipboard(completion?: Promise<void>) {
     if (originalWrite) Object.defineProperty(navigator.clipboard, 'write', originalWrite);
     else Reflect.deleteProperty(navigator.clipboard, 'write');
   });
-  return { write, payloads, writes, copied };
+  return { write, payloads, writes, copied, itemsWritten };
+}
+
+function markedClipboard(completion?: Promise<void>) {
+  const clipboard = promisedClipboard(completion);
+  const latest = () => clipboard.itemsWritten[clipboard.itemsWritten.length - 1];
+  replaceClipboard('readText', mock(async () => (await latest().data['text/plain']).text()));
+  replaceClipboard('read', mock(async () => {
+    const item = latest();
+    return item ? [{ types: ['text/plain', 'text/html'],
+      getType: async (type: string) => item.data[type],
+    } as unknown as ClipboardItem] : [];
+  }));
+  return clipboard;
 }
 
 function textClipboard() {
@@ -513,7 +529,8 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     const { frame: _wireFrame, ...applied } = workerCommands ? applyWorkbookCommand(workbook, commandState, command) : {};
     const reading = command.kind === 'select' || command.kind === 'applyOps' && 'toolbar' in command.payload &&
       (command.payload.toolbar.id === 'paintFormat' || command.payload.toolbar.id === 'refreshProposals');
-    const status = { seq: command.seq, status: options.status ?? 'applied', committed: !reading,
+    const status = { seq: command.seq, status: options.status ?? 'applied',
+      committed: !reading && command.kind !== 'setActiveSheet' && (!options.status || options.status === 'applied'),
       ...(options.status === 'refused' ? { reason: 'invalid-step' } : {}),
       result: options.result ?? (command.kind === 'applyUpdate' ? { remoteUpdate: true, proposals: [] } : undefined) };
     if (status.status === 'applied' && command.kind === 'editCell') {
@@ -2521,17 +2538,30 @@ describe('peerless workbook worker editor', () => {
   it('large TSV paste submits through the editor without overflowing the argument stack', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
-    replaceClipboard('readText', mock(async () => Array.from({ length: 200_000 }, () => 'x').join('\n')));
+    replaceClipboard('readText', mock(async () => Array.from({ length: 100_000 }, () => 'x').join('\n')));
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
     await act(async () => {});
     const command = host.sent[0];
     expect(command).toMatchObject({ kind: 'editCells', payload: { selection: {
-      activeCell: { row: 199_999, col: 0 },
+      activeCell: { row: 99_999, col: 0 },
     } } });
     if (command.kind !== 'editCells') throw new Error('Expected pasted cells');
-    expect(command.payload.args[1]).toHaveLength(200_000);
-    expect(command.payload.args[1][199_999]).toEqual({ row: 199_999, col: 0, input: 'x' });
+    expect(command.payload.args[1]).toHaveLength(100_000);
+    expect(command.payload.args[1][99_999]).toEqual({ row: 99_999, col: 0, input: 'x' });
     expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+  });
+
+  it('refuses TSV paste above the cell limit without changing the source', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    replaceClipboard('readText', mock(async () => Array.from({ length: 100_001 }, () => 'x').join('\n')));
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('100000-cell limit');
+    expect(host.sent).toEqual([]);
+    expect([...host.cells]).toEqual([['0:0:0', 'initial']]);
+    expect(host.hydrate).not.toHaveBeenCalled();
+    expect(host.attach).not.toHaveBeenCalled();
   });
 
   it('read-only proposal panel loads proposals through a worker read command', async () => {
@@ -2911,6 +2941,96 @@ describe('peerless workbook worker editor', () => {
     expect(painted[painted.length - 1]?.commands.some((cmd) => cmd.op === 'text' && (cmd.text === 'a' || cmd.text === 'b'))).toBe(false);
   });
 
+  it('paste turns a deferred cut into one moveRange command', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true });
+    await act(async () => { await clipboard.writes[0]; });
+    expect(host.sent).toEqual([]);
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    fireEvent.keyDown(scroll, { key: 'ArrowDown' });
+    await act(async () => {});
+    await act(async () => host.ack(host.sent[0]));
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent.map((command) => command.kind)).toEqual(['select', 'moveRange']);
+    expect(host.sent[1]).toMatchObject({ kind: 'moveRange', payload: { args: [0, 'A1:A1', 'A2'] } });
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  for (const status of ['refused', 'noop'] as const) {
+    it(`keeps a pending cut available after a ${status} move`, async () => {
+      const host = peerlessHarness();
+      const clipboard = markedClipboard();
+      const view = await mountPeerlessClipboard(host);
+      const scroll = view.getByTestId('xlsx-scroll');
+      await act(async () => fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true }));
+      await act(async () => { await clipboard.writes[0]; });
+      fireEvent.keyDown(scroll, { key: 'ArrowDown' });
+      await act(async () => {});
+      await act(async () => host.ack(host.sent[0]));
+      await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+      expect(host.sent[1].kind).toBe('moveRange');
+      await act(async () => host.ack(host.sent[1], { status }));
+      await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+      expect(host.sent[2].kind).toBe('moveRange');
+      expect(host.cells.get('0:0:0')).toBe('initial');
+    });
+  }
+
+  it('disarms a cross-sheet cut before allowing a later same-sheet paste', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true }));
+    await act(async () => { await clipboard.writes[0]; });
+    fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+    await act(async () => {});
+    await act(async () => host.ack(host.sent[0]));
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent.map((command) => command.kind)).toEqual(['setActiveSheet']);
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/between worksheets/i);
+    fireEvent.click(view.getByRole('tab', { name: 'First' }));
+    await act(async () => {});
+    await act(async () => host.ack(host.sent[1]));
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent[2].kind).toBe('editCells');
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  it('pastes identical external text without moving a marked cut when HTML is unreadable', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true }));
+    await act(async () => { await clipboard.writes[0]; });
+    replaceClipboard('read', undefined);
+    fireEvent.keyDown(scroll, { key: 'ArrowDown' });
+    await act(async () => {});
+    await act(async () => host.ack(host.sent[0]));
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent[1]).toMatchObject({ kind: 'editCells', payload: { args: [0, [{ row: 1, col: 0, input: 'initial' }]] } });
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  it('refuses rebased paste of an array snapshot before submitting a mutation', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    const cell = { a1: 'A1', input: '=SEQUENCE(2)', isFormula: true, isArrayFormula: true };
+    host.cellInputs.mockResolvedValueOnce({ sheet: 0, version: 'v1', cells: [[cell]] });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'c', ctrlKey: true }));
+    await act(async () => { await clipboard.writes[0]; });
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent).toEqual([]);
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/array or spill/i);
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
   for (const outcome of ['success', 'refusal'] as const) {
     it(`cut waits for clipboard write ${outcome}`, async () => {
       const host = peerlessHarness();
@@ -2929,83 +3049,35 @@ describe('peerless workbook worker editor', () => {
         if (outcome === 'success') writing.resolve();
         else writing.reject(new Error('Clipboard denied'));
       });
-      if (outcome === 'success') expect(host.sent[0]).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'clear' } } });
-      else {
-        expect(host.sent).toEqual([]);
-        expect(host.cells.get('0:0:0')).toBe('initial');
-      }
+      expect(host.sent).toEqual([]);
+      expect(host.cells.get('0:0:0')).toBe('initial');
     });
   }
 
-  for (const outcome of ['success', 'refusal'] as const) {
-    it(`cut without ClipboardItem preserves its target after writeText ${outcome}`, async () => {
-      const host = peerlessHarness();
-      const clipboard = textClipboard();
-      const view = await mountPeerlessClipboard(host);
-      const scroll = view.getByTestId('xlsx-scroll');
-      const reading = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
-      host.cellInputs.mockReturnValueOnce(reading.promise);
-      fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true });
-      await act(async () => {});
-      expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-      expect(clipboard.writeText).not.toHaveBeenCalled();
-      expect(host.sent).toEqual([]);
-      await act(async () => reading.resolve({ sheet: 0, version: 'v1', cells: [
-        [{ a1: 'A1', input: 'original\tvalue', isFormula: false }],
-      ] }));
-      expect(clipboard.writeText).toHaveBeenCalledTimes(1);
-      expect(clipboard.writeText).toHaveBeenCalledWith('"original\tvalue"');
-      expect(clipboard.write).not.toHaveBeenCalled();
-      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
-      expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
-      await act(async () => fireEvent.keyDown(scroll, { key: 'n' }));
-      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
-      await act(async () => {});
-      expect(host.sent).toEqual([]);
-      await act(async () => {
-        if (outcome === 'success') clipboard.writing.resolve();
-        else clipboard.writing.reject(new DOMException('Clipboard denied', 'NotAllowedError'));
-      });
-      const clears = host.sent.filter((command) => command.kind === 'applyOps');
-      const edit = host.sent.find((command) => command.kind === 'editCell')!;
-      if (outcome === 'success') {
-        expect(clears).toHaveLength(1);
-        const target = { sheetId: 'sheet:0', range: {
-          kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 },
-        } };
-        expect(clears[0]).toMatchObject({ payload: { toolbar: { id: 'clear', target }, selection: target } });
-        expect(host.sent[0]).toBe(clears[0]);
-        expect(host.sent.map((command) => command.kind)).toEqual(['applyOps', 'select', 'editCell']);
-        const select = host.sent.find((command) => command.kind === 'select')!;
-        expect(select.seq).toBeGreaterThan(clears[0].seq);
-        expect(edit.seq).toBeGreaterThan(select.seq);
-      } else {
-        expect(clears).toEqual([]);
-        expect(host.sent.map((command) => command.kind)).toEqual(['editCell']);
-        expect(host.cells.get('0:0:0')).toBe('initial');
-        expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard denied/i);
-        expect(view.queryByTestId('xlsx-error')).toBeNull();
-      }
-      expect(edit).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 1, 'n'] } });
-      await act(async () => { for (const command of host.sent.slice()) host.ack(command); });
-      expect(host.cells.get('0:0:1')).toBe('n');
-      await act(async () => fireEvent.keyDown(scroll, { key: 'r' }));
-      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
-      await act(async () => {});
-      const next = host.sent[host.sent.length - 1]!;
-      expect(next).toMatchObject({ kind: 'editCell', payload: { args: [0, 1, 1, 'r'] } });
-      await act(async () => host.ack(next));
-      expect(host.cells.get('0:1:1')).toBe('r');
-      expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-      expect(host.sent.filter((command) => command.kind === 'applyOps')).toHaveLength(outcome === 'success' ? 1 : 0);
-      expect(host.hydrate).not.toHaveBeenCalled();
-      expect(host.attach).not.toHaveBeenCalled();
-    });
-  }
-
-  it('cut behind a pending paste leaves newer input after the clear', async () => {
-    const host = peerlessHarness(false, true);
+  it('refuses text-only cut before reading input and pastes identical external text without moving', async () => {
+    const host = peerlessHarness();
     const clipboard = textClipboard();
+    replaceClipboard('read', undefined);
+    replaceClipboard('readText', mock(async () => 'initial'));
+    const view = await mountPeerlessClipboard(host);
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true }));
+    expect(clipboardReads(host)).toEqual([]);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard write access/i);
+    fireEvent.keyDown(scroll, { key: 'ArrowDown' });
+    await act(async () => {});
+    await act(async () => host.ack(host.sent[0]));
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent[1]).toMatchObject({ kind: 'editCells', payload: { args: [0, [{ row: 1, col: 0, input: 'initial' }]] } });
+    expect(host.sent.some((command) => command.kind === 'moveRange')).toBe(false);
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  it('cut behind a pending paste preserves source until a later edit', async () => {
+    const host = peerlessHarness(false, true);
+    const writing = deferred<void>();
+    const clipboard = markedClipboard(writing.promise);
     const pasting = deferred<string>();
     replaceClipboard('readText', mock(() => pasting.promise));
     const view = await mountPeerlessClipboard(host);
@@ -3019,30 +3091,23 @@ describe('peerless workbook worker editor', () => {
     expect(clipboardReads(host)).toEqual([]);
     await act(async () => pasting.resolve('pasted'));
     expect(host.sent.map((command) => command.kind)).toEqual(['editCells', 'editCell']);
-    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(clipboard.copied).toEqual([]);
     await act(async () => host.ack(host.sent[0]));
     expect(host.sent[1]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'before'] } });
     await act(async () => host.ack(host.sent[1]));
     expect(host.sent.map((command) => command.kind)).toEqual(['editCells', 'editCell']);
-    expect(clipboard.writeText).toHaveBeenCalledWith('before');
+    expect(clipboard.copied).toEqual(['before']);
     expect((formula as HTMLInputElement).value).toBe('after');
     fireEvent.keyDown(formula, { key: 'Enter' });
     expect(host.sent).toHaveLength(2);
-    await act(async () => clipboard.writing.resolve());
-    expect(host.sent.map((command) => command.kind)).toEqual(['editCells', 'editCell', 'applyOps', 'editCell']);
-    const target = { sheetId: 'sheet:0', range: {
-      kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 },
-    } };
-    expect(host.sent[2]).toMatchObject({ payload: { toolbar: { id: 'clear', target }, selection: target } });
-    expect(host.sent[3]).toMatchObject({ payload: { args: [0, 0, 0, 'after'] } });
-    expect(host.sent[3].seq).toBeGreaterThan(host.sent[2].seq);
+    await act(async () => writing.resolve());
+    expect(host.sent.map((command) => command.kind)).toEqual(['editCells', 'editCell', 'editCell']);
+    expect(host.sent[2]).toMatchObject({ payload: { args: [0, 0, 0, 'after'] } });
+    expect(host.cells.get('0:0:0')).toBe('before');
     await act(async () => host.ack(host.sent[2]));
-    expect(host.cells.get('0:0:0')).toBe('');
-    await act(async () => host.ack(host.sent[3]));
     expect(host.cells.get('0:0:0')).toBe('after');
     expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
-    expect(clipboard.write).not.toHaveBeenCalled();
+    expect(clipboard.write).toHaveBeenCalledTimes(1);
     expect(host.hydrate).not.toHaveBeenCalled();
     expect(host.attach).not.toHaveBeenCalled();
   });
@@ -3124,7 +3189,7 @@ describe('peerless workbook worker editor', () => {
     const formula = view.getByTestId('xlsx-formula-input');
     fireEvent.change(formula, { target: { value: 'draft' } });
     await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }));
-    expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('The cell entry before this could not be saved.');
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard write access/i);
     expect(view.queryByTestId('xlsx-error')).toBeNull();
     expect(clipboardReads(host)).toEqual([]);
     expect(clipboard.write).not.toHaveBeenCalled();
@@ -3134,96 +3199,6 @@ describe('peerless workbook worker editor', () => {
     expect(host.hydrate).not.toHaveBeenCalled();
     expect(host.attach).not.toHaveBeenCalled();
   });
-
-  for (const ending of ['replacement', 'failure'] as const) {
-    it(`cut without ClipboardItem never writes after ${ending} at read fulfillment`, async () => {
-      const host = peerlessHarness();
-      const clipboard = textClipboard();
-      const fulfilled = deferred<void>();
-      const create = peerlessInput.createPeerlessWorkerInputCoordinator;
-      let onRead: (() => void) | undefined;
-      const observed = spyOn(peerlessInput, 'createPeerlessWorkerInputCoordinator').mockImplementation((hooks) => {
-        const input = create(hooks);
-        const runAfterPendingInput = input.runAfterPendingInput;
-        input.runAfterPendingInput = (operation, fence) => {
-          const notify = onRead;
-          onRead = undefined;
-          const result = runAfterPendingInput(operation, fence);
-          if (notify) void result.then(() => { notify(); fulfilled.resolve(); }).catch(fulfilled.reject);
-          return result;
-        };
-        return input;
-      });
-      restorers.push(() => observed.mockRestore());
-      const view = await mountPeerlessClipboard(host);
-      const reading = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
-      host.cellInputs.mockReturnValueOnce(reading.promise);
-      onRead = () => {
-        expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-        expect(clipboard.writeText).not.toHaveBeenCalled();
-        if (ending === 'replacement') flushSync(() => view.rerender(host.asyncEditor({ file: file.slice() })));
-        else host.fail(new SessionFailure('crash', 'Worker stopped'));
-      };
-      await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }));
-      expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-      await act(async () => {
-        reading.resolve({ sheet: 0, version: 'v1', cells: [
-          [{ a1: 'A1', input: 'initial', isFormula: false }],
-        ] });
-        await fulfilled.promise;
-      });
-      expect(clipboard.writeText).not.toHaveBeenCalled();
-      expect(clipboard.write).not.toHaveBeenCalled();
-      expect(host.sent).toEqual([]);
-      expect(host.cells.get('0:0:0')).toBe('initial');
-      expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-      expect(host.hydrate).not.toHaveBeenCalled();
-      expect(host.attach).not.toHaveBeenCalled();
-    });
-
-    it(`cut without ClipboardItem never writes after ${ending} during its read`, async () => {
-      const host = peerlessHarness();
-      const clipboard = textClipboard();
-      const view = await mountPeerlessClipboard(host);
-      const reading = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
-      host.cellInputs.mockReturnValueOnce(reading.promise);
-      await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }));
-      expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-      expect(clipboard.writeText).not.toHaveBeenCalled();
-      await act(async () => {
-        if (ending === 'replacement') view.rerender(host.asyncEditor({ file: file.slice() }));
-        else host.fail(new SessionFailure('crash', 'Worker stopped'));
-      });
-      await act(async () => reading.resolve({ sheet: 0, version: 'v1', cells: [
-        [{ a1: 'A1', input: 'initial', isFormula: false }],
-      ] }));
-      expect(clipboard.writeText).not.toHaveBeenCalled();
-      expect(clipboard.write).not.toHaveBeenCalled();
-      expect(host.sent).toEqual([]);
-      expect(host.cells.get('0:0:0')).toBe('initial');
-      expect(clipboardReads(host)).toEqual([[0, 'A1:A1']]);
-      expect(host.hydrate).not.toHaveBeenCalled();
-      expect(host.attach).not.toHaveBeenCalled();
-    });
-
-    it(`cut without ClipboardItem never clears after ${ending}`, async () => {
-      const host = peerlessHarness();
-      const clipboard = textClipboard();
-      const view = await mountPeerlessClipboard(host);
-      await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }));
-      expect(clipboard.writeText).toHaveBeenCalledWith('initial');
-      expect(host.sent).toEqual([]);
-      await act(async () => {
-        if (ending === 'replacement') view.rerender(host.asyncEditor({ file: file.slice() }));
-        else host.fail(new SessionFailure('crash', 'Worker stopped'));
-      });
-      await act(async () => clipboard.writing.resolve());
-      expect(host.sent).toEqual([]);
-      expect(host.cells.get('0:0:0')).toBe('initial');
-      expect(host.hydrate).not.toHaveBeenCalled();
-      expect(host.attach).not.toHaveBeenCalled();
-    });
-  }
 
   it('clear sends one compact operation for the entire selected range', async () => {
     const host = peerlessHarness();
@@ -3789,17 +3764,18 @@ describe('workbook worker editor', () => {
   });
 
   for (const kind of ['paste', 'cut'] as const) {
-    it(`applies ${kind} awaiting clipboard completion across a readOnly flip`, async () => {
+    it(`completes accepted ${kind} across a readOnly flip`, async () => {
       const host = harness();
       host.editMethods.save.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...host.cells])).buffer);
       let api!: XlsxWorkerEditorApi;
       const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
       const completion = deferred<void>();
       const reading = deferred<string>();
+      const clipboard = kind === 'cut' ? promisedClipboard(completion.promise) : null;
       if (kind === 'paste') {
         const read = spyOn(navigator.clipboard, 'readText').mockReturnValue(reading.promise);
         restorers.push(() => read.mockRestore());
-      } else promisedClipboard().write.mockReturnValue(completion.promise);
+      }
       const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} onReady={onReady} />);
       await opened();
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: kind === 'paste' ? 'v' : 'x', ctrlKey: true });
@@ -3809,7 +3785,7 @@ describe('workbook worker editor', () => {
       act(() => { void api.saveAsync().then((bytes) => { saved = bytes; }); });
       await act(async () => { reading.resolve('pasted'); completion.resolve(); });
       await advance();
-      const input = kind === 'paste' ? 'pasted' : '';
+      const input = kind === 'paste' ? 'pasted' : 'initial';
       expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
       expect(await api.cellAsync(0, 0, 0)).toMatchObject({ input });
       expect(painted.some((frame) => frame.commands.some((command) => command.op === 'text' && command.text === `worker:${input}`))).toBe(true);
@@ -3817,7 +3793,12 @@ describe('workbook worker editor', () => {
       await expect(api.editCellAsync(0, 0, 0, 'later')).rejects.toThrow('read-only');
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: kind === 'paste' ? 'v' : 'x', ctrlKey: true });
       await advance();
-      expect(host.editMethods.editCells).toHaveBeenCalledTimes(1);
+      expect(host.editMethods.editCells).toHaveBeenCalledTimes(kind === 'paste' ? 1 : 0);
+      expect(host.editMethods.moveRange).not.toHaveBeenCalled();
+      if (clipboard) {
+        expect(clipboard.copied).toEqual(['initial']);
+        expect(clipboard.write).toHaveBeenCalledTimes(1);
+      }
     });
   }
 
@@ -4545,7 +4526,7 @@ describe('workbook worker editor', () => {
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
   });
 
-  it('admits cut in the gesture and copies the preceding accepted value before clearing it', async () => {
+  it('admits cut in the gesture and copies the preceding accepted value without clearing it', async () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
@@ -4580,11 +4561,12 @@ describe('workbook worker editor', () => {
     await act(async () => hydration.resolve(host.peer));
     await advance(12);
     expect<unknown>(copied).toBe('accepted');
-    expect(host.cells.get('0:0:0')).toBe('');
+    expect(host.cells.get('0:0:0')).toBe('accepted');
     expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'accepted']]);
-    expect(host.editMethods.editCells.mock.calls).toEqual([[0, [{ row: 0, col: 0, input: '' }]]]);
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.editMethods.moveRange).not.toHaveBeenCalled();
     expect(host.log.indexOf('edit:0:0:0:accepted')).toBeLessThan(host.log.indexOf('clipboard:accepted'));
-    expect(host.log.indexOf('clipboard:accepted')).toBeLessThan(host.log.indexOf('edit:0:0:0:'));
+    expect(host.log).not.toContain('edit:0:0:0:');
   });
 
   it('keeps a later live draft open when an earlier accepted commit publishes', async () => {
@@ -4624,11 +4606,16 @@ describe('workbook worker editor', () => {
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
   });
 
-  it('drains an accepted cut payload and mutation before the replaced document is disposed', async () => {
+  it('drains an accepted cut payload without mutation before the replaced document is disposed', async () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
     const clipboard = promisedClipboard();
+    const write = clipboard.write.getMockImplementation()!;
+    clipboard.write.mockImplementation(async (items) => {
+      await write(items);
+      host.log.push('clipboard:initial');
+    });
     const errors = mock((_error: Error) => {});
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} onError={errors} />);
     await opened();
@@ -4643,11 +4630,12 @@ describe('workbook worker editor', () => {
     expect(await (await clipboard.payloads[0]).text()).toBe('initial');
     await clipboard.writes[0];
     expect(clipboard.copied).toEqual(['initial']);
-    expect(host.editMethods.editCells.mock.calls).toEqual([[0, [{ row: 0, col: 0, input: '' }]]]);
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
     await waitFor(() => expect(host.session.dispose).toHaveBeenCalledTimes(1));
-    expect(host.log.indexOf('batch')).toBeLessThan(host.log.indexOf('dispose:facade'));
-    expect(host.editMethods.editCells).toHaveBeenCalledTimes(1);
-    expect(host.cells.get('0:0:0')).toBe('');
+    expect(host.log.indexOf('clipboard:initial')).toBeLessThan(host.log.indexOf('dispose:facade'));
+    expect(clipboard.write).toHaveBeenCalledTimes(1);
+    expect(host.editMethods.moveRange).not.toHaveBeenCalled();
+    expect(host.cells.get('0:0:0')).toBe('initial');
     expect(errors).not.toHaveBeenCalled();
   });
 
@@ -5329,7 +5317,7 @@ function reviewBatch(value: string, version = 'v1'): XlsxEditRequest {
     inputs: [[value]], expect: { cells: [[{ displayText: 'initial' }]] } }] };
 }
 
-function replaceClipboard(name: 'write' | 'writeText' | 'readText', value: unknown) {
+function replaceClipboard(name: 'write' | 'writeText' | 'readText' | 'read', value: unknown) {
   const original = Object.getOwnPropertyDescriptor(navigator.clipboard, name);
   Object.defineProperty(navigator.clipboard, name, { configurable: true, value });
   restorers.push(() => {
@@ -5388,7 +5376,7 @@ it('drains a buffered chart nudge before its timer expires on disposal', async (
   expect(host.log.indexOf('chart:chart:1:0')).toBeLessThan(host.log.indexOf('dispose:facade'));
 });
 
-it('cancels the original pending cut before replaying it during recovery', async () => {
+it('recovers a pending cut without clearing its source or duplicating later edits', async () => {
   const host = harness(true);
   const clipboard = promisedClipboard();
   const completion = deferred<void>();
@@ -5409,11 +5397,14 @@ it('cancels the original pending cut before replaying it during recovery', async
   act(() => { recovered = api.recoverySave(); });
   await act(async () => completion.resolve());
   const saved = await recovered;
-  expect(host.peerMethods.editCells).toHaveBeenCalledTimes(1);
-  expect(host.peerMethods.editCells.mock.calls).toEqual([[0, [{ row: 0, col: 0, input: '' }]]]);
+  expect(clipboard.write).toHaveBeenCalledTimes(1);
+  expect(await (await clipboard.payloads[0]).text()).toBe('initial');
+  expect(host.peerMethods.editCells).not.toHaveBeenCalled();
+  expect(host.editMethods.editCells).not.toHaveBeenCalled();
+  expect(host.editMethods.moveRange).not.toHaveBeenCalled();
   expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 1, 'newer']]);
-  expect(host.peerMethods.setCalculationContext).toHaveBeenCalledTimes(2);
-  expect(JSON.parse(new TextDecoder().decode(saved.bytes))).toEqual([['0:0:0', ''], ['0:0:1', 'newer']]);
+  expect(host.peerMethods.setCalculationContext).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(new TextDecoder().decode(saved.bytes))).toEqual([['0:0:0', 'initial'], ['0:0:1', 'newer']]);
 });
 
 for (const mode of ['unsupported-cut', 'construct-cut', 'throw-cut', 'deny-cut', 'deny-copy'] as const) {
@@ -5723,16 +5714,18 @@ it('recovers on the first attempt with a pending failed flush', async () => {
 });
 
 for (const route of ['paste', 'cut', 'delete', 'host', 'bulk', 'formula-save', 'formula-navigation'] as const) {
-  it(`paints every accepted pre-hydration cell edit before hydration resolves (${route})`, async () => {
+  it(route === 'cut' ? 'keeps a pre-hydration cut source visible until paste' :
+    `paints every accepted pre-hydration cell edit before hydration resolves (${route})`, async () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
     replaceClipboard('readText', mock(async () => 'pasted'));
+    const clipboard = route === 'cut' ? promisedClipboard() : null;
     let api!: XlsxWorkerEditorApi;
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     let accepted: Promise<unknown> | undefined;
-    if (route === 'cut') { promisedClipboard(); fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }); }
+    if (route === 'cut') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
     else if (route === 'paste') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
     else if (route === 'delete') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'Delete' });
     else if (route === 'host') act(() => { accepted = api.editCellAsync(0, 0, 0, 'host'); });
@@ -5742,10 +5735,18 @@ for (const route of ['paste', 'cut', 'delete', 'host', 'bulk', 'formula-save', '
       act(() => { accepted = route === 'formula-save' ? api.save() : api.selectCellsAsync(1, xlsx.selectionAt({ row: 0, col: 0 })); });
     }
     await advance();
-    const expected = route === 'delete' || route === 'cut' ? '' : route === 'paste' ? 'pasted' : route === 'host' ? 'host' : route === 'bulk' ? 'plugin' : '=24';
-    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(expected);
-    expect(host.preview).toHaveBeenCalled();
-    expect(painted.some((list) => list.commands.some((cmd) => cmd.op === 'text' && cmd.text === `preview:${expected}`))).toBe(true);
+    const expected = route === 'cut' ? 'initial' : route === 'delete' ? '' : route === 'paste' ? 'pasted' : route === 'host' ? 'host' : route === 'bulk' ? 'plugin' : '=24';
+    if (route === 'cut') {
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(host.preview).not.toHaveBeenCalled();
+      expect(clipboard!.copied).toEqual([]);
+      expect(host.cells.get('0:0:0')).toBe('initial');
+      expect(painted[painted.length - 1].commands.some((cmd) => cmd.op === 'text' && cmd.text === 'worker:initial')).toBe(true);
+    } else {
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(expected);
+      expect(host.preview).toHaveBeenCalled();
+      expect(painted.some((list) => list.commands.some((cmd) => cmd.op === 'text' && cmd.text === `preview:${expected}`))).toBe(true);
+    }
     expect(api.hydrated).toBe(false);
     expect(host.editMethods.editCell).not.toHaveBeenCalled();
     expect(host.editMethods.editCells).not.toHaveBeenCalled();
@@ -5753,6 +5754,13 @@ for (const route of ['paste', 'cut', 'delete', 'host', 'bulk', 'formula-save', '
     await advance();
     await accepted;
     expect(host.cells.get('0:0:0')).toBe(expected);
+    if (clipboard) {
+      expect(clipboard.copied).toEqual(['initial']);
+      expect(clipboard.write).toHaveBeenCalledTimes(1);
+      expect(host.editMethods.editCells).not.toHaveBeenCalled();
+      expect(host.editMethods.moveRange).not.toHaveBeenCalled();
+      expect(host.replay).not.toHaveBeenCalled();
+    }
   });
 }
 
@@ -7001,7 +7009,7 @@ it('retires a held preview after scroll and zoom change when the covering worker
   expect(painted[painted.length - 1].commands.some((cmd) => cmd.op === 'text' && cmd.text === 'worker:new viewport')).toBe(true);
 });
 
-it('restores a pre-hydration cut preview when clipboard writing is refused', async () => {
+it('preserves a pre-hydration cut source when clipboard writing is refused', async () => {
   const host = harness();
   const hydration = deferred<WorkbookHandle>();
   host.hydrate.mockReturnValue(hydration.promise);
@@ -7012,11 +7020,14 @@ it('restores a pre-hydration cut preview when clipboard writing is refused', asy
   await opened();
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
   await advance();
-  expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+  expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+  expect(host.preview).not.toHaveBeenCalled();
   expect(host.cells.get('0:0:0')).toBe('initial');
   await act(async () => writing.reject(new DOMException('Clipboard denied', 'NotAllowedError')));
   await advance();
   expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard denied/i);
+  expect(host.cells.get('0:0:0')).toBe('initial');
   expect(host.editMethods.editCells).not.toHaveBeenCalled();
   await act(async () => hydration.resolve(host.peer));
   await advance();
@@ -7024,7 +7035,9 @@ it('restores a pre-hydration cut preview when clipboard writing is refused', asy
   expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard denied/i);
   expect(host.cells.get('0:0:0')).toBe('initial');
   expect(host.editMethods.editCells).not.toHaveBeenCalled();
+  expect(host.editMethods.moveRange).not.toHaveBeenCalled();
   expect(host.replay).not.toHaveBeenCalled();
+  expect(host.preview).not.toHaveBeenCalled();
   expect(host.peerMethods.displayList).not.toHaveBeenCalled();
 });
 
@@ -7326,5 +7339,76 @@ describe('remote proposal freshness', () => {
       expect(host.hydrate).not.toHaveBeenCalled();
       expect(host.attach).not.toHaveBeenCalled();
     });
+  }
+});
+
+for (const outcome of ['refused', 'noop'] as const) {
+  it(`legacy worker keeps its cut after a ${outcome} move`, async () => {
+    const host = harness();
+    const clipboard = markedClipboard();
+    if (outcome === 'refused') host.editMethods.moveRange.mockImplementation(() => { throw new RangeError('Move refused'); });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true }));
+    await advance();
+    await act(async () => { await clipboard.writes[0]; });
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    await advance();
+    expect(host.editMethods.moveRange).toHaveBeenCalledTimes(1);
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    await advance();
+    expect(host.editMethods.moveRange).toHaveBeenCalledTimes(2);
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+}
+
+it('rechecks a prepared cut after an earlier queued source edit cancels it', async () => {
+  const host = harness(true);
+  const navigation = spyOn(host.peer, 'setActiveSheet').mockImplementation(() => {});
+  restorers.push(() => navigation.mockRestore());
+  const clipboard = markedClipboard();
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true });
+  await advance();
+  await clipboard.writes[0];
+  expect(clipboard.copied).toEqual(['initial']);
+  await act(async () => { await api.selectCellsAsync(0, xlsx.selectionAt({ row: 0, col: 1 })); });
+  const writes = deferred<void>();
+  const flush = spyOn(host.attached!, 'flush').mockReturnValue(writes.promise);
+  restorers.push(() => flush.mockRestore());
+  let blocked!: Promise<void>;
+  let editing!: Promise<EditResult | null>;
+  try {
+    act(() => { blocked = api.flush(); });
+    await act(async () => {});
+    expect(flush).toHaveBeenCalledTimes(1);
+    act(() => { editing = api.editCellAsync(0, 0, 0, 'edited'); });
+    fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(host.peerMethods.editCell).not.toHaveBeenCalled();
+    expect(host.peerMethods.editCells).not.toHaveBeenCalled();
+    await act(async () => writes.resolve());
+    await advance();
+    await blocked;
+    await editing;
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'edited']]);
+    expect(host.peerMethods.editCells.mock.calls).toEqual([[0, [{ row: 0, col: 1, input: 'initial' }]]]);
+    expect(host.cells.get('0:0:0')).toBe('edited');
+    expect(host.cells.get('0:0:1')).toBe('initial');
+    expect(clipboard.write).toHaveBeenCalledTimes(1);
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+    expect(api.failure).toBeNull();
+  } finally {
+    await act(async () => writes.resolve());
+    await advance();
+    await blocked;
+    await editing;
   }
 });

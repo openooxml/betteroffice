@@ -15,7 +15,6 @@ import {
   cellRect,
   chartRegionAtPoint,
   extendTo,
-  fromTsv,
   hyperlinkAtCell,
   initWasm,
   isPngExportAvailable,
@@ -64,6 +63,7 @@ import type {
   CollaborationReplica,
 } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
+import { CellClipboard, clipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
 import { LocaleProvider, useTranslation } from './i18n';
 import {
   createXlsxCommandController,
@@ -702,6 +702,7 @@ function XlsxEditorContent({
   // current model — either would answer for pixels that are not on screen.
   const paintedRef = useRef<{ frame: DisplayList; zoom: number; sheet: number; handle: WorkbookHandle | null } | null>(null);
   const rafRef = useRef<number | null>(null);
+  const [cellClipboard] = useState(() => new CellClipboard());
   const rootRef = useRef<HTMLDivElement>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
   const formulaInputRef = useRef<HTMLInputElement>(null);
@@ -1145,6 +1146,7 @@ function XlsxEditorContent({
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate(() => {
             if (disposed || !handle) return;
+            cellClipboard.changed();
             mutationRef.current += 1;
             try {
               setSheetInfo(handle.sheetInfo());
@@ -1478,13 +1480,14 @@ function XlsxEditorContent({
   // pending proposals because structural ops and undo/redo can drop them.
   const applyResult = useCallback(
     (result: EditResult) => {
+      if (result.applied) cellClipboard.changed();
       mutationRef.current += 1;
       setSheetInfo(result.sheetInfo);
       setRevision((r) => r + 1);
       refreshProposals();
       if (result.applied) onChangeRef.current?.();
     },
-    [refreshProposals]
+    [refreshProposals, cellClipboard]
   );
 
   // before a command runs, an arrow burst lands and a composition ends.
@@ -1812,79 +1815,86 @@ function XlsxEditorContent({
     if (target && !readOnly) void coordinator.input(() => writeClear(target));
   }, [captureTarget, writeClear, readOnly, coordinator]);
 
-  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget) => {
+  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget, cut = false) => {
+    const token = cellClipboard.begin();
     try {
       const from = handle.cell(sheet, range.top, range.left).a1;
       const to = handle.cell(sheet, range.bottom, range.right).a1;
       const cells = handle.rangeCells(sheet, `${from}:${to}`);
-      const tsv = toTsv(
-        cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
-      );
-      await navigator.clipboard.writeText(tsv);
-      return true;
-    } catch {
-      // clipboard denied or read failed — nothing to paste, leave state as-is.
-      return false;
+      if (cut) cellClipboard.watch(token);
+      const marked = typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function';
+      if (cut && !marked) throw new Error('Cut requires clipboard write access');
+      if (marked) await navigator.clipboard.write([new ClipboardItem({
+        'text/plain': new Blob([toTsv(cells)], { type: 'text/plain' }), 'text/html': clipboardMarker(token, toTsv(cells)),
+      })]);
+      else await navigator.clipboard.writeText(toTsv(cells));
+      if (handleRef.current === handle && (!cut || !readOnlyRef.current)) {
+        cellClipboard.capture(token, { owner: handle, sheet, range, cells, cut }, marked);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [cellClipboard]);
 
-  const copySelection = useCallback(async () => {
+  const copySelection = useCallback(() => {
     const target = captureTarget();
-    if (target) await copyTarget(target);
-  }, [captureTarget, copyTarget]);
+    if (target) void coordinator.input(() => copyTarget(target));
+  }, [captureTarget, copyTarget, coordinator]);
 
-  // the cut copies at once and takes its place in input order: it clears what was selected
-  // when it was accepted, once the clipboard write settles, and only while that workbook is
-  // still open and writable.
   const cutSelection = useCallback(() => {
     const target = captureTarget();
-    if (!target) return;
-    const copied = copyTarget(target);
-    if (readOnly) return;
-    void coordinator.input(async () => ((await copied) ? writeClear(target) : undefined));
-  }, [captureTarget, copyTarget, writeClear, readOnly, coordinator]);
+    if (target && !readOnly) void coordinator.input(() => copyTarget(target, true));
+  }, [captureTarget, copyTarget, readOnly, coordinator]);
 
-  // the clipboard is read while the key press still grants access; the write
-  // takes its place in input order.
   const pasteSelection = useCallback(() => {
     const handle = handleRef.current;
     const selection = selectionRef.current;
     if (!handle || !selection || readOnly) return Promise.resolve();
     const reading = (async () => {
       try {
-        return await navigator.clipboard.readText();
-      } catch {
+        return await readCellClipboard();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
         return null;
       }
     })();
     const sheet = activeSheetRef.current;
     const r = normalizeRange(selection);
     return coordinator.input(async () => {
-      const text = await reading;
-      if (text === null || readOnlyRef.current || handleRef.current !== handle) return;
-      const grid = fromTsv(text);
-      if (grid.length === 0) return;
-      const edits: CellInputEdit[] = [];
-      let width = 1;
-      grid.forEach((rowArr, dr) => {
-        width = Math.max(width, rowArr.length);
-        rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
-      });
+      const data = await reading;
+      if (data === null || readOnlyRef.current || handleRef.current !== handle) return;
       try {
-        applyResult(handle.editCells(sheet, edits));
+        const { text, html } = data;
+        const pasted = cellClipboard.paste(handle, text, r, html, sheet);
+        const grid = pasted ? [] : parseCellClipboardText(text);
+        if (!pasted && grid.length === 0) return;
+        const edits: CellInputEdit[] = pasted?.edits ?? [];
+        let width = 1;
+        if (!pasted) grid.forEach((rowArr, dr) => {
+          width = Math.max(width, rowArr.length);
+          rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
+        });
+        if (pasted?.cut) {
+          const from = handle.cell(sheet, pasted.range.top, pasted.range.left).a1;
+          const to = handle.cell(sheet, pasted.range.bottom, pasted.range.right).a1;
+          const destination = handle.cell(sheet, r.top, r.left).a1;
+          const result = handle.moveRange(sheet, `${from}:${to}`, destination);
+          applyResult(result);
+          cellClipboard.consume(pasted, result.applied);
+        } else applyResult(handle.editCells(sheet, edits));
+        if (selectionRef.current === selection && activeSheetRef.current === sheet) {
+          setSelection({
+            anchor: { row: r.top, col: r.left },
+            focus: { row: pasted?.bottom ?? r.top + grid.length - 1, col: pasted?.right ?? r.left + width - 1 },
+          });
+        }
+        return true;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         return false;
       }
-      if (selectionRef.current === selection && activeSheetRef.current === sheet) {
-        setSelection({
-          anchor: { row: r.top, col: r.left },
-          focus: { row: r.top + grid.length - 1, col: r.left + width - 1 },
-        });
-      }
-      return true;
     });
-  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection]);
+  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection, cellClipboard]);
 
   useEffect(() => {
     const handle = handleRef.current;
@@ -2518,6 +2528,7 @@ function XlsxEditorContent({
       className={className}
       role="application"
       aria-label={t('editor.appLabel')}
+      onKeyDownCapture={(event) => { if (!fromPlugin(event) && event.key === 'Escape') cellClipboard.cancelCut(); }}
       style={{
         position: 'relative',
         display: 'flex',
