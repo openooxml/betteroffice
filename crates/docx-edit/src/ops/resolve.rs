@@ -500,8 +500,9 @@ impl EditingDoc {
                     let Some(stories) = txn.get_map(crate::STORIES) else {
                         return Err(OpError::UnknownChange(revision_id.clone()));
                     };
-                    let mut ids: Vec<String> =
-                        stories.keys(&txn).map(|key| key.to_string()).collect();
+                    let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+                        .map(|(id, _)| id.to_owned())
+                        .collect();
                     ids.sort();
                     ids.into_iter()
                         .filter_map(|story_id| match stories.get(&txn, &story_id) {
