@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { XlsxEditor } from "@betteroffice/xlsx-react";
 import type {
-  XlsxEditorApi,
+  XlsxAsyncEditorApi,
   XlsxPlugin,
   XlsxPluginGrant,
 } from "@betteroffice/xlsx-react";
@@ -122,6 +122,7 @@ export function XlsxDemoClient() {
   const [collaborativeFile, setCollaborativeFile] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [ready, setReady] = useState(false);
+  const [editorFailed, setEditorFailed] = useState(false);
   const [loading, setLoading] = useState(!bootEmpty);
   const [error, setError] = useState<string | null>(null);
   const [compact, setCompact] = useState(false);
@@ -140,7 +141,7 @@ export function XlsxDemoClient() {
         : undefined,
     [reviewPlugin, reviewWrites],
   );
-  const apiRef = useRef<XlsxEditorApi | null>(null);
+  const apiRef = useRef<XlsxAsyncEditorApi | null>(null);
   // set once the user opens their own document, so the async showcase auto-load
   // can't clobber that choice if it resolves afterwards.
   const userActedRef = useRef(false);
@@ -158,21 +159,36 @@ export function XlsxDemoClient() {
     };
   }, []);
 
-  const onReady = useCallback((api: XlsxEditorApi) => {
+  const onReady = useCallback((api: XlsxAsyncEditorApi) => {
     apiRef.current = api;
     setReady(true);
+    return () => {
+      if (apiRef.current !== api) return;
+      apiRef.current = null;
+      setReady(false);
+    };
   }, []);
 
-  const proposeTotals = useCallback(() => {
+  const proposeTotals = useCallback(async () => {
     const api = apiRef.current;
-    if (!api) return;
-    const edits = buildTotalsEdits(api.handle);
-    if (edits.length === 0) return;
+    if (!api?.proposeChanges) return;
     try {
-      api.handle.propose("demo-agent", "totals and source updates", edits);
-      api.refreshProposals();
-    } catch {
-      // proposals not in this wasm build — nothing staged.
+      const exported = await api.exportStructured({
+        includeHiddenRows: true,
+        includeHiddenColumns: true,
+        includeDefinedNames: false,
+      });
+      if (!exported.ok || apiRef.current !== api) return;
+      const edits = buildTotalsEdits(exported.content);
+      if (edits.length === 0) return;
+      const result = await api.proposeChanges({
+        agentId: "demo-agent",
+        note: "totals and source updates",
+        edits,
+      });
+      if (!result.ok) console.warn("Proposal refused", result.failure);
+    } catch (cause) {
+      console.warn("Proposal failed", cause);
     }
   }, []);
 
@@ -184,6 +200,8 @@ export function XlsxDemoClient() {
         const bytes = new Uint8Array(await blob.arrayBuffer());
         setError(null);
         setCollaborativeFile(collaborative);
+        setReady(false);
+        setEditorFailed(false);
         setFile(bytes);
         setFileName(name);
       } catch (e) {
@@ -250,6 +268,7 @@ export function XlsxDemoClient() {
   const closeFile = useCallback(() => {
     userActedRef.current = true;
     setFile(undefined);
+    setEditorFailed(false);
     setFileName("");
     setCollaborativeFile(false);
     setError(null);
@@ -291,6 +310,30 @@ export function XlsxDemoClient() {
       cancelled = true;
     };
   }, []);
+
+  const collaboration = useMemo(
+    () =>
+      collaborativeFile && room && seed && collab.clientId && user
+        ? {
+            clientId: collab.clientId,
+            initialUpdate: seed,
+            onReplica: collab.onReplica,
+            provider: collab.provider,
+          }
+        : undefined,
+    [
+      collab.clientId,
+      collab.onReplica,
+      collab.provider,
+      collaborativeFile,
+      room,
+      seed,
+      user,
+    ],
+  );
+  // the overlay stays up until the editor paints the workbook, so no blank
+  // grid shows between the bytes arriving and the first frame.
+  const opening = loading || (file !== undefined && !ready && !editorFailed);
 
   return (
     <div className="fixed inset-0 z-20 flex flex-col bg-surface text-fg">
@@ -367,7 +410,7 @@ export function XlsxDemoClient() {
             <button
               className={barPrimary}
               data-testid="propose-totals"
-              onClick={proposeTotals}
+              onClick={() => void proposeTotals()}
               disabled={!ready}
               title="Stage tracked totals and source updates as an agent proposal"
             >
@@ -404,8 +447,8 @@ export function XlsxDemoClient() {
           </div>
         )}
 
-        {/* the editor stays mounted even with no file (it paints a demo frame),
-            so the empty state is an overlay on top rather than an unmount. */}
+        {/* the editor stays mounted with no file, so the loading and empty
+            states are overlays on top rather than an unmount. */}
         <div
           className={cn(
             "relative flex min-h-0 min-w-0 flex-1",
@@ -415,21 +458,14 @@ export function XlsxDemoClient() {
           )}
         >
           <XlsxEditor
-            legacySyncApi
-            experimentalWorkerOpen={false}
             file={file}
             fileName={fileName}
-            collaboration={
-              collaborativeFile && room && seed && collab.clientId && user
-                ? {
-                    clientId: collab.clientId,
-                    initialUpdate: seed,
-                    onReplica: collab.onReplica,
-                    provider: collab.provider,
-                  }
-                : undefined
-            }
+            collaboration={collaboration}
             onReady={onReady}
+            onError={(cause) => {
+              setEditorFailed(true);
+              console.error(cause);
+            }}
             readOnly={readOnly}
             plugins={plugins}
             pluginGrants={pluginGrants}
@@ -450,12 +486,12 @@ export function XlsxDemoClient() {
             }
           />
 
-          {!file &&
-            (loading ? (
-              <div className="absolute inset-0 z-1 grid place-items-center bg-surface text-[13.5px] text-mute">
-                Opening workbook…
-              </div>
-            ) : (
+          {opening ? (
+            <div className="absolute inset-0 z-1 grid place-items-center bg-surface text-[13.5px] text-mute">
+              Opening workbook…
+            </div>
+          ) : (
+            !file && (
               <div className="absolute inset-0 z-1 grid place-items-center bg-surface p-8 max-[720px]:p-4">
                 <div
                   className={cn(
