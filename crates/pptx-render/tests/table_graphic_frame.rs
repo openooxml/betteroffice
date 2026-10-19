@@ -146,6 +146,50 @@ fn table_cell_picture_positive_fill_insets_letterbox_the_destination() {
 }
 
 #[test]
+fn table_cell_picture_outset_crop_stays_inside_the_inset_destination() {
+    let Primitive::Image {
+        x,
+        y,
+        w,
+        h,
+        crop,
+        destination,
+        ..
+    } = cell_picture(
+        PictureCrop {
+            left: 25_000,
+            top: 25_000,
+            right: 25_000,
+            bottom: 25_000,
+        },
+        PictureCrop {
+            left: -50_000,
+            top: -25_000,
+            right: -50_000,
+            bottom: -75_000,
+        },
+    )
+    else {
+        panic!("expected a cell image")
+    };
+    assert_eq!(
+        (round(x), round(y), round(w), round(h)),
+        (144.0, 73.73, 160.0, 19.47)
+    );
+    assert!(crop.is_whole());
+    let destination = destination.expect("outset crop places the bitmap inside the frame");
+    for (actual, expected) in [destination.x, destination.y, destination.w, destination.h]
+        .into_iter()
+        .zip([x + w * 0.25, y + h * 0.125, w * 0.5, h * 0.5])
+    {
+        assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+    }
+    assert!(destination.x >= x && destination.y >= y);
+    assert!(destination.x + destination.w <= x + w);
+    assert!(destination.y + destination.h <= y + h);
+}
+
+#[test]
 fn table_cell_picture_mixed_fill_insets_letterbox_and_crop_the_source() {
     for (fill_rect, expected_rect, expected_crop) in [
         (

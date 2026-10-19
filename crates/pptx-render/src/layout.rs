@@ -5321,14 +5321,13 @@ fn picture_filled(
 }
 
 fn cell_picture_filled(
-    primitive: Primitive,
+    mut primitive: Primitive,
     picture: Option<&PictureFill>,
     dpi: Option<f32>,
     theme: &Theme,
 ) -> Primitive {
-    let mut primitive = picture_filled(primitive, picture, dpi, theme);
     if let Some(picture) = picture.filter(|picture| picture.tile.is_none())
-        && let Primitive::Image { x, y, w, h, .. } = &mut primitive
+        && let Primitive::Shape { x, y, w, h, .. } = &mut primitive
     {
         let inset = |value: i32| value.max(0) as f32 / 100_000.0;
         let left = inset(picture.fill_rect.left);
@@ -5340,7 +5339,7 @@ fn cell_picture_filled(
         *w *= (1.0 - left - right).max(0.0);
         *h *= (1.0 - top - bottom).max(0.0);
     }
-    primitive
+    picture_filled(primitive, picture, dpi, theme)
 }
 
 /// Folds `a:srcRect` and the `a:stretch/a:fillRect` band into source fractions.
