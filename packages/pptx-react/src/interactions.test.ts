@@ -115,6 +115,36 @@ const frame: SlideDisplayList = {
 };
 
 describe('pptx interactions', () => {
+  it('text columns resolve a caret in the second column', () => {
+    const box = structuredClone(frame.primitives[2]) as TextBoxPrimitive;
+    const second = box.lines[1]!;
+    second.columnOffset = 150;
+    second.x += 150;
+    second.y = box.lines[0]!.y;
+    second.caretStops = second.caretStops.map((stop) => ({ ...stop, x: stop.x + 150 }));
+    expect(textLocationAtPoint({ ...frame, primitives: [box] }, 'text', 'story',
+      { x: 260, y: 120 })).toEqual({ position: 5, lineIndex: 1 });
+  });
+
+  it('single-column hit testing keeps the row right of a short line', () => {
+    const box = structuredClone(frame.primitives[2]) as TextBoxPrimitive;
+    box.lines[0]!.width = 10;
+    box.lines[0]!.caretStops = [{ position: 0, x: 110 }, { position: 5, x: 120 }];
+    expect(textLocationAtPoint({ ...frame, primitives: [box] }, 'text', 'story',
+      { x: 210, y: 120 })).toEqual({ position: 5, lineIndex: 0 });
+  });
+
+  it('single-column hit testing keeps the row in reversed vertical flow', () => {
+    const box = structuredClone(frame.primitives[2]) as TextBoxPrimitive;
+    box.lines[0]!.x = 210;
+    box.lines[0]!.y = 140;
+    box.lines[0]!.width = 10;
+    box.lines[0]!.caretStops = [{ position: 0, x: 210 }, { position: 5, x: 220 }];
+    box.lines[1]!.y = 110;
+    expect(textLocationAtPoint({ ...frame, primitives: [box] }, 'text', 'story',
+      { x: 110, y: 150 })).toEqual({ position: 0, lineIndex: 0 });
+  });
+
   it('maps client coordinates into slide coordinates', () => {
     expect(slidePoint({ left: 200, top: 100, width: 640, height: 360 }, frame, 520, 280)).toEqual({
       x: 640,

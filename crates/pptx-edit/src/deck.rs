@@ -1507,11 +1507,17 @@ fn merge_source_text_body(
     let mut changed = target.list_style != source.list_style
         || target.default_list_style != source.default_list_style
         || target.compat_line_spacing != source.compat_line_spacing
+        || target.num_col != source.num_col
+        || target.spc_col != source.spc_col
+        || target.rtl_col != source.rtl_col
         || target.vertical_overflow != source.vertical_overflow
         || target.horizontal_overflow != source.horizontal_overflow;
     target.vertical_overflow = source.vertical_overflow;
     target.horizontal_overflow = source.horizontal_overflow;
     target.compat_line_spacing = source.compat_line_spacing;
+    target.num_col = source.num_col;
+    target.spc_col = source.spc_col;
+    target.rtl_col = source.rtl_col;
     target.list_style.clone_from(&source.list_style);
     target
         .default_list_style
@@ -3948,6 +3954,19 @@ mod tests {
         assert!(merge_source_chart_properties(&mut target, &source));
         assert_eq!(target, source);
         assert!(!merge_source_chart_properties(&mut target, &source));
+    }
+
+    #[test]
+    fn text_columns_are_restored_when_a_source_is_reattached() {
+        let mut json = serde_json::to_value(pptx_parse::TextBody::default()).unwrap();
+        json["numCol"] = 2.into();
+        json["spcCol"] = 457_200.into();
+        json["rtlCol"] = true.into();
+        let source = serde_json::from_value(json).unwrap();
+        let mut target = pptx_parse::TextBody::default();
+        assert!(merge_source_text_body(&mut target, &source));
+        assert_eq!(target, source);
+        assert!(!merge_source_text_body(&mut target, &source));
     }
 
     #[test]

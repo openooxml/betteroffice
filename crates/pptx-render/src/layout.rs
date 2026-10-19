@@ -704,7 +704,7 @@ impl RenderedSlide {
                 if !inside_shape && !(text.overflow && region.hit_rect.contains(text_x, text_y)) {
                     continue;
                 }
-                if let Some(line) = nearest_line(&text.lines, text_y)
+                if let Some(line) = nearest_line(&text.lines, text_x, text_y)
                     && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
                         (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
                     })
@@ -1627,6 +1627,7 @@ impl<'a> LayoutBuilder<'a> {
                     &content,
                     cell_cascade(&cell.text, &inherited),
                     columns[column + span] - columns[column],
+                    heights[row_index..row_index + row_span].iter().sum(),
                 )?;
                 if row_span == 1 {
                     heights[row_index] = heights[row_index].max(height);
@@ -1729,6 +1730,7 @@ impl<'a> LayoutBuilder<'a> {
         content: &TextContent,
         cascade: BodyCascade<'_>,
         width: f32,
+        height: f32,
     ) -> Result<f32, RenderError> {
         if TextFlow::from_body_vert(cascade.vertical()) != TextFlow::Horizontal {
             return Ok(0.0);
@@ -1750,9 +1752,13 @@ impl<'a> LayoutBuilder<'a> {
             x: 0.0,
             y: 0.0,
             w: (width - emu_to_px(left + right)).max(1.0),
-            h: 0.0,
+            h: (height - emu_to_px(top + bottom)).max(1.0),
         };
-        let text = self.layout_text(&resolved, rect, 1.0, false, true)?;
+        let text = if cascade.num_col() > 1 {
+            self.layout_text_columns(&resolved, rect, cascade)?
+        } else {
+            self.layout_text(&resolved, rect, 1.0, false, true)?
+        };
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
@@ -1816,10 +1822,7 @@ impl<'a> LayoutBuilder<'a> {
             w: (text_rect.w - emu_to_px(left + right) - preset_x * 2.0).max(1.0),
             h: (text_rect.h - emu_to_px(top + bottom) - preset_y * 2.0).max(1.0),
         };
-        let scale = autofit_font_scale(cascade.autofit());
-        let stacked = flow == TextFlow::Stacked;
-        let mut laid_out =
-            self.layout_text(&resolved, content_rect, scale, stacked, cascade.wraps())?;
+        let mut laid_out = self.layout_text_columns(&resolved, content_rect, cascade)?;
         self.line_count += laid_out.lines.len();
         if self.line_count > MAX_TEXT_LINES {
             return Err(RenderError::ResourceLimit(format!(
@@ -1848,6 +1851,7 @@ impl<'a> LayoutBuilder<'a> {
         if flow == TextFlow::VertLeftToRight {
             reverse_line_order(&mut laid_out.lines);
         }
+        let scale = autofit_font_scale(cascade.autofit());
         let display_paragraphs = resolved
             .paragraphs
             .iter()
@@ -1905,6 +1909,35 @@ impl<'a> LayoutBuilder<'a> {
             transform: text_transform,
             lines,
         })
+    }
+
+    fn layout_text_columns(
+        &self,
+        resolved: &ResolvedContent,
+        rect: PxRect,
+        cascade: BodyCascade<'_>,
+    ) -> Result<LayoutText, RenderError> {
+        let flow = TextFlow::from_body_vert(cascade.vertical());
+        let scale = autofit_font_scale(cascade.autofit());
+        let stacked = flow == TextFlow::Stacked;
+        let columns = if flow == TextFlow::Horizontal {
+            cascade.num_col()
+        } else {
+            1
+        };
+        let gap = emu_to_px(cascade.spc_col()).min(
+            (rect.w - f32::from(columns)).max(0.0) / f32::from(columns.saturating_sub(1).max(1)),
+        );
+        let column_rect = PxRect {
+            w: ((rect.w - f32::from(columns - 1) * gap) / f32::from(columns)).max(1.0),
+            ..rect
+        };
+        let mut laid_out =
+            self.layout_text(resolved, column_rect, scale, stacked, cascade.wraps())?;
+        if columns > 1 {
+            flow_text_columns(&mut laid_out, column_rect, columns, gap, cascade.rtl_col());
+        }
+        Ok(laid_out)
     }
 
     /// `layout_content` behind the renderer cache.
@@ -2215,6 +2248,22 @@ impl BodyCascade<'_> {
             .and_then(|body| body.vertical.as_deref())
             .or_else(|| self.layout.and_then(|body| body.vertical.as_deref()))
             .or_else(|| self.master.and_then(|body| body.vertical.as_deref()))
+    }
+
+    fn num_col(&self) -> u8 {
+        cascade_value(self.primary, self.layout, self.master, |body| body.num_col)
+            .unwrap_or(1)
+            .clamp(1, 16)
+    }
+
+    fn spc_col(&self) -> i64 {
+        cascade_value(self.primary, self.layout, self.master, |body| body.spc_col)
+            .unwrap_or(0)
+            .max(0)
+    }
+
+    fn rtl_col(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| body.rtl_col).unwrap_or(false)
     }
 
     fn space_first_last_para(&self) -> bool {
@@ -3046,6 +3095,7 @@ fn chart_text_primitive(
             }],
         }],
         lines: vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y: baseline - line_box.ascent,
             width,
@@ -3373,6 +3423,33 @@ fn layout_content(
     })
 }
 
+fn flow_text_columns(text: &mut LayoutText, rect: PxRect, columns: u8, gap: f32, rtl: bool) {
+    let trailing_space = text.lines.last().map_or(0.0, |line| {
+        text.total_height - (line.y + line.height - rect.y)
+    });
+    let mut column = 0;
+    let mut column_start = rect.y;
+    let mut has_lines = false;
+    let mut total_height = 0.0_f32;
+    for line in &mut text.lines {
+        let mut y = line.y - column_start;
+        if has_lines && y + line.height > rect.h && column + 1 < columns {
+            column += 1;
+            column_start = line.y;
+            y = 0.0;
+        }
+        let visual_column = if rtl { columns - 1 - column } else { column };
+        line.column_offset = f32::from(visual_column) * (rect.w + gap);
+        shift_line(line, line.column_offset, rect.y + y - line.y);
+        total_height = total_height.max(y + line.height);
+        has_lines = true;
+    }
+    if let Some(last) = text.lines.last() {
+        total_height = total_height.max(last.y + last.height - rect.y + trailing_space);
+    }
+    text.total_height = total_height;
+}
+
 /// Height of a `spcBef` or `spcAft`, whose percentages measure a single line.
 fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale: f32) -> f32 {
     let height = match spacing {
@@ -3496,6 +3573,7 @@ fn layout_paragraph(
             points_to_px(autofit_size_pt(style.font_size_pt, scale)),
         );
         return Ok(vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y,
             width: 0.0,
@@ -3600,6 +3678,7 @@ fn layout_paragraph(
             mirror_line(&mut runs, &mut caret_stops, line_x, line_width);
         }
         output.push(PositionedTextLine {
+            column_offset: 0.0,
             x: line_x,
             y: line_y,
             width: line_width,
@@ -4531,14 +4610,18 @@ fn local_point(rect: PxRect, transform: Transform, x: f32, y: f32) -> (f32, f32)
     (center_x + local_x, center_y + local_y)
 }
 
-fn nearest_line(lines: &[PositionedTextLine], y: f32) -> Option<&PositionedTextLine> {
-    lines.iter().min_by(|left, right| {
-        distance_to_interval(y, left.y, left.y + left.height).total_cmp(&distance_to_interval(
-            y,
-            right.y,
-            right.y + right.height,
-        ))
-    })
+fn nearest_line(lines: &[PositionedTextLine], x: f32, y: f32) -> Option<&PositionedTextLine> {
+    let columns = lines
+        .windows(2)
+        .any(|pair| pair[1].column_offset != pair[0].column_offset);
+    let distance = |line: &PositionedTextLine| {
+        let dx = distance_to_interval(x, line.x, line.x + line.width);
+        let dy = distance_to_interval(y, line.y, line.y + line.height);
+        if columns { dx * dx + dy * dy } else { dy }
+    };
+    lines
+        .iter()
+        .min_by(|left, right| distance(left).total_cmp(&distance(right)))
 }
 
 fn distance_to_interval(value: f32, start: f32, end: f32) -> f32 {
@@ -5674,6 +5757,7 @@ mod tests {
             h: 20.0,
         };
         let line = |y: f32, height: f32| PositionedTextLine {
+            column_offset: 0.0,
             x: 10.0,
             y,
             width: 200.0,
@@ -7739,6 +7823,7 @@ mod tests {
                         TextFlow::Horizontal,
                     ),
                     lines: vec![PositionedTextLine {
+                        column_offset: 0.0,
                         x: 110.0,
                         y: 110.0,
                         width: 100.0,
@@ -7803,6 +7888,7 @@ mod tests {
                     rect: TextFlow::Vert270.layout_rect(rect),
                     transform: text_transform(shape, TextFlow::Vert270),
                     lines: vec![PositionedTextLine {
+                        column_offset: 0.0,
                         x: 60.0,
                         y: 150.0,
                         width: 100.0,
@@ -7943,6 +8029,9 @@ mod tests {
                 text: Some(TextBody {
                     vertical_overflow: None,
                     horizontal_overflow: None,
+                    num_col: None,
+                    spc_col: None,
+                    rtl_col: None,
                     wrap: None,
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
@@ -7988,6 +8077,287 @@ mod tests {
                 )
             })
             .expect("the master text box was laid out")
+    }
+
+    fn text_columns_body() -> TextBody {
+        let body = TextBody {
+            anchor: Some("t".to_owned()),
+            inset_left: Some(95_250),
+            inset_right: Some(95_250),
+            inset_top: Some(47_625),
+            inset_bottom: Some(47_625),
+            paragraphs: vec![pptx_parse::TextParagraph {
+                properties: ParagraphProperties {
+                    line_spacing: Some(LineSpacing::Points { value: 12.0 }),
+                    ..ParagraphProperties::default()
+                },
+                runs: vec![pptx_parse::TextRun {
+                    text: "first\nsecond\nthird\nfourth\nfifth".to_owned(),
+                    properties: RunProperties {
+                        font_size_pt: Some(12.0),
+                        font_family: Some("Arial".to_owned()),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                }],
+                ..pptx_parse::TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        let mut json = serde_json::to_value(body).unwrap();
+        json["numCol"] = 2.into();
+        json["spcCol"] = 95_250.into();
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn text_columns_slide(body: TextBody) -> RenderedSlide {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_012).unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        snapshot.slides[0].shapes.clear();
+        let mut shape = package.slides[0]
+            .shapes
+            .iter()
+            .find_map(|node| match node {
+                ShapeNode::Shape(shape) if shape.text.is_some() => Some(shape.clone()),
+                _ => None,
+            })
+            .unwrap();
+        shape.base.id = 9_002;
+        shape.base.placeholder = None;
+        shape.base.transform = ShapeTransform {
+            x: 0,
+            y: 0,
+            width: 2_000_250,
+            height: 428_625,
+            ..ShapeTransform::default()
+        };
+        shape.geometry = "rect".to_owned();
+        shape.text = Some(body);
+        package.masters[0].shapes = vec![ShapeNode::Shape(shape)];
+        package.layouts[0].shapes.clear();
+        renderer().layout_slide(&package, &snapshot, 0).unwrap()
+    }
+
+    fn text_columns_lines(rendered: &RenderedSlide) -> &[PositionedTextLine] {
+        rendered
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    object_id: 9_002,
+                    lines,
+                    ..
+                } => Some(lines.as_slice()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn text_columns_fill_then_continue_at_the_next_column() {
+        let rendered = text_columns_slide(text_columns_body());
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 5);
+        assert!((lines[0].x - 10.0).abs() < 0.01);
+        assert!((lines[1].x - 10.0).abs() < 0.01);
+        assert!((lines[2].x - 110.0).abs() < 0.01, "{:?}", lines[2]);
+        assert!((lines[2].y - lines[0].y).abs() < 0.01);
+        assert!((lines[3].y - lines[1].y).abs() < 0.01);
+        assert!(lines[4].y + lines[4].height > 40.0);
+        let stop = &lines[2].caret_stops[0];
+        assert!((stop.x - lines[2].x).abs() < 0.01);
+        assert!((lines[2].runs[0].x - lines[2].x).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_column_hit_testing_keeps_the_row_right_of_a_short_line() {
+        let mut body = text_columns_body();
+        body.num_col = None;
+        body.paragraphs[0].runs[0].text = "i\na considerably longer line".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].end, 2);
+        let x = lines[0].x + 150.0;
+        let y = lines[0].y + lines[0].height / 2.0;
+        assert!(matches!(
+            rendered.hit_test(x, y),
+            Some(HitTestResult::Text { position: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn single_column_hit_testing_keeps_the_row_in_reversed_vertical_flow() {
+        let mut body = text_columns_body();
+        body.num_col = None;
+        body.vertical = Some("mongolianVert".to_owned());
+        body.paragraphs[0].properties.alignment = Some("ctr".to_owned());
+        body.paragraphs[0].runs[0].text = "i\nwide".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].y > lines[1].y);
+        assert!(lines[0].x > lines[1].x);
+        let x = lines[1].x;
+        let y = lines[0].y + lines[0].height / 2.0;
+        assert_eq!(nearest_line(lines, x, y).unwrap().start, lines[0].start);
+    }
+
+    #[test]
+    fn text_columns_keep_their_origin_for_centered_short_lines() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].properties.alignment = Some("ctr".to_owned());
+        body.paragraphs[0].runs[0].text = "i\ni\ni".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].x > 10.0);
+        assert!(lines[2].x > 110.0);
+        let json = serde_json::to_value(lines).unwrap();
+        assert!(json[0].get("columnOffset").is_none());
+        assert_eq!(json[2]["columnOffset"], 100.0);
+        assert!((lines[2].x - lines[0].x - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_hit_test_finds_a_caret_in_column_two() {
+        let rendered = text_columns_slide(text_columns_body());
+        let lines = text_columns_lines(&rendered);
+        assert!(matches!(
+            rendered.hit_test(110.0, lines[0].y + lines[0].height / 2.0),
+            Some(HitTestResult::Text { position, .. }) if position == lines[2].start
+        ));
+    }
+
+    #[test]
+    fn text_columns_wrap_to_the_column_width() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].runs[0].text =
+            "several words that must wrap within each narrow column".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|line| line.width <= 90.01));
+        assert!((lines[2].x - 110.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_anchor_the_whole_block() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].runs[0].text = "first\nsecond\nthird\nfourth".to_owned();
+        let top = text_columns_slide(body.clone());
+        let top_lines = text_columns_lines(&top);
+        for (anchor, shift) in [("ctr", 1.5), ("b", 3.0)] {
+            body.anchor = Some(anchor.to_owned());
+            let rendered = text_columns_slide(body.clone());
+            for (line, original) in text_columns_lines(&rendered).iter().zip(top_lines) {
+                assert!((line.y - original.y - shift).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn text_columns_use_the_stored_normal_autofit_scale() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].properties.line_spacing = None;
+        body.autofit = Some(TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: None,
+        });
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert!((lines[3].x - 110.0).abs() < 0.01);
+        assert!((lines[3].y - lines[0].y).abs() < 0.01);
+        assert!((lines[0].runs[0].font_size_px - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_follow_right_to_left_column_order() {
+        let mut json = serde_json::to_value(text_columns_body()).unwrap();
+        json["rtlCol"] = true.into();
+        let rendered = text_columns_slide(serde_json::from_value(json).unwrap());
+        let lines = text_columns_lines(&rendered);
+        assert!((lines[0].x - 110.0).abs() < 0.01);
+        assert!((lines[2].x - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_leave_vertical_and_single_column_layout_unchanged() {
+        for vertical in [None, Some("vert"), Some("vert270"), Some("wordArtVert")] {
+            let mut json = serde_json::to_value(text_columns_body()).unwrap();
+            json["vertical"] = serde_json::to_value(vertical).unwrap();
+            json["numCol"] = 1.into();
+            let single = text_columns_slide(serde_json::from_value(json.clone()).unwrap());
+            if vertical.is_some() {
+                json["numCol"] = 2.into();
+            } else {
+                json.as_object_mut().unwrap().remove("numCol");
+            }
+            let other = text_columns_slide(serde_json::from_value(json).unwrap());
+            assert_eq!(
+                serde_json::to_value(&single.display_list).unwrap(),
+                serde_json::to_value(&other.display_list).unwrap()
+            );
+        }
+        let mut body = text_columns_body();
+        let natural = text_columns_slide(body.clone());
+        body.autofit = Some(TextAutofit::Shape);
+        let shape_fit = text_columns_slide(body);
+        assert_eq!(
+            serde_json::to_value(&natural.display_list).unwrap(),
+            serde_json::to_value(&shape_fit.display_list).unwrap()
+        );
+    }
+
+    #[test]
+    fn text_columns_inherit_properties_and_keep_explicit_overrides() {
+        let master = text_columns_body();
+        let layout = TextBody {
+            spc_col: Some(190_500),
+            rtl_col: Some(true),
+            ..TextBody::default()
+        };
+        let primary = TextBody::default();
+        let mut cascade = cell_cascade(&primary, &master);
+        cascade.layout = Some(&layout);
+        assert_eq!(cascade.num_col(), 2);
+        assert_eq!(cascade.spc_col(), 190_500);
+        assert!(cascade.rtl_col());
+        let primary = TextBody {
+            num_col: Some(1),
+            spc_col: Some(0),
+            rtl_col: Some(false),
+            ..TextBody::default()
+        };
+        cascade.primary = Some(&primary);
+        assert_eq!(cascade.num_col(), 1);
+        assert_eq!(cascade.spc_col(), 0);
+        assert!(!cascade.rtl_col());
+    }
+
+    #[test]
+    fn text_columns_keep_paragraph_spacing_inside_a_column() {
+        let mut body = text_columns_body();
+        let mut first = body.paragraphs[0].clone();
+        first.runs[0].text = "first".to_owned();
+        first.properties.space_after = Some(LineSpacing::Points { value: 3.0 });
+        let mut second = body.paragraphs[0].clone();
+        second.runs[0].text = "second\nthird".to_owned();
+        second.properties.space_before = Some(LineSpacing::Points { value: 6.0 });
+        let mut third = body.paragraphs[0].clone();
+        third.runs[0].text = "fourth".to_owned();
+        third.properties.space_before = Some(LineSpacing::Points { value: 3.0 });
+        body.paragraphs = vec![first, second, third];
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 4);
+        assert!((lines[1].x - 110.0).abs() < 0.01);
+        assert!((lines[1].y - 5.0).abs() < 0.01);
+        assert!((lines[3].y - 41.0).abs() < 0.01);
     }
 
     #[test]

@@ -261,7 +261,7 @@ fn parse_shape(
         style: parse_shape_style(element.child("style"), properties).map(Box::new),
         text: element
             .child("txBody")
-            .map(|body| parse_text_body(body, part, budget))
+            .map(|body| parse_text_body_raw(body, part, budget))
             .transpose()?,
     })
 }
@@ -1292,6 +1292,30 @@ pub(crate) fn parse_text_body(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<TextBody, PptxError> {
+    let mut body = parse_text_body_raw(element, part, budget)?;
+    normalize_text_columns(&mut body, 1);
+    Ok(body)
+}
+
+pub(crate) fn normalize_text_columns(body: &mut TextBody, inherited_columns: u8) {
+    if body.num_col == Some(1) && inherited_columns <= 1 {
+        body.num_col = None;
+    }
+    if body.num_col.unwrap_or(inherited_columns) <= 1 && inherited_columns <= 1 {
+        if body.spc_col == Some(0) {
+            body.spc_col = None;
+        }
+        if body.rtl_col == Some(false) {
+            body.rtl_col = None;
+        }
+    }
+}
+
+fn parse_text_body_raw(
+    element: &XmlElement,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<TextBody, PptxError> {
     let body_properties = element.child("bodyPr");
     let mut paragraphs = Vec::new();
     for paragraph in element.children_named("p") {
@@ -1305,6 +1329,13 @@ pub(crate) fn parse_text_body(
         vertical: body_properties
             .and_then(|value| value.attribute("vert"))
             .map(str::to_owned),
+        num_col: numeric_attribute(body_properties, "numCol")
+            .filter(|value| (1..=16).contains(value))
+            .map(|value| value as u8),
+        spc_col: numeric_attribute(body_properties, "spcCol").filter(|value| *value >= 0),
+        rtl_col: body_properties
+            .and_then(|value| value.attribute("rtlCol"))
+            .map(parse_bool),
         compat_line_spacing: body_properties
             .and_then(|value| value.attribute("compatLnSpc"))
             .map(parse_bool),
@@ -2535,6 +2566,77 @@ mod tests {
         assert!(json.get("verticalOverflow").is_none());
         assert!(json.get("horizontalOverflow").is_none());
         assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), *body);
+    }
+
+    #[test]
+    fn text_columns_parse_count_spacing_and_direction() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:txBody><a:bodyPr numCol="2" spcCol="457200" rtlCol="1"/><a:p/></p:txBody>"#,
+            "text.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["numCol"], 2);
+        assert_eq!(json["spcCol"], 457_200);
+        assert_eq!(json["rtlCol"], true);
+        assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), body);
+    }
+
+    #[test]
+    fn text_columns_default_and_invalid_attributes_keep_the_legacy_json() {
+        for count in ["", "0", "17", "-1", "two"] {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(r#"<p:txBody><a:bodyPr numCol="{count}"/><a:p/></p:txBody>"#);
+            let root = parse_xml(xml.as_bytes(), "text.xml", &mut budget).unwrap();
+            let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+            let json = serde_json::to_value(body).unwrap();
+            assert!(json.get("numCol").is_none(), "{count}");
+            assert!(json.get("spcCol").is_none());
+            assert!(json.get("rtlCol").is_none());
+        }
+    }
+
+    #[test]
+    fn text_columns_default_attributes_serialize_identically_to_absent_attributes() {
+        let parse = |attributes: &str| {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(r#"<p:txBody><a:bodyPr {attributes}/><a:p/></p:txBody>"#);
+            let root = parse_xml(xml.as_bytes(), "text.xml", &mut budget).unwrap();
+            serde_json::to_vec(&parse_text_body(&root, "text.xml", &mut budget).unwrap()).unwrap()
+        };
+        let absent = parse("");
+        for attributes in [
+            r#"rtlCol="0""#,
+            r#"spcCol="0""#,
+            r#"numCol="1""#,
+            r#"numCol="1" rtlCol="0" spcCol="0""#,
+        ] {
+            assert_eq!(parse(attributes), absent, "{attributes}");
+        }
+    }
+
+    #[test]
+    fn text_columns_preserve_the_maximum_column_count() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:txBody><a:bodyPr numCol="16" spcCol="0" rtlCol="0"/><a:p/></p:txBody>"#,
+            "text.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["numCol"], 16);
+        assert_eq!(json["spcCol"], 0);
+        assert_eq!(json["rtlCol"], false);
+        assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), body);
     }
 
     #[test]
