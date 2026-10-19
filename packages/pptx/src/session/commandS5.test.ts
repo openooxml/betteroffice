@@ -69,6 +69,23 @@ test('pending_unicode_stops', () => {
   } finally { json.mockRestore(); }
 });
 
+test('discarded_frame_keeps_media_pending_for_the_next_frame', () => {
+  const displayList = list();
+  displayList.primitives = [{ kind: 'image', objectId: 1, name: 'picture', assetId: 'picture', x: 0, y: 0, w: 120, h: 80 }];
+  const bytes = new Uint8Array([137, 80, 78, 71]);
+  const handle = { mediaBytes: () => bytes } as unknown as wasm.PresentationHandle;
+  const sentMedia = new Set<string>();
+  const tags = { slideId: 'slide', slideIndex: 0, slideRevision: 1, coversThroughSeq: 1,
+    documentEpoch: 1, incarnation: 'worker', epoch: 1, version: 'v1' };
+  const discarded = buildCommandFrame(handle, tags, sentMedia, undefined, displayList);
+  expect(discarded.value.media).toHaveLength(1);
+  const delivered = buildCommandFrame(handle, { ...tags, epoch: 2 }, sentMedia, undefined, displayList);
+  expect(delivered.value.media).toEqual([{ assetId: 'picture', bytes: bytes.buffer }]);
+  expect(sentMedia.size).toBe(0);
+  for (const { assetId } of delivered.value.media) sentMedia.add(assetId);
+  expect(buildCommandFrame(handle, { ...tags, epoch: 3 }, sentMedia, undefined, displayList).value.media).toEqual([]);
+});
+
 test('line_edges_respect_wrapped_graphemes', () => {
   const text = 'a😀b';
   const json = spyOn(wasm, 'presentationDisplayListJson').mockReturnValue(JSON.stringify(list(text,

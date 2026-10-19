@@ -129,13 +129,15 @@ fn rename_duplicate_shape(shape: &mut ShapeSnapshot, old_slide: &str, new_slide:
 /// The background write a slide's snapshot change needs; `None` keeps the
 /// source declaration untouched.
 fn background_write(current: &SlideSnapshot, baseline: &SlideSnapshot) -> Option<BackgroundWrite> {
-    if current.background == baseline.background {
-        return None;
+    match &current.background {
+        Some(fill) if current.background != baseline.background => {
+            Some(BackgroundWrite::Set(Box::new(fill.clone())))
+        }
+        None if current.background_edited || baseline.background.is_some() => {
+            Some(BackgroundWrite::Clear)
+        }
+        _ => None,
     }
-    Some(match current.background.clone() {
-        Some(fill) => BackgroundWrite::Set(Box::new(fill)),
-        None => BackgroundWrite::Clear,
-    })
 }
 
 fn notes_write(current: &DeckSnapshot, baseline: &DeckSnapshot) -> Option<NotesWrite> {

@@ -106,6 +106,7 @@ export type ResidentEngineSession = Pick<
   | 'setImageGeometryAt'
   | 'setColumnWidth'
   | 'insertText'
+  | 'insertLineBreak'
   | 'replaceRange'
   | 'deleteRange'
   | 'splitParagraph'
@@ -794,6 +795,8 @@ export async function createResidentEngineSession(
     insertText: (at, text, author) => applyCommandMutation(at.story, () => JSON.parse(author
       ? session.insert_text(at.story, at.paraId, at.offset, text, author.name, author.date)
       : session.edit_text_resident(at.story, at.paraId, at.offset, at.paraId, at.offset, text))),
+    insertLineBreak: (at, author) => applyCommandMutation(at.story, () =>
+      JSON.parse(session.insert_line_break(at.story, at.paraId, at.offset, author?.name, author?.date))),
     replaceRange: (range, text, author) => applyCommandMutation(range.story, () =>
       JSON.parse(session.replace_range(...rangeArgs(range), text, author?.name, author?.date))),
     deleteRange: (range, author) => applyCommandMutation(range.story, () => JSON.parse(author

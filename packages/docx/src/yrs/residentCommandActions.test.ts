@@ -62,6 +62,44 @@ test('d1a_types_replaces_deletes_and_breaks_without_peer', async () => {
   expect(arm.version).toBe(5);
 }, TIMEOUT);
 
+test('line break keeps typed text in one paragraph and saves a wrapping break', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine(['']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'insertText', { text: 'a', selection: selection(id, 0) })).status).toBe('applied');
+  const broken = execute(arm, command(arm, 'lineBreak', {}));
+  expect(broken.status).toBe('applied');
+  expectCaret(broken, { story: 'body', paraId: id, offset: 2 });
+  expect(execute(arm, command(arm, 'insertText', { text: 'b' })).status).toBe('applied');
+  expect(arm.engine.paragraphs('body').map(paragraph => paragraph.paraId)).toEqual([id]);
+  const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
+  const saved = await repackDocx(projected);
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml.match(/<w:p[\s>]/g)).toHaveLength(1);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:br(?: w:type="textWrapping")?\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
+}, TIMEOUT);
+
+test('line break replaces a selection and undo restores it in one step', async () => {
+  const arm = await openCommandEngine(['abcd']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const broken = execute(arm, command(arm, 'lineBreak', { selection: selection(id, 3, 1) }));
+  expect(broken.status).toBe('applied');
+  expectCaret(broken, { story: 'body', paraId: id, offset: 2 });
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'text')
+    .map(segment => segment.text)).toEqual(['a', 'd']);
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'embed')
+    .map(segment => segment.embedKind)).toEqual(['break']);
+  expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
+  expect(texts(arm)).toEqual(['abcd']);
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'embed')).toHaveLength(0);
+  expect(execute(arm, command(arm, 'redo', {})).status).toBe('applied');
+  expect(arm.engine.paragraphs('body').map(paragraph => paragraph.paraId)).toEqual([id]);
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'embed')
+    .map(segment => segment.embedKind)).toEqual(['break']);
+}, TIMEOUT);
+
 test('d1a_rebases_sticky_anchors_and_predecessor_selection', async () => {
   const arm = await openCommandEngine();
   const id = arm.engine.paragraphs('body')[0]!.paraId;
@@ -111,6 +149,7 @@ test('d1a_refuses_invalid_basis_anchors_and_readonly_before_mutation', async () 
     command(arm, 'insertText', { text: '!', selection: forged }, { basis: { epoch: 1, version: 0 } }),
     command(arm, 'insertText', { text: '!', selection: selection(id, -1) }),
     command(arm, 'paragraphBreak', { selection: selection(id, 0, 1000) }),
+    command(arm, 'lineBreak', { selection: selection(id, 0, 1000) }),
     command(arm, 'deleteBackward', { selection: selection('missing', 0) }),
     command(arm, 'insertText', { text: '!', selection: selection(id, 0, 0, 'missing-story') }),
     command(arm, 'replaceSelection', { text: '!', selection: {
@@ -132,6 +171,7 @@ test('d1a_refuses_invalid_basis_anchors_and_readonly_before_mutation', async () 
   arm.state.storedMarks = { story: 'body', paraId: id, clear: false, delta: { fontSize: -1 } };
   const beforeCompound = snapshot(arm);
   expect(execute(arm, command(arm, 'insertText', { text: 'unsafe' })).status).toBe('refused');
+  expect(execute(arm, command(arm, 'lineBreak', {})).status).toBe('refused');
   expect(snapshot(arm)).toEqual(beforeCompound);
   arm.state.storedMarks = null;
 
@@ -139,6 +179,7 @@ test('d1a_refuses_invalid_basis_anchors_and_readonly_before_mutation', async () 
   for (const intent of [
     command(arm, 'insertText', { text: 'blocked' }),
     command(arm, 'paragraphBreak', { selection: selection(id, 0, 2) }),
+    command(arm, 'lineBreak', { selection: selection(id, 0, 2) }),
     command(arm, 'formatRange', { selection: selection(id, 0, 1), delta: { bold: true } }),
   ]) {
     const before = snapshot(arm);
@@ -162,6 +203,7 @@ test('d1a_refuses_anchorless_stale_commands_before_mutation', async () => {
     command(arm, 'insertText', { text: '!' }, extra),
     command(arm, 'deleteBackward', {}, extra),
     command(arm, 'paragraphBreak', {}, extra),
+    command(arm, 'lineBreak', {}, extra),
     command(arm, 'toggleMark', { mark: { type: 'bold' } }, extra),
   ]) {
     const before = snapshot(arm);
@@ -587,4 +629,3 @@ test('setObjectProperties preserves image wrap distances across non-inline worke
     expect(xml).toContain('distR="457200"');
   }
 }, TIMEOUT);
-

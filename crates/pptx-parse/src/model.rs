@@ -171,6 +171,10 @@ pub struct Slide {
     pub background_picture: Option<Box<PictureFill>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
+    /// `p:cSld` declares `p:bg`, whatever fill it holds; `false` in packages
+    /// stored before it was read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declares_background: bool,
     pub shapes: Vec<ShapeNode>,
     /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]

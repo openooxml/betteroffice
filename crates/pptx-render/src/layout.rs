@@ -431,8 +431,13 @@ impl SlideRenderer {
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
             .unwrap_or(&default_format_scheme);
+        let slide_background = if deck_slide.background_edited {
+            Some(BackgroundSource::from_edit(deck_slide.background.as_ref()))
+        } else {
+            parsed_slide.map(BackgroundSource::from_slide)
+        };
         let background_source = [
-            parsed_slide.map(BackgroundSource::from_slide),
+            slide_background,
             layout.map(BackgroundSource::from_layout),
             master.map(BackgroundSource::from_master),
         ]
@@ -655,6 +660,15 @@ struct BackgroundSource<'a> {
 }
 
 impl<'a> BackgroundSource<'a> {
+    /// An edited slide background, which replaces the part's `p:bg` whole.
+    fn from_edit(fill: Option<&'a ShapeFill>) -> Self {
+        Self {
+            fill,
+            picture: None,
+            reference: None,
+        }
+    }
+
     fn from_slide(slide: &'a Slide) -> Self {
         Self {
             fill: slide.background.as_ref(),
@@ -1869,7 +1883,15 @@ impl<'a> LayoutBuilder<'a> {
                     .collect(),
             })
             .collect();
-        let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
+        let (left, right) = (text_rect.x - 0.5, text_rect.x + text_rect.w + 0.5);
+        let horizontal_overflow = laid_out.lines.iter().any(|line| {
+            line.runs
+                .iter()
+                .filter(|run| !run.text.trim().is_empty())
+                .any(|run| run.x < left || run.x + run.width > right)
+        });
+        let overflow = !cascade.clips_overflow()
+            && (laid_out.total_height > content_rect.h || horizontal_overflow);
         let text_shadow = cascade.text_shadow().and_then(|effects| {
             shadow(
                 effects,
@@ -7402,6 +7424,84 @@ mod tests {
         assert_eq!(
             referenced.display_list.primitives[0],
             rendered.display_list.primitives[0]
+        );
+    }
+
+    #[test]
+    fn an_edited_slide_background_paints_before_the_deck_is_saved() {
+        let session = DeckSession::open(FIXTURE, 8_303).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        let context = EditCtx::local("background");
+        let painted = |session: &DeckSession| {
+            renderer()
+                .layout_scoped_slide(session.package(), &session.slide_scope(0).unwrap())
+                .unwrap()
+                .display_list
+                .background
+        };
+        let declared = painted(&session);
+        let mut inherited = session.package().clone();
+        inherited.slides[0].background = None;
+        let inherited = renderer()
+            .layout_slide(&inherited, &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list
+            .background;
+        assert_ne!(inherited, declared);
+
+        session
+            .set_slide_background(
+                &context,
+                &slide_id,
+                Some(&ShapeFill {
+                    fill_type: "solid".to_owned(),
+                    color: Some(ColorValue {
+                        rgb: Some("0F1720".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    gradient: None,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            painted(&session),
+            Some(Paint::Solid {
+                color: "#0F1720".to_owned()
+            })
+        );
+
+        session
+            .set_slide_background(&context, &slide_id, None)
+            .unwrap();
+        assert_eq!(painted(&session), inherited);
+    }
+
+    #[test]
+    fn a_scheme_alias_background_paints_its_theme_colour() {
+        let session = DeckSession::open(FIXTURE, 8_304).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        session
+            .set_slide_background(
+                &EditCtx::local("background"),
+                &slide_id,
+                Some(&ShapeFill {
+                    fill_type: "solid".to_owned(),
+                    color: Some(ColorValue {
+                        theme_color: Some("bg1".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    gradient: None,
+                }),
+            )
+            .unwrap();
+        let rendered = renderer()
+            .layout_scoped_slide(session.package(), &session.slide_scope(0).unwrap())
+            .unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#FFFFFF".to_owned()
+            })
         );
     }
 

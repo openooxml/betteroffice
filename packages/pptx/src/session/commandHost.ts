@@ -563,13 +563,15 @@ export function registerPresentationCommandHandlers(
     const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId);
     retainVersions();
     const updates = pendingUpdates.splice(0);
-    return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
+    const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
       frame: result?.value ?? null }, [...(result?.transfer ?? []), ...updates.map((update) => update.bytes)]);
+    for (const { assetId } of reply.value.frame?.media ?? []) sentMedia.add(assetId);
+    return reply;
   }
 
   function admit(command: PresentationCommandEnvelope): Admission | PresentationCommandRefusalReason {
@@ -1447,6 +1449,7 @@ export function registerPresentationCommandHandlers(
       }
       if (request.knownRevision === slideRevision) return { ...base, status: 'unchanged' as const };
       const result = frame(request.slideId, false);
+      for (const { assetId } of result.value.media) sentMedia.add(assetId);
       return transferable({ ...base, status: 'frame' as const, frame: result.value }, result.transfer);
     },
     flushCommandEditor(_, request) {
