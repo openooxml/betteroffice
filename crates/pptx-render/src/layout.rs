@@ -503,6 +503,9 @@ impl SlideRenderer {
             let background_dpi = builder
                 .media_part(&asset_id)
                 .and_then(|part| image_dpi(&part.bytes));
+            let tile = picture_fill_tile(picture, background_dpi);
+            let (crop, destination) = picture_fill_crop(picture).placement(0.0, 0.0, width, height);
+            let destination = if tile.is_some() { None } else { destination };
             builder.primitives.push(Primitive::Image {
                 geometry_fallback: false,
                 object_id: 0,
@@ -514,8 +517,9 @@ impl SlideRenderer {
                 h: height,
                 asset_id: Some(asset_id),
                 effects: Vec::new(),
-                crop: picture_fill_crop(picture),
-                tile: picture_fill_tile(picture, background_dpi),
+                crop,
+                destination,
+                tile,
                 path: None,
                 stroke: None,
                 shadow: None,
@@ -1218,6 +1222,10 @@ impl<'a> LayoutBuilder<'a> {
             }
             return;
         }
+        let (crop, destination) = crop
+            .map(image_crop)
+            .unwrap_or_default()
+            .placement(rect.x, rect.y, rect.w, rect.h);
         self.primitives.push(Primitive::Image {
             object_id,
             shape_id: Some(shape_id.to_owned()),
@@ -1228,7 +1236,8 @@ impl<'a> LayoutBuilder<'a> {
             h: rect.h,
             asset_id: media_part_path.map(str::to_owned),
             effects: image_effects(effects, self.theme),
-            crop: crop.map(image_crop).unwrap_or_default(),
+            crop,
+            destination,
             tile: None,
             path: mask.path,
             geometry_fallback: mask.geometry_fallback,
@@ -5080,9 +5089,9 @@ fn picture_asset_id(shape: &ShapeSnapshot) -> Option<String> {
     })
 }
 
-/// Clamps outsets and discards empty crops.
+/// Discards empty source rectangles.
 fn image_crop(crop: &PictureCrop) -> ImageCrop {
-    let fraction = |value: i32| (value as f32 / 100_000.0).clamp(0.0, 1.0);
+    let fraction = |value: i32| (value as f32 / 100_000.0).min(1.0);
     let cropped = ImageCrop {
         left: fraction(crop.left),
         top: fraction(crop.top),
@@ -5162,24 +5171,30 @@ fn picture_filled(
             shadow,
             transform,
             ..
-        } => Primitive::Image {
-            object_id,
-            shape_id,
-            name,
-            x,
-            y,
-            w,
-            h,
-            asset_id: picture.media_part_path.clone(),
-            effects: Vec::new(),
-            crop: picture_fill_crop(picture),
-            tile: picture_fill_tile(picture, dpi),
-            path: (geometry != "rect").then_some(path),
-            geometry_fallback,
-            stroke,
-            shadow,
-            transform,
-        },
+        } => {
+            let tile = picture_fill_tile(picture, dpi);
+            let (crop, destination) = picture_fill_crop(picture).placement(x, y, w, h);
+            let destination = if tile.is_some() { None } else { destination };
+            Primitive::Image {
+                object_id,
+                shape_id,
+                name,
+                x,
+                y,
+                w,
+                h,
+                asset_id: picture.media_part_path.clone(),
+                effects: Vec::new(),
+                crop,
+                destination,
+                tile,
+                path: (geometry != "rect").then_some(path),
+                geometry_fallback,
+                stroke,
+                shadow,
+                transform,
+            }
+        }
         other => other,
     }
 }
@@ -5550,6 +5565,7 @@ mod tests {
                 ..PictureCrop::default()
             }),
             ImageCrop {
+                left: -0.05,
                 right: 0.2,
                 ..ImageCrop::default()
             }
@@ -5610,6 +5626,106 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_picture_crop_offsets_the_image_inside_its_frame() {
+        assert_picture_outset(
+            PictureCrop {
+                top: -36_890,
+                bottom: 36_890,
+                ..PictureCrop::default()
+            },
+            (100.0, 86.89, 200.0, 63.11),
+            ImageCrop {
+                bottom: 0.3689,
+                ..ImageCrop::default()
+            },
+        );
+    }
+
+    #[test]
+    fn mixed_picture_crops_keep_insets_and_outsets_on_both_axes() {
+        assert_picture_outset(
+            PictureCrop {
+                left: 7_795,
+                top: -36_890,
+                right: -5_518,
+                bottom: 36_890,
+            },
+            (100.0, 86.89, 200.0 * 0.92205 / 0.97723, 63.11),
+            ImageCrop {
+                left: 0.07795,
+                bottom: 0.3689,
+                ..ImageCrop::default()
+            },
+        );
+        assert_picture_outset(
+            PictureCrop {
+                left: -25_000,
+                top: 20_000,
+                right: 50_000,
+                bottom: -20_000,
+            },
+            (100.0 + 200.0 / 3.0, 50.0, 400.0 / 3.0, 80.0),
+            ImageCrop {
+                top: 0.2,
+                right: 0.5,
+                ..ImageCrop::default()
+            },
+        );
+    }
+
+    fn assert_picture_outset(crop: PictureCrop, dest: (f32, f32, f32, f32), kept: ImageCrop) {
+        let fixture = include_bytes!("../tests/fixtures/picture-crop-mask.pptx");
+        let mut package = pptx_parse::parse_pptx(fixture).unwrap();
+        let picture = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find_map(|node| match node {
+                ShapeNode::Picture(picture) if picture.base.id == 90 => Some(picture),
+                _ => None,
+            })
+            .unwrap();
+        picture.crop = crop;
+        let session = DeckSession::from_package_with_source(package, fixture, 289).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| matches!(primitive, Primitive::Image { object_id: 90, .. }))
+            .unwrap();
+        let Primitive::Image {
+            x,
+            y,
+            w,
+            h,
+            crop,
+            destination,
+            path,
+            ..
+        } = image
+        else {
+            unreachable!()
+        };
+        assert_eq!((*x, *y, *w, *h), (100.0, 50.0, 200.0, 100.0));
+        let destination = destination.unwrap();
+        for (actual, expected) in [
+            (destination.x, dest.0),
+            (destination.y, dest.1),
+            (destination.w, dest.2),
+            (destination.h, dest.3),
+        ] {
+            assert!((actual - expected).abs() < 0.001, "{actual} != {expected}");
+        }
+        assert_eq!(*crop, kept);
+        assert_eq!(
+            path.as_ref().unwrap()[0],
+            GeometryPathCommand::Move { x: 1.0, y: 0.5 }
+        );
+    }
+
+    #[test]
     fn a_fixture_picture_keeps_its_crop_mask_and_outline_through_layout() {
         let session = DeckSession::open(
             include_bytes!("../tests/fixtures/picture-crop-mask.pptx"),
@@ -5625,6 +5741,12 @@ mod tests {
             .iter()
             .find(|primitive| matches!(primitive, Primitive::Image { object_id: 90, .. }))
             .unwrap();
+        assert!(
+            serde_json::to_value(image)
+                .unwrap()
+                .get("destination")
+                .is_none()
+        );
         let Primitive::Image {
             x,
             y,
