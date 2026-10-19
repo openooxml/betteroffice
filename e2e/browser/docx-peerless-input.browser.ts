@@ -1193,7 +1193,7 @@ test('list Tab preserves selected text and Shift Tab preserves level-zero number
     .replace('</Types>', '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>'));
   await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
   const input = await focusDocument(page);
-  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.toolbar?.paragraphProperties.numPr))
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.initial?.editState?.toolbar?.paragraphProperties.numPr))
     .toEqual({ numId: 1, ilvl: 0 });
   const start = await commandCount(page);
   await input.press('Shift+Tab');
