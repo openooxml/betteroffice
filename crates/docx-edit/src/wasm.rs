@@ -3785,6 +3785,24 @@ impl EditSession {
         Ok(text_receipt_json(receipt))
     }
 
+    pub fn insert_line_break(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
+        let at = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let ctx = edit_ctx(author_name, author_date)?;
+        let receipt = self
+            .engine
+            .doc()
+            .insert_hard_break(&ctx, Position::new(story, at))
+            .map_err(js_err)?;
+        Ok(text_receipt_json(receipt))
+    }
+
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
     /// pilcrow. The FIRST half keeps the original paraId and the second is
     /// re-minted. A split at the paragraph end leaves the empty second half
@@ -5601,6 +5619,40 @@ pub fn render_docx_markdown_with_pages_json(
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+
+    #[test]
+    fn line_break_inserts_one_inline_unit_and_is_undoable() {
+        let mut session = EditSession::new(76.0).unwrap();
+        session.undo = UndoSession::with_clock(Arc::new(|| 0));
+        session
+            .engine
+            .doc()
+            .create_story_with_paragraph_id("body", "p1", "ab", "Normal", "left")
+            .unwrap();
+        session.track_undo();
+        let receipt: Value = serde_json::from_str(
+            &session
+                .insert_line_break("body", "p1", 1, None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["range"]["start"]["offset"], 1);
+        assert_eq!(receipt["range"]["end"]["offset"], 2);
+        let segments = session.story_segments("body").unwrap();
+        let parsed: Value = serde_json::from_str(&segments).unwrap();
+        assert_eq!(parsed[0]["text"], "a");
+        assert_eq!(parsed[1]["embedKind"], "break");
+        assert_eq!(parsed[2]["text"], "b");
+        assert_eq!(session.engine.doc().paragraphs("body").unwrap().len(), 1);
+        session.add_undo_boundary();
+        assert!(session.undo());
+        assert_eq!(
+            session.engine.doc().paragraphs("body").unwrap()[0].text,
+            "ab"
+        );
+        assert!(session.redo());
+        assert_eq!(session.story_segments("body").unwrap(), segments);
+    }
 
     #[test]
     fn paragraph_segments_build_only_requested_units() {

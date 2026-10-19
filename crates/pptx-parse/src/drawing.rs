@@ -239,7 +239,9 @@ fn parse_shape(
         paths: properties
             .filter(|value| value.child("prstGeom").is_none())
             .and_then(|value| value.child("custGeom"))
-            .and_then(|custom| parse_custom_geometry(custom, parse_custom_shape_extent(transform)))
+            .and_then(|custom| {
+                parse_custom_geometry(custom, parse_custom_shape_extent(transform), budget)
+            })
             .unwrap_or_default(),
         base: parse_base(
             element

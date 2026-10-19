@@ -15,7 +15,8 @@ use serde_json::Value;
 use yrs::{ReadTxn, Transact, Update};
 
 use crate::deck::{
-    shape_fill, stroked_outline, validate_adjustments, validate_background, validate_rect,
+    normalized_background, shape_fill, stroked_outline, validate_adjustments, validate_background,
+    validate_rect,
 };
 use crate::model::validate_xml_text;
 use crate::proposals::inherited_style;
@@ -1160,11 +1161,18 @@ fn plan_background(
             &requested,
         ));
     }
-    let fill = background.as_deref().cloned();
-    if let Some(fill) = &fill {
+    if let Some(fill) = background {
         validate_background(fill).map_err(|error| invalid(error, &requested))?;
     }
-    let effect = (slide.background != fill).then_some(Effect::Background(fill));
+    let fill = background.as_deref().map(normalized_background);
+    let changes = match &fill {
+        Some(_) => slide.background.as_ref().map(normalized_background) != fill,
+        None => {
+            slide.background.is_some()
+                || (!slide.background_edited && deck.declares_source_background(slide))
+        }
+    };
+    let effect = changes.then_some(Effect::Background(fill));
     Ok(Planned::property(
         index,
         requested,
