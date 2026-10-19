@@ -5,7 +5,7 @@ import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import { scrollIntoViewDelta, scrollViewport } from '../internals/viewportBand';
 import { parseClipboardHtml } from '../internals/clipboardHtml';
 import { beginComposition, updateComposition, endComposition, type PeerlessCompositionEndResult, type PeerlessCompositionState } from './composition';
-import { admitInputIntents, submitFormattingIntent, type PeerlessInputAdmission } from './inputAdmission';
+import { admitInputIntents, admitIntent, submitFormattingIntent, type PeerlessInputAdmission } from './inputAdmission';
 import { normalizeInputEvent, type PeerlessInputEvent, type PeerlessInputEventState } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
 
@@ -86,6 +86,8 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     let active: { id: number; phase: 'start' | 'beforeinput'; inputType: string | null; keyboard: boolean } | null = null;
     let composition: PeerlessCompositionState | null = null;
     let mounted = true;
+    let escapeArmed = false;
+    const clearEscape = () => { escapeArmed = false; };
     const isReadOnly = () => admission.getSnapshot().readOnly;
     const dispatch = (event: PeerlessInputEvent, native: Event) => {
       const normalized = normalizeInputEvent(event, state);
@@ -97,7 +99,11 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       });
     };
     const keydown = (event: KeyboardEvent) => {
+      const exit = escapeArmed && event.key === 'Tab';
+      if (event.key !== 'Shift') clearEscape();
       if (event.defaultPrevented || state.composing || event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Escape') { escapeArmed = true; active = null; return; }
+      if (exit || (event.key === 'Tab' && isReadOnly())) { active = null; return; }
       state = { ...state, trailingCompositionText: null };
       const key = event.key.toLowerCase();
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && ['b', 'i', 'u'].includes(key)) {
@@ -111,9 +117,12 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         } }, { inputTime: event.timeStamp });
         return;
       }
-      const tableTab = event.key === 'Tab' && !event.altKey && !event.ctrlKey && !event.metaKey &&
-        !!(viewStore.getSnapshot().editState ?? admission.session.state.editState)?.tableContext;
-      const inputType = tableTab ? 'insertText' : event.key === 'Backspace' ? 'deleteContentBackward'
+      const tab = event.key === 'Tab' && !event.altKey && !event.ctrlKey && !event.metaKey;
+      const editState = viewStore.getSnapshot().editState ?? admission.session.state.editState;
+      const tableTab = tab && !!editState?.tableContext;
+      const numPr = editState?.toolbar?.paragraphProperties.numPr as { numId?: number } | null | undefined;
+      if (tab && event.shiftKey && !tableTab && !(numPr?.numId && numPr.numId > 0)) { active = null; return; }
+      const inputType = tab ? 'insertText' : event.key === 'Backspace' ? 'deleteContentBackward'
         : event.key === 'Delete' ? 'deleteContentForward'
         : event.key === 'Enter' ? 'insertParagraph' : null;
       active = { id: ++nextEventId, phase: 'start', inputType, keyboard: true };
@@ -124,6 +133,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         else admitInputIntents(admission, [{ kind: 'navigateCell', payload: {
           direction: event.shiftKey ? 'backward' : 'forward', extend: false, createLastRow: !event.shiftKey && !isReadOnly(),
         } }], { inputTime: event.timeStamp, source: 'selection', fence: true });
+      } else if (tab) {
+        event.preventDefault();
+        state = { ...state, lastHandledEventId: active.id };
+        admitIntent(admission, { kind: 'insertText', payload: { text: '\t' } }, {
+          inputTime: event.timeStamp, source: 'typing', fence: true,
+          tabDirection: event.shiftKey ? 'backward' : 'forward',
+        });
       }
       else dispatch({ source: 'keydown', eventId: active.id, inputTime: event.timeStamp,
         key: event.key, code: event.code, shift: event.shiftKey, alt: event.altKey,
@@ -140,6 +156,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         (active.inputType === 'deleteContentBackward' && inputType.endsWith('Backward')) ||
         (active.inputType === 'deleteContentForward' && inputType.endsWith('Forward')));
     const beforeinput = (event: InputEvent) => {
+      clearEscape();
       const inputType = event.inputType ?? '';
       if (!active || active.phase !== 'start' || !compatible(inputType)) {
         active = { id: ++nextEventId, phase: 'start', inputType, keyboard: false };
@@ -163,6 +180,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       if (isReadOnly() && !state.composing) event.preventDefault();
     };
     const input = (event: InputEvent) => {
+      clearEscape();
       const inputType = event.inputType ?? '';
       const eventId = compatible(inputType) ? active!.id : ++nextEventId;
       dispatch({ source: 'input', eventId, inputTime: event.timeStamp,
@@ -176,6 +194,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       }
     };
     const paste = (event: ClipboardEvent) => {
+      clearEscape();
       if (state.composing) return;
       event.preventDefault();
       active = { id: ++nextEventId, phase: 'start', inputType: 'insertFromPaste', keyboard: false };
@@ -193,6 +212,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       element.value = '';
     };
     const compositionstart = () => {
+      clearEscape();
       if (composition || isReadOnly()) return;
       const id = ++nextEventId;
       composition = beginComposition(admission, id);
@@ -237,7 +257,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       } else if (result.state.recoverableText) callbacks.current.onRecoverableText?.(result.state.recoverableText);
     };
     const compositionend = (event: CompositionEvent) => finishComposition(event.data ?? composition?.text ?? element.value);
-    const blur = () => { if (composition) finishComposition(composition.text); active = null; };
+    const blur = () => { clearEscape(); if (composition) finishComposition(composition.text); active = null; };
     const copy = (event: ClipboardEvent) => {
       if (!callbacks.current.onClipboard || state.composing) return;
       event.preventDefault();
@@ -254,6 +274,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     element.addEventListener('compositionupdate', compositionupdate);
     element.addEventListener('compositionend', compositionend);
     element.addEventListener('blur', blur);
+    element.ownerDocument.addEventListener('pointerdown', clearEscape, true);
     return () => {
       mounted = false;
       try {
@@ -278,6 +299,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         element.removeEventListener('compositionupdate', compositionupdate);
         element.removeEventListener('compositionend', compositionend);
         element.removeEventListener('blur', blur);
+        element.ownerDocument.removeEventListener('pointerdown', clearEscape, true);
       }
     };
   }, [admission, viewStore]);

@@ -37,6 +37,7 @@ export type PeerlessAdmissionTarget =
 /** @internal */
 export interface PeerlessAdmissionOptions extends Omit<SubmitOptions<PeerlessEchoIntent>, 'after' | 'echo'> {
   source?: 'typing' | 'paste' | 'formatting' | 'selection' | 'composition';
+  tabDirection?: 'forward' | 'backward';
   onSubmitted?(ticket: CommandTicket): void;
   hostProposal?: boolean;
 }
@@ -133,8 +134,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const refusal = (reason: string): CommandTicket => ({ id: --nextTicket, seq: undefined,
     ack: Promise.resolve({ status: 'refused', reason }), presented: Promise.resolve('dropped') });
   const dependencyOf = (ticket: CommandTicket | undefined) => ticket && reviewDependencies.has(ticket) ? reviewDependencies.get(ticket) : ticket;
-  const track = (ticket: CommandTicket, review = false) => {
-    const prefix = tail ? prefixes.get(tail) ?? Promise.resolve(true) : Promise.resolve(true);
+  const track = (ticket: CommandTicket, review = false, recover = false) => {
+    const prefix = tail && !recover ? prefixes.get(tail) ?? Promise.resolve(true) : Promise.resolve(true);
     prefixes.set(ticket, Promise.all([prefix, ticket.ack]).then(([ok, outcome]) =>
       ok && (review || (outcome.status !== 'refused' && outcome.status !== 'cancelled')), () => false));
     tail = ticket;
@@ -175,7 +176,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     waitForSelection: boolean,
     send: (predecessor: CommandTicket | undefined, goalX?: number) => CommandTicket | undefined,
     verticalDirection?: 'up' | 'down',
-    barrier = false
+    barrier = false,
+    recover?: () => CommandTicket | undefined
   ): CommandTicket => {
     let backing: CommandTicket | undefined;
     let resolveAck!: (outcome: TicketOutcome) => void;
@@ -199,16 +201,17 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     const dependency = after ? deferred.get(after) ?? Promise.resolve({ ticket: after }) : Promise.resolve({});
     void dependency.then(async (value: { ticket?: CommandTicket; blocked?: boolean }) => {
       if (disposed) return cancel();
-      if (value.blocked && !barrier) return cancel('dependency-refused');
-      if (waitForSelection && value.ticket) {
+      let failed = value.blocked && !barrier;
+      if (waitForSelection && value.ticket && !failed) {
         const ok = after && prefixes.has(after) ? await prefixes.get(after)! :
           await value.ticket.ack.then((outcome) => outcome.status !== 'refused' && outcome.status !== 'cancelled');
         if (disposed) return cancel();
-        if (!ok) return cancel('dependency-refused');
+        failed = !ok;
       }
+      if (failed && !recover) return cancel('dependency-refused');
       const goalX = verticalDirection ? await geometryGoal(value.ticket, verticalDirection) : undefined;
       if (disposed) return cancel();
-      backing = send(value.ticket, goalX);
+      backing = failed ? recover!() : send(value.ticket, goalX);
       resolveReady({ ticket: backing });
       if (backing) {
         void backing.ack.then(resolveAck, rejectAck);
@@ -233,7 +236,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   ): PeerlessAdmissionResult => {
     if (disposed) throw disposedError();
     const environment = intent.kind === 'setRenderEnvironment' || intent.kind === 'setFontEnvironment';
-    const { source, onSubmitted, hostProposal, ...metadata } = options;
+    const { source, tabDirection, onSubmitted, hostProposal, ...metadata } = options;
     const granted = isProposal(intent) && hostProposal === true;
     if (readOnly() && !environment && (!isSelection(intent) || deletionExtension) && !granted) {
       if (counted) releaseCount();
@@ -259,7 +262,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         held.push({ intent, options, deletionExtension, release, drop });
         return { status: 'held', slot: compositionSlot, echoEnabled: false, released };
       }
-      const fence = 'suggesting' in intent.payload || metadata.fence || isSelection(intent) || !isText(intent) ||
+      const fence = tabDirection !== undefined || 'suggesting' in intent.payload || metadata.fence || isSelection(intent) || !isText(intent) ||
         intent.kind === 'paragraphBreak' || intent.kind === 'replaceSelection' ||
         source === 'paste' || source === 'composition';
       if (fence && echoDisabledReason !== 'intent-cap') disableEcho('fence');
@@ -268,8 +271,21 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const echo = preview ? { ...preview, originalIntentCount: 1 } : undefined;
       const vertical = intent.kind === 'navigate' && (intent.payload.direction === 'up' || intent.payload.direction === 'down')
         ? intent.payload.direction : undefined;
-      const send = (predecessor: CommandTicket | undefined, goalX?: number) => {
+      const send = (predecessor: CommandTicket | undefined, goalX?: number, recoverTab = false) => {
         const selection = workerSelection();
+        if (tabDirection && !recoverTab) {
+          const toolbar = latestEditState()?.toolbar;
+          const numPr = toolbar?.paragraphProperties.numPr as { numId?: number; ilvl?: number } | null | undefined;
+          if (selection && (!isCollapsed(selection) || selection.focus.offset === 0) &&
+            (toolbar?.paraId === selection.focus.paraId || toolbar?.paraId === selection.anchor.paraId) && numPr?.numId && numPr.numId > 0) {
+            if (tabDirection === 'backward' && (numPr.ilvl ?? 0) === 0) return;
+            const suggesting = 'suggesting' in intent.payload ? intent.payload.suggesting : undefined;
+            intent = { kind: 'changeIndent', payload: {
+              direction: tabDirection === 'backward' ? 'decrease' : 'increase',
+              ...(suggesting ? { suggesting } : {}),
+            } };
+          } else if (tabDirection === 'backward') return;
+        }
         if (deletionExtension && !isCollapsed(selection)) return predecessor;
         if (intent.kind === 'navigate' && 'goalX' in intent.payload) {
           verticalGoal = hasImplicitVerticalGoal(intent) ? goalX : intent.payload.goalX;
@@ -299,11 +315,12 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         }
         return ticket;
       };
-      const waitForSelection = intent.kind === 'formatRange' || isRevision(intent) || deletionExtension || vertical !== undefined;
+      const waitForSelection = tabDirection !== undefined || intent.kind === 'formatRange' || isRevision(intent) || deletionExtension || vertical !== undefined;
       const ticket = deletionExtension || vertical || (after && (waitForSelection || deferred.has(after))) ||
         (intent.kind === 'formatRange' && !workerSelection())
-        ? defer(after, waitForSelection, send, vertical) : send(after)!;
-      track(ticket, isRevision(intent));
+        ? defer(after, waitForSelection, send, vertical, false, tabDirection ? () => send(undefined, undefined, true) : undefined)
+        : send(after) ?? defer(after, false, () => undefined);
+      track(ticket, isRevision(intent), tabDirection !== undefined);
       return { status: 'submitted', ticket, echoEnabled: echo !== undefined };
     } catch (error) {
       if (!counted) releaseCount();

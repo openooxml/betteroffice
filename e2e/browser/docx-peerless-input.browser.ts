@@ -1119,6 +1119,127 @@ test('package_image_pixels_survive_authoritative_edit_frame', async ({ page }) =
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBe(0);
 });
 
+test('Escape then Tab leaves document input in either direction', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  const start = await commandCount(page);
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await input.focus();
+    await input.press('Escape');
+    await input.press(key);
+    await expect(input).not.toBeFocused();
+  }
+  await input.focus();
+  await input.press('Shift+Tab');
+  await expect(input).not.toBeFocused();
+  expect(await commandsSince(page, start)).toEqual([]);
+});
+
+test('read-only Tab leaves document input in either direction', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  await setMode(page, 'Editing', 'Viewing');
+  await expect(input).not.toBeEditable();
+  await settled(page);
+  const start = await commandCount(page);
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await input.focus();
+    await input.press(key);
+    await expect(input).not.toBeFocused();
+  }
+  expect(await commandsSince(page, start)).toEqual([]);
+});
+
+test('list Tab preserves selected text and Shift Tab preserves level-zero numbering', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+    .replace('<w:p><w:r>', '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r>'));
+  zip.file('word/numbering.xml',
+    '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:abstractNum w:abstractNumId="0">' + [0, 1].map(level =>
+      `<w:lvl w:ilvl="${level}"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%${level + 1}."/></w:lvl>`
+    ).join('') + '</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>');
+  zip.file('word/_rels/document.xml.rels',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>');
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string'))
+    .replace('</Types>', '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>'));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.toolbar?.paragraphProperties.numPr))
+    .toEqual({ numId: 1, ilvl: 0 });
+  const start = await commandCount(page);
+  await input.press('Shift+Tab');
+  await settled(page);
+  expect(await commandsSince(page, start)).toEqual([]);
+  expect(await savedXml(page)).toMatch(/<w:numId w:val="1"\s*\/>/);
+  await input.press('Shift+ArrowRight');
+  await input.press('Shift+ArrowRight');
+  await input.press('Tab');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.toolbar?.paragraphProperties.numPr))
+    .toEqual({ numId: 1, ilvl: 1 });
+  await input.press('Shift+Tab');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.toolbar?.paragraphProperties.numPr))
+    .toEqual({ numId: 1, ilvl: 0 });
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await input.focus();
+    await input.press('Escape');
+    await input.press(key);
+    await expect(input).not.toBeFocused();
+  }
+});
+
+test('body Tab saves a tab between typed text with acknowledgements withheld', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+    .replace('<w:r><w:t>abcd</w:t></w:r>', ''));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  const start = await commandCount(page);
+  await page.evaluate(() => { window.__docxPeerlessInput.holdAcks = true; });
+  await beforeinput(input, 'a');
+  await input.press('Tab');
+  await expect(input).toBeFocused();
+  await beforeinput(input, 'b');
+  await page.evaluate(() => window.__docxPeerlessInput.releaseAcks());
+  await expect.poll(async () => (await commandsSince(page, start)).length).toBe(3);
+  await settled(page);
+  const commands = await commandsSince(page, start);
+  expect(commands.map(({ kind, payload }) => ({ kind, payload }))).toEqual([
+    { kind: 'insertText', payload: { text: 'a' } },
+    { kind: 'insertText', payload: { text: '\t' } },
+    { kind: 'insertText', payload: { text: 'b' } },
+  ]);
+  expectChain(commands);
+  const xml = await savedXml(page);
+  expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:tab\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
+});
+
+test('body Tab replaces selected text and supports undo and redo', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  await input.press('ArrowRight');
+  await input.press('Shift+ArrowRight');
+  await input.press('Shift+ArrowRight');
+  await settled(page);
+  await input.press('Tab');
+  await expect(input).toBeFocused();
+  await settled(page);
+  const xml = await savedXml(page);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:tab\s*\/>[\s\S]*<w:t[^>]*>d<\/w:t>/);
+  await input.press('ControlOrMeta+z');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
+  await input.press('ControlOrMeta+Shift+z');
+  await settled(page);
+  expect(await savedXml(page)).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:tab\s*\/>[\s\S]*<w:t[^>]*>d<\/w:t>/);
+});
+
 test('table_tab_and_shift_tab_preserve_typing_with_acks_withheld', async ({ page }) => {
   const zip = await JSZip.loadAsync(await documentBytes());
   const cell = (text: string) => `<w:tc><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;

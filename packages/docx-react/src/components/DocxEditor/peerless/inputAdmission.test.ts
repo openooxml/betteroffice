@@ -534,6 +534,33 @@ test('d2b_format_range_requires_the_acked_worker_selection', async () => {
   expect(failed.admission.getSnapshot().tail).toBeUndefined();
 });
 
+test('Tab recovers from a cancelled deferred predecessor and restarts the selection prefix', async () => {
+  const { admission, submitted } = lane();
+  try {
+    admitIntent(admission, { kind: 'insertText', payload: { text: 'a' } });
+    const cancelled = submitFormattingIntent(admission, { kind: 'formatRange', payload: { delta: { bold: true } } });
+    const tab = admitIntent(admission, { kind: 'insertText', payload: { text: '\t' } }, { tabDirection: 'forward' });
+    admitIntent(admission, { kind: 'insertText', payload: { text: 'b' } });
+    if (cancelled.status !== 'submitted' || tab.status !== 'submitted') throw new Error('input was not submitted');
+    submitted[0]!.settle({ status: 'refused', seq: 1, reason: 'invalid-selection' });
+    expect(await cancelled.ticket.ack).toMatchObject({ status: 'cancelled' });
+    for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+    expect(submitted.map(({ kind, payload }) => ({ kind, payload }))).toEqual([
+      { kind: 'insertText', payload: { text: 'a' } },
+      { kind: 'insertText', payload: { text: '\t' } },
+      { kind: 'insertText', payload: { text: 'b' } },
+    ]);
+    expect(submitted[1]!.options.after).toBeUndefined();
+    expect(submitted[2]!.options.after).toBe(submitted[1]!.ticket);
+    submitFormattingIntent(admission, { kind: 'formatRange', payload: { delta: { italic: true } } });
+    submitted[1]!.settle({ status: 'applied', seq: 2 });
+    submitted[2]!.settle({ status: 'applied', seq: 3 });
+    for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+    expect(submitted.map(({ kind }) => kind)).toEqual(['insertText', 'insertText', 'insertText', 'formatRange']);
+    expect(submitted[3]!.options.after).toBe(submitted[2]!.ticket);
+  } finally { admission.dispose(); }
+});
+
 test('mode_barriers_restart_dependencies_after_refused_input', async () => {
   const { admission, submitted } = lane();
   admitIntent(admission, { kind: 'insertText', payload: { text: 'refused' } });

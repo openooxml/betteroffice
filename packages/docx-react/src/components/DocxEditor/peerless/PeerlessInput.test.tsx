@@ -9,6 +9,7 @@ import { clipboardFragmentHtml } from '../internals/clipboardHtml';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import { admitIntent, createInputAdmission, submitFormattingIntent } from './inputAdmission';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
+import { PLAIN_CONTEXT } from '../../../commands/testing';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -428,6 +429,207 @@ test('d2b_explicit_vertical_goal_wins_over_geometry_and_is_retained', async () =
   }
 });
 
+test('body Tab inserts one tab behind typing and prevents focus navigation', async () => {
+  const input = mount();
+  beforeinput(input.textarea, 'insertText', 'a');
+  const tab = new KeyboardEvent('keydown', { key: 'Tab', code: 'Tab', bubbles: true, cancelable: true });
+  act(() => { input.textarea.dispatchEvent(tab); });
+  expect(tab.defaultPrevented).toBe(true);
+  beforeinput(input.textarea, 'insertText', '\t');
+  fireEvent.input(input.textarea, { inputType: 'insertText', target: { value: '\t' } });
+  fireEvent.keyUp(input.textarea, { key: 'Tab' });
+  beforeinput(input.textarea, 'insertText', 'b');
+  await act(async () => {
+    input.entries[0]!.settle({ status: 'applied', seq: 1 });
+    await input.entries[0]!.ticket.ack;
+  });
+  expect(input.submitted).toEqual(['insertText', 'insertText', 'insertText']);
+  expect(input.entries.map(({ payload }) => payload)).toEqual([{ text: 'a' }, { text: '\t' }, { text: 'b' }]);
+  expect(input.entries[1]!.options.after).toBe(input.entries[0]!.ticket);
+  expect(input.entries[1]!.options.fence).toBe(true);
+  expect(input.entries[2]!.options.after).toBe(input.entries[1]!.ticket);
+});
+
+test('Tab and Shift Tab at a list text start use list indentation', async () => {
+  for (const shiftKey of [false, true]) {
+    const input = mount();
+    const point = { story: 'body', paraId: 'p1', offset: 0 };
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: point, focus: point };
+    input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl: 1 } } };
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+    await act(async () => { input.textarea.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(true);
+    expect(input.submitted).toEqual(['changeIndent']);
+    expect(input.entries[0]!.payload).toEqual({ direction: shiftKey ? 'decrease' : 'increase' });
+    expect(input.entries[0]!.options.fence).toBe(true);
+    input.unmount();
+  }
+});
+
+test('Tab inserts text within a list or over a body selection and ignores cancelled numbering', async () => {
+  for (const [anchor, focus, numId] of [[2, 2, 1], [0, 3, 0], [3, 0, 0], [0, 0, 0]] as const) {
+    const input = mount();
+    input.snapshot.workerSelection = input.session.state.selection = {
+      anchor: { story: 'body', paraId: 'p1', offset: anchor }, focus: { story: 'body', paraId: 'p1', offset: focus },
+    };
+    input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId, ilvl: 0 } } };
+    await act(async () => { fireEvent.keyDown(input.textarea, { key: 'Tab' }); });
+    expect(input.submitted).toEqual(['insertText']);
+    expect(input.entries[0]!.payload).toEqual({ text: '\t' });
+    input.unmount();
+  }
+});
+
+test('Tab and Shift Tab change the level of selected list paragraphs in either selection direction', async () => {
+  for (const shiftKey of [false, true]) {
+    for (const multiple of [false, true]) {
+      for (const backward of [false, true]) {
+        const input = mount();
+        const start = { story: 'body', paraId: 'p1', offset: multiple ? 1 : 0 };
+        const end = { story: 'body', paraId: multiple ? 'p2' : 'p1', offset: 3 };
+        input.snapshot.workerSelection = input.session.state.selection = {
+          anchor: backward ? end : start, focus: backward ? start : end,
+        };
+        input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl: 1 } } };
+        await act(async () => { fireEvent.keyDown(input.textarea, { key: 'Tab', shiftKey }); });
+        expect(input.submitted).toEqual(['changeIndent']);
+        expect(input.entries[0]!.payload).toEqual({ direction: shiftKey ? 'decrease' : 'increase' });
+        input.unmount();
+      }
+    }
+  }
+});
+
+test('Shift Tab at list level zero preserves numbering and admits following text', async () => {
+  for (const ilvl of [undefined, 0]) {
+    const input = mount();
+    const point = { story: 'body', paraId: 'p1', offset: 0 };
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: point, focus: point };
+    input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl } } };
+    fireEvent.keyDown(input.textarea, { key: 'Tab', shiftKey: true });
+    const ticket = input.admission.getSnapshot().tail!;
+    expect(input.submitted).toEqual([]);
+    fireEvent.keyUp(input.textarea, { key: 'Tab' });
+    beforeinput(input.textarea, 'insertText', 'b');
+    await act(async () => { expect(await ticket.ack).toEqual({ status: 'noop' }); });
+    expect(input.submitted).toEqual(['insertText']);
+    expect(input.entries[0]!.payload).toEqual({ text: 'b' });
+    input.unmount();
+  }
+});
+
+test('Tab after a refused or cancelled predecessor inserts a tab and admits following text', async () => {
+  for (const status of ['refused', 'cancelled'] as const) {
+    const input = mount();
+    const point = { story: 'body', paraId: 'p1', offset: 0 };
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: point, focus: point };
+    input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl: 0 } } };
+    beforeinput(input.textarea, 'insertText', 'a');
+    fireEvent.keyDown(input.textarea, { key: 'Tab' });
+    fireEvent.keyUp(input.textarea, { key: 'Tab' });
+    beforeinput(input.textarea, 'insertText', 'b');
+    expect(input.submitted).toEqual(['insertText']);
+    await act(async () => {
+      input.entries[0]!.settle({ status, seq: 1, reason: 'invalid-selection' });
+      await input.entries[0]!.ticket.ack;
+    });
+    expect(input.submitted).toEqual(['insertText', 'insertText', 'insertText']);
+    expect(input.entries.map(({ payload }) => payload)).toEqual([{ text: 'a' }, { text: '\t' }, { text: 'b' }]);
+    expect(input.entries[1]!.options.after).toBeUndefined();
+    expect(input.entries[2]!.options.after).toBe(input.entries[1]!.ticket);
+    input.unmount();
+  }
+});
+
+test('Tab resolves the list caret after pending typing or navigation', async () => {
+  for (const typing of [false, true]) {
+    const input = mount();
+    const point = { story: 'body', paraId: 'p1', offset: typing ? 0 : 2 };
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: point, focus: point };
+    input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl: 0 } } };
+    if (typing) beforeinput(input.textarea, 'insertText', 'a');
+    else {
+      fireEvent.keyDown(input.textarea, { key: 'Home' });
+      fireEvent.keyUp(input.textarea, { key: 'Home' });
+    }
+    fireEvent.keyDown(input.textarea, { key: 'Tab' });
+    expect(input.submitted).toEqual([typing ? 'insertText' : 'navigate']);
+    await act(async () => {
+      const after = { ...point, offset: typing ? 1 : 0 };
+      input.entries[0]!.settle({ status: 'applied', seq: 1 }, { anchor: after, focus: after });
+      await input.entries[0]!.ticket.ack;
+    });
+    expect(input.submitted).toEqual([typing ? 'insertText' : 'navigate', typing ? 'insertText' : 'changeIndent']);
+    expect(input.entries[1]!.payload).toEqual(typing ? { text: '\t' } : { direction: 'increase' });
+    expect(input.entries[1]!.options.after).toBe(input.entries[0]!.ticket);
+    input.unmount();
+  }
+});
+
+test('body Tab leaves modified, composing and read-only keys alone', async () => {
+  const input = mount();
+  for (const modifier of ['ctrlKey', 'metaKey', 'altKey']) {
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', [modifier]: true, bubbles: true, cancelable: true });
+    act(() => { input.textarea.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(false);
+  }
+  fireEvent.compositionStart(input.textarea);
+  fireEvent.keyDown(input.textarea, { key: 'Tab', isComposing: true });
+  expect(input.submitted).toEqual([]);
+  input.unmount();
+  const readonly = mount(true);
+  for (const shiftKey of [false, true]) {
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+    await act(async () => { readonly.textarea.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(false);
+  }
+  expect(readonly.submitted).toEqual([]);
+});
+
+test('Escape then Tab allows focus navigation in either direction and consumes the escape', async () => {
+  for (const shiftKey of [false, true]) {
+    const input = mount();
+    const point = { story: 'body', paraId: 'p1', offset: 0 };
+    input.snapshot.workerSelection = input.session.state.selection = { anchor: point, focus: point };
+    input.snapshot.editState!.toolbar = { ...PLAIN_CONTEXT, paraId: 'p1', paragraphProperties: { numPr: { numId: 1, ilvl: 1 } } };
+    fireEvent.keyDown(input.textarea, { key: 'Escape' });
+    fireEvent.keyUp(input.textarea, { key: 'Escape' });
+    if (shiftKey) fireEvent.keyDown(input.textarea, { key: 'Shift' });
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+    await act(async () => { input.textarea.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(false);
+    expect(input.submitted).toEqual([]);
+    const next = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    act(() => { input.textarea.dispatchEvent(next); });
+    expect(next.defaultPrevented).toBe(true);
+    expect(input.submitted).toEqual(['changeIndent']);
+    input.unmount();
+  }
+});
+
+test('keys, input and pointer interactions disarm Escape before Tab', () => {
+  for (const interaction of ['key', 'beforeinput', 'input', 'pointer'] as const) {
+    const input = mount();
+    fireEvent.keyDown(input.textarea, { key: 'Escape' });
+    if (interaction === 'key') fireEvent.keyDown(input.textarea, { key: 'ArrowLeft' });
+    else if (interaction === 'beforeinput') beforeinput(input.textarea, 'insertText', 'a');
+    else if (interaction === 'input') fireEvent.input(input.textarea, { inputType: 'insertText', target: { value: 'a' } });
+    else fireEvent.pointerDown(document.body);
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    act(() => { input.textarea.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(true);
+    input.unmount();
+  }
+});
+
+test('Shift Tab in a body paragraph allows backward focus navigation', () => {
+  const input = mount();
+  const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+  act(() => { input.textarea.dispatchEvent(tab); });
+  expect(tab.defaultPrevented).toBe(false);
+  expect(input.submitted).toEqual([]);
+});
+
 test('table_tab_and_shift_tab_navigate_behind_pending_edits', () => {
   const input = mount();
   input.snapshot.editState!.tableContext = {
@@ -667,15 +869,18 @@ test('reads wait for active composition to settle before flushing accepted input
   expect(input.submitted).toEqual(['replaceSelection']);
 });
 
-test('readonly_table_tab_navigates_without_requesting_a_new_row', () => {
+test('read-only table Tab allows focus navigation without submitting commands', () => {
   const input = mount(true);
   input.snapshot.editState!.tableContext = {
     story: 'body', tableIndex: 0, rowIndex: 0, columnIndex: 0, rowCount: 1, columnCount: 2,
     hasMultiCellSelection: false, canSplitCell: false,
   };
-  fireEvent.keyDown(input.textarea, { key: 'Tab', code: 'Tab' });
-  expect(input.submitted).toEqual(['navigateCell']);
-  expect(input.entries[0]!.payload).toEqual({ direction: 'forward', extend: false, createLastRow: false });
+  for (const shiftKey of [false, true]) {
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+    act(() => { input.textarea.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(false);
+  }
+  expect(input.submitted).toEqual([]);
   input.unmount();
 });
 
