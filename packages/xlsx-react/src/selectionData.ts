@@ -1,5 +1,5 @@
 import { normalizeRange, selectionKeyReducer } from '@betteroffice/xlsx';
-import type { Direction, GridMeta, KeyInput, Selection, SelectionData, SelectionHidden, SelectionLimits } from '@betteroffice/xlsx';
+import type { CellAddr, Direction, GridMeta, KeyInput, Selection, SelectionData, SelectionHidden, SelectionLimits } from '@betteroffice/xlsx';
 
 export function selectionHidden(grid: GridMeta | undefined): SelectionHidden {
   const contains = (spans: [number, number][] | undefined, index: number) => {
@@ -50,6 +50,7 @@ interface NavigationContext {
 
 interface NavigationOptions {
   context(): NavigationContext | null;
+  activeCell?(selection: Selection): CellAddr;
   limits(): SelectionLimits;
   hidden?(): SelectionHidden;
   query(context: NavigationContext, direction: Direction | undefined): SelectionData | Promise<SelectionData>;
@@ -76,15 +77,19 @@ export function createSelectionDataNavigation() {
         const selected = options.context();
         if (!samePosition(batch.context, selected) || !selected) return;
         const request = selectionDataRequest(key);
+        const selection = options.activeCell && (!key.shiftKey || request === 'region')
+          ? { ...selected.selection, focus: options.activeCell(selected.selection), range: normalizeRange(selected.selection) }
+          : selected.selection;
         let data: SelectionData | undefined;
         try {
-          data = await options.query(selected, request === 'region' || !request ? undefined : request);
+          data = await options.query(selection === selected.selection ? selected : { ...selected, selection },
+            request === 'region' || !request ? undefined : request);
         } catch {}
         const current = options.context();
         if (pending !== batch || !samePosition(selected, current) || !current) return;
         if (selected.version !== current.version) continue;
         batch.keys.shift();
-        const action = selectionKeyReducer(selected.selection, key, options.limits(), data, options.hidden?.());
+        const action = selectionKeyReducer(selection, key, options.limits(), data, options.hidden?.());
         if (action.type !== 'move') continue;
         batch.target = action.selection;
         const applied = options.apply(action.selection);

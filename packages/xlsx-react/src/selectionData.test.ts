@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { normalizeRange, selectionAt } from '@betteroffice/xlsx';
-import type { Selection, SelectionData } from '@betteroffice/xlsx';
+import type { KeyInput, Selection, SelectionData } from '@betteroffice/xlsx';
 import { deriveLimits } from './viewer/sessionGeometry';
 import { createSelectionDataNavigation, sameSelection, selectionHidden } from './selectionData';
 
@@ -14,7 +14,7 @@ function deferred<T>() {
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const right = { key: 'ArrowRight', ctrlKey: true };
 
-function navigation() {
+function navigation(anchorActive = false) {
   let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 1, col: 1 }) };
   const query = mock(async (_context: typeof current, _direction: string | undefined): Promise<SelectionData> => ({
     edge: null, region: null,
@@ -28,13 +28,44 @@ function navigation() {
     get current() { return current; },
     update(next: Partial<typeof current>) { current = { ...current, ...next }; },
     query, apply,
-    press: (key = right) => queue.enqueue(key, {
+    press: (key: KeyInput = right) => queue.enqueue(key, {
+      activeCell: anchorActive ? (selection) => selection.anchor : undefined,
       context: () => current, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), query, apply,
     }),
   };
 }
 
 describe('selection data navigation', () => {
+  it('extends from the focus then jumps from the active anchor in one queued batch', async () => {
+    const nav = navigation(true);
+    nav.update({ selection: { anchor: { row: 1, col: 1 }, focus: { row: 4, col: 3 } } });
+    nav.query.mockImplementation(async (context) => ({
+      edge: { row: context.selection.focus.row, col: context.selection.focus.col + 2 },
+    }));
+    nav.press({ ...right, shiftKey: true });
+    nav.press(right);
+    await tick();
+    expect(nav.query.mock.calls[0]![0].selection.focus).toEqual({ row: 4, col: 3 });
+    expect(nav.apply.mock.calls[0]![0]).toEqual({ anchor: { row: 1, col: 1 }, focus: { row: 4, col: 5 } });
+    expect(nav.query.mock.calls[1]![0].selection.focus).toEqual({ row: 1, col: 1 });
+    expect(nav.current.selection).toEqual(selectionAt({ row: 1, col: 3 }));
+  });
+
+  it('preserves the active anchor and range comparison across select-all presses', async () => {
+    const nav = navigation(true);
+    const anchor = { row: 2, col: 2 };
+    nav.update({ selection: { anchor, focus: { row: 4, col: 4 } } });
+    const region = { top: 0, left: 0, bottom: 4, right: 4 };
+    nav.query.mockResolvedValue({ region });
+    nav.press({ key: 'a', ctrlKey: true });
+    nav.press({ key: 'a', ctrlKey: true });
+    await tick();
+    expect(nav.query.mock.calls[0]![0].selection.focus).toEqual(anchor);
+    expect(normalizeRange(nav.apply.mock.calls[0]![0])).toEqual(region);
+    expect(normalizeRange(nav.current.selection)).toEqual({ top: 0, left: 0, bottom: 99, right: 19 });
+    expect(nav.current.selection.anchor).toEqual(anchor);
+  });
+
   it('chains rapid repeated jumps from each accepted target', async () => {
     const nav = navigation();
     const first = deferred<SelectionData>();

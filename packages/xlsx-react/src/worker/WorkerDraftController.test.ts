@@ -51,6 +51,43 @@ function setup() {
 }
 
 describe('loading cell input', () => {
+  for (const source of ['cell', 'formula'] as const) {
+    test(`edits the range anchor through ${source} input`, async () => {
+      const { controller, state, prefill, complete, edits, select } = setup();
+      state.selection = { anchor: { row: 1, col: 1 }, focus: { row: 4, col: 3 } };
+      if (source === 'cell') {
+        controller.open();
+        expect(prefill.mock.calls[0]).toMatchObject([0, { row: 1, col: 1 }]);
+        await complete('anchor');
+        expect(controller.getSnapshot().cell).toMatchObject({ row: 1, col: 1, value: 'anchor' });
+      }
+      controller.change(source, '4242');
+      controller.commit(source, 'down');
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatchObject({ row: 1, col: 1, value: '4242' });
+      expect(select.mock.calls[0]).toMatchObject([0, { row: 1, col: 1 }, 'down']);
+    });
+
+    test(`starts ${source} composition at the range anchor`, async () => {
+      const { controller, state, edits } = setup();
+      state.selection = { anchor: { row: 4, col: 3 }, focus: { row: 1, col: 1 } };
+      controller.start(source);
+      controller.change(source, '4242');
+      controller.end();
+      await Promise.resolve();
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatchObject({ row: 4, col: 3, value: '4242' });
+    });
+  }
+
+  test('typing replaces the range anchor', () => {
+    const { controller, state, edits } = setup();
+    state.selection = { anchor: { row: 4, col: 3 }, focus: { row: 1, col: 1 } };
+    controller.open('x');
+    controller.commit('cell');
+    expect(edits[0]).toMatchObject({ row: 4, col: 3, value: 'x' });
+  });
+
   for (const inputType of ['insertText', 'insertFromPaste', 'insertFromDrop']) {
     test(`holds ${inputType} text until the existing input arrives`, async () => {
       const { controller, beforeInput, complete } = setup();

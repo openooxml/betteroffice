@@ -661,7 +661,13 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (op.method !== 'undo' && op.method !== 'redo') {
     if (committed && afterHistory.undoDepth > history.undoDepth) {
       if (state.historySelections.length > history.undoDepth + 1) state.historySelections.length = history.undoDepth + 1;
-      state.historySelections[afterHistory.undoDepth] = { before: beforeSelection, after: structuredClone(state.selection),
+      let after = structuredClone(state.selection);
+      if (op.method === 'editCell') {
+        const [sheet, row, col] = op.args;
+        after = { sheetId: state.sheetIds[sheet], activeCell: { row, col },
+          range: { kind: 'rowCol', start: { row, col }, end: { row, col } } };
+      }
+      state.historySelections[afterHistory.undoDepth] = { before: beforeSelection, after,
         beforeSheets: beforeSheetIds, afterSheets: [...state.sheetIds] };
     }
   }
