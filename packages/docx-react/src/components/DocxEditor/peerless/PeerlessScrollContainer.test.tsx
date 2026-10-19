@@ -118,6 +118,11 @@ test('peerless_editor_owns_scroll_container', async () => {
   expect(editor.scroller.tabIndex).toBe(0);
 });
 
+test('peerless_scroll_container_contains_scroll_chaining', async () => {
+  const editor = await mount();
+  expect(editor.scroller.style.overscrollBehavior).toBe('contain');
+});
+
 test('page_keys_scroll_peerless_container_without_blurring_document_input', async () => {
   const editor = await mount();
   const input = editor.getByRole('textbox', { name: 'Document input' });

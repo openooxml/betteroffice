@@ -1011,7 +1011,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       containerRef={container} scrollContainerRef={scroller} editorContentRef={content}
       className={className} containerStyle={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', minHeight: 0, minWidth: 0, backgroundColor: 'var(--doc-bg)', ...style }}
       mainContentStyle={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}
-      editorContainerStyle={{ flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto', overflowY: 'auto', position: 'relative', overflowAnchor: 'none' }}
+      editorContainerStyle={{ flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto', overflowY: 'auto', overscrollBehavior: 'contain', position: 'relative', overflowAnchor: 'none' }}
       showRuler={props.showRuler ?? false} readOnlyProp={readOnly} showOutline={navigation.showOutline} showOutlineButton={props.showOutlineButton ?? true}
       sidebarOpen={sidebarOpen} minLayoutWidth={minLayoutWidth} editorScrollLeft={navigation.pageInfo.scrollLeft} expandedSidebarItem={expandedSidebarItem}
       trackedChanges={trackedChanges?.entries ?? []} onScrollContainerMouseDown={ignore} onEditorBgMouseDown={(event) => {

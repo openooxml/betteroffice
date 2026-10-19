@@ -398,27 +398,219 @@ test('worker caret blinks on the hybrid interval only while the input is focused
   expect(caret().opacity).toBe('1');
 });
 
-test('a press outside the pages ends their click sequence', async () => {
-  const counts: number[] = [];
-  const editor = await mount(false, false, false, undefined, undefined, {
-    onPartPoint: ({ clickCount }) => { counts.push(clickCount); return true; },
-    pageOverlays: <button type="button">Close header editing</button>,
+function pointerHost(container: HTMLElement) {
+  const host = container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  const capture = mock(() => {});
+  const release = mock(() => {});
+  Object.defineProperties(host, {
+    getBoundingClientRect: { value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }) },
+    setPointerCapture: { value: capture },
+    hasPointerCapture: { value: () => true },
+    releasePointerCapture: { value: release },
   });
-  const host = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
-  Object.defineProperty(host, 'getBoundingClientRect', { value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }) });
-  const press = (target: Element) => {
-    fireEvent.pointerDown(target, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
-    fireEvent.pointerUp(target, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
-  };
-  press(host);
-  press(host);
-  press(editor.getByRole('button', { name: 'Close header editing' }));
-  press(host);
-  press(host);
-  press(document.body);
-  press(host);
-  expect(counts).toEqual([1, 2, 1, 2, 1]);
+  return { host, capture, release };
+}
+
+test('touch presses allow native panning without selecting or focusing the input', async () => {
+  const editor = await mount();
+  const { host, capture } = pointerHost(editor.container);
+  const surface = editor.canvas.parentElement!;
+  expect(host.style.touchAction).toBe('pan-x pan-y');
+  expect(surface.style.touchAction).toBe('pan-x pan-y');
+  const down = new PointerEvent('pointerdown', { pointerId: 1, pointerType: 'touch', isPrimary: true,
+    button: 0, buttons: 1, clientX: 50, clientY: 10, bubbles: true, cancelable: true });
+  fireEvent(surface, down);
+  expect(down.defaultPrevented).toBe(false);
+  expect(capture).not.toHaveBeenCalled();
+  expect(editor.binding.admission.getSnapshot().originalUnackedIntents).toBe(0);
+  expect(document.activeElement).not.toBe(editor.textarea);
 });
+
+test('a touch tap places the caret on release and keeps the document input focused', async () => {
+  const editor = await mount();
+  const { host } = pointerHost(editor.container);
+  const point = { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: 50, clientY: 10 };
+  fireEvent.pointerDown(host, { ...point, buttons: 1 });
+  expect(editor.binding.admission.getSnapshot().originalUnackedIntents).toBe(0);
+  fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 52 });
+  fireEvent.pointerUp(host, { ...point, clientX: 52 });
+  await waitFor(() => expect(editor.commands).toHaveLength(1));
+  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { page, x: 52, y: 10, clickCount: 1 } });
+  const mouse = new MouseEvent('mousedown', { button: 0, bubbles: true, cancelable: true });
+  fireEvent(host, mouse);
+  expect(mouse.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(editor.textarea);
+});
+
+for (const end of ['up', 'cancel', 'lost-capture'] as const) {
+  test(`a touch long press extends selection until pointer ${end}`, async () => {
+    const editor = await mount();
+    const { host, capture, release } = pointerHost(editor.container);
+    jest.useFakeTimers();
+    restorers.push(() => jest.useRealTimers());
+    const point = { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: 50, clientY: 10 };
+    fireEvent.pointerDown(host, { ...point, buttons: 1 });
+    fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 57 });
+    act(() => { jest.advanceTimersByTime(499); });
+    expect(editor.binding.admission.getSnapshot().originalUnackedIntents).toBe(0);
+    expect(capture).not.toHaveBeenCalled();
+    expect(host.style.touchAction).toBe('pan-x pan-y');
+    act(() => { jest.advanceTimersByTime(1); });
+    expect(capture).toHaveBeenCalledWith(1);
+    expect(host.style.touchAction).toBe('none');
+    const move = new Event('touchmove', { bubbles: true, cancelable: true });
+    fireEvent(host, move);
+    expect(move.defaultPrevented).toBe(true);
+    fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 80 });
+    if (end === 'up') fireEvent.pointerUp(host, { ...point, clientX: 80 });
+    else if (end === 'cancel') fireEvent.pointerCancel(host, point);
+    else fireEvent.lostPointerCapture(host, point);
+    expect(release).toHaveBeenCalledWith(1);
+    expect(host.style.touchAction).toBe('pan-x pan-y');
+    fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 90 });
+    jest.useRealTimers();
+    await waitFor(() => expect(editor.commands).toHaveLength(2));
+    expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { page, x: 50, y: 10 } });
+    expect(editor.commands[1]).toMatchObject({ kind: 'extendSelection', payload: { page, x: 80, y: 10 } });
+  });
+}
+
+test('a touch long press keeps selecting when capture transfers from the canvas to the host', async () => {
+  const editor = await mount();
+  const { host, capture, release } = pointerHost(editor.container);
+  jest.useFakeTimers();
+  restorers.push(() => jest.useRealTimers());
+  const point = { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: 50, clientY: 10 };
+  fireEvent.pointerDown(editor.canvas, { ...point, buttons: 1 });
+  act(() => { jest.advanceTimersByTime(500); });
+  expect(capture).toHaveBeenCalledWith(1);
+  fireEvent.lostPointerCapture(editor.canvas, { ...point, bubbles: true });
+  expect(release).not.toHaveBeenCalled();
+  expect(host.style.touchAction).toBe('none');
+  fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 80 });
+  fireEvent.pointerUp(host, { ...point, clientX: 80 });
+  expect(release).toHaveBeenCalledWith(1);
+  expect(host.style.touchAction).toBe('pan-x pan-y');
+  fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 90 });
+  jest.useRealTimers();
+  await waitFor(() => expect(editor.commands).toHaveLength(2));
+  expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { page, x: 50, y: 10 } });
+  expect(editor.commands[1]).toMatchObject({ kind: 'extendSelection', payload: { page, x: 80, y: 10 } });
+});
+
+test('a touch swipe cancels long press and keeps native scrolling', async () => {
+  const editor = await mount();
+  const { host, capture } = pointerHost(editor.container);
+  jest.useFakeTimers();
+  restorers.push(() => jest.useRealTimers());
+  const point = { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: 50, clientY: 10 };
+  fireEvent.pointerDown(host, { ...point, buttons: 1 });
+  fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 80 });
+  act(() => { jest.advanceTimersByTime(500); });
+  const move = new Event('touchmove', { bubbles: true, cancelable: true });
+  fireEvent(host, move);
+  expect(move.defaultPrevented).toBe(false);
+  fireEvent.pointerUp(host, { ...point, clientX: 80 });
+  expect(capture).not.toHaveBeenCalled();
+  expect(host.style.touchAction).toBe('pan-x pan-y');
+  expect(editor.binding.admission.getSnapshot().originalUnackedIntents).toBe(0);
+  expect(editor.commands).toEqual([]);
+});
+
+test('touch taps seven pixels apart select a word then a paragraph', async () => {
+  const editor = await mount();
+  const { host } = pointerHost(editor.container);
+  for (const clientX of [50, 57, 64]) {
+    const point = { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX, clientY: 10 };
+    fireEvent.pointerDown(host, { ...point, buttons: 1 });
+    fireEvent.pointerUp(host, point);
+  }
+  await waitFor(() => expect(editor.commands).toHaveLength(3));
+  expect(editor.commands).toMatchObject([
+    { kind: 'selectPoint', payload: { clickCount: 1 } },
+    { kind: 'selectPoint', payload: { clickCount: 2 } },
+    { kind: 'selectPoint', payload: { clickCount: 3 } },
+  ]);
+});
+
+for (const end of ['move', 'release-away', 'cancel', 'lost-capture'] as const) {
+  test(`a touch ${end} does not place the caret or extend selection`, async () => {
+    const editor = await mount();
+    const { host } = pointerHost(editor.container);
+    const point = { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: 50, clientY: 10 };
+    fireEvent.pointerDown(host, { ...point, buttons: 1 });
+    if (end === 'move') {
+      const move = new PointerEvent('pointermove', { ...point, buttons: 1, clientY: 30, bubbles: true, cancelable: true });
+      fireEvent(host, move);
+      expect(move.defaultPrevented).toBe(false);
+      fireEvent.pointerMove(host, { ...point, buttons: 1 });
+    } else if (end === 'cancel') fireEvent.pointerCancel(host, point);
+    else if (end === 'lost-capture') fireEvent.lostPointerCapture(host, point);
+    fireEvent.pointerUp(host, { ...point, clientY: end === 'release-away' ? 30 : 10 });
+    expect(editor.binding.admission.getSnapshot().originalUnackedIntents).toBe(0);
+    expect(editor.commands).toEqual([]);
+    expect(document.activeElement).not.toBe(editor.textarea);
+  });
+}
+
+for (const target of ['pages', 'outside']) {
+  test(`a second touch on ${target} cancels pending caret placement`, async () => {
+    const editor = await mount();
+    const { host } = pointerHost(editor.container);
+    const second = target === 'pages' ? host : document.body;
+    const point = { pointerType: 'touch', button: 0, clientX: 50, clientY: 10 };
+    fireEvent.pointerDown(host, { ...point, pointerId: 1, isPrimary: true, buttons: 1 });
+    fireEvent.pointerDown(second, { ...point, pointerId: 2, isPrimary: false, buttons: 1 });
+    fireEvent.pointerUp(second, { ...point, pointerId: 2, isPrimary: false });
+    fireEvent.pointerUp(host, { ...point, pointerId: 1, isPrimary: true });
+    expect(editor.binding.admission.getSnapshot().originalUnackedIntents).toBe(0);
+    expect(editor.commands).toEqual([]);
+    expect(document.activeElement).not.toBe(editor.textarea);
+  });
+}
+
+for (const pointerType of ['mouse', 'pen']) {
+  test(`${pointerType} dragging selects text and stops extending after release`, async () => {
+    const editor = await mount();
+    const { host, capture, release } = pointerHost(editor.container);
+    const point = { pointerId: 1, pointerType, isPrimary: true, button: 0, clientX: 50, clientY: 10 };
+    const down = new PointerEvent('pointerdown', { ...point, buttons: 1, bubbles: true, cancelable: true });
+    fireEvent(host, down);
+    expect(down.defaultPrevented).toBe(true);
+    expect(capture).toHaveBeenCalledWith(1);
+    fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 80 });
+    fireEvent.pointerUp(host, { ...point, clientX: 80 });
+    expect(release).toHaveBeenCalledWith(1);
+    fireEvent.pointerMove(host, { ...point, buttons: 1, clientX: 90 });
+    await waitFor(() => expect(editor.commands).toHaveLength(2));
+    expect(editor.commands[0]).toMatchObject({ kind: 'selectPoint', payload: { page, x: 50, y: 10 } });
+    expect(editor.commands[1]).toMatchObject({ kind: 'extendSelection', payload: { page, x: 80, y: 10 } });
+    expect(document.activeElement).toBe(editor.textarea);
+  });
+}
+
+for (const pointerType of ['mouse', 'touch']) {
+  test(`a ${pointerType} press outside the pages ends their click sequence`, async () => {
+    const counts: number[] = [];
+    const editor = await mount(false, false, false, undefined, undefined, {
+      onPartPoint: ({ clickCount }) => { counts.push(clickCount); return true; },
+      pageOverlays: <button type="button">Close header editing</button>,
+    });
+    const { host } = pointerHost(editor.container);
+    const press = (target: Element) => {
+      fireEvent.pointerDown(target, { pointerId: 1, pointerType, isPrimary: true, button: 0, clientX: 50, clientY: 10 });
+      fireEvent.pointerUp(target, { pointerId: 1, pointerType, isPrimary: true, button: 0, clientX: 50, clientY: 10 });
+    };
+    press(host);
+    press(host);
+    press(editor.getByRole('button', { name: 'Close header editing' }));
+    press(host);
+    press(host);
+    press(document.body);
+    press(host);
+    expect(counts).toEqual([1, 2, 1, 2, 1]);
+  });
+}
 
 test('single_cell selection keeps the worker caret next to its highlight', async () => {
   const editor = await mount(true, false, true);
