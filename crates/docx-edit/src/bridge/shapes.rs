@@ -463,13 +463,30 @@ fn shape_paragraph(
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
 ) -> ParagraphBlock {
-    let alignment = object(paragraph, "formatting")
+    let formatting = object(paragraph, "formatting");
+    let alignment = formatting
         .and_then(|value| string_in(value, "alignment"))
         .and_then(|value| match value.as_str() {
             "both" => Some("justify".to_owned()),
             "left" | "center" | "right" => Some(value),
             _ => None,
         });
+    let values: std::collections::BTreeMap<String, yrs::Any> = formatting
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| {
+            Some((
+                key.clone(),
+                crate::seed::any_from_value(value.clone()).ok()?,
+            ))
+        })
+        .collect();
+    let mut attrs = ParagraphAttrs {
+        alignment,
+        ..ParagraphAttrs::default()
+    };
+    super::lower_paragraph_spacing(&values, &mut attrs, env);
+    super::lower_paragraph_indent(&values, &mut attrs);
     let mut runs: Vec<Run> = array(paragraph, "content")
         .into_iter()
         .flatten()
@@ -512,10 +529,7 @@ fn shape_paragraph(
         id: BlockId::Str(block_id),
         para_id: string(paragraph, "paraId"),
         runs,
-        attrs: Some(ParagraphAttrs {
-            alignment,
-            ..ParagraphAttrs::default()
-        }),
+        attrs: Some(attrs),
         pm_start: None,
         pm_end: None,
     }
