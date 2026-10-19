@@ -12,7 +12,9 @@ use ooxml_drawingml::{
 use crate::PptxError;
 use crate::comments::{CommentFlavor, CommentSlide, CommentsWrite, authors_xml, comments_xml};
 use crate::drawing::parse_run_properties;
-use crate::model::{Bullet, PptxPackage, RunProperties, ShapeElements, SlideReference};
+use crate::model::{
+    Bullet, PptxPackage, RunProperties, ShapeElements, SlideReference, TextAutofit,
+};
 use crate::xml::{
     DRAWINGML_NS, PRESENTATIONML_NS, ParseBudget, ParseLimits, XmlElement, XmlNode,
     alternate_content_branch_index, parse_xml, serialize_xml, serialize_xml_fragment,
@@ -124,6 +126,7 @@ pub struct InheritedTransform {
 
 pub struct TextWrite {
     pub target: TextTarget,
+    pub autofit: Option<TextAutofit>,
     pub paragraphs: Vec<ParagraphWrite>,
 }
 
@@ -2374,6 +2377,35 @@ fn patch_text(
             .and_then(|table_cell| table_cell.child_mut("txBody")),
     };
     let body = body.ok_or_else(|| write_error(part, "text target has no body"))?;
+    if let Some(TextAutofit::Normal {
+        font_scale,
+        line_space_reduction,
+    }) = &text.autofit
+    {
+        if body.child("bodyPr").is_none() {
+            body.children.insert(
+                0,
+                XmlNode::Element(XmlElement::new(prefixes.drawing("bodyPr"))),
+            );
+        }
+        let properties = body.child_mut("bodyPr").unwrap();
+        if properties.child("normAutofit").is_none() {
+            let position = properties.children.iter().position(|child| {
+                matches!(child, XmlNode::Element(element) if matches!(element.local_name(), "scene3d" | "sp3d" | "flatTx" | "extLst"))
+            }).unwrap_or(properties.children.len());
+            properties.children.insert(
+                position,
+                XmlNode::Element(XmlElement::new(prefixes.drawing("normAutofit"))),
+            );
+        }
+        let autofit = properties.child_mut("normAutofit").unwrap();
+        if let Some(scale) = font_scale {
+            autofit.set_attribute("fontScale", format_fixed(scale * 100_000.0));
+        }
+        if let Some(reduction) = line_space_reduction {
+            autofit.set_attribute("lnSpcReduction", format_fixed(reduction * 100_000.0));
+        }
+    }
     rebuild_paragraphs(body, &text.paragraphs, theme, prefixes)?;
     Ok(())
 }

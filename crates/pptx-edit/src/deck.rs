@@ -2434,7 +2434,7 @@ pub(crate) fn shape_parts<T: ReadTxn>(
 
 /// The seed state `snapshot_doc` reads back for `package`, computed without
 /// materializing a scratch document. `save` diffs the live doc against this.
-pub(crate) fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
+pub fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
     seeded_snapshot(package, true)
 }
 

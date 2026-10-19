@@ -795,7 +795,7 @@ function openPresentationInternal(
       return wasmCall(() => doc.mediaBytes(partPath));
     },
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes());
+      return wasmCall(() => renderer.saveBytes(doc));
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(

@@ -9,7 +9,7 @@ use pptx_parse::{
     BackgroundWrite, Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite,
     CommentsWrite, DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd,
     PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeWrite, SlideWrite,
-    TextTarget, TextWrite,
+    TextAutofit, TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -23,6 +23,19 @@ impl DeckSession {
     /// Serializes the deck with all edits applied. Untouched slides keep their
     /// exact source part bytes; edited slides are patched at the XML level.
     pub fn save(&self) -> EditResult<Vec<u8>> {
+        self.save_with_autofit(&HashMap::new())
+    }
+
+    #[doc(hidden)]
+    pub fn save_with_autofit(&self, autofit: &HashMap<String, TextAutofit>) -> EditResult<Vec<u8>> {
+        self.save_with_autofit_resolver(|_, _| Ok(autofit.clone()))
+    }
+
+    #[doc(hidden)]
+    pub fn save_with_autofit_resolver(
+        &self,
+        resolve: impl FnOnce(&DeckSnapshot, &DeckSnapshot) -> EditResult<HashMap<String, TextAutofit>>,
+    ) -> EditResult<Vec<u8>> {
         if !self.package.has_parts() {
             return Err(EditError::Write(
                 "this session carries no source file bytes; open it from the \
@@ -42,7 +55,8 @@ impl DeckSession {
             return pptx_parse::write_pptx(&self.package)
                 .map_err(|error| EditError::Write(error.to_string()));
         }
-        let deck = deck_write(&current, &baseline, &self.package)?;
+        let autofit = resolve(&current, &baseline)?;
+        let deck = deck_write(&current, &baseline, &self.package, &autofit)?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
@@ -52,6 +66,7 @@ fn deck_write(
     current: &DeckSnapshot,
     baseline: &DeckSnapshot,
     package: &PptxPackage,
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<DeckWrite> {
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
         .slides
@@ -66,7 +81,12 @@ fn deck_write(
             },
             Some(base) => SlideWrite::Patch {
                 part_path: source_part_path(slide)?,
-                shapes: shape_writes(&slide.shapes, &base.shapes, source_shapes(package, slide))?,
+                shapes: shape_writes(
+                    &slide.shapes,
+                    &base.shapes,
+                    source_shapes(package, slide),
+                    autofit,
+                )?,
                 background: background_write(slide, base),
             },
             None if slide.source_part_path.is_some() => {
@@ -86,6 +106,7 @@ fn deck_write(
                         &slide.shapes,
                         &base.shapes,
                         source_shapes(package, slide),
+                        autofit,
                     )?,
                     background: background_write(slide, &base),
                 }
@@ -409,6 +430,7 @@ fn shape_writes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
     source: &[ShapeNode],
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -424,7 +446,12 @@ fn shape_writes(
                 let index = addressed_source_index(shape, source)?;
                 ShapeWrite::Patch {
                     source_index: index,
-                    patch: Box::new(shape_patch(shape, base, group_children(source, index))?),
+                    patch: Box::new(shape_patch(
+                        shape,
+                        base,
+                        group_children(source, index),
+                        autofit,
+                    )?),
                 }
             }
             None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
@@ -467,6 +494,7 @@ fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
     source_children: &[ShapeNode],
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     let source_inherited = base.width <= 0 || base.height <= 0;
@@ -526,11 +554,12 @@ fn shape_patch(
         }
         patch.texts.push(TextWrite {
             target: text_target(&story.id, &shape.id)?,
+            autofit: autofit.get(&story.id).cloned(),
             paragraphs: paragraph_writes(story, base_story)?,
         });
     }
     if shape.children != base.children {
-        patch.children = shape_writes(&shape.children, &base.children, source_children)?;
+        patch.children = shape_writes(&shape.children, &base.children, source_children, autofit)?;
     }
     Ok(patch)
 }

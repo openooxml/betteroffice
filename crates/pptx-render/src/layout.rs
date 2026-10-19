@@ -128,6 +128,12 @@ impl SubstitutionLog {
     }
 }
 
+struct CachedBaselineStory {
+    body: TextBody,
+    theme: Theme,
+    story: StorySnapshot,
+}
+
 pub struct SlideRenderer {
     fonts: FontStore,
     faces: HashMap<(String, bool, bool), FontFace>,
@@ -140,6 +146,7 @@ pub struct SlideRenderer {
     font_count: usize,
     /// Laid-out text reused across display-list builds and slides.
     text_layouts: Mutex<TextLayoutCache>,
+    baseline_stories: Mutex<HashMap<String, CachedBaselineStory>>,
 }
 
 impl Default for SlideRenderer {
@@ -158,6 +165,7 @@ impl SlideRenderer {
             fallback_family: None,
             font_count: 0,
             text_layouts: Mutex::new(TextLayoutCache::default()),
+            baseline_stories: Mutex::new(HashMap::new()),
         }
     }
 
@@ -485,6 +493,7 @@ impl SlideRenderer {
             parsed_slide,
             primitives: Vec::new(),
             hit_regions: Vec::new(),
+            autofit: HashMap::new(),
             substitutions: SubstitutionLog::default(),
             shape_count: 0,
             line_count: 0,
@@ -561,7 +570,67 @@ impl SlideRenderer {
             },
             font_substitutions: builder.substitutions.entries,
             hit_regions: builder.hit_regions,
+            autofit: builder.autofit,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn save(&self, session: &pptx_edit::DeckSession) -> pptx_edit::EditResult<Vec<u8>> {
+        if self.fallback_font().is_none() {
+            return session.save();
+        }
+        session.save_with_autofit_resolver(|snapshot, baseline| {
+            let mut autofit = HashMap::new();
+            for (index, slide) in snapshot.slides.iter().enumerate() {
+                let base = baseline.slides.iter().find(|base| base.id == slide.id);
+                let parents = SlideParents::resolve(
+                    session.package(),
+                    slide.source_part_path.as_deref(),
+                    slide.layout_part_path.as_deref(),
+                );
+                if !has_autofit_edits(
+                    &slide.shapes,
+                    base.map_or(&[], |base| &base.shapes),
+                    &parents,
+                ) {
+                    continue;
+                }
+                let rendered = self
+                    .layout_slide(session.package(), snapshot, index)
+                    .map_err(|error| pptx_edit::EditError::Write(error.to_string()))?;
+                autofit.extend(rendered.autofit);
+            }
+            Ok(autofit)
+        })
+    }
+
+    fn story_edited(&self, story: &StorySnapshot, body: &TextBody, theme: &Theme) -> bool {
+        let Ok(mut cache) = self.baseline_stories.lock() else {
+            return pptx_edit::baseline_story(&story.id, body, Some(theme))
+                .is_ok_and(|baseline| baseline != *story);
+        };
+        if let Some(cached) = cache.get(&story.id)
+            && cached.body == *body
+            && cached.theme == *theme
+        {
+            return cached.story != *story;
+        }
+        let Ok(baseline) = pptx_edit::baseline_story(&story.id, body, Some(theme)) else {
+            return false;
+        };
+        let edited = baseline != *story;
+        if cache.len() >= 128 {
+            cache.clear();
+        }
+        cache.insert(
+            story.id.clone(),
+            CachedBaselineStory {
+                body: body.clone(),
+                theme: theme.clone(),
+                story: baseline,
+            },
+        );
+        edited
     }
 
     /// Whether a face was registered under `family` itself, rather than one
@@ -630,6 +699,46 @@ impl SlideRenderer {
     }
 }
 
+fn has_autofit_edits(
+    current: &[ShapeSnapshot],
+    baseline: &[ShapeSnapshot],
+    parents: &SlideParents<'_>,
+) -> bool {
+    current.iter().any(|shape| {
+        let base = baseline.iter().find(|base| base.id == shape.id);
+        if has_autofit_edits(
+            &shape.children,
+            base.map_or(&[], |base| &base.children),
+            parents,
+        ) {
+            return true;
+        }
+        if base.is_some_and(|base| base.text_stories == shape.text_stories) {
+            return false;
+        }
+        let original = parents
+            .slide
+            .and_then(|slide| find_node(&slide.shapes, shape.source_id));
+        let layout = shape.placeholder.as_ref().and_then(|placeholder| {
+            parents
+                .layout
+                .and_then(|layout| find_placeholder(&layout.shapes, placeholder))
+        });
+        let master = shape.placeholder.as_ref().and_then(|placeholder| {
+            parents
+                .master
+                .and_then(|master| find_placeholder(&master.shapes, placeholder))
+        });
+        matches!(
+            [original, layout, master]
+                .into_iter()
+                .flatten()
+                .find_map(|node| node_text(node)?.autofit.as_ref()),
+            Some(TextAutofit::Normal { .. })
+        )
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -689,6 +798,7 @@ pub struct RenderedSlide {
     /// Families the slide asked for that no registered face matched.
     pub font_substitutions: Vec<FontSubstitution>,
     hit_regions: Vec<HitRegion>,
+    autofit: HashMap<String, TextAutofit>,
 }
 
 impl RenderedSlide {
@@ -737,6 +847,7 @@ struct LayoutBuilder<'a> {
     parsed_slide: Option<&'a Slide>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
+    autofit: HashMap<String, TextAutofit>,
     substitutions: SubstitutionLog,
     shape_count: usize,
     line_count: usize,
@@ -974,7 +1085,15 @@ impl<'a> LayoutBuilder<'a> {
         let text = match shape.kind {
             ShapeKind::GraphicFrame => None,
             ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
-                shape.text_stories.first().map(content_from_story)
+                shape.text_stories.first().map(|story| {
+                    let mut content = content_from_story(story);
+                    content.refit_autofit =
+                        matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
+                            && body_cascade.primary.is_some_and(|body| {
+                                self.renderer.story_edited(story, body, self.theme)
+                            });
+                    content
+                })
             }
         };
         let text_hit = if let Some(content) = text {
@@ -1792,7 +1911,7 @@ impl<'a> LayoutBuilder<'a> {
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
         self.substitutions.enter_shape(shape_id);
-        let resolved = resolve_content(
+        let mut resolved = resolve_content(
             self.renderer,
             self.theme,
             &content,
@@ -1816,8 +1935,61 @@ impl<'a> LayoutBuilder<'a> {
             w: (text_rect.w - emu_to_px(left + right) - preset_x * 2.0).max(1.0),
             h: (text_rect.h - emu_to_px(top + bottom) - preset_y * 2.0).max(1.0),
         };
-        let scale = autofit_font_scale(cascade.autofit());
         let stacked = flow == TextFlow::Stacked;
+        let scale = if content.refit_autofit {
+            let steps = [
+                (100_000, 0),
+                (100_000, 10_000),
+                (100_000, 20_000),
+                (92_500, 20_000),
+                (85_000, 20_000),
+                (77_500, 20_000),
+                (70_000, 20_000),
+                (62_500, 20_000),
+                (55_000, 20_000),
+                (47_500, 20_000),
+                (40_000, 20_000),
+                (32_500, 20_000),
+                (25_000, 20_000),
+            ];
+            let mut low = 0;
+            let mut high = steps.len() - 1;
+            while low < high {
+                let mid = (low + high) / 2;
+                let (scale, reduction) = steps[mid];
+                for paragraph in &mut resolved.paragraphs {
+                    paragraph.line_space_reduction = reduction as f32 / 100_000.0;
+                }
+                let text = self.layout_text(
+                    &resolved,
+                    content_rect,
+                    scale as f32 / 100_000.0,
+                    stacked,
+                    cascade.wraps(),
+                )?;
+                if text.total_height <= content_rect.h
+                    && text.lines.iter().all(|line| line.width <= content_rect.w)
+                {
+                    high = mid;
+                } else {
+                    low = mid + 1;
+                }
+            }
+            let (scale, reduction) = steps[low];
+            for paragraph in &mut resolved.paragraphs {
+                paragraph.line_space_reduction = reduction as f32 / 100_000.0;
+            }
+            self.autofit.insert(
+                content.story_id.clone(),
+                TextAutofit::Normal {
+                    font_scale: Some(f64::from(scale) / 100_000.0),
+                    line_space_reduction: Some(f64::from(reduction) / 100_000.0),
+                },
+            );
+            scale as f32 / 100_000.0
+        } else {
+            autofit_font_scale(cascade.autofit())
+        };
         let mut laid_out =
             self.layout_text(&resolved, content_rect, scale, stacked, cascade.wraps())?;
         self.line_count += laid_out.lines.len();
@@ -2309,6 +2481,7 @@ fn cascade_value<T: Copy>(
 #[derive(Clone)]
 struct TextContent {
     story_id: String,
+    refit_autofit: bool,
     paragraphs: Vec<ContentParagraph>,
 }
 
@@ -2329,6 +2502,7 @@ struct ContentRun {
 fn content_from_story(story: &StorySnapshot) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
+        refit_autofit: false,
         paragraphs: story
             .paragraphs
             .iter()
@@ -2368,6 +2542,7 @@ fn content_from_body(
 ) -> TextContent {
     TextContent {
         story_id: format!("inherited:{story_id}"),
+        refit_autofit: false,
         paragraphs: body
             .paragraphs
             .iter()
@@ -7651,6 +7826,7 @@ mod tests {
                 primitives: Vec::new(),
             },
             font_substitutions: Vec::new(),
+            autofit: HashMap::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "rotated".to_owned(),
                 rect: PxRect {
@@ -7702,6 +7878,7 @@ mod tests {
                 primitives: Vec::new(),
             },
             font_substitutions: Vec::new(),
+            autofit: HashMap::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "mirrored".to_owned(),
                 rect: PxRect {
@@ -7792,6 +7969,7 @@ mod tests {
                 primitives: Vec::new(),
             },
             font_substitutions: Vec::new(),
+            autofit: HashMap::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "sideways".to_owned(),
                 hit_rect: rect,
@@ -8659,6 +8837,82 @@ mod tests {
     }
 
     #[test]
+    fn normal_autofit_refits_edited_text_and_restores_stored_scale_on_undo() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let parsed = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find_map(|node| match node {
+                ShapeNode::Shape(shape) if shape.text.is_some() => Some(shape),
+                _ => None,
+            })
+            .unwrap();
+        parsed.base.transform.width = 2_476_500;
+        parsed.base.transform.height = 952_500;
+        parsed.base.placeholder = None;
+        let body = parsed.text.as_mut().unwrap();
+        body.autofit = Some(TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: Some(0.1),
+        });
+        body.paragraphs.truncate(1);
+        body.paragraphs[0].runs.truncate(1);
+        body.paragraphs[0].runs[0].text = "Start".into();
+        body.paragraphs[0].runs[0].properties.font_size_pt = Some(24.0);
+        let session = DeckSession::from_package(package, 8_004).unwrap();
+        session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+        let initial = session.snapshot().unwrap();
+        let shape = initial.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| !shape.text_stories.is_empty())
+            .unwrap();
+        let story = &shape.text_stories[0];
+        let renderer = renderer();
+        let lines = |snapshot: &DeckSnapshot| {
+            renderer
+                .layout_slide(session.package(), snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .into_iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        shape_id: Some(id),
+                        lines,
+                        ..
+                    } if id == shape.id => Some(lines),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let before = lines(&initial);
+        assert!((before[0].runs[0].font_size_px - points_to_px(12.0)).abs() < 0.01);
+        session
+            .insert_text(
+                &EditCtx::local("test"),
+                &story.id,
+                story.length - 1,
+                &" words that must shrink to stay inside the box".repeat(8),
+                &TextStyle::default(),
+            )
+            .unwrap();
+        let after = lines(&session.snapshot().unwrap());
+        let bottom = emu_to_px(shape.y + shape.height);
+        assert!(
+            after
+                .iter()
+                .all(|line| line.y + line.height <= bottom + 0.01),
+            "typed text must fit inside its shape"
+        );
+        session.add_undo_barrier();
+        assert!(session.undo());
+        assert_eq!(lines(&session.snapshot().unwrap()), before);
+        assert!(session.redo());
+        assert_eq!(lines(&session.snapshot().unwrap()), after);
+    }
+
+    #[test]
     fn normal_autofit_steps_the_type_down_by_its_stored_scale() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_003).unwrap();
@@ -8671,8 +8925,6 @@ mod tests {
             .unwrap();
         let shape_id = shape.id.clone();
         let source_id = shape.source_id;
-        let story_id = shape.text_stories[0].id.clone();
-        let index = shape.text_stories[0].length - 1;
         let parsed = package.slides[0]
             .shapes
             .iter_mut()
@@ -8692,15 +8944,6 @@ mod tests {
                 &shape_id,
                 2_000_000,
                 500_000,
-            )
-            .unwrap();
-        session
-            .insert_text(
-                &EditCtx::local("test"),
-                &story_id,
-                index,
-                " text that must shrink",
-                &TextStyle::default(),
             )
             .unwrap();
         let snapshot = session.snapshot().unwrap();

@@ -42,6 +42,8 @@ pub use batch::{
     EditTarget, EditValidation, FillGuard, MAX_REQUEST_BYTES, OutlineGuard, RectGuard, SlideTarget,
     TargetEdge, TextGuard, ValidationOutcome, outcome_json, oversized_request,
 };
+#[doc(hidden)]
+pub use deck::baseline_snapshot;
 pub use model::*;
 pub use ooxml_drawingml::{ColorValue, GradientFill, GradientStop, ShapeFill};
 #[doc(hidden)]
@@ -49,6 +51,8 @@ pub use peer::{PeerError, PeerFont};
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
+#[doc(hidden)]
+pub use story::baseline_story;
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
     ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,

@@ -6,7 +6,7 @@ import { isClientMessage, isHostMessage } from '../../../../shared/office-sessio
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { initWasm, openPresentation } from '../wasm/loader';
-import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import { PptxDocument, PptxRenderer } from '../wasm/generated/pptx_wasm.js';
 import { createPresentationEditorSession } from './editorSession';
 import { createPresentationSessionHost } from './host';
 import type { PptxWorkerEditorOperation } from './replay';
@@ -318,18 +318,17 @@ test('flush_and_save_wait_for_final_ack', async () => {
 
 test('normal_save_and_export_use_worker_only', async () => {
   const context = await setup();
-  const peerSave = spyOn(context.peerDoc, 'saveBytes');
-  const workerSave = spyOn(context.workerDoc, 'saveBytes');
+  const save = spyOn(PptxRenderer.prototype, 'saveBytes');
   try {
     context.access.setSlideNotes(context.access.snapshot().slides[0].id, 'worker save');
     await context.owner.saveAsync();
-    expect(workerSave).toHaveBeenCalledTimes(1);
-    expect(peerSave).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(save.mock.calls[0]?.[0]).toBe(context.workerDoc);
     expect('exportStructured' in context.access).toBe(false);
     expect('exportMarkdown' in context.access).toBe(false);
     expect('applyUpdate' in context.access).toBe(false);
     expect('setUndoCaptureMode' in context.access).toBe(false);
-  } finally { peerSave.mockRestore(); workerSave.mockRestore(); await context.owner.dispose(); }
+  } finally { save.mockRestore(); await context.owner.dispose(); }
 });
 
 async function recovery(context: Awaited<ReturnType<typeof setup>>, text: string) {
@@ -424,10 +423,11 @@ test('recovery_serialization_failure_is_retryable', async () => {
   const context = await setup();
   context.access.setSlideNotes(context.access.snapshot().slides[0].id, 'retry recovery');
   context.crash();
-  const save = spyOn(context.peerDoc, 'saveBytes').mockImplementationOnce(() => { throw new Error('serialization'); });
+  const save = spyOn(PptxRenderer.prototype, 'saveBytes').mockImplementationOnce(() => { throw new Error('serialization'); });
   const free = spyOn(context.peerDoc, 'free');
   try {
     await expect(context.owner.recoverySave()).rejects.toThrow('serialization');
+    expect(save.mock.calls[0]?.[0]).toBe(context.peerDoc);
     expect(context.owner.state.stage).toBe('failed');
     expect(free).not.toHaveBeenCalled();
     save.mockImplementationOnce(() => { throw new Error('retirement serialization'); });

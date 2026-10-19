@@ -916,7 +916,7 @@ fn valid_kern(value: &Any) -> bool {
 
 /// The snapshot `snapshot_story` reads back from a story `seed_story` wrote,
 /// computed without materializing a scratch document.
-pub(crate) fn baseline_story(
+pub fn baseline_story(
     story_id: &str,
     body: &TextBody,
     theme: Option<&Theme>,

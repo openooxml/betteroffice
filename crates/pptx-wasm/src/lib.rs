@@ -117,6 +117,11 @@ impl PptxRenderer {
         Ok(id)
     }
 
+    #[wasm_bindgen(js_name = saveBytes)]
+    pub fn save_bytes(&self, document: &PptxDocument) -> Result<Vec<u8>, JsValue> {
+        self.renderer.save(document.session()).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = layoutSlideJson)]
     pub fn layout_slide_json(
         &mut self,

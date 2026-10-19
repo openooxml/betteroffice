@@ -6,31 +6,27 @@ const DECK: &[u8] = include_bytes!("fixtures/line-spacing.pptx");
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
 fn render(family: &str, size_pt: f64, scale: f64) -> (f32, Vec<PositionedTextLine>) {
-    let session = DeckSession::open(DECK, 8_021).unwrap();
-    let mut snapshot = session.snapshot().unwrap();
-    let shape = snapshot.slides[0]
-        .shapes
-        .iter_mut()
-        .find(|shape| shape.source_id == 4)
-        .unwrap();
-    for paragraph in &mut shape.text_stories[0].paragraphs {
-        for run in &mut paragraph.runs {
-            run.style.font_family = Some(family.to_owned());
-            run.style.font_size_pt = Some(size_pt);
-        }
-    }
-    let mut package = session.package().clone();
+    let mut package = pptx_parse::parse_pptx(DECK).unwrap();
     let ShapeNode::Shape(shape) = &mut package.slides[0].shapes[2] else {
         panic!("text shape");
     };
-    shape.text.as_mut().unwrap().autofit = Some(TextAutofit::Normal {
+    let body = shape.text.as_mut().unwrap();
+    for paragraph in &mut body.paragraphs {
+        for run in &mut paragraph.runs {
+            run.properties.font_family = Some(family.to_owned());
+            run.properties.font_size_pt = Some(size_pt);
+        }
+    }
+    body.autofit = Some(TextAutofit::Normal {
         font_scale: Some(scale),
         line_space_reduction: None,
     });
+    let session = DeckSession::from_package(package, 8_021).unwrap();
+    let snapshot = session.snapshot().unwrap();
     let mut renderer = SlideRenderer::new();
     renderer.register_font("Arial", false, false, FONT).unwrap();
     renderer
-        .layout_slide(&package, &snapshot, 0)
+        .layout_slide(session.package(), &snapshot, 0)
         .unwrap()
         .display_list
         .primitives
