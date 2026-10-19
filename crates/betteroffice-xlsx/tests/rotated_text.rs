@@ -1,3 +1,5 @@
+#![cfg(feature = "raster")]
+
 use betteroffice_xlsx::{CellRange, CellRef, RenderOptions, SheetId, Workbook};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
