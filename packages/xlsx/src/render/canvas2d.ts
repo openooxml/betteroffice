@@ -319,8 +319,10 @@ function paintRotatedText(ctx: CanvasRenderingContext2D, cmd: TextCmd, deg: numb
     }
   }
   const metrics = ctx.measureText(cmd.text);
-  const ascent = metrics.actualBoundingBoxAscent || fontSize * 0.8;
-  const descent = metrics.actualBoundingBoxDescent || fontSize * 0.2;
+  const ascent = (deg === 90 ? metrics.fontBoundingBoxAscent : undefined)
+    ?? (metrics.actualBoundingBoxAscent || fontSize * 0.8);
+  const descent = (deg === 90 ? metrics.fontBoundingBoxDescent : undefined)
+    ?? (metrics.actualBoundingBoxDescent || fontSize * 0.2);
   const lineHeight = ascent + descent;
   const angle = (-deg * Math.PI) / 180;
   const cos = Math.cos(angle);

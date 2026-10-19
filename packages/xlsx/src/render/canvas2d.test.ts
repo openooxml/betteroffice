@@ -396,6 +396,45 @@ describe('Canvas2D text', () => {
     expect(fills).toEqual([{ text: 'Header', x: 0, y: 4 }]);
   });
 
+  it('positions vertical line boxes independently of glyph ink', () => {
+    for (const [align, expectedX] of [['left', 10], ['center', 15], ['right', 20]] as const) {
+      for (const [valign, expectedY] of [['top', 20], ['center', 140], ['bottom', 260]] as const) {
+        const translates: number[][] = [];
+        const baselines: number[] = [];
+        const context = {
+          font: '', fillStyle: '', textAlign: '', textBaseline: '',
+          save() {}, restore() {}, setTransform() {}, clearRect() {},
+          beginPath() {}, rect() {}, clip() {}, fillRect() {}, rotate() {},
+          translate(x: number, y: number) { translates.push([x, y]); },
+          measureText(text: string) {
+            return {
+              width: 40,
+              actualBoundingBoxAscent: text === 'ID' ? 10 : 12,
+              actualBoundingBoxDescent: text === 'ID' ? 0 : 4,
+              fontBoundingBoxAscent: 12,
+              fontBoundingBoxDescent: 4,
+            };
+          },
+          fillText(_text: string, _x: number, y: number) { baselines.push(y); },
+        };
+        paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+          width: 30, height: 284,
+          commands: ['ID', 'Fundplatz'].map<TextCmd>((text) => ({
+            op: 'text', x: 15, y: 142, text, fontSize: 11, color: '#000000', align,
+            clip: { x: 0, y: 0, w: 30, h: 284 }, rotationDeg: 90,
+            rotationBox: { x: 2, y: 0, w: 26, h: 280 }, rotationValign: valign,
+          })),
+        }, 1);
+        expect(translates).toHaveLength(2);
+        for (const [x, y] of translates) {
+          expect(x).toBeCloseTo(expectedX);
+          expect(y).toBeCloseTo(expectedY);
+        }
+        expect(baselines).toEqual([4, 4]);
+      }
+    }
+  });
+
   it('draws stacked text one character per line', () => {
     const fills: { text: string; x: number; y: number }[] = [];
     const context = {

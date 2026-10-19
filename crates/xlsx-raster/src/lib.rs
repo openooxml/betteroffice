@@ -1074,6 +1074,69 @@ mod tests {
     }
 
     #[test]
+    fn vertical_header_defaults_to_the_padded_right_edge() {
+        let mut bounds = Vec::new();
+        for horizontal in [
+            None,
+            Some(xlsx_model::HAlign::Left),
+            Some(xlsx_model::HAlign::Center),
+            Some(xlsx_model::HAlign::Right),
+        ] {
+            let mut workbook = xlsx_model::Workbook::default();
+            workbook.styles.cell_xfs.push(xlsx_model::Xf {
+                alignment: Some(xlsx_model::Alignment {
+                    h: horizontal,
+                    text_rotation: Some(90),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let mut sheet = xlsx_model::Sheet::new("Sheet1");
+            sheet.col_widths.insert(0, 3.54296875);
+            sheet.row_heights.insert(0, 213.5);
+            sheet.set_cell(
+                xlsx_model::CellRef::new(0, 0),
+                xlsx_model::Cell {
+                    value: xlsx_model::CellValue::Text {
+                        value: "Fundplatz".into(),
+                    },
+                    style: Some(0),
+                    ..Default::default()
+                },
+            );
+            workbook.sheets.push(sheet);
+            let dl = xlsx_render::build_display_list(
+                &workbook,
+                xlsx_model::SheetId(0),
+                &xlsx_render::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 30.0,
+                    height: 285.0,
+                },
+            )
+            .unwrap();
+            bounds.push(ink_bounds(&dl));
+        }
+        assert_eq!(bounds[0], bounds[3]);
+        assert!(
+            bounds[1].0 < bounds[2].0 && bounds[2].0 < bounds[3].0,
+            "{bounds:?}"
+        );
+        assert!(
+            bounds[0].0 + bounds[0].2 > 30 && bounds[0].2 < 28,
+            "{bounds:?}"
+        );
+        assert!(bounds.iter().all(|b| b.3 < 283), "{bounds:?}");
+        assert!(
+            bounds
+                .iter()
+                .all(|b| b.1 == bounds[0].1 && b.3 == bounds[0].3),
+            "{bounds:?}"
+        );
+    }
+
+    #[test]
     fn rotated_number_overflow_paints_hashes_along_its_direction() {
         let cell = DlRect {
             x: 0.0,

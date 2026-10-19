@@ -1022,6 +1022,14 @@ where
         } else {
             resolve_text_rotation(xf.text_rotation)
         };
+        let align = if rotation_deg == Some(90.0)
+            && matches!(xf.h, None | Some(HAlign::General))
+            && matches!(cell.value, CellValue::Text { .. })
+        {
+            Align::Right
+        } else {
+            align
+        };
         let clip = spill_clip(
             geom,
             &cols,
@@ -1038,6 +1046,25 @@ where
         );
         let stacked = stacked && !matches!(cell.value, CellValue::Number { .. });
         let rotated = rotation_deg.is_some() || stacked;
+        let rotation_valign = rotated.then_some(resolve_rotation_valign(valign));
+        let mut text_box = Rect {
+            x: cell_box.x,
+            y: cell_box.y,
+            w: cell_box.w,
+            h: cell_box.h,
+        };
+        if rotation_deg == Some(90.0) && matches!(cell.value, CellValue::Text { .. }) {
+            let horizontal_pad = print
+                .map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi)
+                .min(text_box.w / 2.0);
+            text_box.x += horizontal_pad;
+            text_box.w -= 2.0 * horizontal_pad;
+            if rotation_valign == Some(TextValign::Bottom) {
+                let bottom_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
+                text_box.h = (text_box.h - bottom_pad).max(0.0);
+            }
+        }
+        let rotation_box = rotated.then_some(text_box);
         let (tx, ty, clip, number_format) = if stacked {
             (
                 cell_box.x + cell_box.w / 2.0,
@@ -1048,7 +1075,7 @@ where
         } else if let Some(deg) = rotation_deg {
             let number_format = number_format.map(|mut layout| {
                 layout.left = 0.0;
-                layout.width = rotated_available_length(cell_box.w, cell_box.h, deg, size);
+                layout.width = rotated_available_length(text_box.w, text_box.h, deg, size);
                 layout
             });
             (
@@ -1060,14 +1087,6 @@ where
         } else {
             (tx, ty, clip, number_format)
         };
-        let rotation_box = rotated.then_some(Rect {
-            x: cell_box.x,
-            y: cell_box.y,
-            w: cell_box.w,
-            h: cell_box.h,
-        });
-        let rotation_valign = rotated.then_some(resolve_rotation_valign(valign));
-
         commands.push(DrawCmd::Text {
             x: tx,
             y: ty,
@@ -3550,17 +3569,25 @@ mod tests {
     }
 
     fn rotated_dl(rotation: Option<u16>) -> DisplayList {
-        let mut wb = Workbook::default();
-        wb.styles.cell_xfs.push(Xf {
-            alignment: Some(Alignment {
+        rotated_alignment_dl(
+            Alignment {
                 text_rotation: rotation,
                 ..Alignment::default()
-            }),
+            },
+            10.0,
+            60.0,
+        )
+    }
+
+    fn rotated_alignment_dl(alignment: Alignment, width: f64, height: f64) -> DisplayList {
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(alignment),
             ..Xf::default()
         });
         let mut sheet = Sheet::new("Sheet1");
-        sheet.col_widths.insert(0, 10.0);
-        sheet.row_heights.insert(0, 60.0);
+        sheet.col_widths.insert(0, width);
+        sheet.row_heights.insert(0, height);
         let mut cell = text_cell("Header");
         cell.style = Some(0);
         sheet.set_cell(CellRef::new(0, 0), cell);
@@ -3572,7 +3599,7 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 width: 400.0,
-                height: 200.0,
+                height: 400.0,
             },
         )
         .unwrap()
@@ -3583,6 +3610,66 @@ mod tests {
             .iter()
             .find(|c| matches!(c, DrawCmd::Text { text, .. } if &**text == "Header"))
             .unwrap()
+    }
+
+    #[test]
+    fn vertical_header_alignment_uses_padded_edges() {
+        for (horizontal, expected) in [
+            (None, Align::Right),
+            (Some(HAlign::General), Align::Right),
+            (Some(HAlign::Left), Align::Left),
+            (Some(HAlign::Center), Align::Center),
+            (Some(HAlign::Right), Align::Right),
+        ] {
+            for vertical in [
+                None,
+                Some(VAlign::Top),
+                Some(VAlign::Center),
+                Some(VAlign::Bottom),
+            ] {
+                let dl = rotated_alignment_dl(
+                    Alignment {
+                        h: horizontal,
+                        v: vertical,
+                        text_rotation: Some(90),
+                        ..Alignment::default()
+                    },
+                    3.54296875,
+                    213.5,
+                );
+                let DrawCmd::Text {
+                    align,
+                    rotation_box,
+                    clip,
+                    ..
+                } = only_text(&dl)
+                else {
+                    panic!("text")
+                };
+                assert_eq!(*align, expected, "{horizontal:?} {vertical:?}");
+                let bounds = rotation_box.unwrap();
+                assert_eq!(bounds.x, clip.x + 2.0);
+                assert_eq!(bounds.w, clip.w - 4.0);
+                assert_eq!(bounds.y, clip.y);
+                let bottom_pad = if matches!(vertical, None | Some(VAlign::Bottom)) {
+                    2.0
+                } else {
+                    0.0
+                };
+                assert_eq!(bounds.h, clip.h - bottom_pad);
+            }
+        }
+    }
+
+    #[test]
+    fn other_rotations_keep_their_general_text_alignment() {
+        for rotation in [None, Some(0), Some(45), Some(135), Some(180), Some(255)] {
+            let dl = rotated_dl(rotation);
+            let DrawCmd::Text { align, .. } = only_text(&dl) else {
+                panic!("text")
+            };
+            assert_eq!(*align, Align::Left, "{rotation:?}");
+        }
     }
 
     #[test]
@@ -3606,13 +3693,16 @@ mod tests {
         assert!(!stacked);
         assert_eq!(*rotation_valign, Some(TextValign::Bottom));
         let cell_box = (*rotation_box).unwrap();
-        assert_eq!(cell_box.x, 0.0);
+        assert_eq!(cell_box.x, 2.0);
         assert_eq!(cell_box.y, 0.0);
-        assert_eq!(cell_box.w, geometry::col_chars_to_px(10.0));
-        assert_eq!(cell_box.h, geometry::row_pt_to_px(60.0));
-        assert_eq!(*clip, cell_box);
-        assert_eq!(*x, cell_box.x + cell_box.w / 2.0);
-        assert_eq!(*y, cell_box.y + cell_box.h / 2.0);
+        assert_eq!(cell_box.w, geometry::col_chars_to_px(10.0) - 4.0);
+        assert_eq!(cell_box.h, geometry::row_pt_to_px(60.0) - 2.0);
+        assert_eq!(clip.x, 0.0);
+        assert_eq!(clip.y, 0.0);
+        assert_eq!(clip.w, cell_box.w + 4.0);
+        assert_eq!(clip.h, cell_box.h + 2.0);
+        assert_eq!(*x, clip.x + clip.w / 2.0);
+        assert_eq!(*y, clip.y + clip.h / 2.0);
         let json = serde_json::to_value(cmd).unwrap();
         assert_eq!(json["rotationDeg"], 90.0);
         assert_eq!(json["rotationBox"]["w"], cell_box.w as f64);
@@ -3830,6 +3920,11 @@ mod tests {
         };
         assert_eq!(*rotation_deg, Some(90.0));
         assert!(!stacked);
-        assert!(rotation_box.is_some());
+        let bounds = rotation_box.unwrap();
+        assert!((bounds.x - 2.0 * 96.0 / metrics.dpi).abs() < 0.001);
+        assert!(
+            (bounds.w - (metrics.column_pixels(10.0) - 4.0 * 96.0 / metrics.dpi)).abs() < 0.001
+        );
+        assert!((bounds.h - (80.0 - 3.0 * 96.0 / metrics.dpi)).abs() < 0.001);
     }
 }
