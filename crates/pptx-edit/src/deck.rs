@@ -2289,6 +2289,25 @@ fn validate_background_color(color: &ColorValue) -> EditResult<()> {
             )));
         }
     }
+    for transform in &color.transforms {
+        use ooxml_drawingml::ColorTransform::*;
+
+        let valid = match *transform {
+            Tint(value) | Shade(value) | LumMod(value) | LumOff(value) | SatMod(value)
+            | Alpha(value) => value.is_finite() && (0.0..=1.0).contains(&value),
+            Hue(value) | HueMod(value) | HueOff(value) | Sat(value) | SatOff(value)
+            | Lum(value) | Red(value) | RedMod(value) | RedOff(value) | Green(value)
+            | GreenMod(value) | GreenOff(value) | Blue(value) | BlueMod(value) | BlueOff(value)
+            | AlphaMod(value) | AlphaOff(value) => value.is_finite(),
+            Comp | Inv | Gray | Gamma | InvGamma => true,
+        };
+        if !valid {
+            return Err(EditError::InvalidFill(format!(
+                "background colour transform {} has an invalid value",
+                transform.xml_name()
+            )));
+        }
+    }
     Ok(())
 }
 

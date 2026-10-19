@@ -42,15 +42,18 @@ pub fn parse_color_element(element: Option<&XmlElement>) -> Option<ColorValue> {
         }
     }
     if let Some(color) = element.child_by_full_name("a:sysClr") {
-        return Some(ColorValue {
-            rgb: Some(
-                color
-                    .attribute(None, "lastClr")
-                    .unwrap_or("000000")
-                    .to_owned(),
-            ),
-            ..ColorValue::default()
-        });
+        return Some(apply_color_modifiers(
+            ColorValue {
+                rgb: Some(
+                    color
+                        .attribute(None, "lastClr")
+                        .unwrap_or("000000")
+                        .to_owned(),
+                ),
+                ..ColorValue::default()
+            },
+            color,
+        ));
     }
     if let Some(color) = element.child_by_full_name("a:prstClr") {
         let rgb = match color.attribute(None, "val")? {
@@ -64,55 +67,34 @@ pub fn parse_color_element(element: Option<&XmlElement>) -> Option<ColorValue> {
             "magenta" => "FF00FF",
             _ => return None,
         };
-        return Some(ColorValue {
-            rgb: Some(rgb.to_owned()),
-            ..ColorValue::default()
-        });
+        return Some(apply_color_modifiers(
+            ColorValue {
+                rgb: Some(rgb.to_owned()),
+                ..ColorValue::default()
+            },
+            color,
+        ));
     }
     None
 }
 
 fn apply_color_modifiers(mut color: ColorValue, element: &XmlElement) -> ColorValue {
-    if let Some(value) = element
-        .child_by_full_name("a:shade")
-        .and_then(|child| child.attribute(None, "val"))
-        .and_then(parse_javascript_integer_prefix)
-    {
-        color.theme_shade = Some(format!(
-            "{:02X}",
-            js_round(value / 100_000.0 * 255.0) as i64
-        ));
-    }
-    if let Some(value) = element
-        .child_by_full_name("a:tint")
-        .and_then(|child| child.attribute(None, "val"))
-        .and_then(parse_javascript_integer_prefix)
-    {
-        color.theme_tint = Some(format!(
-            "{:02X}",
-            js_round(value / 100_000.0 * 255.0) as i64
-        ));
-    }
-    color.luminance_modulation = color_fraction(element, "a:lumMod");
-    color.luminance_offset = color_fraction(element, "a:lumOff");
-    color.saturation_modulation = color_fraction(element, "a:satMod");
-    color.alpha = color_fraction(element, "a:alpha");
+    color.transforms = element
+        .child_elements()
+        .filter_map(|child| {
+            ooxml_drawingml::ColorTransform::from_xml(
+                child.local_name(),
+                child.attribute(None, "val"),
+            )
+        })
+        .collect();
     color
-}
-
-/// A `ST_Percentage` in thousandths of a percent, as a fraction.
-fn color_fraction(element: &XmlElement, name: &str) -> Option<f64> {
-    let value = element
-        .child_by_full_name(name)
-        .and_then(|child| child.attribute(None, "val"))
-        .and_then(parse_javascript_integer_prefix)?;
-    (value.is_finite() && (0.0..=1_000_000.0).contains(&value)).then_some(value / 100_000.0)
 }
 
 fn scheme_color(value: &str) -> &str {
     match value {
         "accent1" | "accent2" | "accent3" | "accent4" | "accent5" | "accent6" | "dk1" | "lt1"
-        | "dk2" | "lt2" | "hlink" | "folHlink" => value,
+        | "dk2" | "lt2" | "hlink" | "folHlink" | "phClr" => value,
         "tx1" => "text1",
         "tx2" => "text2",
         "bg1" => "background1",
@@ -691,9 +673,6 @@ fn local_child<'a>(parent: Option<&'a XmlElement>, name: &str) -> Option<&'a Xml
         .child_elements()
         .find(|child| child.local_name() == name)
 }
-fn js_round(value: f64) -> f64 {
-    (value + 0.5).floor()
-}
 
 #[cfg(test)]
 mod tests {
@@ -714,6 +693,45 @@ mod tests {
     }
 
     #[test]
+    fn color_transforms_preserve_order_signed_offsets_and_percentages() {
+        use ooxml_drawingml::ColorTransform;
+
+        let solid = root(
+            r#"<a:solidFill><a:schemeClr val="accent1"><a:tint val="50%"/><a:lumMod val="50000"/><a:satOff val="-10%"/><a:hueOff val="-5400000"/><a:alphaMod val="50000"/><a:comp/></a:schemeClr></a:solidFill>"#,
+        );
+        let color = parse_color_element(Some(&solid)).unwrap();
+        assert_eq!(
+            color.transforms,
+            vec![
+                ColorTransform::Tint(0.5),
+                ColorTransform::LumMod(0.5),
+                ColorTransform::SatOff(-0.1),
+                ColorTransform::HueOff(-0.25),
+                ColorTransform::AlphaMod(0.5),
+                ColorTransform::Comp,
+            ]
+        );
+        for source in [
+            r#"<a:srgbClr val="4472C4"><a:tint val="40000"/></a:srgbClr>"#,
+            r#"<a:sysClr val="windowText" lastClr="4472C4"><a:tint val="40000"/></a:sysClr>"#,
+            r#"<a:schemeClr val="accent1"><a:tint val="40000"/></a:schemeClr>"#,
+        ] {
+            let solid = root(&format!("<a:solidFill>{source}</a:solidFill>"));
+            assert_eq!(
+                resolve_color_value_to_hex(parse_color_element(Some(&solid)).as_ref()).as_deref(),
+                Some("#CFD5EA")
+            );
+        }
+        let solid = root(
+            r#"<a:solidFill><a:prstClr val="black"><a:tint val="50000"/></a:prstClr></a:solidFill>"#,
+        );
+        assert_eq!(
+            resolve_color_value_to_hex(parse_color_element(Some(&solid)).as_ref()).as_deref(),
+            Some("#BCBCBC")
+        );
+    }
+
+    #[test]
     fn colors_fills_outlines_and_null_line_ends_match_the_shared_package() {
         let solid = root(
             "<a:solidFill><a:schemeClr val=\"accent1\"><a:tint val=\"40000\"/></a:schemeClr></a:solidFill>",
@@ -722,7 +740,7 @@ mod tests {
             parse_color_element(Some(&solid)),
             Some(ColorValue {
                 theme_color: Some("accent1".into()),
-                theme_tint: Some("66".into()),
+                transforms: vec![ooxml_drawingml::ColorTransform::Tint(0.4)],
                 ..ColorValue::default()
             })
         );

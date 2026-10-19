@@ -6356,7 +6356,7 @@ mod tests {
                 BlipEffect::Duotone {
                     shadow: Some(ColorValue {
                         theme_color: Some("background2".to_owned()),
-                        theme_shade: Some("73".to_owned()),
+                        transforms: vec![ooxml_drawingml::ColorTransform::Shade(0.45)],
                         ..ColorValue::default()
                     }),
                     highlight: Some(ColorValue {
@@ -6373,7 +6373,7 @@ mod tests {
             effects,
             vec![
                 ImageEffect::Duotone {
-                    shadow: "#737373FF".to_owned(),
+                    shadow: "#B3B3B3FF".to_owned(),
                     highlight: "#FFFFFFFF".to_owned(),
                 },
                 ImageEffect::BiLevel { threshold: 0.25 },

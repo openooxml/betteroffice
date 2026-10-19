@@ -1209,12 +1209,12 @@ fn parse_color_element(color: &XmlElement) -> Option<ColorValue> {
         },
         _ => return None,
     };
-    parsed.theme_tint = color.child("tint").and_then(color_modifier);
-    parsed.theme_shade = color.child("shade").and_then(color_modifier);
-    parsed.luminance_modulation = color.child("lumMod").and_then(color_fraction);
-    parsed.luminance_offset = color.child("lumOff").and_then(color_fraction);
-    parsed.saturation_modulation = color.child("satMod").and_then(color_fraction);
-    parsed.alpha = color.child("alpha").and_then(color_fraction);
+    parsed.transforms = color
+        .child_elements()
+        .filter_map(|child| {
+            ooxml_drawingml::ColorTransform::from_xml(child.local_name(), child.attribute("val"))
+        })
+        .collect();
     Some(parsed)
 }
 
@@ -1251,28 +1251,6 @@ fn preset_color(value: &str) -> Option<&'static str> {
         "magenta" => Some("FF00FF"),
         _ => None,
     }
-}
-
-/// A `ST_Percentage` in thousandths of a percent, as a fraction.
-fn color_fraction(element: &XmlElement) -> Option<f64> {
-    let value = element.attribute("val")?.trim();
-    let value = value
-        .strip_suffix('%')
-        .map(|percent| percent.parse::<f64>().map(|value| value * 1_000.0))
-        .unwrap_or_else(|| value.parse::<f64>())
-        .ok()?;
-    (value.is_finite() && (0.0..=1_000_000.0).contains(&value)).then_some(value / 100_000.0)
-}
-
-fn color_modifier(element: &XmlElement) -> Option<String> {
-    let value = element.attribute("val")?.parse::<f64>().ok()?;
-    if !value.is_finite() || !(0.0..=100_000.0).contains(&value) {
-        return None;
-    }
-    Some(format!(
-        "{:02X}",
-        (value / 100_000.0 * 255.0).round() as i64
-    ))
 }
 
 fn parse_crop(element: Option<&XmlElement>) -> PictureCrop {
@@ -1645,7 +1623,100 @@ mod tests {
     use super::*;
     use crate::ParseLimits;
     use crate::xml::parse_xml;
-    use ooxml_drawingml::GeometryPathCommand;
+    use ooxml_drawingml::{ColorTransform, GeometryPathCommand};
+
+    #[test]
+    fn legacy_color_json_keeps_its_resolution_and_serialized_shape() {
+        let source = serde_json::json!({
+            "rgb": "204060",
+            "themeTint": "80",
+            "alpha": 0.5,
+        });
+        let color: ColorValue = serde_json::from_value(source.clone()).unwrap();
+        assert!(color.transforms.is_empty());
+        assert_eq!(serde_json::to_value(&color).unwrap(), source);
+        assert_eq!(
+            ooxml_drawingml::resolve_color_value_to_rgba_hex(Some(&color), None).as_deref(),
+            Some("#8F9FAF80")
+        );
+    }
+
+    #[test]
+    fn malformed_legacy_transforms_do_not_change_the_color() {
+        for (name, maximum) in [
+            ("tint", 100_000),
+            ("shade", 100_000),
+            ("lumMod", 1_000_000),
+            ("lumOff", 1_000_000),
+            ("satMod", 1_000_000),
+            ("alpha", 1_000_000),
+        ] {
+            for value in [-1, maximum + 1] {
+                let xml =
+                    format!(r#"<a:srgbClr val="4472C4"><a:{name} val="{value}"/></a:srgbClr>"#);
+                let limits = ParseLimits::default();
+                let root =
+                    parse_xml(xml.as_bytes(), "color.xml", &mut ParseBudget::new(&limits)).unwrap();
+                let color = parse_color_element(&root).unwrap();
+                assert!(color.transforms.is_empty(), "{xml}");
+                assert_eq!(
+                    ooxml_drawingml::resolve_color_value_to_rgba_hex(Some(&color), None).as_deref(),
+                    Some("#4472C4FF"),
+                    "{xml}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drawingml_palette_colors_match_reference_values() {
+        for (rgb, modifiers, expected) in [
+            ("4472C4", r#"<a:tint val="40000"/>"#, "#CFD5EA"),
+            ("4472C4", r#"<a:tint val="20000"/>"#, "#E9EBF5"),
+            ("4F81BD", r#"<a:tint val="60000"/>"#, "#B2C1DB"),
+            ("000000", r#"<a:tint val="50000"/>"#, "#BCBCBC"),
+            ("4472C4", r#"<a:shade val="50000"/>"#, "#2F528F"),
+            ("4F81BD", r#"<a:shade val="50000"/>"#, "#385D8A"),
+            (
+                "4472C4",
+                r#"<a:lumMod val="60000"/><a:lumOff val="40000"/>"#,
+                "#8FAADC",
+            ),
+            ("4472C4", r#"<a:lumMod val="75000"/>"#, "#2F5597"),
+            ("6254E7", r#"<a:tint val="50000"/>"#, "#C5C3F3"),
+        ] {
+            let xml = format!(r#"<a:srgbClr val="{rgb}">{modifiers}</a:srgbClr>"#);
+            let limits = ParseLimits::default();
+            let root =
+                parse_xml(xml.as_bytes(), "color.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let color = parse_color_element(&root).unwrap();
+            assert_eq!(
+                ooxml_drawingml::resolve_color_value_to_hex(Some(&color)).as_deref(),
+                Some(expected),
+                "{xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn drawingml_color_transforms_follow_document_order() {
+        for (modifiers, expected) in [
+            (r#"<a:tint val="50000"/><a:lumMod val="50000"/>"#, "#3F5493"),
+            (r#"<a:lumMod val="50000"/><a:tint val="50000"/>"#, "#BDBFC6"),
+            (r#"<a:shade val="50000"/><a:shade val="50000"/>"#, "#203A68"),
+        ] {
+            let xml = format!(r#"<a:srgbClr val="4472C4">{modifiers}</a:srgbClr>"#);
+            let limits = ParseLimits::default();
+            let root =
+                parse_xml(xml.as_bytes(), "color.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let color = parse_color_element(&root).unwrap();
+            assert_eq!(
+                ooxml_drawingml::resolve_color_value_to_hex(Some(&color)).as_deref(),
+                Some(expected),
+                "{xml}"
+            );
+        }
+    }
 
     #[test]
     fn a_kern_threshold_reads_in_points_within_the_schema_range() {
@@ -2168,14 +2239,14 @@ mod tests {
                     }),
                     to: Some(ColorValue {
                         rgb: Some("FFFFFF".to_owned()),
-                        alpha: Some(0.0),
+                        transforms: vec![ColorTransform::Alpha(0.0)],
                         ..ColorValue::default()
                     }),
                 },
                 BlipEffect::Duotone {
                     shadow: Some(ColorValue {
                         theme_color: Some("background2".to_owned()),
-                        theme_shade: Some("73".to_owned()),
+                        transforms: vec![ColorTransform::Shade(0.45)],
                         ..ColorValue::default()
                     }),
                     highlight: Some(ColorValue {
@@ -3119,8 +3190,10 @@ mod tests {
         assert!(!shadow.rotate_with_shape);
         let color = shadow.color.expect("the shadow should have a colour");
         assert_eq!(color.theme_color.as_deref(), Some("background1"));
-        assert_eq!(color.luminance_modulation, Some(0.5));
-        assert_eq!(color.alpha, Some(0.4));
+        assert_eq!(
+            color.transforms,
+            vec![ColorTransform::LumMod(0.5), ColorTransform::Alpha(0.4)]
+        );
 
         assert_eq!(effects_of(&data.shapes[1]), None);
         assert_eq!(effects_of(&data.shapes[2]), None);
