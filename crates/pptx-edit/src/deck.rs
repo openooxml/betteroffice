@@ -437,6 +437,7 @@ impl DeckSession {
                     .insert(&mut txn, id.as_str(), value)
                     .cast::<TextRef>()
                     .map_err(|_| EditError::StoryNotFound(id.clone()))?;
+                crate::story::materialize_paragraph_joins(&text, &mut txn, &source_id)?;
                 let prefix = format!("para:{source_id}:");
                 for diff in text.diff(&txn, YChange::identity) {
                     if let Out::YMap(marker) = diff.insert {
