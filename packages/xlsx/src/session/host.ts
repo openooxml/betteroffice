@@ -525,6 +525,11 @@ export function createWorkbookSessionHost(
         scrollPosition: opened.cellPosition(sheet, row, col),
       };
     },
+    selectionData(_, sheet, row, col, direction) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      return opened.selectionData(sheet, row, col, direction);
+    },
     cellInputs(_, sheet, range) {
       const opened = workbook();
       checkSheet(opened, sheet);

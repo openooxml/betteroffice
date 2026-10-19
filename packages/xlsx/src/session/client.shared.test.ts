@@ -125,6 +125,8 @@ const reads: { name: string; method: string; call(session: WorkbookSession): Pro
     { name: 'sheetView', call: (session: WorkbookSession) => session.call.sheetView(0),
       value: (seq: number) => ({ sheet: 0, version: `opaque:${seq}`, contentWidth: seq, contentHeight: 40,
         frozenRows: 0, frozenCols: 0, frozenWidth: 0, frozenHeight: 0, initialScrollX: 0, initialScrollY: 0 }) },
+    { name: 'selectionData', call: (session: WorkbookSession) => session.call.selectionData(0, 0, 0, 'down'),
+      value: (seq: number) => ({ edge: { row: seq, col: 0 }, region: null }) },
     { name: 'cellGeometry', call: (session: WorkbookSession) => session.call.cellGeometry(0, 0, 0),
       value: (seq: number) => ({ sheet: 0, version: `opaque:${seq}`, rect: { x: 0, y: 0, width: seq, height: 40 },
         scrollPosition: { x: 0, y: 0 } }) },

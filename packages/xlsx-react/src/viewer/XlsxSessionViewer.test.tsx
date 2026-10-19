@@ -69,6 +69,7 @@ function session() {
       sheet, version: 'v1', rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
       scrollPosition: { x: col * 96, y: row * 24 },
     })),
+    selectionData: mock<WorkbookSession['call']['selectionData']>(async () => ({ edge: null, region: null })),
     cellInputs: mock(async (sheet: number, range: string) => ({
       sheet, version: 'v1', cells: [[{ a1: range, input: '=SUM(B1:C1)', isFormula: true }]],
     })),
@@ -177,6 +178,101 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook session viewer', () => {
+  it('uses model region bounds while retaining the active cell', async () => {
+    const { viewer, call } = session();
+    call.selectionData.mockResolvedValue({ region: { top: 0, left: 0, bottom: 2, right: 2 } });
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 110, clientY: 30 });
+    fireEvent.mouseUp(window);
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    expect(call.selectionData).toHaveBeenCalledWith(0, 1, 1, undefined);
+    const outline = view.getByTestId('xlsx-selection') as HTMLElement;
+    expect(outline.style.width).toBe('288px');
+    expect(outline.style.height).toBe('72px');
+    expect(view.getAllByRole('gridcell').filter((cell) => cell.getAttribute('aria-selected') === 'true')).toHaveLength(9);
+    await tick();
+    fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+    expect(outline.style.left).toBe('192px');
+    expect(outline.style.top).toBe('24px');
+    expect(outline.style.width).toBe('96px');
+    expect(outline.style.height).toBe('24px');
+  });
+
+  for (const change of ['selection', 'sheet']) it(`drops a data query after changing ${change}`, async () => {
+    const { viewer, call } = session();
+    const answer = deferred<xlsx.SelectionData>();
+    call.selectionData.mockReturnValueOnce(answer.promise);
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'ArrowDown', metaKey: true });
+    if (change === 'selection') fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+    else {
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      await tick();
+    }
+    const geometryReads = call.cellGeometry.mock.calls.length;
+    await act(async () => answer.resolve({ edge: { row: 90, col: 0 } }));
+    expect(call.cellGeometry).toHaveBeenCalledTimes(geometryReads);
+    const outline = view.queryByTestId('xlsx-selection') as HTMLElement | null;
+    if (change === 'sheet' && outline === null) return;
+    expect(outline!.style.left).toBe(change === 'selection' ? '96px' : '0px');
+    expect(outline!.style.top).toBe('0px');
+    expect(outline!.style.width).toBe('96px');
+    expect(outline!.style.height).toBe('24px');
+  });
+
+  it('chains rapid data jumps through accepted viewer selections', async () => {
+    const { viewer, call } = session();
+    const first = deferred<xlsx.SelectionData>();
+    call.selectionData.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ edge: { row: 0, col: 2 } });
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'ArrowRight', ctrlKey: true });
+    fireEvent.keyDown(scroll, { key: 'ArrowRight', ctrlKey: true });
+    expect(call.selectionData).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve({ edge: { row: 0, col: 1 } }));
+    await tick();
+    await tick();
+    expect(call.selectionData.mock.calls[1]).toEqual([0, 0, 1, 'right']);
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('192px');
+  });
+
+  it('re-queries a data edge after the document version changes', async () => {
+    const { viewer, call } = session();
+    const first = deferred<xlsx.SelectionData>();
+    const fresh = deferred<xlsx.SelectionData>();
+    call.selectionData.mockReturnValueOnce(first.promise).mockReturnValueOnce(fresh.promise);
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight', ctrlKey: true });
+    viewer.confirmedBasis.version = 'v2';
+    await act(async () => first.resolve({ edge: { row: 0, col: 1 } }));
+    expect(call.selectionData).toHaveBeenCalledTimes(2);
+    expect(call.cellGeometry).not.toHaveBeenCalled();
+    await act(async () => fresh.resolve({ edge: { row: 0, col: 2 } }));
+    expect(call.cellGeometry).toHaveBeenCalledWith(0, 0, 2);
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('192px');
+  });
+
+  it('uses the directional limit after a data query fails', async () => {
+    const { viewer, call } = session();
+    call.selectionData.mockRejectedValueOnce(new Error('Query failed'));
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight', ctrlKey: true }); });
+    expect(call.cellGeometry).toHaveBeenCalledWith(0, 0, 42);
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+  });
+
   it('intercepts viewer saving and exposes painted pointer queries with stale guards', async () => {
     const { viewer } = session();
     open(viewer);
