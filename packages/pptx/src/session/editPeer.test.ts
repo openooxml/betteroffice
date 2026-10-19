@@ -250,6 +250,20 @@ test('successful_noops_consume_sequence_refusals_do_not', async () => {
   } finally { await context.owner.dispose(); }
 });
 
+test('text_box_marker_survives_worker_replay_and_is_omitted_for_preset_shapes', async () => {
+  const context = await setup();
+  try {
+    const slide = context.access.snapshot().slides[0].id;
+    const rect = { x: 0, y: 0, width: 1000000, height: 500000 };
+    context.access.addTextBox(slide, { name: 'Note', rect, text: 'Hello', style: {} });
+    context.access.addShape(slide, { name: 'Ellipse', rect, geometry: 'ellipse', fill: '#123456' });
+    const shapes = context.access.snapshot().slides[0].shapes;
+    expect(shapes.find((shape) => shape.name === 'Note')!.textBox).toBe(true);
+    expect(shapes.find((shape) => shape.name === 'Ellipse')).not.toHaveProperty('textBox');
+    await equal(context);
+  } finally { await context.owner.dispose(); }
+});
+
 test('arguments_are_owned_before_peer_apply', async () => {
   const context = await setup();
   try {

@@ -153,6 +153,7 @@ pub struct RunWrite {
 pub struct ShapeAdd {
     pub name: String,
     pub geometry: String,
+    pub text_box: bool,
     pub x: i64,
     pub y: i64,
     pub width: i64,
@@ -3296,13 +3297,17 @@ fn shape_element(
         ));
     }
     let shape_id = alloc_shape_id(next_shape_id, part)?;
+    let mut non_visual_properties = XmlElement::new(prefixes.presentation("cNvSpPr"));
+    if add.text_box {
+        non_visual_properties.set_attribute("txBox", "1");
+    }
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
                 .with_attribute("id", shape_id.to_string())
                 .with_attribute("name", add.name.clone()),
         )
-        .with_child(XmlElement::new(prefixes.presentation("cNvSpPr")))
+        .with_child(non_visual_properties)
         .with_child(XmlElement::new(prefixes.presentation("nvPr")));
     let transform = XmlElement::new(prefixes.drawing("xfrm"))
         .with_child(
@@ -3655,6 +3660,58 @@ mod tests {
     use crate::drawing::parse_run_properties;
     use crate::model::ShapeElements;
     use crate::xml::{ParseBudget, parse_xml};
+
+    #[test]
+    fn a_labelled_ellipse_is_not_written_as_a_text_box() {
+        let add = ShapeAdd {
+            name: "Labelled ellipse".to_owned(),
+            geometry: "ellipse".to_owned(),
+            text_box: false,
+            x: 0,
+            y: 0,
+            width: 1_000_000,
+            height: 500_000,
+            adjust_values: BTreeMap::new(),
+            fill: None,
+            outline: None,
+            paragraphs: Some(vec![ParagraphWrite {
+                source_index: None,
+                preserved_xml: None,
+                rebuild: true,
+                properties_changed: true,
+                alignment: None,
+                level: 0,
+                bullet: None,
+                runs: vec![RunWrite {
+                    text: "Ellipse label".to_owned(),
+                    properties: RunProperties::default(),
+                }],
+            }]),
+            picture: None,
+        };
+        let mut root = XmlElement::new("p:sld");
+        let prefixes = Prefixes::from_root(&mut root);
+        let shape = shape_element(&add, &mut Some(2), &prefixes, "ppt/slides/slide1.xml").unwrap();
+        assert!(shape.child("txBody").unwrap().child("p").is_some());
+        assert_eq!(
+            shape
+                .child("spPr")
+                .unwrap()
+                .child("prstGeom")
+                .unwrap()
+                .attribute("prst"),
+            Some("ellipse")
+        );
+        assert_eq!(
+            shape
+                .child("nvSpPr")
+                .unwrap()
+                .child("cNvSpPr")
+                .unwrap()
+                .attribute("txBox"),
+            None
+        );
+    }
 
     #[test]
     fn a_new_gradient_outline_writes_its_stops_and_angle() {
