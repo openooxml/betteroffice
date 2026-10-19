@@ -576,6 +576,8 @@ pub enum GraphicFrameData {
 #[serde(rename_all = "camelCase")]
 pub struct DiagramDrawing {
     pub part_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_extent: Option<[i64; 2]>,
     pub shapes: Vec<ShapeNode>,
 }
 
