@@ -8592,11 +8592,20 @@ fn emit_shape_fragment(
             .and_then(|margins| margins.get("bottom"))
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let content_height: f64 = block
-            .inner_measures
+        let mut flow = crate::header_footer::HeaderFooterFlow::default();
+        let tops: Vec<f64> = block
+            .inner_text
             .iter()
-            .map(|measure| measure.total_height)
-            .sum();
+            .zip(&block.inner_measures)
+            .map(|(para, pm)| {
+                let spacing = para.attrs.as_ref().and_then(|attrs| attrs.spacing);
+                let before = spacing.and_then(|spacing| spacing.before).unwrap_or(0.0);
+                let after = spacing.and_then(|spacing| spacing.after).unwrap_or(0.0);
+                let content_height = (pm.total_height - before - after).max(0.0);
+                flow.place(content_height, before, after)
+            })
+            .collect();
+        let content_height = flow.height();
         let available_height = (frag.height - margin_top - margin_bottom).max(0.0);
         let anchor = block
             .text_body_properties
@@ -8610,12 +8619,11 @@ fn emit_shape_fragment(
         };
         let content_x = frag.x + margin_left;
         let content_width = (frag.width - margin_left - margin_right).max(0.0);
-        let mut y_offset = margin_top + anchor_offset;
         for (i, para) in block.inner_text.iter().enumerate() {
-            let Some(pm) = block.inner_measures.get(i) else {
+            let (Some(pm), Some(&top)) = (block.inner_measures.get(i), tops.get(i)) else {
                 continue;
             };
-            let para_y = frag.y + y_offset;
+            let para_y = frag.y + margin_top + anchor_offset + top;
             let synthetic = ParagraphFragmentIn {
                 block_id: para.id.clone(),
                 x: content_x,
@@ -8632,7 +8640,6 @@ fn emit_shape_fragment(
             emit_paragraph_fragment(
                 prims, &synthetic, para, pm, ctx, content_x, para_y, None, None, true, true,
             );
-            y_offset += pm.total_height;
         }
     }
 

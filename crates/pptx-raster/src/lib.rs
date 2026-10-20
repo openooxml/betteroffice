@@ -47,8 +47,8 @@ use std::sync::Arc;
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_text::{FontId, FontStore};
 use pptx_render::{
-    GradientType, ImageCrop, ImageTile, Paint as SlidePaint, Primitive, Shadow as SlideShadow,
-    Stroke as SlideStroke, SurfaceDisplayList, Transform as SlideTransform,
+    GradientType, ImageCrop, ImageDestination, ImageTile, Paint as SlidePaint, Primitive,
+    Shadow as SlideShadow, Stroke as SlideStroke, SurfaceDisplayList, Transform as SlideTransform,
 };
 use tiny_skia::{
     Color, ColorU8, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LinearGradient, Mask,
@@ -410,6 +410,7 @@ impl Painter<'_, '_> {
                 asset_id,
                 effects,
                 crop,
+                destination,
                 tile,
                 path,
                 stroke,
@@ -423,6 +424,7 @@ impl Painter<'_, '_> {
                 asset_id.as_deref(),
                 effects,
                 *crop,
+                *destination,
                 *tile,
                 path.as_deref(),
                 stroke.as_ref(),
@@ -617,6 +619,7 @@ impl Painter<'_, '_> {
         asset_id: Option<&str>,
         effects: &[pptx_render::ImageEffect],
         crop: ImageCrop,
+        destination: Option<ImageDestination>,
         tile: Option<ImageTile>,
         commands: Option<&[GeometryPathCommand]>,
         stroke: Option<&SlideStroke>,
@@ -635,10 +638,13 @@ impl Painter<'_, '_> {
             return Ok(());
         };
         let (kept_x, kept_y) = crop.kept();
+        let destination = destination.map_or(Some(frame), |rect| {
+            Rect::from_xywh(rect.x, rect.y, rect.w, rect.h)
+        });
         let bounded = !crop.is_whole() || commands.is_some();
         let mut mask = None;
         let mut decoded: Option<(Arc<Pixmap>, Transform)> = None;
-        if kept_x > 0.0 && kept_y > 0.0 {
+        if let Some(destination) = destination.filter(|_| kept_x > 0.0 && kept_y > 0.0) {
             if bounded {
                 let Some(bound) = self.clipped_path(clip, outline.clone(), transform)? else {
                     return Ok(());
@@ -656,29 +662,29 @@ impl Painter<'_, '_> {
                             intrinsic,
                             crop,
                             tile,
-                            frame.width(),
-                            frame.height(),
+                            destination.width(),
+                            destination.height(),
                             self.scale,
                         )
                     });
                     if let Some(surface) = tiled {
                         let fit = Transform::from_row(
-                            frame.width() / surface.width() as f32,
+                            destination.width() / surface.width() as f32,
                             0.0,
                             0.0,
-                            frame.height() / surface.height() as f32,
-                            frame.x(),
-                            frame.y(),
+                            destination.height() / surface.height() as f32,
+                            destination.x(),
+                            destination.y(),
                         );
                         decoded = Some((Arc::new(surface), fit));
                     } else {
                         let fit = Transform::from_row(
-                            frame.width() / (source.width() as f32 * kept_x),
+                            destination.width() / (source.width() as f32 * kept_x),
                             0.0,
                             0.0,
-                            frame.height() / (source.height() as f32 * kept_y),
-                            frame.x() - crop.left * frame.width() / kept_x,
-                            frame.y() - crop.top * frame.height() / kept_y,
+                            destination.height() / (source.height() as f32 * kept_y),
+                            destination.x() - crop.left * destination.width() / kept_x,
+                            destination.y() - crop.top * destination.height() / kept_y,
                         );
                         decoded = Some((source, fit));
                     }
@@ -1612,6 +1618,7 @@ mod tests {
             let h = if kind == "line" { 0.0 } else { 80.0 };
             list.primitives.push(if kind == "image" {
                 Primitive::Image {
+                    destination: None,
                     tile: None,
                     geometry_fallback: false,
                     object_id: 1,
@@ -2292,6 +2299,7 @@ mod tests {
         let images = AssetMap::from([("mark", bytes.as_slice())]);
         let mut list = empty_list(300.0, 200.0);
         list.primitives.push(Primitive::Image {
+            destination: None,
             tile: None,
             geometry_fallback: false,
             object_id: 1,
@@ -2354,6 +2362,7 @@ mod tests {
         let render = |crop: ImageCrop| {
             let mut list = empty_list(8.0, 2.0);
             list.primitives.push(Primitive::Image {
+                destination: None,
                 tile: Some(ImageTile {
                     scale_x: 1.0,
                     scale_y: 1.0,
@@ -2399,6 +2408,7 @@ mod tests {
 
     fn shadowed_image(asset: &str, shadow: SlideShadow) -> Primitive {
         Primitive::Image {
+            destination: None,
             tile: None,
             geometry_fallback: false,
             object_id: 1,
@@ -2635,6 +2645,80 @@ mod tests {
     }
 
     #[test]
+    fn an_outset_picture_keeps_its_mask_outline_and_transform_in_the_frame() {
+        let fonts = FontStore::new();
+        let mut source = Pixmap::new(10, 10).unwrap();
+        source.fill(Color::from_rgba8(0, 0, 255, 255));
+        let bytes = source.encode_png().unwrap();
+        let images = AssetMap::from([("photo", bytes.as_slice())]);
+        for (rotation_deg, flip_v, empty, filled) in [
+            (0.0, false, (70, 40), (70, 100)),
+            (0.0, true, (70, 100), (70, 40)),
+            (90.0, false, (100, 70), (40, 70)),
+        ] {
+            let mut list = empty_list(140.0, 140.0);
+            list.primitives.push(Primitive::Image {
+                object_id: 1,
+                shape_id: None,
+                name: "Photo".into(),
+                x: 20.0,
+                y: 20.0,
+                w: 100.0,
+                h: 100.0,
+                asset_id: Some("photo".into()),
+                effects: Vec::new(),
+                crop: ImageCrop {
+                    bottom: 0.4,
+                    ..Default::default()
+                },
+                destination: Some(ImageDestination {
+                    x: 20.0,
+                    y: 60.0,
+                    w: 100.0,
+                    h: 60.0,
+                }),
+                tile: None,
+                path: ooxml_drawingml::preset_geometry_to_path("ellipse", &Default::default(), 1.0),
+                geometry_fallback: false,
+                stroke: Some(SlideStroke {
+                    join: None,
+                    color: "#ff00ff".into(),
+                    width: 2.0,
+                    dashed: false,
+                    paint: None,
+                    head_end: None,
+                    tail_end: None,
+                }),
+                shadow: None,
+                transform: SlideTransform {
+                    rotation_deg,
+                    flip_v,
+                    ..Default::default()
+                },
+            });
+            let rendered = render_slide(
+                &list,
+                &resources(&fonts, &images),
+                &RenderOptions {
+                    background: Background::Transparent,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let pixels = Pixmap::decode_png(&rendered.bytes).unwrap();
+            assert_eq!(pixels.pixel(empty.0, empty.1).unwrap().alpha(), 0);
+            let fill = pixels.pixel(filled.0, filled.1).unwrap();
+            assert_eq!(
+                (fill.red(), fill.green(), fill.blue(), fill.alpha()),
+                (0, 0, 255, 255)
+            );
+            assert_eq!(pixels.pixel(25, 110).unwrap().alpha(), 0);
+            let border = pixels.pixel(70, 20).unwrap();
+            assert!(border.red() > 100 && border.green() == 0 && border.blue() > 100);
+        }
+    }
+
+    #[test]
     fn a_cropped_masked_picture_preserves_pixels_outline_and_parent_clip() {
         let fonts = FontStore::new();
         let mut source = Pixmap::new(100, 100).unwrap();
@@ -2647,6 +2731,7 @@ mod tests {
         for flip_h in [false, true] {
             for parent_clip in [false, true] {
                 let image = Primitive::Image {
+                    destination: None,
                     tile: None,
                     geometry_fallback: false,
                     object_id: 1,
@@ -2760,6 +2845,7 @@ mod tests {
     fn picture_on_a_strip(asset: &str, crop: ImageCrop) -> SurfaceDisplayList {
         let mut list = empty_list(400.0, 100.0);
         list.primitives.push(Primitive::Image {
+            destination: None,
             tile: None,
             geometry_fallback: false,
             object_id: 1,
@@ -2989,6 +3075,7 @@ mod tests {
         let render = |asset: &str| {
             let mut list = empty_list(200.0, 100.0);
             list.primitives.push(Primitive::Image {
+                destination: None,
                 tile: Some(ImageTile {
                     scale_x: 1.0,
                     scale_y: 1.0,
@@ -3037,6 +3124,7 @@ mod tests {
         for asset_id in [None, Some("ppt/media/image1.png")] {
             let mut list = empty_list(100.0, 100.0);
             list.primitives.push(Primitive::Image {
+                destination: None,
                 tile: None,
                 geometry_fallback: false,
                 object_id: 1,

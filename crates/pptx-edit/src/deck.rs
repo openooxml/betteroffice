@@ -190,6 +190,9 @@ fn seed_shape(
         }
         ShapeNode::Picture(picture) => {
             shape_map.insert(txn, "kind", "picture");
+            if picture.aspect_ratio_locked {
+                shape_map.insert(txn, "aspectRatioLocked", true);
+            }
             shape_map.insert(txn, "geometry", "rect");
             insert_json(&shape_map, txn, "fillJson", picture.fill.as_ref())?;
             insert_json(&shape_map, txn, "outlineJson", picture.outline.as_ref())?;
@@ -488,16 +491,16 @@ impl DeckSession {
         if let Some(background) = background {
             validate_background(background)?;
         }
+        let background = background.map(normalized_background);
         let read = self.doc.transact();
         let slide = slide_ref(&read, slide_id)?;
-        let before = slide_background(&slide, &read, &self.package)?;
+        let (before, _) = slide_background(&slide, &read, &self.package);
         drop(read);
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        match background {
+        match &background {
             Some(background) => {
                 insert_json(&slide, &mut txn, "backgroundJson", Some(background))?;
-                slide.remove(&mut txn, "backgroundCleared");
             }
             None => {
                 slide.remove(&mut txn, "backgroundJson");
@@ -509,7 +512,7 @@ impl DeckSession {
         Ok(SlideBackgroundReceipt {
             slide_id: slide_id.to_owned(),
             before,
-            after: background.cloned(),
+            after: background,
         })
     }
 
@@ -517,26 +520,12 @@ impl DeckSession {
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
         let index = live_slide_index(&txn, slide_id)?;
-        let slides = required_map(&txn, SLIDES)?;
         let slide = slide_ref(&txn, slide_id)?;
         let shape_order = slide_shape_order(&slide, &txn)?;
         let shape_ids = live_shape_order(&shape_order, &txn)?;
-        remove_shape_entries(&mut txn, &shape_ids)?;
-        let comments = required_map(&txn, crate::COMMENTS)?;
-        let mut comment_ids: Vec<String> = comments
-            .iter(&txn)
-            .filter_map(|(id, value)| {
-                let entry = value.cast::<MapRef>().ok()?;
-                (map_string(&entry, &txn, "slideId").as_deref() == Some(slide_id))
-                    .then(|| id.to_owned())
-            })
-            .collect();
-        comment_ids.sort();
-        for id in comment_ids {
-            comments.remove(&mut txn, &id);
-        }
+        tombstone_shapes(&mut txn, &shape_ids)?;
         remove_slide_entries(&order, &mut txn, slide_id);
-        slides.remove(&mut txn, slide_id);
+        slide.remove(&mut txn, "id");
         Ok(SlideReceipt {
             slide_id: slide_id.to_owned(),
             from_index: Some(index),
@@ -768,6 +757,7 @@ impl DeckSession {
         shape.insert(&mut txn, "id", shape_id.as_str());
         shape.insert(&mut txn, "sourceId", 0_f64);
         shape.insert(&mut txn, "kind", "picture");
+        shape.insert(&mut txn, "aspectRatioLocked", true);
         shape.insert(&mut txn, "name", draft.name.as_str());
         shape.insert(&mut txn, "x", draft.rect.x as f64);
         shape.insert(&mut txn, "y", draft.rect.y as f64);
@@ -901,7 +891,7 @@ impl DeckSession {
             ids.iter()
                 .position(|id| id == shape_id)
                 .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))? as u32;
-        remove_shape_entries(&mut txn, &[shape_id.to_owned()])?;
+        tombstone_shapes(&mut txn, &[shape_id.to_owned()])?;
         for (index, id) in string_array_ref(&order, &txn).iter().enumerate().rev() {
             if id == shape_id {
                 order.remove(&mut txn, index as u32);
@@ -1171,11 +1161,22 @@ fn validate_doc_impl(
     }
     let txn = doc.transact();
     let stories = required_map(&txn, STORIES)?;
-    for (story_id, value) in stories.iter(&txn) {
-        let story = value
-            .cast::<TextRef>()
-            .map_err(|_| EditError::InvalidState(format!("story {story_id} is not text")))?;
-        validate_story(&story, &txn, story_id)?;
+    let mut shapes: Vec<_> = snapshot
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .collect();
+    while let Some(shape) = shapes.pop() {
+        shapes.extend(&shape.children);
+        for story in &shape.text_stories {
+            let text = stories
+                .get(&txn, &story.id)
+                .and_then(|value| value.cast::<TextRef>().ok())
+                .ok_or_else(|| {
+                    EditError::InvalidState(format!("story {} is not text", story.id))
+                })?;
+            validate_story(&text, &txn, &story.id)?;
+        }
     }
     Ok((owned, snapshot))
 }
@@ -1319,6 +1320,10 @@ pub(crate) fn import_source_render_data(
         }
         if slide.background != source.background {
             slide.background.clone_from(&source.background);
+            changed = true;
+        }
+        if slide.declares_background != source.declares_background {
+            slide.declares_background = source.declares_background;
             changed = true;
         }
     }
@@ -2022,7 +2027,11 @@ pub(crate) fn live_shape_order<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditRes
     let mut seen = HashSet::new();
     Ok(string_array_ref(order, txn)
         .into_iter()
-        .filter(|id| shapes.contains_key(txn, id) && seen.insert(id.clone()))
+        .filter(|id| {
+            shapes.contains_key(txn, id)
+                && !entry_is_deleted(&shapes, txn, id)
+                && seen.insert(id.clone())
+        })
         .collect())
 }
 
@@ -2041,7 +2050,7 @@ fn snapshot_slide<T: ReadTxn>(
     } = slide_parts(slides, package, txn, slide_id)?;
     let slide = slide_ref(txn, slide_id)?;
     snapshot.notes = slide_notes(&slide, txn, package);
-    snapshot.background = slide_background(&slide, txn, package)?;
+    (snapshot.background, snapshot.background_edited) = slide_background(&slide, txn, package);
     for shape_id in shape_ids {
         snapshot.shapes.push(snapshot_shape(
             shapes,
@@ -2076,9 +2085,7 @@ pub(crate) fn slide_parts<T: ReadTxn>(
     txn: &T,
     slide_id: &str,
 ) -> EditResult<SlideParts> {
-    let slide = slides
-        .get(txn, slide_id)
-        .and_then(|value| value.cast::<MapRef>().ok())
+    let slide = live_entry(slides, txn, slide_id)
         .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
     let source_part_path = map_string(&slide, txn, "sourcePartPath");
     let layout_part_path = map_string(&slide, txn, "layoutPartPath");
@@ -2097,6 +2104,7 @@ pub(crate) fn slide_parts<T: ReadTxn>(
             name: map_string(&slide, txn, "name"),
             notes: String::new(),
             background: None,
+            background_edited: false,
             shapes: Vec::new(),
         },
         theme,
@@ -2193,24 +2201,67 @@ pub(crate) fn slide_notes<T: ReadTxn>(slide: &MapRef, txn: &T, package: &PptxPac
 }
 
 /// The slide's effective background: a stored override, an explicit clear, or
-/// the declaration on the source part.
+/// the declaration on the source part, and whether an edit changed it from that
+/// declaration. A stored fill the writer cannot read or serialize, as a peer may
+/// send, is ignored.
 pub(crate) fn slide_background<T: ReadTxn>(
     slide: &MapRef,
     txn: &T,
     package: &PptxPackage,
-) -> EditResult<Option<ShapeFill>> {
-    if let Some(background) = optional_json::<ShapeFill, _>(slide, txn, "backgroundJson")? {
-        return Ok(Some(background));
+) -> (Option<ShapeFill>, bool) {
+    let source_part_path = map_string(slide, txn, "sourcePartPath");
+    let source = source_slide(package, source_part_path.as_deref());
+    let declared = source.and_then(|source| source.background.clone());
+    let stored = map_string(slide, txn, "backgroundJson")
+        .and_then(|json| serde_json::from_str::<ShapeFill>(&json).ok())
+        .filter(|fill| validate_background(fill).is_ok())
+        .map(|fill| normalized_background(&fill));
+    if let Some(background) = stored {
+        if declared.as_ref().map(normalized_background).as_ref() == Some(&background) {
+            return (declared, false);
+        }
+        return (Some(background), true);
     }
     if map_bool(slide, txn, "backgroundCleared") == Some(true) {
-        return Ok(None);
+        let declares =
+            declared.is_some() || source.is_some_and(|source| source.declares_background);
+        return (None, declares);
     }
-    let source_part_path = map_string(slide, txn, "sourcePartPath");
-    Ok(package
+    (declared, false)
+}
+
+pub(crate) fn source_slide<'a>(
+    package: &'a PptxPackage,
+    part_path: Option<&str>,
+) -> Option<&'a pptx_parse::Slide> {
+    package
         .slides
         .iter()
-        .find(|source| Some(&source.part_path) == source_part_path.as_ref())
-        .and_then(|source| source.background.clone()))
+        .find(|source| Some(source.part_path.as_str()) == part_path)
+}
+
+/// `fill` with scheme aliases spelled the way the parser reads them and hex
+/// digits in upper case, so equal fills compare equal.
+pub(crate) fn normalized_background(fill: &ShapeFill) -> ShapeFill {
+    let mut fill = fill.clone();
+    let stops = fill
+        .gradient
+        .iter_mut()
+        .flat_map(|gradient| gradient.stops.iter_mut().map(|stop| &mut stop.color));
+    for color in fill.color.iter_mut().chain(stops) {
+        if let Some(rgb) = &mut color.rgb {
+            rgb.make_ascii_uppercase();
+        }
+        let canonical = match color.theme_color.as_deref() {
+            Some("bg1") => "background1",
+            Some("tx1") => "text1",
+            Some("bg2") => "background2",
+            Some("tx2") => "text2",
+            _ => continue,
+        };
+        color.theme_color = Some(canonical.to_owned());
+    }
+    fill
 }
 
 /// Rejects backgrounds the writer cannot serialize; `theme` fills only come
@@ -2235,10 +2286,12 @@ pub(crate) fn validate_background(fill: &ShapeFill) -> EditResult<()> {
                     "a gradient background needs at least two stops".to_owned(),
                 ));
             }
-            if gradient.angle.is_some_and(|angle| !angle.is_finite()) {
-                return Err(EditError::InvalidFill(
-                    "the gradient angle is not a finite number".to_owned(),
-                ));
+            if let Some(angle) = gradient.angle
+                && !(angle >= 0.0 && (angle * 60_000.0).round() < 21_600_000.0)
+            {
+                return Err(EditError::InvalidFill(format!(
+                    "gradient angle {angle} is outside 0..360 degrees"
+                )));
             }
             for stop in &gradient.stops {
                 if !stop.position.is_finite() || !(0.0..=100_000.0).contains(&stop.position) {
@@ -2304,6 +2357,10 @@ fn known_scheme_color(color: &str) -> bool {
             | "tx1"
             | "bg2"
             | "tx2"
+            | "dk1"
+            | "lt1"
+            | "dk2"
+            | "lt2"
             | "accent1"
             | "accent2"
             | "accent3"
@@ -2312,7 +2369,6 @@ fn known_scheme_color(color: &str) -> bool {
             | "accent6"
             | "hlink"
             | "folHlink"
-            | "phClr"
     )
 }
 
@@ -2383,9 +2439,7 @@ pub(crate) fn shape_parts<T: ReadTxn>(
     shape_id: &str,
     theme: Option<&Theme>,
 ) -> EditResult<ShapeParts> {
-    let shape = shapes
-        .get(txn, shape_id)
-        .and_then(|value| value.cast::<MapRef>().ok())
+    let shape = live_entry(shapes, txn, shape_id)
         .ok_or_else(|| EditError::InvalidState(format!("missing shape {shape_id}")))?;
     let story_ids = map_string_array(&shape, txn, "textStories")?;
     let child_ids = map_string_array(&shape, txn, "children")?;
@@ -2412,6 +2466,7 @@ pub(crate) fn shape_parts<T: ReadTxn>(
         flip_v: map_bool(&shape, txn, "flipV").unwrap_or_default(),
         inherited: None,
         hidden: map_bool(&shape, txn, "hidden").unwrap_or_default(),
+        aspect_ratio_locked: map_bool(&shape, txn, "aspectRatioLocked").unwrap_or_default(),
         geometry: required_string(&shape, txn, "geometry")?,
         adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
         placeholder: optional_json(&shape, txn, "placeholderJson")?,
@@ -2512,6 +2567,7 @@ fn baseline_slide(
         name: slide.name.clone(),
         notes: slide.notes.clone(),
         background: slide.background.clone(),
+        background_edited: false,
         shapes,
     })
 }
@@ -2614,6 +2670,7 @@ fn baseline_shape(
         flip_v: transform.flip_v,
         inherited: None,
         hidden: base.hidden,
+        aspect_ratio_locked: matches!(shape, ShapeNode::Picture(picture) if picture.aspect_ratio_locked),
         geometry,
         adjust_values,
         placeholder: baseline_json_option(&base.placeholder)?,
@@ -2679,7 +2736,9 @@ pub(crate) fn live_slide_order<T: ReadTxn>(txn: &T) -> EditResult<Vec<(u32, Stri
         .enumerate()
         .filter_map(|(index, value)| {
             let id = out_string(&value)?;
-            let live = slides.contains_key(txn, &id) && seen.insert(id.clone());
+            let live = slides.contains_key(txn, &id)
+                && !entry_is_deleted(&slides, txn, &id)
+                && seen.insert(id.clone());
             live.then_some((index as u32, id))
         })
         .collect())
@@ -2733,17 +2792,28 @@ pub(crate) fn required_map<T: ReadTxn>(txn: &T, name: &str) -> EditResult<MapRef
 }
 
 pub(crate) fn slide_ref<T: ReadTxn>(txn: &T, slide_id: &str) -> EditResult<MapRef> {
-    required_map(txn, SLIDES)?
-        .get(txn, slide_id)
-        .and_then(|value| value.cast::<MapRef>().ok())
+    live_entry(&required_map(txn, SLIDES)?, txn, slide_id)
         .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))
 }
 
 pub(crate) fn shape_ref<T: ReadTxn>(txn: &T, shape_id: &str) -> EditResult<MapRef> {
-    required_map(txn, SHAPES)?
-        .get(txn, shape_id)
-        .and_then(|value| value.cast::<MapRef>().ok())
+    live_entry(&required_map(txn, SHAPES)?, txn, shape_id)
         .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))
+}
+
+/// The identity is an undoable membership marker; deleting it keeps the map's content merging.
+fn live_entry<T: ReadTxn>(entries: &MapRef, txn: &T, id: &str) -> Option<MapRef> {
+    entries
+        .get(txn, id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .filter(|entry| entry.contains_key(txn, "id"))
+}
+
+fn entry_is_deleted<T: ReadTxn>(entries: &MapRef, txn: &T, id: &str) -> bool {
+    entries
+        .get(txn, id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .is_some_and(|entry| !entry.contains_key(txn, "id"))
 }
 
 fn require_shape_kind<T: ReadTxn>(shape: &MapRef, txn: &T) -> EditResult<()> {
@@ -2773,18 +2843,14 @@ fn require_shape_membership<T: ReadTxn>(txn: &T, slide_id: &str, shape_id: &str)
     }
 }
 
-fn remove_shape_entries(txn: &mut TransactionMut<'_>, root_shape_ids: &[String]) -> EditResult<()> {
+fn tombstone_shapes(txn: &mut TransactionMut<'_>, root_shape_ids: &[String]) -> EditResult<()> {
     let shapes = required_map(txn, SHAPES)?;
-    let stories = required_map(txn, STORIES)?;
     let mut entries = ShapeEntries::default();
     for shape_id in root_shape_ids {
         collect_shape_entries(&shapes, txn, shape_id, &mut HashSet::new(), &mut entries)?;
     }
-    for story_id in entries.story_ids {
-        stories.remove(txn, &story_id);
-    }
     for shape_id in entries.shape_ids {
-        shapes.remove(txn, &shape_id);
+        shape_ref(txn, &shape_id)?.remove(txn, "id");
     }
     Ok(())
 }
@@ -2793,8 +2859,6 @@ fn remove_shape_entries(txn: &mut TransactionMut<'_>, root_shape_ids: &[String])
 struct ShapeEntries {
     shape_ids: Vec<String>,
     seen_shape_ids: HashSet<String>,
-    story_ids: Vec<String>,
-    seen_story_ids: HashSet<String>,
 }
 
 fn collect_shape_entries<T: ReadTxn>(
@@ -2822,11 +2886,6 @@ fn collect_shape_entries<T: ReadTxn>(
         .get(txn, shape_id)
         .and_then(|value| value.cast::<MapRef>().ok())
         .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
-    for story_id in map_string_array(&shape, txn, "textStories")? {
-        if entries.seen_story_ids.insert(story_id.clone()) {
-            entries.story_ids.push(story_id);
-        }
-    }
     for child_id in map_string_array(&shape, txn, "children")? {
         collect_shape_entries(shapes, txn, &child_id, visiting, entries)?;
     }
@@ -4245,12 +4304,12 @@ mod tests {
     }
 
     #[test]
-    fn delete_operations_remove_owned_map_entries() {
+    fn delete_operations_retain_owned_map_entries_for_undo() {
         let session = DeckSession::open(FIXTURE, 101).unwrap();
         let context = EditCtx::local("test");
-        let baseline = map_lengths(&session);
 
         for cycle in 0..3 {
+            let baseline = map_lengths(&session);
             let index = session.snapshot().unwrap().slides.len() as u32;
             let slide = session.insert_slide(&context, index, None).unwrap();
             let first = session
@@ -4261,35 +4320,31 @@ mod tests {
                 .unwrap();
             assert_eq!(map_lengths(&session), add_lengths(baseline, (1, 2, 2)));
 
+            session.add_undo_barrier();
             session
                 .remove_shape(&context, &slide.slide_id, &first.shape_id)
                 .unwrap();
-            assert_eq!(map_lengths(&session), add_lengths(baseline, (1, 1, 1)));
+            assert_eq!(map_lengths(&session), add_lengths(baseline, (1, 2, 2)));
 
             session.delete_slide(&context, &slide.slide_id).unwrap();
-            assert_eq!(map_lengths(&session), baseline);
+            assert_eq!(map_lengths(&session), add_lengths(baseline, (1, 2, 2)));
         }
     }
 
     #[test]
-    fn deleting_seeded_slide_cascades_descendant_entries() {
+    fn deleting_seeded_slide_retains_descendant_entries_for_undo() {
         let session = DeckSession::open(FIXTURE, 202).unwrap();
-        let slide = session.snapshot().unwrap().slides[0].clone();
+        let initial = session.snapshot().unwrap();
+        let slide = &initial.slides[0];
         let before = map_lengths(&session);
-        let owned = slide.shapes.iter().fold((0, 0), |total, shape| {
-            let next = shape_entry_lengths(shape);
-            (total.0 + next.0, total.1 + next.1)
-        });
 
         session
             .delete_slide(&EditCtx::local("test"), &slide.id)
             .unwrap();
 
-        assert!(owned.0 > slide.shapes.len() as u32);
-        assert_eq!(
-            map_lengths(&session),
-            (before.0 - 1, before.1 - owned.0, before.2 - owned.1)
-        );
+        assert_eq!(map_lengths(&session), before);
+        assert!(session.undo());
+        assert_eq!(session.snapshot().unwrap(), initial);
     }
 
     fn draft(cycle: u32, index: u32) -> ShapeDraft {
@@ -4312,16 +4367,6 @@ mod tests {
             required_map(&txn, SLIDES).unwrap().len(&txn),
             required_map(&txn, SHAPES).unwrap().len(&txn),
             required_map(&txn, STORIES).unwrap().len(&txn),
-        )
-    }
-
-    fn shape_entry_lengths(shape: &ShapeSnapshot) -> (u32, u32) {
-        shape.children.iter().fold(
-            (1, shape.text_stories.len() as u32),
-            |(shape_count, story_count), child| {
-                let child_counts = shape_entry_lengths(child);
-                (shape_count + child_counts.0, story_count + child_counts.1)
-            },
         )
     }
 

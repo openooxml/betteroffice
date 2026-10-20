@@ -171,7 +171,7 @@ export function registerPresentationCommandHandlers(
     }
   }
 
-  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt): string[] {
+  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt, selectAppeared = false): string[] {
     const opened = presentation();
     const dirty = new Set(receipt.changedSlideIds);
     if (receipt.deckSizeChanged || receipt.slideOrderChanged) {
@@ -193,6 +193,8 @@ export function registerPresentationCommandHandlers(
       if (activeSlideId === null || !ids.has(activeSlideId)) {
         activeSlideId = metadata.slides[Math.max(0, Math.min(index, metadata.slides.length - 1))]?.id ?? null;
       }
+      const appeared = selectAppeared ? metadata.slides.find((slide) => !previous.has(slide.id)) : undefined;
+      if (appeared) activeSlideId = appeared.id;
     }
     const content = opened.readCommandContent({ slideIds: [...dirty].filter((id) => revisions.has(id)) });
     if (!content.ok) throw new Error(`Presentation history read refused: ${content.failure.message}`);
@@ -258,7 +260,8 @@ export function registerPresentationCommandHandlers(
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
       canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
-      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape),
+      aspectRatioLocked: shape.aspectRatioLocked ?? false, units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -564,13 +567,15 @@ export function registerPresentationCommandHandlers(
     const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId);
     retainVersions();
     const updates = pendingUpdates.splice(0);
-    return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
+    const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
       frame: result?.value ?? null }, [...(result?.transfer ?? []), ...updates.map((update) => update.bytes)]);
+    for (const { assetId } of reply.value.frame?.media ?? []) sentMedia.add(assetId);
+    return reply;
   }
 
   function admit(command: PresentationCommandEnvelope): Admission | PresentationCommandRefusalReason {
@@ -1351,7 +1356,7 @@ export function registerPresentationCommandHandlers(
         const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
         const committed = apply(command, admitted);
         const historyDirtySlideIds = committed && admitted.kind === 'history'
-          ? refreshHistory(command.seq, admitted.receipt!) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
+          ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
         if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
         if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
           const cached = stories.get(storyKey(admitted.selection))!;
@@ -1448,6 +1453,7 @@ export function registerPresentationCommandHandlers(
       }
       if (request.knownRevision === slideRevision) return { ...base, status: 'unchanged' as const };
       const result = frame(request.slideId, false);
+      for (const { assetId } of result.value.media) sentMedia.add(assetId);
       return transferable({ ...base, status: 'frame' as const, frame: result.value }, result.transfer);
     },
     flushCommandEditor(_, request) {

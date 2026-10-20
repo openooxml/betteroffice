@@ -279,6 +279,34 @@ test('invalid or failed sources leave the client available for a new opening', a
   }
 }, TIMEOUT);
 
+test('foreign and invalid packages reject opening and allow a valid source afterward', async () => {
+  const missing = new Map(Object.entries(unzipContainer(source(1))));
+  missing.delete('word/document.xml');
+  const malformed = new Map(Object.entries(unzipContainer(source(1))));
+  malformed.set('word/document.xml', toBytes('<w:document><w:body></w:document>'));
+  const unsupported = new Map(Object.entries(unzipContainer(source(1))));
+  unsupported.set('word/document.xml', toBytes('<w:document xmlns:w="urn:unsupported-ooxml:main"><w:body/></w:document>'));
+  const spreadsheet = new Map([
+    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>')],
+    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')],
+    ['xl/workbook.xml', toBytes('<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>')],
+  ]);
+  const archive = new Map([['readme.txt', toBytes('Archive contents')]]);
+  const worker = startWorker();
+  const client = new ResidentEngineWorkerClient(worker);
+  try {
+    for (const parts of [missing, malformed, unsupported, spreadsheet, archive]) {
+      const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+      await expect(client.openSource({ bytes })).rejects.toThrow(/namespace|unsupported|invalid|format|document|root/i);
+      expect(client.isReady()).toBe(false);
+    }
+    await client.openSource({ bytes: source(1), preview: false });
+    expect((await client.commandInit(init())).frame).toBeDefined();
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 for (const input of ['bytes', 'document'] as const) {
   test(`viewport-first ${input} opening previews its first page with the command fonts before commands start`, async () => {
     const bytes = source();

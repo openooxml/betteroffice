@@ -1032,7 +1032,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
       overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}
         layerRef={setPluginLayer} heldGeometry={documentReady ? pluginGeometry.geometry() : null} /></>} dialogs={<>{propertyDialogs.element}<FindReplaceDialog isOpen={searchState.isOpen} replaceMode={searchState.replaceMode}
-        onClose={() => search.close()} currentResult={searchState.result}
+        onClose={(text, options) => { search.close(text, options); focus(); }} currentResult={searchState.result}
         onFind={(text, options) => { void search.find(text, options).catch((error) => reportRecoverableError(error)); return null; }}
         onFindNext={() => { search.host.searchNext(); return search.getSnapshot().result?.matches[search.getSnapshot().result!.currentIndex] ?? null; }}
         onFindPrevious={() => { search.host.searchPrevious(); return search.getSnapshot().result?.matches[search.getSnapshot().result!.currentIndex] ?? null; }}

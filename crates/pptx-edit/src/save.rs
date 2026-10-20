@@ -30,13 +30,15 @@ impl DeckSession {
                     .to_owned(),
             ));
         }
-        if let Some(attribute) = crate::source_run_properties::unrecovered_attribute(&self.doc) {
+        let current = self.snapshot()?;
+        if let Some(attribute) =
+            crate::source_run_properties::unrecovered_attribute(&self.doc, &current)
+        {
             return Err(EditError::Write(format!(
                 "run {attribute} could not be recovered from the source file for some \
                  restored text, and saving now would drop it"
             )));
         }
-        let current = self.snapshot()?;
         let baseline = baseline_snapshot(&self.package)?;
         if current == baseline {
             return pptx_parse::write_pptx(&self.package)
@@ -129,13 +131,15 @@ fn rename_duplicate_shape(shape: &mut ShapeSnapshot, old_slide: &str, new_slide:
 /// The background write a slide's snapshot change needs; `None` keeps the
 /// source declaration untouched.
 fn background_write(current: &SlideSnapshot, baseline: &SlideSnapshot) -> Option<BackgroundWrite> {
-    if current.background == baseline.background {
-        return None;
+    match &current.background {
+        Some(fill) if current.background != baseline.background => {
+            Some(BackgroundWrite::Set(Box::new(fill.clone())))
+        }
+        None if current.background_edited || baseline.background.is_some() => {
+            Some(BackgroundWrite::Clear)
+        }
+        _ => None,
     }
-    Some(match current.background.clone() {
-        Some(fill) => BackgroundWrite::Set(Box::new(fill)),
-        None => BackgroundWrite::Clear,
-    })
 }
 
 fn notes_write(current: &DeckSnapshot, baseline: &DeckSnapshot) -> Option<NotesWrite> {

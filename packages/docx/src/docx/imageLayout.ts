@@ -112,7 +112,10 @@ export function resolveImageLayoutAttrs(
         displayMode: 'float',
         cssFloat,
         wrapText: cssFloat === 'left' ? 'right' : 'left',
-        position: buildAnchorPosition(),
+        position: {
+          ...buildAnchorPosition(),
+          horizontal: { relativeTo: 'margin', align: cssFloat },
+        },
       };
     }
     case 'square':

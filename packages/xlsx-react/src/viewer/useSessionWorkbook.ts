@@ -115,7 +115,7 @@ export class ViewerSession {
 
   async selectCellsAsync(sheet: number, selection: Selection): Promise<boolean> {
     if (!this.current || !this.validSheet(sheet) || !validSelection(selection)) return false;
-    const next = { anchor: { ...selection.anchor }, focus: { ...selection.focus } };
+    const next = structuredClone(selection);
     const navigation = this.beginNavigation();
     this.viewRequest += 1;
     try {

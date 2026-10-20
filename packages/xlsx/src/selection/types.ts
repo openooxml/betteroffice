@@ -13,13 +13,14 @@ export interface CellAddr {
 }
 
 /**
- * An active selection as an anchor/focus pair. `anchor` is the fixed corner
- * (where the selection started); `focus` is the moving corner. A collapsed
- * selection has `anchor` equal to `focus`.
+ * `anchor` is the fixed starting cell; `focus` is the active cell.
+ * `range` overrides their bounds for region selection.
  */
 export interface Selection {
   anchor: CellAddr;
   focus: CellAddr;
+  /** Explicit bounds when the active cell is inside a selected region. */
+  range?: CellRange;
 }
 
 /**
@@ -58,6 +59,7 @@ export interface MoveOpts {
   extend?: boolean;
   step?: number;
   limits: SelectionLimits;
+  hidden?: SelectionHidden;
 }
 
 /**
@@ -83,3 +85,14 @@ export type SelectionAction =
   | { type: 'startEdit'; initialInput?: string }
   | { type: 'clear' }
   | { type: 'none' };
+
+/** Precomputed model answers for one keyboard navigation request. */
+export interface SelectionData {
+  edge?: CellAddr | null;
+  region?: CellRange | null;
+}
+
+export interface SelectionHidden {
+  isRowHidden(row: number): boolean;
+  isColHidden(col: number): boolean;
+}
