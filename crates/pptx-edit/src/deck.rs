@@ -1242,40 +1242,62 @@ pub(crate) fn import_source_render_data(
     let sources = source
         .slides
         .iter()
-        .map(|part| (&part.part_path, &part.shapes))
+        .map(|part| (&part.part_path, (&part.shapes, &part.background_picture)))
         .chain(
             source
                 .layouts
                 .iter()
-                .map(|part| (&part.part_path, &part.shapes)),
+                .map(|part| (&part.part_path, (&part.shapes, &part.background_picture))),
         )
         .chain(
             source
                 .masters
                 .iter()
-                .map(|part| (&part.part_path, &part.shapes)),
+                .map(|part| (&part.part_path, (&part.shapes, &part.background_picture))),
         )
         .collect::<HashMap<_, _>>();
     let mut changed = false;
-    for (path, shapes) in package
+    for (path, (shapes, picture)) in package
         .slides
         .iter_mut()
-        .map(|part| (&part.part_path, &mut part.shapes))
-        .chain(
-            package
-                .layouts
-                .iter_mut()
-                .map(|part| (&part.part_path, &mut part.shapes)),
-        )
-        .chain(
-            package
-                .masters
-                .iter_mut()
-                .map(|part| (&part.part_path, &mut part.shapes)),
-        )
+        .map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        })
+        .chain(package.layouts.iter_mut().map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        }))
+        .chain(package.masters.iter_mut().map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        }))
     {
-        if let Some(source) = sources.get(path) {
-            changed |= merge_source_render_shapes(shapes, source);
+        if let Some((source_shapes, source_picture)) = sources.get(path) {
+            changed |= merge_source_render_shapes(shapes, source_shapes);
+            if picture != *source_picture {
+                picture.clone_from(source_picture);
+                changed = true;
+            }
+        }
+    }
+    for theme in &mut package.themes {
+        if let Some(source) = source
+            .themes
+            .iter()
+            .find(|source| source.part_path == theme.part_path)
+            && theme.background_pictures != source.background_pictures
+        {
+            theme
+                .background_pictures
+                .clone_from(&source.background_pictures);
+            changed = true;
         }
     }
     for master in &mut package.masters {

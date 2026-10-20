@@ -1571,6 +1571,7 @@ pub(crate) fn picture_fill_element(
     Some(PictureFill {
         media_part_path: relationship_target(relationships, &relationship_id),
         relationship_id: Some(relationship_id),
+        effects: parse_blip_effects(fill.child("blip")),
         crop: parse_crop(fill.child("srcRect")),
         fill_rect: parse_crop(
             fill.child("stretch")
@@ -2342,6 +2343,74 @@ mod tests {
             panic!("expected a shape");
         };
         assert!(solid.picture_fill.is_none());
+    }
+
+    #[test]
+    fn a_background_blip_fill_keeps_its_blip_effects() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:blipFill><a:blip r:embed="rId7"><a:alphaModFix amt="20000"/><a:lum bright="10000" contrast="-20000"/></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg><p:spTree/></p:cSld></p:sld>"#,
+            "ppt/slideMasters/slideMaster1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[image_relationship("rId7", "image1.png")],
+            "ppt/slideMasters/slideMaster1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let picture = data
+            .background_picture
+            .expect("background picture resolves");
+        assert_eq!(
+            serde_json::to_value(&*picture).unwrap()["effects"],
+            serde_json::json!([
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.1, "contrast": -0.2 }
+            ])
+        );
+    }
+
+    #[test]
+    fn a_shape_blip_fill_keeps_its_blip_effects() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Filled"/><p:nvPr/></p:nvSpPr><p:spPr><a:blipFill><a:blip r:embed="rId7"><a:alphaModFix amt="20000"/><a:lum/></a:blip><a:tile sx="50000" sy="50000"/></a:blipFill></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[image_relationship("rId7", "image1.png")],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(filled) = &data.shapes[0] else {
+            panic!("expected a shape");
+        };
+        let picture = filled.picture_fill.as_ref().expect("blip resolves");
+        assert_eq!(
+            picture.tile,
+            Some(PictureTile {
+                scale_x: 0.5,
+                scale_y: 0.5
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&**picture).unwrap()["effects"],
+            serde_json::json!([
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.0, "contrast": 0.0 }
+            ])
+        );
     }
 
     fn image_relationship(id: &str, file: &str) -> Relationship {

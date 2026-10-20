@@ -606,6 +606,7 @@ fn walk_story_chunks<T: ReadTxn>(
     let mut pending_hidden_field_blocks = BTreeSet::new();
     let mut pending_code_join: Option<(Vec<FieldCodeParagraph>, String)> = None;
     let mut field_join: Option<FieldJoin> = None;
+    let mut section_mark_breaks = None;
     macro_rules! position {
         () => {
             preview::WalkPosition {
@@ -1016,6 +1017,15 @@ fn walk_story_chunks<T: ReadTxn>(
                         })
                     } else {
                         LayoutBlock::PageBreak(PageBreakBlock {
+                            section_mark_ineligible: section_mark_ineligible(
+                                txn,
+                                chunks,
+                                (chunk_index, story_index),
+                                local.source.upgrade().as_deref(),
+                                story_id,
+                                &mut section_mark_breaks,
+                            )
+                            .then_some(true),
                             sdt_groups: None,
                             id,
                             pm_start,
@@ -1523,6 +1533,87 @@ fn walk_story_chunks<T: ReadTxn>(
         );
     }
     Ok((blocks, after, hidden_field_blocks))
+}
+
+type ParagraphBreakEnds = BTreeMap<String, (crate::structured::BreakType, Option<u32>)>;
+
+fn section_mark_ineligible<T: ReadTxn>(
+    txn: &T,
+    chunks: &[yrs::types::text::Diff<YChange>],
+    (chunk_index, story_index): (usize, u32),
+    source: Option<&crate::seed::SourceMetadata>,
+    story_id: &str,
+    breaks: &mut Option<ParagraphBreakEnds>,
+) -> bool {
+    use crate::structured::source::InlineSource;
+
+    let mut owner = chunk_index;
+    let pilcrow = loop {
+        let Some(previous) = owner.checked_sub(1) else {
+            return false;
+        };
+        owner = previous;
+        let Out::YMap(mark) = &chunks[owner].insert else {
+            return false;
+        };
+        if is_pilcrow(mark, txn) {
+            break mark;
+        }
+        if !matches!(
+            shared_map_string(mark, txn, "_kind").as_deref(),
+            Some("pageBreak" | "columnBreak")
+        ) {
+            return false;
+        }
+    };
+    let start = chunks[..owner]
+        .iter()
+        .rposition(|chunk| {
+            matches!(&chunk.insert, Out::YMap(mark) if matches!(
+                shared_map_string(mark, txn, "_kind").as_deref(),
+                Some("pilcrow" | "table" | "blockSdt" | "pageBreak" | "columnBreak")
+            ))
+        })
+        .map_or(0, |index| index + 1);
+    let whitespace_only = start < owner
+        && chunks[start..owner]
+            .iter()
+            .all(|chunk| match &chunk.insert {
+                Out::Any(Any::String(text)) => text.chars().all(char::is_whitespace),
+                Out::YMap(mark) => shared_map_string(mark, txn, "_kind").as_deref() == Some("tab"),
+                _ => false,
+            });
+    if whitespace_only {
+        return true;
+    }
+    let breaks = breaks.get_or_insert_with(|| {
+        let Some(source) = source else {
+            return BTreeMap::new();
+        };
+        let provenance = &source.read().provenance;
+        let Some((inline, _)) = provenance.by_story.get(story_id) else {
+            return BTreeMap::new();
+        };
+        let mut resolved = Default::default();
+        inline
+            .iter()
+            .filter_map(|&index| {
+                let record = &provenance.inline[index];
+                let InlineSource::Break { kind, .. } = record.content else {
+                    return None;
+                };
+                Some((
+                    record.para_id.clone(),
+                    (kind, record.pin.resolve(txn, &mut resolved)),
+                ))
+            })
+            .collect()
+    });
+    let para_id = shared_map_string(pilcrow, txn, "paraId").unwrap_or_default();
+    let pilcrow_index = story_index - (chunk_index - owner) as u32;
+    breaks.get(&para_id).is_some_and(|(kind, position)| {
+        *kind != crate::structured::BreakType::Page || *position != Some(pilcrow_index)
+    })
 }
 
 /// CamelCase alias of [`yrs_doc_to_layout_blocks`] for callers spelling the
@@ -3360,12 +3451,13 @@ fn flush_paragraph_parts<T: ReadTxn>(
             atom: true,
         });
     }
+    let has_source_content = !drawings.is_empty();
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
 
     if drawings.is_empty() {
-        let paragraph = flush_paragraph(
+        let mut paragraph = flush_paragraph(
             raw_runs,
             pilcrow,
             pilcrow_attributes,
@@ -3378,6 +3470,12 @@ fn flush_paragraph_parts<T: ReadTxn>(
             (map, source),
             carried,
         );
+        if has_source_content || (paragraph.runs.is_empty() && paragraph_pm_units > 0) {
+            paragraph
+                .attrs
+                .get_or_insert_with(Default::default)
+                .has_source_content = Some(true);
+        }
         if paragraph.runs.is_empty()
             && (hides_mark
                 || (!env.show_hidden_text
@@ -3460,6 +3558,14 @@ fn flush_paragraph_parts<T: ReadTxn>(
             (&mut preview::LoweringOutput::default(), 0),
             Vec::new(),
         )));
+    }
+    for block in &mut blocks {
+        if let LayoutBlock::Paragraph(paragraph) = block {
+            paragraph
+                .attrs
+                .get_or_insert_with(Default::default)
+                .has_source_content = Some(true);
+        }
     }
     blocks
 }
@@ -4158,6 +4264,7 @@ fn lower_paragraph_attrs(
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
+    result.has_source_content = true_property(values, "hasSourceContent");
     result.keep_next = true_property(values, "keepNext");
     result.keep_lines = true_property(values, "keepLines");
     result.widow_control = false_property(values, "widowControl");

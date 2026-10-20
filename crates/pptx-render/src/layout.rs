@@ -521,7 +521,14 @@ impl SlideRenderer {
                 w: width,
                 h: height,
                 asset_id: Some(asset_id),
-                effects: Vec::new(),
+                effects: image_effects_with_placeholder(
+                    &picture.effects,
+                    theme,
+                    background_source
+                        .as_ref()
+                        .and_then(|source| source.reference)
+                        .and_then(|reference| reference.color.as_ref()),
+                ),
                 crop,
                 destination,
                 tile,
@@ -1411,7 +1418,7 @@ impl<'a> LayoutBuilder<'a> {
                     .and_then(|path| self.media_part(path))
                     .and_then(|part| image_dpi(&part.bytes));
                 self.primitives
-                    .push(picture_filled(primitive, picture, dpi));
+                    .push(picture_filled(primitive, picture, dpi, self.theme));
             }
             return Ok(());
         }
@@ -1445,7 +1452,7 @@ impl<'a> LayoutBuilder<'a> {
                 .and_then(|path| self.media_part(path))
                 .and_then(|part| image_dpi(&part.bytes));
             self.primitives
-                .push(picture_filled(primitive, picture, dpi));
+                .push(picture_filled(primitive, picture, dpi, self.theme));
         }
         Ok(())
     }
@@ -4935,7 +4942,43 @@ fn resolved_transform_value(
 
 /// Resolves bitmap effect colours against the theme.
 fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
-    let rgba = |color: Option<&ColorValue>| resolve_color_value_to_rgba_hex(color, Some(theme));
+    image_effects_with_placeholder(effects, theme, None)
+}
+
+fn image_effects_with_placeholder(
+    effects: &[BlipEffect],
+    theme: &Theme,
+    placeholder: Option<&ColorValue>,
+) -> Vec<ImageEffect> {
+    let placeholder = placeholder.and_then(|color| {
+        Some(ColorValue {
+            rgb: Some(resolve_color_value_to_hex_with_theme(
+                Some(color),
+                Some(theme),
+            )?),
+            alpha: color.alpha,
+            ..ColorValue::default()
+        })
+    });
+    let rgba = |color: Option<&ColorValue>| {
+        let color = color?;
+        let substituted;
+        let color = if color.theme_color.as_deref() == Some("phClr")
+            && let Some(placeholder) = &placeholder
+        {
+            substituted = ColorValue {
+                rgb: placeholder.rgb.clone(),
+                theme_color: None,
+                auto: None,
+                alpha: color.alpha.or(placeholder.alpha),
+                ..color.clone()
+            };
+            &substituted
+        } else {
+            color
+        };
+        resolve_color_value_to_rgba_hex(Some(color), Some(theme))
+    };
     effects
         .iter()
         .filter_map(|effect| match effect {
@@ -5256,6 +5299,7 @@ fn picture_filled(
     primitive: Primitive,
     picture: Option<&PictureFill>,
     dpi: Option<f32>,
+    theme: &Theme,
 ) -> Primitive {
     let Some(picture) = picture else {
         return primitive;
@@ -5289,7 +5333,7 @@ fn picture_filled(
                 w,
                 h,
                 asset_id: picture.media_part_path.clone(),
-                effects: Vec::new(),
+                effects: image_effects(&picture.effects, theme),
                 crop,
                 destination,
                 tile,
@@ -7788,6 +7832,7 @@ mod tests {
         let picture = PictureFill {
             relationship_id: None,
             media_part_path: Some("ppt/media/image1.png".to_owned()),
+            effects: Vec::new(),
             tile: None,
             crop: PictureCrop::default(),
             fill_rect: PictureCrop {
@@ -7836,6 +7881,151 @@ mod tests {
             referenced.display_list.primitives[0],
             rendered.display_list.primitives[0]
         );
+    }
+
+    #[test]
+    fn a_theme_background_picture_resolves_effects_with_the_master_reference_color() {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        for (path, bytes) in &mut parts {
+            if path == "ppt/slides/slide1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, "");
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/slideMasters/slideMaster1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, r#"<p:bg><p:bgRef idx="1001"><a:schemeClr val="accent1"><a:shade val="50000"/><a:alpha val="50000"/></a:schemeClr></p:bgRef></p:bg>"#);
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/theme/theme1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<a:bgFillStyleLst>").unwrap();
+                let end = xml.find("</a:bgFillStyleLst>").unwrap() + "</a:bgFillStyleLst>".len();
+                xml.replace_range(start..end, r#"<a:bgFillStyleLst><a:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="background"><a:duotone><a:schemeClr val="phClr"><a:shade val="50000"/></a:schemeClr><a:schemeClr val="phClr"><a:tint val="50000"/><a:alpha val="25000"/></a:schemeClr></a:duotone><a:clrChange><a:clrFrom><a:schemeClr val="phClr"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"/></a:clrTo></a:clrChange></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill></a:bgFillStyleLst>"#);
+                *bytes = xml.into_bytes();
+            }
+        }
+        parts.push((
+            "ppt/theme/_rels/theme1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="background" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"#.to_vec(),
+        ));
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut package = pptx_parse::parse_pptx(&source).unwrap();
+        package.themes[0].theme.color_scheme.accent1 = "808080".to_owned();
+        let session = DeckSession::open(&source, 8_321).unwrap();
+        let rendered = renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the theme background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Duotone {
+                    shadow: "#20202080".to_owned(),
+                    highlight: "#9F9F9F40".to_owned(),
+                },
+                ImageEffect::ColorChange {
+                    from: "#40404080".to_owned(),
+                    to: "#FFFFFFFF".to_owned(),
+                    use_alpha: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_318).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "effects": [
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.1, "contrast": -0.2 }
+            ]
+        }))
+        .unwrap();
+        package.slides[0].background_picture = Some(Box::new(picture));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Alpha { amount: 0.2 },
+                ImageEffect::Luminance {
+                    brightness: 0.1,
+                    contrast: -0.2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shape_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_319).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "tile": { "scaleX": 0.5, "scaleY": 0.5 },
+            "effects": [{ "type": "alpha", "amount": 0.2 }]
+        }))
+        .unwrap();
+        package.masters[0]
+            .shapes
+            .push(ShapeNode::Shape(pptx_parse::Shape {
+                has_preset_geometry: true,
+                effects: None,
+                base: pptx_parse::ShapeBase {
+                    id: 9_002,
+                    name: "Filled".to_owned(),
+                    description: None,
+                    hidden: false,
+                    placeholder: None,
+                    transform: ShapeTransform {
+                        x: 0,
+                        y: 0,
+                        width: 1_000_000,
+                        height: 1_000_000,
+                        ..ShapeTransform::default()
+                    },
+                },
+                geometry: "rect".to_owned(),
+                adjust_values: BTreeMap::new(),
+                paths: Vec::new(),
+                style: None,
+                fill: Some(ShapeFill::named("picture")),
+                picture_fill: Some(Box::new(picture)),
+                outline: None,
+                text: None,
+            }));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 9_002,
+                        ..
+                    }
+                )
+            })
+            .expect("the picture-filled master shape paints as an image");
+        let Primitive::Image { effects, tile, .. } = image else {
+            unreachable!()
+        };
+        assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
+        assert!(tile.is_some());
     }
 
     #[test]

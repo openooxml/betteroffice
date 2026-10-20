@@ -426,6 +426,9 @@ pub struct PictureFill {
     /// `a:tile`: the picture repeats at its own size instead of stretching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tile: Option<PictureTile>,
+    /// Bitmap effects in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<BlipEffect>,
 }
 
 /// `a:blipFill/a:tile`. The offset, alignment and flip it can also carry are
