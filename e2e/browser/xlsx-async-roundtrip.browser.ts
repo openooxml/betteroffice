@@ -493,3 +493,27 @@ test('xlsx roundtrip: a 2000-row workbook opens, edits its last row, and saves w
   const second = await save(page, info, 'large-reopened');
   expect(stableParts(second.parts)).toEqual(stableParts(first.parts));
 });
+
+test('xlsx roundtrip: typing a date in a date cell saves a numeric date rather than text', async ({ page }, info) => {
+  await open(page, await fixture({ sheets: [
+    { name: 'Dates', rows: '<row r="1"><c r="C1" s="1"><v>45292</v></c></row>' },
+  ] }));
+  await select(page, 'C1');
+  await cellText(page, 'C1', '1/1/24');
+  const input = page.getByTestId('xlsx-formula-input');
+  await input.fill('1/15/2024');
+  await input.press('Enter');
+  await select(page, 'C1');
+  await cellText(page, 'C1', '1/15/24');
+  await page.getByTestId('xlsx-undo').click();
+  await cellText(page, 'C1', '1/1/24');
+  await page.getByTestId('xlsx-redo').click();
+  await cellText(page, 'C1', '1/15/24');
+  const first = await save(page, info, 'typed-date');
+  expect((await inspect(page, first.parts))['xl/worksheets/sheet1.xml'].C1).toMatchObject({ value: '45306', type: 'n', style: { numFmtId: '14' } });
+  await open(page, first.file);
+  await select(page, 'C1');
+  await cellText(page, 'C1', '1/15/24');
+  const second = await save(page, info, 'typed-date-reopened');
+  expect(stableParts(second.parts)).toEqual(stableParts(first.parts));
+});
