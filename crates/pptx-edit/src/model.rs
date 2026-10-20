@@ -132,6 +132,8 @@ pub struct ShapeSnapshot {
     /// Hides this shape and its descendants.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub geometry: String,
     pub adjust_values: BTreeMap<String, f64>,
     pub placeholder: Option<Placeholder>,
@@ -195,6 +197,10 @@ pub struct SlideSnapshot {
     pub notes: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<ShapeFill>,
+    /// An edit changed the background from what the source part declares, so
+    /// `background` stands for the slide whatever `p:bg` that part holds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub background_edited: bool,
     pub shapes: Vec<ShapeSnapshot>,
 }
 

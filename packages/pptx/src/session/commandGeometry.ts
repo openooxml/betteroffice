@@ -176,11 +176,12 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
       }
     }
     if (primitive.kind === 'textBox' && primitive.storyId) {
+      const nearest = target || entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table');
       const columns = primitive.lines?.some((line, index, lines) => index > 0 &&
         (line.columnOffset ?? 0) !== (lines[index - 1].columnOffset ?? 0));
       let nearestDistance = Number.POSITIVE_INFINITY;
       const line = primitive.lines?.reduce<CaretLine | undefined>((best, candidate) => {
-        if (!target && (local.y < candidate.y || local.y > candidate.y + candidate.height)) return best;
+        if (!nearest && (local.y < candidate.y || local.y > candidate.y + candidate.height)) return best;
         const distance = (value: CaretLine) => {
           let left = value.x;
           let right = value.x;

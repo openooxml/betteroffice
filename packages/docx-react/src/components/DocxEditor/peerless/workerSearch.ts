@@ -10,6 +10,7 @@ type Run = { query: string; options: FindOptions; token: string; version: number
 export function createWorkerSearch(controller: ReturnType<typeof createPeerlessShellController>, reveal: (rect: DocxEchoRect) => void) {
   let run: Run | null = null;
   let generation = 0;
+  let pendingReplaces = 0;
   let disposed = false;
   let state = { isOpen: false, replaceMode: false, result: null as FindResult | null, highlights: [] as Array<DocxEchoRect & { current: boolean }> };
   const listeners = new Set<() => void>();
@@ -24,6 +25,13 @@ export function createWorkerSearch(controller: ReturnType<typeof createPeerlessS
   const current = (candidate: Run) => {
     const view = controller.getSnapshot().view;
     return !disposed && run === candidate && view?.identity.session === candidate.session && view.version === candidate.version;
+  };
+  const select = (candidate: Run) => {
+    const hit = candidate.hits[candidate.current];
+    if (!state.isOpen || !hit || !current(candidate)) return;
+    void controller.submit({ kind: 'select', payload: { selection: {
+      anchor: { story: hit.range.story, ...hit.range.start }, focus: { story: hit.range.story, ...hit.range.end },
+    } } }).catch(() => {});
   };
   const paragraphs = async (candidate: Run) => {
     const groups = new Map<string, Set<string>>();
@@ -152,34 +160,47 @@ export function createWorkerSearch(controller: ReturnType<typeof createPeerlessS
     }
   });
   return {
-    host, find, getSnapshot: () => state,
+    host, getSnapshot: () => state,
+    async find(query: string, options: FindOptions): Promise<DocxSearchState> {
+      if (!state.isOpen) return { query, options: { caseSensitive: options.matchCase }, total: 0, current: -1 };
+      return find(query, options);
+    },
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
     open(replaceMode: boolean) { state = { ...state, isOpen: true, replaceMode }; publish(); },
-    close() { state = { ...state, isOpen: false }; clear(); },
+    close(query: string, options: FindOptions) {
+      if (!pendingReplaces && run && run.query === query && run.options.matchCase === options.matchCase && run.options.matchWholeWord === options.matchWholeWord) select(run);
+      state = { ...state, isOpen: false }; clear();
+    },
     async replace(text: string, all = false): Promise<number> {
       const candidate = run;
       if (!candidate || !current(candidate) || controller.environment().readOnly || controller.environment().mode === 'viewing') return 0;
-      await controller.ref.flushPendingInput();
-      if (!current(candidate)) return 0;
-      const projection = await paragraphs(candidate);
-      const targets: DocxTextRange[] = [];
-      for (const hit of all ? candidate.hits : candidate.hits.slice(candidate.current, candidate.current + 1)) {
-        const value = projection.get(`${hit.range.story}\n${hit.range.start.paraId}`) ?? '';
-        const matches = findAllMatches(value, candidate.query, { ...candidate.options, matchWholeWord: false });
-        const native = candidate.all.filter(other => other.range.story === hit.range.story && other.range.start.paraId === hit.range.start.paraId);
-        const match = matches[hit.ordinal];
-        if (!match || matches.length !== native.length) return 0;
-        const result = await controller.readAt({ kind: 'findText', request: { text: value.slice(match.start, match.end),
-          within: { kind: 'paragraph', story: hit.range.story, paraId: hit.range.start.paraId }, view: 'accepted', limit: 10000 } }, candidate.token);
-        if (!result.ok || result.truncated) return 0;
-        const target = result.matches.find(item => item.range.start.offset === match.start && item.range.end.offset === match.end)?.range;
-        if (!target) return 0;
-        targets.push(target);
+      const request = generation;
+      pendingReplaces++;
+      try {
+        await controller.ref.flushPendingInput();
+        if (!current(candidate)) return 0;
+        const projection = await paragraphs(candidate);
+        const targets: DocxTextRange[] = [];
+        for (const hit of all ? candidate.hits : candidate.hits.slice(candidate.current, candidate.current + 1)) {
+          const value = projection.get(`${hit.range.story}\n${hit.range.start.paraId}`) ?? '';
+          const matches = findAllMatches(value, candidate.query, { ...candidate.options, matchWholeWord: false });
+          const native = candidate.all.filter(other => other.range.story === hit.range.story && other.range.start.paraId === hit.range.start.paraId);
+          const match = matches[hit.ordinal];
+          if (!match || matches.length !== native.length) return 0;
+          const result = await controller.readAt({ kind: 'findText', request: { text: value.slice(match.start, match.end),
+            within: { kind: 'paragraph', story: hit.range.story, paraId: hit.range.start.paraId }, view: 'accepted', limit: 10000 } }, candidate.token);
+          if (!result.ok || result.truncated) return 0;
+          const target = result.matches.find(item => item.range.start.offset === match.start && item.range.end.offset === match.end)?.range;
+          if (!target) return 0;
+          targets.push(target);
+        }
+        if (!current(candidate)) return 0;
+        const result = await controller.submit({ kind: 'replaceMatches', payload: { targets, text, expectVersion: candidate.token } });
+        if (request === generation && !disposed) await find(candidate.query, candidate.options, true);
+        return result.ok && result.status === 'executed' ? targets.length : 0;
+      } finally {
+        pendingReplaces--;
       }
-      if (!current(candidate)) return 0;
-      const result = await controller.submit({ kind: 'replaceMatches', payload: { targets, text, expectVersion: candidate.token } });
-      await find(candidate.query, candidate.options, true);
-      return result.ok && result.status === 'executed' ? targets.length : 0;
     },
     dispose() { disposed = true; generation++; unsubscribe(); listeners.clear(); hostListeners.clear(); },
   };

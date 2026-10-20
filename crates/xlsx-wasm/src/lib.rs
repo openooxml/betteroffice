@@ -417,6 +417,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = selectionDataJson)]
+    pub fn selection_data_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .selection_data_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = cellRectJson)]
     pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
         self.session

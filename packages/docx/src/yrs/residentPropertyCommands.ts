@@ -15,6 +15,11 @@ function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
     (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
+function sameImagePosition(current: unknown, value: unknown): boolean {
+  if (!record(current) || !record(value)) return (current ?? null) === (value ?? null);
+  return [...new Set([...Object.keys(current), ...Object.keys(value)])]
+    .every(key => sameImagePosition(current[key], value[key]));
+}
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const text = (value: unknown): value is string => typeof value === 'string' && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value);
 const choice = (value: unknown, values: string[]) => text(value) && values.includes(value);
@@ -121,8 +126,10 @@ export function propertyCommandTarget(engine: ResidentDocxCommandEngine, command
 
 export function applyPropertyCommand(engine: ResidentDocxCommandEngine, command: DocxCommandIntent): Pick<DocxCommandApplyResult, 'status'> {
   const before = engine.proposalEngine.version();
-  engine.beginUndoCapture();
-  engine.addUndoBoundary();
+  if (command.kind !== 'setObjectProperties') {
+    engine.beginUndoCapture();
+    engine.addUndoBoundary();
+  }
   switch (command.kind) {
     case 'setHyperlink': {
       let range = commandSelectionRange(engine, command.payload.selection)!;
@@ -143,8 +150,11 @@ export function applyPropertyCommand(engine: ResidentDocxCommandEngine, command:
       const patch = command.payload.patch;
       if (Object.entries(patch).every(([key, value]) => {
         const current = key === 'wrap' ? (read.properties.wrapType ?? read.properties.wrap) : read.properties[key];
-        return value === null ? current === undefined || current === null : JSON.stringify(current) === JSON.stringify(value);
-      })) break;
+        return key === 'position' ? sameImagePosition(current, value)
+          : value === null ? current === undefined || current === null : JSON.stringify(current) === JSON.stringify(value);
+      })) return { status: 'noop' };
+      engine.beginUndoCapture();
+      engine.addUndoBoundary();
       const other = { ...patch, ...(patch.widthEmu === undefined ? {} : { width: Number(patch.widthEmu) / 9525 }),
         ...(patch.heightEmu === undefined ? {} : { height: Number(patch.heightEmu) / 9525 }),
         ...(patch.wrap === undefined ? {} : { wrapType: patch.wrap }) };

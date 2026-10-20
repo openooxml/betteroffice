@@ -59,7 +59,15 @@ export function usePeerlessTextSelection(store: PeerlessViewStore | null, {
     let extend = drag;
     if (!drag) {
       const hit = peerlessPositionAtPoint(presentation, canvas.current, event.clientX, event.clientY);
-      if (hit?.kind !== 'text') return false;
+      if (!hit) {
+        recent.current = null;
+        event.preventDefault();
+        void store.dispatch({ kind: 'setSelection', payload: { selection: null,
+          inputTime: event.timeStamp, undoGroup: 'selection' } }).catch(() => {});
+        event.currentTarget.focus();
+        return true;
+      }
+      if (hit.kind !== 'text') return false;
       const selected = at?.source === 'confirmed' ? at.selection : null;
       extend = event.shiftKey && (at?.source === 'afterSeq' || selected?.slideId === confirmed.frame.slideId &&
         selected.shapeId === hit.shapeId && selected.storyId === hit.storyId && selected.kind !== 'shape' && selected.kind !== 'object');

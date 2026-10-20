@@ -1,6 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, it } from 'bun:test';
 import { useState } from 'react';
+import { flushSync } from 'react-dom';
 import { EditableCombobox } from './EditableCombobox';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
@@ -13,6 +14,70 @@ afterAll(async () => {
 });
 
 describe('EditableCombobox', () => {
+  it.each([
+    ['Zoom', '50%', '83%', '83%'],
+    ['Zoom', '100%', '75%', '75%'],
+    ['Font size', '18', ' 24 ', '24'],
+    ['Shape adjustment', '17%', '40', '40%'],
+  ])(
+    'keeps the synchronously applied %s value after Enter and blur (%s to %s)',
+    async (label, initial, entered, applied) => {
+      const commits: string[] = [];
+      function Field() {
+        const [value, setValue] = useState(initial);
+        return (
+          <EditableCombobox
+            value={value}
+            options={[]}
+            label={label}
+            onCommit={(draft) => {
+              commits.push(draft);
+              flushSync(() => setValue(applied));
+            }}
+          />
+        );
+      }
+      const { getByRole } = render(<Field />);
+      const input = getByRole('combobox') as HTMLInputElement;
+
+      act(() => input.focus());
+      fireEvent.input(input, { target: { value: entered } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      await act(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+
+      expect(commits).toEqual([entered.trim()]);
+      expect(input.value).toBe(applied);
+    }
+  );
+
+  it('keeps the synchronously applied value after a blur commit', async () => {
+    const commits: string[] = [];
+    function Field() {
+      const [value, setValue] = useState('50%');
+      return (
+        <EditableCombobox
+          value={value}
+          options={[]}
+          label="Zoom"
+          onCommit={(draft) => {
+            commits.push(draft);
+            flushSync(() => setValue(`${Number.parseFloat(draft)}%`));
+          }}
+        />
+      );
+    }
+    const { getByRole } = render(<Field />);
+    const input = getByRole('combobox') as HTMLInputElement;
+
+    act(() => input.focus());
+    fireEvent.input(input, { target: { value: '83' } });
+    act(() => input.blur());
+    await act(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+
+    expect(commits).toEqual(['83']);
+    expect(input.value).toBe('83%');
+  });
+
   it('restores the applied value after a rejected commit', () => {
     const { getByRole } = render(<ZoomCombobox />);
     const input = getByRole('combobox') as HTMLInputElement;
