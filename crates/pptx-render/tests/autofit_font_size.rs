@@ -143,3 +143,78 @@ fn edited_unwrapped_autofit_includes_paragraph_margin() {
 fn edited_unwrapped_autofit_includes_first_line_indent() {
     assert_unwrapped_autofit_fits(0, 285_750);
 }
+
+fn right_aligned_refit(text: &str, typed: &str) -> (f32, Option<TextAutofit>) {
+    let mut package = pptx_parse::parse_pptx(DECK).unwrap();
+    let source = format!(
+        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld><p:spTree><p:sp>
+<p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="476250" y="476250"/><a:ext cx="2857500" cy="1905000"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr wrap="square" lIns="95250" rIns="95250" tIns="0" bIns="0"><a:normAutofit/></a:bodyPr>
+<a:lstStyle/><a:p><a:pPr algn="r" marL="0" marR="0" indent="0"><a:buNone/></a:pPr>
+<a:r><a:rPr sz="2400"><a:latin typeface="Arial"/></a:rPr><a:t>{text}</a:t></a:r>
+<a:endParaRPr sz="2400"/></a:p></p:txBody>
+</p:sp></p:spTree></p:cSld></p:sld>"#
+    );
+    assert!(package.replace_part("ppt/slides/slide1.xml", source.into_bytes()));
+    let bytes = pptx_parse::write_pptx(&package).unwrap();
+    let session = DeckSession::open(&bytes, 8_024).unwrap();
+    let story = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0].clone();
+    session
+        .insert_text(
+            &EditCtx::local("test"),
+            &story.id,
+            story.length - 1,
+            typed,
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let mut renderer = SlideRenderer::new();
+    renderer.register_font("Arial", false, false, FONT).unwrap();
+    let size = renderer
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list
+        .primitives
+        .into_iter()
+        .find_map(|primitive| match primitive {
+            Primitive::TextBox {
+                object_id: 2,
+                lines,
+                ..
+            } => Some(lines[0].runs[0].font_size_px),
+            _ => None,
+        })
+        .unwrap();
+    let saved = renderer.save(&session).unwrap();
+    let reopened = DeckSession::open(&saved, 8_025).unwrap();
+    let ShapeNode::Shape(shape) = &reopened.package().slides[0].shapes[0] else {
+        panic!("text shape");
+    };
+    (size, shape.text.as_ref().unwrap().autofit.clone())
+}
+
+fn assert_full_size((size, autofit): (f32, Option<TextAutofit>)) {
+    assert_eq!(size, 32.0);
+    assert!(
+        matches!(
+            autofit,
+            Some(TextAutofit::Normal { font_scale, .. }) if font_scale.is_none_or(|scale| scale == 1.0)
+        ),
+        "{autofit:?}"
+    );
+}
+
+#[test]
+fn edited_right_aligned_wrapped_paragraph_keeps_its_full_size() {
+    assert_full_size(right_aligned_refit(
+        "Alpha beta gamma delta epsilon zeta eta theta",
+        " iota",
+    ));
+}
+
+#[test]
+fn a_typed_trailing_space_keeps_right_aligned_text_at_full_size() {
+    assert_full_size(right_aligned_refit("Right aligned", " "));
+}

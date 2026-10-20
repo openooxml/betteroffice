@@ -2198,7 +2198,8 @@ impl<'a> LayoutBuilder<'a> {
                 if text.total_height <= content_rect.h
                     && text.lines.iter().all(|line| {
                         line.x >= content_rect.x
-                            && line.x + line.width <= content_rect.x + content_rect.w
+                            && visible_right(line)
+                                <= content_rect.x + content_rect.w + FIT_EPSILON_PX
                     })
                 {
                     high = mid;
@@ -2596,6 +2597,38 @@ impl TextFlow {
 }
 
 /// Mirrors the lines within the block they occupy, keeping the block in place.
+/// The right edge of a line's ink: blanks that hang past the end of a wrapped
+/// line, or that were just typed, do not count, as in `aligned_slice`.
+fn visible_right(line: &PositionedTextLine) -> f32 {
+    let last = line.runs.iter().rev().find_map(|run| {
+        let visible = run.text.trim_end_matches(char::is_whitespace);
+        (!visible.is_empty()).then(|| {
+            (
+                run.end - utf16_len(&run.text[visible.len()..]),
+                run.letter_spacing_px,
+            )
+        })
+    });
+    let Some((end, tracking)) = last else {
+        return line.x;
+    };
+    let right = line
+        .caret_stops
+        .iter()
+        .filter(|stop| stop.position <= end)
+        .map(|stop| stop.x)
+        .fold(line.x, f32::max);
+    let ends_at_right = line
+        .caret_stops
+        .iter()
+        .any(|stop| stop.position == end && stop.x >= right);
+    if ends_at_right {
+        right - tracking
+    } else {
+        right
+    }
+}
+
 fn reverse_line_order(lines: &mut [PositionedTextLine]) {
     let Some(top) = lines.iter().map(|line| line.y).reduce(f32::min) else {
         return;
@@ -3956,6 +3989,9 @@ const NO_WRAP_WIDTH_PX: f32 = 1.0e6;
 
 /// A stop the pen already sits on does not hold the tab.
 const TAB_EPSILON_PX: f32 = 0.01;
+/// Slack for a right-aligned line, whose summed advances can land a rounding
+/// step past the edge it was placed against.
+const FIT_EPSILON_PX: f32 = 0.01;
 
 /// Width one tab takes. The stop is chosen from `offset` — where PowerPoint's
 /// pen would be — and the width is measured from `pen`, where ours is; the two
