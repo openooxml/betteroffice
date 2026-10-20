@@ -56,7 +56,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
       }
       const slideId = view?.confirmed?.frame.slideId;
       const slide = run?.client.state.slides.find((slide) => slide.id === slideId);
-      return { status: !run?.current ? 'unavailable' : !view?.confirmed ? 'empty' : 'ready',
+      return { status: !run?.current ? 'unavailable' : 'ready',
         readOnly: view?.editState.readOnly ?? true, reviewing: review.diff,
         pendingInput: Boolean((view?.pending.length || view?.waitingInputCount) && (!view?.editState.canUndo ||
           view?.pending.some((record) => record.intent.kind === 'undo' || record.intent.kind === 'redo'))),
@@ -80,7 +80,7 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
       resume(captured) {
         const origin = captured as Origin;
         if (!run?.current || origin.run !== run) return 'document-replaced';
-        if (origin.slideId !== run.store.getSnapshot().confirmed?.frame.slideId) return 'target-changed';
+        if (origin.slideId !== (run.store.getSnapshot().confirmed?.frame.slideId ?? null)) return 'target-changed';
         if (!['undo', 'redo', 'save', 'tool', 'insertImage'].includes(origin.id) && origin.target !== target(run)) return 'target-changed';
         return null;
       },

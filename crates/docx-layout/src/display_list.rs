@@ -8636,11 +8636,20 @@ fn emit_shape_fragment_with_clip(
             .and_then(|margins| margins.get("bottom"))
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let content_height: f64 = block
-            .inner_measures
+        let mut flow = crate::header_footer::HeaderFooterFlow::default();
+        let tops: Vec<f64> = block
+            .inner_text
             .iter()
-            .map(|measure| measure.total_height)
-            .sum();
+            .zip(&block.inner_measures)
+            .map(|(para, pm)| {
+                let spacing = para.attrs.as_ref().and_then(|attrs| attrs.spacing);
+                let before = spacing.and_then(|spacing| spacing.before).unwrap_or(0.0);
+                let after = spacing.and_then(|spacing| spacing.after).unwrap_or(0.0);
+                let content_height = (pm.total_height - before - after).max(0.0);
+                flow.place(content_height, before, after)
+            })
+            .collect();
+        let content_height = flow.height();
         let properties = block.text_body_properties.as_ref();
         let vertical = properties
             .and_then(|properties| properties.get("vertical"))
@@ -8669,7 +8678,6 @@ fn emit_shape_fragment_with_clip(
         };
         let content_x = frag.x + margin_left + (body_width - content_width) / 2.0;
         let content_y = frag.y + margin_top + (body_height - available_height) / 2.0;
-        let mut y_offset = anchor_offset;
         let text_start = prims.len();
         let bounded = group_clip.is_some()
             && properties
@@ -8681,9 +8689,10 @@ fn emit_shape_fragment_with_clip(
                 .and_then(Value::as_str)
                 != Some("overflow");
         for (i, para) in block.inner_text.iter().enumerate() {
-            let Some(pm) = block.inner_measures.get(i) else {
+            let (Some(pm), Some(&top)) = (block.inner_measures.get(i), tops.get(i)) else {
                 continue;
             };
+            let y_offset = anchor_offset + top;
             let para_y = content_y + y_offset;
             let mut line_y = y_offset;
             let to_line = if bounded {
@@ -8717,7 +8726,6 @@ fn emit_shape_fragment_with_clip(
             emit_paragraph_fragment(
                 prims, &synthetic, para, pm, ctx, content_x, para_y, None, None, true, true,
             );
-            y_offset += pm.total_height;
         }
         let shape_rotation = if properties
             .and_then(|properties| properties.get("upright"))
@@ -9699,6 +9707,7 @@ struct CellPaint {
     grid_index: usize,
     cell_y: f64,
     cell_h: f64,
+    content_h: f64,
     is_first_row: bool,
     selectable: bool,
 }
@@ -9864,6 +9873,7 @@ impl TablePaintPlan {
                 grid_index,
                 cell_y: to_frag_y(row_tops.get(g.row_index).copied().unwrap_or(0.0)),
                 cell_h: span_height(g),
+                content_h: span_height(g),
                 is_first_row: false,
                 selectable: false,
             });
@@ -9877,13 +9887,25 @@ impl TablePaintPlan {
                 if g.row_index != vr.row_index {
                     continue;
                 }
+                let cell_h = if g.row_span > 1 {
+                    span_height(g)
+                } else {
+                    row_h
+                };
                 paints.push(CellPaint {
                     grid_index,
                     cell_y: vr.frag_y,
-                    cell_h: if g.row_span > 1 {
-                        span_height(g)
+                    cell_h,
+                    content_h: if vr.band_height.is_some() {
+                        measure
+                            .rows
+                            .iter()
+                            .skip(g.row_index)
+                            .take(g.row_span)
+                            .map(|row| row.height)
+                            .sum()
                     } else {
-                        row_h
+                        cell_h
                     },
                     is_first_row: g.row_index == 0 || vr.is_first_in_fragment,
                     selectable: true,
@@ -10423,7 +10445,7 @@ pub(crate) fn emit_table_fragment(
                 &CellPaintRef::from(p.g),
                 cx,
                 content_y,
-                p.cell_h,
+                paint.content_h,
                 is_first_col,
                 content_clip_top,
                 content_clip_bottom,
@@ -11586,7 +11608,7 @@ fn visit_table_fragment(
             &CellPaintRef::from(g),
             frag.x + g.x,
             content_y,
-            paint.cell_h,
+            paint.content_h,
             is_first_grid_column(g, block, measure),
             clip_top,
             clip_bottom,

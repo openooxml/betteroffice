@@ -176,7 +176,8 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
       }
     }
     if (primitive.kind === 'textBox' && primitive.storyId) {
-      const line = target ? primitive.lines?.reduce<CaretLine | undefined>((best, candidate) => {
+      const nearest = target || entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table');
+      const line = nearest ? primitive.lines?.reduce<CaretLine | undefined>((best, candidate) => {
         const distance = (value: CaretLine) => Math.max(value.y - local.y, local.y - value.y - value.height, 0);
         return !best || distance(candidate) < distance(best) ? candidate : best;
       }, undefined) : primitive.lines?.find((candidate) => local.y >= candidate.y && local.y <= candidate.y + candidate.height);

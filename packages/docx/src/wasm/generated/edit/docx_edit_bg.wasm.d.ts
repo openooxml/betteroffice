@@ -98,6 +98,7 @@ export const editsession_headings_json: (a: number, b: number, c: number) => [nu
 export const editsession_history_stories: (a: number) => [number, number];
 export const editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+export const editsession_insert_line_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
 export const editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];

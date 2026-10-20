@@ -1097,6 +1097,12 @@ export function wrapSession(
           ) as YrsReplaceReceipt
       );
     },
+    insertLineBreak: (at, suggesting) => {
+      ensureUndo(at.story);
+      return mutate(() => JSON.parse(session.insert_line_break(
+        at.story, at.paraId, at.offset, suggesting?.name, suggesting?.date
+      )) as YrsReplaceReceipt);
+    },
     deleteRange: (range, suggesting) => {
       ensureUndo(range.story);
       return mutate(

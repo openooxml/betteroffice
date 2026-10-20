@@ -7,6 +7,7 @@
  * layer is framework glue — keyboard/mouse wiring, focus flow, and DOM chrome.
  */
 
+import { selectionDataRequest, selectionHidden } from './selectionData';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import {
@@ -861,7 +862,7 @@ function XlsxEditorContent({
     (handle: WorkbookHandle, sheet: number, next: Selection | null) => {
       handle.setActiveSheet(sheet);
       setSheetInfo(handle.sheetInfo());
-      setSelection(next ? { anchor: { ...next.anchor }, focus: { ...next.focus } } : null);
+      setSelection(next ? structuredClone(next) : null);
       setSelectedChart(null);
       dropDrafts();
       setCapturedFormat(null);
@@ -1062,7 +1063,7 @@ function XlsxEditorContent({
     return {
       sheetId,
       sheetIndex: activeSheet,
-      cells: selection ? { anchor: { ...selection.anchor }, focus: { ...selection.focus } } : null,
+      cells: selection ? structuredClone(selection) : null,
       chartId: selectedChart?.id ?? null,
     };
   }, [sheetInfo, activeSheet, selection, selectedChart]);
@@ -1285,10 +1286,11 @@ function XlsxEditorContent({
       collaborationProvider.setCursor(null);
       return;
     }
+    const range = normalizeRange(selection);
     collaborationProvider.setCursor({
       sheet,
-      anchor: { ...selection.anchor },
-      head: { ...selection.focus },
+      anchor: selection.range ? { row: range.top, col: range.left } : { ...selection.anchor },
+      head: selection.range ? { row: range.bottom, col: range.right } : { ...selection.focus },
     });
   }, [collaborationProvider, selection, sheetInfo, activeSheet, revision]);
 
@@ -1764,7 +1766,7 @@ function XlsxEditorContent({
       suppressBlurRef.current = true;
       setEditing(null);
       const base = selectionAt({ row, col });
-      setSelection(move ? moveFocus(base, move, { limits: limits() }) : base);
+      setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: selectionHidden(frameRef.current?.grid) }) : base);
       focusContainer();
       showRejected(activeSheetRef.current);
     },
@@ -1956,7 +1958,7 @@ function XlsxEditorContent({
       if (!handleRef.current || draft?.source !== 'formula' || readOnly) return;
       if (!coordinator.submit(draft)) return;
       setFormulaDraft(null);
-      if (move) setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
+      if (move) setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits(), hidden: selectionHidden(frameRef.current?.grid) }) : prev));
       showRejected(activeSheetRef.current);
     },
     [coordinator, limits, readOnly, showRejected]
@@ -2021,6 +2023,9 @@ function XlsxEditorContent({
         }
       }
 
+      const request = selectionDataRequest(e);
+      const data = request ? handle.selectionData(activeSheetRef.current, selection.focus.row,
+        selection.focus.col, request === 'region' ? undefined : request) : undefined;
       const action = selectionKeyReducer(
         selection,
         {
@@ -2030,11 +2035,15 @@ function XlsxEditorContent({
           ctrlKey: e.ctrlKey,
           altKey: e.altKey,
         },
-        limits()
+        limits(),
+        data,
+        selectionHidden(frameRef.current?.grid)
       );
       switch (action.type) {
         case 'move':
           setSelection(action.selection);
+          if (request) revealCell(activeSheetRef.current, action.selection.focus.row, action.selection.focus.col, 'nearest',
+            () => selectionRef.current === action.selection);
           e.preventDefault();
           break;
         case 'startEdit':
@@ -2061,6 +2070,7 @@ function XlsxEditorContent({
       clearCells,
       selectedChart,
       nudgeChart,
+      revealCell,
       readOnly,
     ]
   );
