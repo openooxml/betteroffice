@@ -1205,11 +1205,13 @@ impl<'a> LayoutBuilder<'a> {
         media_part_path: Option<&str>,
         effects: &[BlipEffect],
         crop: Option<&PictureCrop>,
-        mask: PictureMask,
-        outline: Option<Stroke>,
+        mut mask: PictureMask,
+        mut outline: Option<Stroke>,
         shadow: Option<Shadow>,
     ) {
-        if effects.is_empty()
+        let separate_outline = mask.outline_path.is_some();
+        let metafile = !mask.empty
+            && effects.is_empty()
             && self.push_metafile(
                 object_id,
                 name,
@@ -1218,57 +1220,66 @@ impl<'a> LayoutBuilder<'a> {
                 media_part_path,
                 crop,
                 &mask,
-            )
-        {
-            if let Some(outline) = outline {
-                self.primitives.push(Primitive::Shape {
-                    clip: None,
-                    even_odd: false,
-                    object_id,
-                    shape_id: Some(shape_id.to_owned()),
-                    name: name.to_owned(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    geometry: "rect".to_owned(),
-                    path: mask
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0)),
-                    geometry_fallback: mask.geometry_fallback,
-                    adjust_values: BTreeMap::new(),
-                    fill: None,
-                    stroke: Some(outline),
-                    shadow: None,
-                    transform,
-                });
-            }
-            return;
+            );
+        if !mask.empty && !metafile {
+            let (crop, destination) = crop
+                .map(image_crop)
+                .unwrap_or_default()
+                .placement(rect.x, rect.y, rect.w, rect.h);
+            self.primitives.push(Primitive::Image {
+                object_id,
+                shape_id: Some(shape_id.to_owned()),
+                name: name.to_owned(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                asset_id: media_part_path.map(str::to_owned),
+                effects: image_effects(effects, self.theme),
+                crop,
+                destination,
+                tile: None,
+                path: mask.path.take(),
+                geometry_fallback: mask.geometry_fallback,
+                stroke: if separate_outline {
+                    None
+                } else {
+                    outline.take()
+                },
+                shadow,
+                transform,
+            });
         }
-        let (crop, destination) = crop
-            .map(image_crop)
-            .unwrap_or_default()
-            .placement(rect.x, rect.y, rect.w, rect.h);
-        self.primitives.push(Primitive::Image {
-            object_id,
-            shape_id: Some(shape_id.to_owned()),
-            name: name.to_owned(),
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
-            asset_id: media_part_path.map(str::to_owned),
-            effects: image_effects(effects, self.theme),
-            crop,
-            destination,
-            tile: None,
-            path: mask.path,
-            geometry_fallback: mask.geometry_fallback,
-            stroke: outline,
-            shadow,
-            transform,
-        });
+        if (metafile || separate_outline)
+            && let Some(outline) = outline
+        {
+            let path = mask
+                .outline_path
+                .or(mask.path)
+                .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
+            if path.is_empty() {
+                return;
+            }
+            self.primitives.push(Primitive::Shape {
+                clip: None,
+                even_odd: false,
+                object_id,
+                shape_id: Some(shape_id.to_owned()),
+                name: name.to_owned(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                geometry: if separate_outline { "custom" } else { "rect" }.to_owned(),
+                path,
+                geometry_fallback: mask.geometry_fallback,
+                adjust_values: BTreeMap::new(),
+                fill: None,
+                stroke: Some(outline),
+                shadow: None,
+                transform,
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5261,12 +5272,40 @@ fn image_crop(crop: &PictureCrop) -> ImageCrop {
 #[derive(Default)]
 struct PictureMask {
     path: Option<Vec<GeometryPathCommand>>,
+    outline_path: Option<Vec<GeometryPathCommand>>,
+    empty: bool,
     geometry_fallback: bool,
 }
 
 fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     if picture.geometry.is_empty() || picture.geometry == "rect" || rect.h <= 0.0 {
         return PictureMask::default();
+    }
+    if picture.geometry == "custom" && !picture.paths.is_empty() {
+        let path: Vec<_> = picture
+            .paths
+            .iter()
+            .filter(|path| !path.no_fill)
+            .flat_map(|path| path.commands.iter().cloned())
+            .collect();
+        let outline_path = picture
+            .paths
+            .iter()
+            .any(|path| path.no_fill || path.no_stroke)
+            .then(|| {
+                picture
+                    .paths
+                    .iter()
+                    .filter(|path| !path.no_stroke)
+                    .flat_map(|path| path.commands.iter().cloned())
+                    .collect()
+            });
+        return PictureMask {
+            empty: path.is_empty(),
+            path: (!path.is_empty()).then_some(path),
+            outline_path,
+            geometry_fallback: false,
+        };
     }
     let (path, geometry_fallback) = geometry_path_with_fallback(
         &picture.geometry,
@@ -5276,6 +5315,7 @@ fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     PictureMask {
         path: (!path.is_empty()).then_some(path),
         geometry_fallback,
+        ..PictureMask::default()
     }
 }
 
@@ -5749,6 +5789,7 @@ mod tests {
             effects: Vec::new(),
             crop: PictureCrop::default(),
             geometry: "rect".to_owned(),
+            paths: Vec::new(),
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
@@ -5776,6 +5817,210 @@ mod tests {
             ))
         );
         assert_eq!(path[5], ooxml_drawingml::GeometryPathCommand::Close);
+    }
+
+    #[test]
+    fn custom_geometry_picture_is_clipped_through_layout_and_save() {
+        let mut source = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let part = "ppt/slides/slide1.xml";
+        let picture = r#"<p:pic><p:nvPicPr><p:cNvPr id="4242" name="Triangle"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:custGeom><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:pic>"#;
+        let xml = std::str::from_utf8(source.part_bytes(part).unwrap())
+            .unwrap()
+            .replace("</p:spTree>", &format!("{picture}</p:spTree>"));
+        assert!(source.replace_part(part, xml.clone().into_bytes()));
+        let bytes = pptx_parse::write_pptx(&source).unwrap();
+        let session = DeckSession::open(&bytes, 289).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let Primitive::Image {
+            path,
+            geometry_fallback,
+            stroke,
+            ..
+        } = image
+        else {
+            unreachable!()
+        };
+        assert!(!geometry_fallback);
+        assert_eq!(
+            path.as_ref().unwrap(),
+            &vec![
+                GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert_eq!(stroke.as_ref().unwrap().color, "#0000FF");
+        let saved = session.save().unwrap();
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        assert_eq!(reopened.part_bytes(part).unwrap(), xml.as_bytes());
+    }
+
+    fn layout_custom_geometry_picture(path_a_fill: &str, path_b_stroke: &str) -> RenderedSlide {
+        let mut source = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let part = "ppt/slides/slide1.xml";
+        let picture = format!(
+            r#"<p:pic><p:nvPicPr><p:cNvPr id="4242" name="Custom picture"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr><a:xfrm rot="5400000" flipH="1"><a:off x="914400" y="457200"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:custGeom><a:pathLst><a:path w="100" h="100" fill="{path_a_fill}" stroke="0"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path><a:path w="100" h="100" fill="none" stroke="{path_b_stroke}"><a:moveTo><a:pt x="25" y="25"/></a:moveTo><a:lnTo><a:pt x="75" y="25"/></a:lnTo></a:path></a:pathLst></a:custGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:pic>"#
+        );
+        let xml = std::str::from_utf8(source.part_bytes(part).unwrap())
+            .unwrap()
+            .replace("</p:spTree>", &format!("{picture}</p:spTree>"));
+        assert!(source.replace_part(part, xml.into_bytes()));
+        let bytes = pptx_parse::write_pptx(&source).unwrap();
+        let session = DeckSession::open(&bytes, 290).unwrap();
+        renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn custom_geometry_picture_path_flags_control_mask_and_outline() {
+        let rendered = layout_custom_geometry_picture("norm", "1");
+        let primitives = &rendered.display_list.primitives;
+        let index = primitives
+            .iter()
+            .position(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let Primitive::Image {
+            path,
+            stroke,
+            shape_id,
+            transform,
+            x,
+            y,
+            w,
+            h,
+            ..
+        } = &primitives[index]
+        else {
+            panic!("expected image");
+        };
+        assert_eq!(
+            path.as_ref().unwrap(),
+            &vec![
+                GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert!(stroke.is_none());
+        let Primitive::Shape {
+            object_id: 4242,
+            path,
+            fill: None,
+            stroke: Some(stroke),
+            shape_id: outline_id,
+            transform: outline_transform,
+            x: outline_x,
+            y: outline_y,
+            w: outline_w,
+            h: outline_h,
+            ..
+        } = &primitives[index + 1]
+        else {
+            panic!("expected stroke-only outline immediately after image");
+        };
+        assert_eq!(shape_id, outline_id);
+        assert_eq!(transform, outline_transform);
+        assert_eq!((x, y, w, h), (outline_x, outline_y, outline_w, outline_h));
+        assert_eq!(
+            path,
+            &vec![
+                GeometryPathCommand::Move { x: 0.25, y: 0.25 },
+                GeometryPathCommand::Line { x: 0.75, y: 0.25 },
+            ]
+        );
+        assert_eq!(stroke.color, "#0000FF");
+        assert_eq!(
+            primitives
+                .iter()
+                .filter(|p| matches!(
+                    p,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    } | Primitive::Shape {
+                        object_id: 4242,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn custom_geometry_picture_without_filled_paths_emits_only_its_outline() {
+        for stroked in [true, false] {
+            let rendered = layout_custom_geometry_picture("none", if stroked { "1" } else { "0" });
+            let primitives: Vec<_> = rendered
+                .display_list
+                .primitives
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p,
+                        Primitive::Image {
+                            object_id: 4242,
+                            ..
+                        } | Primitive::Shape {
+                            object_id: 4242,
+                            ..
+                        }
+                    )
+                })
+                .collect();
+            assert!(
+                primitives
+                    .iter()
+                    .all(|p| !matches!(p, Primitive::Image { .. }))
+            );
+            assert_eq!(primitives.len(), usize::from(stroked));
+            if stroked {
+                let Primitive::Shape {
+                    path,
+                    fill: None,
+                    stroke: Some(stroke),
+                    ..
+                } = primitives[0]
+                else {
+                    panic!("expected stroke-only outline");
+                };
+                assert_eq!(
+                    path,
+                    &vec![
+                        GeometryPathCommand::Move { x: 0.25, y: 0.25 },
+                        GeometryPathCommand::Line { x: 0.75, y: 0.25 },
+                    ]
+                );
+                assert_eq!(stroke.color, "#0000FF");
+            }
+        }
     }
 
     #[test]
@@ -9685,6 +9930,7 @@ mod tests {
             media_part_path: Some("ppt/media/logo.emf".to_owned()),
             crop,
             geometry: "rect".to_owned(),
+            paths: Vec::new(),
             adjust_values: BTreeMap::new(),
             style: None,
             fill: None,

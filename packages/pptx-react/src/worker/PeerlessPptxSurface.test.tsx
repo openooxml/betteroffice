@@ -1578,14 +1578,14 @@ test('p4_paragraph_join_end_type_survives_first_deletion_reply', async () => {
     await act(async () => { value.release(); await value.flush(); });
     const intents = value.sent.slice(value.start);
     expect(intents.map((intent) => intent.kind)).toEqual(['deleteBackward', 'moveSelection', 'insertText']);
-    expect(value.outcomes.get(intents[0].seq)).toMatchObject({ status: 'noop', committed: false });
+    expect(value.outcomes.get(intents[0].seq)).toMatchObject({ status: 'applied', committed: true });
     expect(value.outcomes.get(intents[1].seq)).toMatchObject({ status: 'applied', committed: false });
     expect(value.outcomes.get(intents[2].seq)).toMatchObject({ status: 'applied', committed: true });
     for (const [index, intent] of intents.slice(1).entries()) {
       expect(intent.afterSeq).toBe(intents[index].seq);
       expect('at' in intent.payload ? intent.payload.at : undefined).toEqual({ source: 'afterSeq', seq: intents[index].seq });
     }
-    expect(await value.savedParagraphs()).toEqual(['a', 'bcY']);
+    expect(await value.savedParagraphs()).toEqual(['abcY']);
     expect(value.errors).not.toHaveBeenCalled();
     expect(value.sent[value.start + 1]).toMatchObject({ payload: { motion: 'lineEnd', extend: false } });
   } finally { await value.dispose(); }

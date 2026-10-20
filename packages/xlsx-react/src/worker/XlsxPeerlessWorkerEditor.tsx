@@ -155,6 +155,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   propsRef.current = props;
   const [commands] = useState(createXlsxCommandController);
   const [active, setActive, activeRef] = useSyncedState(0);
+  const activeSheetId = useRef<string | undefined>(undefined);
   const [presentation] = useState(() => new WorkerPresentationStore());
   const { setSelection, selectionRef, setView, viewRef, setPainted } = presentation;
   const [catalog, setCatalog, catalogRef] = useSyncedState<WorkbookSheetSummary[]>([]);
@@ -209,6 +210,30 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   });
   const ownerRef = useRef(run);
   ownerRef.current = run;
+  const sheetSelections = useMemo(() => new Map<string, Selection>(), [run]);
+  const sheetScrolls = useMemo(() => new Map<string, { x: number; y: number }>(), [run]);
+  const sheetId = (sheet: number) => (ownerRef.current?.session.editState.sheets ??
+    ownerRef.current?.session.state.sheets)?.find((entry) => entry.index === sheet)?.id;
+  const sheetSelection = (sheet: number): Selection => {
+    const id = sheetId(sheet);
+    if (id && id === activeSheetId.current && selectionRef.current) return selectionRef.current;
+    const target = ownerRef.current?.session.selection;
+    return (id ? sheetSelections.get(id) : undefined) ??
+      (target && target.sheetId === id ? commandSelection(target) : null) ?? selectionAt({ row: 0, col: 0 });
+  };
+  const restoreSheetScroll = (view: WorkbookSheetView) => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const content = scroll.firstElementChild as HTMLElement | null;
+    if (content) {
+      content.style.width = `${view.contentWidth * zoomRef.current}px`;
+      content.style.height = `${view.contentHeight * zoomRef.current}px`;
+    }
+    const id = sheetId(view.sheet);
+    const position = id ? sheetScrolls.get(id) : undefined;
+    scroll.scrollLeft = (position?.x ?? view.initialScrollX) * zoomRef.current;
+    scroll.scrollTop = (position?.y ?? view.initialScrollY) * zoomRef.current;
+  };
   const editable = () => Boolean(ownerRef.current?.ready && !ownerRef.current.retiring &&
     !ownerRef.current.failure && !ownerRef.current.readOnly && !propsRef.current.readOnly && !coordinatorRef.current?.readOnly);
   const report = useCallback((error: unknown) => {
@@ -235,8 +260,22 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null, viewRef.current!,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const predict = (sheet: number, next: Selection) => {
-    if (sheet === activeRef.current && sameSelection(selectionRef.current, next)) return;
+    const nextId = sheetId(sheet);
+    if (sheet === activeRef.current && nextId === activeSheetId.current && sameSelection(selectionRef.current, next)) return;
+    const previousId = activeSheetId.current;
+    const scroll = scrollRef.current;
+    if ((nextId !== previousId || sheet !== activeRef.current) && scroll) {
+      if (previousId) sheetScrolls.set(previousId, { x: scroll.scrollLeft / zoomRef.current, y: scroll.scrollTop / zoomRef.current });
+      const position = nextId ? sheetScrolls.get(nextId) : undefined;
+      scroll.scrollLeft = (position?.x ?? 0) * zoomRef.current;
+      scroll.scrollTop = (position?.y ?? 0) * zoomRef.current;
+    }
+    if (nextId !== previousId && previousId && selectionRef.current) {
+      sheetSelections.set(previousId, structuredClone(selectionRef.current));
+    }
+    if (nextId) sheetSelections.set(nextId, structuredClone(next));
     navigation.current += 1;
+    activeSheetId.current = nextId;
     setActive(sheet);
     setSelection(structuredClone(next));
     setSelectedChart(null);
@@ -255,6 +294,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     void owner.session.call.cellGeometry(sheet, cell.row, cell.col).then((geometry) => {
       const scroll = scrollRef.current;
       if (!owner.current || ownerRef.current !== owner || navigation.current !== at || !scroll) return;
+      const id = sheetId(sheet);
+      if (id) sheetScrolls.set(id, geometry.scrollPosition);
       scroll.scrollLeft = geometry.scrollPosition.x * zoomRef.current;
       scroll.scrollTop = geometry.scrollPosition.y * zoomRef.current;
       sourceRef.current?.schedule();
@@ -427,11 +468,12 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         revision !== geometryRevision.current || activeRef.current !== next.sheet) return;
       const changedSheet = viewRef.current?.sheet !== next.sheet;
       setView(next);
+      if (changedSheet) restoreSheetScroll(next);
       if (paint || changedSheet) sourceRef.current?.schedule();
     }).catch((error) => {
       if (ownerRef.current === owner && owner.current && !owner.failure) owner.fail(error);
     });
-  }, [setView, viewRef]);
+  }, [setView, viewRef, sheetScrolls]);
   const selectionKey = () => {
     const selected = selectionRef.current;
     if (!selected) return '';
@@ -541,7 +583,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       const restored = commandSelection(target, selectionRef.current);
       if (sheet !== undefined && restored) predict(sheet, restored);
     } else if (!ack.selection && ack.editState?.activeSheet !== undefined && reconcile && ack.editState.activeSheet !== activeRef.current) {
-      predict(ack.editState.activeSheet, selectionRef.current ?? selectionAt({ row: 0, col: 0 }));
+      predict(ack.editState.activeSheet, sheetSelection(ack.editState.activeSheet));
     }
     publish?.();
     if (ack.frame) {
@@ -700,6 +742,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     pluginHost.beginLoad();
     cancelGestures();
     setRefusal(null); presentation.reset();
+    activeSheetId.current = undefined;
     setSelectedChart(null); setChartOffset(null); setFormatToken(null); setProposals([]); setStaleFor({});
     setProposalsPanelOpen(false); formatSource.current = null;
     setCatalog(run?.session.editState.sheets ?? run?.session.state.sheets ?? []);
@@ -750,21 +793,14 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const echo = new WorkerCellEcho({ source, context: () => canvasRef.current?.getContext('2d') ?? null });
     echoRef.current = echo;
     const sheet = run.session.editState.activeSheet ?? run.session.state.activeSheet;
+    activeSheetId.current = sheetId(sheet);
     setActive(sheet);
     const openView = (next: WorkbookSheetView) => {
       if (!run.current || run.failure || sourceRef.current !== source) return;
       setView(next);
-      setSelection(selectionAt({ row: 0, col: 0 }));
-      const scroll = scrollRef.current;
-      if (scroll) {
-        const content = scroll.firstElementChild as HTMLElement | null;
-        if (content) {
-          content.style.width = `${next.contentWidth * zoomRef.current}px`;
-          content.style.height = `${next.contentHeight * zoomRef.current}px`;
-        }
-        scroll.scrollLeft = next.initialScrollX * zoomRef.current;
-        scroll.scrollTop = next.initialScrollY * zoomRef.current;
-      }
+      activeSheetId.current = sheetId(sheet);
+      setSelection(structuredClone(sheetSelection(sheet)));
+      restoreSheetScroll(next);
     };
     const initial = run.session.initialPaint;
     if (initial) { openView(initial.sheetView); if (!source.installInitial(initial.frame)) source.schedule(); }
@@ -906,12 +942,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       void ticket.result.catch((error) => { reject(error); report(error); });
     } else void written.catch((error) => { reject(error); report(error); });
   };
-  const navigate = (sheet: number, next: Selection) => {
+  const navigate = (sheet: number, next?: Selection) => {
     if (!run?.ready || run.failure || draftController.isComposing('cell') || draftController.isComposing('formula')) return;
     draftController.commit('cell'); draftController.commit('formula');
-    const target = rangeTarget(sheet, next);
-    predict(sheet, next);
-    reveal(sheet, next.focus);
+    const selected = next ?? sheetSelection(sheet);
+    const target = rangeTarget(sheet, selected);
+    predict(sheet, selected);
+    if (next) reveal(sheet, selected.focus);
     command({ kind: 'setActiveSheet', payload: { args: [sheet], target, selection: target } });
   };
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false, generation = run?.generation) => {
@@ -1224,7 +1261,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         {sheets.length > 0 && <div data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
           style={{ display: 'flex', gap: 2, padding: '4px 6px', borderTop: '1px solid #e0e0e0', background: '#fafafa', overflowX: 'auto' }}>
           {sheets.map((sheet) => <button key={sheet.id} role="tab" aria-selected={sheet.index === active} disabled={Boolean(error)}
-            onClick={() => navigate(sheet.index, selectionAt({ row: 0, col: 0 }))}
+            onClick={() => navigate(sheet.index)}
             style={{ border: 'none', padding: '4px 12px', cursor: 'pointer', background: sheet.index === active ? '#ffffff' : 'transparent',
               borderBottom: sheet.index === active ? `2px solid ${BRAND}` : '2px solid transparent', fontWeight: sheet.index === active ? 600 : 400 }}>
             {sheet.name}

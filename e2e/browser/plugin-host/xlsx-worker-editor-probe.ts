@@ -89,6 +89,7 @@ export interface WorkerEditorProbe {
   pauseDelivery(): void;
   resumeDelivery(): Promise<void>;
   pendingUpdates(sender: number): number;
+  savedBytes(index?: number): number[] | null;
 }
 
 declare global {

@@ -461,9 +461,11 @@ pub struct Picture {
     /// Bitmap effects in document order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<BlipEffect>,
-    /// Preset mask; defaults to the frame rectangle.
+    /// Mask geometry; defaults to the frame rectangle.
     #[serde(default = "rect_geometry", skip_serializing_if = "is_rect")]
     pub geometry: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<CustomGeometryPath>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,

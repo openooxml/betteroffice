@@ -380,6 +380,299 @@ fn replacement_story(deck: &DeckSession) -> pptx_edit::StorySnapshot {
     deck.snapshot().unwrap().slides[1].shapes[0].text_stories[0].clone()
 }
 
+#[test]
+fn joining_paragraphs_preserves_each_source_run_and_last_end_properties() {
+    let paragraphs = [
+        r#"<a:p><a:pPr algn="ctr" marL="1234"/><a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>First link</a:t></a:r><a:r><a:rPr strike="sngStrike"/><a:t> first tail</a:t></a:r><a:endParaRPr lang="en-US" sz="1100"/></a:p>"#,
+        r#"<a:p><a:pPr algn="r"/><a:r><a:rPr lang="fr-FR"><a:hlinkClick r:id="rId3"/></a:rPr><a:t>Second link</a:t></a:r><a:r><a:rPr dirty="0"/><a:t> second tail</a:t></a:r><a:endParaRPr lang="de-DE" sz="1700"/></a:p>"#,
+    ];
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    slide.1 = slide.1.replace(
+        "<a:p><a:r><a:t>Second</a:t></a:r></a:p>",
+        &paragraphs.concat(),
+    );
+    let deck = DeckSession::open(&zip(source), 13).unwrap();
+    let story = replacement_story(&deck);
+    let boundary = "First link first tail".len() as u32;
+    deck.delete_text_joining_paragraphs(&context(), &story.id, boundary, boundary + 1)
+        .unwrap();
+    let saved = deck.save().unwrap();
+    let xml = part_text(&parts(&saved), "ppt/slides/slide2.xml");
+    let body = xml
+        .split("<p:txBody>")
+        .nth(1)
+        .unwrap()
+        .split("</p:txBody>")
+        .next()
+        .unwrap();
+    assert_eq!(body.matches("<a:p>").count(), 1);
+    let runs: Vec<_> = body
+        .split("<a:r>")
+        .skip(1)
+        .map(|run| run.split("</a:r>").next().unwrap())
+        .collect();
+    assert_eq!(runs.len(), 4);
+    for (run, (text, markup, linked)) in runs.iter().zip([
+        ("First link", r#"lang="en-US""#, true),
+        (" first tail", r#"strike="sngStrike""#, false),
+        ("Second link", r#"lang="fr-FR""#, true),
+        (" second tail", r#"dirty="0""#, false),
+    ]) {
+        assert!(run.contains(&format!("<a:t>{text}</a:t>")), "{run}");
+        assert!(run.contains(markup), "{run}");
+        assert_eq!(run.contains("hlinkClick"), linked, "{run}");
+    }
+    assert!(runs[0].contains(r#"<a:hlinkClick r:id="rId2"/>"#));
+    assert!(runs[2].contains(r#"<a:hlinkClick r:id="rId3"/>"#));
+    assert!(body.contains(r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#));
+    assert!(!body.contains(r#"<a:endParaRPr lang="en-US""#));
+    assert!(xml.contains("marL=\"1234\""));
+    assert_eq!(
+        replacement_story(&DeckSession::open(&saved, 14).unwrap()).plain_text(),
+        "First link first tailSecond link second tail"
+    );
+    assert!(deck.undo());
+    assert_eq!(replacement_story(&deck), story);
+    assert!(deck.redo());
+    assert_eq!(deck.save().unwrap(), saved);
+    let split = DeckSession::open(&saved, 20).unwrap();
+    split
+        .insert_paragraph_break(&context(), &story.id, 0)
+        .unwrap();
+    split
+        .delete_paragraph_break(&context(), &story.id, 0)
+        .unwrap();
+    let rejoined = part_text(&parts(&split.save().unwrap()), "ppt/slides/slide2.xml");
+    assert!(rejoined.contains(r#"<a:hlinkClick r:id="rId2"/>"#));
+    assert!(rejoined.contains(r#"<a:hlinkClick r:id="rId3"/>"#));
+    assert!(rejoined.contains(r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#));
+}
+
+#[test]
+fn joining_a_split_paragraph_preserves_the_styled_paragraph_mark() {
+    let end = r#"<a:endParaRPr lang="de-DE" sz="1700"/>"#;
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    slide.1 = slide.1.replace(
+        "<a:p><a:r><a:t>Second</a:t></a:r></a:p>",
+        &format!(
+            "<a:p><a:r><a:t>First</a:t></a:r>{end}</a:p><a:p><a:r><a:t>Second</a:t></a:r></a:p>"
+        ),
+    );
+    let deck = DeckSession::open(&zip(source), 13).unwrap();
+    let story = replacement_story(&deck);
+    deck.insert_paragraph_break(&context(), &story.id, 9)
+        .unwrap();
+    deck.delete_paragraph_break(&context(), &story.id, 5)
+        .unwrap();
+    assert_eq!(replacement_story(&deck).plain_text(), "FirstSec\nond");
+
+    let saved = deck.save().unwrap();
+    let xml = part_text(&parts(&saved), "ppt/slides/slide2.xml");
+    let first = xml.split("<a:p>").nth(1).unwrap();
+    let first = first.split("</a:p>").next().unwrap();
+    assert_eq!(first.matches(end).count(), 1, "{first}");
+    assert!(first.ends_with(end), "{first}");
+    assert_eq!(
+        replacement_story(&DeckSession::open(&saved, 14).unwrap()).plain_text(),
+        "FirstSec\nond"
+    );
+}
+
+#[test]
+fn plain_delete_batch_delete_and_proposals_refuse_paragraph_joins() {
+    for field in [false, true] {
+        let mut source = fixture_parts(256);
+        let slide = source
+            .iter_mut()
+            .find(|(path, _)| path == "ppt/slides/slide2.xml")
+            .unwrap();
+        let second = if field {
+            r#"<a:fld id="{D038279B-FC19-497E-A7D1-5ADD9CAF016F}" type="slidenum"><a:t>1</a:t></a:fld>"#
+        } else {
+            "<a:r><a:t>Second</a:t></a:r>"
+        };
+        slide.1 = slide.1.replace(
+            "<a:p><a:r><a:t>Second</a:t></a:r></a:p>",
+            &format!("<a:p><a:r><a:t>First</a:t></a:r></a:p><a:p>{second}</a:p>"),
+        );
+        let bytes = zip(source);
+        let deck = DeckSession::open(&bytes, 15).unwrap();
+        let story = replacement_story(&deck);
+        let before = deck.encode_state_as_update_v1();
+        assert!(matches!(
+            deck.delete_text(&context(), &story.id, 5, 6),
+            Err(EditError::ParagraphBoundary { .. })
+        ));
+        let request: pptx_edit::EditRequest = serde_json::from_value(serde_json::json!({
+            "expectVersion": deck.version(),
+            "steps": [{"op": "deleteText", "target": {"kind": "range", "slideId": deck.snapshot().unwrap().slides[1].id, "shapeId": deck.snapshot().unwrap().slides[1].shapes[0].id, "storyId": story.id, "start": 5, "end": 6}}]
+        })).unwrap();
+        assert!(deck.apply_edits(&request).unwrap().is_err());
+        let proposal = deck.propose(pptx_edit::ProposalRequest {
+            agent_id: "editor".into(),
+            note: None,
+            edits: vec![pptx_edit::ProposalEdit::ReplaceText {
+                story_id: story.id.clone(),
+                start: 5,
+                end: 6,
+                text: String::new(),
+                style: None,
+            }],
+        });
+        assert!(proposal.is_err());
+        assert_eq!(deck.encode_state_as_update_v1(), before);
+        assert!(!deck.can_undo());
+    }
+}
+
+#[test]
+fn deleting_a_paragraph_break_keeps_first_properties() {
+    let deck = DeckSession::open(&replacement_source(&["First", "Second"]), 16).unwrap();
+    let story = replacement_story(&deck);
+    deck.set_paragraph_alignment(&context(), &story.id, 0, 0, Some("ctr"))
+        .unwrap();
+    deck.set_paragraph_alignment(&context(), &story.id, 6, 6, Some("r"))
+        .unwrap();
+    let before = replacement_story(&deck);
+    deck.add_undo_barrier();
+    deck.delete_paragraph_break(&context(), &story.id, 5)
+        .unwrap();
+    let joined = replacement_story(&deck);
+    assert_eq!(joined.plain_text(), "FirstSecond");
+    assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
+    assert!(deck.undo());
+    assert_eq!(replacement_story(&deck), before);
+}
+
+#[test]
+fn splitting_a_joined_paragraph_keeps_current_properties() {
+    let mut source = fixture_parts(256);
+    let slide = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide2.xml")
+        .unwrap();
+    slide.1 = slide.1.replace(
+        "<a:p><a:r><a:t>Second</a:t></a:r></a:p>",
+        concat!(
+            r#"<a:p><a:pPr algn="ctr" lvl="1" marL="1234"><a:buChar char="*"/></a:pPr><a:r><a:t>First</a:t></a:r></a:p>"#,
+            r#"<a:p><a:pPr algn="r" lvl="2"><a:buNone/></a:pPr><a:r><a:t>Second</a:t></a:r></a:p>"#,
+        ),
+    );
+    let deck = DeckSession::open(&zip(source), 20).unwrap();
+    let story = replacement_story(&deck);
+    deck.delete_paragraph_break(&context(), &story.id, 5)
+        .unwrap();
+    deck.set_paragraph_alignment(&context(), &story.id, 0, 0, Some("just"))
+        .unwrap();
+    let joined = replacement_story(&deck);
+    deck.add_undo_barrier();
+    deck.insert_paragraph_break(&context(), &story.id, 8)
+        .unwrap();
+    let split = replacement_story(&deck);
+    assert_eq!(split.plain_text(), "FirstSec\nond");
+    let trailing = &split.paragraphs[1];
+    assert_eq!(trailing.alignment, joined.paragraphs[0].alignment);
+    assert_eq!(trailing.level, joined.paragraphs[0].level);
+    assert_eq!(trailing.bullet_json, joined.paragraphs[0].bullet_json);
+    assert_eq!(
+        trailing.source_paragraphs,
+        joined.paragraphs[0].source_paragraphs
+    );
+    assert_ne!(split.paragraphs[0].id, trailing.id);
+    let saved = deck.save().unwrap();
+    let xml = part_text(&parts(&saved), "ppt/slides/slide2.xml");
+    assert_eq!(xml.matches(r#"marL="1234""#).count(), 2);
+    let reopened = DeckSession::open(&saved, 21).unwrap();
+    let reopened = replacement_story(&reopened);
+    for paragraph in &reopened.paragraphs {
+        assert_eq!(paragraph.alignment, joined.paragraphs[0].alignment);
+        assert_eq!(paragraph.level, joined.paragraphs[0].level);
+        assert_eq!(paragraph.bullet_json, joined.paragraphs[0].bullet_json);
+    }
+    assert!(deck.undo());
+    assert_eq!(replacement_story(&deck), joined);
+    assert!(deck.redo());
+    assert_eq!(replacement_story(&deck), split);
+}
+
+#[test]
+fn duplicating_a_joined_story_keeps_its_paragraph_properties_and_sources() {
+    let deck = DeckSession::open(&replacement_source(&["First", "Second"]), 18).unwrap();
+    let story = replacement_story(&deck);
+    deck.set_paragraph_alignment(&context(), &story.id, 0, 0, Some("ctr"))
+        .unwrap();
+    deck.delete_paragraph_break(&context(), &story.id, 5)
+        .unwrap();
+    let joined = replacement_story(&deck);
+    let slide = deck.snapshot().unwrap().slides[1].id.clone();
+    deck.duplicate_slide(&context(), &slide, 2).unwrap();
+    let copy = deck.snapshot().unwrap().slides[2].shapes[0].text_stories[0].clone();
+    assert_eq!(copy.plain_text(), joined.plain_text());
+    assert_eq!(copy.paragraphs[0].alignment, joined.paragraphs[0].alignment);
+    assert_eq!(
+        copy.paragraphs[0].source_paragraphs,
+        joined.paragraphs[0].source_paragraphs
+    );
+    assert_eq!(copy.paragraphs[0].runs, joined.paragraphs[0].runs);
+    let saved = deck.save().unwrap();
+    let reopened = DeckSession::open(&saved, 19).unwrap();
+    let copy = &reopened.snapshot().unwrap().slides[2].shapes[0].text_stories[0];
+    assert_eq!(copy.plain_text(), joined.plain_text());
+    assert_eq!(copy.paragraphs[0].alignment.as_deref(), Some("ctr"));
+}
+
+#[test]
+fn explicit_joins_and_break_deletion_protect_fields_on_both_sides() {
+    for field_first in [false, true] {
+        for field_text in ["1", ""] {
+            let mut source = fixture_parts(256);
+            let slide = source
+                .iter_mut()
+                .find(|(path, _)| path == "ppt/slides/slide2.xml")
+                .unwrap();
+            let field = format!(
+                r#"<a:p><a:fld id="{{D038279B-FC19-497E-A7D1-5ADD9CAF016F}}" type="slidenum"><a:t>{field_text}</a:t></a:fld></a:p>"#
+            );
+            let plain = "<a:p><a:r><a:t>Plain</a:t></a:r></a:p>";
+            let paragraphs = if field_first {
+                format!("{field}{plain}")
+            } else {
+                format!("{plain}{field}")
+            };
+            slide.1 = slide
+                .1
+                .replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &paragraphs);
+            let deck = DeckSession::open(&zip(source), 17).unwrap();
+            let story = replacement_story(&deck);
+            let boundary = if field_first {
+                field_text.len() as u32
+            } else {
+                5
+            };
+            let before = deck.encode_state_as_update_v1();
+            assert!(matches!(
+                deck.delete_text_joining_paragraphs(&context(), &story.id, boundary, boundary + 1),
+                Err(EditError::ParagraphBoundary { .. })
+            ));
+            assert!(matches!(
+                deck.delete_paragraph_break(&context(), &story.id, boundary),
+                Err(EditError::ParagraphBoundary { .. })
+            ));
+            assert_eq!(deck.encode_state_as_update_v1(), before);
+            assert!(!deck.can_undo());
+        }
+    }
+}
+
 fn replacement_drafts(texts: &[&str]) -> Vec<pptx_edit::TextParagraphDraft> {
     texts
         .iter()
@@ -411,6 +704,47 @@ fn snapshot_drafts(story: &pptx_edit::StorySnapshot) -> Vec<pptx_edit::TextParag
                 .collect(),
         })
         .collect()
+}
+
+#[test]
+fn story_replacement_beside_fields_refuses_without_mutation() {
+    for field_first in [false, true] {
+        for field_text in ["1", ""] {
+            let mut source = fixture_parts(256);
+            let slide = source
+                .iter_mut()
+                .find(|(path, _)| path == "ppt/slides/slide2.xml")
+                .unwrap();
+            let field = format!(
+                r#"<a:p><a:fld id="{{D038279B-FC19-497E-A7D1-5ADD9CAF016F}}" type="slidenum"><a:t>{field_text}</a:t></a:fld></a:p>"#
+            );
+            let plain = "<a:p><a:r><a:t>Plain</a:t></a:r></a:p>";
+            let paragraphs = if field_first {
+                format!("{field}{plain}")
+            } else {
+                format!("{plain}{field}")
+            };
+            slide.1 = slide
+                .1
+                .replace("<a:p><a:r><a:t>Second</a:t></a:r></a:p>", &paragraphs);
+            let deck = DeckSession::open(&zip(source), 22).unwrap();
+            let original = replacement_story(&deck);
+            let drafts = snapshot_drafts(&original);
+            let field_index = usize::from(!field_first);
+            let before = deck.encode_state_as_update_v1();
+            assert!(matches!(
+                deck.set_story_paragraphs(
+                    &context(),
+                    &original.id,
+                    &drafts[field_index..field_index + 1],
+                ),
+                Err(EditError::ParagraphBoundary { .. })
+            ));
+            assert_eq!(replacement_story(&deck), original);
+            assert_eq!(deck.encode_state_as_update_v1(), before);
+            assert!(!deck.can_undo());
+        }
+    }
 }
 
 fn sync_replacement_peers(a: &DeckSession, b: &DeckSession) {

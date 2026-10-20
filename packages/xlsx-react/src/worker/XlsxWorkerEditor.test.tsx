@@ -2676,6 +2676,206 @@ describe('peerless workbook worker editor', () => {
     expect(host.sent[4]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 1, 'x'] } });
   });
 
+  for (const range of [false, true]) {
+    it(`sheet tabs retain independent ${range ? 'reverse ranges' : 'active cells'} before and after acknowledgement`, async () => {
+      const host = peerlessHarness();
+      const view = await host.mount();
+      const scroll = view.getByTestId('xlsx-scroll');
+      const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      const acknowledgeTab = async () => {
+        const command = host.sent[host.sent.length - 1];
+        if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+        expect(command.payload.selection).toBeDefined();
+        await act(async () => host.ack(command, { selection: command.payload.selection }));
+      };
+      for (const key of ['ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
+      if (range) {
+        fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
+        fireEvent.keyDown(scroll, { key: 'ArrowLeft', shiftKey: true });
+      }
+      const first = host.sent[host.sent.length - 1].payload;
+      fireEvent.click(view.getByRole('tab', { name: 'First' }));
+      expect(name.value).toBe(range ? 'B2' : 'C3');
+      await acknowledgeTab();
+      expect(name.value).toBe(range ? 'B2' : 'C3');
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      expect(name.value).toBe('A1');
+      await acknowledgeTab();
+      expect(name.value).toBe('A1');
+      for (const key of ['ArrowRight', 'ArrowDown', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
+      const second = host.sent[host.sent.length - 1].payload;
+      fireEvent.click(view.getByRole('tab', { name: 'First' }));
+      expect(name.value).toBe(range ? 'B2' : 'C3');
+      expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'setActiveSheet', payload: first });
+      await acknowledgeTab();
+      expect(name.value).toBe(range ? 'B2' : 'C3');
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      expect(name.value).toBe('B4');
+      expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'setActiveSheet', payload: second });
+      await acknowledgeTab();
+      expect(name.value).toBe('B4');
+    });
+  }
+
+  for (const first of [{ x: 0, y: 0 }, { x: 384, y: 240 }]) {
+    it(`sheet tabs restore independent scroll positions from ${first.x},${first.y} without revealing the selection`, async () => {
+      const host = peerlessHarness();
+      const initialView = await host.sheetView(0);
+      host.sheetView.mockImplementation(async (sheet) => ({ ...initialView, sheet,
+        initialScrollX: 96, initialScrollY: 24,
+      }));
+      host.push({ throughSeq: 0, version: 'v1', statuses: [], selection: {
+        sheetId: 'sheet:0', range: { kind: 'a1', a1: 'C3' },
+      } });
+      const view = await host.mount();
+      const scroll = view.getByTestId('xlsx-scroll');
+      const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      const tab = async (label: string) => {
+        await act(async () => fireEvent.click(view.getByRole('tab', { name: label })));
+        const command = host.sent[host.sent.length - 1];
+        if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+        await act(async () => host.ack(command, { selection: command.payload.selection }));
+      };
+      expect(scroll.scrollLeft).toBe(96);
+      expect(scroll.scrollTop).toBe(24);
+      scroll.scrollLeft = first.x; scroll.scrollTop = first.y;
+      await tab('Second');
+      expect(scroll.scrollLeft).toBe(96);
+      expect(scroll.scrollTop).toBe(24);
+      scroll.scrollLeft = 192; scroll.scrollTop = 72;
+      await tab('First');
+      expect(name.value).toBe('C3');
+      expect(scroll.scrollLeft).toBe(first.x);
+      expect(scroll.scrollTop).toBe(first.y);
+      await tab('Second');
+      expect(scroll.scrollLeft).toBe(192);
+      expect(scroll.scrollTop).toBe(72);
+      expect(host.cellGeometry).not.toHaveBeenCalled();
+    });
+  }
+
+  it('cross-sheet hyperlinks reveal their target even when the initial sheet view arrives later', async () => {
+    const host = peerlessHarness();
+    const frame = await host.frame({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
+    host.frame.mockResolvedValueOnce({ ...frame, displayList: { ...frame.displayList,
+      hyperlinks: [{ top: 0, bottom: 0, left: 0, right: 0, location: 'Second!C3' }],
+    } });
+    const view = await host.mount();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    const nextView = deferred<xlsx.WorkbookSheetView>();
+    host.sheetView.mockReturnValueOnce(nextView.promise);
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { clientX: 12, clientY: 12, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 12, clientY: 12, button: 0 });
+      fireEvent.click(scroll, { clientX: 12, clientY: 12 });
+    });
+    expect(host.cellGeometry).toHaveBeenLastCalledWith(1, 2, 2);
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C3');
+    expect(scroll.scrollLeft).toBe(192);
+    expect(scroll.scrollTop).toBe(48);
+    await act(async () => nextView.resolve({ sheet: 1, version: 'v1', contentWidth: 4000, contentHeight: 6000,
+      frozenRows: 0, frozenCols: 0, frozenWidth: 0, frozenHeight: 0, initialScrollX: 960, initialScrollY: 240,
+    }));
+    expect(scroll.scrollLeft).toBe(192);
+    expect(scroll.scrollTop).toBe(48);
+  });
+
+  for (const withSelection of [false, true]) {
+    it(`sheet tabs keep selections by id after a reorder acknowledgement ${withSelection ? 'with' : 'without'} a selection`, async () => {
+      const host = peerlessHarness();
+      const view = await host.mount();
+      const scroll = view.getByTestId('xlsx-scroll');
+      const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+      scroll.scrollLeft = 288; scroll.scrollTop = 120;
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      for (const key of ['ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
+      const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:1', range: { kind: 'a1', a1: 'C3' } };
+      await act(async () => host.ack(host.sent[host.sent.length - 1], { selection }));
+      scroll.scrollLeft = 192; scroll.scrollTop = 72;
+      const undoing = host.commands().execute('undo', null);
+      await act(async () => {});
+      const undo = host.sent[host.sent.length - 1];
+      expect(undo.kind).toBe('undo');
+      await act(async () => host.push({ throughSeq: undo.seq, version: 'v2',
+        statuses: [{ seq: undo.seq, status: 'applied', committed: true }],
+        editState: { activeSheet: 0, sheets: [
+          { id: 'sheet:1', index: 0, name: 'Second' }, { id: 'sheet:0', index: 1, name: 'First' },
+        ] }, ...(withSelection ? { selection } : {}),
+      }));
+      await undoing;
+      expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+      expect(name.value).toBe('C3');
+      expect(scroll.scrollLeft).toBe(192);
+      expect(scroll.scrollTop).toBe(72);
+      fireEvent.click(view.getByRole('tab', { name: 'First' }));
+      expect(name.value).toBe('B1');
+      expect(scroll.scrollLeft).toBe(288);
+      expect(scroll.scrollTop).toBe(120);
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      expect(name.value).toBe('C3');
+      expect(scroll.scrollLeft).toBe(192);
+      expect(scroll.scrollTop).toBe(72);
+    });
+  }
+
+  it('sheet tabs retain selections restored by command acknowledgements', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+    const undoing = host.commands().execute('undo', null);
+    await act(async () => {});
+    await act(async () => host.ack(host.sent[1], { selection: {
+      sheetId: 'sheet:1', range: { kind: 'a1', a1: 'B4:D5' }, activeCell: { row: 3, col: 1 },
+    } }));
+    await undoing;
+    fireEvent.click(view.getByRole('tab', { name: 'First' }));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+    fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ payload: { selection: {
+      sheetId: 'sheet:1', activeCell: { row: 3, col: 1 }, range: {
+        kind: 'rowCol', start: { row: 3, col: 1 }, end: { row: 4, col: 3 },
+      },
+    } } });
+  });
+
+  it('opens with the session selection when it is known', async () => {
+    const host = peerlessHarness();
+    host.push({ throughSeq: 0, version: 'v1', statuses: [], selection: {
+      sheetId: 'sheet:0', range: { kind: 'a1', a1: 'C3' },
+    } });
+    const view = await host.mount();
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C3');
+  });
+
+  it('clears remembered sheet selections and scroll positions when the workbook is replaced', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+    const scroll = view.getByTestId('xlsx-scroll');
+    scroll.scrollLeft = 288; scroll.scrollTop = 120;
+    fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown' });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+    await act(async () => {});
+    scroll.scrollLeft = 192; scroll.scrollTop = 72;
+    fireEvent.click(view.getByRole('tab', { name: 'First' }));
+    await act(async () => host.replace(view));
+    await opened();
+    await waitFor(() => expect(host.ready).toHaveBeenCalledTimes(2));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'First' })));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+  });
+
   it('rapid tab changes send both active-sheet intents before acknowledgement and Save', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
