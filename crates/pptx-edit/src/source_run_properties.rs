@@ -13,8 +13,8 @@ use yrs::{
 use crate::deck::{SourceImport, map_string};
 use crate::story::style_from_attrs;
 use crate::{
-    BOOTSTRAP_CLIENT_ID, DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, PARA_ID,
-    ShapeSnapshot, StorySnapshot, TextStyle,
+    BOOTSTRAP_CLIENT_ID, DeckSession, DeckSnapshot, EditError, EditResult, META, MIGRATE_ORIGIN,
+    PARA_ID, ShapeSnapshot, StorySnapshot, TextStyle,
 };
 
 #[derive(Clone, Copy)]
@@ -73,9 +73,13 @@ enum Pending {
 /// characters unresolved, still in the deck, that a save would strip it from.
 /// Caps and colours were never kept before, so their unresolved characters save
 /// as they are.
-pub(crate) fn unrecovered_attribute(doc: &Doc) -> Option<&'static str> {
+pub(crate) fn unrecovered_attribute(doc: &Doc, snapshot: &DeckSnapshot) -> Option<&'static str> {
     let txn = doc.transact();
     let meta = txn.get_map(META)?;
+    let mut live = HashMap::new();
+    for slide in &snapshot.slides {
+        collect_stories(&slide.shapes, &mut live);
+    }
     [SourceProperty::Baseline, SourceProperty::Spacing]
         .into_iter()
         .map(SourceProperty::keys)
@@ -83,8 +87,9 @@ pub(crate) fn unrecovered_attribute(doc: &Doc) -> Option<&'static str> {
             Some(Out::Any(Any::String(json))) => {
                 serde_json::from_str::<Unresolved>(&json).map_or(true, |stories| {
                     stories
-                        .values()
-                        .flatten()
+                        .iter()
+                        .filter(|(id, _)| live.contains_key(id.as_str()))
+                        .flat_map(|(_, items)| items)
                         .any(|&(client, clock)| alive(&txn, ID::new(ClientID::new(client), clock)))
                 })
             }

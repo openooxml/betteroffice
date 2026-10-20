@@ -243,6 +243,27 @@ test('computes imageState.wrap and submits setObjectProperties patches for apply
   });
 });
 
+test('applyImageWrap writes margin alignment without a horizontal offset for both side presets', async () => {
+  const { hook, applyQuery, controller, selection } = fixture();
+  let currentProps: Record<string, unknown> = { width: 80, height: 40, wrapType: 'inline' };
+  controller.query = (async () => ({ version: 'captured-native', selection,
+    value: { kind: 'object', handle: 'physical-first', properties: currentProps } })) as never;
+  for (const [target, side, wrapText] of [
+    ['squareRight', 'right', 'left'],
+    ['squareLeft', 'left', 'right'],
+  ] as const) {
+    await act(async () => { expect(await hook.result.current.applyImageWrap(target)).toBe(true); });
+    const patch = {
+      wrap: 'square', wrapType: 'square', displayMode: 'float', cssFloat: side, wrapText,
+      position: { horizontal: { relativeTo: 'margin', align: side }, vertical: { relativeTo: 'paragraph', posOffset: 0 } },
+    };
+    expect(applyQuery.mock.calls.at(-1)![1]).toEqual({ kind: 'setObjectProperties', payload: {
+      handle: 'physical-first', expectVersion: 'captured-native', patch,
+    } });
+    currentProps = { ...currentProps, ...patch };
+  }
+});
+
 test('buildImageWrapPatch omits wrap distance keys for non-inline targets so existing distances survive', () => {
   const currentWithDistances = {
     wrapType: 'inline',

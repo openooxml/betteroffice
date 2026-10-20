@@ -380,10 +380,9 @@ impl EditingDoc {
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Vec::new();
         };
-        let mut story_ids: Vec<String> = {
-            use yrs::Map;
-            stories.keys(&txn).map(|key| key.to_string()).collect()
-        };
+        let mut story_ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_owned())
+            .collect();
         story_ids.sort();
         story_ids
             .into_iter()
@@ -679,7 +678,7 @@ impl EditingDoc {
                 result.entry(id).or_default().insert((author, date));
             }
         };
-        for (story_id, value) in stories.iter(&txn) {
+        for (story_id, value) in crate::live_stories(&stories, &txn) {
             let Out::YText(story) = value else {
                 continue;
             };
@@ -788,10 +787,9 @@ impl EditingDoc {
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Err(OpError::UnknownChange(revision_id.to_owned()));
         };
-        let mut story_ids: Vec<String> = {
-            use yrs::Map;
-            stories.keys(&txn).map(|key| key.to_string()).collect()
-        };
+        let mut story_ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_owned())
+            .collect();
         story_ids.sort();
         for story_id in story_ids {
             use yrs::Map;
