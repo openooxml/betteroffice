@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-Opening and saving a document loads the package and parse Wasm modules in parallel, and the docx Wasm module is smaller.
+The first document opened or saved in a browser starts sooner.
