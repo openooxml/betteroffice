@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const GITHUB_HOSTED = /^(ubuntu|macos|windows)-[\w.-]+$/;
 export const LABEL = 'ubuntu-latest';
-export const SAMPLE_RUNS = 20;
+export const BATCH_RUNS = 10;
 
 /** `packages python package_tests:2 rust`: job groups in the order they claim GitHub-hosted slots. */
 export function parseGroups(spec) {
@@ -30,6 +30,10 @@ export function allocate(groups, free) {
   return routes;
 }
 
+export function share(free, own, peer) {
+  return own + peer > 0 ? Math.floor((free * own) / (own + peer)) : 0;
+}
+
 export function hostedJobs(jobs) {
   return jobs.filter(
     (job) =>
@@ -40,23 +44,30 @@ export function hostedJobs(jobs) {
 }
 
 /**
- * GitHub-hosted jobs queued or running in the repository, routed or not; stops counting at `cap`. Past
- * SAMPLE_RUNS active runs it scales the sampled count up, which bounds the API calls in a burst of runs.
+ * GitHub-hosted jobs queued or running in the repository, routed or not. Fetches run job pages in
+ * batches of BATCH_RUNS and stops after the batch in which the count reaches `cap`.
  */
 export async function busyHosted(api, repository, cap) {
   const runs = [];
   for (const status of ['in_progress', 'queued']) {
     const page = await api(`/repos/${repository}/actions/runs?status=${status}&per_page=100`);
-    for (const { id } of page.workflow_runs ?? []) if (!runs.includes(id)) runs.push(id);
+    const listed = page.workflow_runs ?? [];
+    if (page.total_count > listed.length) return cap;
+    for (const { id } of listed) if (!runs.includes(id)) runs.push(id);
   }
-  const sample = runs.slice(0, SAMPLE_RUNS);
   let busy = 0;
-  for (const run of sample) {
-    const page = await api(`/repos/${repository}/actions/runs/${run}/jobs?filter=latest&per_page=100`);
-    busy += hostedJobs(page.jobs ?? []);
+  for (let i = 0; i < runs.length; i += BATCH_RUNS) {
+    const pages = await Promise.all(
+      runs.slice(i, i + BATCH_RUNS).map((run) => api(`/repos/${repository}/actions/runs/${run}/jobs?filter=latest&per_page=100`))
+    );
+    for (const page of pages) {
+      const jobs = page.jobs ?? [];
+      if (page.total_count > jobs.length) return cap;
+      busy += hostedJobs(jobs);
+    }
     if (busy >= cap) return busy;
   }
-  return sample.length < runs.length ? Math.ceil((busy * runs.length) / sample.length) : busy;
+  return busy;
 }
 
 function count(value, fallback) {
@@ -80,7 +91,9 @@ export async function route(env, fetchImpl = fetch, signal = AbortSignal.timeout
     return response.json();
   };
   const busy = await busyHosted(api, env.GITHUB_REPOSITORY, capacity);
-  return { routes: allocate(groups, Math.max(0, capacity - busy)), busy };
+  const own = groups.reduce((sum, { slots }) => sum + slots, 0);
+  const free = share(Math.max(0, capacity - busy), own, count(env.ROUTE_PEER_SLOTS, 0));
+  return { routes: allocate(groups, free), busy };
 }
 
 // Never fails the job: any error or the deadline leaves every output empty, which keeps the jobs on their kyora class.

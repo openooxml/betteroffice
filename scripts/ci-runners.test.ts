@@ -249,6 +249,21 @@ describe('CI runner routing', () => {
     }
   });
 
+  test('each router declares the total slots of the other routers as ROUTE_PEER_SLOTS', () => {
+    for (const router of routers) {
+      const env = router.job.steps.find((step: any) => step.id === 'route').env;
+      const peerSlots = routers
+        .filter((other) => other !== router)
+        .flatMap((other) => groupsOf(other))
+        .reduce((sum, { slots }) => sum + slots, 0);
+      const raw = String(env.ROUTE_PEER_SLOTS ?? '');
+      const declared = /^\d+$/.test(raw)
+        ? Number(raw)
+        : Number(raw.match(/^\$\{\{\s*github\.event_name == 'workflow_dispatch' && '0' \|\| '(\d+)'\s*\}\}$/)?.[1]);
+      expect(declared, router.name).toBe(peerSlots);
+    }
+  });
+
   test('routed jobs run GitHub-hosted unless the pull request is a fork, BO_CI_RUNNER pins them or BO_CI_SPILL is off', () => {
     for (const entry of kyoraJobs.filter(({ id }) => id !== 'route')) {
       for (const event of TRUSTED) {

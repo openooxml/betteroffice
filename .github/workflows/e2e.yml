@@ -39,6 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ROUTE_GROUPS: browser:2 corpus
+          ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '5' }}
           BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
           BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
           BO_CI_SPILL: ${{ vars.BO_CI_SPILL }}
