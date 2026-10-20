@@ -20,6 +20,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { parseDocx, repackDocx } from '@betteroffice/docx';
 
 const document = await parseDocx(await readFile('input.docx'));
+// document.package.document.content: the body's paragraphs and tables
+// document.package also holds styles, numbering, theme, media, headers and footers
 const bytes = await repackDocx(document);
 await writeFile('output.docx', new Uint8Array(bytes));
 ```
