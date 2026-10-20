@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum PptxError {
     #[error("PPTX container error: {0}")]
     Container(String),
+    #[error("not a PowerPoint presentation: {message}")]
+    NotAPresentation { message: String },
     #[error("missing required PPTX part {0}")]
     MissingPart(String),
     #[error("malformed XML in {part} at byte {offset}: {message}")]

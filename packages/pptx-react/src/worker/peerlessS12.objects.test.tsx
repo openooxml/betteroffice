@@ -1,6 +1,43 @@
-import { expect, test } from 'bun:test';
+import { expect, mock, test } from 'bun:test';
 import { act, fireEvent } from '@testing-library/react';
 import { open } from './peerlessTestHarness';
+import * as wasm from '../../../pptx/src/wasm/loader';
+
+test('deleting every slide keeps document commands and history available', async () => {
+  const saved = mock((_bytes: Uint8Array) => {});
+  const value = await open({ onSave: saved });
+  const access = await value.api.handleAsync();
+  const slides = [...value.client.state.slides];
+  for (const slide of slides) {
+    await act(async () => { await access.deleteSlide(slide.id); });
+  }
+  expect(value.client.state.slides).toHaveLength(0);
+  expect(value.view.getByTestId('pptx-worker-status').textContent).toBe('No slides');
+  expect(value.view.queryByTestId('pptx-notes-textarea')).toBeNull();
+  for (const command of ['undo', 'insertSlide', 'save'] as const) {
+    expect(value.api.commands.getState(command).enabled).toBe(true);
+  }
+  for (const command of ['insertImage', 'exportPng', 'slideshow'] as const) {
+    expect(value.api.commands.getState(command)).toMatchObject({ enabled: false, disabledReason: { code: 'slide-required' } });
+  }
+  await act(async () => { expect(await value.api.commands.execute('save', null)).toMatchObject({ ok: true }); });
+  expect(saved).toHaveBeenCalledTimes(1);
+  const empty = wasm.openPresentation(saved.mock.calls[0]![0]);
+  try { expect(empty.snapshot().slides).toHaveLength(0); }
+  finally { empty.dispose(); }
+  await act(async () => { expect(await value.api.commands.execute('undo', null)).toMatchObject({ ok: true }); });
+  expect(value.client.state.slides.map((slide) => slide.id)).toEqual([slides[1]!.id]);
+  expect(value.api.commands.getState('redo').enabled).toBe(true);
+  await act(async () => { expect(await value.api.commands.execute('redo', null)).toMatchObject({ ok: true }); });
+  expect(value.client.state.slides).toHaveLength(0);
+  await act(async () => { expect(await value.api.commands.execute('insertSlide', {})).toMatchObject({ ok: true }); });
+  expect(value.client.state.slides).toHaveLength(1);
+  expect(value.client.state.activeSlideId).toBe(value.client.state.slides[0]!.id);
+  expect(value.view.queryByTestId('pptx-worker-status')).toBeNull();
+  const recovered = wasm.openPresentation(await value.api.saveAsync());
+  try { expect(recovered.snapshot().slides).toHaveLength(1); }
+  finally { recovered.dispose(); }
+});
 
 test('object_slide_history', async () => {
   const value = await open();

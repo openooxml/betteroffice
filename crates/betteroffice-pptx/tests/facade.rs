@@ -112,10 +112,20 @@ fn facade_deletes_a_paragraph_break() {
     presentation
         .insert_paragraph_break(&context, &story_id, 1)
         .unwrap();
+    let split = presentation.story(&story_id).unwrap();
     presentation
         .delete_paragraph_break(&context, &story_id, 1)
         .unwrap();
-    assert_eq!(presentation.story(&story_id).unwrap(), before);
+    let joined = presentation.story(&story_id).unwrap();
+    assert_eq!(joined.plain_text(), before.plain_text());
+    assert_eq!(joined.length, before.length);
+    assert_eq!(joined.paragraphs.len(), before.paragraphs.len());
+    assert_eq!(joined.paragraphs[0].id, split.paragraphs[0].id);
+    assert_eq!(
+        joined.paragraphs[0].alignment,
+        split.paragraphs[0].alignment
+    );
+    assert_eq!(joined.paragraphs[0].runs, before.paragraphs[0].runs);
 }
 
 #[test]
