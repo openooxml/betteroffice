@@ -7224,6 +7224,8 @@ fn three_d_depth_axes_drop_and_surfaces_stay_refused() {
     );
     let to_value = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="2"/>"#;
     assert_eq!(axis_ids(part("bar3DChart", to_value, "")), ["1", "2", "2"]);
+    let padded = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="002"/>"#;
+    assert_eq!(axis_ids(part("bar3DChart", padded, "")), ["1", "2", "002"]);
     assert_eq!(axis_ids(part("barChart", three, "")), ["1", "2", "3"]);
     assert!(
         crate::chart_space(

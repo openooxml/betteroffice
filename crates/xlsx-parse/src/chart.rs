@@ -119,14 +119,22 @@ fn drop_depth_axes(root: &Element, space: &mut ChartSpace) {
         {
             continue;
         }
-        let depth = group.axis_ids[2].trim();
+        let depth = &group.axis_ids[2];
         if axes
             .iter()
-            .filter(|axis| axis.id.as_deref().map(str::trim) == Some(depth))
+            .filter(|axis| axis.id.as_deref().is_some_and(|id| same_axis_id(id, depth)))
             .all(|axis| axis.axis_type == "series")
         {
             group.axis_ids.truncate(2);
         }
+    }
+}
+
+fn same_axis_id(first: &str, second: &str) -> bool {
+    let (first, second) = (first.trim(), second.trim());
+    match (first.parse::<i128>(), second.parse::<i128>()) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => first == second,
     }
 }
 
