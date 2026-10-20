@@ -1371,7 +1371,8 @@ export function registerPresentationCommandHandlers(
         if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
         const outcome: PresentationCommandOutcome = { seq: command.seq,
           status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
-            : committed || admitted.kind === 'format' || admitted.kind === 'alignment' ||
+            : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
+            admitted.kind === 'format' || admitted.kind === 'alignment' ||
             admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
             command.kind === 'compositionStart' || command.kind === 'compositionEnd' ? 'applied' : 'noop',
           committed };

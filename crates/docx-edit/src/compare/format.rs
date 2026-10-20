@@ -138,7 +138,7 @@ impl RunStyles {
                         };
                         if default_paragraph.is_none()
                             && element.attribute(Some("w"), "type") == Some("paragraph")
-                            && matches!(element.attribute(Some("w"), "default"), Some("1" | "true"))
+                            && element.parse_boolean_attribute(Some("w"), "default") == Some(true)
                         {
                             default_paragraph = Some(id.to_owned());
                         }

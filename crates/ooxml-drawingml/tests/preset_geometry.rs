@@ -159,6 +159,43 @@ const PRESETS: &[&str] = &[
     "doubleWave",
     "heart",
     "irregularSeal1",
+    "bevel",
+    "bracePair",
+    "bracketPair",
+    "chartPlus",
+    "chartStar",
+    "chartX",
+    "cornerTabs",
+    "diagStripe",
+    "ellipseRibbon2",
+    "flowChartCollate",
+    "flowChartMultidocument",
+    "flowChartOfflineStorage",
+    "flowChartOr",
+    "flowChartPunchedCard",
+    "flowChartPunchedTape",
+    "flowChartSort",
+    "flowChartSummingJunction",
+    "funnel",
+    "halfFrame",
+    "irregularSeal2",
+    "leftRightCircularArrow",
+    "leftRightRibbon",
+    "leftRightUpArrow",
+    "leftUpArrow",
+    "lightningBolt",
+    "lineInv",
+    "mathDivide",
+    "mathMinus",
+    "mathNotEqual",
+    "nonIsoscelesTrapezoid",
+    "pieWedge",
+    "plaque",
+    "plaqueTabs",
+    "smileyFace",
+    "snipRoundRect",
+    "squareTabs",
+    "sun",
 ];
 
 /// Presets added here whose ECMA-376 definition curves rather than only turning corners.
@@ -187,8 +224,10 @@ const CALLOUTS: &[&str] = &[
 /// Presets whose ECMA-376 curve stays inside the frame while a control point of it does not.
 const HULL_OUTSIDE_FRAME: &[&str] = &[
     "ellipseRibbon",
+    "ellipseRibbon2",
     "noSmoking",
     "flowChartDocument",
+    "flowChartMultidocument",
     "wave",
     "doubleWave",
 ];
@@ -206,7 +245,9 @@ const SPEC_OVERRUNS_FRAME: &[&str] = &[
     "borderCallout3",
     "callout2",
     "callout3",
+    "mathDivide",
     "mathMultiply",
+    "mathNotEqual",
     "swooshArrow",
     "teardrop",
     "bentUpArrow",
@@ -217,6 +258,9 @@ const SPEC_OVERRUNS_FRAME: &[&str] = &[
     "cloud",
     "heart",
     "curvedDownArrow",
+    "cornerTabs",
+    "plaqueTabs",
+    "squareTabs",
 ];
 
 /// `cloudCallout`'s body overruns the 43200 frame its own path declares by about 1%.
@@ -796,6 +840,21 @@ proptest! {
             "wave",
             "doubleWave",
             "heart",
+            "bracePair",
+            "bracketPair",
+            "ellipseRibbon2",
+            "flowChartOr",
+            "flowChartPunchedTape",
+            "flowChartSummingJunction",
+            "funnel",
+            "leftRightCircularArrow",
+            "leftRightRibbon",
+            "mathDivide",
+            "pieWedge",
+            "plaque",
+            "plaqueTabs",
+            "smileyFace",
+            "sun",
         ];
         for shape in curved {
             let path = draw(shape, &adjustments, aspect);
@@ -1997,6 +2056,20 @@ fn single_path_consumers_do_not_receive_partial_layered_presets() {
         "curvedDownArrow",
         "verticalScroll",
         "horizontalScroll",
+        "bevel",
+        "bracePair",
+        "bracketPair",
+        "chartPlus",
+        "chartStar",
+        "chartX",
+        "ellipseRibbon2",
+        "flowChartMultidocument",
+        "flowChartOfflineStorage",
+        "flowChartOr",
+        "flowChartSort",
+        "flowChartSummingJunction",
+        "leftRightRibbon",
+        "smileyFace",
     ] {
         assert!(preset_geometry_to_path(shape, &HashMap::new(), 1.0).is_none());
         assert!(
@@ -3273,4 +3346,525 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn tabs_follow_ecma_coordinates() {
+    let dx = (5.0f64.sqrt() / 20.0) / 2.0;
+    let dy = 5.0f64.sqrt() / 20.0;
+    assert_ecma_endpoints(
+        &endpoints(&draw("cornerTabs", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (dx, 0.0),
+            (0.0, dy),
+            (0.0, 1.0 - dy),
+            (dx, 1.0),
+            (1.0 - dx, 0.0),
+            (1.0, dy),
+            (1.0, 1.0 - dy),
+            (1.0, 1.0),
+            (1.0 - dx, 1.0),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("squareTabs", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (dx, 0.0),
+            (dx, dy),
+            (0.0, dy),
+            (0.0, 1.0 - dy),
+            (dx, 1.0),
+            (1.0 - dx, 0.0),
+            (1.0, dy),
+            (1.0 - dx, 1.0 - dy),
+            (1.0, 1.0),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("plaqueTabs", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (dx, 0.0),
+            (0.0, dy),
+            (0.0, 1.0 - dy),
+            (dx, 1.0),
+            (0.0, 1.0),
+            (1.0, 0.0),
+            (1.0, dy),
+            (1.0 - dx, 0.0),
+            (1.0 - dx, 1.0),
+            (1.0, 1.0 - dy),
+            (1.0, 1.0),
+        ],
+    );
+}
+
+#[test]
+fn chart_marks_follow_ecma_coordinates() {
+    use ooxml_drawingml::PresetPathFill;
+    for (shape, marks) in [
+        (
+            "chartPlus",
+            vec![(0.5, 0.0), (0.5, 1.0), (0.0, 0.5), (1.0, 0.5)],
+        ),
+        (
+            "chartX",
+            vec![(0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)],
+        ),
+        (
+            "chartStar",
+            vec![
+                (0.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+                (1.0, 0.0),
+                (0.5, 0.0),
+                (0.5, 1.0),
+            ],
+        ),
+    ] {
+        let layers = preset_geometry_layers(shape, &HashMap::new(), 2.0).unwrap();
+        assert_eq!(layers.len(), 2, "{shape}");
+        assert_eq!(layers[0].fill, PresetPathFill::None);
+        assert!(layers[0].stroke && !layers[1].stroke);
+        assert_eq!(layers[1].fill, PresetPathFill::Normal);
+        assert_points(&endpoints(&layers[0].commands), &marks);
+        assert_points(
+            &endpoints(&layers[1].commands),
+            &[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)],
+        );
+    }
+}
+
+#[test]
+fn bevel_layers_follow_ecma_coordinates() {
+    use ooxml_drawingml::PresetPathFill;
+    assert_eq!(
+        preset_geometry_default_adjustments("bevel"),
+        named(&[("adj", 0.125)])
+    );
+    let layers = preset_geometry_layers("bevel", &HashMap::new(), 2.0).unwrap();
+    assert_eq!(layers.len(), 6);
+    let fills = [
+        PresetPathFill::Normal,
+        PresetPathFill::LightenLess,
+        PresetPathFill::DarkenLess,
+        PresetPathFill::Lighten,
+        PresetPathFill::Darken,
+        PresetPathFill::None,
+    ];
+    for (layer, fill) in layers.iter().zip(fills) {
+        assert_eq!(layer.fill, fill);
+        assert_eq!(layer.stroke, fill == PresetPathFill::None);
+    }
+    assert_points(
+        &endpoints(&layers[0].commands),
+        &[
+            (0.0625, 0.125),
+            (0.9375, 0.125),
+            (0.9375, 0.875),
+            (0.0625, 0.875),
+        ],
+    );
+    assert_points(
+        &endpoints(&layers[1].commands),
+        &[(0.0, 0.0), (1.0, 0.0), (0.9375, 0.125), (0.0625, 0.125)],
+    );
+    assert_points(
+        &endpoints(&layers[4].commands),
+        &[(1.0, 0.0), (1.0, 1.0), (0.9375, 0.875), (0.9375, 0.125)],
+    );
+}
+
+#[test]
+fn plaque_snip_and_stripe_follow_ecma_coordinates() {
+    assert_points(
+        &endpoints(&draw("diagStripe", &HashMap::new(), 2.0)),
+        &[(0.0, 0.5), (0.5, 0.0), (1.0, 0.0), (0.0, 1.0)],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("plaque", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.16667),
+            (0.083335, 0.0),
+            (0.916665, 0.0),
+            (1.0, 0.16667),
+            (1.0, 0.83333),
+            (0.916665, 1.0),
+            (0.083335, 1.0),
+            (0.0, 0.83333),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("snipRoundRect", &HashMap::new(), 2.0)),
+        &[
+            (0.083335, 0.0),
+            (0.916665, 0.0),
+            (1.0, 0.16667),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.0, 0.16667),
+            (0.083335, 0.0),
+        ],
+    );
+    assert_points(
+        &vertices(&draw("halfFrame", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.66667, 0.33333),
+            (0.166665, 0.33333),
+            (0.166665, 0.833335),
+            (0.0, 1.0),
+        ],
+    );
+    assert_points(
+        &vertices(&draw("nonIsoscelesTrapezoid", &HashMap::new(), 2.0)),
+        &[(0.0, 1.0), (0.125, 0.0), (0.875, 0.0), (1.0, 1.0)],
+    );
+}
+
+#[test]
+fn pair_brackets_follow_ecma_endpoints() {
+    assert_ecma_endpoints(
+        &vertices(&draw("bracketPair", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.16667),
+            (0.916665, 0.0),
+            (1.0, 0.83333),
+            (0.083335, 1.0),
+        ],
+    );
+    assert_ecma_endpoints(
+        &vertices(&draw("bracePair", &HashMap::new(), 2.0)),
+        &[
+            (0.08333, 1.0),
+            (0.041665, 0.58333),
+            (0.041665, 0.08333),
+            (0.91667, 0.0),
+            (0.958335, 0.41667),
+            (0.958335, 0.91667),
+        ],
+    );
+}
+
+#[test]
+fn math_family_follows_ecma_coordinates() {
+    assert_points(
+        &vertices(&draw("mathMinus", &HashMap::new(), 2.0)),
+        &[
+            (0.13255, 0.3824),
+            (0.86745, 0.3824),
+            (0.86745, 0.6176),
+            (0.13255, 0.6176),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("mathDivide", &HashMap::new(), 2.0)),
+        &[
+            (0.5, 0.1179),
+            (0.5, 0.8821),
+            (0.13255, 0.3824),
+            (0.86745, 0.3824),
+            (0.86745, 0.6176),
+            (0.13255, 0.6176),
+        ],
+    );
+    assert_points(
+        &vertices(&draw("mathNotEqual", &HashMap::new(), 2.0)),
+        &[
+            (0.13255, 0.206),
+            (0.4909299714, 0.206),
+            (0.5284189055, 0.0),
+            (0.6389267577, 0.0804431377),
+            (0.6160772775, 0.206),
+            (0.86745, 0.206),
+            (0.86745, 0.4412),
+            (0.5732743779, 0.4412),
+            (0.5518729281, 0.5588),
+            (0.86745, 0.5588),
+            (0.86745, 0.794),
+            (0.5090700286, 0.794),
+            (0.4715810945, 1.0),
+            (0.3610732423, 0.9195568623),
+            (0.3839227225, 0.794),
+            (0.13255, 0.794),
+            (0.13255, 0.5588),
+            (0.4267256221, 0.5588),
+            (0.4481270719, 0.4412),
+            (0.13255, 0.4412),
+        ],
+    );
+}
+
+#[test]
+fn flowchart_family_follows_ecma_coordinates() {
+    assert_points(
+        &vertices(&draw("flowChartCollate", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.5, 0.5),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.5, 0.5),
+        ],
+    );
+    assert_points(
+        &vertices(&draw("flowChartPunchedCard", &HashMap::new(), 2.0)),
+        &[(0.0, 0.2), (0.2, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+    );
+    assert_points(
+        &vertices(&draw("flowChartOfflineStorage", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.5, 1.0),
+            (0.4, 0.8),
+            (0.6, 0.8),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.5, 1.0),
+        ],
+    );
+    let il = (1.0 - std::f64::consts::FRAC_1_SQRT_2) / 2.0;
+    let ir = 1.0 - il;
+    assert_ecma_endpoints(
+        &endpoints(&draw("flowChartSummingJunction", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.0, 0.5),
+            (il, il),
+            (ir, ir),
+            (ir, il),
+            (il, ir),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("flowChartOr", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (0.5, 1.0),
+            (0.0, 0.5),
+            (1.0, 0.5),
+        ],
+    );
+    let sort = preset_geometry_layers("flowChartSort", &HashMap::new(), 2.0).unwrap();
+    assert_eq!(sort.len(), 2);
+    assert_points(
+        &vertices(&draw("flowChartSort", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+            (0.0, 0.5),
+            (1.0, 0.5),
+            (0.0, 0.5),
+            (0.5, 0.0),
+            (1.0, 0.5),
+            (0.5, 1.0),
+        ],
+    );
+    let multi = preset_geometry_layers("flowChartMultidocument", &HashMap::new(), 2.0).unwrap();
+    assert_eq!(multi.len(), 3);
+    assert_ecma_endpoints(
+        &endpoints(&multi[0].commands),
+        &[
+            (0.0, 20782.0 / 21600.0),
+            (18595.0 / 21600.0, 18022.0 / 21600.0),
+            (18595.0 / 21600.0, 3675.0 / 21600.0),
+            (0.0, 3675.0 / 21600.0),
+            (1532.0 / 21600.0, 3675.0 / 21600.0),
+            (18595.0 / 21600.0, 16352.0 / 21600.0),
+            (2972.0 / 21600.0, 0.0),
+            (1.0, 14392.0 / 21600.0),
+        ],
+    );
+}
+
+#[test]
+fn seal_bolt_smiley_and_sun_follow_ecma_coordinates() {
+    assert_points(
+        &vertices(&draw("lightningBolt", &HashMap::new(), 2.0)),
+        &[
+            (8472.0 / 21600.0, 0.0),
+            (12860.0 / 21600.0, 6080.0 / 21600.0),
+            (11050.0 / 21600.0, 6797.0 / 21600.0),
+            (16577.0 / 21600.0, 12007.0 / 21600.0),
+            (14767.0 / 21600.0, 12877.0 / 21600.0),
+            (1.0, 1.0),
+            (10012.0 / 21600.0, 14915.0 / 21600.0),
+            (12222.0 / 21600.0, 13987.0 / 21600.0),
+            (5022.0 / 21600.0, 9705.0 / 21600.0),
+            (7602.0 / 21600.0, 8382.0 / 21600.0),
+            (0.0, 3890.0 / 21600.0),
+        ],
+    );
+    let seal = vertices(&draw("irregularSeal2", &HashMap::new(), 2.0));
+    assert_eq!(seal.len(), 28);
+    assert!(
+        near(seal[0], (11462.0 / 21600.0, 4342.0 / 21600.0))
+            && near(seal[5], (1.0, 6645.0 / 21600.0))
+            && near(seal[27], (9722.0 / 21600.0, 1887.0 / 21600.0))
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("sun", &HashMap::new(), 2.0)),
+        &[
+            (1.0, 0.5),
+            (0.7982292175292969, 0.5717544555664062),
+            (18436.0 / 21600.0, 3163.0 / 21600.0),
+            (0.5, 0.0),
+            (3163.0 / 21600.0, 3163.0 / 21600.0),
+            (0.0, 0.5),
+            (3163.0 / 21600.0, 18436.0 / 21600.0),
+            (0.5, 1.0),
+            (18436.0 / 21600.0, 18436.0 / 21600.0),
+            (0.25, 0.5),
+        ],
+    );
+    let smiley = preset_geometry_layers("smileyFace", &HashMap::new(), 2.0).unwrap();
+    assert_eq!(smiley.len(), 3);
+    assert_ecma_endpoints(
+        &endpoints(&smiley[1].commands),
+        &[
+            (6215.0 / 21600.0, 7570.0 / 21600.0),
+            (13135.0 / 21600.0, 7570.0 / 21600.0),
+        ],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&smiley[2].commands),
+        &[
+            (4969.0 / 21699.0, 16515.0 / 21600.0 - 0.04653),
+            (16640.0 / 21600.0, 16515.0 / 21600.0 - 0.04653),
+        ],
+    );
+}
+
+#[test]
+fn up_arrows_and_ribbons_follow_ecma_coordinates() {
+    assert_points(
+        &vertices(&draw("leftUpArrow", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.75),
+            (0.125, 0.5),
+            (0.125, 0.625),
+            (0.8125, 0.625),
+            (0.8125, 0.25),
+            (0.75, 0.25),
+            (0.875, 0.0),
+            (1.0, 0.25),
+            (0.9375, 0.25),
+            (0.9375, 0.875),
+            (0.125, 0.875),
+            (0.125, 1.0),
+        ],
+    );
+    assert_points(
+        &vertices(&draw("leftRightUpArrow", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.75),
+            (0.125, 0.5),
+            (0.125, 0.625),
+            (0.4375, 0.625),
+            (0.4375, 0.25),
+            (0.375, 0.25),
+            (0.5, 0.0),
+            (0.625, 0.25),
+            (0.5625, 0.25),
+            (0.5625, 0.625),
+            (0.875, 0.625),
+            (0.875, 0.5),
+            (1.0, 0.75),
+            (0.875, 1.0),
+            (0.875, 0.875),
+            (0.125, 0.875),
+            (0.125, 1.0),
+        ],
+    );
+    let ribbon2 = preset_geometry_layers("ellipseRibbon2", &HashMap::new(), 2.0).unwrap();
+    assert_eq!(ribbon2.len(), 3);
+    assert_points(
+        &endpoints(&ribbon2[0].commands),
+        &[
+            (0.0, 1.0),
+            (0.375, 0.8828125),
+            (0.25, 0.78125),
+            (0.75, 0.78125),
+            (0.625, 0.8828125),
+            (1.0, 1.0),
+            (0.875, 0.5703125),
+            (1.0, 0.25),
+            (0.75, 0.15625),
+            (0.75, 0.03125),
+            (0.25, 0.03125),
+            (0.25, 0.15625),
+            (0.0, 0.25),
+            (0.125, 0.5703125),
+        ],
+    );
+    assert_points(
+        &endpoints(&ribbon2[1].commands),
+        &[
+            (0.375, 0.7578125),
+            (0.375, 0.8828125),
+            (0.25, 0.78125),
+            (0.75, 0.78125),
+            (0.625, 0.8828125),
+            (0.625, 0.7578125),
+            (0.375, 0.7578125),
+        ],
+    );
+    let lr = preset_geometry_layers("leftRightRibbon", &HashMap::new(), 2.0).unwrap();
+    assert_eq!(lr.len(), 3);
+    assert!(
+        endpoints(&lr[0].commands)
+            .iter()
+            .any(|&p| near(p, (0.0, 0.416665)))
+    );
+}
+
+#[test]
+fn funnel_pie_and_circular_follow_ecma_endpoints() {
+    assert_ecma_endpoints(
+        &endpoints(&draw("pieWedge", &HashMap::new(), 2.0)),
+        &[(0.0, 1.0), (1.0, 0.0), (1.0, 1.0)],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("funnel", &HashMap::new(), 2.0)),
+        &[
+            (0.004865965629214843, 0.2847932752400166),
+            (0.9951340343707852, 0.2847932752400166),
+            (0.6237835085926963, 0.9461983188100042),
+            (0.3762164914073037, 0.9461983188100042),
+            (0.025, 0.25),
+        ],
+    );
+    let circular = endpoints(&draw("leftRightCircularArrow", &HashMap::new(), 2.0));
+    assert_ecma_endpoints(&circular, &[(0.0625, 0.5), (0.9375, 0.5)]);
+    assert_points(
+        &vertices(&draw("lineInv", &HashMap::new(), 2.0)),
+        &[(0.0, 1.0), (1.0, 0.0)],
+    );
+    assert_ecma_endpoints(
+        &endpoints(&draw("flowChartPunchedTape", &HashMap::new(), 2.0)),
+        &[
+            (0.0, 0.1),
+            (0.5, 0.1),
+            (1.0, 0.1),
+            (1.0, 0.9),
+            (0.5, 0.9),
+            (0.0, 0.9),
+        ],
+    );
 }

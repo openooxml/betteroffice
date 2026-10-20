@@ -1270,8 +1270,9 @@ fn parse_scene_node(
         let scale_x = parent.a.hypot(parent.b);
         let scale_y = parent.c.hypot(parent.d);
         let parent_rotation = parent.b.atan2(parent.a) * 180.0 / std::f64::consts::PI;
-        let authored_flip =
-            transform_element.and_then(|value| value.attribute(None, "flipH")) == Some("1");
+        let authored_flip = transform_element
+            .and_then(|value| value.parse_boolean_attribute(None, "flipH"))
+            == Some(true);
         let transform = SceneTransform {
             offset_x: Some(parent_offset.0),
             offset_y: Some(parent_offset.1),
@@ -1286,8 +1287,9 @@ fn parse_scene_node(
             ),
             flip_h: ((parent.a * parent.d - parent.b * parent.c < 0.0) != authored_flip)
                 .then_some(true),
-            flip_v: (transform_element.and_then(|value| value.attribute(None, "flipV"))
-                == Some("1"))
+            flip_v: (transform_element
+                .and_then(|value| value.parse_boolean_attribute(None, "flipV"))
+                == Some(true))
             .then_some(true),
             child_offset_x: finite_attribute(child_offset, "x"),
             child_offset_y: finite_attribute(child_offset, "y"),
@@ -1477,12 +1479,12 @@ fn group_matrix(parent: Matrix, transform: Option<&XmlElement>) -> Matrix {
     let child_width = nonzero(finite_attribute(child_extent, "cx").unwrap_or(width));
     let child_height = nonzero(finite_attribute(child_extent, "cy").unwrap_or(height));
     let rotation = rot_to_degrees(transform.attribute(None, "rot")).unwrap_or(0.0);
-    let flip_x = if transform.attribute(None, "flipH") == Some("1") {
+    let flip_x = if transform.parse_boolean_attribute(None, "flipH") == Some(true) {
         -1.0
     } else {
         1.0
     };
-    let flip_y = if transform.attribute(None, "flipV") == Some("1") {
+    let flip_y = if transform.parse_boolean_attribute(None, "flipV") == Some(true) {
         -1.0
     } else {
         1.0
@@ -1603,11 +1605,7 @@ fn numeric_attribute(element: Option<&XmlElement>, name: &str) -> Option<f64> {
     parse_javascript_integer_prefix(element?.attribute(None, name)?)
 }
 fn bool_attribute(element: Option<&XmlElement>, name: &str) -> Option<bool> {
-    match element?.attribute(None, name)? {
-        "1" | "true" | "on" => Some(true),
-        "0" | "false" | "off" => Some(false),
-        _ => None,
-    }
+    element?.parse_boolean_attribute(None, name)
 }
 fn nonzero(value: f64) -> f64 {
     if value == 0.0 { 1.0 } else { value }
@@ -1808,12 +1806,12 @@ fn render_group_matrix(parent: Matrix, transform: Option<&XmlElement>) -> Matrix
     let child_width = nonzero(finite_attribute(child_extent, "cx").unwrap_or(width));
     let child_height = nonzero(finite_attribute(child_extent, "cy").unwrap_or(height));
     let rotation = rot_to_degrees(transform.attribute(None, "rot")).unwrap_or(0.0);
-    let flip_x = if transform.attribute(None, "flipH") == Some("1") {
+    let flip_x = if transform.parse_boolean_attribute(None, "flipH") == Some(true) {
         -1.0
     } else {
         1.0
     };
-    let flip_y = if transform.attribute(None, "flipV") == Some("1") {
+    let flip_y = if transform.parse_boolean_attribute(None, "flipV") == Some(true) {
         -1.0
     } else {
         1.0
@@ -2131,6 +2129,8 @@ mod tests {
     fn flipped_groups_compose_picture_rotation_and_reflection() {
         for (group, picture, offset, rotation, flipped) in [
             ("flipH=\"1\"", "", (700.0, 50.0), 0.0, true),
+            ("flipH=\"true\"", "", (700.0, 50.0), 0.0, true),
+            ("flipH=\"on\"", "", (700.0, 50.0), 0.0, true),
             ("flipH=\"1\"", "rot=\"5400000\"", (700.0, 50.0), -90.0, true),
             ("flipV=\"1\"", "rot=\"5400000\"", (100.0, 350.0), 90.0, true),
             (

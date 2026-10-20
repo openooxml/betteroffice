@@ -752,8 +752,13 @@ fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
                 pm_start: None,
                 pm_end: None,
             })),
-            Some("drawing") => {
-                let image = field(content, "image")?;
+            Some(kind @ ("drawing" | "opaqueDrawing")) => {
+                let image_key = if kind == "drawing" {
+                    "image"
+                } else {
+                    "preview"
+                };
+                let image = field(content, image_key)?;
                 let values = crate::seed::payload(crate::seed::image_payload(image)).ok()?;
                 Some(Run::Image(super::lower_image_values(
                     &values.into_iter().collect(),

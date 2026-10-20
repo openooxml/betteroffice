@@ -218,19 +218,15 @@ fn parse_anchor(
     let size = parse_extent(container.child_by_full_name("wp:extent"));
     let padding = parse_effect_extent(container.child_by_full_name("wp:effectExtent"));
     let properties = parse_doc_properties(container.child_by_full_name("wp:docPr"));
-    let behind_doc = container.attribute(None, "behindDoc") == Some("1");
-    let anchor_hidden = container.attribute(None, "hidden") == Some("1");
-    let layout_in_cell = container
-        .attribute(None, "layoutInCell")
-        .map(|value| value == "1");
-    let allow_overlap = container
-        .attribute(None, "allowOverlap")
-        .map(|value| value == "1");
+    let behind_doc = container.parse_boolean_attribute(None, "behindDoc") == Some(true);
+    let anchor_hidden = container.parse_boolean_attribute(None, "hidden") == Some(true);
+    let layout_in_cell = container.parse_boolean_attribute_or_false(None, "layoutInCell");
+    let allow_overlap = container.parse_boolean_attribute_or_false(None, "allowOverlap");
     let relative_height = container
         .attribute(None, "relativeHeight")
         .and_then(js_number)
         .filter(|value| value.is_finite());
-    let simple_pos_flag = container.attribute(None, "simplePos") == Some("1");
+    let simple_pos_flag = container.parse_boolean_attribute(None, "simplePos") == Some(true);
     let simple_pos = container.child_by_full_name("wp:simplePos");
     // Nested `graphicFrameLocks` elements are ignored.
     let locked = container
@@ -438,7 +434,7 @@ fn parse_doc_properties(element: Option<&XmlElement>) -> DocProperties {
             .attribute(None, "title")
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
-        decorative: element.attribute(None, "decorative") == Some("1")
+        decorative: element.parse_boolean_attribute(None, "decorative") == Some(true)
             || element.child_by_full_name("adec:decorative").is_some(),
         hyperlink_id: hyperlink
             .and_then(|value| value.attribute(Some("r"), "id"))
@@ -450,8 +446,9 @@ fn parse_doc_properties(element: Option<&XmlElement>) -> DocProperties {
         hyperlink_target: hyperlink
             .and_then(|value| value.attribute(None, "tgtFrame"))
             .map(str::to_owned),
-        hyperlink_history: hyperlink.map(|value| value.attribute(None, "history") != Some("0")),
-        hidden: element.attribute(None, "hidden") == Some("1"),
+        hyperlink_history: hyperlink
+            .map(|value| value.parse_boolean_attribute(None, "history") != Some(false)),
+        hidden: element.parse_boolean_attribute(None, "hidden") == Some(true),
     }
 }
 
@@ -517,8 +514,8 @@ fn parse_picture_transform(container: &XmlElement) -> Option<Transform2D> {
     let properties = picture_properties(container)?;
     let transform = properties.child_by_full_name("a:xfrm")?;
     let rotation = rot_to_degrees(transform.attribute(None, "rot"));
-    let flip_h = (transform.attribute(None, "flipH") == Some("1")).then_some(true);
-    let flip_v = (transform.attribute(None, "flipV") == Some("1")).then_some(true);
+    let flip_h = (transform.parse_boolean_attribute(None, "flipH") == Some(true)).then_some(true);
+    let flip_v = (transform.parse_boolean_attribute(None, "flipV") == Some(true)).then_some(true);
     (rotation.is_some() || flip_h.is_some() || flip_v.is_some()).then_some(Transform2D {
         rotation,
         flip_h,
@@ -651,9 +648,9 @@ pub fn parse_anchor_position(anchor: &XmlElement) -> Option<ImagePosition> {
     let horizontal_element = anchor.child_by_full_name("wp:positionH");
     let vertical_element = anchor.child_by_full_name("wp:positionV");
     let simple_pos = anchor.child_by_full_name("wp:simplePos");
-    let use_simple_pos = anchor.attribute(None, "simplePos") == Some("1");
+    let use_simple_pos = anchor.parse_boolean_attribute(None, "simplePos") == Some(true);
     let relative_height = numeric_attr(Some(anchor), "relativeHeight");
-    let behind_doc = anchor.attribute(None, "behindDoc") == Some("1");
+    let behind_doc = anchor.parse_boolean_attribute(None, "behindDoc") == Some(true);
     let hidden_raw = anchor.attribute(None, "hidden");
     let locked_raw = anchor.attribute(None, "locked");
     if horizontal_element.is_none()
@@ -675,8 +672,8 @@ pub fn parse_anchor_position(anchor: &XmlElement) -> Option<ImagePosition> {
         }),
         relative_height: relative_height.filter(|value| value.is_finite()),
         behind_doc: behind_doc.then_some(true),
-        hidden: matches!(hidden_raw, Some("1" | "true")).then_some(true),
-        locked: matches!(locked_raw, Some("1" | "true")).then_some(true),
+        hidden: (anchor.parse_boolean_attribute(None, "hidden") == Some(true)).then_some(true),
+        locked: (anchor.parse_boolean_attribute(None, "locked") == Some(true)).then_some(true),
         horizontal: parse_position_h(horizontal_element)
             .unwrap_or_else(|| PositionAxis::relative_to("column")),
         vertical: parse_position_v(vertical_element)
@@ -755,7 +752,7 @@ pub fn parse_anchor_wrap(anchor: &XmlElement) -> ImageWrap {
         .find(|element| is_wrap_name(&element.name));
     parse_wrap_element(
         element,
-        anchor.attribute(None, "behindDoc") == Some("1"),
+        anchor.parse_boolean_attribute(None, "behindDoc") == Some(true),
         Some(&distances),
     )
 }
@@ -916,6 +913,33 @@ mod tests {
             Some("grayscale")
         );
         assert!(image.rotation_bounds.is_some());
+    }
+
+    #[test]
+    fn anchored_picture_parses_true_flags() {
+        let drawing = root(
+            r#"<w:drawing><wp:anchor behindDoc="true" layoutInCell="true" allowOverlap="true"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1" cy="2"/><wp:wrapNone/><wp:docPr id="2"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="missing"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        );
+        let image = parse_drawing(&drawing, None, None).unwrap();
+        assert_eq!(image.layout_in_cell, Some(true));
+        assert_eq!(image.allow_overlap, Some(true));
+        assert_eq!(image.wrap.wrap_type, "behind");
+        assert_eq!(image.position.unwrap().behind_doc, Some(true));
+        let anchor = drawing.child_by_full_name("wp:anchor").unwrap();
+        assert_eq!(
+            parse_anchor_position(anchor).unwrap().behind_doc,
+            Some(true)
+        );
+        assert_eq!(parse_anchor_wrap(anchor).wrap_type, "behind");
+    }
+
+    #[test]
+    fn anchored_picture_parses_empty_layout_in_cell_as_false() {
+        let drawing = root(
+            r#"<w:drawing><wp:anchor layoutInCell=""><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="missing"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        );
+        let image = parse_drawing(&drawing, None, None).unwrap();
+        assert_eq!(image.layout_in_cell, Some(false));
     }
 
     #[test]
