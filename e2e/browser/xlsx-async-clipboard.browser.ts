@@ -161,3 +161,30 @@ test('one undo removes the entire pasted block and preserves the preceding edit'
   await input(page, 4, 1, 'block-d');
   expect(await roundTrip(page, info)).toEqual(after);
 });
+
+test('copy formulas shifts relative references and keeps absolute and mixed references', async ({ page }, info) => {
+  await selectCell(page, 0, 3);
+  await copy(page, '=A1+$B$1+A$2+$B2');
+  await selectCell(page, 2, 3);
+  await page.getByTestId('xlsx-scroll').press('ControlOrMeta+v');
+  await input(page, 2, 3, '=A3+$B$1+A$2+$B4');
+  await expect(page.getByRole('gridcell').filter({ hasText: /^D3, / })).toHaveText(/^D3, 33(?:, selected)?$/);
+  const after = (await save(page, info, 'formula-paste')).sheets;
+  expect(after[sheet].cells.D3.formula).toBe('A3+$B$1+A$2+$B4');
+  await page.getByTestId('xlsx-undo').click();
+  await input(page, 2, 3, '');
+  await page.getByTestId('xlsx-redo').click();
+  await input(page, 2, 3, '=A3+$B$1+A$2+$B4');
+  expect((await roundTrip(page, info))[sheet].cells.D1.formula).toBe('A1+$B$1+A$2+$B2');
+});
+
+test('copying a formula shifts only its relative references at the destination', async ({ page }, info) => {
+  await input(page, 0, 3, '=A1+$B$1+A$2+$B2');
+  await copy(page);
+  await selectCell(page, 2, 4);
+  await page.getByTestId('xlsx-scroll').press('ControlOrMeta+v');
+  await input(page, 2, 4, '=B3+$B$1+B$2+$B4');
+  const saved = await roundTrip(page, info);
+  expect(saved[sheet].cells.E3.formula).toBe('B3+$B$1+B$2+$B4');
+  expect(saved[sheet].cells.D1.formula).toBe('A1+$B$1+A$2+$B2');
+});
