@@ -9,6 +9,7 @@ use ooxml_drawingml::{
     TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
     preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
+    style_reference_color,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -530,8 +531,7 @@ impl SlideRenderer {
                     theme,
                     background_source
                         .as_ref()
-                        .and_then(|source| source.reference)
-                        .and_then(|reference| reference.color.as_ref()),
+                        .and_then(|source| source.reference),
                 ),
                 crop,
                 destination,
@@ -5234,36 +5234,13 @@ fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
 fn image_effects_with_placeholder(
     effects: &[BlipEffect],
     theme: &Theme,
-    placeholder: Option<&ColorValue>,
+    reference: Option<&StyleReference>,
 ) -> Vec<ImageEffect> {
-    let placeholder = placeholder.and_then(|color| {
-        Some(ColorValue {
-            rgb: Some(resolve_color_value_to_hex_with_theme(
-                Some(color),
-                Some(theme),
-            )?),
-            alpha: color.alpha,
-            ..ColorValue::default()
-        })
-    });
     let rgba = |color: Option<&ColorValue>| {
         let color = color?;
-        let substituted;
-        let color = if color.theme_color.as_deref() == Some("phClr")
-            && let Some(placeholder) = &placeholder
-        {
-            substituted = ColorValue {
-                rgb: placeholder.rgb.clone(),
-                theme_color: None,
-                auto: None,
-                alpha: color.alpha.or(placeholder.alpha),
-                ..color.clone()
-            };
-            &substituted
-        } else {
-            color
-        };
-        resolve_color_value_to_rgba_hex(Some(color), Some(theme))
+        let substituted =
+            reference.and_then(|reference| style_reference_color(color, reference, theme));
+        resolve_color_value_to_rgba_hex(Some(substituted.as_ref().unwrap_or(color)), Some(theme))
     };
     effects
         .iter()
@@ -8269,11 +8246,11 @@ mod tests {
             *effects,
             vec![
                 ImageEffect::Duotone {
-                    shadow: "#20202080".to_owned(),
-                    highlight: "#9F9F9F40".to_owned(),
+                    shadow: "#42424280".to_owned(),
+                    highlight: "#C4C4C440".to_owned(),
                 },
                 ImageEffect::ColorChange {
-                    from: "#40404080".to_owned(),
+                    from: "#5C5C5C80".to_owned(),
                     to: "#FFFFFFFF".to_owned(),
                     use_alpha: true,
                 },

@@ -142,6 +142,15 @@ pub fn style_outline(
     Some(resolved)
 }
 
+/// Resolves a `phClr` colour against the reference's colour, as a style fill does.
+pub fn style_reference_color(
+    value: &ColorValue,
+    reference: &StyleReference,
+    theme: &Theme,
+) -> Option<ColorValue> {
+    substitute_color(Some(value), placeholder_color(reference, theme).as_ref())
+}
+
 /// Applies reference modifiers before style modifiers.
 fn placeholder_color(reference: &StyleReference, theme: &Theme) -> Option<ColorValue> {
     let color = reference.color.as_ref()?;
