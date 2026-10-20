@@ -211,6 +211,148 @@ fn undo_reverts_only_local_origin_and_preserves_remote_text() {
     );
 }
 
+fn undo_deletion_preserves_concurrent_edits(delete_slide: bool) {
+    let context = EditCtx::local("local");
+    for editor_syncs_first in [false, true] {
+        let left = DeckSession::open(FIXTURE, 407).unwrap();
+        let right = DeckSession::open(FIXTURE, 408).unwrap();
+        let initial = left.snapshot().unwrap();
+        let (slide, shape) = initial
+            .slides
+            .iter()
+            .find_map(|slide| {
+                slide
+                    .shapes
+                    .iter()
+                    .find(|shape| !shape.text_stories.is_empty())
+                    .map(|shape| (slide, shape))
+            })
+            .unwrap();
+        let story_id = &shape.text_stories[0].id;
+        let index = right.story(story_id).unwrap().length - 1;
+
+        if delete_slide {
+            left.delete_slide(&context, &slide.id).unwrap();
+        } else {
+            left.remove_shape(&context, &slide.id, &shape.id).unwrap();
+        }
+        left.add_undo_barrier();
+        right
+            .insert_text(&context, story_id, index, " REMOTE", &TextStyle::default())
+            .unwrap();
+        right
+            .move_shape(&context, &slide.id, &shape.id, 1_234_567, 2_345_678)
+            .unwrap();
+        if delete_slide {
+            right
+                .set_slide_notes(&context, &slide.id, "Remote notes")
+                .unwrap();
+            right
+                .add_text_box(
+                    &context,
+                    &slide.id,
+                    &ShapeDraft {
+                        name: "Remote shape".to_owned(),
+                        rect: ShapeRect {
+                            x: 0,
+                            y: 0,
+                            width: 1_000_000,
+                            height: 500_000,
+                        },
+                        text: "Remote shape".to_owned(),
+                        style: TextStyle::default(),
+                    },
+                )
+                .unwrap();
+            right
+                .add_comment(
+                    &context,
+                    &slide.id,
+                    "Author",
+                    "A",
+                    "Remote comment",
+                    "2026-09-01T10:00:00.000",
+                    0,
+                    0,
+                )
+                .unwrap();
+        }
+        let expected = right.snapshot().unwrap();
+        let peers = if editor_syncs_first {
+            [&right, &left]
+        } else {
+            [&left, &right]
+        };
+        exchange(&peers);
+        assert_converged(&peers);
+        for peer in peers {
+            let deleted = peer.snapshot().unwrap();
+            assert!(deleted.slides.iter().all(|entry| {
+                if delete_slide {
+                    entry.id != slide.id
+                } else {
+                    entry.shapes.iter().all(|entry| entry.id != shape.id)
+                }
+            }));
+        }
+        let joiner = DeckSession::open_from_update_with_source(
+            &left.encode_state_as_update_v1(),
+            FIXTURE,
+            410,
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            assert!(left.undo());
+            exchange(&peers);
+            sync(&left, &joiner);
+            assert_converged(&[&left, &right, &joiner]);
+            for peer in [&left, &right, &joiner] {
+                assert!(
+                    peer.story(story_id)
+                        .unwrap()
+                        .plain_text()
+                        .contains("REMOTE")
+                );
+                assert_eq!(peer.snapshot().unwrap(), expected);
+                let saved = DeckSession::open(&peer.save().unwrap(), 409).unwrap();
+                let restored = saved.snapshot().unwrap();
+                let slide_index = initial
+                    .slides
+                    .iter()
+                    .position(|entry| entry.id == slide.id)
+                    .unwrap();
+                let shape_index = slide
+                    .shapes
+                    .iter()
+                    .position(|entry| entry.id == shape.id)
+                    .unwrap();
+                let restored_shape = &restored.slides[slide_index].shapes[shape_index];
+                assert!(
+                    restored_shape.text_stories[0]
+                        .plain_text()
+                        .contains("REMOTE")
+                );
+                assert_eq!((restored_shape.x, restored_shape.y), (1_234_567, 2_345_678));
+            }
+            assert!(left.redo());
+            exchange(&peers);
+            sync(&left, &joiner);
+            assert_converged(&[&left, &right, &joiner]);
+        }
+    }
+}
+
+#[test]
+fn undo_slide_deletion_preserves_concurrent_text_and_geometry() {
+    undo_deletion_preserves_concurrent_edits(true);
+}
+
+#[test]
+fn undo_shape_deletion_preserves_concurrent_text_and_geometry() {
+    undo_deletion_preserves_concurrent_edits(false);
+}
+
 #[test]
 fn cross_paragraph_format_is_one_undoable_operation() {
     let session = DeckSession::open(FIXTURE, 405).unwrap();

@@ -74,6 +74,34 @@ impl<'a> ParseBudget<'a> {
         }
     }
 
+    pub fn scratch(&self) -> Self {
+        Self::new(self.limits)
+    }
+
+    pub fn charge_xml_from(&mut self, source: &Self, part: &str) -> Result<(), PptxError> {
+        charge(
+            &mut self.xml_bytes,
+            source.xml_bytes,
+            self.limits.max_xml_bytes,
+            "xmlBytes",
+            part,
+        )?;
+        charge(
+            &mut self.xml_events,
+            source.xml_events,
+            self.limits.max_xml_events,
+            "xmlEvents",
+            part,
+        )?;
+        charge(
+            &mut self.xml_text_bytes,
+            source.xml_text_bytes,
+            self.limits.max_xml_text_bytes,
+            "xmlTextBytes",
+            part,
+        )
+    }
+
     /// XML events this budget has been charged, including the one that broke it.
     pub fn xml_events_spent(&self) -> usize {
         self.xml_events

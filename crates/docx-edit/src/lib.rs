@@ -182,6 +182,7 @@ pub mod wasm;
 pub mod wasm_memory;
 
 const STORIES: &str = "stories";
+const REMOVED_STORIES: &str = "removed_stories";
 const COMMENTS: &str = "comments";
 const PILCROW_KIND: &str = "pilcrow";
 const KIND_KEY: &str = "_kind";
@@ -677,7 +678,7 @@ pub struct EditingDoc {
     keeps_deleted: Arc<AtomicBool>,
     commit_hooks: Rc<RefCell<CommitHooks>>,
     _update_sub: Subscription,
-    _story_revision_sub: Subscription,
+    _story_revision_subs: [Subscription; 2],
     _seen_subs: Vec<Subscription>,
 }
 
@@ -696,6 +697,7 @@ impl EditingDoc {
         // Root shared types are schema declarations; their contents are still changed only in the
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
+        doc.get_or_insert_map(REMOVED_STORIES);
         doc.get_or_insert_map(COMMENTS);
         doc.get_or_insert_map(part_metadata::PART_METADATA);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
@@ -731,6 +733,10 @@ impl EditingDoc {
         let story_revision_sub = doc
             .get_or_insert_map(STORIES)
             .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
+        let stamped = Arc::clone(&story_revisions);
+        let removed_story_sub = doc
+            .get_or_insert_map(REMOVED_STORIES)
+            .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
@@ -763,7 +769,7 @@ impl EditingDoc {
             keeps_deleted,
             commit_hooks,
             _update_sub: update_sub,
-            _story_revision_sub: story_revision_sub,
+            _story_revision_subs: [story_revision_sub, removed_story_sub],
             _seen_subs: seen_subs,
         }
     }
@@ -1307,10 +1313,10 @@ impl EditingDoc {
             .expect("stories root is declared by EditingDoc::new");
         for story_id in story_ids {
             let para_id = self.next_id();
-            if stories.contains_key(&txn, story_id) {
+            if story_id_taken(&stories, &txn, story_id) {
                 return Err(EditError::StoryExists(story_id.clone()));
             }
-            let story = stories.insert(&mut txn, story_id.clone(), TextPrelim::new(""));
+            let story = insert_story(&mut txn, &stories, story_id.clone());
             let pilcrow = story.insert_embed_with_attributes(
                 &mut txn,
                 0,
@@ -1337,10 +1343,10 @@ impl EditingDoc {
         let stories = txn
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
-        if stories.contains_key(&txn, &story_id) {
+        if story_id_taken(&stories, &txn, &story_id) {
             return Err(EditError::StoryExists(story_id));
         }
-        let story = stories.insert(&mut txn, story_id, TextPrelim::new(""));
+        let story = insert_story(&mut txn, &stories, story_id);
         if !initial_text.is_empty() {
             story.insert_with_attributes(&mut txn, 0, initial_text, insertion_attrs(None, None));
         }
@@ -1372,10 +1378,10 @@ impl EditingDoc {
         let stories = txn
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
-        if stories.contains_key(&txn, &story_id) {
+        if story_id_taken(&stories, &txn, &story_id) {
             return Err(OpError::StoryExists(story_id));
         }
-        let story = stories.insert(&mut txn, story_id, TextPrelim::new(""));
+        let story = insert_story(&mut txn, &stories, story_id);
         let mut deltas = Vec::with_capacity(paragraphs.len() * 2);
         let mut para_ids = Vec::with_capacity(paragraphs.len());
         let attrs = Box::new(insertion_attrs(None, None));
@@ -1405,22 +1411,23 @@ impl EditingDoc {
         Ok(para_ids)
     }
 
-    /// Removes one complete story from the document map.
+    /// Removes one complete story from the document.
     pub fn delete_story(&self, story_id: &str) -> EditResult<()> {
         let mut txn = self.doc.transact_mut_with(self.client_id);
-        let stories = txn
-            .get_map(STORIES)
-            .expect("stories root is declared by EditingDoc::new");
-        if stories.remove(&mut txn, story_id).is_some() {
-            self.chunk_snapshots
-                .lock()
-                .unwrap()
-                .entries
-                .remove(story_id);
-            Ok(())
+        story_ref(&txn, story_id)?;
+        if self.keeps_deleted() {
+            mark_story_removed(&mut txn, story_id);
         } else {
-            Err(EditError::StoryNotFound(story_id.to_owned()))
+            txn.get_map(STORIES)
+                .expect("stories root is declared by EditingDoc::new")
+                .remove(&mut txn, story_id);
         }
+        self.chunk_snapshots
+            .lock()
+            .unwrap()
+            .entries
+            .remove(story_id);
+        Ok(())
     }
 
     /// Updates one independently-convergent property on the pilcrow identified by `para_id`.
@@ -1442,19 +1449,21 @@ impl EditingDoc {
         let stories = txn
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
-        for (_, value_ref) in stories.iter(&txn) {
+        let found = crate::live_stories(&stories, &txn).find_map(|(_, value_ref)| {
             let Out::YText(story) = value_ref else {
-                continue;
+                return None;
             };
-            for (_, pilcrow) in pilcrows(&story, &txn) {
-                if map_string(&pilcrow, &txn, PARA_ID).as_deref() == Some(para_id) {
-                    identity::promote(self, &mut txn, &pilcrow);
-                    pilcrow.insert(&mut txn, key, value);
-                    return Ok(());
-                }
-            }
-        }
-        Err(EditError::ParagraphNotFound(para_id.to_owned()))
+            pilcrows(&story, &txn)
+                .into_iter()
+                .map(|(_, pilcrow)| pilcrow)
+                .find(|pilcrow| map_string(pilcrow, &txn, PARA_ID).as_deref() == Some(para_id))
+        });
+        let Some(pilcrow) = found else {
+            return Err(EditError::ParagraphNotFound(para_id.to_owned()));
+        };
+        identity::promote(self, &mut txn, &pilcrow);
+        pilcrow.insert(&mut txn, key, value);
+        Ok(())
     }
 
     /// Creates a side-map comment whose anchors are sticky positions, in one transaction.
@@ -1627,6 +1636,7 @@ impl EditingDoc {
         anchors
             .into_iter()
             .map(|anchor| {
+                story_ref(&txn, &anchor.story)?;
                 let start = anchor.start.get_offset(&txn).ok_or_else(|| {
                     EditError::InvalidComment("start anchor no longer resolves".into())
                 })?;
@@ -1732,7 +1742,7 @@ impl EditingDoc {
         let stories = txn
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
-        for (story_id, value) in stories.iter(&txn) {
+        for (story_id, value) in crate::live_stories(&stories, &txn) {
             let Out::YText(story) = value else {
                 continue;
             };
@@ -1944,10 +1954,52 @@ pub(crate) fn decode_peer_update_v1(bytes: &[u8]) -> EditResult<Update> {
 }
 
 fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
+    if story_is_removed(txn, story_id) {
+        return Err(EditError::StoryNotFound(story_id.to_owned()));
+    }
     txn.get_map(STORIES)
         .and_then(|stories| stories.get(txn, story_id))
         .and_then(|value| value.cast::<TextRef>().ok())
         .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
+}
+
+fn story_is_removed<T: ReadTxn>(txn: &T, story_id: &str) -> bool {
+    txn.get_map(REMOVED_STORIES)
+        .is_some_and(|removed| removed.contains_key(txn, story_id))
+}
+
+fn mark_story_removed(txn: &mut yrs::TransactionMut<'_>, story_id: &str) {
+    txn.get_map(REMOVED_STORIES)
+        .expect("removed stories root is declared by EditingDoc::new")
+        .insert(txn, story_id, true);
+}
+
+fn story_id_taken<T: ReadTxn>(stories: &MapRef, txn: &T, story_id: &str) -> bool {
+    stories.contains_key(txn, story_id) && !story_is_removed(txn, story_id)
+}
+
+fn insert_story(
+    txn: &mut yrs::TransactionMut<'_>,
+    stories: &MapRef,
+    story_id: impl Into<Arc<str>>,
+) -> TextRef {
+    let story_id = story_id.into();
+    txn.get_map(REMOVED_STORIES)
+        .expect("removed stories root is declared by EditingDoc::new")
+        .remove(txn, &story_id);
+    stories.insert(txn, story_id, TextPrelim::new(""))
+}
+
+fn live_stories<'a, T: ReadTxn>(
+    stories: &'a MapRef,
+    txn: &'a T,
+) -> impl Iterator<Item = (&'a str, Out)> + 'a {
+    let removed = txn.get_map(REMOVED_STORIES);
+    stories.iter(txn).filter(move |(id, _)| {
+        !removed
+            .as_ref()
+            .is_some_and(|removed| removed.contains_key(txn, id))
+    })
 }
 
 fn check_position<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> EditResult<()> {

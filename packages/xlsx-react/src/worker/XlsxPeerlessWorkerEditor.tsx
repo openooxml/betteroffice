@@ -1,3 +1,4 @@
+import { createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   cellAtPoint, cellRect, chartRegionAtPoint, extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable,
   moveFocus, normalizeRange, paintDisplayList, parseHyperlinkLocation, safeExternalHyperlink, selectionAt,
@@ -72,7 +73,7 @@ function address(cell: CellAddr): string {
   return `${column}${cell.row + 1}`;
 }
 
-function commandSelection(target: WorkbookCommandSelection): Selection | null {
+function commandSelection(target: WorkbookCommandSelection, previous?: Selection | null): Selection | null {
   let start: CellAddr;
   let end: CellAddr;
   if (target.range.kind === 'rowCol') ({ start, end } = target.range);
@@ -85,6 +86,13 @@ function commandSelection(target: WorkbookCommandSelection): Selection | null {
     end = cell(match[3] ?? match[1], match[4] ?? match[2]);
   }
   const focus = target.activeCell ?? end;
+  if (previous?.range && previous.focus.row === focus.row && previous.focus.col === focus.col &&
+    previous.range.top === start.row && previous.range.left === start.col &&
+    previous.range.bottom === end.row && previous.range.right === end.col) return previous;
+  if ((focus.row !== start.row && focus.row !== end.row) ||
+    (focus.col !== start.col && focus.col !== end.col)) {
+    return { ...selectionAt(focus), range: { top: start.row, left: start.col, bottom: end.row, right: end.col } };
+  }
   return { focus: { ...focus }, anchor: {
     row: focus.row === start.row ? end.row : start.row,
     col: focus.col === start.col ? end.col : start.col,
@@ -170,6 +178,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [proposalsPanelOpen, setProposalsPanelOpen, panelRef] = useSyncedState(false);
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
   const navigation = useRef(0);
+  const [selectionNavigation] = useState(createSelectionDataNavigation);
   const causalSelection = useRef<number | null>(null);
   const mutation = useRef(0);
   const sourceRef = useRef<PeerlessWorkerPaintSource | null>(null);
@@ -222,11 +231,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     return selectionRef.current && sheets?.some((sheet) => sheet.index === activeRef.current)
       ? rangeTarget(activeRef.current, selectionRef.current) : undefined;
   };
+  const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null, viewRef.current!,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
-  const sameSelection = (first: Selection | null, second: Selection) => first !== null &&
-    first.anchor.row === second.anchor.row && first.anchor.col === second.anchor.col &&
-    first.focus.row === second.focus.row && first.focus.col === second.focus.col;
   const predict = (sheet: number, next: Selection) => {
     if (sheet === activeRef.current && sameSelection(selectionRef.current, next)) return;
     navigation.current += 1;
@@ -272,7 +279,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     prefill: (sheet, cell) => readWorkerCellInput(run!.session, sheet, address(cell)),
     select: (sheet, cell, move) => {
       const base = selectionAt(cell);
-      predict(sheet, move ? moveFocus(base, move, { limits: limits() }) : base);
+      predict(sheet, move ? moveFocus(base, move, { limits: limits(), hidden: hidden() }) : base);
       reveal(sheet, selectionRef.current!.focus);
     },
     selectionTarget: selectedTarget,
@@ -531,7 +538,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (ack.selection && reconcile) {
       const target = ack.selection;
       const sheet = run.session.editState.sheets?.find((entry) => entry.id === target.sheetId)?.index;
-      const restored = commandSelection(target);
+      const restored = commandSelection(target, selectionRef.current);
       if (sheet !== undefined && restored) predict(sheet, restored);
     } else if (!ack.selection && ack.editState?.activeSheet !== undefined && reconcile && ack.editState.activeSheet !== activeRef.current) {
       predict(ack.editState.activeSheet, selectionRef.current ?? selectionAt({ row: 0, col: 0 }));
@@ -1121,7 +1128,34 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       clipboard(event.key.toLowerCase() === 'c' ? 'copy' : event.key.toLowerCase() === 'x' ? 'cut' : 'paste');
       event.preventDefault(); return;
     }
-    const action = selectionKeyReducer(selectionRef.current, event, limits());
+    const request = selectionDataRequest(event);
+    if (request) {
+      event.preventDefault();
+      const owner = run;
+      const sheet = activeRef.current;
+      selectionNavigation.enqueue(event, {
+        context: () => {
+          if (!owner.current || owner.retiring || owner.failure || ownerRef.current !== owner ||
+            activeRef.current !== sheet || chartRef.current || draftController.getSnapshot().cell ||
+            !selectionRef.current) return null;
+          const basis = owner.session.confirmedBasis;
+          return { owner, sheet, selection: selectionRef.current, navigation: navigation.current,
+            version: `${basis.epoch}:${basis.version}:${owner.session.state.version}` };
+        },
+        limits,
+        hidden,
+        query: (context, direction) => owner.session.call.selectionData(sheet,
+          context.selection.focus.row, context.selection.focus.col, direction),
+        apply: (next) => {
+          predict(sheet, next);
+          reveal(sheet, next.focus);
+          command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
+          return true;
+        },
+      });
+      return;
+    }
+    const action = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden());
     if (action.type === 'move') {
       predict(activeRef.current, action.selection);
       reveal(activeRef.current, action.selection.focus);
