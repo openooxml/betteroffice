@@ -198,6 +198,11 @@ function harness(realFacade = false, normalizeInput = false) {
     sheetView: mock(async (sheet: number) => ({ ...info(), sheet, version: `v${version}`, frozenWidth: 0, frozenHeight: 0 })),
     cellInputs: mock(async (sheet: number, range: string) => ({ sheet, version: `v${version}`,
       cells: peerMethods.rangeCells(sheet, range) })),
+    selectionData: mock(async (sheet: number) => peerMethods.selectionData(sheet)),
+    cellGeometry: mock(async (sheet: number, row: number, col: number): Promise<xlsx.WorkbookCellGeometry> => ({
+      sheet, version: `v${version}`, rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
+      scrollPosition: { x: col * 96, y: row * 24 },
+    })),
   };
   const sessionSave = mock<WorkbookSession['save']>(async () => new Uint8Array([0]));
   const session: WorkbookSession = {
@@ -4234,7 +4239,15 @@ describe('workbook worker editor', () => {
       await advance(3);
       expect(host.editMethods.editCells).not.toHaveBeenCalled();
       expect(host.cells.has('0:0:1')).toBe(false);
-      await act(async () => { paste.resolve('first\toutside'); hydration.resolve(host.peer); });
+      await act(async () => { paste.resolve('first\toutside'); });
+      if (!hydrated) {
+        await advance(16);
+        expect(host.preview.mock.calls[host.preview.mock.calls.length - 1]![2]).toMatchObject([
+          { method: 'editCells', args: [0, [{ row: 0, col: 0, input: 'first' }, { row: 0, col: 1, input: 'outside' }]] },
+        ]);
+        expect(host.editMethods.editCells).not.toHaveBeenCalled();
+        await act(async () => hydration.resolve(host.peer));
+      }
       await advance(16);
       expect(host.editMethods.editCells.mock.calls).toEqual([
         [0, [{ row: 0, col: 0, input: 'first' }, { row: 0, col: 1, input: 'outside' }]],

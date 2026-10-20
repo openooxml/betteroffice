@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from 'bun:test';
 import { normalizeRange, selectionAt } from '@betteroffice/xlsx';
 import type { KeyInput, Selection, SelectionData } from '@betteroffice/xlsx';
 import { deriveLimits } from './viewer/sessionGeometry';
-import { clearedCells, createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from './selectionData';
+import { MAX_CLEAR_CELLS, clearedCells, createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from './selectionData';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

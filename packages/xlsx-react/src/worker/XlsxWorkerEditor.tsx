@@ -1056,7 +1056,9 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const prepareMutation = async (text: string, queued = false) => {
       if (kind === 'cut' && reachesSheetEdge(range) && !queued) return;
       if (kind !== 'copy' && !mutation) {
-        const edits = kind === 'paste' ? [] : clearedCells(range, usedRange);
+        const data = kind === 'cut' && reachesSheetEdge(range) ?
+          await (run!.peer ?? run!.session.call).selectionData?.(sheet, 0, 0, 'usedRange') : undefined;
+        const edits = kind === 'paste' ? [] : clearedCells(range, () => data?.usedRange);
         if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
         if (kind === 'cut' && edits.length === 0) return;
         if (kind === 'paste') {
@@ -1113,7 +1115,9 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     let op: WorkbookReplayOp | undefined;
     let discardPreview: (() => Promise<void>) | undefined;
     const prepareClear = async () => {
-      const edits = clearedCells(range, () => run!.peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange);
+      const data = reachesSheetEdge(range) ?
+        await (run!.peer ?? run!.session.call).selectionData?.(sheet, 0, 0, 'usedRange') : undefined;
+      const edits = clearedCells(range, () => data?.usedRange);
       if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
       if (edits.length === 0) return;
       op = { method: 'editCells', args: [sheet, edits] };
