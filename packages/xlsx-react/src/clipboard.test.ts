@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { CellClipboard, clipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
+import { CellClipboard, clipboardMarker, newClipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
 
 const owner = {};
 const range = { top: 0, left: 2, bottom: 0, right: 2 };
@@ -55,6 +55,17 @@ describe('cell clipboard', () => {
     clipboard.cancelCut();
     clipboard.capture(token, { owner, sheet: 0, range, cells, cut: true }, true);
     expect(clipboard.paste(owner, text, range, token.marker)).toBeNull();
+  });
+
+  test('a marker minted for a copy that never begins keeps the earlier capture, and a later begin writes under it', () => {
+    const { clipboard, paste } = captured();
+    const marker = newClipboardMarker();
+    expect(paste()?.edits[0].copyFrom).toEqual({ row: 0, col: 2 });
+    const token = clipboard.begin(undefined, marker);
+    expect(token.marker).toBe(marker);
+    clipboard.capture(token, { owner, sheet: 0, range, cells, cut: false }, true);
+    const html = `<table data-betteroffice-clipboard="${marker}"></table>`;
+    expect(clipboard.paste(owner, text, range, html, 0)?.edits[0].copyFrom).toEqual({ row: 0, col: 2 });
   });
 
   test('external text and replaced workbooks do not use internal copy metadata', () => {

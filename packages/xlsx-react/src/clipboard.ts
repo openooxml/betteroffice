@@ -22,11 +22,10 @@ export class CellClipboard {
     return this.escapes;
   }
 
-  begin(escapes = this.escapes): Token {
+  begin(escapes = this.escapes, marker = newClipboardMarker()): Token {
     this.captured = null;
     this.watching = null;
-    return { revision: ++this.revision, cancellation: this.cancellation, escapes,
-      marker: `betteroffice-${crypto.randomUUID()}` };
+    return { revision: ++this.revision, cancellation: this.cancellation, escapes, marker };
   }
 
   capture(token: Token, capture: Capture, marked = false): void {
@@ -95,13 +94,17 @@ export class CellClipboard {
   }
 }
 
-export function clipboardMarker(token: Token, text = ''): Blob {
+export function newClipboardMarker(): string {
+  return `betteroffice-${crypto.randomUUID()}`;
+}
+
+export function clipboardMarker(token: Pick<Token, 'marker'>, text = ''): Blob {
   const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const rows = fromTsv(text).map((row) => `<tr>${row.map((cell) => `<td>${escape(cell)}</td>`).join('')}</tr>`).join('');
   return new Blob([`<table data-betteroffice-clipboard="${token.marker}">${rows}</table>`], { type: 'text/html' });
 }
 
-export function clipboardHtml(token: Token, text: Promise<Blob>): Promise<Blob> {
+export function clipboardHtml(token: Pick<Token, 'marker'>, text: Promise<Blob>): Promise<Blob> {
   const html = text.then(async (blob) => clipboardMarker(token, await blob.text()));
   void html.catch(() => {});
   return html;

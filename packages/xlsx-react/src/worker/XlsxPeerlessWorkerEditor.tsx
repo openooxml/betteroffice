@@ -49,7 +49,7 @@ import { PeerlessWorkbookSession, type PeerlessSessionWorkbookProps } from './us
 import { usePeerlessSessionWorkbook } from './usePeerlessSessionWorkbook';
 import { PeerlessWorkerPaintSource, type WorkerPaintRequest, type WorkerPaintResult } from './PeerlessWorkerPaintSource';
 
-import { CellClipboard, clipboardHtml, parseCellClipboardText, readCellClipboard, type CellPaste } from '../clipboard';
+import { CellClipboard, clipboardHtml, newClipboardMarker, parseCellClipboardText, readCellClipboard, type CellPaste } from '../clipboard';
 import { WorkerCellEcho } from './WorkerCellEcho';
 import { WorkerDraftController, type WorkerNativeDraft } from './WorkerDraftController';
 import { PeerlessWorkerInputs } from './PeerlessWorkerInputs';
@@ -890,13 +890,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const clipboardAccess = (kind: 'copy' | 'cut' | 'paste'): { read?: Promise<{ text: string; html?: string | null }>;
     write?: Promise<void>; resolve?: (blob: Blob) => void; reject?: (error: unknown) => void; refused?: { error: unknown };
-    token?: ReturnType<CellClipboard['begin']> } => {
+    marker?: string } => {
     if (kind === 'paste') {
       const read = readCellClipboard();
       void read.catch(() => {});
       return { read };
     }
-    const token = cellClipboard.begin();
+    const marker = newClipboardMarker();
     let resolve!: (blob: Blob) => void;
     let reject!: (error: unknown) => void;
     const payload = new Promise<Blob>((done, fail) => { resolve = done; reject = fail; });
@@ -905,13 +905,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     let refused: { error: unknown } | undefined;
     try {
       if (typeof ClipboardItem === 'function' && typeof navigator.clipboard?.write === 'function') {
-        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload, 'text/html': clipboardHtml(token, payload) })]);
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload, 'text/html': clipboardHtml({ marker }, payload) })]);
         void write.catch(() => {});
       } else if (kind === 'cut' && typeof navigator.clipboard?.writeText !== 'function') {
         throw new WorkerInputRefusal('Cut requires clipboard write access');
       }
     } catch (error) { refused = { error }; }
-    return { write, resolve, reject, refused, token };
+    return { write, resolve, reject, refused, marker };
   };
   const clipboard = (kind: 'copy' | 'cut' | 'paste', access: ReturnType<typeof clipboardAccess>) => {
     if (!clipboardAllowed(kind)) { access.reject?.(new XlsxCommandAdmissionError('editor-unavailable')); return; }
@@ -950,8 +950,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (ownerRef.current !== owner || !owner.current || owner.retiring) throw new XlsxCommandAdmissionError('document-replaced');
       if (owner.failure) throw owner.failure;
     };
-    const { write, resolve, reject, refused, token } = access;
+    const { write, resolve, reject, refused, marker } = access;
     if (refused) { reject!(refused.error); report(refused.error); return; }
+    const token = cellClipboard.begin(undefined, marker);
     const copied = coordinator.runAfterPendingInput(async () => {
       checkOwner();
       const result = await owner.session.call.cellInputs(sheet, selectedRange(selected));
@@ -964,7 +965,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (write) { resolve!(new Blob([text], { type: 'text/plain' })); await write; }
       else await navigator.clipboard.writeText(text);
       checkOwner();
-      if (kind === 'copy') cellClipboard.capture(token!, { owner, sheet, range, cells, cut: false }, Boolean(write));
+      if (kind === 'copy') cellClipboard.capture(token, { owner, sheet, range, cells, cut: false }, Boolean(write));
     });
     cellClipboard.pending = written.catch(() => {});
     if (kind === 'cut') {
