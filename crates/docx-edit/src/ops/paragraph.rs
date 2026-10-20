@@ -774,7 +774,8 @@ impl EditingDoc {
 
     /// Decreases `indentLeft` by `step` twips, defaulting to
     /// [`INDENT_STEP_TWIPS`] and clamping at zero. Reaching zero removes the
-    /// attribute rather than storing it.
+    /// attribute, except on a paragraph with direct formatting, which keeps an
+    /// explicit zero so a style or list indent does not return on save.
     pub fn decrease_indent(
         &self,
         ctx: &EditCtx,
@@ -787,8 +788,14 @@ impl EditingDoc {
         for target in &targets {
             let current = number_prop(&target.map, &txn, INDENT_LEFT).unwrap_or(0.0);
             let next = (current - step).max(0.0);
-            if next > 0.0 {
+            let direct = matches!(
+                target.map.get(&txn, "_originalFormatting"),
+                Some(Out::Any(Any::Map(_)))
+            );
+            if next > 0.0 || (direct && current > 0.0) {
                 target.map.insert(&mut txn, INDENT_LEFT, Any::Number(next));
+            } else if direct {
+                continue;
             } else {
                 target.map.remove(&mut txn, INDENT_LEFT);
             }

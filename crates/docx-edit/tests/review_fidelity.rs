@@ -1953,6 +1953,41 @@ fn indent_edits_reach_saved_direct_indentation() {
 }
 
 #[test]
+fn outdent_to_zero_over_a_style_indent_survives_save() {
+    use docx_edit::{EditCtx, ParaSelector};
+    let styles = format!(
+        r#"{NORMAL_STYLE}<w:style w:type="paragraph" w:styleId="Indented"><w:name w:val="Indented"/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>"#
+    );
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Indented"/><w:ind w:left="1440"/></w:pPr><w:r><w:t>Direct over style</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:pStyle w:val="Indented"/></w:pPr><w:r><w:t>Style only</w:t></w:r></w:p>"#,
+    );
+    let engine = EngineSession::new(74242);
+    seed_from_docx(engine.doc(), &document(body, &styles)).unwrap();
+    let paragraphs = engine.doc().paragraphs("body").unwrap();
+    let ctx = EditCtx::local("", "");
+    for (index, times) in [(0, 3), (1, 2)] {
+        for _ in 0..times {
+            engine
+                .doc()
+                .decrease_indent(
+                    &ctx,
+                    &ParaSelector::One(paragraphs[index].para_id.clone()),
+                    None,
+                )
+                .unwrap();
+        }
+        let (original, xml) = saved_paragraph_formatting(&engine, index);
+        assert_eq!(original["indentLeft"].as_f64(), Some(0.0), "{xml}");
+        assert!(xml.contains(r#"<w:ind w:left="0"/>"#), "{xml}");
+        assert_eq!(
+            reopened_property(&xml, &styles, "indentLeft").as_f64(),
+            Some(0.0)
+        );
+    }
+}
+
+#[test]
 fn style_change_supersedes_direct_line_spacing_and_indent_on_save() {
     use docx_edit::{EditCtx, ParaAttrDelta, ParaSelector, Patch, ResolvedStyleProjection};
     let body = r#"<w:p><w:pPr><w:spacing w:after="240" w:line="240" w:lineRule="auto"/><w:ind w:left="360" w:hanging="360"/></w:pPr><w:r><w:t>Restyled</w:t></w:r></w:p>"#;
