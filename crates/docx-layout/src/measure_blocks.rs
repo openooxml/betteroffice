@@ -68,6 +68,8 @@ pub struct FloatPageGeometry {
     pub content_height: f64,
 }
 
+const MAX_COLUMN_ZONE_Y: f64 = 10_000_000.0;
+
 /// Paragraph-relative column slots selected by pagination.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnWidthBand {
@@ -1216,7 +1218,7 @@ impl FlowState {
                     left_margin: 0.0,
                     right_margin: width - band.width,
                     top_y: band.top + *cumulative_y,
-                    bottom_y: band.bottom + *cumulative_y,
+                    bottom_y: (band.bottom + *cumulative_y).min(MAX_COLUMN_ZONE_Y),
                     segments: Vec::new(),
                     full_width_block: false,
                 }

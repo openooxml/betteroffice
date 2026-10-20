@@ -1421,7 +1421,7 @@ fn placed_column_measurement_frames(
             return false;
         }
         if let Some(last) = bands.last_mut() {
-            last.bottom = 1e12;
+            last.bottom = f64::INFINITY;
         }
         true
     });

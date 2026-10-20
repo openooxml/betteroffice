@@ -789,6 +789,52 @@ fn assert_spanning_columns(output: &Value) {
 }
 
 #[test]
+fn a_paragraph_rewraps_when_it_flows_into_a_narrower_final_column() {
+    let body = fixture::p(
+        "71000003",
+        &format!(
+            r#"<w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>{}"#,
+            fixture::r(&"Words continue through columns with different widths. ".repeat(12))
+        ),
+    );
+    let output = layout_page_body(
+        12240,
+        4560,
+        r#"<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="3954" w:space="2870"/><w:col w:w="3256"/></w:cols>"#,
+        &body,
+    );
+    let measured = &output["measured"][0];
+    let lines = measured["measure"]["lines"].as_array().unwrap();
+    assert!(lines.iter().all(|line| line["syntheticFallback"] != true));
+    let mut columns_seen = [false; 2];
+    for fragment in output["layout"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|page| page["fragments"].as_array().unwrap())
+        .filter(|fragment| fragment["kind"] == "paragraph")
+    {
+        let column = usize::from(fragment["x"].as_f64().unwrap() > 73.0);
+        columns_seen[column] = true;
+        let width = [3954.0 / 15.0, 3256.0 / 15.0][column];
+        let from = fragment["fromLine"].as_u64().unwrap() as usize;
+        let to = fragment["toLine"].as_u64().unwrap() as usize;
+        for line in &lines[from..to] {
+            assert!(visible_line_width(measured, line) <= width + 0.01);
+        }
+    }
+    assert_eq!(columns_seen, [true, true]);
+    let last = output["layout"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|page| page["fragments"].as_array().unwrap())
+        .rfind(|fragment| fragment["kind"] == "paragraph")
+        .unwrap();
+    assert!(last["x"].as_f64().unwrap() > 73.0);
+}
+
+#[test]
 fn balancing_rewraps_a_paragraph_in_each_unequal_column() {
     let body = fixture::p(
         "71000003",
