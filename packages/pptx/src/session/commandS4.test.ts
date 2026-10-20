@@ -301,3 +301,40 @@ test('undoing_a_deleted_slide_reselects_it', async () => {
     expect(redone.activeSlideId).toBe(first.slideId);
   } finally { await session.dispose(); }
 });
+
+test('slide_changing_invocations_drop_the_previous_slides_selection', async () => {
+  const session = await open();
+  try {
+    const [first, second] = session.stories as [PptxStoryText, PptxStoryText];
+    const object = await session.command(session.state, 1, { kind: 'selectObject', payload: {
+      ...input, frame: session.state.frame, shapeId: first.shapeId } });
+    expect(object.selection).toMatchObject({ kind: 'object', slideId: first.slideId, shapeId: first.shapeId });
+    const moved = await session.command(object, 2, { kind: 'invoke', payload: {
+      ...input, method: 'moveSlide', args: [second.slideId, 0] } });
+    expect(moved.activeSlideId).toBe(first.slideId);
+    expect(moved.selection).toMatchObject({ kind: 'object', slideId: first.slideId, shapeId: first.shapeId });
+    const inserted = await session.command(moved, 3, { kind: 'invoke', payload: {
+      ...input, method: 'insertSlide', args: [2] } });
+    expect(inserted.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(inserted.activeSlideId).toBe((inserted.mutationResult as { slideId: string }).slideId);
+    expect(inserted.selection).toBeNull();
+    expect(inserted.editState.object ?? null).toBeNull();
+
+    const caret = await session.command(inserted, 4, { kind: 'setSelection', payload: {
+      ...input, selection: selection(first, 1, 3) } });
+    expect(caret.activeSlideId).toBe(first.slideId);
+    const again = await session.command(caret, 5, { kind: 'invoke', payload: {
+      ...input, method: 'insertSlide', args: [2] } });
+    expect(again.activeSlideId).toBe((again.mutationResult as { slideId: string }).slideId);
+    expect(again.selection).toBeNull();
+
+    const back = await session.command(again, 6, { kind: 'setSelection', payload: {
+      ...input, selection: selection(first, 2) } });
+    expect(back.activeSlideId).toBe(first.slideId);
+    const deleted = await session.command(back, 7, { kind: 'invoke', payload: {
+      ...input, method: 'deleteSlide', args: [first.slideId] } });
+    expect(deleted.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(deleted.activeSlideId).not.toBe(first.slideId);
+    expect(deleted.selection).toBeNull();
+  } finally { await session.dispose(); }
+});

@@ -1116,8 +1116,8 @@ export function registerPresentationCommandHandlers(
       refreshHistory(command.seq, admitted.receipt);
       if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
-      if (selection && !target(selection)) selection = null;
-      objectSelection = object && slideIndices.has(object.slideId) ? selectedObject(object.slideId, object.shapeId) : null;
+      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
+      objectSelection = object && object.slideId === activeSlideId ? selectedObject(object.slideId, object.shapeId) : null;
       clearMarks();
       return true;
     }
@@ -1132,7 +1132,7 @@ export function registerPresentationCommandHandlers(
       refreshHistory(command.seq, admitted.receipt);
       for (const [seq, value] of retained) selections.set(seq, value);
       selection = selected ? resolve(selected) : null;
-      if (selection && !target(selection)) selection = null;
+      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
       if (composition && composed) {
         const next = resolve(composed);
         if (next && target(next)) composition = { ...composition, selection: next }; else composition = undefined;
