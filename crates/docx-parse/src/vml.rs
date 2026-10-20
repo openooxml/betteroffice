@@ -253,6 +253,15 @@ pub(crate) fn vml_image_contents(
     vml_images(picture, relationships, media, budget, MAX_VML_SHAPES)
 }
 
+pub(crate) fn vml_story_image_contents(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    budget: Option<&mut ParseBudget<'_>>,
+) -> Vec<Image> {
+    vml_shape_images(picture, false, relationships, media, budget, MAX_VML_SHAPES)
+}
+
 fn vml_images(
     picture: &XmlElement,
     relationships: Option<&RelationshipMap>,
@@ -260,8 +269,30 @@ fn vml_images(
     mut budget: Option<&mut ParseBudget<'_>>,
     limit: usize,
 ) -> Vec<Image> {
+    let images = vml_shape_images(
+        picture,
+        false,
+        relationships,
+        media,
+        budget.as_deref_mut(),
+        limit,
+    );
+    if !images.is_empty() {
+        return images;
+    }
+    vml_shape_images(picture, true, relationships, media, budget, 1)
+}
+
+fn vml_shape_images(
+    picture: &XmlElement,
+    text_boxes: bool,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    mut budget: Option<&mut ParseBudget<'_>>,
+    limit: usize,
+) -> Vec<Image> {
     let mut shapes = Vec::new();
-    collect_vml_shapes(picture, None, 0, &mut shapes);
+    collect_vml_shapes(picture, None, text_boxes, 0, &mut shapes);
     let mut images = Vec::new();
     for (shape, group) in shapes {
         let Some(image_data) = direct_image_data(shape) else {
@@ -743,17 +774,18 @@ fn group_transform<'a>(
 fn collect_vml_shapes<'a>(
     element: &'a XmlElement,
     group: Option<VmlGroupTransform<'a>>,
+    text_boxes: bool,
     depth: usize,
     output: &mut Vec<(&'a XmlElement, Option<VmlGroupTransform<'a>>)>,
 ) {
-    if depth > MAX_VML_DEPTH
-        || output.len() >= MAX_VML_SHAPES
-        || matches!(element.name.as_str(), "v:textbox" | "w:txbxContent")
-    {
+    let text_box = matches!(element.name.as_str(), "v:textbox" | "w:txbxContent");
+    if depth > MAX_VML_DEPTH || output.len() >= MAX_VML_SHAPES || (text_box && !text_boxes) {
         return;
     }
     let group = if element.name == "v:group" {
         Some(group_transform(element, group))
+    } else if text_box {
+        None
     } else {
         group
     };
@@ -784,7 +816,7 @@ fn collect_vml_shapes<'a>(
         });
     }
     for (_, child) in children {
-        collect_vml_shapes(child, group, depth + 1, output);
+        collect_vml_shapes(child, group, text_boxes, depth + 1, output);
         if output.len() >= MAX_VML_SHAPES {
             break;
         }
@@ -1523,6 +1555,18 @@ mod tests {
         let images = vml_image_contents(inner, None, None, None);
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].size.width, 20.0 * EMU_PER_PIXEL);
+    }
+
+    #[test]
+    fn vml_picture_only_inside_a_textbox_story_stays_visible() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group style="width:400px;height:200px" coordsize="100,100"><v:shape style="width:100;height:100"><v:textbox><w:txbxContent><w:p><w:r><w:pict><v:shape style="width:20px;height:10px"><v:imagedata r:id="rId1"/></v:shape><v:shape style="width:30px;height:15px"><v:imagedata r:id="rId2"/></v:shape></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#,
+        );
+        let images = vml_image_contents(&picture, None, None, None);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].relationship_id, "rId1");
+        assert_eq!(images[0].size.width, 20.0 * EMU_PER_PIXEL);
+        assert_eq!(images[0].size.height, 10.0 * EMU_PER_PIXEL);
     }
 
     #[test]

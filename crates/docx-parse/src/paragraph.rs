@@ -1775,6 +1775,22 @@ mod tests {
     }
 
     #[test]
+    fn vml_textbox_picture_stays_a_drawing() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:r><w:pict><v:shape style="position:absolute;width:200pt;height:100pt"><v:textbox><w:txbxContent><w:p><w:r><w:pict><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rId4"/></v:shape></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+        );
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[0] else {
+            panic!("expected picture run");
+        };
+        let [RunContent::Drawing { image }] = run.content.as_slice() else {
+            panic!("expected one drawing, got {:?}", run.content);
+        };
+        assert_eq!(image.relationship_id, "rId4");
+        assert_eq!(image.size.width, 914_400.0);
+        assert_eq!(image.size.height, 457_200.0);
+    }
+
+    #[test]
     fn unmodeled_drawings_survive_as_opaque_drawings() {
         let paragraph = parse(
             r#"<w:p xmlns:w="w" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml">

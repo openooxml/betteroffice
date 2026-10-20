@@ -18,7 +18,7 @@ use crate::smart_art::{
     SmartArtContext, create_smart_art_context, is_smart_art_drawing, parse_smart_art_from_drawing,
 };
 use crate::text_box::parse_text_box;
-use crate::vml::{Watermark, extract_watermark, vml_image_content, vml_image_contents};
+use crate::vml::{Watermark, extract_watermark, vml_image_content, vml_story_image_contents};
 use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml};
 
 const MAX_PROJECTION_DEPTH: usize = 64;
@@ -182,7 +182,7 @@ fn collect_projection_leaves(
                     .into_iter()
                     .collect()
             } else {
-                vml_image_contents(element, relationships, Some(media), Some(budget))
+                vml_story_image_contents(element, relationships, Some(media), Some(budget))
             };
             for image in images.into_iter().take(remaining) {
                 output.vml_images.push(DrawingLeaf {
@@ -329,6 +329,15 @@ mod tests {
             assert_eq!(part.vml_images.len(), 1);
             assert_eq!(part.vml_images[0].value["image"]["rId"], "rId1");
         }
+    }
+
+    #[test]
+    fn textbox_only_picture_projects_once() {
+        let part = project_vml(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:shape style="width:200px;height:100px"><v:textbox><w:txbxContent><w:p><w:r><w:pict><v:shape style="width:20px;height:10px"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+        assert_eq!(part.vml_images.len(), 1);
+        assert_eq!(part.vml_images[0].value["image"]["rId"], "rId1");
     }
 
     #[test]
