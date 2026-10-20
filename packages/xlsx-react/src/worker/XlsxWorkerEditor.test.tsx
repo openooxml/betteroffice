@@ -3150,6 +3150,29 @@ describe('peerless workbook worker editor', () => {
     expect(host.cells.get('0:0:0')).toBe('initial');
   });
 
+  it('pastes a whole-sheet copy as the used range it copied', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    host.selectionData.mockResolvedValue({ edge: null, region: null, usedRange: { top: 0, left: 0, bottom: 0, right: 0 } });
+    const scroll = view.getByTestId('xlsx-scroll');
+    let acked = 0;
+    const acknowledge = () => act(async () => { for (const command of host.sent.slice(acked)) host.ack(command); acked = host.sent.length; });
+    await act(async () => fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }));
+    await acknowledge();
+    await act(async () => fireEvent.keyDown(scroll, { key: 'c', ctrlKey: true }));
+    await act(async () => { await clipboard.writes[0]; });
+    expect(host.cellInputs).toHaveBeenLastCalledWith(0, 'A1:A1');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'ArrowDown' }));
+    await acknowledge();
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    await act(async () => {});
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'editCells', payload: {
+      args: [0, [{ row: 1, col: 0, input: 'initial' }]],
+    } });
+  });
+
   it('read-only proposal panel loads proposals through a worker read command', async () => {
     const host = peerlessHarness();
     const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
