@@ -88,6 +88,25 @@ async function matchingSheetView(
 }
 
 describe('workbook sessions', () => {
+  test('selection queries cross the worker protocol without changing the workbook', async () => {
+    const worker = await session();
+    try {
+      const before = await worker.save();
+      const reference = openWorkbook(before);
+      try {
+        const version = await worker.call.version();
+        for (const direction of ['up', 'down', 'left', 'right', undefined] as const) {
+          expect(await worker.call.selectionData(0, 2, 2, direction))
+            .toEqual(reference.selectionData(0, 2, 2, direction));
+        }
+        expect(await worker.call.version()).toBe(version);
+        expect(await worker.save()).toEqual(before);
+        await expect(worker.call.selectionData(99, 0, 0)).rejects.toThrow();
+        await expect(worker.call.selectionData(0, 1_048_576, 0)).rejects.toThrow();
+      } finally { reference.dispose(); }
+    } finally { await worker.dispose(); }
+  });
+
   test('worker applyOps restores a custom column width after hiding and unhiding', async () => {
     const worker = await session();
     let seq = 0;

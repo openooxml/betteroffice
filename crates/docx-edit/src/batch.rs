@@ -717,6 +717,7 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
     if txn.root_refs().any(|(name, _)| {
         ![
             crate::STORIES,
+            crate::REMOVED_STORIES,
             crate::COMMENTS,
             crate::part_metadata::PART_METADATA,
             crate::document_properties::DOCUMENT_PROPERTIES,
@@ -3389,7 +3390,9 @@ mod direct_tests {
         let story_ids: Vec<_> = {
             let txn = direct.yrs_doc().transact();
             let stories = txn.get_map(crate::STORIES).unwrap();
-            stories.keys(&txn).map(str::to_owned).collect()
+            crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_owned())
+                .collect()
         };
         for story_id in story_ids {
             assert_eq!(

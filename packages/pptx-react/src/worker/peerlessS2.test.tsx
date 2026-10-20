@@ -284,7 +284,8 @@ for (const target of ['edited_active', 'unloaded_inactive'] as const) {
     const restored = await act(async () => client.dispatch({ kind: 'undo', payload: { inputTime: 2, undoGroup: 'history' } }));
     expect(restored.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
     for (let turn = 0; turn < 5; turn += 1) await drainIdle();
-    expect(thumbnail.mock.calls.filter(([slideId]) => slideId === removedId).length).toBeGreaterThan(1);
+    expect(client.state.activeSlideId).toBe(removedId);
+    await waitFor(() => expect(paints[paints.length - 1]?.confirmed?.frame.slideId).toBe(removedId));
     expect(previews).toContain(removedId);
     expect(errors).not.toHaveBeenCalled();
   });

@@ -5,6 +5,7 @@ import { createSessionClient } from '../../../../shared/office-session/client';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import * as wasm from '../wasm/loader';
+import type { SlideDisplayList } from '../types';
 import { registerPresentationCommandHandlers } from './commandHost';
 import { PRESENTATION_COMMAND_METHODS, type PresentationCommandAck, type PresentationCommandEnvelope,
   type PresentationCommandEvents, type PresentationCommandIntent, type PresentationCommandMethods } from './commandProtocol';
@@ -125,6 +126,33 @@ test('image_roundtrip_and_creation_receipt', async () => {
     try { expect(reopened.snapshot().slides[0]!.shapes).toHaveLength(2);
       expect(reopened.layoutSlide(0).primitives.some((primitive) => primitive.kind === 'image')).toBe(true);
     } finally { reopened.dispose(); }
+  } finally { await session.dispose(); }
+});
+
+test('insert_picture_reply_delivers_media_after_discarded_geometry_frames', async () => {
+  const session = await open();
+  try {
+    const ack = await session.command(session.state, 1, { kind: 'insertPicture', payload: {
+      ...input, slideId: session.story.slideId, name: 'picture', rect, contentType: 'image/png', bytes: png.slice().buffer } });
+    expect(ack.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(ack.selection?.kind).toBe('object');
+    expect(ack.frame).not.toBeNull();
+    const list = JSON.parse(new TextDecoder().decode(ack.frame!.displayList)) as SlideDisplayList;
+    const picture = list.primitives.find((primitive) => primitive.kind === 'image');
+    expect(picture?.kind).toBe('image');
+    if (picture?.kind !== 'image' || !picture.assetId) throw new Error('Expected an inserted picture');
+    expect(ack.frame!.media).toEqual([{ assetId: picture.assetId, bytes: png.buffer }]);
+    const flushed = await session.rpc.call.flushCommandEditor({ ...identity, seq: 1 });
+    expect(flushed.frame!.media).toEqual([]);
+    const thumbnail = await session.rpc.call.thumbnailFrame({ ...identity, slideId: session.story.slideId });
+    expect(thumbnail.status).toBe('frame');
+    if (thumbnail.status !== 'frame') throw new Error('Expected a thumbnail frame');
+    expect(thumbnail.frame.media).toEqual([]);
+    const undone = await session.command(ack, 2, { kind: 'undo', payload: input });
+    const redone = await session.command(undone, 3, { kind: 'redo', payload: input });
+    expect(redone.frame!.media).toEqual([]);
+    const restored = JSON.parse(new TextDecoder().decode(redone.frame!.displayList)) as SlideDisplayList;
+    expect(restored.primitives.find((primitive) => primitive.kind === 'image')).toMatchObject({ assetId: picture.assetId });
   } finally { await session.dispose(); }
 });
 

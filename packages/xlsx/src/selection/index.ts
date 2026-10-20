@@ -9,6 +9,8 @@ export type {
   CellRange,
   Direction,
   SelectionLimits,
+  SelectionData,
+  SelectionHidden,
   MoveOpts,
   KeyInput,
   SelectionAction,
