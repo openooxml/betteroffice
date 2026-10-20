@@ -194,7 +194,7 @@ function changeIndent(
   forEachSelectedParagraph(session, selection, (range, properties) => {
     const current = paragraphNumber(properties.indentLeft);
     const next = direction === 'indent' ? current + 720 : Math.max(0, current - 720);
-    session.setParagraphAttrs(range, { indentLeft: next > 0 ? next : null }, suggesting);
+    if (next !== current) session.setParagraphAttrs(range, { indentLeft: next }, suggesting);
   });
 }
 
