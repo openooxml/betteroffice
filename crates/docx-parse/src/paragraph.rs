@@ -1310,7 +1310,7 @@ fn parse_alternate_content(
         budget,
         drawing,
         in_header_footer,
-    )
+    )?
     .map(|(_, parsed)| parsed)
     .unwrap_or_default())
 }
