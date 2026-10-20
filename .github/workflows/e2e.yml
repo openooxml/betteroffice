@@ -18,19 +18,22 @@ jobs:
     name: ${{ matrix.name }}
     # A fresh kyora VM per job; fork pull requests stay GitHub-hosted and BO_CI_RUNNER overrides (see ci.yml).
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
-    timeout-minutes: 40
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: corpus
             name: Corpus scenarios
+            timeout: 40
           - suite: browser
             shard: 1
             name: Browser editors (1/2)
+            timeout: 70
           - suite: browser
             shard: 2
             name: Browser editors (2/2)
+            timeout: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
