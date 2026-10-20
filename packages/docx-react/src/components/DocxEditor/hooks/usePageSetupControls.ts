@@ -82,7 +82,7 @@ export function usePageSetupControls({
     (twips: number) => {
       pagedEditorRef.current?.applyYrsCommand({
         type: 'paragraphAttrs',
-        attrs: { indentLeft: twips > 0 ? twips : null },
+        attrs: { indentLeft: Math.max(0, twips) },
       });
     },
     [pagedEditorRef]
@@ -92,7 +92,7 @@ export function usePageSetupControls({
     (twips: number) => {
       pagedEditorRef.current?.applyYrsCommand({
         type: 'paragraphAttrs',
-        attrs: { indentRight: twips > 0 ? twips : null },
+        attrs: { indentRight: Math.max(0, twips) },
       });
     },
     [pagedEditorRef]

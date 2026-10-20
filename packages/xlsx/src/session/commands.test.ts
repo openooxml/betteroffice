@@ -9,7 +9,7 @@ import type {
   WorkbookAck, WorkbookCommand, WorkbookCommandPayload, WorkbookFormatTokenResult, WorkbookToolbarPayload,
 } from './commandProtocol';
 import type { WorkbookSession } from './client';
-import { createWorkbookCommandState } from './commandHandlers';
+import { classifyRefusal, createWorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import * as toolbarCommands from './commandToolbar';
 import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod } from './replay';
@@ -168,8 +168,29 @@ describe('workbook commands', () => {
     } finally { clearing.mockRestore(); await session.dispose(); }
   });
 
+  test('toolbar clear to the sheet edge clears only its used cells', async () => {
+    const { session, handle } = await trackedSession();
+    const target = { ...selected, range: { kind: 'a1' as const, a1: 'A2:XFD1048576' } };
+    try {
+      await session.submit(command(session, 1, 'editCells', { args: [0, [
+        { row: 1, col: 0, input: 'text' }, { row: 3, col: 2, input: '=A2' },
+      ]] }));
+      const clearing = spyOn(handle, 'editCells');
+      try {
+        expect(await session.submit(command(session, 2, 'applyOps', {
+          toolbar: { id: 'clear', args: null, target }, selection: target,
+        }))).toMatchObject({ status: 'applied', committed: true });
+        expect(clearing).toHaveBeenCalledTimes(1);
+        expect(clearing.mock.calls[0]![1].length).toBeLessThan(100_000);
+        expect(handle.cell(0, 1, 0).input).toBe('');
+        expect(handle.cell(0, 3, 2).input).toBe('');
+      } finally { clearing.mockRestore(); }
+    } finally { await session.dispose(); }
+  });
+
   test('toolbar clear refuses oversized ranges before expanding cells', async () => {
     const { session, handle } = await trackedSession();
+    await session.submit(command(session, 1, 'editCells', { args: [0, [{ row: 1_048_575, col: 16_383, input: 'far' }]] }));
     const resolving = spyOn(toolbarCommands, 'resolveWorkbookToolbar').mockImplementation(() => {
       throw new Error('Oversized clear reached cell expansion');
     });
@@ -179,7 +200,7 @@ describe('workbook commands', () => {
       const version = handle.version();
       const history = handle.historyState();
       const selection = structuredClone(session.selection);
-      let seq = 0;
+      let seq = 1;
       for (const a1 of ['A2:A100002', 'A1:XFD1048576']) {
         const target = { ...selected, range: { kind: 'a1' as const, a1 } };
         expect(await session.submit(command(session, ++seq, 'applyOps', {
@@ -1845,10 +1866,46 @@ describe('workbook commands', () => {
       await send('undo', { args: [] });
       expect(state.selection).toEqual(branchSelection);
       await send('redo', { args: [] });
-      expect(state.selection).toEqual(after);
+      expect(state.selection).toEqual({ ...selected, activeCell: { row: 1, col: 0 },
+        range: { kind: 'rowCol', start: { row: 1, col: 0 }, end: { row: 1, col: 0 } } });
       expect(handle.cell(0, 1, 0).input).toBe('branch');
     } finally { handle.dispose(); }
   });
+
+  for (const targeted of [false, true]) {
+    test(`redo selects the edited cell after Enter and independent navigation${targeted ? ' with a stable target' : ''}`, async () => {
+      const { session, handle } = await trackedSession();
+      const edited = { ...selected, activeCell: { row: 2, col: 2 },
+        range: { kind: 'rowCol' as const, start: { row: 2, col: 2 }, end: { row: 2, col: 2 } } };
+      const next = { ...selected, range: { kind: 'a1' as const, a1: 'C4' }, activeCell: { row: 3, col: 2 } };
+      const elsewhere = { ...selected, range: { kind: 'a1' as const, a1: 'B2' } };
+      const acks: WorkbookAck[] = [];
+      session.onAck((ack) => { acks.push(ack); });
+      try {
+        await session.submit(command(session, 1, 'select', { selection: edited }));
+        await session.submit(command(session, 2, 'editCell', {
+          args: targeted ? [1, 0, 0, '4242'] : [0, 2, 2, '4242'],
+          ...(targeted ? { target: edited } : {}), selection: next,
+        }));
+        expect(session.selection).toEqual(next);
+        expect(handle.cell(0, 2, 2).input).toBe('4242');
+        await session.submit(command(session, 3, 'select', { selection: elsewhere }));
+        await session.submit(command(session, 4, 'undo', { args: [] }));
+        expect(session.selection).toEqual(edited);
+        expect(handle.cell(0, 2, 2).input).toBe('');
+        await session.submit(command(session, 5, 'select', { selection: edited }));
+        await session.submit(command(session, 6, 'redo', { args: [] }));
+        expect(session.selection).toEqual(edited);
+        expect(handle.cell(0, 2, 2).input).toBe('4242');
+        await session.submit(command(session, 7, 'undo', { args: [] }));
+        await session.submit(command(session, 8, 'select', { selection: elsewhere }));
+        await session.submit(command(session, 9, 'redo', { args: [] }));
+        expect(session.selection).toEqual(edited);
+        expect(acks[acks.length - 1]?.selection).toEqual(edited);
+        expect(handle.cell(0, 2, 2).input).toBe('4242');
+      } finally { await session.dispose(); }
+    });
+  }
 
   test('undo redo restore worker selection and history availability', async () => {
     const session = await createTestWorkbookSession(bytes);
@@ -1863,7 +1920,8 @@ describe('workbook commands', () => {
       expect(acks[acks.length - 1]?.selection).toEqual(selected);
       expect(acks[acks.length - 1]?.editState).toMatchObject({ canUndo: false, canRedo: true });
       await session.submit(command(session, 4, 'redo', { args: [] }));
-      expect(acks[acks.length - 1]?.selection?.range).toEqual({ kind: 'a1', a1: 'A2' });
+      expect(acks[acks.length - 1]?.selection).toEqual({ ...selected, activeCell: { row: 0, col: 0 },
+        range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 } } });
       expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('5');
     } finally { await session.dispose(); }
   });
@@ -1906,6 +1964,50 @@ describe('workbook commands', () => {
       expect(session.failure?.code).toBe('crash');
       await expect(session.save()).rejects.toBeInstanceOf(SessionFailure);
     } finally { failing.mockRestore(); await session.dispose(); }
+  });
+
+  test('copy origin errors from batch edits are classified as invalid commands', () => {
+    expect(classifyRefusal(new Error('bad edit args: copy origin is outside the grid'), 'editCells'))
+      .toMatchObject({ reason: 'invalid-command' });
+  });
+
+  test('out-of-grid copy origins are classified refusals without changing state', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      const before = await session.save();
+      for (const [index, copyFrom] of [
+        { row: 1_048_576, col: 0 }, { row: 0, col: 16_384 },
+        { row: Number.MAX_SAFE_INTEGER, col: 0 },
+      ].entries()) {
+        expect(await session.submit(command(session, index + 1, 'editCells', {
+          args: [0, [{ row: 2, col: 2, input: '=A1', copyFrom }]],
+        }))).toMatchObject({ status: 'refused', reason: 'invalid-command', committed: false });
+        expect(await session.save()).toEqual(before);
+        expect(session.failure).toBeUndefined();
+      }
+      expect(await session.submit(command(session, 4, 'editCell', { args: [0, 2, 2, 'valid'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+    } finally { await session.dispose(); }
+  });
+
+  test('copied formula origins survive worker command validation and undo', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'editCells', {
+        args: [0, [
+          { row: 2, col: 2, input: '=A1+$B$1+$A1+A$1', copyFrom: { row: 0, col: 2 } },
+          { row: 3, col: 2, input: '=SUM(A1:B2)', copyFrom: { row: 0, col: 2 } },
+          { row: 2, col: 3, input: '=A1' },
+        ]],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      const inputs = await session.call.cellInputs(0, 'C3:D4');
+      expect(inputs.cells.map((row) => row.map((cell) => cell.input))).toEqual([
+        ['=A3+$B$1+$A3+A$1', '=A1'], ['=SUM(A4:B5)', ''],
+      ]);
+      expect(await session.submit(command(session, 2, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'C3')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
   });
 
   test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {

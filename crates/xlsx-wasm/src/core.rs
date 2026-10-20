@@ -4,8 +4,9 @@ use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
     CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
     PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, SnapshotBudget,
-    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SelectionDirection, SheetId,
+    SnapshotBudget, StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,15 +97,25 @@ struct MoveRangeArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CellEditInput {
     row: u32,
     col: u32,
     input: String,
+    copy_from: Option<CellRef>,
 }
 
 #[derive(Deserialize)]
 struct OpsArgs {
     ops: Vec<Op>,
+}
+
+#[derive(Deserialize)]
+struct SelectionDataArgs {
+    sheet: u32,
+    row: u32,
+    col: u32,
+    direction: Option<SelectionDirection>,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +235,8 @@ struct CellEdit {
     a1: String,
     input: String,
     is_formula: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_array_formula: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -716,11 +729,24 @@ impl Session {
         let edits = args
             .edits
             .into_iter()
-            .map(|edit| WorkbookCellInput {
-                cell: CellRef::new(edit.row, edit.col),
-                input: edit.input,
+            .map(|edit| {
+                let cell = CellRef::new(edit.row, edit.col);
+                let input = match (edit.copy_from, edit.input.strip_prefix('=')) {
+                    (Some(origin), Some(formula)) => {
+                        if origin.row >= betteroffice_xlsx::MAX_ROWS
+                            || origin.col >= betteroffice_xlsx::MAX_COLS
+                        {
+                            return Err("bad edit args: copy origin is outside the grid".to_owned());
+                        }
+                        let formula = betteroffice_xlsx::translate_formula(formula, origin, cell)
+                            .map_err(|_| "formula exceeds the length limit".to_owned())?;
+                        format!("={formula}")
+                    }
+                    _ => edit.input,
+                };
+                Ok(WorkbookCellInput { cell, input })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let result = self
             .workbook
             .edit_cells(
@@ -811,6 +837,13 @@ impl Session {
             a1: cell.cell.to_a1(),
             input: cell.input,
             is_formula: cell.is_formula,
+            is_array_formula: self
+                .workbook
+                .sheet(SheetId(args.sheet))
+                .map_err(|error| error.to_string())?
+                .array_formulas()
+                .any(|(_, range)| range.contains(cell.cell))
+                .then_some(true),
         })
         .map_err(|error| error.to_string())
     }
@@ -856,6 +889,20 @@ impl Session {
         serde_json::to_string(&CellPosition { x, y }).map_err(|error| error.to_string())
     }
 
+    pub fn selection_data_json(&self, args: &str) -> Result<String, String> {
+        let args: SelectionDataArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad selection args: {error}"))?;
+        let data = self
+            .workbook
+            .selection_data(
+                SheetId(args.sheet),
+                CellRef::new(args.row, args.col),
+                args.direction,
+            )
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&data).map_err(|error| error.to_string())
+    }
+
     pub fn cell_rect_json(&self, args: &str) -> Result<String, String> {
         let args: CellArgs =
             serde_json::from_str(args).map_err(|error| format!("bad cell args: {error}"))?;
@@ -871,6 +918,13 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
         let range =
             CellRange::parse_a1(&args.range).map_err(|error| format!("bad range: {error}"))?;
+        let arrays: Vec<_> = self
+            .workbook
+            .sheet(SheetId(args.sheet))
+            .map_err(|error| error.to_string())?
+            .array_formulas()
+            .filter_map(|(_, array)| array.overlaps(&range).then_some(array))
+            .collect();
         let cells = self
             .workbook
             .range_cells(SheetId(args.sheet), range)
@@ -882,6 +936,10 @@ impl Session {
                         a1: cell.cell.to_a1(),
                         input: cell.input,
                         is_formula: cell.is_formula,
+                        is_array_formula: arrays
+                            .iter()
+                            .any(|range| range.contains(cell.cell))
+                            .then_some(true),
                     })
                     .collect()
             })
@@ -1567,6 +1625,10 @@ mod tests {
         ] {
             let frame: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
             assert_eq!(frame["grid"]["colOffsets"].as_array().unwrap().len(), 9);
+            assert_eq!(
+                frame["grid"]["hiddenColSpans"],
+                serde_json::json!([[8, xlsx_model::MAX_COLS - 1]])
+            );
             assert!(frame.to_string().contains("r19c7"));
         }
     }
@@ -1626,6 +1688,67 @@ mod tests {
             text_command(&display_value(&session), "15");
             assert_eq!(session.save().unwrap(), source);
         }
+    }
+
+    #[test]
+    fn selection_data_json_uses_the_model_without_changing_state() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":1,"row":900000,"col":50,"input":"=1"}"#, None)
+            .unwrap();
+        let version = session.document_version();
+        let saved = session.save().unwrap();
+        let data: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":800000,"col":50,"direction":"down"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            data["edge"],
+            serde_json::json!({ "row": 900000, "col": 50 })
+        );
+        let region: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":900000,"col":50}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            region["region"],
+            serde_json::json!({
+                "top": 900000, "left": 50, "bottom": 900000, "right": 50,
+            })
+        );
+        assert!(region["usedRange"].is_null());
+        let used: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":0,"col":0,"direction":"usedRange"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(used["usedRange"]["bottom"], 900000);
+        assert_eq!(used["usedRange"]["right"], 50);
+        assert!(used["region"].is_null());
+        assert!(used["edge"].is_null());
+        assert!(
+            session
+                .selection_data_json(r#"{"sheet":2,"row":0,"col":0}"#)
+                .is_err()
+        );
+        assert!(
+            session
+                .selection_data_json(r#"{"sheet":0,"row":1048576,"col":0}"#)
+                .is_err()
+        );
+        assert!(
+            session
+                .selection_data_json(r#"{"sheet":0,"row":0,"col":0,"direction":"diagonal"}"#)
+                .is_err()
+        );
+        assert_eq!(session.workbook.active_sheet(), SheetId(0));
+        assert_eq!(session.document_version(), version);
+        assert_eq!(session.save().unwrap(), saved);
     }
 
     #[test]
@@ -1716,6 +1839,85 @@ mod tests {
                 .unwrap()
                 .contains(r#""isFormula":true"#)
         );
+    }
+
+    #[test]
+    fn copied_cell_inputs_rebase_only_internal_formulas_and_undo_as_a_batch() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        session.edit_cells_json(
+            r#"{"sheet":0,"edits":[{"row":42,"col":3,"input":"=A1+$B$1+A$2+$B2","copyFrom":{"row":40,"col":3}},{"row":43,"col":3,"input":"=A1","copyFrom":{"row":40,"col":3}},{"row":42,"col":4,"input":"=A1"}]}"#,
+            None,
+        ).unwrap();
+        for (row, col, expected) in [(42, 3, "=A3+$B$1+A$2+$B4"), (43, 3, "=A4"), (42, 4, "=A1")] {
+            assert_eq!(
+                session
+                    .workbook
+                    .cell(SheetId(0), CellRef::new(row, col))
+                    .unwrap()
+                    .input,
+                expected
+            );
+        }
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        session.undo_json(None).unwrap();
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(42, 3))
+                .unwrap()
+                .input,
+            ""
+        );
+        session.redo_json(None).unwrap();
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(42, 3))
+                .unwrap()
+                .input,
+            "=A3+$B$1+A$2+$B4"
+        );
+    }
+
+    #[test]
+    fn range_inputs_mark_array_anchors_and_spill_members() {
+        for formula in ["SUM(A1:A2)", "_xlfn.SEQUENCE(2)"] {
+            let mut sheet = Sheet::new("Data");
+            let anchor = CellRef::new(0, 1);
+            sheet.set_cell(
+                anchor,
+                Cell {
+                    formula: Some(formula.into()),
+                    ..Cell::default()
+                },
+            );
+            sheet.set_array_formula(anchor, CellRange::new(anchor, CellRef::new(1, 1)));
+            let mut model = WorkbookModel::default();
+            model.sheets.push(sheet);
+            let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+            let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+            let session = Session::open(&bytes, None).unwrap();
+            let before = session.workbook.save().unwrap();
+            let result = session
+                .range_cells_json(r#"{"sheet":0,"range":"A1:B2"}"#)
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(result["cells"][0][1]["isArrayFormula"], true);
+            assert_eq!(result["cells"][1][1]["isArrayFormula"], true);
+            assert!(result["cells"][0][0].get("isArrayFormula").is_none());
+            let member = session
+                .range_cells_json(r#"{"sheet":0,"range":"B2"}"#)
+                .unwrap();
+            assert!(member.contains(r#""isArrayFormula":true"#));
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":1,"col":1}"#)
+                    .unwrap()
+                    .contains(r#""isArrayFormula":true"#)
+            );
+            assert_eq!(session.workbook.save().unwrap(), before);
+        }
     }
 
     #[test]

@@ -196,7 +196,7 @@ export interface XlsxPluginNavigationOptions {
  */
 export interface XlsxPluginNavigation {
   /**
-   * Activates the sheet, selects `selection` in its direction and reveals the focus cell.
+   * Activates the sheet, selects `selection` in its direction and reveals its anchor (the active cell).
    * Keyboard focus stays where it is unless `focus` is true.
    */
   selectCells(

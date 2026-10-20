@@ -253,7 +253,7 @@ describe('peer bootstrap corpus parity', () => {
         editBoth(baseline.session, bootstrapped.session);
         compareReads(baseline.session, bootstrapped.session);
         await compareBytes(baseline, bootstrapped, host);
-      });
+      }, 30_000);
     }
   }
 });

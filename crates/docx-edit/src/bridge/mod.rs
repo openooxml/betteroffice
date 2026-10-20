@@ -33,7 +33,7 @@
 //! page content height, and the mapping from yrs ids to the numeric ids the
 //! layout contract uses — arrive in [`RenderEnv`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -57,6 +57,7 @@ use crate::list_marker::{ListState, compute_list_marker};
 use crate::seed::synthesized_cell_width;
 
 pub(crate) mod group_pictures;
+mod group_transforms;
 pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
@@ -568,6 +569,89 @@ fn lower_story_with_preview<T: ReadTxn>(
     result
 }
 
+fn can_omit_trailing_body_page_break<T: ReadTxn>(
+    txn: &T,
+    chunks: &[yrs::types::text::Diff<YChange>],
+    starts_at_boundary: bool,
+    local: &local::LocalLowering,
+) -> bool {
+    use crate::structured::source::InlineSource;
+
+    let Some(source) = local.source.upgrade() else {
+        return false;
+    };
+    let mut tail = chunks.iter().rev();
+    let pilcrow = loop {
+        match tail.next().map(|diff| &diff.insert) {
+            Some(Out::YMap(embed))
+                if shared_map_string(embed, txn, "_kind").as_deref() == Some("pageBreak") => {}
+            Some(Out::YMap(mark)) if is_pilcrow(mark, txn) => break mark,
+            _ => return false,
+        }
+    };
+    let empty = match tail.next().map(|diff| &diff.insert) {
+        Some(Out::YMap(embed)) => matches!(
+            shared_map_string(embed, txn, "_kind").as_deref(),
+            Some("pilcrow" | "table" | "blockSdt" | "pageBreak")
+        ),
+        None => starts_at_boundary,
+        _ => false,
+    };
+    if !empty
+        || pilcrow.contains_key(txn, "sectPr")
+        || pilcrow.contains_key(txn, "sectionBreakType")
+    {
+        return false;
+    }
+    let Some(para_id) = shared_map_string(pilcrow, txn, "paraId") else {
+        return false;
+    };
+    let read = source.read();
+    let provenance = &read.provenance;
+    if provenance
+        .block_order
+        .get("body")
+        .is_some_and(|order| order.last().and_then(Option::as_deref) != Some(para_id.as_str()))
+        || !provenance
+            .relocated
+            .iter()
+            .any(|item| item.pin.story == "body" && item.para_id == para_id)
+        || provenance.inline.iter().any(|item| {
+            item.pin.story == "body"
+                && item.para_id == para_id
+                && !matches!(
+                    item.content,
+                    InlineSource::Break {
+                        kind: crate::structured::BreakType::Page,
+                        ..
+                    }
+                )
+        })
+    {
+        return false;
+    }
+    let footnote_position = read
+        .final_section
+        .as_ref()
+        .and_then(|section| section.get("footnotePr"))
+        .and_then(|properties| properties.get("position"))
+        .or_else(|| read.settings.as_ref()?.get("footnotePr")?.get("position"))
+        .and_then(Value::as_str)
+        .unwrap_or("pageBottom");
+    !txn.get_map(crate::STORIES).is_some_and(|stories| {
+        stories.iter(txn).any(|(id, _)| {
+            let note_id = id.strip_prefix("en:").or_else(|| {
+                if matches!(footnote_position, "docEnd" | "sectEnd") {
+                    id.strip_prefix("fn:")
+                } else {
+                    None
+                }
+            });
+            note_id.is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+        })
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_story_chunks<T: ReadTxn>(
     txn: &T,
@@ -587,6 +671,8 @@ fn walk_story_chunks<T: ReadTxn>(
     mut hidden_field_blocks: BTreeSet<String>,
     mut recording: Option<&mut preview::UnitRecorder>,
 ) -> Result<(Vec<LayoutBlock>, preview::WalkPosition, BTreeSet<String>), BridgeError> {
+    let starts_at_boundary =
+        initial.at_block_boundary && initial.paragraph_start == initial.story_index;
     let preview::WalkPosition {
         story_slot,
         mut table_ordinal,
@@ -606,6 +692,7 @@ fn walk_story_chunks<T: ReadTxn>(
     let mut pending_hidden_field_blocks = BTreeSet::new();
     let mut pending_code_join: Option<(Vec<FieldCodeParagraph>, String)> = None;
     let mut field_join: Option<FieldJoin> = None;
+    let mut section_mark_breaks = None;
     macro_rules! position {
         () => {
             preview::WalkPosition {
@@ -702,6 +789,13 @@ fn walk_story_chunks<T: ReadTxn>(
                     ),
                     story_index + 1 == story.len(txn),
                     local_safe
+                        && !(story_id == "body"
+                            && chunk_index + 2 == chunks.len()
+                            && chunks.get(chunk_index + 1).is_some_and(|next| {
+                                matches!(&next.insert, Out::YMap(embed)
+                                    if shared_map_string(embed, txn, "_kind").as_deref()
+                                        == Some("pageBreak"))
+                            }))
                         && reserved.is_empty()
                         && !value_string(values.get("paraId"))
                             .is_some_and(|id| hidden_field_blocks.contains(&id)),
@@ -1005,7 +1099,11 @@ fn walk_story_chunks<T: ReadTxn>(
                 // so an edit before a break leaves its block unchanged.
                 let id = BlockId::Str(format!("{story_id}:{kind}:{break_ordinal}"));
                 break_ordinal += 1;
-                if !hidden {
+                let terminal = kind == "pageBreak"
+                    && story_id == "body"
+                    && story_index + 1 == story.len(txn)
+                    && can_omit_trailing_body_page_break(txn, chunks, starts_at_boundary, local);
+                if !hidden && !terminal {
                     let (pm_start, pm_end) = (Some(pm_cursor as f64), Some((pm_cursor + 1) as f64));
                     blocks.push(if kind == "columnBreak" {
                         LayoutBlock::ColumnBreak(ColumnBreakBlock {
@@ -1016,6 +1114,15 @@ fn walk_story_chunks<T: ReadTxn>(
                         })
                     } else {
                         LayoutBlock::PageBreak(PageBreakBlock {
+                            section_mark_ineligible: section_mark_ineligible(
+                                txn,
+                                chunks,
+                                (chunk_index, story_index),
+                                local.source.upgrade().as_deref(),
+                                story_id,
+                                &mut section_mark_breaks,
+                            )
+                            .then_some(true),
                             sdt_groups: None,
                             id,
                             pm_start,
@@ -1434,7 +1541,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(opaque, txn, "_kind").as_deref() == Some("opaqueDrawing") =>
             {
                 let values = shared_values(opaque, txn);
-                if let Some(preview) = values.get("preview").and_then(any_map) {
+                for preview in opaque_image_previews(&values) {
                     let formatting = lower_run_formatting(attributes, env);
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::Image(lower_image_values(preview, &formatting, env)),
@@ -1525,6 +1632,87 @@ fn walk_story_chunks<T: ReadTxn>(
     Ok((blocks, after, hidden_field_blocks))
 }
 
+type ParagraphBreakEnds = BTreeMap<String, (crate::structured::BreakType, Option<u32>)>;
+
+fn section_mark_ineligible<T: ReadTxn>(
+    txn: &T,
+    chunks: &[yrs::types::text::Diff<YChange>],
+    (chunk_index, story_index): (usize, u32),
+    source: Option<&crate::seed::SourceMetadata>,
+    story_id: &str,
+    breaks: &mut Option<ParagraphBreakEnds>,
+) -> bool {
+    use crate::structured::source::InlineSource;
+
+    let mut owner = chunk_index;
+    let pilcrow = loop {
+        let Some(previous) = owner.checked_sub(1) else {
+            return false;
+        };
+        owner = previous;
+        let Out::YMap(mark) = &chunks[owner].insert else {
+            return false;
+        };
+        if is_pilcrow(mark, txn) {
+            break mark;
+        }
+        if !matches!(
+            shared_map_string(mark, txn, "_kind").as_deref(),
+            Some("pageBreak" | "columnBreak")
+        ) {
+            return false;
+        }
+    };
+    let start = chunks[..owner]
+        .iter()
+        .rposition(|chunk| {
+            matches!(&chunk.insert, Out::YMap(mark) if matches!(
+                shared_map_string(mark, txn, "_kind").as_deref(),
+                Some("pilcrow" | "table" | "blockSdt" | "pageBreak" | "columnBreak")
+            ))
+        })
+        .map_or(0, |index| index + 1);
+    let whitespace_only = start < owner
+        && chunks[start..owner]
+            .iter()
+            .all(|chunk| match &chunk.insert {
+                Out::Any(Any::String(text)) => text.chars().all(char::is_whitespace),
+                Out::YMap(mark) => shared_map_string(mark, txn, "_kind").as_deref() == Some("tab"),
+                _ => false,
+            });
+    if whitespace_only {
+        return true;
+    }
+    let breaks = breaks.get_or_insert_with(|| {
+        let Some(source) = source else {
+            return BTreeMap::new();
+        };
+        let provenance = &source.read().provenance;
+        let Some((inline, _)) = provenance.by_story.get(story_id) else {
+            return BTreeMap::new();
+        };
+        let mut resolved = Default::default();
+        inline
+            .iter()
+            .filter_map(|&index| {
+                let record = &provenance.inline[index];
+                let InlineSource::Break { kind, .. } = record.content else {
+                    return None;
+                };
+                Some((
+                    record.para_id.clone(),
+                    (kind, record.pin.resolve(txn, &mut resolved)),
+                ))
+            })
+            .collect()
+    });
+    let para_id = shared_map_string(pilcrow, txn, "paraId").unwrap_or_default();
+    let pilcrow_index = story_index - (chunk_index - owner) as u32;
+    breaks.get(&para_id).is_some_and(|(kind, position)| {
+        *kind != crate::structured::BreakType::Page || *position != Some(pilcrow_index)
+    })
+}
+
 /// CamelCase alias of [`yrs_doc_to_layout_blocks`] for callers spelling the
 /// entry point the way the boundary names it.
 #[allow(non_snake_case)]
@@ -1534,6 +1722,17 @@ pub fn yrsDocToLayoutBlocks(
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
     yrs_doc_to_layout_blocks(doc, story_id, env)
+}
+
+fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, Any>> {
+    let mut previews = Vec::new();
+    if let Some(preview) = values.get("preview").and_then(any_map) {
+        previews.push(preview);
+    }
+    if let Some(Any::Array(images)) = values.get("previews") {
+        previews.extend(images.iter().filter_map(any_map));
+    }
+    previews
 }
 
 /// The paragraph a field's paragraph joins because the field's code hides its mark, and the
@@ -2404,7 +2603,8 @@ fn lower_shape_block<T: ReadTxn>(
         .and_then(|value| {
             let projected =
                 group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
-            shapes::lower_shape_json(projected.as_ref().unwrap_or(&value), pm_start, env)
+            let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
+            shapes::lower_shape_json(&rendered, pm_start, env)
         })
     {
         return Some(block);
@@ -2742,17 +2942,15 @@ fn lower_inline_sdt_values(
                 });
             }
             "image" | "opaqueDrawing" => {
-                let image = if kind == "opaqueDrawing" {
-                    payload
-                        .and_then(|payload| payload.get("preview"))
-                        .and_then(any_map)
+                let images = if kind == "opaqueDrawing" {
+                    payload.map(opaque_image_previews).unwrap_or_default()
                 } else {
-                    payload
+                    payload.into_iter().collect()
                 };
-                if let Some(payload) = image {
+                for payload in images {
                     runs.push(RawRun {
                         kind: RawRunKind::Image(lower_image_values(payload, &formatting, env)),
-                        formatting,
+                        formatting: formatting.clone(),
                         story_start: story_index,
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
@@ -3360,12 +3558,13 @@ fn flush_paragraph_parts<T: ReadTxn>(
             atom: true,
         });
     }
+    let has_source_content = !drawings.is_empty();
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
 
     if drawings.is_empty() {
-        let paragraph = flush_paragraph(
+        let mut paragraph = flush_paragraph(
             raw_runs,
             pilcrow,
             pilcrow_attributes,
@@ -3378,6 +3577,12 @@ fn flush_paragraph_parts<T: ReadTxn>(
             (map, source),
             carried,
         );
+        if has_source_content || (paragraph.runs.is_empty() && paragraph_pm_units > 0) {
+            paragraph
+                .attrs
+                .get_or_insert_with(Default::default)
+                .has_source_content = Some(true);
+        }
         if paragraph.runs.is_empty()
             && (hides_mark
                 || (!env.show_hidden_text
@@ -3460,6 +3665,14 @@ fn flush_paragraph_parts<T: ReadTxn>(
             (&mut preview::LoweringOutput::default(), 0),
             Vec::new(),
         )));
+    }
+    for block in &mut blocks {
+        if let LayoutBlock::Paragraph(paragraph) = block {
+            paragraph
+                .attrs
+                .get_or_insert_with(Default::default)
+                .has_source_content = Some(true);
+        }
     }
     blocks
 }
@@ -4158,6 +4371,7 @@ fn lower_paragraph_attrs(
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
+    result.has_source_content = true_property(values, "hasSourceContent");
     result.keep_next = true_property(values, "keepNext");
     result.keep_lines = true_property(values, "keepLines");
     result.widow_control = false_property(values, "widowControl");
@@ -6813,5 +7027,20 @@ mod tests {
             ),
         ]);
         assert!(image_outline(&values, &RenderEnv::default()).is_none());
+    }
+
+    #[test]
+    fn image_outlines_read_legacy_and_ordered_colour_modifiers_alike() {
+        for color in [
+            json!({"rgb":"FFFFFF","luminanceModulation":0.75}),
+            json!({"rgb":"FFFFFF","transforms":[{"kind":"lumMod","value":0.75}]}),
+        ] {
+            let values = HashMap::from([(
+                "borderColorValue".to_owned(),
+                serde_json::from_value::<Any>(color).unwrap(),
+            )]);
+            let outline = image_outline(&values, &RenderEnv::default()).unwrap();
+            assert_eq!(outline.color.as_deref(), Some("#BFBFBF"));
+        }
     }
 }

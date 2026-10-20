@@ -44,6 +44,7 @@ pub use workbook::batch::{
     EditRefusal, EditRequest, EditSource, EditStep, EditValidation, MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES, StepGuard, ValidationOutcome, outcome_json,
 };
+pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,
     RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome, ReadRequest, SheetEntry,
@@ -58,15 +59,16 @@ pub use workbook::{
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, DateSystem, DefinedName, ErrorValue,
-    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetChart, SheetFormat, SheetId,
-    Stylesheet, Workbook as WorkbookModel,
+    ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, Color, DateSystem, DefinedName,
+    ErrorValue, FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, RichRun, RowId, RunBaseline, RunStyle,
+    RunUnderline, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 pub use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
     KeptFacets, NumberFormatMutation, Op, Proposal, ProposedEdit, Provenance, StylePatch,
     StyleProperty, TextWrapping, Transaction, VerticalAlignment,
 };
+pub use xlsx_parse::translate_formula;
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
     HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,

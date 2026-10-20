@@ -937,8 +937,7 @@ impl Scan {
         let Some(stories) = txn.get_map(STORIES) else {
             return scan;
         };
-        let mut texts: Vec<(String, TextRef)> = stories
-            .iter(txn)
+        let mut texts: Vec<(String, TextRef)> = crate::live_stories(&stories, txn)
             .filter_map(|(id, value)| match value {
                 Out::YText(text) => Some((id.to_string(), text)),
                 _ => None,
@@ -1744,8 +1743,10 @@ impl EditingDoc {
             .get_map(SESSION)
             .and_then(|session| map_string(&session, &txn, GENERATION));
         let story = txn.get_map(STORIES).and_then(|stories| {
-            stories.get(&txn, "body").or_else(|| {
-                let mut names: Vec<String> = stories.keys(&txn).map(str::to_owned).collect();
+            story_ref(&txn, "body").ok().map(Out::YText).or_else(|| {
+                let mut names: Vec<String> = crate::live_stories(&stories, &txn)
+                    .map(|(id, _)| id.to_owned())
+                    .collect();
                 names.sort();
                 names.first().and_then(|name| stories.get(&txn, name))
             })

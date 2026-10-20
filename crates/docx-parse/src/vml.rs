@@ -237,11 +237,64 @@ pub(crate) fn vml_image_content(
     picture: &XmlElement,
     relationships: Option<&RelationshipMap>,
     media: Option<&MediaMap>,
-    mut budget: Option<&mut ParseBudget<'_>>,
+    budget: Option<&mut ParseBudget<'_>>,
 ) -> Option<Image> {
+    vml_images(picture, relationships, media, budget, 1)
+        .into_iter()
+        .next()
+}
+
+pub(crate) fn vml_image_contents(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    budget: Option<&mut ParseBudget<'_>>,
+) -> Vec<Image> {
+    vml_images(picture, relationships, media, budget, MAX_VML_SHAPES)
+}
+
+pub(crate) fn vml_story_image_contents(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    budget: Option<&mut ParseBudget<'_>>,
+) -> Vec<Image> {
+    vml_shape_images(picture, false, relationships, media, budget, MAX_VML_SHAPES)
+}
+
+fn vml_images(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    mut budget: Option<&mut ParseBudget<'_>>,
+    limit: usize,
+) -> Vec<Image> {
+    let images = vml_shape_images(
+        picture,
+        false,
+        relationships,
+        media,
+        budget.as_deref_mut(),
+        limit,
+    );
+    if !images.is_empty() {
+        return images;
+    }
+    vml_shape_images(picture, true, relationships, media, budget, 1)
+}
+
+fn vml_shape_images(
+    picture: &XmlElement,
+    text_boxes: bool,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    mut budget: Option<&mut ParseBudget<'_>>,
+    limit: usize,
+) -> Vec<Image> {
     let mut shapes = Vec::new();
-    collect_vml_shapes(picture, 0, &mut shapes);
-    for shape in shapes.into_iter().take(MAX_VML_SHAPES) {
+    collect_vml_shapes(picture, None, text_boxes, 0, &mut shapes);
+    let mut images = Vec::new();
+    for (shape, group) in shapes {
         let Some(image_data) = direct_image_data(shape) else {
             continue;
         };
@@ -265,6 +318,10 @@ pub(crate) fn vml_image_content(
         let style = parse_style_attr(shape.attribute(None, "style"));
         let mut width = css_length_to_px(style.get("width").map(String::as_str));
         let mut height = css_length_to_px(style.get("height").map(String::as_str));
+        if let Some(group) = group {
+            width = group_length_to_px(style.get("width").map(String::as_str), group.scale_x);
+            height = group_length_to_px(style.get("height").map(String::as_str), group.scale_y);
+        }
         if width.is_none() || height.is_none() {
             if let Some((intrinsic_width, intrinsic_height)) = intrinsic_size_px(
                 image_src_bytes(resolved.src.as_deref(), budget.as_deref_mut()).as_deref(),
@@ -284,11 +341,14 @@ pub(crate) fn vml_image_content(
                 }
             }
         }
+        let group_style = group.map(|group| parse_style_attr(group.root.attribute(None, "style")));
+        let placement_style = group_style.as_ref().unwrap_or(&style);
         let positioned = matches!(
-            style.get("position").map(String::as_str),
+            placement_style.get("position").map(String::as_str),
             Some("absolute" | "relative")
         );
-        let wrap_type = shape
+        let wrap_type = group
+            .map_or(shape, |group| group.root)
             .child_elements()
             .find(|child| child.local_name() == "wrap")
             .and_then(|wrap| wrap.attribute(None, "type"));
@@ -305,6 +365,7 @@ pub(crate) fn vml_image_content(
                 Some("none") => "inFront",
                 Some("tight") => "tight",
                 Some("through") => "through",
+                None if group.is_some() => "inFront",
                 _ => "square",
             }
         });
@@ -322,52 +383,89 @@ pub(crate) fn vml_image_content(
             .map(|value| truncate_utf8(value, 4_096).to_owned());
 
         if positioned {
-            // `left`/`top` are group-child coordinates, never anchor offsets.
             let anchor_left = css_length_to_px(style.get("margin-left").map(String::as_str))
                 .and_then(pixels_to_emu);
             let anchor_top = css_length_to_px(style.get("margin-top").map(String::as_str))
                 .and_then(pixels_to_emu);
-            let left = anchor_left.or_else(|| {
+            let mut left = anchor_left.or_else(|| {
                 css_length_to_px(style.get("left").map(String::as_str)).and_then(pixels_to_emu)
             });
-            let top = anchor_top.or_else(|| {
+            let mut top = anchor_top.or_else(|| {
                 css_length_to_px(style.get("top").map(String::as_str)).and_then(pixels_to_emu)
             });
+            if let Some(group) = group {
+                left = pixels_to_emu(
+                    group.offset_x
+                        + group_length_to_px(
+                            style
+                                .get("left")
+                                .or_else(|| style.get("margin-left"))
+                                .map(String::as_str),
+                            group.scale_x,
+                        )
+                        .unwrap_or(0.0),
+                );
+                top = pixels_to_emu(
+                    group.offset_y
+                        + group_length_to_px(
+                            style
+                                .get("top")
+                                .or_else(|| style.get("margin-top"))
+                                .map(String::as_str),
+                            group.scale_y,
+                        )
+                        .unwrap_or(0.0),
+                );
+            }
+            let z_index = placement_style
+                .get("z-index")
+                .or_else(|| style.get("z-index"))
+                .and_then(|value| js_number(value))
+                .filter(safe_number);
+            let behind_doc = z_index.map(|value| value < 0.0);
+            if behind_doc == Some(true) && matches!(wrap_type, None | Some("none")) {
+                image.wrap = blank_wrap("behind");
+            }
             image.position = Some(ImagePosition {
                 use_simple_pos: None,
                 simple_pos: None,
-                relative_height: style
-                    .get("z-index")
-                    .and_then(|value| js_number(value))
-                    .filter(safe_number),
-                behind_doc: None,
-                hidden: matches!(style.get("visibility").map(String::as_str), Some("hidden"))
+                relative_height: z_index.map(|value| value.max(0.0)),
+                behind_doc,
+                hidden: (matches!(style.get("visibility").map(String::as_str), Some("hidden"))
+                    || matches!(
+                        placement_style.get("visibility").map(String::as_str),
+                        Some("hidden")
+                    ))
+                .then_some(true)
+                .or_else(|| {
+                    (matches!(style.get("mso-hide").map(String::as_str), Some("all"))
+                        || matches!(
+                            placement_style.get("mso-hide").map(String::as_str),
+                            Some("all")
+                        ))
                     .then_some(true)
-                    .or_else(|| {
-                        matches!(style.get("mso-hide").map(String::as_str), Some("all"))
-                            .then_some(true)
-                    }),
+                }),
                 locked: None,
                 horizontal: PositionAxis {
                     relative_to: vml_horizontal_relative_to(
-                        style
+                        placement_style
                             .get("mso-position-horizontal-relative")
                             .map(String::as_str),
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: anchor_left,
+                    pos_offset: if group.is_some() { left } else { anchor_left },
                     offset: left,
                 },
                 vertical: PositionAxis {
                     relative_to: vml_vertical_relative_to(
-                        style
+                        placement_style
                             .get("mso-position-vertical-relative")
                             .map(String::as_str),
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: anchor_top,
+                    pos_offset: if group.is_some() { top } else { anchor_top },
                     offset: top,
                 },
             });
@@ -440,9 +538,12 @@ pub(crate) fn vml_image_content(
                 }]),
             });
         }
-        return Some(image);
+        images.push(image);
+        if images.len() >= limit {
+            break;
+        }
     }
-    None
+    images
 }
 
 pub fn extract_watermark(
@@ -578,18 +679,144 @@ fn resolve_watermark_image(
     ResolvedWatermarkImage::default()
 }
 
-fn collect_vml_shapes<'a>(element: &'a XmlElement, depth: usize, output: &mut Vec<&'a XmlElement>) {
-    if depth > MAX_VML_DEPTH || output.len() >= MAX_VML_SHAPES {
+#[derive(Clone, Copy)]
+struct VmlGroupTransform<'a> {
+    root: &'a XmlElement,
+    scale_x: f64,
+    scale_y: f64,
+    offset_x: f64,
+    offset_y: f64,
+}
+
+fn vml_coordinate_pair(raw: Option<&str>, default: (f64, f64)) -> (f64, f64) {
+    raw.and_then(|raw| {
+        let mut values = raw
+            .split(|character: char| character == ',' || character.is_whitespace())
+            .filter(|value| !value.is_empty());
+        let x = js_number(values.next()?).filter(safe_number)?;
+        let y = js_number(values.next()?).filter(safe_number)?;
+        values.next().is_none().then_some((x, y))
+    })
+    .unwrap_or(default)
+}
+
+fn group_length_to_px(raw: Option<&str>, scale: f64) -> Option<f64> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let coordinate = js_number(raw).or_else(|| {
+        ["pt", "px", "in", "cm", "mm", "pc"]
+            .into_iter()
+            .find_map(|unit| {
+                raw.strip_suffix(unit)
+                    .filter(|value| !value.trim().is_empty())
+                    .and_then(js_number)
+            })
+    })?;
+    let pixels = coordinate * scale;
+    safe_number(&pixels).then_some(pixels)
+}
+
+fn group_transform<'a>(
+    element: &'a XmlElement,
+    parent: Option<VmlGroupTransform<'a>>,
+) -> VmlGroupTransform<'a> {
+    let style = parse_style_attr(element.attribute(None, "style"));
+    let (origin_x, origin_y) =
+        vml_coordinate_pair(element.attribute(None, "coordorigin"), (0.0, 0.0));
+    let (coord_width, coord_height) =
+        vml_coordinate_pair(element.attribute(None, "coordsize"), (1000.0, 1000.0));
+    let coord_width = if coord_width > 0.0 {
+        coord_width
+    } else {
+        1000.0
+    };
+    let coord_height = if coord_height > 0.0 {
+        coord_height
+    } else {
+        1000.0
+    };
+    let parent_scale_x = parent.map_or(1.0, |parent| parent.scale_x);
+    let parent_scale_y = parent.map_or(1.0, |parent| parent.scale_y);
+    let length = |raw, scale| {
+        if parent.is_some() {
+            group_length_to_px(raw, scale)
+        } else {
+            css_length_to_px(raw)
+        }
+    };
+    let width = length(style.get("width").map(String::as_str), parent_scale_x)
+        .unwrap_or(coord_width * parent_scale_x);
+    let height = length(style.get("height").map(String::as_str), parent_scale_y)
+        .unwrap_or(coord_height * parent_scale_y);
+    let offset = |coordinate, margin| {
+        if parent.is_some() {
+            style.get(coordinate).or_else(|| style.get(margin))
+        } else {
+            style.get(margin).or_else(|| style.get(coordinate))
+        }
+        .map(String::as_str)
+    };
+    let left = length(offset("left", "margin-left"), parent_scale_x).unwrap_or(0.0);
+    let top = length(offset("top", "margin-top"), parent_scale_y).unwrap_or(0.0);
+    let scale_x = width / coord_width;
+    let scale_y = height / coord_height;
+    VmlGroupTransform {
+        root: parent.map_or(element, |parent| parent.root),
+        scale_x,
+        scale_y,
+        offset_x: parent.map_or(0.0, |parent| parent.offset_x) + left - origin_x * scale_x,
+        offset_y: parent.map_or(0.0, |parent| parent.offset_y) + top - origin_y * scale_y,
+    }
+}
+
+fn collect_vml_shapes<'a>(
+    element: &'a XmlElement,
+    group: Option<VmlGroupTransform<'a>>,
+    text_boxes: bool,
+    depth: usize,
+    output: &mut Vec<(&'a XmlElement, Option<VmlGroupTransform<'a>>)>,
+) {
+    let text_box = matches!(element.name.as_str(), "v:textbox" | "w:txbxContent");
+    if depth > MAX_VML_DEPTH || output.len() >= MAX_VML_SHAPES || (text_box && !text_boxes) {
         return;
     }
+    let group = if element.name == "v:group" {
+        Some(group_transform(element, group))
+    } else if text_box {
+        None
+    } else {
+        group
+    };
     if matches!(
         element.name.as_str(),
         "v:shape" | "v:rect" | "v:roundrect" | "v:oval"
     ) {
-        output.push(element);
+        output.push((element, group));
     }
-    for child in element.child_elements() {
-        collect_vml_shapes(child, depth + 1, output);
+    let mut children: Vec<_> = element
+        .child_elements()
+        .map(|child| {
+            let z_index = if element.name == "v:group" {
+                parse_style_attr(child.attribute(None, "style"))
+                    .get("z-index")
+                    .and_then(|value| js_number(value))
+                    .filter(safe_number)
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            (z_index, child)
+        })
+        .collect();
+    if element.name == "v:group" {
+        children.sort_by(|(left, _), (right, _)| {
+            left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    for (_, child) in children {
+        collect_vml_shapes(child, group, text_boxes, depth + 1, output);
         if output.len() >= MAX_VML_SHAPES {
             break;
         }
@@ -1148,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_vml_child_coordinates_are_not_anchor_offsets() {
+    fn grouped_vml_child_coordinates_use_the_group_anchor_and_default_coordsize() {
         let picture = root(
             r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:group style="position:absolute;margin-left:36pt;margin-top:770.6pt;width:540pt;height:1.5pt"><v:shape id="Picture 41" style="position:absolute;left:2476;top:4038;width:6952;height:3368"><v:imagedata r:id="rId2"/></v:shape></v:group></w:pict>"#,
         );
@@ -1156,9 +1383,190 @@ mod tests {
             .unwrap()
             .position
             .unwrap();
-        assert_eq!(position.horizontal.pos_offset, None);
-        assert_eq!(position.vertical.pos_offset, None);
-        assert_eq!(position.horizontal.offset, Some(23_583_900.0));
+        assert_eq!(position.horizontal.pos_offset, Some(17_437_608.0));
+        assert_eq!(position.vertical.pos_offset, Some(9_863_544.0));
+        assert_eq!(position.horizontal.offset, position.horizontal.pos_offset);
+        assert_eq!(position.vertical.offset, position.vertical.pos_offset);
+    }
+
+    #[test]
+    fn nested_vml_groups_compose_origins_scales_and_offsets() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group coordorigin="10,20" coordsize="1000,500" style="position:absolute;margin-left:8px;margin-top:12px;width:200px;height:100px;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"><v:group coordorigin="50,60" coordsize="200,100" style="left:110;top:70;width:400;height:200"><v:shape style="left:75;top:85;width:50;height:25"><v:imagedata r:id="rId1"/></v:shape></v:group><v:shape style="left:10;top:20;width:100;height:50"><v:imagedata r:id="rId2"/></v:shape></v:group></w:pict>"#,
+        );
+        let images = vml_image_contents(&picture, None, None, None);
+        assert_eq!(images.len(), 2);
+        for (image, (id, x, y, width, height)) in images.iter().zip([
+            ("rId1", 38.0, 32.0, 20.0, 10.0),
+            ("rId2", 8.0, 12.0, 20.0, 10.0),
+        ]) {
+            assert_eq!(image.relationship_id, id);
+            assert_eq!(image.size.width, width * EMU_PER_PIXEL);
+            assert_eq!(image.size.height, height * EMU_PER_PIXEL);
+            let position = image.position.as_ref().unwrap();
+            assert_eq!(position.horizontal.relative_to, "page");
+            assert_eq!(position.vertical.relative_to, "page");
+            assert_eq!(position.horizontal.pos_offset, Some(x * EMU_PER_PIXEL));
+            assert_eq!(position.vertical.pos_offset, Some(y * EMU_PER_PIXEL));
+        }
+    }
+
+    #[test]
+    fn grouped_vml_placement_uses_root_position_and_explicit_wrap() {
+        for (position, wrap, expected) in [
+            ("", "", "inline"),
+            ("position:absolute;", "", "inFront"),
+            (
+                "position:relative;",
+                r#"<w10:wrap type="square"/>"#,
+                "square",
+            ),
+        ] {
+            let picture = root(&format!(
+                r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:w10="w10"><v:group coordsize="1000,1000" style="{position}width:200px;height:100px"><v:shape style="position:absolute;left:100;top:200;width:300;height:400"><v:imagedata r:id="rId1"/></v:shape><v:shape style="width:200;height:100"><v:imagedata r:id="rId2"/></v:shape>{wrap}</v:group></w:pict>"#
+            ));
+            let images = vml_image_contents(&picture, None, None, None);
+            assert_eq!(images.len(), 2);
+            for image in images {
+                assert_eq!(image.wrap.wrap_type, expected);
+                assert_eq!(image.position.is_some(), !position.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_vml_lengths_scale_coordinate_suffixes_and_empty_values() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group coordorigin="10,20" coordsize="1000,500" style="position:absolute;left:8;top:12;width:200;height:100"><v:group coordorigin="50,60" coordsize="200,100" style="left:110pt;top:70px;width:400pt;height:200px"><v:shape style="left:75pt;top:85px;width:50pt;height:25px"><v:imagedata r:id="rId1"/></v:shape></v:group><v:group coordsize="1000,500" style="width:;height:100"><v:shape style="width:50;height:25"><v:imagedata r:id="rId2"/></v:shape></v:group></v:group></w:pict>"#,
+        );
+        let images = vml_image_contents(&picture, None, None, None);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].size.width, 20.0 * EMU_PER_PIXEL);
+        assert_eq!(images[0].size.height, 10.0 * EMU_PER_PIXEL);
+        let position = images[0].position.as_ref().unwrap();
+        assert_eq!(position.horizontal.pos_offset, Some(38.0 * EMU_PER_PIXEL));
+        assert_eq!(position.vertical.pos_offset, Some(32.0 * EMU_PER_PIXEL));
+        assert_eq!(images[1].size.width, 10.0 * EMU_PER_PIXEL);
+        assert_eq!(images[1].size.height, EMU_PER_PIXEL);
+        assert_eq!(group_length_to_px(Some(""), 0.2), None);
+        assert_eq!(group_length_to_px(Some(" "), 0.2), None);
+    }
+
+    #[test]
+    fn grouped_vml_empty_shape_dimensions_use_intrinsic_size() {
+        let mut png = vec![0; 24];
+        png[..4].copy_from_slice(&[137, b'P', b'N', b'G']);
+        png[16..20].copy_from_slice(&40_u32.to_be_bytes());
+        png[20..24].copy_from_slice(&20_u32.to_be_bytes());
+        let media = build_media_map(&[("word/media/picture.png".to_owned(), png)]);
+        let relationships = RelationshipMap::from([(
+            "rId1".to_owned(),
+            Relationship {
+                id: "rId1".to_owned(),
+                relationship_type: "image".to_owned(),
+                target: "media/picture.png".to_owned(),
+                target_mode: None,
+            },
+        )]);
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group style="width:100px;height:100px"><v:shape style="width:;height:"><v:imagedata r:id="rId1"/></v:shape></v:group></w:pict>"#,
+        );
+        let image = vml_image_content(&picture, Some(&relationships), Some(&media), None).unwrap();
+        assert_eq!(image.size.width, 40.0 * EMU_PER_PIXEL);
+        assert_eq!(image.size.height, 20.0 * EMU_PER_PIXEL);
+    }
+
+    #[test]
+    fn grouped_vml_offsets_prefer_coordinates_and_fall_back_to_margins() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group coordsize="100,100" style="position:absolute;left:99px;top:99px;margin-left:8px;margin-top:12px;width:200px;height:100px"><v:group coordsize="100,100" style="left:10;top:20;margin-left:90;margin-top:90;width:50;height:50"><v:shape style="left:5;top:6;margin-left:80;margin-top:80;width:10;height:10"><v:imagedata r:id="rId1"/></v:shape></v:group><v:group coordsize="100,100" style="margin-left:10;margin-top:20;width:50;height:50"><v:shape style="margin-left:5;margin-top:6;width:10;height:10"><v:imagedata r:id="rId2"/></v:shape></v:group></v:group></w:pict>"#,
+        );
+        let images = vml_image_contents(&picture, None, None, None);
+        assert_eq!(images.len(), 2);
+        for image in images {
+            let position = image.position.unwrap();
+            assert_eq!(position.horizontal.pos_offset, Some(33.0 * EMU_PER_PIXEL));
+            assert_eq!(position.vertical.pos_offset, Some(35.0 * EMU_PER_PIXEL));
+        }
+    }
+
+    #[test]
+    fn grouped_vml_negative_root_z_index_stays_behind_text() {
+        for (root_z, child_z, expected_z, behind) in [
+            ("z-index:-10;", "z-index:5;", 0.0, true),
+            ("z-index:10;", "z-index:-5;", 10.0, false),
+            ("", "z-index:-5;", 0.0, true),
+        ] {
+            let picture = root(&format!(
+                r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group style="position:absolute;{root_z}width:200px;height:100px"><v:shape style="{child_z}width:500;height:500"><v:imagedata r:id="rId1"/></v:shape></v:group></w:pict>"#
+            ));
+            let image = vml_image_content(&picture, None, None, None).unwrap();
+            assert_eq!(
+                image.wrap.wrap_type,
+                if behind { "behind" } else { "inFront" }
+            );
+            let position = image.position.unwrap();
+            assert_eq!(position.relative_height, Some(expected_z));
+            assert_eq!(position.behind_doc, Some(behind));
+        }
+    }
+
+    #[test]
+    fn grouped_vml_pictures_follow_child_z_order_and_keep_root_stacking() {
+        for root_z in [-10.0_f64, 10.0] {
+            let picture = root(&format!(
+                r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group style="position:absolute;z-index:{root_z};width:100px;height:100px"><v:shape style="z-index:2;width:500;height:500"><v:imagedata r:id="rIdHigh"/></v:shape><v:shape style="z-index:1;width:500;height:500"><v:imagedata r:id="rIdLow"/></v:shape><v:group style="z-index:1;width:500;height:500"><v:shape style="z-index:2;width:500;height:500"><v:imagedata r:id="rIdNestedHigh"/></v:shape><v:shape style="z-index:1;width:500;height:500"><v:imagedata r:id="rIdNestedLow"/></v:shape></v:group></v:group></w:pict>"#
+            ));
+            let images = vml_image_contents(&picture, None, None, None);
+            assert_eq!(
+                images
+                    .iter()
+                    .map(|image| image.relationship_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["rIdLow", "rIdNestedLow", "rIdNestedHigh", "rIdHigh"]
+            );
+            for image in images {
+                let behind = root_z < 0.0;
+                assert_eq!(
+                    image.wrap.wrap_type,
+                    if behind { "behind" } else { "inFront" }
+                );
+                let position = image.position.unwrap();
+                assert_eq!(position.relative_height, Some(root_z.max(0.0)));
+                assert_eq!(position.behind_doc, Some(behind));
+            }
+        }
+    }
+
+    #[test]
+    fn vml_picture_does_not_claim_images_inside_a_textbox_story() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:shape style="width:200px;height:100px"><v:imagedata r:id="rIdOuter"/><v:textbox><w:txbxContent><w:p><w:r><w:pict><v:shape style="width:20px;height:10px"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+        let outer = vml_image_contents(&picture, None, None, None);
+        assert_eq!(outer.len(), 1);
+        assert_eq!(outer[0].relationship_id, "rIdOuter");
+        assert_eq!(outer[0].size.width, 200.0 * EMU_PER_PIXEL);
+        let inner = picture
+            .find_deep("w", "txbxContent")
+            .unwrap()
+            .find_deep("w", "pict")
+            .unwrap();
+        let images = vml_image_contents(inner, None, None, None);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].size.width, 20.0 * EMU_PER_PIXEL);
+    }
+
+    #[test]
+    fn vml_picture_only_inside_a_textbox_story_stays_visible() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:group style="width:400px;height:200px" coordsize="100,100"><v:shape style="width:100;height:100"><v:textbox><w:txbxContent><w:p><w:r><w:pict><v:shape style="width:20px;height:10px"><v:imagedata r:id="rId1"/></v:shape><v:shape style="width:30px;height:15px"><v:imagedata r:id="rId2"/></v:shape></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></v:group></w:pict>"#,
+        );
+        let images = vml_image_contents(&picture, None, None, None);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].relationship_id, "rId1");
+        assert_eq!(images[0].size.width, 20.0 * EMU_PER_PIXEL);
+        assert_eq!(images[0].size.height, 10.0 * EMU_PER_PIXEL);
     }
 
     #[test]

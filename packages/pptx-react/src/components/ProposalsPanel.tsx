@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
 import type {
@@ -15,6 +15,8 @@ import { commandReason } from '../commands/evaluate';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { useTranslation } from '../i18n';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
+
+const ProposalChangeDetails = lazy(() => import('./ProposalDetails').then((module) => ({ default: module.ProposalChangeDetails })));
 
 interface Props {
   handle: PresentationHandle;
@@ -245,17 +247,11 @@ export function ProposalsPanel({
               >
                 {location(change)}
               </button>
-              {!visualDisabledReason && change.oldText !== change.newText ? (
-                <div style={styles.textDiff}>
-                  <del style={styles.deleted}>
-                    {change.oldText || t('proposals.blank')}
-                  </del>
-                  <ins style={styles.inserted}>
-                    {change.newText || t('proposals.blank')}
-                  </ins>
-                </div>
-              ) : null}
-              {!visualDisabledReason && change.before && change.after && <ShapeChange change={change} />}
+              {!visualDisabledReason && (
+                <Suspense fallback={null}>
+                  <ProposalChangeDetails change={change} t={t} />
+                </Suspense>
+              )}
               <button
                 type="button"
                 data-testid="pptx-proposal-preview"
@@ -351,19 +347,9 @@ export function ProposalsPanel({
                 ))}
               </select>
             </label>
-            {preview.data.proposal.changes[selected.index].oldText !==
-              preview.data.proposal.changes[selected.index].newText && (
-              <div style={styles.textDiff}>
-                <del style={styles.deleted}>
-                  {preview.data.proposal.changes[selected.index].oldText ||
-                    t('proposals.blank')}
-                </del>
-                <ins style={styles.inserted}>
-                  {preview.data.proposal.changes[selected.index].newText ||
-                    t('proposals.blank')}
-                </ins>
-              </div>
-            )}
+            <Suspense fallback={null}>
+              <ProposalChangeDetails change={preview.data.proposal.changes[selected.index]} t={t} textOnly />
+            </Suspense>
             <div style={styles.previews}>
               <PreviewCanvas
                 label={t('proposals.before')}
@@ -411,37 +397,6 @@ export function ProposalsPanel({
         )}
       </dialog>
     </aside>
-  );
-}
-
-function ShapeChange({ change }: { change: ProposalChange }) {
-  const { t } = useTranslation();
-  const before = change.before!;
-  const after = change.after!;
-  const geometryChanged =
-    before.x !== after.x ||
-    before.y !== after.y ||
-    before.width !== after.width ||
-    before.height !== after.height;
-  const rectangle = (shape: typeof before) =>
-    [shape.x, shape.y, shape.width, shape.height]
-      .map((value) => (value / 12700).toFixed(1))
-      .join(', ');
-  return (
-    <>
-      {geometryChanged && (
-        <p style={styles.detail}>
-          {t('proposals.geometry')}
-          <br />
-          {rectangle(before)} → {rectangle(after)} pt
-        </p>
-      )}
-      {JSON.stringify({ ...before, x: 0, y: 0, width: 0, height: 0 }) !==
-        JSON.stringify({ ...after, x: 0, y: 0, width: 0, height: 0 }) &&
-        change.oldText === change.newText && (
-          <p style={styles.detail}>{t('proposals.appearance')}</p>
-        )}
-    </>
   );
 }
 
@@ -530,22 +485,6 @@ const styles: Record<string, CSSProperties> = {
   author: { color: '#4338ca' },
   note: { margin: '6px 0 12px', lineHeight: 1.5 },
   change: { borderTop: '1px solid #eef2f7', padding: '10px 0' },
-  textDiff: {
-    display: 'grid',
-    gap: 6,
-    margin: '8px 0',
-    whiteSpace: 'pre-wrap',
-    overflowWrap: 'anywhere',
-    maxHeight: 200,
-    overflowY: 'auto',
-  },
-  deleted: { color: '#9f1239', background: '#fff1f2', padding: '4px 6px' },
-  inserted: {
-    color: '#166534',
-    background: '#f0fdf4',
-    padding: '4px 6px',
-    textDecoration: 'none',
-  },
   actions: { display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 },
   button: {
     border: '1px solid #cbd5e1',
@@ -582,7 +521,6 @@ const styles: Record<string, CSSProperties> = {
     color: '#92400e',
     lineHeight: 1.5,
   },
-  detail: { color: '#64748b', lineHeight: 1.5 },
   muted: { color: '#64748b', marginTop: 24 },
   dialog: {
     width: 'min(1200px, 92vw)',

@@ -519,7 +519,7 @@ impl Presentation {
     /// The container is rebuilt, so the output is not byte-identical to the
     /// source even without edits.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(self.session.save()?)
+        Ok(self.renderer.save(&self.session)?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {

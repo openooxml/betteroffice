@@ -838,6 +838,7 @@ function runContentToUnits(
         kind: content.kind,
         xml: content.xml,
         ...(content.preview ? { preview: imagePayload(content.preview) } : {}),
+        ...(content.previews?.length ? { previews: content.previews.map(imagePayload) } : {}),
       }, drawingMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
@@ -1144,9 +1145,11 @@ function paragraphAttrs(
     ...(formatting?.cnfStyle ? { cnfStyle: formatting.cnfStyle } : {}),
   };
 
+  if (formatting?.frame) attrs.hasSourceContent = true;
   if (styleResolver) {
     const resolved = styleResolver.resolveParagraphStyle(styleId, tableParagraphFormatting, tableRunFormatting);
     const stylePpr = resolved.paragraphFormatting;
+    if (stylePpr?.frame) attrs.hasSourceContent = true;
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? stylePpr?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? stylePpr?.spaceAfter ?? null;

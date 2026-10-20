@@ -20,7 +20,7 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
-use docx_layout::measure_blocks::TableMeasurementFrame;
+use docx_layout::measure_blocks::{ColumnWidthBand, TableMeasurementFrame};
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
@@ -548,6 +548,7 @@ fn column_measurement_width(
     page_width: f64,
     margins: &docx_layout::types::PageMargins,
     columns: Option<&ColumnLayout>,
+    column_index: usize,
 ) -> f64 {
     let content_width = (page_width - margins.left - margins.right).max(1.0);
     let Some(columns) = columns.filter(|columns| columns.count > 1.0) else {
@@ -557,13 +558,18 @@ fn column_measurement_width(
         && let Some(width) = columns
             .columns
             .as_ref()
-            .and_then(|authored| authored.first())
+            .and_then(|authored| authored.get(column_index))
             .and_then(|column| column.width)
             .filter(|width| width.is_finite() && *width > 0.0)
     {
         return width;
     }
-    ((content_width - (columns.count - 1.0) * columns.gap) / columns.count).floor()
+    let width = (content_width - (columns.count - 1.0) * columns.gap) / columns.count;
+    if columns.equal_width == Some(false) {
+        width
+    } else {
+        width.floor()
+    }
 }
 
 #[cfg(test)]
@@ -634,6 +640,7 @@ fn region_table_measurement_frames<'a>(
     let (fallback_sections, _) =
         docx_layout::prescan::collect_section_configs(&measured_breaks, &initial, final_config);
     let mut section_index = 0;
+    let mut column_index = 0;
     let mut previous_section = None;
     let mut placement_page_width = fallback_size.w;
     let mut placement_margins = &fallback_margins;
@@ -643,6 +650,15 @@ fn region_table_measurement_frames<'a>(
         .into_iter()
         .zip(negative_flows)
         .map(|(block, negative_flow)| {
+            if matches!(block, LayoutBlock::PageBreak(_))
+                || matches!(
+                    block,
+                    LayoutBlock::Paragraph(p)
+                        if p.attrs.as_ref().and_then(|a| a.page_break_before) == Some(true)
+                )
+            {
+                column_index = 0;
+            }
             let section = regions
                 .sections
                 .get(section_index)
@@ -657,7 +673,7 @@ fn region_table_measurement_frames<'a>(
             let columns = section
                 .and_then(|section| section.columns.as_ref())
                 .or(fallback.columns.as_ref());
-            let width = column_measurement_width(size.w, margins, columns);
+            let width = column_measurement_width(size.w, margins, columns, column_index);
             let section_break = section_breaks.get(section_index);
             let placement_columns = match section_break {
                 Some(section_break) => section
@@ -724,8 +740,17 @@ fn region_table_measurement_frames<'a>(
                 section_width_known,
                 allow_side_switch: section_width_known && !negative_flow,
             };
+            if matches!(block, LayoutBlock::ColumnBreak(_)) {
+                let count = columns.map_or(1, |c| (c.count.round() as usize).max(1));
+                column_index = if count > 1 && column_index + 1 < count {
+                    column_index + 1
+                } else {
+                    0
+                };
+            }
             if matches!(block, LayoutBlock::SectionBreak(_)) {
                 section_index += 1;
+                column_index = 0;
             }
             (width, table_frame)
         })
@@ -1291,7 +1316,119 @@ fn floats_follow_the_text(blocks: &[LayoutBlock]) -> bool {
     })
 }
 
-fn stabilize_shape_wrapping<F>(
+fn unequal_column_blocks(input: &LayoutInput, regions: &DocumentRegions) -> Vec<bool> {
+    let breaks: Vec<_> = input
+        .measured
+        .iter()
+        .filter_map(|measured| match &measured.block {
+            LayoutBlock::SectionBreak(section) => Some(section),
+            _ => None,
+        })
+        .collect();
+    let mut section_index = 0;
+    input
+        .measured
+        .iter()
+        .map(|measured| {
+            let columns = regions
+                .sections
+                .get(section_index)
+                .and_then(|section| section.columns.as_ref())
+                .or_else(|| {
+                    breaks
+                        .get(section_index)
+                        .and_then(|section| section.columns.as_ref())
+                })
+                .or(input.options.columns.as_ref());
+            let unequal = columns
+                .is_some_and(|columns| columns.count > 1.0 && columns.equal_width == Some(false));
+            if matches!(measured.block, LayoutBlock::SectionBreak(_)) {
+                section_index += 1;
+            }
+            unequal
+        })
+        .collect()
+}
+
+fn placed_column_measurement_frames(
+    input: &LayoutInput,
+    layout: &Layout,
+    recorded: &[(BlockId, f64)],
+    unequal: &[bool],
+    widths: &mut [f64],
+) -> BTreeMap<usize, Vec<ColumnWidthBand>> {
+    let indices: HashMap<_, _> = input
+        .measured
+        .iter()
+        .enumerate()
+        .filter_map(|(index, measured)| {
+            measured
+                .block
+                .block_id()
+                .map(|id| (block_key(id).into_owned(), index))
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    for (id, width) in recorded {
+        if let Some(&index) = indices.get(block_key(id).as_ref())
+            && unequal[index]
+            && seen.insert(index)
+        {
+            widths[index] = *width;
+        }
+    }
+    let mut bands = BTreeMap::<usize, Vec<ColumnWidthBand>>::new();
+    for fragment in layout.pages.iter().flat_map(|page| &page.fragments) {
+        let docx_layout::types::Fragment::Paragraph(fragment) = fragment else {
+            continue;
+        };
+        let Some(&index) = indices.get(block_key(&fragment.block_id).as_ref()) else {
+            continue;
+        };
+        if !unequal[index] {
+            continue;
+        }
+        let BlockExtent::Paragraph(measure) = &input.measured[index].measure else {
+            continue;
+        };
+        let before = match &input.measured[index].block {
+            LayoutBlock::Paragraph(block) => {
+                docx_layout::paragraph_spacing::get_spacing_before(block)
+            }
+            _ => 0.0,
+        };
+        let height = |end: usize| {
+            measure
+                .lines
+                .iter()
+                .take(end)
+                .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                .sum::<f64>()
+        };
+        widths[index] = widths[index].max(fragment.width);
+        bands.entry(index).or_default().push(ColumnWidthBand {
+            top: if fragment.from_line == 0 {
+                0.0
+            } else {
+                height(fragment.from_line) + before
+            },
+            bottom: height(fragment.to_line) + before,
+            width: fragment.width,
+        });
+    }
+    bands.retain(|index, bands| {
+        if bands.iter().all(|band| band.width == widths[*index]) {
+            return false;
+        }
+        if let Some(last) = bands.last_mut() {
+            last.bottom = f64::INFINITY;
+        }
+        true
+    });
+    bands
+}
+
+fn stabilize_flow_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
@@ -1311,7 +1448,9 @@ where
             _ => None,
         })
         .collect::<Vec<_>>();
-    if shapes.is_empty() {
+    let unequal = unequal_column_blocks(input, regions);
+    let has_unequal = unequal.iter().any(|unequal| *unequal);
+    if shapes.is_empty() && !has_unequal {
         return Ok(false);
     }
     let mut blocks = input
@@ -1319,13 +1458,35 @@ where
         .iter()
         .map(|measured| measured.block.clone())
         .collect::<Vec<_>>();
-    let (widths, table_wrap_frames) =
+    let (mut widths, table_wrap_frames) =
         region_table_measurement_frames(blocks.iter(), input, regions);
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
+    let mut previous_bands = BTreeMap::new();
+    let mut visited = if has_unequal {
+        vec![(
+            previous_offsets.clone(),
+            widths.clone(),
+            previous_bands.clone(),
+        )]
+    } else {
+        Vec::new()
+    };
     let mut touched = false;
-    for phase in 0..shapes.len() + 2 {
-        let layout = place(input, phase)?;
+    let max_phases = if has_unequal {
+        32 + input.measured.len()
+    } else {
+        shapes.len() + 2
+    };
+    for phase in 0..max_phases {
+        let (layout, recorded) = if has_unequal {
+            docx_layout::place::layout_document_with_column_widths(input)?
+        } else {
+            (place(input, phase)?, Vec::new())
+        };
+        let mut next_widths = widths.clone();
+        let mut bands =
+            placed_column_measurement_frames(input, &layout, &recorded, &unequal, &mut next_widths);
         let offsets = shapes
             .iter()
             .filter_map(|(index, id)| {
@@ -1344,16 +1505,52 @@ where
                     })
             })
             .collect::<BTreeMap<_, _>>();
-        if offsets == previous_offsets {
+        if offsets == previous_offsets && next_widths == widths && bands == previous_bands {
             return Ok(touched);
         }
-        let measures = docx_layout::measure_blocks::measure_blocks_with_table_frames(
+        let repeated = visited
+            .iter()
+            .position(|(seen_offsets, seen_widths, seen_bands)| {
+                *seen_offsets == offsets && *seen_widths == next_widths && *seen_bands == bands
+            });
+        let accept = has_unequal && (repeated.is_some() || phase + 1 == max_phases);
+        if accept {
+            for (index, unequal) in unequal.iter().enumerate() {
+                if !unequal {
+                    continue;
+                }
+                let candidates = &visited[repeated.unwrap_or(0)..];
+                if !candidates.iter().any(|(_, widths, previous_bands)| {
+                    widths[index] != next_widths[index]
+                        || previous_bands.get(&index) != bands.get(&index)
+                }) {
+                    continue;
+                }
+                let mut narrowest = next_widths[index];
+                for (_, widths, bands) in candidates {
+                    narrowest = narrowest.min(widths[index]);
+                    for band in bands.get(&index).into_iter().flatten() {
+                        narrowest = narrowest.min(band.width);
+                    }
+                }
+                for band in bands.remove(&index).into_iter().flatten() {
+                    narrowest = narrowest.min(band.width);
+                }
+                next_widths[index] = narrowest;
+            }
+        }
+        if has_unequal {
+            visited.push((offsets.clone(), next_widths.clone(), bands.clone()));
+        }
+        widths = next_widths;
+        let measures = docx_layout::measure_blocks::measure_blocks_with_column_frames(
             &mut blocks,
             &widths,
             &table_wrap_frames,
             measurement,
             Some(&geometry),
             &offsets,
+            &bands,
         )
         .map_err(docx_layout::LayoutError::Invalid)?;
         for (measured, (block, measure)) in
@@ -1363,7 +1560,11 @@ where
             measured.measure = measure;
         }
         touched = true;
+        if accept {
+            return Ok(touched);
+        }
         previous_offsets = offsets;
+        previous_bands = bands;
     }
     Err(docx_layout::LayoutError::Invalid(
         "anchored shape wrapping did not converge".to_owned(),
@@ -5989,7 +6190,7 @@ impl EngineSession {
         notes: &docx_layout::footnotes::NoteLayoutInput,
         env: &RenderEnv,
     ) -> bool {
-        use yrs::{Map, ReadTxn};
+        use yrs::ReadTxn;
         let single_column =
             |columns: Option<&ColumnLayout>| columns.is_none_or(|columns| columns.count == 1.0);
         if !notes.contents.is_empty()
@@ -6006,8 +6207,7 @@ impl EngineSession {
         let notes_present = {
             let txn = self.doc.yrs_doc().transact();
             txn.get_map(crate::STORIES).is_some_and(|stories| {
-                stories
-                    .iter(&txn)
+                crate::live_stories(&stories, &txn)
                     .any(|(id, _)| id.starts_with("fn:") || id.starts_with("en:"))
             })
         };
@@ -6233,7 +6433,7 @@ impl EngineSession {
             let mut global_ids = BTreeSet::new();
             let txn = self.doc.yrs_doc().transact();
             if let Some(stories) = txn.get_map(crate::STORIES) {
-                for (id, value) in stories.iter(&txn) {
+                for (id, value) in crate::live_stories(&stories, &txn) {
                     let Ok(story) = value.cast::<yrs::TextRef>() else {
                         continue;
                     };
@@ -6609,7 +6809,7 @@ impl EngineSession {
         })
     }
 
-    fn stabilize_region_shapes(
+    fn stabilize_region_flow(
         &self,
         input: &mut LayoutInput,
         regions: &DocumentRegions,
@@ -6619,11 +6819,11 @@ impl EngineSession {
         trigger: RelayoutTrigger,
     ) -> Result<bool, docx_layout::LayoutError> {
         if !trigger.uses_region_path() {
-            return stabilize_shape_wrapping(input, regions, measurement, |input, _| {
+            return stabilize_flow_wrapping(input, regions, measurement, |input, _| {
                 docx_layout::place::layout_document(input)
             });
         }
-        stabilize_shape_wrapping(input, regions, measurement, |input, phase| {
+        stabilize_flow_wrapping(input, regions, measurement, |input, phase| {
             let mut fingerprints =
                 measured_fingerprints(input).map_err(docx_layout::LayoutError::Invalid)?;
             self.prepare_placement_fingerprints(
@@ -6701,7 +6901,7 @@ impl EngineSession {
             None
         };
         if resident_body
-            && stabilize_shape_wrapping(&mut input, &regions, &measurement, |input, _| {
+            && stabilize_flow_wrapping(&mut input, &regions, &measurement, |input, _| {
                 docx_layout::place::layout_document(input)
             })
             .map_err(layout_error_message)?
@@ -6809,7 +7009,7 @@ impl EngineSession {
                 };
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
                 if resident_body {
-                    stabilize_shape_wrapping(pass, &regions, &measurement, |input, _| {
+                    stabilize_flow_wrapping(pass, &regions, &measurement, |input, _| {
                         docx_layout::place::layout_document(input)
                     })?;
                 }
@@ -6829,12 +7029,9 @@ impl EngineSession {
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             let reshaped = resident_body
-                && stabilize_shape_wrapping(
-                    &mut final_input,
-                    &regions,
-                    &measurement,
-                    |input, _| docx_layout::place::layout_document(input),
-                )
+                && stabilize_flow_wrapping(&mut final_input, &regions, &measurement, |input, _| {
+                    docx_layout::place::layout_document(input)
+                })
                 .map_err(layout_error_message)?;
             let fingerprints = if reshaped {
                 measured_fingerprints(&final_input)?
@@ -7073,7 +7270,7 @@ impl EngineSession {
         };
         if resident_body
             && self
-                .stabilize_region_shapes(
+                .stabilize_region_flow(
                     &mut input,
                     &regions,
                     &measurement,
@@ -7198,7 +7395,7 @@ impl EngineSession {
                 })?;
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
                 let reshaped = resident_body
-                    && self.stabilize_region_shapes(
+                    && self.stabilize_region_flow(
                         pass,
                         &regions,
                         &measurement,
@@ -7260,7 +7457,7 @@ impl EngineSession {
             if !uses_region_path {
                 let reshaped = resident_body
                     && self
-                        .stabilize_region_shapes(
+                        .stabilize_region_flow(
                             &mut final_input,
                             &regions,
                             &measurement,
@@ -8030,14 +8227,13 @@ impl EngineSession {
         if changed.is_empty() {
             return Ok(paragraphs);
         }
-        use yrs::{Map, ReadTxn, Transact};
+        use yrs::{ReadTxn, Transact};
         let stories: Vec<String> = {
             let txn = self.doc.yrs_doc().transact();
             txn.get_map(crate::STORIES)
                 .map_or_else(Vec::new, |stories| {
-                    stories
-                        .iter(&txn)
-                        .filter(|(_, value)| value.clone().cast::<yrs::TextRef>().is_ok())
+                    crate::live_stories(&stories, &txn)
+                        .filter(|(_, value)| matches!(value, yrs::Out::YText(_)))
                         .map(|(story, _)| story.to_owned())
                         .collect()
                 })
@@ -11076,6 +11272,9 @@ mod trigger_routing_tests;
 mod font_dependency_tests;
 
 #[cfg(test)]
+mod trailing_page_break_tests;
+
+#[cfg(test)]
 mod tests {
     use super::trigger_routing_tests::{OpenSwitch, PreviewSwitch};
     use super::*;
@@ -11102,6 +11301,7 @@ mod tests {
         anchor: &str,
         alignment: &str,
         sections: serde_json::Value,
+        expected_width: f64,
     ) -> (f64, f64) {
         let regions: DocumentRegions =
             serde_json::from_value(json!({"sections": sections})).unwrap();
@@ -11146,7 +11346,7 @@ mod tests {
         apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
         let (widths, table_wrap_frames) =
             region_measurement_frames(blocks.iter(), &input, &regions);
-        assert_eq!(widths[widths.len() - 2], 600.0);
+        assert_eq!(widths[widths.len() - 2], expected_width);
         let font = docx_layout::register_measure_font(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
         ))
@@ -11184,7 +11384,7 @@ mod tests {
             table_wrap_section(1220.0, json!({"count": 2, "gap": 20})),
         ] {
             assert_eq!(
-                measured_table_wrap_margins("column", "left", json!([section])),
+                measured_table_wrap_margins("column", "left", json!([section]), 600.0),
                 (0.0, 0.0)
             );
         }
@@ -11197,7 +11397,7 @@ mod tests {
             json!({"count": 2, "gap": 20, "equalWidth": false, "columns": [{"width": 600}, {"width": 400}]}),
         );
         assert_eq!(
-            measured_table_wrap_margins("text", "left", json!([section])),
+            measured_table_wrap_margins("text", "left", json!([section]), 400.0),
             (0.0, 0.0)
         );
     }
@@ -11206,7 +11406,7 @@ mod tests {
     fn centered_wide_tables_in_equal_columns_keep_main_margins() {
         let section = table_wrap_section(1220.0, json!({"count": 2, "gap": 20}));
         assert_eq!(
-            measured_table_wrap_margins("text", "center", json!([section])),
+            measured_table_wrap_margins("text", "center", json!([section]), 600.0),
             (0.0, 0.0)
         );
     }
@@ -11215,7 +11415,7 @@ mod tests {
     fn wide_tables_in_a_known_single_column_use_the_larger_gap() {
         let section = table_wrap_section(600.0, serde_json::Value::Null);
         assert_eq!(
-            measured_table_wrap_margins("text", "left", json!([section])),
+            measured_table_wrap_margins("text", "left", json!([section]), 600.0),
             (0.0, 369.0)
         );
     }
@@ -11256,7 +11456,7 @@ mod tests {
         let mut third = table_wrap_section(600.0, serde_json::Value::Null);
         third["sectionStart"] = json!("continuous");
         assert_eq!(
-            measured_table_wrap_margins("text", "left", json!([first, second, third])),
+            measured_table_wrap_margins("text", "left", json!([first, second, third]), 600.0),
             (0.0, 0.0)
         );
     }
@@ -14550,9 +14750,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
-    fn relayout_runs_before_a_deleted_table_is_collected() {
-        use yrs::{ReadTxn, StateVector};
+    fn relayout_observes_table_deletion_while_removed_cells_stay_retained() {
+        use yrs::{Map, ReadTxn, StateVector};
 
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
         let engine = EngineSession::new(9390);
         let doc = engine.doc();
         let ctx = crate::EditCtx::local("", "");
@@ -14560,14 +14763,32 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let table = doc
             .insert_table(&ctx, crate::Position::new("body", 0), 1, 1)
             .unwrap();
-        let marker = "text only the deleted table holds";
+        let cell = &table.created_story_ids[0];
+        let marker = "DeletedTableCell";
         doc.insert_text(
             &ctx,
-            crate::Position::new(&table.created_story_ids[0], 0),
+            crate::Position::new(cell, 0),
             marker,
             crate::FormatPolicy::Inherit,
         )
         .unwrap();
+        let request = small_page_request(font);
+        assert!(
+            engine
+                .lower_story_json(cell, &RenderEnv::default())
+                .unwrap()
+                .contains(marker)
+        );
+        assert_eq!(doc.search_text(marker, true, None).unwrap().len(), 1);
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        assert!(
+            engine
+                .retained_kernel_inputs_json()
+                .unwrap()
+                .contains(marker)
+        );
         let epoch = Rc::clone(&engine.doc_epoch);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let probe = Rc::clone(&seen);
@@ -14584,7 +14805,50 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, before + 1);
         assert!(holds(&seen[0].1));
-        assert!(!holds(&doc.encode_state_as_update_v1()));
+        assert!(!doc.keeps_deleted());
+        assert!(doc.delete_story(cell).is_err());
+        assert!(holds(&doc.encode_state_as_update_v1()));
+        {
+            let txn = doc.yrs_doc().transact();
+            let stories = txn.get_map(crate::STORIES).unwrap();
+            let removed = txn.get_map(crate::REMOVED_STORIES).unwrap();
+            assert!(matches!(stories.get(&txn, cell), Some(yrs::Out::YText(_))));
+            assert_eq!(
+                removed.get(&txn, cell),
+                Some(yrs::Out::Any(Any::Bool(true)))
+            );
+        }
+        assert!(doc.table_payload(&table.table).is_err());
+        assert!(doc.story_len(cell).is_err());
+        assert_eq!(
+            doc.list_stories()
+                .stories
+                .into_iter()
+                .map(|info| info.story)
+                .collect::<Vec<_>>(),
+            ["body"]
+        );
+        assert!(doc.search_text(marker, true, None).unwrap().is_empty());
+        assert!(
+            engine
+                .lower_story_json(cell, &RenderEnv::default())
+                .is_err()
+        );
+        assert!(
+            !engine
+                .lower_story_json("body", &RenderEnv::default())
+                .unwrap()
+                .contains(marker)
+        );
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        assert!(
+            !engine
+                .retained_kernel_inputs_json()
+                .unwrap()
+                .contains(marker)
+        );
     }
 
     #[test]
@@ -16409,6 +16673,77 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     #[test]
     fn resident_local_lowering_patch_applies_with_floats() {
         local_lowering_measurement_reuse(true);
+    }
+
+    #[test]
+    fn section_mark_after_page_break_tracks_current_paragraph_text() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let geometry = r#"<w:sectPr><w:pgSz w:w="7200" w:h="4320"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#;
+        for enabled in [false, true] {
+            for (whitespace, width) in [
+                (r#"<w:t xml:space="preserve">   </w:t>"#, 3),
+                ("<w:tab/><w:tab/>", 2),
+            ] {
+                let body = |text: &str| {
+                    format!(
+                        r#"<w:p w14:paraId="10000001"><w:r><w:t>{text}</w:t>{whitespace}<w:br w:type="page"/></w:r></w:p><w:p w14:paraId="10000002"><w:pPr>{geometry}</w:pPr></w:p><w:p w14:paraId="10000003"><w:r><w:t>B</w:t></w:r></w:p>{geometry}"#
+                    )
+                };
+                let bytes = lowering_pages::with_body(&body(""));
+                let engine = EngineSession::new(9657);
+                engine.set_local_lowering(enabled);
+                crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+                engine
+                    .doc()
+                    .apply_raw_ops(
+                        "body",
+                        vec![crate::RawOp::SetEmbedAttr {
+                            index: width + 1,
+                            key: "sectionMarkIneligible".to_owned(),
+                            value: Any::Bool(true),
+                        }],
+                        &crate::EditCtx::local("", ""),
+                    )
+                    .unwrap();
+                let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+                let initial: serde_json::Value = serde_json::from_str(
+                    &engine.layout_document_with_regions_json(&request).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(initial["layout"]["pages"].as_array().unwrap().len(), 3);
+                engine.build_display_list_frame("{}", 0).unwrap();
+
+                for text in [Some("x"), None] {
+                    let end = u32::from(text.is_none());
+                    engine
+                        .edit_resident_text(crate::StoryRange::new("body", 0, end), text, true)
+                        .unwrap();
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    engine.apply_and_layout("body", epoch).unwrap();
+                    let incremental: serde_json::Value = serde_json::from_str(
+                        &engine.layout_document_with_regions_json(&request).unwrap(),
+                    )
+                    .unwrap();
+                    let fresh = EngineSession::new(9658);
+                    crate::seed_from_docx(
+                        fresh.doc(),
+                        &lowering_pages::with_body(&body(text.unwrap_or_default())),
+                    )
+                    .unwrap();
+                    let cold: serde_json::Value = serde_json::from_str(
+                        &fresh.layout_document_with_regions_json(&request).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        incremental["layout"]["pages"].as_array().unwrap().len(),
+                        if text.is_some() { 2 } else { 3 }
+                    );
+                    assert_eq!(incremental, cold, "local={enabled}, text={text:?}");
+                }
+            }
+        }
     }
 
     #[test]

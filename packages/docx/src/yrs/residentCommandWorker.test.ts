@@ -2038,7 +2038,7 @@ for (const offset of [0, 4]) {
       expect(inserted.outcomes[0]?.status).toBe('applied');
       expect(inserted.version).toBe(1);
       expect(inserted.selection!.focus.offset).toBe(1);
-      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(offset ? ['Seed', ''] : ['Seed']);
+      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(offset ? ['Seed', '', ''] : ['Seed']);
       const { parseDocx } = await import('../docx/parser');
       const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
       expect(JSON.stringify(reopened.package.document)).toContain('"breakType":"page"');
@@ -2048,6 +2048,32 @@ for (const offset of [0, 4]) {
     } finally { client.destroy(); }
   }, TIMEOUT);
 }
+
+test('a page break at the end of the document keeps two pages after saving and reopening', async () => {
+  const text = 'Seed';
+  const { client, engine, init } = await openWorker({
+    bodyXml: `<w:p w14:paraId="00000001">${textRun(text)}</w:p>`,
+  });
+  const reopened = await createResidentEngineSession();
+  try {
+    const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: text.length };
+    const inserted = await client.edit(intent(1, 0, 'insertPageBreak', { selection: { anchor: at, focus: at } }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(JSON.parse(engine.retainedLayoutJson()).layout.pages).toHaveLength(2);
+    const bytes = (await client.save({ comments: [] })).bytes;
+    const paragraphs = savedBody(bytes).match(/<w:p\b[^>]*(?:\/>|>[\s\S]*?<\/w:p>)/g)!;
+    expect(paragraphs.at(-2)).toContain('<w:br w:type="page"/>');
+    expect(paragraphs.at(-1)).not.toMatch(/<w:(?:r|hyperlink|sdt)\b/);
+    reopened.openDocx(new Uint8Array(bytes));
+    const fontBytes = init.fonts[0]!;
+    if (!(fontBytes instanceof Uint8Array)) throw new Error('Font bytes unavailable');
+    const font = reopened.registerFont(fontBytes);
+    const request = JSON.parse(init.layoutInput);
+    request.measurement.fontChains = { 'liberation sans|0|0': [font] };
+    reopened.layoutDocumentWithRegionsRetained(JSON.stringify(request));
+    expect(JSON.parse(reopened.retainedLayoutJson()).layout.pages).toHaveLength(2);
+  } finally { reopened.destroy(); client.destroy(); }
+}, TIMEOUT);
 
 test('round two break commands refuse a cell before mutation', async () => {
   const { client, engine } = await openWorker({ bodyXml: OUTER_TABLE, prepare(engine) {

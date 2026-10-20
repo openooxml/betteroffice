@@ -158,6 +158,7 @@ export type {
 export type {
   BlipEffect,
   CaretStop,
+  ColorTransform,
   ColorValue,
   CommentFlavor,
   CommentReceipt,

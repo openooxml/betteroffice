@@ -1503,9 +1503,11 @@ test('p1_atomic_replacement_break_and_unicode_delete', async () => {
     const at = { source: 'confirmed' as const, selection: selection(story, 3, 8) };
     const ack = await session.rpc.call.command(envelope(session.state, 1,
       { kind: 'replaceText', payload: { ...input, at, text: 'X' } }));
-    expect(ack.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'unsupported', committed: false }]);
-    expect((await session.read(1)).stories).toEqual(before.stories);
-    expect(session.document().canUndo()).toBe(false);
+    expect(ack.outcomes).toEqual([{ seq: 1, status: 'applied', committed: true }]);
+    expect((await session.read(1)).stories[0]!.text).toBe('alpXta');
+    const undone = await session.rpc.call.command(envelope(ack, 2, { kind: 'undo', payload: input }));
+    expect((await session.read(2)).stories).toEqual(before.stories);
+    expect(undone.editState.canUndo).toBe(false);
   } finally { await session.dispose(); }
 });
 
@@ -1839,13 +1841,103 @@ test('p4_moveSelection_uses_geometry_after_paragraph_split', async () => {
   } finally { await session.dispose(); }
 });
 
-test('p7_fresh_paragraph_edge_noop_acknowledges_caret_for_chained_end_and_typing', async () => {
+for (const kind of ['deleteBackward', 'deleteForward'] as const) {
+  test(`${kind}_joins_paragraphs_on_confirmed_and_afterSeq_paths_with_history`, async () => {
+    for (const relative of [false, true]) {
+      const session = await open(['a😀\nbc']);
+      try {
+        const before = (await session.read()).stories[0]!;
+        const at = selection(before, kind === 'deleteBackward' ? 4 : 3);
+        const selected = await session.rpc.call.command(envelope(session.state, 1, {
+          kind: 'setSelection', payload: { ...input, selection: at },
+        }));
+        const deleted = await session.rpc.call.command(envelope(selected, 2, { kind, payload: {
+          ...input, at: relative ? { source: 'afterSeq', seq: 1 } : { source: 'confirmed', selection: at },
+          unit: 'codePoint',
+        } }, undefined, relative ? 1 : undefined));
+        expect(deleted.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
+        expect(deleted.selection).toEqual(selection(before, 3));
+        const joined = (await session.read(2)).stories[0]!;
+        expect(joined.text).toBe('a😀bc');
+        expect(joined.paragraphs).toHaveLength(1);
+        covering(deleted, before.slideId);
+        const saved = await session.rpc.call.saveCommandEditor(session.fence(2));
+        const reopened = session.Document.openCollaborative(new Uint8Array(saved.bytes), 7812);
+        try {
+          const restored = content(JSON.parse(reopened.readContentJson('{}')) as PptxReadResult).stories[0]!;
+          expect(restored.text).toBe(joined.text);
+          expect(restored.paragraphs).toHaveLength(1);
+        } finally { reopened.free(); }
+        const undone = await session.rpc.call.command(envelope(deleted, 3, { kind: 'undo', payload: input }));
+        expect((await session.read(3)).stories[0]).toEqual(before);
+        expect(undone.editState.canUndo).toBe(false);
+        const redone = await session.rpc.call.command(envelope(undone, 4, { kind: 'redo', payload: input }));
+        expect((await session.read(4)).stories[0]).toEqual(joined);
+        expect(redone.outcomes).toEqual([{ seq: 4, status: 'applied', committed: true }]);
+      } finally { await session.dispose(); }
+    }
+  });
+}
+
+test('paragraph_joins_handle_empty_paragraphs_and_code_point_counts', async () => {
+  const cases = [
+    { text: '\na', kind: 'deleteBackward', offset: 1, count: 1, expected: 'a' },
+    { text: 'a\n', kind: 'deleteForward', offset: 1, count: 1, expected: 'a' },
+    { text: '\n', kind: 'deleteBackward', offset: 1, count: 1, expected: '' },
+    { text: 'a\n\nbc', kind: 'deleteForward', offset: 1, count: 2, expected: 'abc' },
+    { text: 'a😀\nbc', kind: 'deleteBackward', offset: 4, count: 2, expected: 'abc' },
+    { text: 'a\n😀bc', kind: 'deleteForward', offset: 1, count: 2, expected: 'abc' },
+  ] as const;
+  for (const item of cases) {
+    const session = await open([item.text]);
+    try {
+      const story = (await session.read()).stories[0]!;
+      const deleted = await session.rpc.call.command(envelope(session.state, 1, {
+        kind: item.kind, payload: { ...input,
+          at: { source: 'confirmed', selection: selection(story, item.offset) },
+          unit: 'codePoint', count: item.count },
+      }));
+      expect(deleted.outcomes).toEqual([{ seq: 1, status: 'applied', committed: true }]);
+      const joined = (await session.read(1)).stories[0]!;
+      expect(joined.text).toBe(item.expected);
+      expect(joined.paragraphs).toHaveLength(1);
+      const undone = await session.rpc.call.command(envelope(deleted, 2, { kind: 'undo', payload: input }));
+      expect((await session.read(2)).stories[0]).toEqual(story);
+      expect(undone.editState.canUndo).toBe(false);
+    } finally { await session.dispose(); }
+  }
+});
+
+test('joining_a_paragraph_is_separate_from_adjacent_character_deletions', async () => {
+  const session = await open(['a\nbc']);
+  try {
+    const story = (await session.read()).stories[0]!;
+    const first = await session.rpc.call.command(envelope(session.state, 1, {
+      kind: 'deleteBackward', payload: { ...input,
+        at: { source: 'confirmed', selection: selection(story, 3) }, unit: 'codePoint' },
+    }));
+    expect((await session.read(1)).stories[0]!.text).toBe('a\nc');
+    const joined = await session.rpc.call.command(envelope(first, 2, {
+      kind: 'deleteBackward', payload: { ...input, at: { source: 'afterSeq', seq: 1 }, unit: 'codePoint' },
+    }, undefined, 1));
+    expect((await session.read(2)).stories[0]!.text).toBe('ac');
+    const last = await session.rpc.call.command(envelope(joined, 3, {
+      kind: 'deleteBackward', payload: { ...input, at: { source: 'afterSeq', seq: 2 }, unit: 'codePoint' },
+    }, undefined, 2));
+    const undoLast = await session.rpc.call.command(envelope(last, 4, { kind: 'undo', payload: input }));
+    expect((await session.read(4)).stories[0]!.text).toBe('ac');
+    await session.rpc.call.command(envelope(undoLast, 5, { kind: 'undo', payload: input }));
+    expect((await session.read(5)).stories[0]!.text).toBe('a\nc');
+  } finally { await session.dispose(); }
+});
+
+test('fresh_story_edge_noop_acknowledges_caret_for_chained_end_and_typing', async () => {
   for (const kind of ['deleteBackward', 'deleteForward'] as const) {
     const session = await open(['a\nbc']);
     try {
       const story = (await session.read()).stories[0]!;
       expect(session.state.selection).toBeNull();
-      const at = selection(story, kind === 'deleteBackward' ? 2 : 1);
+      const at = selection(story, kind === 'deleteBackward' ? 0 : 4);
       const deleted = await session.rpc.call.command(envelope(session.state, 1, {
         kind, payload: { ...input, at: { source: 'confirmed', selection: at }, unit: 'codePoint' },
       }));
@@ -1861,26 +1953,26 @@ test('p7_fresh_paragraph_edge_noop_acknowledges_caret_for_chained_end_and_typing
           motion: 'lineEnd', extend: false },
       }, undefined, 1));
       expect(moved.outcomes[0]).toMatchObject({ status: 'applied', committed: false });
-      expect(moved.selection).toEqual({ ...selection(story, kind === 'deleteBackward' ? 4 : 1), affinity: 'upstream' });
+      expect(moved.selection).toEqual({ ...selection(story, kind === 'deleteBackward' ? 1 : 4), affinity: 'upstream' });
       const typed = await session.rpc.call.command(envelope(moved, 3, {
         kind: 'insertText', payload: { ...input, at: { source: 'afterSeq', seq: 2 }, text: 'Y' },
       }, undefined, 2));
       expect(typed.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
       const final = (await session.read(3)).stories[0]!;
-      expect(final.text).toBe(kind === 'deleteBackward' ? 'a\nbcY' : 'aY\nbc');
+      expect(final.text).toBe(kind === 'deleteBackward' ? 'aY\nbc' : 'a\nbcY');
       expect(final.paragraphs.map((paragraph) => final.text.slice(paragraph.start, paragraph.end)))
-        .toEqual(kind === 'deleteBackward' ? ['a', 'bcY'] : ['aY', 'bc']);
+        .toEqual(kind === 'deleteBackward' ? ['aY', 'bc'] : ['a', 'bcY']);
     } finally { await session.dispose(); }
   }
 });
 
-test('collapsed_paragraph_boundary_deletes_are_noops_on_confirmed_and_afterSeq_paths', async () => {
+test('collapsed_story_boundary_deletes_are_noops_on_confirmed_and_afterSeq_paths', async () => {
   for (const kind of ['deleteBackward', 'deleteForward'] as const) {
     for (const relative of [false, true]) {
       const session = await open(['a\nbc']);
       try {
         const story = (await session.read()).stories[0]!;
-        const at = selection(story, kind === 'deleteBackward' ? 2 : 1);
+        const at = selection(story, kind === 'deleteBackward' ? 0 : 4);
         const selected = await session.rpc.call.command(envelope(session.state, 1, {
           kind: 'setSelection', payload: { ...input, selection: at },
         }));
@@ -1899,7 +1991,7 @@ test('collapsed_paragraph_boundary_deletes_are_noops_on_confirmed_and_afterSeq_p
           ...input, at: { source: 'afterSeq', seq: 2 }, text: 'Y',
         } }, undefined, 2));
         expect(typed.outcomes).toEqual([{ seq: 3, status: 'applied', committed: true }]);
-        expect((await session.read(3)).stories[0]!.text).toBe(kind === 'deleteBackward' ? 'a\nYbc' : 'aY\nbc');
+        expect((await session.read(3)).stories[0]!.text).toBe(kind === 'deleteBackward' ? 'Ya\nbc' : 'a\nbcY');
       } finally { await session.dispose(); }
     }
   }

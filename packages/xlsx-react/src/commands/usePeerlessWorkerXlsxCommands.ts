@@ -108,7 +108,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
     const sheetId = session?.editState.sheets?.find((sheet) => sheet.index === view.sheet)?.id;
     if (!sheetId || !view.selection) return undefined;
     const range = normalizeRange(view.selection);
-    return { sheetId, activeCell: { ...view.selection.focus }, range: { kind: 'rowCol',
+    return { sheetId, activeCell: { ...view.selection.anchor }, range: { kind: 'rowCol',
       start: { row: range.top, col: range.left }, end: { row: range.bottom, col: range.right } } };
   };
 

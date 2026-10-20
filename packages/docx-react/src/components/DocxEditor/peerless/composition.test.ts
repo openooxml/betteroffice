@@ -109,6 +109,7 @@ function fakeAdmission() {
     getSnapshot: () => ({ readOnly: snapshot.editState?.readOnly ?? false,
       tail,
       originalUnackedIntents: commands.length,
+      pendingInputs: commands.length,
       echoEnabled: true,
       echoDisabledReason: null,
       compositionSlot: slot,

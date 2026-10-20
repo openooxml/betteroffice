@@ -9,7 +9,7 @@ use pptx_parse::{
     BackgroundWrite, Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite,
     CommentsWrite, DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd,
     PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeWrite, SlideWrite,
-    TextTarget, TextWrite,
+    TextAutofit, TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -23,6 +23,19 @@ impl DeckSession {
     /// Serializes the deck with all edits applied. Untouched slides keep their
     /// exact source part bytes; edited slides are patched at the XML level.
     pub fn save(&self) -> EditResult<Vec<u8>> {
+        self.save_with_autofit(&HashMap::new())
+    }
+
+    #[doc(hidden)]
+    pub fn save_with_autofit(&self, autofit: &HashMap<String, TextAutofit>) -> EditResult<Vec<u8>> {
+        self.save_with_autofit_resolver(|_, _| Ok(autofit.clone()))
+    }
+
+    #[doc(hidden)]
+    pub fn save_with_autofit_resolver(
+        &self,
+        resolve: impl FnOnce(&DeckSnapshot, &DeckSnapshot) -> EditResult<HashMap<String, TextAutofit>>,
+    ) -> EditResult<Vec<u8>> {
         if !self.package.has_parts() {
             return Err(EditError::Write(
                 "this session carries no source file bytes; open it from the \
@@ -30,19 +43,22 @@ impl DeckSession {
                     .to_owned(),
             ));
         }
-        if let Some(attribute) = crate::source_run_properties::unrecovered_attribute(&self.doc) {
+        let current = self.snapshot()?;
+        if let Some(attribute) =
+            crate::source_run_properties::unrecovered_attribute(&self.doc, &current)
+        {
             return Err(EditError::Write(format!(
                 "run {attribute} could not be recovered from the source file for some \
                  restored text, and saving now would drop it"
             )));
         }
-        let current = self.snapshot()?;
         let baseline = baseline_snapshot(&self.package)?;
         if current == baseline {
             return pptx_parse::write_pptx(&self.package)
                 .map_err(|error| EditError::Write(error.to_string()));
         }
-        let deck = deck_write(&current, &baseline, &self.package)?;
+        let autofit = resolve(&current, &baseline)?;
+        let deck = deck_write(&current, &baseline, &self.package, &autofit)?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
@@ -52,6 +68,7 @@ fn deck_write(
     current: &DeckSnapshot,
     baseline: &DeckSnapshot,
     package: &PptxPackage,
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<DeckWrite> {
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
         .slides
@@ -66,7 +83,12 @@ fn deck_write(
             },
             Some(base) => SlideWrite::Patch {
                 part_path: source_part_path(slide)?,
-                shapes: shape_writes(&slide.shapes, &base.shapes, source_shapes(package, slide))?,
+                shapes: shape_writes(
+                    &slide.shapes,
+                    &base.shapes,
+                    source_shapes(package, slide),
+                    autofit,
+                )?,
                 background: background_write(slide, base),
             },
             None if slide.source_part_path.is_some() => {
@@ -86,6 +108,7 @@ fn deck_write(
                         &slide.shapes,
                         &base.shapes,
                         source_shapes(package, slide),
+                        autofit,
                     )?,
                     background: background_write(slide, &base),
                 }
@@ -129,13 +152,15 @@ fn rename_duplicate_shape(shape: &mut ShapeSnapshot, old_slide: &str, new_slide:
 /// The background write a slide's snapshot change needs; `None` keeps the
 /// source declaration untouched.
 fn background_write(current: &SlideSnapshot, baseline: &SlideSnapshot) -> Option<BackgroundWrite> {
-    if current.background == baseline.background {
-        return None;
+    match &current.background {
+        Some(fill) if current.background != baseline.background => {
+            Some(BackgroundWrite::Set(Box::new(fill.clone())))
+        }
+        None if current.background_edited || baseline.background.is_some() => {
+            Some(BackgroundWrite::Clear)
+        }
+        _ => None,
     }
-    Some(match current.background.clone() {
-        Some(fill) => BackgroundWrite::Set(Box::new(fill)),
-        None => BackgroundWrite::Clear,
-    })
 }
 
 fn notes_write(current: &DeckSnapshot, baseline: &DeckSnapshot) -> Option<NotesWrite> {
@@ -409,6 +434,7 @@ fn shape_writes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
     source: &[ShapeNode],
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -424,7 +450,12 @@ fn shape_writes(
                 let index = addressed_source_index(shape, source)?;
                 ShapeWrite::Patch {
                     source_index: index,
-                    patch: Box::new(shape_patch(shape, base, group_children(source, index))?),
+                    patch: Box::new(shape_patch(
+                        shape,
+                        base,
+                        group_children(source, index),
+                        autofit,
+                    )?),
                 }
             }
             None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
@@ -467,6 +498,7 @@ fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
     source_children: &[ShapeNode],
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     let source_inherited = base.width <= 0 || base.height <= 0;
@@ -526,11 +558,12 @@ fn shape_patch(
         }
         patch.texts.push(TextWrite {
             target: text_target(&story.id, &shape.id)?,
+            autofit: autofit.get(&story.id).cloned(),
             paragraphs: paragraph_writes(story, base_story)?,
         });
     }
     if shape.children != base.children {
-        patch.children = shape_writes(&shape.children, &base.children, source_children)?;
+        patch.children = shape_writes(&shape.children, &base.children, source_children, autofit)?;
     }
     Ok(patch)
 }
@@ -572,6 +605,7 @@ fn paragraph_writes(
         if base == Some(paragraph) && source_index.is_some() {
             writes.push(ParagraphWrite {
                 source_index,
+                source_paragraphs: Vec::new(),
                 preserved_xml: None,
                 rebuild: false,
                 properties_changed: false,
@@ -598,6 +632,11 @@ fn paragraph_writes(
             .map_err(|error| EditError::Json(error.to_string()))?;
         writes.push(ParagraphWrite {
             source_index,
+            source_paragraphs: paragraph
+                .source_paragraphs
+                .iter()
+                .map(|source| source.xml.clone())
+                .collect(),
             preserved_xml: paragraph.preserved_xml.clone(),
             rebuild: true,
             properties_changed,
@@ -661,6 +700,7 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: shape.geometry.clone(),
+        text_box: shape.text_box,
         x: shape.x,
         y: shape.y,
         width: shape.width,
@@ -686,6 +726,7 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: "rect".to_owned(),
+        text_box: false,
         x: shape.x,
         y: shape.y,
         width: shape.width,

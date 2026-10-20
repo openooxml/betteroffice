@@ -227,6 +227,36 @@ for (const seeder of ['native', 'projected'] as const) {
         expect(documentXml(bytes)).not.toContain('<w:spacing');
       }
     });
+
+    test(`${seeder} ${save} keeps an indent outdented to zero over a style indent through three reopen cycles`, async () => {
+      let bytes = fixture('<w:ind w:left="1440"/>', '<w:ind w:left="720"/>');
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        bytes = await saveOnce(bytes, seeder, save, cycle === 0 ? (session) => {
+          const paragraph = session.paragraphs('body')[2]!;
+          const position = { paraId: paragraph.paraId, offset: 0 };
+          session.setParagraphAttrs({ story: 'body', start: position, end: position }, { indentLeft: 0 });
+        } : undefined);
+        expect(paragraphs(documentXml(bytes))[2]).toContain('<w:ind w:left="0"/>');
+      }
+    });
+
+    test(`${seeder} ${save} writes line spacing and indent edits over direct properties through three reopen cycles`, async () => {
+      let bytes = fixture('<w:spacing w:before="120" w:after="240" w:line="240" w:lineRule="auto"/><w:ind w:left="360" w:hanging="360"/>');
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        bytes = await saveOnce(bytes, seeder, save, cycle === 0 ? (session) => {
+          const paragraph = session.paragraphs('body')[2]!;
+          const position = { paraId: paragraph.paraId, offset: 0 };
+          session.setParagraphAttrs({ story: 'body', start: position, end: position }, {
+            lineSpacing: 360,
+            lineSpacingRule: 'auto',
+            indentLeft: 1080,
+          });
+        } : undefined);
+        const edited = paragraphs(documentXml(bytes))[2]!;
+        expect(spacingTags(edited)).toEqual(['<w:spacing w:before="120" w:after="240" w:line="360" w:lineRule="auto"/>']);
+        expect(edited).toContain('<w:ind w:left="1080" w:hanging="360"/>');
+      }
+    });
   }
 }
 

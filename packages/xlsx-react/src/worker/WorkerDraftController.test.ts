@@ -51,6 +51,43 @@ function setup() {
 }
 
 describe('loading cell input', () => {
+  for (const source of ['cell', 'formula'] as const) {
+    test(`edits the range anchor through ${source} input`, async () => {
+      const { controller, state, prefill, complete, edits, select } = setup();
+      state.selection = { anchor: { row: 1, col: 1 }, focus: { row: 4, col: 3 } };
+      if (source === 'cell') {
+        controller.open();
+        expect(prefill.mock.calls[0]).toMatchObject([0, { row: 1, col: 1 }]);
+        await complete('anchor');
+        expect(controller.getSnapshot().cell).toMatchObject({ row: 1, col: 1, value: 'anchor' });
+      }
+      controller.change(source, '4242', null);
+      controller.commit(source, 'down');
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatchObject({ row: 1, col: 1, value: '4242' });
+      expect(select.mock.calls[0]).toMatchObject([0, { row: 1, col: 1 }, 'down']);
+    });
+
+    test(`starts ${source} composition at the range anchor`, async () => {
+      const { controller, state, edits } = setup();
+      state.selection = { anchor: { row: 4, col: 3 }, focus: { row: 1, col: 1 } };
+      controller.start(source);
+      controller.change(source, '4242', null);
+      controller.end();
+      await Promise.resolve();
+      expect(edits).toHaveLength(1);
+      expect(edits[0]).toMatchObject({ row: 4, col: 3, value: '4242' });
+    });
+  }
+
+  test('typing replaces the range anchor', () => {
+    const { controller, state, edits } = setup();
+    state.selection = { anchor: { row: 4, col: 3 }, focus: { row: 1, col: 1 } };
+    controller.open('x');
+    controller.commit('cell');
+    expect(edits[0]).toMatchObject({ row: 4, col: 3, value: 'x' });
+  });
+
   for (const inputType of ['insertText', 'insertFromPaste', 'insertFromDrop']) {
     test(`holds ${inputType} text until the existing input arrives`, async () => {
       const { controller, beforeInput, complete } = setup();
@@ -157,7 +194,7 @@ describe('loading cell input', () => {
     });
   }
 
-  for (const changed of ['identity', 'navigation', 'sheet', 'focus', 'value'] as const) {
+  for (const changed of ['identity', 'navigation', 'sheet', 'anchor', 'value'] as const) {
     test(`discards the focused input preview after ${changed} changes`, () => {
       const { controller, state } = setup();
       controller.focusedCellInput = {
@@ -167,12 +204,20 @@ describe('loading cell input', () => {
       if (changed === 'identity') state.identity = 'replacement';
       else if (changed === 'navigation') state.navigation++;
       else if (changed === 'sheet') state.sheet++;
-      else if (changed === 'focus') state.selection.focus = { row: 1, col: 0 };
+      else if (changed === 'anchor') state.selection.anchor = { row: 1, col: 0 };
       else state.valueRevision = 'v2';
       controller.open();
       expect(controller.getSnapshot().cell?.value).toBe('');
     });
   }
+
+  test('retains the active input preview when only the range focus changes', () => {
+    const { controller, state } = setup();
+    controller.focusedCellInput = { identity: controller.focusedCellIdentity, value: 'initial' };
+    state.selection.focus = { row: 1, col: 0 };
+    controller.open();
+    expect(controller.getSnapshot().cell).toMatchObject({ row: 0, col: 0, value: 'initial' });
+  });
 
   test('reuses the focused input through open, cancel and nonmutating command sequences', () => {
     const { controller, state } = setup();

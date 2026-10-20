@@ -1,4 +1,9 @@
-import type { CellEdit, ProposalEdit, WorkbookHandle } from "@betteroffice/xlsx";
+import type {
+  ProposalEdit,
+  XlsxExportCell,
+  XlsxExportSheet,
+  XlsxStructuredContent,
+} from "@betteroffice/xlsx";
 
 const SCAN_ROWS = 200;
 const SCAN_COLS = 26;
@@ -14,9 +19,45 @@ function columnLetter(col: number): string {
   return out;
 }
 
-function isNumericLiteral(cell: CellEdit): boolean {
-  const text = cell.input.trim();
-  return text !== "" && !cell.isFormula && Number.isFinite(Number(text));
+interface GridCell {
+  input: string;
+  isFormula: boolean;
+  isNumber: boolean;
+  occupied: boolean;
+}
+
+function cellPosition(a1: string): { row: number; col: number } | null {
+  const match = /^\$?([A-Z]+)\$?(\d+)$/.exec(a1);
+  if (!match) return null;
+  let col = 0;
+  for (const letter of match[1]) col = col * 26 + letter.charCodeAt(0) - 64;
+  return { row: Number(match[2]) - 1, col: col - 1 };
+}
+
+function cellInput(cell: XlsxExportCell): GridCell {
+  if (cell.formula !== null) return { input: `=${cell.formula}`, isFormula: true, isNumber: false, occupied: true };
+  const value = cell.value;
+  const input =
+    value.kind === "number" || value.kind === "text"
+      ? String(value.value)
+      : value.kind === "bool"
+        ? (value.value ? "TRUE" : "FALSE")
+        : "";
+  return { input, isFormula: false, isNumber: value.kind === "number", occupied: value.kind !== "empty" };
+}
+
+function sheetGrid(sheet: XlsxExportSheet): GridCell[][] {
+  const rows = Array.from({ length: SCAN_ROWS }, () =>
+    Array.from({ length: SCAN_COLS }, () => ({ input: "", isFormula: false, isNumber: false, occupied: false })),
+  );
+  for (const cell of sheet.cells) {
+    if (cell.anchor.kind !== "cell") continue;
+    const at = cellPosition(cell.anchor.a1);
+    if (at && at.row < SCAN_ROWS && at.col < SCAN_COLS) {
+      rows[at.row][at.col] = cellInput(cell);
+    }
+  }
+  return rows;
 }
 
 interface ColumnSpan {
@@ -25,7 +66,7 @@ interface ColumnSpan {
   count: number;
 }
 
-function dashboardEdits(rows: CellEdit[][], sheet: number): ProposalEdit[] | null {
+function dashboardEdits(rows: GridCell[][], sheet: number): ProposalEdit[] | null {
   const headerRow = rows.findIndex((row) =>
     ["Units", "Revenue", "Growth", "Updated"].every((label) =>
       row.some((cell) => cell.input.trim() === label),
@@ -47,8 +88,8 @@ function dashboardEdits(rows: CellEdit[][], sheet: number): ProposalEdit[] | nul
   const dataRows = rows
     .map((row, index) => ({ row, index }))
     .filter(({ row, index }) => index > headerRow && index < totalRow && row[0]?.input.trim());
-  const unitsCell = dataRows.find(({ row }) => isNumericLiteral(row[units]));
-  const revenueCell = dataRows.find(({ row }) => isNumericLiteral(row[revenue]));
+  const unitsCell = dataRows.find(({ row }) => row[units].isNumber);
+  const revenueCell = dataRows.find(({ row }) => row[revenue].isNumber);
   if (!unitsCell || !revenueCell) return null;
 
   const edits: ProposalEdit[] = [
@@ -67,7 +108,7 @@ function dashboardEdits(rows: CellEdit[][], sheet: number): ProposalEdit[] | nul
   ];
   const firstDataRow = dataRows[0].index + 1;
   const lastDataRow = dataRows[dataRows.length - 1].index + 1;
-  if (rows[totalRow][growth].input.trim() === "") {
+  if (!rows[totalRow][growth].occupied) {
     const letter = columnLetter(growth);
     edits.push({
       sheet,
@@ -77,7 +118,7 @@ function dashboardEdits(rows: CellEdit[][], sheet: number): ProposalEdit[] | nul
       numberFormat: "percent",
     });
   }
-  if (rows[totalRow][updated].input.trim() === "") {
+  if (!rows[totalRow][updated].occupied) {
     const letter = columnLetter(updated);
     edits.push({
       sheet,
@@ -90,12 +131,12 @@ function dashboardEdits(rows: CellEdit[][], sheet: number): ProposalEdit[] | nul
   return edits.filter((edit) => rows[edit.row][edit.col].input !== edit.input);
 }
 
-function genericTotals(rows: CellEdit[][], sheet: number): ProposalEdit[] {
+function genericTotals(rows: GridCell[][], sheet: number): ProposalEdit[] {
   const columns = new Map<number, ColumnSpan>();
   let lastDataRow = -1;
   rows.forEach((row, rowIndex) => {
     row.forEach((cell, col) => {
-      if (!isNumericLiteral(cell)) return;
+      if (!cell.isNumber) return;
       const span = columns.get(col) ?? { first: rowIndex, last: rowIndex, count: 0 };
       span.first = Math.min(span.first, rowIndex);
       span.last = Math.max(span.last, rowIndex);
@@ -112,20 +153,26 @@ function genericTotals(rows: CellEdit[][], sheet: number): ProposalEdit[] {
     if (span.count < MIN_NUMERIC) continue;
     const letter = columnLetter(col);
     const input = `=SUM(${letter}${span.first + 1}:${letter}${span.last + 1})`;
-    if (rows[totalRow]?.[col]?.input === input) continue;
+    if (totalRow >= SCAN_ROWS || rows[totalRow][col].occupied) continue;
     edits.push({ sheet, row: totalRow, col, input });
   }
   return edits;
 }
 
-/** Build the demo's tracked totals proposal. */
-export function buildTotalsEdits(handle: WorkbookHandle): ProposalEdit[] {
-  const sheet = handle.sheetInfo().activeSheet;
-  let rows: CellEdit[][];
-  try {
-    rows = handle.rangeCells(sheet, `A1:${columnLetter(SCAN_COLS - 1)}${SCAN_ROWS}`);
-  } catch {
-    return [];
+/** Build the demo's tracked totals proposal from the first worksheet that yields one. */
+export function buildTotalsEdits(content: XlsxStructuredContent): ProposalEdit[] {
+  const sheets = content.sheets.flatMap((sheet, position) => {
+    if (sheet.kind !== "worksheet" || sheet.truncated) return [];
+    const index = sheet.anchor.kind === "sheet" ? sheet.anchor.sheet.index : position;
+    return [{ rows: sheetGrid(sheet), index }];
+  });
+  for (const { rows, index } of sheets) {
+    const edits = dashboardEdits(rows, index);
+    if (edits?.length) return edits;
   }
-  return dashboardEdits(rows, sheet) ?? genericTotals(rows, sheet);
+  for (const { rows, index } of sheets) {
+    const edits = genericTotals(rows, index);
+    if (edits.length) return edits;
+  }
+  return [];
 }

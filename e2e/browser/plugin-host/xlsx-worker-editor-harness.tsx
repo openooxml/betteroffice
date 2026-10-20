@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
-import { XlsxEditor, defineXlsxPlugin, type XlsxAsyncEditorApi, type XlsxPluginContext, type XlsxPluginSelection, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
+import { EditorToolbar, XlsxEditor, defineXlsxPlugin, type XlsxAsyncEditorApi, type XlsxPluginContext, type XlsxPluginSelection, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
 import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src/worker/useEditableSessionWorkbook';
 import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
 import {
@@ -311,10 +311,13 @@ let api: XlsxWorkerEditorApi | null = null;
 let peerlessCurrent = deferred<XlsxAsyncEditorApi>();
 let peerlessApi: XlsxAsyncEditorApi | null = null;
 let savedBytes: Uint8Array | null = null;
+const peerSavedBytes: (Uint8Array | null)[] = [null, null];
 let context: XlsxPluginContext<null> | null = null;
 const plugin = defineXlsxPlugin({ id: 'routes', createState: () => null, initialize(value) { context = value; } });
 let source: Uint8Array;
 let readOnly = false;
+let retainToolbar = false;
+const saves: number[][] = [];
 let readyCount = 0;
 
 function renderPeerlessEditor(bytes: Uint8Array, index: number) {
@@ -332,6 +335,7 @@ function renderPeerlessEditor(bytes: Uint8Array, index: number) {
     <XlsxEditor
       file={bytes}
       readOnly={readOnly}
+      toolbar={retainToolbar ? <EditorToolbar mode="commands"><EditorToolbar.Toolbar /><EditorToolbar.FormulaBar /></EditorToolbar> : undefined}
       plugins={[slotPlugin]}
       pluginGrants={{ routes: { document: 'write', editBatches: true } }}
       collaboration={
@@ -372,6 +376,8 @@ function renderPeerlessEditor(bytes: Uint8Array, index: number) {
       onError={(error) => errors.push(error.message)}
       onSave={(nextBytes) => {
         savedBytes = nextBytes;
+        saves.push(Array.from(nextBytes));
+        peerSavedBytes[index] = nextBytes;
       }}
       onReady={(value) => {
         readyCount += 1;
@@ -504,7 +510,8 @@ window.__xlsxWorkerEditor = {
   } : null,
   generation: (index = 0) => (collaboration ? slots[index]!.generation : generation),
   readyCount: () => readyCount,
-  setReadOnly(value) { readOnly = value; flushSync(() => open(source)); },
+  saves,
+  setReadOnly(value, toolbar = false) { readOnly = value; retainToolbar = toolbar; flushSync(() => open(source)); },
   readOnlyEditRefusal() {
     try { api!.editCell(0, 0, 0, 'blocked'); return ''; }
     catch (error) { return (error as Error).message; }
@@ -717,5 +724,8 @@ window.__xlsxWorkerEditor = {
     return deliveryQueue.filter((entry) => entry.sender === sender)
       .flatMap((entry) => decodeMessages(entry.data))
       .filter((message) => message.type === 'update').length;
+  },
+  savedBytes(index = 0) {
+    return peerSavedBytes[index] ? Array.from(peerSavedBytes[index]!) : null;
   },
 };

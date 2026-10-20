@@ -28,7 +28,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
     const at = navigation.current;
     const draftIdentity = controller.focusedCellIdentity;
     let cancelled = false;
-    void run.session.call.cellInputs(active, cellAddress(selection.focus)).then((result) => {
+    void run.session.call.cellInputs(active, cellAddress(selection.anchor)).then((result) => {
       if (!cancelled && run.current && !run.failure && identity === `${run.generation}:${run.session.confirmedBasis.epoch}` &&
         navigation.current === at && controller.focusedCellIdentity === draftIdentity) {
         const value = result.cells[0]?.[0]?.input ?? '';
@@ -56,7 +56,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
     },
     onKeyUp: () => controller.keyUp(),
   }), [controller]);
-  const a1 = selection ? cellAddress(selection.focus) : '';
+  const a1 = selection ? cellAddress(selection.anchor) : '';
   const value = state.formula ?? focusedInput;
   useLayoutEffect(() => {
     const input = controller.formulaInput;

@@ -1,4 +1,5 @@
 import { SessionFailure } from '../../../../shared/office-session/types';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../collaboration/awareness';
 import type { XlsxEditStep, XlsxRangeAddress, XlsxRangeTarget } from '../edits';
 import { StaleProposalError, type CapturedFormat, type CellPoint, type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
 import {
@@ -205,6 +206,16 @@ function admitFormatting(handle: WorkbookHandle, sheet: number, range: string): 
   }
 }
 
+function usedClearTarget(handle: WorkbookHandle, target: ReturnType<typeof resolveCommandTarget>) {
+  if (target.end.row < XLSX_MAX_ROWS - 1 && target.end.col < XLSX_MAX_COLUMNS - 1) return target;
+  const used = handle.selectionData(target.sheet, 0, 0, 'usedRange').usedRange;
+  if (!used) return null;
+  const start = { row: Math.max(target.start.row, used.top), col: Math.max(target.start.col, used.left) };
+  const end = { row: Math.min(target.end.row, used.bottom), col: Math.min(target.end.col, used.right) };
+  if (start.row > end.row || start.col > end.col) return null;
+  return { ...target, start, end, range: `${cellAddress(start)}:${cellAddress(end)}` };
+}
+
 function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand): WorkbookReplayOp {
   if (command.kind === 'select' || command.kind === 'setReadOnly' || command.kind === 'applyUpdate') {
     throw new WorkbookCommandRefusal('invalid-command');
@@ -213,7 +224,9 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
   if (command.kind === 'applyOps' && 'toolbar' in payload) {
     const { toolbar } = payload;
     if (!toolbar.target) throw new WorkbookCommandRefusal('invalid-command');
-    const target = resolveCommandTarget(handle, toolbar.target, state.sheetIds);
+    const resolved = resolveCommandTarget(handle, toolbar.target, state.sheetIds);
+    const target = toolbar.id === 'clear' ? usedClearTarget(handle, resolved) : resolved;
+    if (!target) return { method: 'editCells', args: [resolved.sheet, []] };
     if (toolbar.id === 'clear' &&
       (target.end.row - target.start.row + 1) * (target.end.col - target.start.col + 1) > MAX_VALIDATION_CELLS) {
       throw new WorkbookCommandRefusal('limit-exceeded');
@@ -419,6 +432,7 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   }
   if ((method === 'applyOps' && /^bad ops: /.test(error.message)) ||
     (method === 'applyFormat' && /^bad format args: /.test(error.message)) ||
+    (method === 'editCells' && /^bad edit args: /.test(error.message)) ||
     (method === 'moveRange' && /^bad (?:move range args|range|move destination): /.test(error.message)) ||
     (method === 'applyEdits' && /^malformed request: /.test(error.message))) {
     return new WorkbookCommandRefusal('invalid-command');
@@ -661,7 +675,13 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (op.method !== 'undo' && op.method !== 'redo') {
     if (committed && afterHistory.undoDepth > history.undoDepth) {
       if (state.historySelections.length > history.undoDepth + 1) state.historySelections.length = history.undoDepth + 1;
-      state.historySelections[afterHistory.undoDepth] = { before: beforeSelection, after: structuredClone(state.selection),
+      let after = structuredClone(state.selection);
+      if (op.method === 'editCell') {
+        const [sheet, row, col] = op.args;
+        after = { sheetId: state.sheetIds[sheet], activeCell: { row, col },
+          range: { kind: 'rowCol', start: { row, col }, end: { row, col } } };
+      }
+      state.historySelections[afterHistory.undoDepth] = { before: beforeSelection, after,
         beforeSheets: beforeSheetIds, afterSheets: [...state.sheetIds] };
     }
   }

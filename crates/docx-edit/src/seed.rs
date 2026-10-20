@@ -87,7 +87,9 @@ fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return false;
     };
-    let mut pending: Vec<Out> = stories.iter(txn).map(|(_, value)| value).collect();
+    let mut pending: Vec<Out> = crate::live_stories(&stories, txn)
+        .map(|(_, value)| value)
+        .collect();
     let mut anys: Vec<Any> = Vec::new();
     while let Some(value) = pending.pop() {
         match value {
@@ -2516,6 +2518,12 @@ fn run_content_to_units(
             {
                 payload.insert("preview".to_owned(), json!(image_payload(preview)));
             }
+            if let Some(previews) = field(Some(content), "previews").and_then(Value::as_array) {
+                payload.insert(
+                    "previews".to_owned(),
+                    json!(previews.iter().map(image_payload).collect::<Vec<_>>()),
+                );
+            }
             vec![embed_unit(
                 "opaqueDrawing",
                 payload,
@@ -3331,6 +3339,16 @@ fn paragraph_attrs(
                 .cloned()
                 .unwrap_or(Value::Null),
         );
+    }
+    if field(formatting, "frame").is_some_and(|frame| !frame.is_null())
+        || (styles.enabled
+            && field(
+                styles.resolve_paragraph_style(style_id).paragraph.as_ref(),
+                "frame",
+            )
+            .is_some_and(|frame| !frame.is_null()))
+    {
+        attrs.insert("hasSourceContent".to_owned(), Value::Bool(true));
     }
     if let Some(section) = field(Some(paragraph), "sectionProperties") {
         attrs.insert("_sectionProperties".to_owned(), section.clone());
@@ -5977,10 +5995,10 @@ fn seed_lowered(
     } = lowered;
     let scan_sequences = context.opaque_sequences.is_empty() && {
         let txn = document.yrs_doc().transact();
-        txn.get_map(crate::STORIES)
-            .expect("stories root is declared by EditingDoc::new")
-            .len(&txn)
-            == 0
+        let stories = txn
+            .get_map(crate::STORIES)
+            .expect("stories root is declared by EditingDoc::new");
+        crate::live_stories(&stories, &txn).next().is_none()
             && txn
                 .get_map(crate::identity::SESSION)
                 .expect("session root is declared by EditingDoc::new")

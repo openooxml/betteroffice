@@ -1229,10 +1229,8 @@ fn create_cell_story(
 }
 
 fn remove_story_exact(txn: &mut TransactionMut<'_>, story_id: &str, deleted: &mut Vec<String>) {
-    let stories = txn
-        .get_map(STORIES)
-        .expect("stories root is declared by EditingDoc::new");
-    if stories.remove(txn, story_id).is_some() {
+    if story_ref(txn, story_id).is_ok() {
+        crate::mark_story_removed(txn, story_id);
         deleted.push(story_id.to_owned());
     }
 }
@@ -1242,8 +1240,7 @@ fn remove_story_tree(txn: &mut TransactionMut<'_>, story_id: &str, deleted: &mut
         .get_map(STORIES)
         .expect("stories root is declared by EditingDoc::new");
     let prefix = format!("{story_id}:");
-    let mut ids: Vec<String> = stories
-        .iter(txn)
+    let mut ids: Vec<String> = crate::live_stories(&stories, txn)
         .map(|(id, _)| id.to_string())
         .filter(|id| id == story_id || id.starts_with(&prefix))
         .collect();
@@ -1251,9 +1248,7 @@ fn remove_story_tree(txn: &mut TransactionMut<'_>, story_id: &str, deleted: &mut
     // leaving a descendant whose parent has already vanished.
     ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
     for id in ids {
-        if stories.remove(txn, &id).is_some() {
-            deleted.push(id);
-        }
+        remove_story_exact(txn, &id, deleted);
     }
 }
 
@@ -2341,7 +2336,7 @@ impl EditingDoc {
 
     /// Merges a rectangular range into its top-left cell. Source cell stories
     /// are appended (paragraph-for-paragraph, preserving attrs and embeds) to
-    /// the survivor before their root entries are removed.
+    /// the survivor before being marked removed.
     pub fn merge_cells(&self, ctx: &EditCtx, range: &TableRange) -> OpResult<TableReceipt> {
         let locator = range.anchor.table();
         let mut txn = self.transact_for(ctx);
@@ -4389,7 +4384,9 @@ mod tests {
         fn story_ids_for_test(&self) -> Vec<String> {
             let txn = self.yrs_doc().transact();
             let stories = txn.get_map(STORIES).unwrap();
-            let mut ids: Vec<String> = stories.iter(&txn).map(|(id, _)| id.to_string()).collect();
+            let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_string())
+                .collect();
             ids.sort();
             ids
         }

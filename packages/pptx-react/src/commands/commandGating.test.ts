@@ -32,6 +32,21 @@ describe('PPTX command gate', () => {
     expect(gate('alignment', { value: 'ctr' }, { text: null })).toBe('text-selection-required');
   });
 
+  test('text toggle commands report false active state without a text environment', () => {
+    for (const id of ['bold', 'italic', 'underline'] as const) {
+      const readOnly = evaluatePptxCommand(id, undefined, testEnvironment({ readOnly: true }));
+      expect(readOnly.enabled).toBe(false);
+      expect(readOnly.active).toBe(false);
+      expect(evaluatePptxCommand(id, undefined, testEnvironment({ text: null })).active).toBe(
+        false
+      );
+    }
+    const text = { ...(testEnvironment().text as object), bold: true, italic: 'mixed' } as never;
+    const env = testEnvironment({ text });
+    expect(evaluatePptxCommand('bold', undefined, env).active).toBe(true);
+    expect(evaluatePptxCommand('italic', undefined, env).active).toBe('mixed');
+  });
+
   test('mixed selections report mixed marks and no common value', () => {
     const state = evaluatePptxCommand(
       'italic',

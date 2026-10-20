@@ -6,7 +6,7 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
-    adjacent_paragraph_change_revision_id, adjacent_revision_id, past_leading_blocks,
+    ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, past_leading_blocks,
     position_chunks,
 };
 use crate::{
@@ -63,7 +63,9 @@ fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)
     let stories = txn
         .get_map(crate::STORIES)
         .ok_or_else(|| OpError::UnknownEmbed(embed_id.to_owned()))?;
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
+    let mut story_ids: Vec<String> = crate::live_stories(&stories, txn)
+        .map(|(id, _)| id.to_owned())
+        .collect();
     story_ids.sort();
     for story_id in story_ids {
         let Some(Out::YText(story)) = stories.get(txn, &story_id) else {
@@ -223,6 +225,12 @@ impl EditingDoc {
         }
         crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = position_chunks(&story, &txn, &mut at.index);
+        let append_paragraph = kind == "pageBreak"
+            && at.story == "body"
+            && at.index + 1 == story.len(&txn)
+            && chunks.iter().any(|chunk| {
+                chunk.start == at.index && matches!(chunk.kind, ChunkKind::Pilcrow(_))
+            });
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {
@@ -243,9 +251,21 @@ impl EditingDoc {
         for (key, value) in payload {
             embed.insert(&mut txn, key, value);
         }
+        let new_para_ids = if append_paragraph {
+            let split = self.split_paragraph_in_transaction(
+                ctx,
+                &mut txn,
+                Position::new(&at.story, at.index + 1),
+                None,
+                revision_id.clone(),
+            )?;
+            vec![split.second_para_id]
+        } else {
+            Vec::new()
+        };
         let range = loc_range_in_txn(&at.story, &story, &txn, at.index, at.index + 1)?;
         Ok(Receipt {
-            new_para_ids: Vec::new(),
+            new_para_ids,
             revision_ids: revision_id.into_iter().collect(),
             range: Some(range),
         })

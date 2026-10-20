@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
+import type { AwarenessPeer, CollaborationAwareness, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { createAsyncCollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { Profiler, StrictMode } from 'react';
 import { flushSync } from 'react-dom';
@@ -103,8 +103,17 @@ function harness(realFacade = false, normalizeInput = false) {
       return [[cell(sheet, Number(match[2]) - 1, match[1].charCodeAt(0) - 65)]];
     },
     cellPosition: (_sheet: number, row: number, col: number) => ({ x: col * 96, y: row * 24 }),
+    cellRect: (_sheet: number, row: number, col: number) => ({ x: col * 96, y: row * 24, w: 96, h: 24 }),
     displayList: mock(() => { log.push('display:peer'); return display('peer'); }),
     mergedRanges: () => [], listProposals: () => [],
+    selectionData: (sheet: number) => {
+      const used = [...cells.entries()].filter(([key, input]) => input && key.startsWith(`${sheet}:`))
+        .map(([key]) => key.split(':').map(Number));
+      return { usedRange: used.length === 0 ? null : {
+        top: Math.min(...used.map(([, row]) => row!)), left: Math.min(...used.map(([, , col]) => col!)),
+        bottom: Math.max(...used.map(([, row]) => row!)), right: Math.max(...used.map(([, , col]) => col!)),
+      } };
+    },
     historyState: () => ({ canUndo: true, canRedo: true }),
     selectionFormatting: () => null,
     onUpdate: (listener: () => void) => { updates.add(listener); return () => { updates.delete(listener); }; },
@@ -189,6 +198,11 @@ function harness(realFacade = false, normalizeInput = false) {
     sheetView: mock(async (sheet: number) => ({ ...info(), sheet, version: `v${version}`, frozenWidth: 0, frozenHeight: 0 })),
     cellInputs: mock(async (sheet: number, range: string) => ({ sheet, version: `v${version}`,
       cells: peerMethods.rangeCells(sheet, range) })),
+    selectionData: mock(async (sheet: number) => peerMethods.selectionData(sheet)),
+    cellGeometry: mock(async (sheet: number, row: number, col: number): Promise<xlsx.WorkbookCellGeometry> => ({
+      sheet, version: `v${version}`, rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
+      scrollPosition: { x: col * 96, y: row * 24 },
+    })),
   };
   const sessionSave = mock<WorkbookSession['save']>(async () => new Uint8Array([0]));
   const session: WorkbookSession = {
@@ -274,7 +288,9 @@ function promisedClipboard(completion?: Promise<void>) {
   const payloads: Promise<Blob>[] = [];
   const writes: Promise<void>[] = [];
   const copied: string[] = [];
+  const itemsWritten: Item[] = [];
   const write = mock((items: Item[]) => {
+    itemsWritten.push(items[0]);
     const payload = items[0].data['text/plain'];
     payloads.push(payload);
     const writing = payload.then(async (blob) => {
@@ -293,7 +309,20 @@ function promisedClipboard(completion?: Promise<void>) {
     if (originalWrite) Object.defineProperty(navigator.clipboard, 'write', originalWrite);
     else Reflect.deleteProperty(navigator.clipboard, 'write');
   });
-  return { write, payloads, writes, copied };
+  return { write, payloads, writes, copied, itemsWritten };
+}
+
+function markedClipboard(completion?: Promise<void>) {
+  const clipboard = promisedClipboard(completion);
+  const latest = () => clipboard.itemsWritten[clipboard.itemsWritten.length - 1];
+  replaceClipboard('readText', mock(async () => (await latest().data['text/plain']).text()));
+  replaceClipboard('read', mock(async () => {
+    const item = latest();
+    return item ? [{ types: ['text/plain', 'text/html'],
+      getType: async (type: string) => item.data[type],
+    } as unknown as ClipboardItem] : [];
+  }));
+  return clipboard;
 }
 
 function textClipboard() {
@@ -387,6 +416,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   const presentations: { seq: number; resolve(): void }[] = [];
   const cells = new Map<string, string>([['0:0:0', 'initial']]);
   const charts: xlsx.ChartRegion[] = [];
+  const hidden = { rows: [] as [number, number][], cols: [] as [number, number][] };
   let throughSeq = 0;
   let presentedThroughSeq = 0;
   let selection: xlsx.WorkbookCommandSelection | undefined;
@@ -397,6 +427,11 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   };
   const display = (viewport?: xlsx.Viewport): DisplayList => ({ width: 800, height: 600, charts,
     grid: { startRow: Math.floor((viewport?.y ?? 0) / 24), startCol: 0,
+      hiddenRowSpans: hidden.rows, hiddenColSpans: hidden.cols,
+      rowIndices: Array.from({ length: 8 }, (_, index) => Math.floor((viewport?.y ?? 0) / 24) + index)
+        .filter((row) => !hidden.rows.some(([start, end]) => row >= start && row <= end)).slice(0, 4),
+      colIndices: Array.from({ length: 6 }, (_, col) => col)
+        .filter((col) => !hidden.cols.some(([start, end]) => col >= start && col <= end)).slice(0, 3),
       rowOffsets: [0, 24, 48, 72, 96], colOffsets: [0, 96, 192, 288] },
     commands: [...cells].map(([key, text]) => {
       const [, row, col] = key.split(':').map(Number);
@@ -407,6 +442,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     sheet, version: 'v1', contentWidth: 4000, contentHeight: 6000, frozenRows: 0, frozenCols: 0,
     frozenWidth: 0, frozenHeight: 0, initialScrollX: 0, initialScrollY: 0,
   }));
+  const selectionData = mock<WorkbookSession['call']['selectionData']>(async () => ({ edge: null, region: null }));
   const cellInputs = mock(async (sheet: number, a1: string) => {
     const [, column, row] = /^([A-Z]+)(\d+)/.exec(a1)!;
     const col = [...column].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0) - 1;
@@ -428,7 +464,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     get editState() { return editState; }, get selection() { return selection; },
     failure: undefined,
     get throughSeq() { return throughSeq; }, get presentedThroughSeq() { return presentedThroughSeq; },
-    call: { sheetView, cellInputs, cellGeometry, frame } as unknown as WorkbookSession['call'],
+    call: { sheetView, cellInputs, cellGeometry, selectionData, frame } as unknown as WorkbookSession['call'],
     submit: mock(async (command: xlsx.WorkbookCommand) => {
       sent.push(command);
       commandWaiters.get(sent.length - 1)?.resolve(command);
@@ -547,9 +583,340 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
       <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={<Chrome />} onReady={ready} />
     </Profiler>);
   const fail = (error: SessionFailure) => { for (const listener of failures) listener(error); };
-  return { mount, replace, asyncEditor, setReadOnly, fail, ready, open, sent, commandAt, ack, push, session, frame, sheetView, cellInputs, cellGeometry, hydrate, attach, cells, charts,
+  return { mount, replace, asyncEditor, setReadOnly, fail, ready, open, sent, commandAt, ack, push, session, frame, sheetView, cellInputs, cellGeometry, selectionData, hydrate, attach, cells, charts, hidden,
     renderCount, commands: () => commands };
 }
+
+for (const [key, reverse, address] of [
+  ['ArrowRight', { key: 'ArrowLeft' }, 'C1'],
+  ['Tab', { key: 'Tab', shiftKey: true }, 'C1'],
+  ['ArrowDown', { key: 'ArrowUp' }, 'A3'],
+  ['Enter', { key: 'Enter', shiftKey: true }, 'A3'],
+] as const) {
+  it(`navigates past hidden tracks with ${key} and its reverse in the default peerless editor`, async () => {
+    const host = peerlessHarness();
+    host.hidden.rows.push([1, 1]); host.hidden.cols.push([1, 1]);
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key }); });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe(address);
+    const forward = host.sent[host.sent.length - 1]!;
+    await act(async () => host.ack(forward));
+    await act(async () => { fireEvent.keyDown(scroll, reverse); });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: {
+      activeCell: { row: 0, col: 0 },
+    } } });
+    expect(host.hydrate).not.toHaveBeenCalled();
+  });
+}
+
+for (const [key, address] of [['Tab', 'C1'], ['Enter', 'A3']] as const) {
+  it(`skips hidden tracks after committing cell input with ${key}`, async () => {
+    const host = peerlessHarness();
+    host.hidden.rows.push([1, 1]); host.hidden.cols.push([1, 1]);
+    const view = await host.mount();
+    await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x' }); });
+    await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key }); });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe(address);
+    expect(host.sent.some((command) => command.kind === 'editCell')).toBe(true);
+    expect(host.hydrate).not.toHaveBeenCalled();
+  });
+}
+
+it('extends past hidden tracks while keeping the peerless selection anchor', async () => {
+  const host = peerlessHarness();
+  host.hidden.rows.push([1, 1]); host.hidden.cols.push([1, 1]);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowRight', shiftKey: true }); });
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true }); });
+  expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+  expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: {
+    range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 2 } },
+    activeCell: { row: 0, col: 0 },
+  } } });
+});
+
+it('pages over offscreen hidden rows in the peerless editor', async () => {
+  const host = peerlessHarness();
+  host.hidden.rows.push([10, 49]);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'PageDown' }); });
+  expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A66');
+  expect(host.cellGeometry).toHaveBeenCalledWith(0, 65, 0);
+});
+
+it('keeps peerless selection when the remaining rows and columns are hidden', async () => {
+  const host = peerlessHarness();
+  host.hidden.rows.push([1, 1_048_575]); host.hidden.cols.push([1, 16_383]);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  for (const key of ['ArrowRight', 'ArrowDown', 'Tab', 'Enter', 'PageDown']) {
+    await act(async () => { fireEvent.keyDown(scroll, { key }); });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+  }
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
+  expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+  expect(host.hydrate).not.toHaveBeenCalled();
+});
+
+for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+  it(`selects the current region then the full extent with ${Object.keys(modifier)[0]} without moving focus`, async () => {
+    const host = peerlessHarness();
+    host.selectionData.mockResolvedValue({ region: { top: 0, left: 0, bottom: 2, right: 2 } });
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 110, clientY: 30 });
+    fireEvent.mouseUp(window);
+    await act(async () => { for (const command of host.sent) host.ack(command); });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ...modifier }); });
+    expect(host.selectionData).toHaveBeenLastCalledWith(0, 1, 1, undefined);
+    const first = host.sent[host.sent.length - 1]!;
+    expect(first).toMatchObject({ kind: 'select', payload: { selection: {
+      range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 2 } },
+      activeCell: { row: 1, col: 1 },
+    } } });
+    await act(async () => host.ack(first, { selection: {
+      sheetId: 'sheet:0', range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 2 } },
+      activeCell: { row: 1, col: 1 },
+    } }));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B2');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.width).toBe('288px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.height).toBe('72px');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'A', ...modifier }); });
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: {
+      range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 1_048_575, col: 16_383 } },
+      activeCell: { row: 1, col: 1 },
+    } } });
+    expect(host.hydrate).not.toHaveBeenCalled();
+  });
+}
+
+it('reveals an offscreen data edge and extends from the original anchor', async () => {
+  const host = peerlessHarness();
+  host.selectionData.mockResolvedValue({ edge: { row: 179, col: 0 } });
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true, shiftKey: true }); });
+  expect(host.selectionData).toHaveBeenCalledWith(0, 0, 0, 'down');
+  expect(host.sent[0]).toMatchObject({ kind: 'select', payload: { selection: {
+    range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 179, col: 0 } },
+    activeCell: { row: 0, col: 0 },
+  } } });
+  expect(host.cellGeometry).toHaveBeenCalledWith(0, 179, 0);
+  expect(scroll.scrollTop).toBe(180 * 24 - 600 + 2);
+});
+
+it('keeps a revealed distant cell in reach after an edit refreshes the sheet bounds', async () => {
+  const host = peerlessHarness();
+  host.selectionData.mockResolvedValue({ edge: { row: 9_999, col: 0 } });
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
+  const extent = scroll.firstElementChild as HTMLElement;
+  expect(extent.style.height).toBe('240002px');
+  const reads = host.sheetView.mock.calls.length;
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'Delete' }); });
+  expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'applyOps' });
+  await act(async () => { for (const command of [...host.sent]) host.ack(command); });
+  expect(host.sheetView.mock.calls.length).toBeGreaterThan(reads);
+  expect(extent.style.height).toBe('240002px');
+  expect(extent.style.width).toBe('4000px');
+});
+
+for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+  it(`reveals the used-range corner with ${Object.keys(modifier)[0]}+End and retains it at 150% zoom`, async () => {
+    const host = peerlessHarness();
+    host.selectionData.mockResolvedValue({ usedRange: { top: 0, left: 0, bottom: 9_999, right: 701 } });
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'End', ...modifier }); });
+    expect(host.selectionData).toHaveBeenCalledWith(0, 0, 0, 'usedRange');
+    expect(host.sent[0]).toMatchObject({ kind: 'select', payload: { selection: {
+      range: { kind: 'rowCol', start: { row: 9_999, col: 701 }, end: { row: 9_999, col: 701 } },
+      activeCell: { row: 9_999, col: 701 },
+    } } });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('ZZ10000');
+    expect(host.cellGeometry).toHaveBeenCalledWith(0, 9_999, 701);
+    expect(scroll.scrollLeft).toBe(702 * 96 - 800 + 2);
+    expect(scroll.scrollTop).toBe(10_000 * 24 - 600 + 2);
+    const extent = scroll.firstElementChild as HTMLElement;
+    expect(extent.style.width).toBe('67394px');
+    expect(extent.style.height).toBe('240002px');
+    await act(async () => { await host.commands().execute('zoom', { scale: 1.5 }); });
+    expect(scroll.scrollLeft).toBeCloseTo(702 * 96 * 1.5 - 800 + 2, 6);
+    expect(scroll.scrollTop).toBeCloseTo(10_000 * 24 * 1.5 - 600 + 2, 6);
+    expect(extent.style.width).toBe('101091px');
+    expect(extent.style.height).toBe('360003px');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'Home', ...modifier }); });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+    expect(host.hydrate).not.toHaveBeenCalled();
+  });
+}
+
+for (const change of ['selection', 'sheet', 'replacement']) {
+  it(`drops an obsolete data edge after ${change}`, async () => {
+    const host = peerlessHarness();
+    const answer = deferred<xlsx.SelectionData>();
+    host.selectionData.mockReturnValueOnce(answer.promise);
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'ArrowDown', metaKey: true });
+    if (change === 'selection') fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+    else if (change === 'sheet') fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+    else await act(async () => host.replace(view));
+    const commands = host.sent.length;
+    const geometryReads = host.cellGeometry.mock.calls.length;
+    await act(async () => answer.resolve({ edge: { row: 179, col: 0 } }));
+    expect(host.sent).toHaveLength(commands);
+    expect(host.cellGeometry).toHaveBeenCalledTimes(geometryReads);
+  });
+}
+
+it('clears the cell a pending peerless data jump lands on, then applies later arrows in order', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  const before = host.sent.length;
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'Delete' });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+  await act(async () => {});
+  expect(host.sent).toHaveLength(before);
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  const sent = host.sent.slice(before);
+  expect(sent.map((command) => command.kind)).toEqual(['select', 'applyOps', 'select']);
+  expect(sent[1]).toMatchObject({ payload: { toolbar: { id: 'clear', target: { range: {
+    start: { row: 3, col: 0 }, end: { row: 3, col: 0 },
+  } } } } });
+  expect(sent[2]).toMatchObject({ payload: { selection: { activeCell: { row: 3, col: 1 } } } });
+});
+
+it('types keys queued behind a pending peerless data jump into the cell they open', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  for (const key of ['Delete', 'a', 'b', 'c', 'Enter']) fireEvent.keyDown(scroll, { key });
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  expect(host.sent.filter((command) => command.kind === 'editCell')[0]).toMatchObject({ payload: { args: [0, 3, 0, 'abc'] } });
+});
+
+it('resumes a data jump queued after a typed cell commits behind a pending peerless jump', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise).mockResolvedValueOnce({ edge: { row: 4, col: 5 } });
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'Delete' });
+  fireEvent.keyDown(scroll, { key: 'a' });
+  fireEvent.keyDown(scroll, { key: 'Enter' });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'Delete' });
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  await act(async () => {});
+  expect(host.sent.filter((command) => command.kind === 'editCell')[0]).toMatchObject({ payload: { args: [0, 3, 0, 'a'] } });
+  expect(host.sent.filter((command) => command.kind === 'applyOps').slice(-1)[0]).toMatchObject({ payload: { toolbar: {
+    id: 'clear', target: { range: { start: { row: 4, col: 5 }, end: { row: 4, col: 5 } } },
+  } } });
+});
+
+it('cancels a typed cell with Escape queued behind a pending peerless data jump', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  for (const key of ['Delete', 'a', 'Escape', 'Enter']) fireEvent.keyDown(scroll, { key });
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  expect(host.sent.some((command) => command.kind === 'editCell')).toBe(false);
+});
+
+it('starts clipboard access in the key press behind a pending peerless data jump', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const clipboard = promisedClipboard();
+  const readText = mock(async () => 'pasted');
+  replaceClipboard('readText', readText);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'c', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
+  expect(clipboard.write).toHaveBeenCalledTimes(1);
+  expect(readText).toHaveBeenCalledTimes(1);
+  expect(host.sent.some((command) => command.kind === 'select')).toBe(false);
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+});
+
+it('chains rapid peerless data jumps from the latest accepted target', async () => {
+  const host = peerlessHarness();
+  const first = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ edge: { row: 0, col: 9 } });
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowRight', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight', ctrlKey: true });
+  expect(host.selectionData).toHaveBeenCalledTimes(1);
+  await act(async () => first.resolve({ edge: { row: 0, col: 3 } }));
+  expect(host.selectionData.mock.calls[1]).toEqual([0, 0, 3, 'right']);
+  expect(host.sent).toHaveLength(2);
+  expect(host.sent[1]).toMatchObject({ kind: 'select', payload: { selection: { activeCell: { row: 0, col: 9 } } } });
+});
+
+it('keeps a pending jump when a region selection is acknowledged at a corner', async () => {
+  const host = peerlessHarness();
+  const edge = deferred<xlsx.SelectionData>();
+  host.selectionData.mockResolvedValueOnce({ region: { top: 0, left: 0, bottom: 2, right: 2 } })
+    .mockReturnValueOnce(edge.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight', ctrlKey: true });
+  await act(async () => host.ack(host.sent[0]!, { selection: {
+    sheetId: 'sheet:0', range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 2 } },
+    activeCell: { row: 0, col: 0 },
+  } }));
+  await act(async () => edge.resolve({ edge: { row: 0, col: 2 } }));
+  expect(host.sent).toHaveLength(2);
+  expect(host.sent[1]).toMatchObject({ kind: 'select', payload: { selection: { activeCell: { row: 0, col: 2 } } } });
+});
+
+it('re-queries peerless data after a remote version change', async () => {
+  const host = peerlessHarness();
+  const first = deferred<xlsx.SelectionData>();
+  const fresh = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(first.promise).mockReturnValueOnce(fresh.promise);
+  const view = await host.mount();
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight', ctrlKey: true });
+  host.session.confirmedBasis.version = 'v2';
+  await act(async () => first.resolve({ edge: { row: 0, col: 3 } }));
+  expect(host.selectionData).toHaveBeenCalledTimes(2);
+  expect(host.sent).toHaveLength(0);
+  await act(async () => fresh.resolve({ edge: { row: 0, col: 7 } }));
+  expect(host.sent).toHaveLength(1);
+  expect(host.sent[0]).toMatchObject({ kind: 'select', payload: { selection: { activeCell: { row: 0, col: 7 } } } });
+});
+
+it('falls back to the peerless directional limit after a query failure', async () => {
+  const host = peerlessHarness();
+  host.selectionData.mockRejectedValueOnce(new Error('Query failed'));
+  const view = await host.mount();
+  await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight', ctrlKey: true }); });
+  expect(host.sent[0]).toMatchObject({ kind: 'select', payload: { selection: { activeCell: { row: 0, col: 16_383 } } } });
+  expect(view.queryByRole('alert')).toBeNull();
+});
 
 it('default readiness opens one worker session without a main-thread engine or edit peer', async () => {
   const host = peerlessHarness();
@@ -1180,8 +1547,9 @@ for (const cached of [true, false]) describe(`peerless F2 prefill keyboard repla
       const view = await host.mount();
       const geometry = deferred<xlsx.WorkbookCellGeometry>();
       host.cellGeometry.mockReturnValueOnce(geometry.promise);
+      host.selectionData.mockResolvedValueOnce({ edge: { row: 250, col: 0 } });
       const scroll = view.getByTestId('xlsx-scroll');
-      fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+      await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
       act(() => host.ack(host.sent[0]!, { paint: true }));
       acknowledge(host);
       const prefill = deferred<Awaited<ReturnType<typeof host.cellInputs>>>();
@@ -1222,8 +1590,9 @@ for (const cached of [true, false]) describe(`peerless F2 prefill keyboard repla
     const view = await host.mount();
     const geometry = deferred<xlsx.WorkbookCellGeometry>();
     host.cellGeometry.mockReturnValueOnce(geometry.promise);
+    host.selectionData.mockResolvedValueOnce({ edge: { row: 250, col: 0 } });
     const scroll = view.getByTestId('xlsx-scroll');
-    fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
     act(() => host.ack(host.sent[0]!, { paint: true }));
     fireEvent.keyDown(scroll, { key: 'a' });
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
@@ -1909,6 +2278,24 @@ describe('XlsxEditor async API', () => {
     expect(host.attach).not.toHaveBeenCalled();
   });
 
+  it('publishes region bounds in collaboration presence while retaining the active cell', async () => {
+    const host = collaborativePeerlessHarness();
+    const cursor = mock((_cursor: Parameters<CollaborationAwareness['setCursor']>[0]) => {});
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const collaboration = { clientId: 101, initialUpdate: Uint8Array.of(7),
+      provider: { peers: [], setCursor: cursor, onAwareness: () => () => {} } };
+    host.selectionData.mockResolvedValue({ region: { top: 0, left: 0, bottom: 2, right: 2 } });
+    const view = render(host.asyncEditor({ collaboration, onReady: ready }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 110, clientY: 30 });
+    fireEvent.mouseUp(window);
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    expect(cursor).toHaveBeenLastCalledWith({ sheet: 'sheet:0', anchor: { row: 0, col: 0 }, head: { row: 2, col: 2 } });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B2');
+  });
+
   it('mounts collaboration, paints remote changes and clears merged presence on departure and replacement', async () => {
     const host = collaborativePeerlessHarness();
     const ready = mock((_api: XlsxAsyncEditorApi) => {});
@@ -2398,7 +2785,7 @@ describe('peerless workbook worker editor', () => {
     expect(host.commands().getState('paintFormat').active).toBe(false);
   });
 
-  it('toolbar formatting preserves reverse selection focus through the next edit', async () => {
+  it('toolbar formatting preserves the reverse selection anchor through the next edit', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
     const scroll = view.getByTestId('xlsx-scroll');
@@ -2406,7 +2793,7 @@ describe('peerless workbook worker editor', () => {
     fireEvent.keyDown(scroll, { key: 'ArrowDown' });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
-    const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 0 },
+    const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 2, col: 0 },
       range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 0 } } };
     await act(async () => host.ack(host.sent[3], { paint: true, selection }));
     const formatting = host.commands().execute('bold', null);
@@ -2418,7 +2805,7 @@ describe('peerless workbook worker editor', () => {
     await formatting;
     fireEvent.keyDown(scroll, { key: 'x' });
     fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
-    expect(host.sent[5]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 0, 'x'] } });
+    expect(host.sent[5]).toMatchObject({ kind: 'editCell', payload: { args: [0, 2, 0, 'x'] } });
   });
 
   it('a delayed toolbar reply preserves newer clipboard-blocked navigation', async () => {
@@ -2452,6 +2839,206 @@ describe('peerless workbook worker editor', () => {
     expect(host.sent[4]).toMatchObject({ kind: 'editCell', payload: { args: [0, 0, 1, 'x'] } });
   });
 
+  for (const range of [false, true]) {
+    it(`sheet tabs retain independent ${range ? 'reverse ranges' : 'active cells'} before and after acknowledgement`, async () => {
+      const host = peerlessHarness();
+      const view = await host.mount();
+      const scroll = view.getByTestId('xlsx-scroll');
+      const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      const acknowledgeTab = async () => {
+        const command = host.sent[host.sent.length - 1];
+        if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+        expect(command.payload.selection).toBeDefined();
+        await act(async () => host.ack(command, { selection: command.payload.selection }));
+      };
+      for (const key of ['ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
+      if (range) {
+        fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
+        fireEvent.keyDown(scroll, { key: 'ArrowLeft', shiftKey: true });
+      }
+      const first = host.sent[host.sent.length - 1].payload;
+      fireEvent.click(view.getByRole('tab', { name: 'First' }));
+      expect(name.value).toBe('C3');
+      await acknowledgeTab();
+      expect(name.value).toBe('C3');
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      expect(name.value).toBe('A1');
+      await acknowledgeTab();
+      expect(name.value).toBe('A1');
+      for (const key of ['ArrowRight', 'ArrowDown', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
+      const second = host.sent[host.sent.length - 1].payload;
+      fireEvent.click(view.getByRole('tab', { name: 'First' }));
+      expect(name.value).toBe('C3');
+      expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'setActiveSheet', payload: first });
+      await acknowledgeTab();
+      expect(name.value).toBe('C3');
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      expect(name.value).toBe('B4');
+      expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'setActiveSheet', payload: second });
+      await acknowledgeTab();
+      expect(name.value).toBe('B4');
+    });
+  }
+
+  for (const first of [{ x: 0, y: 0 }, { x: 384, y: 240 }]) {
+    it(`sheet tabs restore independent scroll positions from ${first.x},${first.y} without revealing the selection`, async () => {
+      const host = peerlessHarness();
+      const initialView = await host.sheetView(0);
+      host.sheetView.mockImplementation(async (sheet) => ({ ...initialView, sheet,
+        initialScrollX: 96, initialScrollY: 24,
+      }));
+      host.push({ throughSeq: 0, version: 'v1', statuses: [], selection: {
+        sheetId: 'sheet:0', range: { kind: 'a1', a1: 'C3' },
+      } });
+      const view = await host.mount();
+      const scroll = view.getByTestId('xlsx-scroll');
+      const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      const tab = async (label: string) => {
+        await act(async () => fireEvent.click(view.getByRole('tab', { name: label })));
+        const command = host.sent[host.sent.length - 1];
+        if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+        await act(async () => host.ack(command, { selection: command.payload.selection }));
+      };
+      expect(scroll.scrollLeft).toBe(96);
+      expect(scroll.scrollTop).toBe(24);
+      scroll.scrollLeft = first.x; scroll.scrollTop = first.y;
+      await tab('Second');
+      expect(scroll.scrollLeft).toBe(96);
+      expect(scroll.scrollTop).toBe(24);
+      scroll.scrollLeft = 192; scroll.scrollTop = 72;
+      await tab('First');
+      expect(name.value).toBe('C3');
+      expect(scroll.scrollLeft).toBe(first.x);
+      expect(scroll.scrollTop).toBe(first.y);
+      await tab('Second');
+      expect(scroll.scrollLeft).toBe(192);
+      expect(scroll.scrollTop).toBe(72);
+      expect(host.cellGeometry).not.toHaveBeenCalled();
+    });
+  }
+
+  it('cross-sheet hyperlinks reveal their target even when the initial sheet view arrives later', async () => {
+    const host = peerlessHarness();
+    const frame = await host.frame({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
+    host.frame.mockResolvedValueOnce({ ...frame, displayList: { ...frame.displayList,
+      hyperlinks: [{ top: 0, bottom: 0, left: 0, right: 0, location: 'Second!C3' }],
+    } });
+    const view = await host.mount();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    const nextView = deferred<xlsx.WorkbookSheetView>();
+    host.sheetView.mockReturnValueOnce(nextView.promise);
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { clientX: 12, clientY: 12, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 12, clientY: 12, button: 0 });
+      fireEvent.click(scroll, { clientX: 12, clientY: 12 });
+    });
+    expect(host.cellGeometry).toHaveBeenLastCalledWith(1, 2, 2);
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C3');
+    expect(scroll.scrollLeft).toBe(192);
+    expect(scroll.scrollTop).toBe(48);
+    await act(async () => nextView.resolve({ sheet: 1, version: 'v1', contentWidth: 4000, contentHeight: 6000,
+      frozenRows: 0, frozenCols: 0, frozenWidth: 0, frozenHeight: 0, initialScrollX: 960, initialScrollY: 240,
+    }));
+    expect(scroll.scrollLeft).toBe(192);
+    expect(scroll.scrollTop).toBe(48);
+  });
+
+  for (const withSelection of [false, true]) {
+    it(`sheet tabs keep selections by id after a reorder acknowledgement ${withSelection ? 'with' : 'without'} a selection`, async () => {
+      const host = peerlessHarness();
+      const view = await host.mount();
+      const scroll = view.getByTestId('xlsx-scroll');
+      const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+      scroll.scrollLeft = 288; scroll.scrollTop = 120;
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      for (const key of ['ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
+      const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:1', range: { kind: 'a1', a1: 'C3' } };
+      await act(async () => host.ack(host.sent[host.sent.length - 1], { selection }));
+      scroll.scrollLeft = 192; scroll.scrollTop = 72;
+      const undoing = host.commands().execute('undo', null);
+      await act(async () => {});
+      const undo = host.sent[host.sent.length - 1];
+      expect(undo.kind).toBe('undo');
+      await act(async () => host.push({ throughSeq: undo.seq, version: 'v2',
+        statuses: [{ seq: undo.seq, status: 'applied', committed: true }],
+        editState: { activeSheet: 0, sheets: [
+          { id: 'sheet:1', index: 0, name: 'Second' }, { id: 'sheet:0', index: 1, name: 'First' },
+        ] }, ...(withSelection ? { selection } : {}),
+      }));
+      await undoing;
+      expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+      expect(name.value).toBe('C3');
+      expect(scroll.scrollLeft).toBe(192);
+      expect(scroll.scrollTop).toBe(72);
+      fireEvent.click(view.getByRole('tab', { name: 'First' }));
+      expect(name.value).toBe('B1');
+      expect(scroll.scrollLeft).toBe(288);
+      expect(scroll.scrollTop).toBe(120);
+      fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+      expect(name.value).toBe('C3');
+      expect(scroll.scrollLeft).toBe(192);
+      expect(scroll.scrollTop).toBe(72);
+    });
+  }
+
+  it('sheet tabs retain selections restored by command acknowledgements', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+    const undoing = host.commands().execute('undo', null);
+    await act(async () => {});
+    await act(async () => host.ack(host.sent[1], { selection: {
+      sheetId: 'sheet:1', range: { kind: 'a1', a1: 'B4:D5' }, activeCell: { row: 3, col: 1 },
+    } }));
+    await undoing;
+    fireEvent.click(view.getByRole('tab', { name: 'First' }));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+    fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ payload: { selection: {
+      sheetId: 'sheet:1', activeCell: { row: 3, col: 1 }, range: {
+        kind: 'rowCol', start: { row: 3, col: 1 }, end: { row: 4, col: 3 },
+      },
+    } } });
+  });
+
+  it('opens with the session selection when it is known', async () => {
+    const host = peerlessHarness();
+    host.push({ throughSeq: 0, version: 'v1', statuses: [], selection: {
+      sheetId: 'sheet:0', range: { kind: 'a1', a1: 'C3' },
+    } });
+    const view = await host.mount();
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C3');
+  });
+
+  it('clears remembered sheet selections and scroll positions when the workbook is replaced', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+    const scroll = view.getByTestId('xlsx-scroll');
+    scroll.scrollLeft = 288; scroll.scrollTop = 120;
+    fireEvent.click(view.getByRole('tab', { name: 'Second' }));
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown' });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+    await act(async () => {});
+    scroll.scrollLeft = 192; scroll.scrollTop = 72;
+    fireEvent.click(view.getByRole('tab', { name: 'First' }));
+    await act(async () => host.replace(view));
+    await opened();
+    await waitFor(() => expect(host.ready).toHaveBeenCalledTimes(2));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'First' })));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+  });
+
   it('rapid tab changes send both active-sheet intents before acknowledgement and Save', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
@@ -2465,7 +3052,7 @@ describe('peerless workbook worker editor', () => {
     expect(view.getByRole('tab', { name: 'First' }).getAttribute('aria-selected')).toBe('true');
   });
 
-  it('paste refreshes used sheet dimensions and keyboard limits after acknowledgement', async () => {
+  it('paste refreshes used sheet dimensions without shrinking keyboard limits after acknowledgement', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
     const scroll = view.getByTestId('xlsx-scroll');
@@ -2478,9 +3065,10 @@ describe('peerless workbook worker editor', () => {
     expect(host.sheetView).toHaveBeenLastCalledWith(0);
     expect((scroll.firstElementChild as HTMLElement).style.height).toBe('24000px');
     expect((scroll.firstElementChild as HTMLElement).style.width).toBe('8000px');
-    fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
+    expect(host.selectionData).toHaveBeenLastCalledWith(0, 0, 0, 'down');
     expect(host.sent[1]).toMatchObject({ kind: 'select', payload: { selection: {
-      activeCell: { row: 1000, col: 0 },
+      activeCell: { row: 1_048_575, col: 0 },
     } } });
   });
 
@@ -2521,17 +3109,68 @@ describe('peerless workbook worker editor', () => {
   it('large TSV paste submits through the editor without overflowing the argument stack', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
-    replaceClipboard('readText', mock(async () => Array.from({ length: 200_000 }, () => 'x').join('\n')));
+    replaceClipboard('readText', mock(async () => Array.from({ length: 100_000 }, () => 'x').join('\n')));
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
     await act(async () => {});
     const command = host.sent[0];
     expect(command).toMatchObject({ kind: 'editCells', payload: { selection: {
-      activeCell: { row: 199_999, col: 0 },
+      activeCell: { row: 0, col: 0 },
     } } });
     if (command.kind !== 'editCells') throw new Error('Expected pasted cells');
-    expect(command.payload.args[1]).toHaveLength(200_000);
-    expect(command.payload.args[1][199_999]).toEqual({ row: 199_999, col: 0, input: 'x' });
+    expect(command.payload.args[1]).toHaveLength(100_000);
+    expect(command.payload.args[1][99_999]).toEqual({ row: 99_999, col: 0, input: 'x' });
     expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+  });
+
+  it('refuses TSV paste above the cell limit without changing the source', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    replaceClipboard('readText', mock(async () => Array.from({ length: 100_001 }, () => 'x').join('\n')));
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('100000-cell limit');
+    expect(host.sent).toEqual([]);
+    expect([...host.cells]).toEqual([['0:0:0', 'initial']]);
+    expect(host.hydrate).not.toHaveBeenCalled();
+    expect(host.attach).not.toHaveBeenCalled();
+  });
+
+  it('refuses rebased paste of an array snapshot before submitting a mutation', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    const cell = { a1: 'A1', input: '=SEQUENCE(2)', isFormula: true, isArrayFormula: true };
+    host.cellInputs.mockResolvedValueOnce({ sheet: 0, version: 'v1', cells: [[cell]] });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'c', ctrlKey: true }));
+    await act(async () => { await clipboard.writes[0]; });
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent).toEqual([]);
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/array or spill/i);
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  it('pastes a whole-sheet copy as the used range it copied', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    host.selectionData.mockResolvedValue({ edge: null, region: null, usedRange: { top: 0, left: 0, bottom: 0, right: 0 } });
+    const scroll = view.getByTestId('xlsx-scroll');
+    let acked = 0;
+    const acknowledge = () => act(async () => { for (const command of host.sent.slice(acked)) host.ack(command); acked = host.sent.length; });
+    await act(async () => fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }));
+    await acknowledge();
+    await act(async () => fireEvent.keyDown(scroll, { key: 'c', ctrlKey: true }));
+    await act(async () => { await clipboard.writes[0]; });
+    expect(host.cellInputs).toHaveBeenLastCalledWith(0, 'A1:A1');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'ArrowDown' }));
+    await acknowledge();
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    await act(async () => {});
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'editCells', payload: {
+      args: [0, [{ row: 1, col: 0, input: 'initial' }]],
+    } });
   });
 
   it('read-only proposal panel loads proposals through a worker read command', async () => {
@@ -2601,7 +3240,7 @@ describe('peerless workbook worker editor', () => {
         fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
         await act(async () => {});
         expect(host.sent[0]).toMatchObject({ kind: 'editCells' });
-        expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+        expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
       } else {
         fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: action === 'delete' ? 'Delete' : 'Backspace' });
         await act(async () => {});
@@ -2751,11 +3390,11 @@ describe('peerless workbook worker editor', () => {
     fireEvent.keyDown(scroll, { key: 'ArrowDown' });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
-    const selection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 0 }, range: {
+    const selection = { sheetId: 'sheet:0', activeCell: { row: 2, col: 0 }, range: {
       kind: 'rowCol' as const, start: { row: 0, col: 0 }, end: { row: 2, col: 0 },
     } };
     await act(async () => host.ack(host.sent[3], { paint: true, selection }));
-    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A3');
     expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
     fireEvent.keyDown(scroll, { key: 'Delete' });
     await act(async () => {});
@@ -2785,9 +3424,21 @@ describe('peerless workbook worker editor', () => {
     const host = peerlessHarness();
     const view = await host.mount();
     const scroll = view.getByTestId('xlsx-scroll');
+    const frame = host.frame.getMockImplementation()!;
+    host.frame.mockImplementation(async (viewport, options) => {
+      const next = await frame(viewport, options);
+      const start = Math.floor(viewport.y / 24);
+      const offset = start * 24 - viewport.y;
+      const count = Math.ceil((viewport.height - offset) / 24);
+      next.displayList.grid = { ...next.displayList.grid!, startRow: start,
+        rowIndices: Array.from({ length: count }, (_, index) => start + index),
+        rowOffsets: Array.from({ length: count + 1 }, (_, index) => offset + index * 24) };
+      return next;
+    });
     const geometry = deferred<xlsx.WorkbookCellGeometry>();
     host.cellGeometry.mockReturnValueOnce(geometry.promise);
-    fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+    host.selectionData.mockResolvedValueOnce({ edge: { row: 250, col: 0 } });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
     const selected = host.sent[0];
     await act(async () => host.ack(selected, { paint: true, selection: {
       sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A251' },
@@ -2797,7 +3448,7 @@ describe('peerless workbook worker editor', () => {
     await act(async () => geometry.resolve({ sheet: 0, version: 'v1',
       rect: { x: 0, y: 6000, w: 96, h: 24 }, scrollPosition: { x: 0, y: 6000 } }));
     await advance();
-    expect(scroll.scrollTop).toBe(6000);
+    expect(scroll.scrollTop).toBe(6024 - 600 + 2);
     expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('z');
     fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
     expect(host.sent[1]).toMatchObject({ kind: 'editCell', payload: { args: [0, 250, 0, 'z'] } });
@@ -2836,7 +3487,8 @@ describe('peerless workbook worker editor', () => {
     const scroll = view.getByTestId('xlsx-scroll');
     const geometry = deferred<xlsx.WorkbookCellGeometry>();
     host.cellGeometry.mockReturnValueOnce(geometry.promise);
-    fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+    host.selectionData.mockResolvedValueOnce({ edge: { row: 250, col: 0 } });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
     fireEvent.keyDown(scroll, { key: 'z' });
     fireEvent.keyDown(scroll, { key: 'Escape' });
     await act(async () => {
@@ -2855,7 +3507,8 @@ describe('peerless workbook worker editor', () => {
     const scroll = view.getByTestId('xlsx-scroll');
     const geometry = deferred<xlsx.WorkbookCellGeometry>();
     host.cellGeometry.mockReturnValueOnce(geometry.promise);
-    fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+    host.selectionData.mockResolvedValueOnce({ edge: { row: 250, col: 0 } });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
     fireEvent.keyDown(scroll, { key: 'z' });
     fireEvent.keyDown(scroll, { key: 'Enter' });
     expect(host.sent[1]).toMatchObject({ kind: 'editCell', payload: { args: [0, 250, 0, 'z'] } });
@@ -3124,7 +3777,7 @@ describe('peerless workbook worker editor', () => {
     const formula = view.getByTestId('xlsx-formula-input');
     fireEvent.change(formula, { target: { value: 'draft' } });
     await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }));
-    expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('The cell entry before this could not be saved.');
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard write access/i);
     expect(view.queryByTestId('xlsx-error')).toBeNull();
     expect(clipboardReads(host)).toEqual([]);
     expect(clipboard.write).not.toHaveBeenCalled();
@@ -3229,12 +3882,12 @@ describe('peerless workbook worker editor', () => {
     const host = peerlessHarness();
     const view = await host.mount();
     const scroll = view.getByTestId('xlsx-scroll');
-    fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
     fireEvent.keyDown(scroll, { key: 'Delete' });
     await act(async () => {});
     const clear = host.sent[host.sent.length - 1]!;
     expect(clear).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'clear', target: {
-      range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 250, col: 42 } },
+      range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 1_048_575, col: 16_383 } },
     } } } });
     expect(JSON.stringify(clear.payload).length).toBeLessThan(500);
   });
@@ -3541,6 +4194,38 @@ describe('peerless workbook worker editor', () => {
 });
 
 describe('workbook worker editor', () => {
+  it('keeps legacy worker moves local before hydration and reveals offscreen pages by the nearest amount', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const cellGeometry = mock(async (sheet: number, row: number, col: number): Promise<xlsx.WorkbookCellGeometry> => ({
+      sheet, version: 'v1', rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
+      scrollPosition: { x: col * 96, y: row * 24 },
+    }));
+    Object.assign(host.sessionMethods, { cellGeometry });
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(ready) => { api = ready; }} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    for (const key of ['ArrowRight', 'ArrowDown', 'Tab', 'Enter']) {
+      await act(async () => { fireEvent.keyDown(scroll, { key }); });
+      expect(scroll.scrollLeft).toBe(0);
+      expect(scroll.scrollTop).toBe(0);
+    }
+    expect(cellGeometry).not.toHaveBeenCalled();
+    await act(async () => { await api.commands.execute('zoom', { scale: 2 }); });
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(0);
+    expect(cellGeometry).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'PageDown' }); });
+    expect(cellGeometry).toHaveBeenCalledTimes(1);
+    expect(cellGeometry).toHaveBeenCalledWith(0, 14, 2);
+    expect(scroll.scrollLeft).toBe(0);
+    expect(scroll.scrollTop).toBe(120);
+    await act(async () => hydration.resolve(host.peer));
+  });
+
   for (const decision of [true, false, undefined] as const) {
     it(`coalesces host save requests returning ${String(decision)} after flushing worker input`, async () => {
       const host = harness();
@@ -3590,6 +4275,101 @@ describe('workbook worker editor', () => {
     await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen onReady={onReady} />); });
     expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toBeNull();
     await expect(apis[0].flushPendingInput()).rejects.toThrow('replaced');
+  });
+
+  it('clears a Ctrl+A sheet selection through its used cells', async () => {
+    const host = harness(true);
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'Delete' }); });
+    await advance();
+    expect(host.peerMethods.editCells).toHaveBeenCalledWith(0, [{ row: 0, col: 0, input: '' }]);
+  });
+
+  for (const hydrated of [false, true]) for (const key of ['Delete', 'x'] as const) {
+    it(`${key === 'Delete' ? 'clears' : 'cuts'} cells added by a pending paste after Ctrl+A (${hydrated ? 'hydrated' : 'before hydration'})`, async () => {
+      const host = harness();
+      const hydration = deferred<WorkbookHandle>();
+      if (!hydrated) host.hydrate.mockReturnValue(hydration.promise);
+      const paste = deferred<string>();
+      replaceClipboard('readText', mock(() => paste.promise));
+      if (key === 'x') promisedClipboard();
+      const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+      await opened();
+      const scroll = view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
+      await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+      fireEvent.keyDown(scroll, { key, ctrlKey: key === 'x' });
+      await advance(3);
+      expect(host.editMethods.editCells).not.toHaveBeenCalled();
+      expect(host.cells.has('0:0:1')).toBe(false);
+      await act(async () => { paste.resolve('first\toutside'); });
+      if (!hydrated) {
+        await advance(16);
+        expect(host.preview.mock.calls[host.preview.mock.calls.length - 1]![2]).toMatchObject([
+          { method: 'editCells', args: [0, [{ row: 0, col: 0, input: 'first' }, { row: 0, col: 1, input: 'outside' }]] },
+        ]);
+        expect(host.editMethods.editCells).not.toHaveBeenCalled();
+        await act(async () => hydration.resolve(host.peer));
+      }
+      await advance(16);
+      expect(host.editMethods.editCells.mock.calls).toEqual([
+        [0, [{ row: 0, col: 0, input: 'first' }, { row: 0, col: 1, input: 'outside' }]],
+        [0, [{ row: 0, col: 0, input: '' }, { row: 0, col: 1, input: '' }]],
+      ]);
+      expect(host.cells.get('0:0:0')).toBe('');
+      expect(host.cells.get('0:0:1')).toBe('');
+    });
+  }
+
+  it('preserves replacement input after a deferred Ctrl+A cut and an unchanged commit', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const writing = deferred<void>();
+    const clipboard = promisedClipboard(writing.promise);
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true });
+    reviewEdit(view, 'replacement');
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('replacement');
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(clipboard.copied).toEqual(['initial']);
+    fireEvent.keyDown(scroll, { key: 'ArrowUp' });
+    fireEvent.keyDown(scroll, { key: 'F2' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    await act(async () => writing.resolve());
+    await advance(16);
+    expect(host.editMethods.editCells.mock.calls).toEqual([
+      [0, [{ row: 0, col: 0, input: '' }]],
+    ]);
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'replacement']]);
+    expect(host.cells.get('0:0:0')).toBe('replacement');
+  });
+
+  it('does not dispatch an empty clear for a Ctrl+A sheet selection', async () => {
+    const host = harness();
+    host.cells.clear();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    fireEvent.keyDown(scroll, { key: 'Delete' });
+    await advance();
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.replay).not.toHaveBeenCalled();
   });
 
   it('shows visible ready commit text while the replacement frame is held without blocking input', async () => {
@@ -5329,7 +6109,7 @@ function reviewBatch(value: string, version = 'v1'): XlsxEditRequest {
     inputs: [[value]], expect: { cells: [[{ displayText: 'initial' }]] } }] };
 }
 
-function replaceClipboard(name: 'write' | 'writeText' | 'readText', value: unknown) {
+function replaceClipboard(name: 'write' | 'writeText' | 'readText' | 'read', value: unknown) {
   const original = Object.getOwnPropertyDescriptor(navigator.clipboard, name);
   Object.defineProperty(navigator.clipboard, name, { configurable: true, value });
   restorers.push(() => {
@@ -7036,6 +7816,115 @@ describe('peerless keyboard navigation and proposal freshness', () => {
     const proposals = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
     restorers.push(() => proposals.mockRestore());
   };
+
+  for (const route of ['drag', 'shift-click', 'shift-arrow'] as const) {
+    for (const reverse of [false, true]) {
+      it(`keeps the name box and formula bar at the ${reverse ? 'reverse' : 'forward'} ${route} anchor`, async () => {
+        const host = peerlessHarness(false, true);
+        const anchor = reverse ? { row: 3, col: 2 } : { row: 1, col: 1 };
+        const focus = reverse ? { row: 1, col: 1 } : { row: 3, col: 2 };
+        host.cells.set(`0:${anchor.row}:${anchor.col}`, 'anchor input');
+        host.cells.set(`0:${focus.row}:${focus.col}`, 'focus input');
+        const view = await host.mount();
+        const scroll = view.getByTestId('xlsx-scroll');
+        const point = (cell: { row: number; col: number }) => ({ clientX: cell.col * 96 + 10, clientY: cell.row * 24 + 10 });
+        fireEvent.mouseDown(scroll, point(anchor));
+        if (route === 'drag') fireEvent.mouseMove(scroll, point(focus));
+        fireEvent.mouseUp(window);
+        if (route === 'shift-click') {
+          fireEvent.mouseDown(scroll, { ...point(focus), shiftKey: true });
+          fireEvent.mouseUp(window);
+        } else if (route === 'shift-arrow') {
+          fireEvent.keyDown(scroll, { key: reverse ? 'ArrowLeft' : 'ArrowRight', shiftKey: true });
+          for (let index = 0; index < 2; index++) {
+            fireEvent.keyDown(scroll, { key: reverse ? 'ArrowUp' : 'ArrowDown', shiftKey: true });
+          }
+        }
+        const selection = { sheetId: 'sheet:0', activeCell: anchor,
+          range: { kind: 'rowCol' as const, start: { row: 1, col: 1 }, end: { row: 3, col: 2 } } };
+        expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection } });
+        await act(async () => { for (const command of [...host.sent]) host.ack(command, { paint: true }); });
+        const name = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+        const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+        expect(name.value).toBe(reverse ? 'C4' : 'B2');
+        await waitFor(() => expect(formula.value).toBe('anchor input'));
+        expect(host.cellInputs).toHaveBeenLastCalledWith(0, reverse ? 'C4' : 'B2');
+        expect(view.getByTestId('xlsx-selection').style.width).toBe('192px');
+        expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
+        const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+        expect(outline.style.left).toBe(`${anchor.col * 96}px`);
+        expect(outline.style.top).toBe(`${anchor.row * 24}px`);
+        fireEvent.keyDown(scroll, { key: reverse ? 'ArrowDown' : 'ArrowUp', shiftKey: true });
+        expect(name.value).toBe(reverse ? 'C4' : 'B2');
+        expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: {
+          activeCell: anchor, range: { kind: 'rowCol', start: { row: reverse ? 2 : 1, col: 1 },
+            end: { row: reverse ? 3 : 2, col: 2 } },
+        } } });
+      });
+    }
+  }
+
+  for (const [key, shiftKey, address] of [
+    ['ArrowRight', false, 'C2'], ['ArrowLeft', false, 'A2'],
+    ['ArrowDown', false, 'B3'], ['ArrowUp', false, 'B1'],
+    ['Tab', false, 'C2'], ['Tab', true, 'A2'],
+    ['Enter', false, 'B3'], ['Enter', true, 'B1'],
+  ] as const) {
+    it(`moves from the range anchor with ${shiftKey ? 'Shift+' : ''}${key}`, async () => {
+      const host = peerlessHarness();
+      const view = await host.mount();
+      const scroll = view.getByTestId('xlsx-scroll');
+      fireEvent.mouseDown(scroll, { clientX: 106, clientY: 34 });
+      fireEvent.mouseMove(scroll, { clientX: 202, clientY: 82 });
+      fireEvent.mouseUp(window);
+      fireEvent.keyDown(scroll, { key, shiftKey });
+      expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe(address);
+      expect(view.getByTestId('xlsx-selection').style.width).toBe('96px');
+      expect(view.getByTestId('xlsx-selection').style.height).toBe('24px');
+    });
+  }
+
+  it('restores the edited cell from a redo acknowledgement after Enter navigation', async () => {
+    const host = peerlessHarness();
+    host.cells.set('0:2:2', '303');
+    const view = await host.mount();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 202, clientY: 58 });
+    fireEvent.mouseUp(window);
+    await act(async () => host.ack(host.sent[0]));
+    fireEvent.keyDown(scroll, { key: 'F2' });
+    const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('303'));
+    fireEvent.change(input, { target: { value: '4242' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    const edit = host.sent[1];
+    const editedCell = { sheetId: 'sheet:0', activeCell: { row: 2, col: 2 },
+      range: { kind: 'rowCol' as const, start: { row: 2, col: 2 }, end: { row: 2, col: 2 } } };
+    expect(edit).toMatchObject({ kind: 'editCell', payload: { args: [0, 2, 2, '4242'], target: editedCell } });
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C4');
+    await act(async () => host.ack(edit, { paint: true, selection: { ...editedCell,
+      activeCell: { row: 3, col: 2 }, range: { kind: 'a1', a1: 'C4' } } }));
+    fireEvent.mouseDown(scroll, { clientX: 106, clientY: 34 });
+    fireEvent.mouseUp(window);
+    await act(async () => host.ack(host.sent[2]));
+    const undoing = host.commands().execute('undo', null);
+    const undo = await host.commandAt(3);
+    host.cells.set('0:2:2', '303');
+    await act(async () => host.ack(undo, { paint: true, selection: editedCell }));
+    await undoing;
+    fireEvent.mouseDown(scroll, { clientX: 202, clientY: 58 });
+    fireEvent.mouseUp(window);
+    await act(async () => host.ack(host.sent[4]));
+    const redoing = host.commands().execute('redo', null);
+    const redo = await host.commandAt(5);
+    expect(redo.kind).toBe('redo');
+    host.cells.set('0:2:2', '4242');
+    await act(async () => host.ack(redo, { paint: true, selection: editedCell }));
+    await redoing;
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C3');
+    await waitFor(() => expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('4242'));
+    expect(view.getByTestId('xlsx-selection').style.height).toBe('24px');
+  });
 
   it('outlines the full merge containing the focused cell', async () => {
     const host = peerlessHarness();

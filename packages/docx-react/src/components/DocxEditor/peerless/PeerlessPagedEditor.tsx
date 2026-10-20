@@ -24,6 +24,8 @@ import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
 const emptyPages: readonly PageGeometry[] = [];
 const SCROLL_SETTLE_MS = 150;
+const TOUCH_TAP_SLOP_PX = 8;
+const TOUCH_LONG_PRESS_MS = 500;
 const pageLayouts = new WeakMap<readonly PageGeometry[], { width: number; height: number }>();
 
 function pageLayout(pages: readonly PageGeometry[]) {
@@ -71,7 +73,7 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
     data-page-id={geometry.page.pageId}
     data-page-index={geometry.page.pageIndex}
     className="paged-editor__page canvas-page"
-    style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'none' }}
+    style={{ position: 'absolute', left: geometry.bounds.x, top: geometry.bounds.y, width: geometry.bounds.width, height: geometry.bounds.height, background: 'white', touchAction: 'pan-x pan-y' }}
   >{geometry.displayPage && <CanvasPageMirror page={geometry.displayPage} active={visible && fullMirror} visible={visible}
     noteAnchorRevision={noteAnchorRevision} hold={hold} />}
     {geometry.displayPage && <TableGridlines page={geometry.displayPage} />}</div>;
@@ -151,6 +153,14 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   }, []);
   const input = useRef<HTMLTextAreaElement>(null);
   const click = useRef<{ time: number; x: number; y: number; pageId: string; count: number; press: number } | null>(null);
+  const touchPointer = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const touchLongPress = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchSelection = useRef<HTMLDivElement | null>(null);
+  const cancelTouchPress = useCallback(() => {
+    touchPointer.current = null;
+    if (touchLongPress.current !== null) clearTimeout(touchLongPress.current);
+    touchLongPress.current = null;
+  }, []);
   const presses = useRef(0);
   const geometry = snapshot.geometry;
   const pages = geometry?.pages ?? emptyPages;
@@ -166,12 +176,19 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     scrollSettle.current = null;
   }, []);
   useLayoutEffect(() => {
-    const owner = column.current?.ownerDocument;
-    if (!owner) return;
-    const press = () => { presses.current += 1; };
+    const host = column.current?.querySelector<HTMLDivElement>('[data-peerless-pages-host]');
+    if (!host) return;
+    const owner = host.ownerDocument;
+    const press = () => { presses.current += 1; cancelTouchPress(); };
+    const move = (event: TouchEvent) => { if (touchSelection.current) event.preventDefault(); };
     owner.addEventListener('pointerdown', press, true);
-    return () => owner.removeEventListener('pointerdown', press, true);
-  }, []);
+    host.addEventListener('touchmove', move, { passive: false });
+    return () => {
+      cancelTouchPress();
+      owner.removeEventListener('pointerdown', press, true);
+      host.removeEventListener('touchmove', move);
+    };
+  }, [cancelTouchPress]);
   useLayoutEffect(() => {
     const host = column.current;
     if (!host || !pages.length) return;
@@ -231,11 +248,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const visiblePages = useMemo(() => pages.filter(({ page }) => page.pageId === caretPage ||
     (page.pageIndex >= displayWindow[0] && page.pageIndex < displayWindow[1])), [pages, caretPage, displayWindow]);
   const dragPointer = useRef<number | null>(null);
-  const onPoint = (event: PointerEvent<HTMLDivElement>, drag: boolean) => {
+  const onPoint = (event: PointerEvent<HTMLDivElement>, drag: boolean, host = event.currentTarget) => {
     event.preventDefault();
     const current = binding.viewStore.getSnapshot().geometry;
     if (!current) return;
-    const bounds = event.currentTarget.getBoundingClientRect();
+    const bounds = host.getBoundingClientRect();
     if (bounds.width === 0 || bounds.height === 0) return;
     const point = clientPointToPage(event.clientX, event.clientY, bounds, zoom, current.pages);
     if (!point) return;
@@ -245,7 +262,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     if (!drag) {
       const previous = click.current;
       clickCount = previous && previous.press === presses.current - 1 && event.timeStamp - previous.time < 500 && previous.pageId === page.page.pageId &&
-        Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 5 ? previous.count % 3 + 1 : 1;
+        Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < (event.pointerType === 'touch' ? TOUCH_TAP_SLOP_PX : 5) ? previous.count % 3 + 1 : 1;
       click.current = { time: event.timeStamp, x: event.clientX, y: event.clientY, pageId: page.page.pageId, count: clickCount, press: presses.current };
     } else click.current = null;
     const intent = captureSelectionIntent({
@@ -266,8 +283,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const caret = canDisplaySelection ? geometry?.caret : null;
   const hideCaret = snapshot.editState?.tableContext?.hasMultiCellSelection === true;
   const releasePointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (touchPointer.current?.pointerId === event.pointerId) cancelTouchPress();
     if (dragPointer.current !== event.pointerId) return;
     dragPointer.current = null;
+    if (touchSelection.current) {
+      touchSelection.current.style.touchAction = 'pan-x pan-y';
+      touchSelection.current = null;
+    }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
   return <>
@@ -276,19 +298,47 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
       caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
     <div ref={column} style={{ position: 'relative', width: width * zoom, height: height * zoom, marginLeft: 'auto', marginRight: 'auto' }}>
-      <div data-peerless-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'none' }}
+      <div data-peerless-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
+        onMouseDown={(event) => {
+          if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();
+        }}
         onPointerDown={(event) => {
           if (event.button !== 0 || dragPointer.current !== null || (event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) return;
+          if (event.pointerType === 'touch') {
+            if (event.isPrimary === false) return;
+            touchPointer.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+            const host = event.currentTarget;
+            touchLongPress.current = setTimeout(() => {
+              cancelTouchPress();
+              if (!onPoint(event, false, host)) return;
+              host.setPointerCapture(event.pointerId);
+              dragPointer.current = event.pointerId;
+              touchSelection.current = host;
+              host.style.touchAction = 'none';
+            }, TOUCH_LONG_PRESS_MS);
+            return;
+          }
           if (!onPoint(event, false)) return;
           event.currentTarget.setPointerCapture(event.pointerId);
           dragPointer.current = event.pointerId;
         }}
         onPointerMove={(event) => {
-          if (dragPointer.current === event.pointerId && event.buttons === 1) onPoint(event, true);
+          const touch = touchPointer.current;
+          if (touch?.pointerId === event.pointerId && Math.hypot(event.clientX - touch.x, event.clientY - touch.y) > TOUCH_TAP_SLOP_PX) cancelTouchPress();
+          if (dragPointer.current === event.pointerId && (event.buttons === 1 || touchSelection.current)) onPoint(event, true);
         }}
-        onPointerUp={releasePointer}
+        onPointerUp={(event) => {
+          const touch = touchPointer.current;
+          if (touch?.pointerId === event.pointerId) {
+            cancelTouchPress();
+            if (Math.hypot(event.clientX - touch.x, event.clientY - touch.y) <= TOUCH_TAP_SLOP_PX) onPoint(event, false);
+          }
+          releasePointer(event);
+        }}
         onPointerCancel={releasePointer}
-        onLostPointerCapture={(event) => { if (dragPointer.current === event.pointerId) dragPointer.current = null; }}>
+        onLostPointerCapture={(event) => {
+          if (event.target === event.currentTarget) releasePointer(event);
+        }}>
         {pageOverlays}
         <PeerlessPages pages={pages} visiblePages={visiblePages} canvasForPage={canvasForPage} hold={chromeHold}
           textMirror={pageMirror === 'text'} />

@@ -316,6 +316,39 @@ describe('XlsxEditor grid pointer handling', () => {
     expect(view.workbook().cell(0, 2, 0).input).toBe('Edited item');
   });
 
+  it('uses synchronous model bounds for Ctrl+End and reveals an empty used-range corner', async () => {
+    const view = await mountEditor();
+    const workbook = view.workbook();
+    workbook.editCell(0, 9_999, 0, 'Far row');
+    workbook.editCell(0, 0, 701, 'Far column');
+    const before = workbook.save();
+    const query = spyOn(workbook, 'selectionData');
+    fireEvent.keyDown(view.surface, { key: 'End', ctrlKey: true });
+    expect(query).toHaveBeenCalledWith(0, 0, 0, 'usedRange');
+    query.mockRestore();
+    expect(view.nameBox().value).toBe('ZZ10000');
+    expect(view.formula()).toBe('');
+    await waitFor(() => {
+      expect(view.surface.scrollLeft).toBeGreaterThan(0);
+      expect(view.surface.scrollTop).toBeGreaterThan(0);
+    });
+    fireEvent.keyDown(view.surface, { key: 'Home', ctrlKey: true });
+    expect(view.nameBox().value).toBe('A1');
+    expect(workbook.save()).toEqual(before);
+  });
+
+  it('preserves the selection when a synchronous used-range query fails', async () => {
+    const view = await mountEditor();
+    fireEvent.keyDown(view.surface, { key: 'ArrowRight' });
+    fireEvent.keyDown(view.surface, { key: 'ArrowDown' });
+    const query = spyOn(view.workbook(), 'selectionData').mockImplementationOnce(() => {
+      throw new Error('Query unavailable');
+    });
+    fireEvent.keyDown(view.surface, { key: 'End', ctrlKey: true });
+    expect(view.nameBox().value).toBe('B2');
+    query.mockRestore();
+  });
+
   it('commits and reopens on the target when another cell is double-clicked', async () => {
     const view = await mountEditor();
 
@@ -891,6 +924,149 @@ describe('XlsxEditor host integration', () => {
       expect(reopened.cell(0, target.row, target.col).input).toBe('Host edit');
     } finally {
       reopened.dispose();
+    }
+  });
+
+  type GatedItem = { types: string[]; getType(type: string): Promise<Blob> };
+  const gatedClipboard = () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const state = { items: [] as GatedItem[] };
+    let first = true;
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    Object.defineProperty(globalThis, 'ClipboardItem', {
+      configurable: true,
+      value: class {
+        constructor(private readonly data: Record<string, Blob>) {}
+        get types() { return Object.keys(this.data); }
+        async getType(type: string) { return this.data[type]!; }
+      },
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: async () => {
+          const items = state.items;
+          if (first) { first = false; await gate; }
+          return items[0] ? (await items[0].getType('text/plain')).text() : '';
+        },
+        read: async () => state.items,
+        write: async (next: GatedItem[]) => { state.items = next; },
+        writeText: async (text: string) => {
+          state.items = [{ types: ['text/plain'], getType: async () => new Blob([text], { type: 'text/plain' }) }];
+        },
+      },
+    });
+    return {
+      state,
+      release: () => release(),
+      restore: () => {
+        if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+        else Reflect.deleteProperty(navigator, 'clipboard');
+        if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+        else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+      },
+    };
+  };
+
+  for (const escape of [true, false]) it(`${escape ? 'escape cancels' : 'without escape, runs'} a cut queued behind a pending paste`, async () => {
+    const file = plain.bytes.slice();
+    let api: XlsxEditorApi | undefined;
+    const clipboard = gatedClipboard();
+    const { state } = clipboard;
+
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const surface = view.getByTestId('xlsx-scroll');
+      const source = { row: 40, col: 10 };
+      const destination = { row: 40, col: 12 };
+      const value = 'Moved value';
+      await act(async () => { api!.handle.editCells(0, [{ ...source, input: value }]); });
+      expect(api!.handle.cell(0, source.row, source.col).input).toBe(value);
+      expect(api!.handle.cell(0, destination.row, destination.col).input).toBe('');
+
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => { api!.selectCells(0, selectionAt(source)); });
+      fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
+      if (escape) fireEvent.keyDown(surface, { key: 'Escape' });
+      await act(async () => clipboard.release());
+      if (escape) {
+        await act(async () => {});
+        expect(state.items).toHaveLength(1);
+        expect(api!.handle.cell(0, source.row, source.col).input).toBe(value);
+        return;
+      }
+      await waitFor(() => expect(api!.handle.cell(0, source.row, source.col).input).toBe(''));
+      expect(state.items).toHaveLength(1);
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await waitFor(() => expect(api!.handle.cell(0, destination.row, destination.col).input).toBe(value));
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('keeps a cut made behind a pending paste on the clipboard after an earlier copy', async () => {
+    let api: XlsxEditorApi | undefined;
+    const clipboard = gatedClipboard();
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const surface = view.getByTestId('xlsx-scroll');
+      const copied = { row: 40, col: 10 };
+      const cut = { row: 40, col: 11 };
+      const destination = { row: 40, col: 12 };
+      await act(async () => {
+        api!.handle.editCells(0, [{ ...copied, input: 'Copied value' }, { ...cut, input: 'Cut value' }]);
+      });
+
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => { api!.selectCells(0, selectionAt(copied)); });
+      fireEvent.keyDown(surface, { key: 'c', ctrlKey: true });
+      await act(async () => { api!.selectCells(0, selectionAt(cut)); });
+      fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
+      await act(async () => clipboard.release());
+
+      await waitFor(() => expect(api!.handle.cell(0, cut.row, cut.col).input).toBe(''));
+      expect(await (await clipboard.state.items[0]!.getType('text/plain')).text()).toBe('Cut value');
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await waitFor(() => expect(api!.handle.cell(0, destination.row, destination.col).input).toBe('Cut value'));
+      expect(api!.handle.cell(0, copied.row, copied.col).input).toBe('Copied value');
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('rebases a pending paste from the copy it read after a newer copy', async () => {
+    let api: XlsxEditorApi | undefined;
+    const clipboard = gatedClipboard();
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const surface = view.getByTestId('xlsx-scroll');
+      await act(async () => {
+        api!.handle.editCells(0, [{ row: 40, col: 10, input: '=K40' }, { row: 40, col: 14, input: 'Newer' }]);
+      });
+
+      await act(async () => { api!.selectCells(0, selectionAt({ row: 40, col: 10 })); });
+      await act(async () => { fireEvent.keyDown(surface, { key: 'c', ctrlKey: true }); });
+      await act(async () => { api!.selectCells(0, selectionAt({ row: 41, col: 10 })); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => { api!.selectCells(0, selectionAt({ row: 40, col: 14 })); });
+      await act(async () => { fireEvent.keyDown(surface, { key: 'c', ctrlKey: true }); });
+      await act(async () => clipboard.release());
+
+      await waitFor(() => expect(api!.handle.cell(0, 41, 10).input).toBe('=K41'));
+    } finally {
+      clipboard.restore();
     }
   });
 
@@ -1672,6 +1848,39 @@ describe('XlsxEditor commands', () => {
         fireEvent.keyDown(surface, { key: 'c', ctrlKey: true });
       });
       expect(clipboard.writes.map((write) => write.text)).toEqual(['Second']);
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  for (const key of ['c', 'Delete'] as const) it(`${key === 'c' ? 'copies' : 'clears'} a Ctrl+A sheet selection through its used cells`, async () => {
+    const clipboard = holdClipboardWrite();
+    try {
+      const editor = await mountCommands();
+      const api = editor.api();
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      api.handle.editCells(0, [
+        { row: 0, col: 0, input: 'First' },
+        { row: 3, col: 1, input: 'Second' },
+      ]);
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 40, col: 20 }));
+      });
+      await act(async () => {
+        fireEvent.keyDown(surface, { key: 'a', ctrlKey: true });
+      });
+      await act(async () => {
+        fireEvent.keyDown(surface, key === 'c' ? { key, ctrlKey: true } : { key });
+      });
+      if (key === 'Delete') {
+        await waitFor(() => expect(api.handle.cell(0, 3, 1).input).toBe(''));
+        expect(api.handle.cell(0, 0, 0).input).toBe('');
+        return;
+      }
+      const rows = clipboard.writes[0]!.text.split(/\r?\n/).map((row) => row.split('\t'));
+      expect(rows[0]![0]).toBe('First');
+      expect(rows[3]![1]).toBe('Second');
+      expect(rows.length).toBeLessThan(1_000);
     } finally {
       clipboard.restore();
     }

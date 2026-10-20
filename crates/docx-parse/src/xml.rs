@@ -8,6 +8,9 @@ use thiserror::Error;
 /// Maximum block and inline nesting depth.
 pub const MAX_NESTING_DEPTH: usize = 64;
 
+const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GROUP_TEXT_BOX_NESTING: usize = 4;
+
 /// OOXML namespace URIs.
 pub mod namespaces {
     pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -92,6 +95,8 @@ pub struct ParseBudget<'a> {
     source_ordinals: bool,
     media: Option<&'a crate::media::MediaTable>,
     media_error: Option<String>,
+    group_text_box_bytes: usize,
+    group_text_box_depth: usize,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -113,6 +118,8 @@ impl<'a> ParseBudget<'a> {
             source_ordinals: false,
             media: None,
             media_error: None,
+            group_text_box_bytes: 0,
+            group_text_box_depth: 0,
         }
     }
 
@@ -157,6 +164,40 @@ impl<'a> ParseBudget<'a> {
 
     pub(crate) fn limits(&self) -> &ParseLimits {
         self.limits
+    }
+
+    pub(crate) fn begin_group_text_box_materialization(&mut self) -> Option<bool> {
+        if self.group_text_box_depth >= MAX_GROUP_TEXT_BOX_NESTING {
+            return None;
+        }
+        self.group_text_box_depth += 1;
+        Some(self.group_text_box_depth > 1)
+    }
+
+    pub(crate) fn end_group_text_box_materialization(&mut self) {
+        self.group_text_box_depth = self.group_text_box_depth.saturating_sub(1);
+    }
+
+    fn group_text_box_limit(&self) -> usize {
+        self.limits.max_xml_bytes.min(MAX_GROUP_TEXT_BOX_BYTES)
+    }
+
+    pub(crate) fn group_text_box_budget_spent(&self) -> bool {
+        self.group_text_box_bytes >= self.group_text_box_limit()
+    }
+
+    pub(crate) fn charge_group_text_box_materialization<T: serde::Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+    ) -> bool {
+        let limit = self.group_text_box_limit();
+        let mut meter = GroupTextBoxMeter {
+            used: self.group_text_box_bytes,
+            limit,
+        };
+        let within = serde_json::to_writer(&mut meter, value).is_ok();
+        self.group_text_box_bytes = if within { meter.used } else { limit };
+        within
     }
 
     /// XML events charged so far.
@@ -275,6 +316,27 @@ impl<'a> ParseBudget<'a> {
                 part: part.to_owned(),
             });
         }
+        Ok(())
+    }
+}
+
+struct GroupTextBoxMeter {
+    used: usize,
+    limit: usize,
+}
+
+impl std::io::Write for GroupTextBoxMeter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.used = self.used.saturating_add(bytes.len());
+        if self.used > self.limit {
+            return Err(std::io::Error::other(
+                "group text box materialization limit",
+            ));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -437,6 +499,19 @@ impl XmlElement {
             .find_map(|name| self.attributes.get(*name).map(String::as_str))
     }
 
+    pub fn parse_boolean_attribute(&self, namespace: Option<&str>, name: &str) -> Option<bool> {
+        parse_on_off(self.attribute(namespace, name)?)
+    }
+
+    pub(crate) fn parse_boolean_attribute_or_false(
+        &self,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Option<bool> {
+        self.attribute(namespace, name)
+            .map(|value| parse_on_off(value).unwrap_or(false))
+    }
+
     pub fn text_content(&self) -> String {
         let mut text = String::new();
         self.append_text(&mut text);
@@ -482,10 +557,7 @@ impl XmlElement {
     }
 
     pub fn parse_boolean(&self, namespace: &str) -> bool {
-        !matches!(
-            self.attribute(Some(namespace), "val"),
-            Some("0" | "false" | "off")
-        )
+        self.parse_boolean_attribute(Some(namespace), "val") != Some(false)
     }
 
     pub fn find_deep(&self, namespace: &str, local: &str) -> Option<&XmlElement> {
@@ -601,6 +673,20 @@ impl XmlElement {
         output.push_str("</");
         output.push_str(&self.name);
         output.push('>');
+    }
+}
+
+pub fn parse_on_off(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on") {
+        Some(true)
+    } else if value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("off")
+    {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -1677,6 +1763,47 @@ fn escape_attribute(value: &str, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_on_off_values() {
+        for (value, expected) in [
+            ("1", Some(true)),
+            ("true", Some(true)),
+            ("on", Some(true)),
+            ("ON", Some(true)),
+            ("0", Some(false)),
+            ("false", Some(false)),
+            ("off", Some(false)),
+            ("FALSE", Some(false)),
+            ("Off", Some(false)),
+            (" \tTrUe\r\n", Some(true)),
+            (" off ", Some(false)),
+            ("garbage", None),
+            ("", None),
+            ("   ", None),
+        ] {
+            assert_eq!(parse_on_off(value), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn parses_boolean_attributes() {
+        let doc = parse(
+            r#"<w:spacing w:beforeAutospacing=" On " w:afterAutospacing="off" invalid="garbage"/>"#,
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        assert_eq!(
+            root.parse_boolean_attribute(Some("w"), "beforeAutospacing"),
+            Some(true)
+        );
+        assert_eq!(
+            root.parse_boolean_attribute(Some("w"), "afterAutospacing"),
+            Some(false)
+        );
+        assert_eq!(root.parse_boolean_attribute(None, "invalid"), None);
+        assert_eq!(root.parse_boolean_attribute(None, "missing"), None);
+    }
 
     #[test]
     fn twips_measures_convert_supported_units_and_validate_the_entire_value() {

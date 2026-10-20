@@ -308,6 +308,72 @@ test('font_size_step_resolves_predecessor_target', async () => {
   } finally { await session.dispose(); }
 });
 
+test('normal_autofit_refits_typing_and_saves_the_live_scale', async () => {
+  const zip = await JSZip.loadAsync(await deck(['Start']));
+  const path = 'ppt/slides/slide1.xml';
+  const source = (await zip.file(path)!.async('string'))
+    .replace('<a:bodyPr/>', '<a:bodyPr><a:normAutofit fontScale="50000" lnSpcReduction="10000"/></a:bodyPr>')
+    .replace('cx="6000000" cy="1200000"', 'cx="2476500" cy="952500"');
+  zip.file(path, source);
+  const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+  let saved: Uint8Array;
+  let live: ReturnType<wasm.PresentationHandle['layoutSlide']>;
+  try {
+    const untouched = await JSZip.loadAsync(session.handle().save());
+    expect(await untouched.file(path)!.async('string')).toBe(source);
+    const before = session.handle().layoutSlide(0);
+    const text = ' words that must shrink to stay inside the box'.repeat(8);
+    const inserted = await session.command(session.state, 1, { kind: 'insertText', payload: { ...input,
+      at: { source: 'confirmed', selection: selection(session.story, 5) }, text } });
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    live = session.handle().layoutSlide(0);
+    const textBox = live.primitives.find((primitive) => primitive.kind === 'textBox');
+    expect(textBox?.kind).toBe('textBox');
+    if (textBox?.kind !== 'textBox') throw new Error('Missing text box');
+    expect(textBox.overflow).not.toBe(true);
+    expect(textBox.lines.every((line) => line.y + line.height <= textBox.y + textBox.h)).toBe(true);
+    saved = session.handle().save();
+    const savedZip = await JSZip.loadAsync(saved);
+    const slide = await savedZip.file(path)!.async('string');
+    const scale = Number(slide.match(/fontScale="([0-9]+)"/)?.[1]);
+    expect([92500, 85000, 77500, 70000, 62500, 55000, 47500, 40000, 32500, 25000]).toContain(scale);
+    expect(scale).toBeLessThan(50000);
+    expect(slide).toContain('lnSpcReduction="20000"');
+    const undone = await session.command(inserted, 2, { kind: 'undo', payload: input });
+    expect(session.handle().layoutSlide(0)).toEqual(before);
+    await session.command(undone, 3, { kind: 'redo', payload: input });
+    expect(session.handle().layoutSlide(0)).toEqual(live);
+  } finally { await session.dispose(); }
+  const reopened = await open(saved!);
+  try { expect(reopened.handle().layoutSlide(0)).toEqual(live!); }
+  finally { await reopened.dispose(); }
+});
+
+for (const [height, reduction] of [[685800, 10000], [609600, 20000]]) {
+  test(`normal_autofit_uses_${reduction}_line_spacing_before_shrinking_the_font`, async () => {
+    const zip = await JSZip.loadAsync(await deck(['Start']));
+    const path = 'ppt/slides/slide1.xml';
+    zip.file(path, (await zip.file(path)!.async('string'))
+      .replace('<a:bodyPr/>', '<a:bodyPr lIns="0" rIns="0" tIns="0" bIns="0"><a:normAutofit fontScale="50000"/></a:bodyPr>')
+      .replace('cy="1200000"', `cy="${height}"`));
+    const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      const edited = await session.command(session.state, 1, { kind: 'insertText', payload: { ...input,
+        at: { source: 'confirmed', selection: selection(session.story, 5) }, text: '\nNext' } });
+      expect(edited.outcomes[0]?.status).toBe('applied');
+      const textBox = session.handle().layoutSlide(0).primitives.find((primitive) => primitive.kind === 'textBox');
+      if (textBox?.kind !== 'textBox') throw new Error('Missing text box');
+      expect(textBox.overflow).not.toBe(true);
+      expect(textBox.lines).toHaveLength(2);
+      expect(textBox.lines[0].runs[0].fontSizePx).toBe(32);
+      const saved = await JSZip.loadAsync(session.handle().save());
+      const slide = await saved.file(path)!.async('string');
+      expect(slide).toContain('fontScale="100000"');
+      expect(slide).toContain(`lnSpcReduction="${reduction}"`);
+    } finally { await session.dispose(); }
+  });
+}
+
 test('autofit_font_size_steps_use_unscaled_hundredths', async () => {
   const zip = await JSZip.loadAsync(await deck(['alpha\nbeta']));
   const path = 'ppt/slides/slide1.xml';

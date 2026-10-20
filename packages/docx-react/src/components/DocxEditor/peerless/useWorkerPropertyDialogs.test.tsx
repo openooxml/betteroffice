@@ -63,6 +63,49 @@ test('link dialog keeps edited values across worker view updates', async () => {
   expect(url.value).toBe('https://example.com/changed');
 });
 
+test('link dialog keeps edited values when an earlier open resolves late', async () => {
+  const { hook, controller } = fixture();
+  let resolveText!: (value: { selectedText: string }) => void;
+  const pendingText = new Promise<{ selectedText: string }>(resolve => { resolveText = resolve; });
+  controller.readAt = mock(() => pendingText) as never;
+  let earlier!: ReturnType<typeof hook.result.current.openLink>;
+  await act(async () => { earlier = hook.result.current.openLink(); });
+  controller.readAt = mock(async () => ({ selectedText: 'Old' })) as never;
+  await act(async () => { await hook.result.current.openLink(); });
+  const opened = hook.result.current.element.props.children[2];
+  const view = render(hook.result.current.element);
+  const text = view.getByLabelText('Display Text', { exact: true }) as HTMLInputElement;
+  const url = view.getByLabelText('URL', { exact: true }) as HTMLInputElement;
+  fireEvent.change(text, { target: { value: 'Changed' } });
+  fireEvent.change(url, { target: { value: 'https://example.com/changed' } });
+  await act(async () => { resolveText({ selectedText: 'Old' }); await earlier; });
+  view.rerender(hook.result.current.element);
+  expect(text.value).toBe('Changed');
+  expect(url.value).toBe('https://example.com/changed');
+  expect(hook.result.current.element.props.children[2].props.initialData).toBe(opened.props.initialData);
+  await act(async () => { await hook.result.current.openLink(); });
+  view.rerender(hook.result.current.element);
+  expect(text.value).toBe('Changed');
+  expect(url.value).toBe('https://example.com/changed');
+  expect(hook.result.current.element.props.children[2].props.initialData).toBe(opened.props.initialData);
+});
+
+test('changing the worker session invalidates unfinished link opens', async () => {
+  const { hook, controller } = fixture();
+  let resolveText!: (value: { selectedText: string }) => void;
+  const pendingText = new Promise<{ selectedText: string }>(resolve => { resolveText = resolve; });
+  controller.readAt = mock(() => pendingText) as never;
+  let pending!: ReturnType<typeof hook.result.current.openLink>;
+  await act(async () => { pending = hook.result.current.openLink(); });
+  controller.getSnapshot().view!.identity.epoch++;
+  hook.rerender();
+  await act(async () => { resolveText({ selectedText: 'Old' }); await pending; });
+  expect(hook.result.current.element.props.children[2]).toBeNull();
+  controller.readAt = mock(async () => ({ selectedText: 'Old' })) as never;
+  await act(async () => { await hook.result.current.openLink(); });
+  expect(hook.result.current.element.props.children[2].props.initialData.displayText).toBe('Old');
+});
+
 test('bare caret link inserts display text and existing link removal uses its expanded range', async () => {
   const { hook, applyQuery, selection, controller, range } = fixture();
   selection.focus.offset = selection.anchor.offset;
@@ -241,6 +284,27 @@ test('computes imageState.wrap and submits setObjectProperties patches for apply
       patch: buildImageWrapPatch(currentProps, 'inline'),
     },
   });
+});
+
+test('applyImageWrap writes margin alignment without a horizontal offset for both side presets', async () => {
+  const { hook, applyQuery, controller, selection } = fixture();
+  let currentProps: Record<string, unknown> = { width: 80, height: 40, wrapType: 'inline' };
+  controller.query = (async () => ({ version: 'captured-native', selection,
+    value: { kind: 'object', handle: 'physical-first', properties: currentProps } })) as never;
+  for (const [target, side, wrapText] of [
+    ['squareRight', 'right', 'left'],
+    ['squareLeft', 'left', 'right'],
+  ] as const) {
+    await act(async () => { expect(await hook.result.current.applyImageWrap(target)).toBe(true); });
+    const patch = {
+      wrap: 'square', wrapType: 'square', displayMode: 'float', cssFloat: side, wrapText,
+      position: { horizontal: { relativeTo: 'margin', align: side }, vertical: { relativeTo: 'paragraph', posOffset: 0 } },
+    };
+    expect(applyQuery.mock.calls.at(-1)![1]).toEqual({ kind: 'setObjectProperties', payload: {
+      handle: 'physical-first', expectVersion: 'captured-native', patch,
+    } });
+    currentProps = { ...currentProps, ...patch };
+  }
 });
 
 test('buildImageWrapPatch omits wrap distance keys for non-inline targets so existing distances survive', () => {

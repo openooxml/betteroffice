@@ -14,23 +14,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Free GitHub-hosted runners first, then a fresh kyora VM per job; the router and the variables work as in ci.yml.
+  route:
+    name: Route runners
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      browser: ${{ steps.route.outputs.browser }}
+      corpus: ${{ steps.route.outputs.corpus }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        continue-on-error: true
+        with:
+          sparse-checkout: scripts/ci-route.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Route the jobs
+        id: route
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROUTE_GROUPS: browser:2 corpus
+          ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '5' }}
+          BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
+          BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
+          BO_CI_SPILL: ${{ vars.BO_CI_SPILL }}
+          BO_CI_RUNNER: ${{ vars.BO_CI_RUNNER }}
+        run: node scripts/ci-route.mjs
+
   scenarios:
     name: ${{ matrix.name }}
-    # A fresh kyora VM per job; fork pull requests stay GitHub-hosted and BO_CI_RUNNER overrides (see ci.yml).
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
-    timeout-minutes: 40
+    needs: route
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && (matrix.suite == 'corpus' && needs.route.outputs.corpus || matrix.suite != 'corpus' && needs.route.outputs.browser) || 'kyora-8x8' }}
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: corpus
             name: Corpus scenarios
+            timeout: 60
           - suite: browser
             shard: 1
             name: Browser editors (1/2)
+            timeout: 70
           - suite: browser
             shard: 2
             name: Browser editors (2/2)
+            timeout: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -63,7 +99,7 @@ jobs:
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
@@ -81,7 +117,7 @@ jobs:
           bun run typecheck:e2e
           bun run test:e2e:harness
 
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         if: matrix.suite == 'corpus'
         with:
           version: '0.11.8'
@@ -96,7 +132,7 @@ jobs:
 
       - name: Restore the pinned corpus documents
         if: matrix.suite == 'corpus'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/e2e-assets
           key: e2e-assets-${{ hashFiles('e2e/corpus.ts') }}
@@ -151,7 +187,7 @@ jobs:
         with:
           bun-version: '1.4.3'
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: e2e-timings
           path: ${{ runner.temp }}/e2e-results

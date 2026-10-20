@@ -7,7 +7,8 @@ import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
-  decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting, type PresentationCommandReadResult,
+  decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
+  presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
 import { buildCommandFrame } from './commandFrame';
@@ -170,7 +171,7 @@ export function registerPresentationCommandHandlers(
     }
   }
 
-  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt): string[] {
+  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt, selectAppeared = false): string[] {
     const opened = presentation();
     const dirty = new Set(receipt.changedSlideIds);
     if (receipt.deckSizeChanged || receipt.slideOrderChanged) {
@@ -192,6 +193,8 @@ export function registerPresentationCommandHandlers(
       if (activeSlideId === null || !ids.has(activeSlideId)) {
         activeSlideId = metadata.slides[Math.max(0, Math.min(index, metadata.slides.length - 1))]?.id ?? null;
       }
+      const appeared = selectAppeared ? metadata.slides.find((slide) => !previous.has(slide.id)) : undefined;
+      if (appeared) activeSlideId = appeared.id;
     }
     const content = opened.readCommandContent({ slideIds: [...dirty].filter((id) => revisions.has(id)) });
     if (!content.ok) throw new Error(`Presentation history read refused: ${content.failure.message}`);
@@ -257,7 +260,8 @@ export function registerPresentationCommandHandlers(
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
       canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
-      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape),
+      aspectRatioLocked: shape.aspectRatioLocked ?? false, units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -563,13 +567,15 @@ export function registerPresentationCommandHandlers(
     const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId);
     retainVersions();
     const updates = pendingUpdates.splice(0);
-    return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
+    const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
       frame: result?.value ?? null }, [...(result?.transfer ?? []), ...updates.map((update) => update.bytes)]);
+    for (const { assetId } of reply.value.frame?.media ?? []) sentMedia.add(assetId);
+    return reply;
   }
 
   function admit(command: PresentationCommandEnvelope): Admission | PresentationCommandRefusalReason {
@@ -945,11 +951,6 @@ export function registerPresentationCommandHandlers(
           return 'invalid-payload';
         }
         if (start === end) {
-          if (story.paragraphs.some((paragraph, index) => command.kind === 'deleteBackward'
-            ? index > 0 && paragraph.start === start
-            : index < story.paragraphs.length - 1 && paragraph.end === end)) {
-            return { kind: 'text', selection: { ...at }, start, end, text: '' };
-          }
           for (let index = 0; index < count; index += 1) {
             if (command.kind === 'deleteBackward') {
               if (start === 0) break;
@@ -974,11 +975,10 @@ export function registerPresentationCommandHandlers(
       return { kind: 'text', selection: { ...at }, start, end, text };
     }
     const cached = stories.get(storyKey(at))!;
+    const joinsParagraphs = story.paragraphs.some((paragraph) => start <= paragraph.end && paragraph.end < end);
     for (const paragraph of story.paragraphs) {
-      if (start <= paragraph.end && end >= paragraph.start && !paragraph.editable) return 'unsupported';
-      if (start <= paragraph.end && paragraph.end < end && paragraph !== story.paragraphs[story.paragraphs.length - 1]) {
-        return 'unsupported';
-      }
+      if (start <= paragraph.end && end >= paragraph.start &&
+        (!paragraph.editable || joinsParagraphs && paragraph.fields.length > 0)) return 'unsupported';
       if (paragraph.fields.some((field) =>
         (start > field.start && start < field.end) || (end > field.start && end < field.end))) return 'unsupported';
       if (text.includes('\n') && paragraph.start <= start && start <= paragraph.end &&
@@ -1111,8 +1111,8 @@ export function registerPresentationCommandHandlers(
       refreshHistory(command.seq, admitted.receipt);
       if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
-      if (selection && !target(selection)) selection = null;
-      objectSelection = object && slideIndices.has(object.slideId) ? selectedObject(object.slideId, object.shapeId) : null;
+      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
+      objectSelection = object && object.slideId === activeSlideId ? selectedObject(object.slideId, object.shapeId) : null;
       clearMarks();
       return true;
     }
@@ -1127,7 +1127,7 @@ export function registerPresentationCommandHandlers(
       refreshHistory(command.seq, admitted.receipt);
       for (const [seq, value] of retained) selections.set(seq, value);
       selection = selected ? resolve(selected) : null;
-      if (selection && !target(selection)) selection = null;
+      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
       if (composition && composed) {
         const next = resolve(composed);
         if (next && target(next)) composition = { ...composition, selection: next }; else composition = undefined;
@@ -1243,13 +1243,19 @@ export function registerPresentationCommandHandlers(
       return false;
     }
     if (start !== end || text.length > 0) {
-      const grouped = command.kind === 'insertText' || command.kind === 'deleteBackward' || command.kind === 'deleteForward';
+      const joinsParagraphs = stories.get(storyKey(at))!.text.paragraphs
+        .some((paragraph) => start <= paragraph.end && paragraph.end < end);
+      const grouped = !joinsParagraphs &&
+        (command.kind === 'insertText' || command.kind === 'deleteBackward' || command.kind === 'deleteForward');
       const time = command.payload.inputTime!;
       const group = command.payload.undoGroup!;
       if (!grouped || !typing || typing.target !== storyKey(at) || typing.group !== group ||
         typing.kind !== command.kind || time < typing.time || time - typing.time >= 500 ||
         at.anchor !== typing.position || at.focus !== typing.position) opened.addUndoBoundary();
-      if (end > start) opened.deleteText(at.storyId, start, end);
+      if (end > start) {
+        if (joinsParagraphs) presentationDeleteTextJoiningParagraphs(opened, at.storyId, start, end);
+        else opened.deleteText(at.storyId, start, end);
+      }
       let offset = start;
       const paragraphs = text.split('\n');
       for (const [index, paragraph] of paragraphs.entries()) {
@@ -1350,7 +1356,7 @@ export function registerPresentationCommandHandlers(
         const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
         const committed = apply(command, admitted);
         const historyDirtySlideIds = committed && admitted.kind === 'history'
-          ? refreshHistory(command.seq, admitted.receipt!) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
+          ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
         if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
         if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
           const cached = stories.get(storyKey(admitted.selection))!;
@@ -1365,7 +1371,8 @@ export function registerPresentationCommandHandlers(
         if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
         const outcome: PresentationCommandOutcome = { seq: command.seq,
           status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
-            : committed || admitted.kind === 'format' || admitted.kind === 'alignment' ||
+            : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
+            admitted.kind === 'format' || admitted.kind === 'alignment' ||
             admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
             command.kind === 'compositionStart' || command.kind === 'compositionEnd' ? 'applied' : 'noop',
           committed };
@@ -1447,6 +1454,7 @@ export function registerPresentationCommandHandlers(
       }
       if (request.knownRevision === slideRevision) return { ...base, status: 'unchanged' as const };
       const result = frame(request.slideId, false);
+      for (const { assetId } of result.value.media) sentMedia.add(assetId);
       return transferable({ ...base, status: 'frame' as const, frame: result.value }, result.transfer);
     },
     flushCommandEditor(_, request) {

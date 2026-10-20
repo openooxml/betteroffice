@@ -124,6 +124,19 @@ fn append(output: &mut String, text: &str, limit: usize) -> Result<(), ParseErro
     Ok(())
 }
 
+pub fn translate_formula(
+    source: &str,
+    origin: CellRef,
+    destination: CellRef,
+) -> Result<String, ParseError> {
+    translate(
+        source,
+        i64::from(destination.row) - i64::from(origin.row),
+        i64::from(destination.col) - i64::from(origin.col),
+        MAX_FORMULA_BYTES,
+    )
+}
+
 fn translate(source: &str, rows: i64, cols: i64, limit: usize) -> Result<String, ParseError> {
     if source.len() > limit {
         return Err(budget_error());
@@ -545,6 +558,25 @@ fn translate_operand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_translation_uses_the_source_cell_offset() {
+        let from = CellRef::new(0, 2);
+        let to = CellRef::new(2, 2);
+        for (source, expected) in [
+            ("A1+$B$1+$A1+A$1", "A3+$B$1+$A3+A$1"),
+            ("SUM(A1:B2)", "SUM(A3:B4)"),
+            ("'Other Sheet'!A1+Sheet1!$B2", "'Other Sheet'!A3+Sheet1!$B4"),
+            ("Table1[A1]+Rate_A1+A1", "Table1[A1]+Rate_A1+A3"),
+        ] {
+            assert_eq!(translate_formula(source, from, to).unwrap(), expected);
+        }
+        assert_eq!(
+            translate_formula("A1+$A$1+B$1+$A2", CellRef::new(1, 1), CellRef::new(0, 0)).unwrap(),
+            "#REF!+$A$1+A$1+$A1"
+        );
+        assert_eq!(translate_formula("XFD1048576", from, to).unwrap(), "#REF!");
+    }
 
     #[test]
     fn extension_formula_intersections_are_unresolvable() {

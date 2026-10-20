@@ -16,7 +16,7 @@ use crate::section::{
     SectionProperties, apply_section_inheritance, default_section_properties,
     parse_section_properties,
 };
-use crate::xml::{ParseError, XmlElement};
+use crate::xml::{ParseError, XmlElement, parse_on_off};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
@@ -56,7 +56,7 @@ pub(crate) fn refuses_a_body_cut(document: &XmlElement) -> bool {
     while let Some(element) = pending.pop() {
         let refused = match element.local_name() {
             "anchor" => {
-                element.attribute(None, "simplePos") == Some("1")
+                element.parse_boolean_attribute(None, "simplePos") == Some(true)
                     || element
                         .child_by_local_name("positionV")
                         .and_then(|position| position.attribute(None, "relativeFrom"))
@@ -234,14 +234,21 @@ pub(crate) fn streaming_body_cut(
     xml: &[u8],
     budget: &mut crate::xml::ParseBudget<'_>,
 ) -> Result<bool, ParseError> {
-    streaming_body_cut_with_limit(xml, budget, None).map(|(refused, _)| refused)
+    streaming_body_cut_with_limit(xml, budget, None).map(|cut| cut.refused)
+}
+
+pub(crate) struct StreamingBodyCut {
+    pub refused: bool,
+    pub partial: bool,
+    pub root_name: Option<String>,
+    pub root_namespace: Option<String>,
 }
 
 pub(crate) fn streaming_body_cut_with_limit(
     xml: &[u8],
     budget: &mut crate::xml::ParseBudget<'_>,
     block_limit: Option<usize>,
-) -> Result<(bool, bool), ParseError> {
+) -> Result<StreamingBodyCut, ParseError> {
     let repaired = crate::xml::escape_stray_ampersands(xml);
     let xml = repaired.as_ref();
     let part = "word/document.xml";
@@ -259,6 +266,8 @@ pub(crate) fn streaming_body_cut_with_limit(
     let mut stack: Vec<CutFrame> = Vec::new();
     let mut drawings: Vec<CutDrawing> = Vec::new();
     let mut roots = 0;
+    let mut root_name = None;
+    let mut root_namespace = None;
     let mut refused = false;
     let mut legacy_cut = block_limit.map(StreamingLegacyBodyCut::new);
     loop {
@@ -389,6 +398,11 @@ pub(crate) fn streaming_body_cut_with_limit(
                         frame
                             .namespace_declarations
                             .push((key.to_string(), value.to_string()));
+                        if stack.is_empty()
+                            && key.strip_prefix("xmlns:") == crate::xml::namespace_prefix(&name)
+                        {
+                            root_namespace = Some(value.to_string());
+                        }
                     }
                     for drawing in &mut drawings {
                         drawing.use_attribute(&key, &value);
@@ -399,7 +413,7 @@ pub(crate) fn streaming_body_cut_with_limit(
                         drawing.attribute_bytes = attribute_bytes;
                     }
                     if local == "anchor" && key == "simplePos" {
-                        refused |= value == "1";
+                        refused |= parse_on_off(&value) == Some(true);
                     }
                     if position && key == "relativeFrom" {
                         refused |= !matches!(value.as_ref(), "paragraph" | "line");
@@ -426,6 +440,9 @@ pub(crate) fn streaming_body_cut_with_limit(
                     } else if !matches!(local, "anchor") && key == "style" {
                         refused |= crate::vml::style_placed_off_the_text(Some(&value));
                     }
+                }
+                if stack.is_empty() {
+                    root_name = Some(name.to_string());
                 }
                 match local {
                     "tblpPr" | "framePr" => refused |= prefixed.or(unprefixed).unwrap_or(true),
@@ -531,7 +548,12 @@ pub(crate) fn streaming_body_cut_with_limit(
             "unclosed element".to_owned(),
         ));
     }
-    Ok((refused, legacy_cut.is_some_and(|cut| cut.cut.is_partial())))
+    Ok(StreamingBodyCut {
+        refused,
+        partial: legacy_cut.is_some_and(|cut| cut.cut.is_partial()),
+        root_name,
+        root_namespace,
+    })
 }
 
 // Reader offsets index the input and raw attribute names are the decoded ones only for
@@ -901,10 +923,11 @@ pub fn is_empty_paragraph(paragraph: &Paragraph) -> bool {
             matches!(
                 content,
                 ParagraphContent::Inline(InlineNode::Run(run))
-                    if run.content.iter().any(|content| matches!(
-                        content,
-                        RunContent::Drawing { .. } | RunContent::Shape { .. }
-                    ))
+                    if run.content.iter().any(|content| match content {
+                        RunContent::Drawing { .. } | RunContent::Shape { .. } => true,
+                        RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
+                        _ => false,
+                    })
             )
         })
 }
@@ -1107,6 +1130,14 @@ mod tests {
                 r#"simplePos="1""#,
                 r#"<wp:positionV relativeFrom="paragraph"/>"#,
             ),
+            anchor(
+                r#"simplePos=" true ""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
+            anchor(
+                r#"simplePos="ON""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
             table(r#"w:vertAnchor="margin""#),
             table(r#"w:tblpY="60""#),
             frame(r#"w:vAnchor="page""#),
@@ -1124,6 +1155,14 @@ mod tests {
         for body in [
             anchor("", r#"<wp:positionV relativeFrom="paragraph"/>"#),
             anchor("", r#"<wp:positionV relativeFrom="line"/>"#),
+            anchor(
+                r#"simplePos="false""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
+            anchor(
+                r#"simplePos="Off""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
             anchor(
                 "",
                 r#"<wp:wrap><wp:positionV relativeFrom="page"/></wp:wrap>"#,
@@ -1483,6 +1522,17 @@ mod tests {
         assert!(sections[0].content.is_empty());
         assert_eq!(sections[0].properties.page_width, Some(12_240.0));
         assert!(body.final_section_properties.is_none());
+    }
+
+    #[test]
+    fn vml_group_paragraph_is_not_empty() {
+        let body = parse(
+            r#"<w:document xmlns:w="w" xmlns:v="v" xmlns:r="r"><w:body><w:p><w:r><w:pict><v:group style="width:100px;height:100px"><v:shape style="width:500;height:500"><v:imagedata r:id="rId1"/></v:shape><v:shape style="width:500;height:500"><v:imagedata r:id="rId2"/></v:shape></v:group></w:pict></w:r></w:p></w:body></w:document>"#,
+        );
+        let BlockContent::Paragraph(paragraph) = &body.content[0] else {
+            panic!("expected paragraph");
+        };
+        assert!(!is_empty_paragraph(paragraph));
     }
 
     #[test]

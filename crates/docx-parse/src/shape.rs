@@ -1,5 +1,7 @@
 //! DrawingML shapes, detailed paint, and bounded group/canvas scenes.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::drawingml::{
@@ -14,9 +16,9 @@ use crate::image::{
 use crate::media::{MediaMap, media_token_index, resolve_image_data};
 use crate::relationships::{RelationshipMap, TargetMode};
 use crate::scalars::ColorValue;
-use crate::xml::{XmlElement, parse_javascript_integer_prefix};
+use crate::xml::{ParseBudget, ParseError, XmlElement, parse_javascript_integer_prefix};
 
-const MAX_SCENE_DEPTH: usize = 32;
+pub(crate) const MAX_SCENE_DEPTH: usize = 32;
 const MAX_SCENE_NODES: usize = 4_096;
 const MAX_SAFE_DRAWING_NUMBER: f64 = 1_000_000_000_000.0;
 
@@ -1000,9 +1002,9 @@ pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
         parse_shape(root)
     } else {
         let parsed = parse_drawing_scene_tree(root);
-        let legacy = scene_node_to_legacy(parsed.root.as_ref()?);
+        let legacy = scene_node_to_legacy(parsed.root.as_ref()?, 0);
         scene = Some(parsed);
-        legacy?
+        *legacy?
     };
     if let Some(extent) = container.child_by_full_name("wp:extent") {
         shape.size = ImageSize {
@@ -1115,13 +1117,15 @@ fn resolve_shape_pictures(
     if let Some(stroke) = &mut shape.stroke_paint {
         resolve_paint_picture(stroke.fill.as_mut(), relationships, media)
     }
-    if let Some(children) = &mut shape.children {
-        for child in children {
-            resolve_shape_pictures(child, relationships, media, depth + 1)
+    if depth < MAX_SCENE_DEPTH {
+        if let Some(children) = &mut shape.children {
+            for child in children {
+                resolve_shape_pictures(child, relationships, media, depth + 1)
+            }
         }
-    }
-    if let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) {
-        resolve_scene_pictures(root, relationships, media, depth + 1)
+        if let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) {
+            resolve_scene_pictures(root, relationships, media, depth + 1)
+        }
     }
 }
 fn resolve_scene_pictures(
@@ -1134,12 +1138,14 @@ fn resolve_scene_pictures(
         return;
     }
     resolve_paint_picture(node.fill.as_mut(), relationships, media);
-    if let Some(shape) = &mut node.shape {
-        resolve_shape_pictures(shape, relationships, media, depth + 1)
-    }
-    if let Some(children) = &mut node.children {
-        for child in children {
-            resolve_scene_pictures(child, relationships, media, depth + 1)
+    if depth < MAX_SCENE_DEPTH {
+        if let Some(shape) = &mut node.shape {
+            resolve_shape_pictures(shape, relationships, media, depth + 1)
+        }
+        if let Some(children) = &mut node.children {
+            for child in children {
+                resolve_scene_pictures(child, relationships, media, depth + 1)
+            }
         }
     }
 }
@@ -1176,12 +1182,17 @@ pub fn parse_drawing_scene_tree(root: &XmlElement) -> DrawingScene {
         || is_scene_group(root.local_name())
         || root.local_name() == "wpc"
     {
-        parse_scene_node(root, Matrix::IDENTITY, &mut count, 0)
+        parse_scene_node(root, Matrix::IDENTITY, &mut count, 0).map(|node| *node)
     } else {
-        let children = root
-            .child_elements()
-            .filter_map(|child| parse_scene_node(child, Matrix::IDENTITY, &mut count, 0))
-            .collect::<Vec<_>>();
+        let mut children = Vec::new();
+        for child in root.child_elements() {
+            if count >= MAX_SCENE_NODES {
+                break;
+            }
+            if let Some(node) = parse_scene_node(child, Matrix::IDENTITY, &mut count, 0) {
+                children.push(*node);
+            }
+        }
         if children.len() == 1 {
             children.into_iter().next()
         } else {
@@ -1208,15 +1219,16 @@ fn parse_scene_node(
     parent: Matrix,
     count: &mut usize,
     depth: usize,
-) -> Option<DrawingSceneNode> {
+) -> Option<Box<DrawingSceneNode>> {
     if depth > MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
         return None;
     }
     *count += 1;
     let local = element.local_name();
-    let (id, name) = non_visual_properties(element);
+    let mut node = Box::new(DrawingSceneNode::default());
+    (node.id, node.name) = non_visual_properties(element);
     if is_scene_shape(local) {
-        let mut shape = parse_shape(element);
+        let mut shape = Box::new(parse_shape(element));
         let transform_element = scene_transform(element);
         let off = direct_child(transform_element, "off");
         shape.offset = Some(ShapeOffset {
@@ -1245,14 +1257,10 @@ fn parse_scene_node(
         transform.rotation = shape.transform.as_ref().and_then(|value| value.rotation);
         transform.flip_h = shape.transform.as_ref().and_then(|value| value.flip_h);
         transform.flip_v = shape.transform.as_ref().and_then(|value| value.flip_v);
-        return Some(DrawingSceneNode {
-            kind: Some("shape".into()),
-            id,
-            name,
-            shape: Some(Box::new(shape)),
-            transform: Some(transform),
-            ..DrawingSceneNode::default()
-        });
+        node.kind = Some("shape".into());
+        node.shape = Some(shape);
+        node.transform = Some(transform);
+        return Some(node);
     }
     if is_scene_group(local) || local == "wpc" {
         let transform_element = scene_transform(element);
@@ -1270,8 +1278,9 @@ fn parse_scene_node(
         let scale_x = parent.a.hypot(parent.b);
         let scale_y = parent.c.hypot(parent.d);
         let parent_rotation = parent.b.atan2(parent.a) * 180.0 / std::f64::consts::PI;
-        let authored_flip =
-            transform_element.and_then(|value| value.attribute(None, "flipH")) == Some("1");
+        let authored_flip = transform_element
+            .and_then(|value| value.parse_boolean_attribute(None, "flipH"))
+            == Some(true);
         let transform = SceneTransform {
             offset_x: Some(parent_offset.0),
             offset_y: Some(parent_offset.1),
@@ -1286,86 +1295,81 @@ fn parse_scene_node(
             ),
             flip_h: ((parent.a * parent.d - parent.b * parent.c < 0.0) != authored_flip)
                 .then_some(true),
-            flip_v: (transform_element.and_then(|value| value.attribute(None, "flipV"))
-                == Some("1"))
+            flip_v: (transform_element
+                .and_then(|value| value.parse_boolean_attribute(None, "flipV"))
+                == Some(true))
             .then_some(true),
             child_offset_x: finite_attribute(child_offset, "x"),
             child_offset_y: finite_attribute(child_offset, "y"),
             child_width: finite_attribute(child_extent, "cx"),
             child_height: finite_attribute(child_extent, "cy"),
         };
-        let children = element
-            .child_elements()
-            .filter_map(|child| parse_scene_node(child, matrix, count, depth + 1))
-            .collect();
-        return Some(DrawingSceneNode {
-            kind: Some(if local == "wpc" { "canvas" } else { "group" }.into()),
-            id,
-            name,
-            transform: Some(transform),
-            fill: parse_fill_paint(properties, direct_child(Some(element), "style")),
-            effects: parse_effects(properties, direct_child(Some(element), "style")),
-            children: Some(children),
-            ..DrawingSceneNode::default()
-        });
+        let mut children = Vec::new();
+        if depth < MAX_SCENE_DEPTH {
+            for child in element.child_elements() {
+                if *count >= MAX_SCENE_NODES {
+                    break;
+                }
+                if let Some(child) = parse_scene_node(child, matrix, count, depth + 1) {
+                    children.push(*child);
+                }
+            }
+        }
+        node.kind = Some(if local == "wpc" { "canvas" } else { "group" }.into());
+        node.transform = Some(transform);
+        node.fill = parse_fill_paint(properties, direct_child(Some(element), "style"));
+        node.effects = parse_effects(properties, direct_child(Some(element), "style"));
+        node.children = Some(children);
+        return Some(node);
     }
     if local == "pic" {
-        return Some(DrawingSceneNode {
-            kind: Some("picture".into()),
-            id,
-            name,
-            relationship_id: relationship_id(element),
-            ..DrawingSceneNode::default()
-        });
+        node.kind = Some("picture".into());
+        node.relationship_id = relationship_id(element);
+        return Some(node);
     }
     if local == "graphicFrame" {
-        return Some(DrawingSceneNode {
-            kind: Some(
-                if first_descendant(Some(element), "chart", 0).is_some() {
-                    "chart"
-                } else {
-                    "graphicFrame"
-                }
-                .into(),
-            ),
-            id,
-            name,
-            relationship_id: relationship_id(element),
-            transform: Some(matrix_contract(
-                group_matrix(parent, scene_transform(element)),
-                None,
-                None,
-            )),
-            ..DrawingSceneNode::default()
-        });
+        node.kind = Some(
+            if first_descendant(Some(element), "chart", 0).is_some() {
+                "chart"
+            } else {
+                "graphicFrame"
+            }
+            .into(),
+        );
+        node.relationship_id = relationship_id(element);
+        node.transform = Some(matrix_contract(
+            group_matrix(parent, scene_transform(element)),
+            None,
+            None,
+        ));
+        return Some(node);
     }
     if local == "contentPart" {
-        return Some(DrawingSceneNode {
-            kind: Some("contentPart".into()),
-            id,
-            name,
-            relationship_id: relationship_id(element),
-            ..DrawingSceneNode::default()
-        });
+        node.kind = Some("contentPart".into());
+        node.relationship_id = relationship_id(element);
+        return Some(node);
     }
     None
 }
 
-fn scene_node_to_legacy(node: &DrawingSceneNode) -> Option<Shape> {
+fn scene_node_to_legacy(node: &DrawingSceneNode, depth: usize) -> Option<Box<Shape>> {
+    if depth > MAX_SCENE_DEPTH {
+        return None;
+    }
     if node.kind.as_deref() == Some("shape") {
-        return node.shape.as_deref().cloned();
+        return node.shape.clone();
     }
     if !matches!(node.kind.as_deref(), Some("group" | "canvas")) {
         return None;
     }
     let transform = node.transform.as_ref();
-    let mut shape = Shape::empty(
+    let mut shape = Box::new(Shape::empty(
         "rect".into(),
         ImageSize {
             width: transform.and_then(|value| value.width).unwrap_or(0.0),
             height: transform.and_then(|value| value.height).unwrap_or(0.0),
         },
-    );
+    ));
     shape.id = node.id.clone();
     shape.name = node.name.clone();
     shape.offset = Some(ShapeOffset {
@@ -1377,10 +1381,17 @@ fn scene_node_to_legacy(node: &DrawingSceneNode) -> Option<Shape> {
         flip_h: transform.and_then(|value| value.flip_h),
         flip_v: transform.and_then(|value| value.flip_v),
     });
-    shape.children = node
-        .children
-        .as_ref()
-        .map(|values| values.iter().filter_map(scene_node_to_legacy).collect());
+    if let Some(children) = &node.children {
+        let mut projected = Vec::new();
+        if depth < MAX_SCENE_DEPTH {
+            for child in children {
+                if let Some(child) = scene_node_to_legacy(child, depth + 1) {
+                    projected.push(*child);
+                }
+            }
+        }
+        shape.children = Some(projected);
+    }
     shape.fill_paint = node.fill.clone();
     shape.effects = node.effects.clone();
     Some(shape)
@@ -1477,12 +1488,12 @@ fn group_matrix(parent: Matrix, transform: Option<&XmlElement>) -> Matrix {
     let child_width = nonzero(finite_attribute(child_extent, "cx").unwrap_or(width));
     let child_height = nonzero(finite_attribute(child_extent, "cy").unwrap_or(height));
     let rotation = rot_to_degrees(transform.attribute(None, "rot")).unwrap_or(0.0);
-    let flip_x = if transform.attribute(None, "flipH") == Some("1") {
+    let flip_x = if transform.parse_boolean_attribute(None, "flipH") == Some(true) {
         -1.0
     } else {
         1.0
     };
-    let flip_y = if transform.attribute(None, "flipV") == Some("1") {
+    let flip_y = if transform.parse_boolean_attribute(None, "flipV") == Some(true) {
         -1.0
     } else {
         1.0
@@ -1603,11 +1614,7 @@ fn numeric_attribute(element: Option<&XmlElement>, name: &str) -> Option<f64> {
     parse_javascript_integer_prefix(element?.attribute(None, name)?)
 }
 fn bool_attribute(element: Option<&XmlElement>, name: &str) -> Option<bool> {
-    match element?.attribute(None, name)? {
-        "1" | "true" | "on" => Some(true),
-        "0" | "false" | "off" => Some(false),
-        _ => None,
-    }
+    element?.parse_boolean_attribute(None, name)
 }
 fn nonzero(value: f64) -> f64 {
     if value == 0.0 { 1.0 } else { value }
@@ -1643,7 +1650,7 @@ fn render_scene_shape(
     parent_origin: (f64, f64),
     count: &mut usize,
     depth: usize,
-) -> Option<Shape> {
+) -> Option<Box<Shape>> {
     if depth > MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
         return None;
     }
@@ -1659,7 +1666,7 @@ fn render_scene_shape(
         let height = finite_attribute(extent, "cy")
             .or_else(|| finite_attribute(direct_child(xfrm, "chExt"), "cy"))
             .unwrap_or(0.0);
-        let mut group = Shape::empty("rect".into(), ImageSize { width, height });
+        let mut group = Box::new(Shape::empty("rect".into(), ImageSize { width, height }));
         (group.id, group.name) = non_visual_properties(element);
         group.offset = Some(ShapeOffset {
             x: finite_attribute(off, "x").unwrap_or(0.0),
@@ -1672,26 +1679,30 @@ fn render_scene_shape(
         let properties = direct_child(Some(element), "grpSpPr");
         group.fill_paint = parse_fill_paint(properties, direct_child(Some(element), "style"));
         group.effects = parse_effects(properties, direct_child(Some(element), "style"));
-        group.children = Some(
-            element
-                .child_elements()
-                .filter_map(|child| {
-                    render_scene_shape(
-                        child,
-                        children_matrix,
-                        if depth == 0 { (0.0, 0.0) } else { origin },
-                        count,
-                        depth + 1,
-                    )
-                })
-                .collect(),
-        );
+        let mut children = Vec::new();
+        if depth < MAX_SCENE_DEPTH {
+            for child in element.child_elements() {
+                if *count >= MAX_SCENE_NODES {
+                    break;
+                }
+                if let Some(child) = render_scene_shape(
+                    child,
+                    children_matrix,
+                    if depth == 0 { (0.0, 0.0) } else { origin },
+                    count,
+                    depth + 1,
+                ) {
+                    children.push(*child);
+                }
+            }
+        }
+        group.children = Some(children);
         return Some(group);
     }
     let mut shape = if local == "pic" {
-        parse_picture_shape(element)
+        Box::new(parse_picture_shape(element))
     } else if is_scene_shape(local) {
-        parse_shape(element)
+        Box::new(parse_shape(element))
     } else {
         return None;
     };
@@ -1715,6 +1726,172 @@ fn render_scene_shape(
         }
     }
     Some(shape)
+}
+
+type TextBodyKey = (usize, Option<String>);
+
+pub(crate) const GROUP_SCENE_LIMIT_WARNING: &str = "BetterOffice did not show every shape of a drawing group nested deeper than 32 levels or holding more than 4096 shapes.";
+pub(crate) const GROUP_TEXT_BOX_NESTING_WARNING: &str = "BetterOffice did not show the text of group text boxes nested more than 4 levels inside other group text boxes.";
+pub(crate) const GROUP_TEXT_BOX_BUDGET_WARNING: &str = "BetterOffice did not show the text of some group text boxes nested inside other group text boxes: their copies passed the size limit for nested group text box text.";
+
+pub(crate) fn enrich_group_text_boxes(
+    shape: &mut Shape,
+    drawing: &XmlElement,
+    budget: &mut ParseBudget<'_>,
+    mut parse_story: impl FnMut(
+        &XmlElement,
+        &mut ParseBudget<'_>,
+    ) -> Result<Vec<serde_json::Value>, ParseError>,
+) -> Result<Vec<&'static str>, ParseError> {
+    let mut warnings = Vec::new();
+    let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) else {
+        return Ok(warnings);
+    };
+    let Some(source) = drawing
+        .child_elements()
+        .find(|node| matches!(node.name.as_str(), "wp:inline" | "wp:anchor"))
+        .and_then(|container| container.child_by_full_name("a:graphic"))
+        .and_then(|graphic| graphic.child_by_full_name("a:graphicData"))
+        .and_then(|data| {
+            data.child_elements()
+                .find(|node| is_scene_group(node.local_name()) || node.local_name() == "wpc")
+        })
+    else {
+        return Ok(warnings);
+    };
+    let mut sources = BTreeMap::new();
+    let mut truncated = false;
+    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, &mut truncated);
+    if truncated {
+        warnings.push(GROUP_SCENE_LIMIT_WARNING);
+    }
+    let mut scene_bodies = BTreeMap::new();
+    collect_scene_text_bodies(root, &mut 0, &mut scene_bodies, 0);
+    let mut child_bodies = BTreeMap::new();
+    let mut ordinal = 0;
+    for child in shape.children.iter_mut().flatten() {
+        collect_legacy_text_bodies(child, &mut child_bodies, &mut ordinal, 1);
+    }
+    if !sources.keys().eq(scene_bodies.keys()) || !sources.keys().eq(child_bodies.keys()) {
+        return Err(ParseError::Canonical(
+            "group text body source mismatch".to_owned(),
+        ));
+    }
+    if sources.values().all(Option::is_none) {
+        return Ok(warnings);
+    }
+    let Some(nested) = budget.begin_group_text_box_materialization() else {
+        warnings.push(GROUP_TEXT_BOX_NESTING_WARNING);
+        return Ok(warnings);
+    };
+    let mut outcome = Ok(());
+    for (key, container) in sources {
+        let Some(container) = container else {
+            continue;
+        };
+        if nested && budget.group_text_box_budget_spent() {
+            warnings.push(GROUP_TEXT_BOX_BUDGET_WARNING);
+            break;
+        }
+        let content = match parse_story(container, budget) {
+            Ok(content) => content,
+            Err(error) => {
+                outcome = Err(error);
+                break;
+            }
+        };
+        if nested && !budget.charge_group_text_box_materialization(&content) {
+            warnings.push(GROUP_TEXT_BOX_BUDGET_WARNING);
+            break;
+        }
+        scene_bodies.get_mut(&key).unwrap().content = content.clone();
+        child_bodies.get_mut(&key).unwrap().content = content;
+    }
+    budget.end_group_text_box_materialization();
+    outcome.map(|()| warnings)
+}
+
+fn collect_text_box_sources<'a>(
+    element: &'a XmlElement,
+    count: &mut usize,
+    ordinal: &mut usize,
+    depth: usize,
+    sources: &mut BTreeMap<TextBodyKey, Option<&'a XmlElement>>,
+    truncated: &mut bool,
+) {
+    if depth > MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
+        return;
+    }
+    *count += 1;
+    if is_scene_shape(element.local_name()) {
+        let shape = Box::new(parse_shape(element));
+        if shape.text_body.is_some() {
+            sources.insert(
+                (*ordinal, shape.id),
+                crate::text_box::get_text_box_content_element(element),
+            );
+        }
+        *ordinal += 1;
+    } else if is_scene_group(element.local_name()) || element.local_name() == "wpc" {
+        for child in element.child_elements() {
+            if depth >= MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
+                *truncated |= is_scene_node(child.local_name());
+                continue;
+            }
+            collect_text_box_sources(child, count, ordinal, depth + 1, sources, truncated);
+        }
+    }
+}
+
+fn is_scene_node(name: &str) -> bool {
+    is_scene_shape(name)
+        || is_scene_group(name)
+        || matches!(name, "wpc" | "pic" | "graphicFrame" | "contentPart")
+}
+
+fn collect_scene_text_bodies<'a>(
+    node: &'a mut DrawingSceneNode,
+    ordinal: &mut usize,
+    bodies: &mut BTreeMap<TextBodyKey, &'a mut ShapeTextBody>,
+    depth: usize,
+) {
+    if depth > MAX_SCENE_DEPTH {
+        return;
+    }
+    if let Some(shape) = &mut node.shape {
+        if let Some(body) = &mut shape.text_body {
+            bodies.insert((*ordinal, shape.id.clone()), body);
+        }
+        *ordinal += 1;
+    }
+    if depth < MAX_SCENE_DEPTH {
+        for child in node.children.iter_mut().flatten() {
+            collect_scene_text_bodies(child, ordinal, bodies, depth + 1);
+        }
+    }
+}
+
+fn collect_legacy_text_bodies<'a>(
+    shape: &'a mut Shape,
+    bodies: &mut BTreeMap<TextBodyKey, &'a mut ShapeTextBody>,
+    ordinal: &mut usize,
+    depth: usize,
+) {
+    if depth > MAX_SCENE_DEPTH {
+        return;
+    }
+    if let Some(children) = &mut shape.children {
+        if depth < MAX_SCENE_DEPTH {
+            for child in children {
+                collect_legacy_text_bodies(child, bodies, ordinal, depth + 1);
+            }
+        }
+    } else {
+        if let Some(body) = &mut shape.text_body {
+            bodies.insert((*ordinal, shape.id.clone()), body);
+        }
+        *ordinal += 1;
+    }
 }
 
 fn render_shape_transform(
@@ -1808,12 +1985,12 @@ fn render_group_matrix(parent: Matrix, transform: Option<&XmlElement>) -> Matrix
     let child_width = nonzero(finite_attribute(child_extent, "cx").unwrap_or(width));
     let child_height = nonzero(finite_attribute(child_extent, "cy").unwrap_or(height));
     let rotation = rot_to_degrees(transform.attribute(None, "rot")).unwrap_or(0.0);
-    let flip_x = if transform.attribute(None, "flipH") == Some("1") {
+    let flip_x = if transform.parse_boolean_attribute(None, "flipH") == Some(true) {
         -1.0
     } else {
         1.0
     };
-    let flip_y = if transform.attribute(None, "flipV") == Some("1") {
+    let flip_y = if transform.parse_boolean_attribute(None, "flipV") == Some(true) {
         -1.0
     } else {
         1.0
@@ -1839,6 +2016,154 @@ mod tests {
             .root()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn group_story_enrichment_preserves_geometry_and_bounded_source_identity() {
+        let leaf = r#"<wps:wsp><wps:cNvPr id="2"/><wps:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="100" cy="50"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"#;
+        for (children, expected_stories, expected_depth, truncated) in [
+            (
+                format!("{leaf}<pic:pic/><a:graphicFrame/><a:cxnSp/>{leaf}"),
+                2,
+                1,
+                false,
+            ),
+            (
+                "<wpg:grpSp>".repeat(MAX_SCENE_DEPTH - 1)
+                    + leaf
+                    + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH - 1)
+                    + leaf,
+                2,
+                MAX_SCENE_DEPTH,
+                false,
+            ),
+            (
+                "<wpg:grpSp>".repeat(MAX_SCENE_DEPTH)
+                    + leaf
+                    + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH)
+                    + leaf,
+                1,
+                MAX_SCENE_DEPTH,
+                true,
+            ),
+            (
+                "<wpg:grpSp>".repeat(MAX_SCENE_DEPTH + 2)
+                    + leaf
+                    + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH + 2)
+                    + leaf,
+                1,
+                MAX_SCENE_DEPTH,
+                true,
+            ),
+            (
+                leaf.repeat(MAX_SCENE_NODES + 2),
+                MAX_SCENE_NODES - 2,
+                1,
+                true,
+            ),
+        ] {
+            let drawing = root(&format!(
+                r#"<w:drawing><wp:inline><wp:extent cx="1000" cy="500"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm rot="5400000" flipH="1" flipV="1"><a:off x="10" y="20"/><a:ext cx="1000" cy="500"/><a:chOff x="5" y="10"/><a:chExt cx="500" cy="250"/></a:xfrm></wpg:grpSpPr>{children}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+            ));
+            let mut shape = parse_shape_from_drawing(&drawing).unwrap();
+            let mut pending = vec![(shape.scene.as_ref().unwrap().root.as_ref().unwrap(), 0)];
+            let mut count = 0;
+            let mut max_depth = 0;
+            while let Some((node, depth)) = pending.pop() {
+                count += 1;
+                max_depth = max_depth.max(depth);
+                pending.extend(
+                    node.children
+                        .iter()
+                        .flatten()
+                        .map(|child| (child, depth + 1)),
+                );
+            }
+            assert!(count <= MAX_SCENE_NODES);
+            assert_eq!(max_depth, expected_depth);
+            let rendered = Box::new(shape_for_rendering(&drawing).unwrap());
+            for shape in [&shape, rendered.as_ref()] {
+                let mut pending = vec![(shape, 0)];
+                let mut count = 0;
+                let mut max_depth = 0;
+                while let Some((node, depth)) = pending.pop() {
+                    count += 1;
+                    max_depth = max_depth.max(depth);
+                    pending.extend(
+                        node.children
+                            .iter()
+                            .flatten()
+                            .map(|child| (child, depth + 1)),
+                    );
+                }
+                assert!(count <= MAX_SCENE_NODES);
+                assert_eq!(max_depth, expected_depth);
+            }
+            let baseline = shape.clone();
+            let mut stories = 0;
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let warnings = enrich_group_text_boxes(&mut shape, &drawing, &mut budget, |_, _| {
+                stories += 1;
+                Ok(vec![serde_json::json!({"story": stories})])
+            })
+            .unwrap();
+            assert_eq!(warnings.contains(&GROUP_SCENE_LIMIT_WARNING), truncated);
+            assert_eq!(stories, expected_stories);
+            let mut scene_bodies = BTreeMap::new();
+            collect_scene_text_bodies(
+                shape.scene.as_mut().unwrap().root.as_mut().unwrap(),
+                &mut 0,
+                &mut scene_bodies,
+                0,
+            );
+            let mut child_bodies = BTreeMap::new();
+            let mut ordinal = 0;
+            for child in shape.children.iter_mut().flatten() {
+                collect_legacy_text_bodies(child, &mut child_bodies, &mut ordinal, 1);
+            }
+            assert_eq!(scene_bodies.len(), stories);
+            assert_eq!(child_bodies.len(), stories);
+            for (index, ((key, scene), (child_key, child))) in
+                scene_bodies.iter_mut().zip(&mut child_bodies).enumerate()
+            {
+                assert_eq!(key, child_key);
+                assert_eq!(scene.content, child.content);
+                assert_eq!(scene.content[0]["story"], index + 1);
+                scene.content =
+                    vec![serde_json::json!({"type":"paragraph","formatting":{},"content":[]})];
+                child.content = scene.content.clone();
+            }
+            drop(scene_bodies);
+            drop(child_bodies);
+            assert_eq!(shape, baseline);
+        }
+    }
+
+    #[test]
+    fn mismatched_group_story_counts_and_ids_refuse_enrichment_before_parsing() {
+        let drawing = root(
+            r#"<w:drawing><wp:inline><a:graphic><a:graphicData><wpg:wgp><wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        );
+        for wrong_id in [false, true] {
+            let mut shape = parse_shape_from_drawing(&drawing).unwrap();
+            let children = shape.children.as_mut().unwrap();
+            if wrong_id {
+                children[0].id = Some("other".to_owned());
+            } else {
+                children.clear();
+            }
+            let before = shape.clone();
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            assert!(
+                enrich_group_text_boxes(&mut shape, &drawing, &mut budget, |_, _| panic!(
+                    "mismatched source must not parse stories"
+                ),)
+                .is_err()
+            );
+            assert_eq!(shape, before);
+        }
     }
     #[test]
     fn parses_shape_details_and_placeholder_text() {
@@ -2131,6 +2456,8 @@ mod tests {
     fn flipped_groups_compose_picture_rotation_and_reflection() {
         for (group, picture, offset, rotation, flipped) in [
             ("flipH=\"1\"", "", (700.0, 50.0), 0.0, true),
+            ("flipH=\"true\"", "", (700.0, 50.0), 0.0, true),
+            ("flipH=\"on\"", "", (700.0, 50.0), 0.0, true),
             ("flipH=\"1\"", "rot=\"5400000\"", (700.0, 50.0), -90.0, true),
             ("flipV=\"1\"", "rot=\"5400000\"", (100.0, 350.0), 90.0, true),
             (

@@ -46,7 +46,7 @@ export interface PeerlessInputEventState {
 /** @internal The caller gives overlapping browser events the same eventId. */
 export type PeerlessInputEvent = { eventId: number; inputTime: number } & (
   | { source: 'beforeinput'; inputType: string; data: string | null; isComposing: boolean }
-  | { source: 'keydown'; key: string; code: string; shift: boolean; alt: boolean; ctrl: boolean; meta: boolean; goalX?: number }
+  | { source: 'keydown'; key: string; code: string; shift: boolean; alt: boolean; ctrl: boolean; meta: boolean; goalX?: number; pageDistance?: number }
   | { source: 'input'; inputType: string; value: string; isComposing: boolean }
   | { source: 'paste'; text: string }
 );
@@ -103,6 +103,15 @@ export function normalizeInputEvent(
         } : { unit: 'line', direction: key === 'ArrowUp' ? 'up' : 'down', extend, goalX: event.goalX ?? 0 },
       };
       if (!meta && !ctrl && !alt && event.goalX === undefined) implicitVerticalGoals.add(intent);
+      return result([intent], true);
+    }
+    if ((key === 'PageUp' || key === 'PageDown') && !meta && !ctrl && !alt &&
+      event.pageDistance !== undefined && Number.isFinite(event.pageDistance) && event.pageDistance > 0) {
+      const intent: PeerlessInputIntent = { kind: 'navigate', payload: {
+        unit: 'page', direction: key === 'PageUp' ? 'up' : 'down', extend,
+        goalX: event.goalX ?? 0, distance: event.pageDistance,
+      } };
+      if (event.goalX === undefined) implicitVerticalGoals.add(intent);
       return result([intent], true);
     }
     if (key === 'Home' || key === 'End') return result([{ kind: 'navigate', payload: {

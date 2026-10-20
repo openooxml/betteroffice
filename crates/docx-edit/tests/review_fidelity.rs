@@ -1758,11 +1758,11 @@ fn shape_text_cached_theme_color_survives_import_without_a_second_shade() {
     for (fill, expected) in [
         (
             r#"<a:srgbClr val="204060"><a:shade val="50000"/></a:srgbClr>"#,
-            "#102030",
+            "#142C44",
         ),
         (
             r#"<a:schemeClr val="accent4"><a:tint val="40000"/></a:schemeClr>"#,
-            "#FFE699",
+            "#FFE8CB",
         ),
     ] {
         let shape = SHAPE
@@ -1793,4 +1793,249 @@ fn shape_text_cached_theme_color_survives_import_without_a_second_shade() {
                 .all(|primitive| primitive["color"] != "#421E06")
         );
     }
+}
+
+fn saved_paragraph_formatting(engine: &EngineSession, index: usize) -> (Value, String) {
+    let snapshot = engine.doc().paragraphs("body").unwrap().remove(index);
+    let original =
+        serde_json::to_value(snapshot.properties.get("_originalFormatting").unwrap()).unwrap();
+    let formatting = serde_json::from_value(original.clone()).unwrap();
+    let xml = docx_parse::serializer::serialize_paragraph_formatting(
+        Some(&formatting),
+        None,
+        None,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+    (original, xml)
+}
+
+fn reopened_property(xml: &str, styles: &str, key: &str) -> Value {
+    let reopened = EngineSession::new(74241);
+    seed_from_docx(
+        reopened.doc(),
+        &document(
+            &format!("<w:p>{xml}<w:r><w:t>Reopened</w:t></w:r></w:p>"),
+            styles,
+        ),
+    )
+    .unwrap();
+    let snapshot = reopened.doc().paragraphs("body").unwrap().remove(0);
+    serde_json::to_value(snapshot.properties.get(key).unwrap()).unwrap()
+}
+
+const NORMAL_STYLE: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#;
+
+#[test]
+fn line_spacing_edit_reaches_saved_direct_spacing() {
+    use docx_edit::{EditCtx, ParaAttrDelta, ParaSelector, Patch};
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Styled only</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:spacing w:before="120" w:after="240" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>Direct spacing</w:t></w:r></w:p>"#,
+    );
+    let engine = EngineSession::new(74239);
+    seed_from_docx(engine.doc(), &document(body, NORMAL_STYLE)).unwrap();
+    let ids = engine
+        .doc()
+        .paragraphs("body")
+        .unwrap()
+        .into_iter()
+        .map(|paragraph| paragraph.para_id)
+        .collect::<Vec<_>>();
+    engine
+        .doc()
+        .set_paragraph_attrs(
+            &EditCtx::local("", ""),
+            &ParaSelector::Many(ids),
+            &ParaAttrDelta {
+                line_spacing: Patch::Set(276.0),
+                line_spacing_rule: Patch::Set("auto".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (original, xml) = saved_paragraph_formatting(&engine, 0);
+    assert_eq!(original["lineSpacing"].as_f64(), Some(276.0));
+    assert_eq!(original["lineSpacingRule"], json!("auto"));
+    assert!(xml.contains(r#"<w:pStyle w:val="Normal"/>"#), "{xml}");
+    assert!(
+        xml.contains(r#"<w:spacing w:line="276" w:lineRule="auto"/>"#),
+        "{xml}"
+    );
+    assert_eq!(
+        reopened_property(&xml, NORMAL_STYLE, "lineSpacing").as_f64(),
+        Some(276.0)
+    );
+    let (_, xml) = saved_paragraph_formatting(&engine, 1);
+    assert!(
+        xml.contains(r#"<w:spacing w:before="120" w:after="240" w:line="276" w:lineRule="auto"/>"#),
+        "{xml}"
+    );
+    assert_eq!(
+        reopened_property(&xml, NORMAL_STYLE, "lineSpacing").as_f64(),
+        Some(276.0)
+    );
+}
+
+#[test]
+fn indent_edits_reach_saved_direct_indentation() {
+    use docx_edit::{EditCtx, ParaAttrDelta, ParaSelector, Patch};
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Styled only</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:ind w:left="360" w:leftChars="100" w:hanging="360"/></w:pPr><w:r><w:t>Hanging</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:ind w:left="720" w:firstLine="240"/></w:pPr><w:r><w:t>First line</w:t></w:r></w:p>"#,
+    );
+    let engine = EngineSession::new(74240);
+    seed_from_docx(engine.doc(), &document(body, NORMAL_STYLE)).unwrap();
+    let paragraphs = engine.doc().paragraphs("body").unwrap();
+    let ctx = EditCtx::local("", "");
+    for (index, left) in [(0, 720.0), (1, 1080.0)] {
+        engine
+            .doc()
+            .set_paragraph_attrs(
+                &ctx,
+                &ParaSelector::One(paragraphs[index].para_id.clone()),
+                &ParaAttrDelta {
+                    indent_left: Patch::Set(left),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    engine
+        .doc()
+        .increase_indent(
+            &ctx,
+            &ParaSelector::One(paragraphs[2].para_id.clone()),
+            None,
+        )
+        .unwrap();
+
+    let (_, xml) = saved_paragraph_formatting(&engine, 0);
+    assert!(xml.contains(r#"<w:ind w:left="720"/>"#), "{xml}");
+    assert_eq!(
+        reopened_property(&xml, NORMAL_STYLE, "indentLeft").as_f64(),
+        Some(720.0)
+    );
+    let (original, xml) = saved_paragraph_formatting(&engine, 1);
+    assert!(original.get("indentLeftChars").is_none());
+    assert!(
+        xml.contains(r#"<w:ind w:left="1080" w:hanging="360"/>"#),
+        "{xml}"
+    );
+    assert_eq!(
+        reopened_property(&xml, NORMAL_STYLE, "indentLeft").as_f64(),
+        Some(1080.0)
+    );
+    let (_, xml) = saved_paragraph_formatting(&engine, 2);
+    assert!(
+        xml.contains(r#"<w:ind w:left="1440" w:firstLine="240"/>"#),
+        "{xml}"
+    );
+
+    engine
+        .doc()
+        .set_paragraph_attrs(
+            &ctx,
+            &ParaSelector::One(paragraphs[1].para_id.clone()),
+            &ParaAttrDelta {
+                indent_left: Patch::Clear,
+                indent_first_line: Patch::Clear,
+                hanging_indent: Patch::Clear,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (_, xml) = saved_paragraph_formatting(&engine, 1);
+    assert!(!xml.contains("<w:ind"), "{xml}");
+}
+
+#[test]
+fn outdent_to_zero_over_a_style_indent_survives_save() {
+    use docx_edit::{EditCtx, ParaSelector};
+    let styles = format!(
+        r#"{NORMAL_STYLE}<w:style w:type="paragraph" w:styleId="Indented"><w:name w:val="Indented"/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>"#
+    );
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Indented"/><w:ind w:left="1440"/></w:pPr><w:r><w:t>Direct over style</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:pStyle w:val="Indented"/></w:pPr><w:r><w:t>Style only</w:t></w:r></w:p>"#,
+    );
+    let engine = EngineSession::new(74242);
+    seed_from_docx(engine.doc(), &document(body, &styles)).unwrap();
+    let paragraphs = engine.doc().paragraphs("body").unwrap();
+    let ctx = EditCtx::local("", "");
+    for (index, times) in [(0, 3), (1, 2)] {
+        for _ in 0..times {
+            engine
+                .doc()
+                .decrease_indent(
+                    &ctx,
+                    &ParaSelector::One(paragraphs[index].para_id.clone()),
+                    None,
+                )
+                .unwrap();
+        }
+        let (original, xml) = saved_paragraph_formatting(&engine, index);
+        assert_eq!(original["indentLeft"].as_f64(), Some(0.0), "{xml}");
+        assert!(xml.contains(r#"<w:ind w:left="0"/>"#), "{xml}");
+        assert_eq!(
+            reopened_property(&xml, &styles, "indentLeft").as_f64(),
+            Some(0.0)
+        );
+    }
+}
+
+#[test]
+fn style_change_supersedes_direct_line_spacing_and_indent_on_save() {
+    use docx_edit::{EditCtx, ParaAttrDelta, ParaSelector, Patch, ResolvedStyleProjection};
+    let body = r#"<w:p><w:pPr><w:spacing w:after="240" w:line="240" w:lineRule="auto"/><w:ind w:left="360" w:hanging="360"/></w:pPr><w:r><w:t>Restyled</w:t></w:r></w:p>"#;
+    let styles = format!(
+        r#"{NORMAL_STYLE}<w:style w:type="paragraph" w:styleId="Spaced"><w:name w:val="Spaced"/><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr></w:style>"#
+    );
+    let engine = EngineSession::new(74242);
+    seed_from_docx(engine.doc(), &document(body, &styles)).unwrap();
+    let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+    let ctx = EditCtx::local("", "");
+    engine
+        .doc()
+        .set_paragraph_attrs(
+            &ctx,
+            &ParaSelector::One(id.clone()),
+            &ParaAttrDelta {
+                line_spacing: Patch::Set(276.0),
+                line_spacing_rule: Patch::Set("auto".into()),
+                indent_left: Patch::Set(1080.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    engine
+        .doc()
+        .apply_paragraph_style(
+            &ctx,
+            &ParaSelector::One(id),
+            &ResolvedStyleProjection {
+                style_id: "Spaced".into(),
+                known: true,
+                paragraph_attrs: serde_json::from_value(
+                    json!({"lineSpacing": 360, "lineSpacingRule": "auto"}),
+                )
+                .unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (original, xml) = saved_paragraph_formatting(&engine, 0);
+    for key in [
+        "lineSpacing",
+        "lineSpacingRule",
+        "indentLeft",
+        "indentFirstLine",
+    ] {
+        assert!(original.get(key).is_none(), "{key}: {original}");
+    }
+    assert!(!xml.contains("w:line="), "{xml}");
+    assert!(!xml.contains("<w:ind"), "{xml}");
 }

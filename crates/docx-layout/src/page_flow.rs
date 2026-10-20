@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use crate::LayoutError;
 use crate::types::{
-    ColumnLayout, Fragment, Page, PageFloatBand, PageMargins, SectionPageFloatBands,
-    SectionPageMargins, Size,
+    BlockId, ColumnLayout, Fragment, Page, PageFloatBand, PageMargins, ParagraphFragment,
+    SectionPageFloatBands, SectionPageMargins, Size,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -120,7 +120,7 @@ impl OpeningFragmentGeometry {
                 .unwrap_or(&page.margins)
                 .clone(),
             content_width: paginator.get_content_width(),
-            column_width: paginator.column_width(),
+            column_width: paginator.get_column_width(paginator.states[idx].column_index),
             columns: page.columns.clone(),
             float_bands: page.float_bands.clone(),
             footnote_reserved_height: page.footnote_reserved_height,
@@ -136,7 +136,7 @@ impl OpeningFragmentGeometry {
             && &self.body_anchor_margins
                 == page.body_anchor_margins.as_ref().unwrap_or(&page.margins)
             && self.content_width == paginator.get_content_width()
-            && self.column_width == paginator.column_width()
+            && self.column_width == paginator.get_column_width(paginator.states[idx].column_index)
             && self.columns == page.columns
             && self.float_bands == page.float_bands
             && self.footnote_reserved_height == page.footnote_reserved_height
@@ -153,6 +153,109 @@ fn calculate_column_width(
     let content_width = page_width - left_margin - right_margin;
     let total_gaps = (columns.count - 1.0) * columns.gap;
     (content_width - total_gaps) / columns.count
+}
+
+pub(crate) fn unequal_column_rectangles(
+    content_width: f64,
+    count: usize,
+    gap: f64,
+    columns: impl Iterator<Item = (Option<f64>, Option<f64>)>,
+) -> Vec<(f64, f64)> {
+    let count = count.clamp(1, 45);
+    let mut widths = vec![0.0; count];
+    let mut gaps = vec![if gap.is_finite() { gap.max(0.0) } else { 0.0 }; count];
+    for (index, (width, space)) in columns.take(count).enumerate() {
+        widths[index] = width
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(0.0);
+        if let Some(space) = space.filter(|value| value.is_finite() && *value >= 0.0) {
+            gaps[index] = space;
+        }
+    }
+    let mut gap_total: f64 = gaps.iter().take(count.saturating_sub(1)).sum();
+    if gap_total > content_width {
+        for gap in &mut gaps {
+            *gap *= content_width / gap_total;
+        }
+        gap_total = content_width;
+    }
+    let known_total: f64 = widths.iter().sum();
+    let missing = widths.iter().filter(|width| **width <= 0.0).count();
+    let fallback = if missing > 0 {
+        (content_width - gap_total - known_total).max(0.0) / missing as f64
+    } else {
+        0.0
+    };
+    for width in &mut widths {
+        if *width <= 0.0 {
+            *width = fallback;
+        }
+    }
+    let widths_total: f64 = widths.iter().sum();
+    if widths_total + gap_total > content_width && widths_total > 0.0 {
+        let scale = (content_width - gap_total).max(0.0) / widths_total;
+        for width in &mut widths {
+            *width *= scale;
+        }
+    }
+    let mut x = 0.0;
+    widths
+        .into_iter()
+        .zip(gaps)
+        .map(|(width, gap)| {
+            let rectangle = (x, width);
+            x += width + gap;
+            rectangle
+        })
+        .collect()
+}
+
+fn column_rectangle_at(
+    page_width: f64,
+    left_margin: f64,
+    right_margin: f64,
+    columns: &ColumnLayout,
+    column_index: usize,
+) -> (f64, f64) {
+    if columns.count > 1.0 && columns.equal_width == Some(false) {
+        let rectangles = unequal_column_rectangles(
+            (page_width - left_margin - right_margin).max(0.0),
+            columns.count as usize,
+            columns.gap,
+            columns
+                .columns
+                .iter()
+                .flatten()
+                .map(|col| (col.width, col.space)),
+        );
+        let (x, width) = rectangles[column_index.min(rectangles.len() - 1)];
+        return (left_margin + x, width);
+    }
+    let width = calculate_column_width(page_width, left_margin, right_margin, columns);
+    (
+        left_margin + column_index as f64 * (width + columns.gap),
+        width,
+    )
+}
+
+fn column_width_at(
+    page_width: f64,
+    left_margin: f64,
+    right_margin: f64,
+    columns: &ColumnLayout,
+    column_index: usize,
+) -> f64 {
+    column_rectangle_at(page_width, left_margin, right_margin, columns, column_index).1
+}
+
+fn column_x_at(
+    page_width: f64,
+    left_margin: f64,
+    right_margin: f64,
+    columns: &ColumnLayout,
+    column_index: usize,
+) -> f64 {
+    column_rectangle_at(page_width, left_margin, right_margin, columns, column_index).0
 }
 
 /// The tallest stretch between `top` and `limit` that `bands` (sorted by top)
@@ -205,7 +308,9 @@ pub struct Paginator {
     page_start_column: usize,
     numbering_parity_offset: bool,
     pub pages: Vec<Page>,
+    pub(crate) fragment_column_widths: Option<Vec<(BlockId, f64)>>,
     states: Vec<FlowState>,
+    section_mark_counts: Vec<usize>,
     page_size: Size,
     margins: PageMargins,
     columns: ColumnLayout,
@@ -263,7 +368,9 @@ impl Paginator {
             page_start_column: 0,
             numbering_parity_offset: false,
             pages: Vec::new(),
+            fragment_column_widths: None,
             states: Vec::new(),
+            section_mark_counts: Vec::new(),
             page_size,
             margins,
             columns,
@@ -471,6 +578,14 @@ impl Paginator {
         .then(|| (state.page_index, page.number, self.snapshot_geometry()))
     }
 
+    pub(crate) fn truncate_pages(&mut self, len: usize) {
+        self.pages.truncate(len);
+        self.states.truncate(len);
+        self.section_mark_counts.truncate(len);
+        self.opens_section.truncate(len);
+        self.column_capacities.truncate(len);
+    }
+
     /// Fragment counts used by the placement walk to recognize a block that
     /// was moved wholesale onto a newly-created clean page.
     pub fn page_fragment_counts(&self) -> Vec<usize> {
@@ -613,13 +728,36 @@ impl Paginator {
         self.page_size.w - self.margins.left - self.margins.right
     }
 
+    pub fn get_column_width(&self, column_index: usize) -> f64 {
+        if self.columns.count > 1.0 && self.columns.equal_width == Some(false) {
+            return column_width_at(
+                self.page_size.w,
+                self.margins.left,
+                self.margins.right,
+                &self.columns,
+                column_index,
+            );
+        }
+        self.column_width
+    }
+
     /// Returns the current column width.
     pub fn column_width(&self) -> f64 {
-        self.column_width
+        let column_index = self.states.last().map_or(0, |state| state.column_index);
+        self.get_column_width(column_index)
     }
 
     /// Returns the horizontal origin of a column.
     pub fn get_column_x(&self, column_index: usize) -> f64 {
+        if self.columns.count > 1.0 && self.columns.equal_width == Some(false) {
+            return column_x_at(
+                self.page_size.w,
+                self.margins.left,
+                self.margins.right,
+                &self.columns,
+                column_index,
+            );
+        }
         self.margins.left + column_index as f64 * (self.column_width + self.columns.gap)
     }
 
@@ -644,8 +782,7 @@ impl Paginator {
     fn pristine_page(&self) -> Option<usize> {
         let idx = self.states.len().checked_sub(1)?;
         let state = &self.states[idx];
-        (self.pages[state.page_index].fragments.is_empty() && state.pen_y == state.content_top)
-            .then_some(idx)
+        (self.page_fragment_count(idx) == 0 && state.pen_y == state.content_top).then_some(idx)
     }
 
     /// Re-forms a pristine page when a promoted break remains on the blank sheet.
@@ -799,6 +936,7 @@ impl Paginator {
 
         self.pages.push(page);
         self.states.push(state);
+        self.section_mark_counts.push(0);
         self.opens_section.push(opens_section);
         self.column_capacities.push(None);
         if let Some((size, margins, columns)) = self.resumed_pending.take() {
@@ -827,9 +965,10 @@ impl Paginator {
         &self.states[idx]
     }
 
-    /// Number of fragments already on the state's page.
+    /// Number of occupying fragments on the state's page.
     pub fn page_fragment_count(&self, idx: usize) -> usize {
-        self.pages[self.states[idx].page_index].fragments.len()
+        let page_index = self.states[idx].page_index;
+        self.pages[page_index].fragments.len() - self.section_mark_counts[page_index]
     }
 
     fn float_bands(&self, idx: usize) -> &[PageFloatBand] {
@@ -990,10 +1129,31 @@ impl Paginator {
             .leading_spacing(space_before)
             .max(self.states[idx].deferred_spacing);
 
-        let x = self.get_column_x(self.states[idx].column_index);
+        let column_index = self.states[idx].column_index;
+        let x = self.get_column_x(column_index);
         let y = self.states[idx].pen_y + actual_space_before;
 
         fragment.set_xy(x, y);
+        if self.columns.count > 1.0
+            && self.columns.equal_width == Some(false)
+            && let Fragment::Paragraph(pf) = &mut fragment
+        {
+            pf.width = self.get_column_width(column_index);
+        }
+        let width = self.get_column_width(column_index);
+        if self.columns.count > 1.0
+            && self.columns.equal_width == Some(false)
+            && let Fragment::Table(table) = &mut fragment
+        {
+            table.width = table.width.min(width);
+        }
+        if let Some(widths) = &mut self.fragment_column_widths {
+            match &fragment {
+                Fragment::Paragraph(paragraph) => widths.push((paragraph.block_id.clone(), width)),
+                Fragment::Table(table) => widths.push((table.block_id.clone(), width)),
+                _ => {}
+            }
+        }
         let page_index = self.states[idx].page_index;
         if self.pages[page_index].fragments.is_empty() {
             let opening_geometry = opening_geometry.filter(|geometry| !geometry.matches(self, idx));
@@ -1160,6 +1320,13 @@ impl Paginator {
             self.page_start_spacing_spent = self.leading_spacing_spent;
             self.page_start_column = self.states[idx].column_index;
         }
+    }
+
+    pub(crate) fn push_section_mark(&mut self, fragment: ParagraphFragment) {
+        self.push_fragment_direct(Fragment::Paragraph(fragment));
+        let idx = self.get_current();
+        let page_index = self.states[idx].page_index;
+        self.section_mark_counts[page_index] += 1;
     }
 
     #[allow(dead_code)] // reached once the floating-table hook is swapped in

@@ -65,6 +65,14 @@ pub(super) fn display(bytes: &[u8], media_tokens: bool) -> Value {
 }
 
 fn display_with_layout(bytes: &[u8], media_tokens: bool) -> (Value, Value) {
+    display_with_layout_edit(bytes, media_tokens, |_| {})
+}
+
+fn display_with_layout_edit(
+    bytes: &[u8],
+    media_tokens: bool,
+    edit: impl FnOnce(&EngineSession),
+) -> (Value, Value) {
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
         .unwrap()
         .document
@@ -72,6 +80,7 @@ fn display_with_layout(bytes: &[u8], media_tokens: bool) -> (Value, Value) {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let engine = EngineSession::new(75301);
     crate::seed::seed_with_layout_tokens(engine.doc(), bytes).unwrap();
+    edit(&engine);
     let output = engine
         .layout_document_with_regions_json(
             &json!({
@@ -198,6 +207,45 @@ fn shown_anchor_pages(display: &Value, layout: &Value, anchor_text: &str) -> Vec
 }
 
 #[test]
+fn vml_group_pictures_paint_at_mapped_positions() {
+    let content = r#"<w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:group coordorigin="100,200" coordsize="1200,600" style="position:absolute;margin-left:12pt;margin-top:24pt;width:300pt;height:90pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"><v:shape alt="first" style="position:absolute;left:100;top:200;width:300;height:150"><v:imagedata r:id="rId9"/></v:shape><v:shape alt="second" style="position:absolute;left:500;top:250;width:360;height:200"><v:imagedata r:id="rId9"/></v:shape><v:shape alt="third" style="position:absolute;left:900;top:400;width:240;height:300"><v:imagedata r:id="rId9"/></v:shape></v:group></w:pict><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape alt="separate" style="width:12pt;height:6pt"><v:imagedata r:id="rId9"/></v:shape></w:pict>"#;
+    for media_tokens in [true, false] {
+        let painted = primitives(content, false, media_tokens);
+        let pictures = images(&painted);
+        assert_eq!(pictures.len(), 4);
+        for (alt, x, y, width, height) in [
+            ("first", 16.0, 32.0, 100.0, 30.0),
+            ("second", 16.0 + 400.0 / 3.0, 42.0, 120.0, 40.0),
+            ("third", 16.0 + 800.0 / 3.0, 72.0, 80.0, 60.0),
+        ] {
+            let image = pictures
+                .iter()
+                .find(|image| image["altText"] == alt)
+                .unwrap();
+            for (key, expected) in [("x", x), ("y", y), ("w", width), ("h", height)] {
+                assert!((image[key].as_f64().unwrap() - expected).abs() <= 0.5);
+            }
+            if media_tokens {
+                assert_eq!(image["relId"], "media:0");
+            } else {
+                assert!(
+                    image["relId"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("data:image/png;base64,")
+                );
+            }
+        }
+        let separate = pictures
+            .iter()
+            .find(|image| image["altText"] == "separate")
+            .unwrap();
+        assert_eq!(separate["w"], 16);
+        assert_eq!(separate["h"], 8);
+    }
+}
+
+#[test]
 fn inline_picture_in_text_box_paints_with_body_image_properties() {
     for media_tokens in [true, false] {
         let boxed = primitives(PICTURE, true, media_tokens);
@@ -237,6 +285,66 @@ fn inline_picture_in_text_box_paints_with_body_image_properties() {
             let box_start = shape[position].as_f64().unwrap();
             let box_end = box_start + shape[size].as_f64().unwrap();
             assert!(start >= box_start && end <= box_end);
+        }
+    }
+}
+
+#[test]
+fn chartex_choice_paints_its_picture_fallback_once() {
+    let alternate = format!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><mc:Choice Requires="cx"><w:drawing><wp:inline><wp:extent cx="1828800" cy="914400"/><wp:docPr id="8" name="Chart"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart r:id="rIdChartEx"/></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback>{PICTURE}</mc:Fallback></mc:AlternateContent>"#
+    );
+    for boxed in [false, true] {
+        let mut parts = ooxml_opc::unzip_parts(&document(&alternate, boxed)).unwrap();
+        let relationships = &mut parts
+            .iter_mut()
+            .find(|(path, _)| path == "word/_rels/document.xml.rels")
+            .unwrap()
+            .1;
+        *relationships = String::from_utf8(relationships.clone())
+            .unwrap()
+            .replace(
+                "</Relationships>",
+                r#"<Relationship Id="rIdChartEx" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="charts/chartEx1.xml"/></Relationships>"#,
+            )
+            .into_bytes();
+        parts.push((
+            "word/charts/chartEx1.xml".to_owned(),
+            br#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart/></cx:chartSpace>"#.to_vec(),
+        ));
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        for media_tokens in [true, false] {
+            let display = display(&bytes, media_tokens);
+            let painted: Vec<_> = display["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|page| page["primitives"].as_array().unwrap())
+                .cloned()
+                .collect();
+            let pictures = images(&painted);
+            assert_eq!(
+                pictures.len(),
+                1,
+                "boxed={boxed}, media_tokens={media_tokens}"
+            );
+            if media_tokens {
+                assert_eq!(pictures[0]["relId"], "media:0");
+            } else {
+                assert!(
+                    pictures[0]["relId"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("data:image/png;base64,")
+                );
+            }
+            let fallback = primitives(PICTURE, boxed, media_tokens);
+            let expected = images(&fallback);
+            assert_eq!(expected.len(), 1);
+            for key in ["relId", "w", "h", "crop", "altText"] {
+                assert_eq!(pictures[0][key], expected[0][key], "{key}");
+            }
+            assert!(painted.iter().all(|primitive| primitive["chart"].is_null()));
         }
     }
 }
@@ -646,4 +754,769 @@ fn anchored_shape() -> String {
     format!(
         r#"<w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
     )
+}
+
+#[test]
+fn grouped_text_boxes_paint_once_at_composed_child_positions() {
+    let paragraph = |text| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let text_box = |id, x, y, content: &str| {
+        format!(
+            r#"<wps:wsp><wps:cNvPr id="{id}"/><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="952500" cy="476250"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr lIns="9525" tIns="19050" rIns="0" bIns="0"/></wps:wsp>"#
+        )
+    };
+    let alpha = text_box(2, 190500, 95250, &paragraph("Alpha"));
+    let beta_content = format!(
+        "<w:sdt><w:sdtPr/><w:sdtContent><w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl></w:sdtContent></w:sdt>",
+        paragraph("Beta")
+    );
+    let beta = text_box(3, 95250, 47625, &beta_content);
+    let origin = |primitive: &Value| {
+        if primitive["kind"] == "glyphRun" {
+            (
+                primitive["glyphs"][0]["x"].as_f64().unwrap(),
+                primitive["glyphs"][0]["y"].as_f64().unwrap(),
+            )
+        } else {
+            (
+                primitive["x"].as_f64().unwrap(),
+                primitive["baselineY"].as_f64().unwrap(),
+            )
+        }
+    };
+    for (nested, picture) in [(false, false), (true, false), (true, true)] {
+        let beta = if nested {
+            format!(
+                r#"<wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x="1047750" y="428625"/><a:ext cx="762000" cy="381000"/><a:chOff x="0" y="0"/><a:chExt cx="381000" cy="190500"/></a:xfrm></wpg:grpSpPr>{beta}</wpg:grpSp>"#
+            )
+        } else {
+            text_box(3, 1143000, 476250, &beta_content)
+        };
+        let picture = if picture {
+            &PICTURE[PICTURE.find("<pic:pic>").unwrap()
+                ..PICTURE.find("</pic:pic>").unwrap() + "</pic:pic>".len()]
+        } else {
+            ""
+        };
+        let group = format!(
+            r#"<w:drawing><wp:inline><wp:extent cx="3810000" cy="1905000"/><wp:docPr id="1" name="Group"/><a:graphic><a:graphicData><wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3810000" cy="1905000"/><a:chOff x="95250" y="47625"/><a:chExt cx="1905000" cy="952500"/></a:xfrm></wpg:grpSpPr>{picture}{alpha}{beta}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+        );
+        let bytes = document(&group, false);
+        let (display, _) = display_with_layout(&bytes, true);
+        let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+            .unwrap()
+            .document
+            .package;
+        let request = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2030-01-02T03:04:05.006Z"},
+            "document": {"content": package.document.content},
+            "relationshipEntries": package.relationship_entries,
+            "selective": {"changedParaIds": []},
+            "options": {"updateModifiedDate": false}
+        }))
+        .unwrap();
+        let saved = docx_parse::write_docx_s13(request, &bytes).unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&saved).unwrap(),
+            ooxml_opc::unzip_parts(&bytes).unwrap()
+        );
+        let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+        let painted = text(primitives);
+        let pictures: Vec<_> = primitives
+            .iter()
+            .filter(|p| p["fillPaint"]["kind"] == "picture")
+            .collect();
+        assert_eq!(pictures.len(), usize::from(!picture.is_empty()));
+        if let Some(picture) = pictures.first() {
+            assert_eq!(picture["fillPaint"]["pictureSrc"], "media:0");
+        }
+        assert_eq!(painted.matches("Alpha").count(), 1);
+        assert_eq!(painted.matches("Beta").count(), 1);
+        let shapes: Vec<_> = primitives.iter().filter(|p| p["kind"] == "shape").collect();
+        let root = shapes[0];
+        for (label, dx, dy) in [
+            ("Alpha", 20.0, 10.0),
+            (
+                "Beta",
+                if nested { 240.0 } else { 220.0 },
+                if nested { 100.0 } else { 90.0 },
+            ),
+        ] {
+            let label = first_glyph(primitives, label);
+            let child_x = root["x"].as_f64().unwrap() + dx;
+            let child_y = root["y"].as_f64().unwrap() + dy;
+            let child = shapes
+                .iter()
+                .find(|p| {
+                    (p["x"].as_f64().unwrap() - child_x).abs() < 0.01
+                        && (p["y"].as_f64().unwrap() - child_y).abs() < 0.01
+                })
+                .unwrap();
+            let (x, y) = origin(label);
+            assert!((x - child_x - 1.0).abs() < 0.01);
+            assert!(y >= child_y + 2.0 && y < child_y + child["h"].as_f64().unwrap());
+        }
+    }
+    let control = primitives("<w:t>Standalone</w:t>", true, true);
+    assert_eq!(text(&control), "Standalone");
+    let shape = control.iter().find(|p| p["kind"] == "shape").unwrap();
+    let label = first_glyph(&control, "Standalone");
+    assert!((origin(label).0 - shape["x"].as_f64().unwrap()).abs() < 0.01);
+}
+
+#[test]
+fn nested_group_text_boxes_with_fractional_transforms_paint_inside_child_boxes() {
+    let groups = [
+        (
+            "Alpha", -19050, 45085, 641985, 2261, 2248, 1011, 2261, 2493, 2461,
+        ),
+        (
+            "Beta", 6926580, 38735, 622935, 3387, 2109, 981, 3518, 2364, 3387,
+        ),
+        (
+            "Gamma", 0, 3933825, 632460, 2366, 2237, 996, 2366, 2493, 2551,
+        ),
+        (
+            "Delta", 6926580, 3933825, 615950, 3462, 2108, 970, 3582, 2364, 3462,
+        ),
+    ];
+    let children: String = groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let (label, x, y, width, child_x, child_y, child_width, line_x, line_y, text_x) = group;
+            let id = index * 3 + 2;
+            let line_id = id + 1;
+            let text_id = id + 2;
+            format!(
+                r#"<wpg:grpSp><wpg:cNvPr id="{id}"/><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="184150"/><a:chOff x="{child_x}" y="{child_y}"/><a:chExt cx="{child_width}" cy="290"/></a:xfrm></wpg:grpSpPr><wps:wsp><wps:cNvPr id="{line_id}"/><wps:cNvCnPr/><wps:spPr><a:xfrm><a:off x="{line_x}" y="{line_y}"/><a:ext cx="850" cy="0"/></a:xfrm><a:prstGeom prst="straightConnector1"/><a:noFill/><a:ln w="6350"><a:solidFill><a:srgbClr val="333333"/></a:solidFill><a:prstDash val="dash"/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp><wps:wsp><wps:cNvPr id="{text_id}"/><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="{text_x}" y="{child_y}"/><a:ext cx="811" cy="290"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:t>{label}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t" anchorCtr="0" upright="1"><a:noAutofit/></wps:bodyPr></wps:wsp></wpg:grpSp>"#
+            )
+        })
+        .collect();
+    let group = format!(
+        r#"<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>center</wp:align></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>3287395</wp:posOffset></wp:positionV><wp:extent cx="7568640" cy="4078800"/><wp:effectExtent l="0" t="0" r="32385" b="17145"/><wp:wrapNone/><wp:docPr id="1" name="Group"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="7568640" cy="4078800"/><a:chOff x="-19050" y="38735"/><a:chExt cx="7568565" cy="4079240"/></a:xfrm></wpg:grpSpPr>{children}</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    );
+    let mut parts = ooxml_opc::unzip_parts(&document(&group, false)).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    *xml = std::str::from_utf8(xml)
+        .unwrap()
+        .replace(r#"w:w="12240" w:h="15840""#, r#"w:w="11906" w:h="16838""#)
+        .replace(
+            r#"w:top="1440" w:right="1440" w:bottom="1440" w:left="1440""#,
+            r#"w:top="680" w:right="1134" w:bottom="680" w:left="1134""#,
+        )
+        .into_bytes();
+    let shown = display(&ooxml_opc::rezip_parts(&parts).unwrap(), true);
+    let pages = shown["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0];
+    let primitives = page["primitives"].as_array().unwrap();
+    let root = primitives.iter().find(|p| p["kind"] == "shape").unwrap();
+    let root_x = root["x"].as_f64().unwrap();
+    let root_y = root["y"].as_f64().unwrap();
+    let scale_x = 7568640.0 / 7568565.0;
+    let scale_y = 4078800.0 / 4079240.0;
+    assert!(
+        (root_x - (page["width"].as_f64().unwrap() - root["w"].as_f64().unwrap()) / 2.0).abs()
+            < 0.01
+    );
+    assert!((root_y - 3287395.0 / 9525.0).abs() < 0.01);
+    for (index, (label, x, y, width, child_x, _, child_width, _, _, text_x)) in
+        groups.iter().enumerate()
+    {
+        assert_eq!(text(primitives).matches(*label).count(), 1);
+        let key = format!(
+            "{}:child:{index}:child:1",
+            root["blockKey"].as_str().unwrap()
+        );
+        let child = primitives
+            .iter()
+            .find(|p| p["kind"] == "shape" && p["blockKey"] == key)
+            .unwrap();
+        let child_x = root_x
+            + (f64::from(*x)
+                + 19050.0
+                + f64::from(text_x - child_x) * f64::from(*width) / f64::from(*child_width))
+                * scale_x
+                / 9525.0;
+        let child_y = root_y + (f64::from(*y) - 38735.0) * scale_y / 9525.0;
+        let child_width = 811.0 * f64::from(*width) / f64::from(*child_width) * scale_x / 9525.0;
+        let child_height = 184150.0 * scale_y / 9525.0;
+        assert!((child["x"].as_f64().unwrap() - child_x).abs() < 0.01);
+        assert!((child["y"].as_f64().unwrap() - child_y).abs() < 0.01);
+        assert!((child["w"].as_f64().unwrap() - child_width).abs() < 0.01);
+        assert!((child["h"].as_f64().unwrap() - child_height).abs() < 0.01);
+        assert!(child_x >= 0.0 && child_x + child_width <= page["width"].as_f64().unwrap());
+        assert!(child_y >= 0.0 && child_y + child_height <= page["height"].as_f64().unwrap());
+        let label = first_glyph(primitives, label);
+        let glyphs: Vec<_> = if label["kind"] == "glyphRun" {
+            label["glyphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|glyph| (glyph["x"].as_f64().unwrap(), glyph["y"].as_f64().unwrap()))
+                .collect()
+        } else {
+            vec![(
+                label["x"].as_f64().unwrap(),
+                label["baselineY"].as_f64().unwrap(),
+            )]
+        };
+        assert!(glyphs.iter().all(|(x, y)| {
+            *x >= child_x
+                && *x < child_x + child_width
+                && *y >= child_y
+                && *y < child_y + child_height
+        }));
+    }
+}
+
+fn glyph_origin(primitive: &Value) -> (f64, f64) {
+    if primitive["kind"] == "glyphRun" {
+        (
+            primitive["glyphs"][0]["x"].as_f64().unwrap(),
+            primitive["glyphs"][0]["y"].as_f64().unwrap(),
+        )
+    } else {
+        (
+            primitive["x"].as_f64().unwrap(),
+            primitive["baselineY"].as_f64().unwrap(),
+        )
+    }
+}
+
+fn group_text_child(text: &str, x: i64, y: i64, width: i64, height: i64) -> String {
+    format!(
+        r#"<wps:wsp><wps:cNvPr id="2"/><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr></wps:wsp>"#
+    )
+}
+
+fn text_group(children: &str, width: i64, height: i64, viewport: &str) -> String {
+    format!(
+        r#"<w:drawing><wp:inline><wp:extent cx="{width}" cy="{height}"/><wp:docPr id="1" name="Group"/><a:graphic><a:graphicData><wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/>{viewport}</a:xfrm></wpg:grpSpPr>{children}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+    )
+}
+
+fn force_group_fallback(engine: &EngineSession) {
+    use crate::{EditCtx, RawOp, SegmentContent};
+
+    let shape = engine
+        .doc()
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find_map(|segment| {
+            let SegmentContent::OtherEmbed { kind, payload } = segment.content else {
+                return None;
+            };
+            if kind != "shape" {
+                return None;
+            }
+            let yrs::Any::String(source) = payload.get("shapeJson")? else {
+                return None;
+            };
+            serde_json::from_str::<Value>(source).ok()
+        })
+        .unwrap();
+    let sources = engine.doc().source_index().unwrap().group_picture_sources();
+    assert!(crate::bridge::group_pictures::project(&shape, "body", &sources, true).is_some());
+    let mut edited = shape;
+    edited["scene"]["version"] = json!(2);
+    assert!(crate::bridge::group_pictures::project(&edited, "body", &sources, true).is_none());
+    engine
+        .doc()
+        .apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Delete { index: 0, len: 1 },
+                RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "shape".into(),
+                    payload: vec![("shapeJson".into(), yrs::Any::from(edited.to_string()))],
+                    attrs: yrs::types::Attrs::new(),
+                },
+            ],
+            &EditCtx::local("", "2030-01-02T03:04:05.006Z"),
+        )
+        .unwrap();
+}
+
+#[test]
+fn raw_nested_group_text_matches_projected_boxes_with_rotation_and_flips() {
+    for (outer, inner) in [
+        ("", ""),
+        (r#"rot="5400000" flipH="1""#, r#"rot="16200000" flipV="1""#),
+        (r#"flipV="1""#, r#"rot="1800000" flipH="1""#),
+    ] {
+        let child = group_text_child("Nested", 309, 1839, 3375, 363);
+        let nested = format!(
+            r#"<wpg:grpSp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:grpSpPr><a:xfrm {inner}><a:off x="266" y="0"/><a:ext cx="8803" cy="4570"/><a:chOff x="266" y="0"/><a:chExt cx="8803" cy="4570"/></a:xfrm></wpg:grpSpPr>{child}</wpg:grpSp>"#
+        );
+        let group = text_group(
+            &nested,
+            5779090,
+            3074670,
+            r#"<a:chOff x="0" y="0"/><a:chExt cx="9074" cy="4842"/>"#,
+        )
+        .replacen("<a:xfrm>", &format!("<a:xfrm {outer}>"), 1);
+        let bytes = document(&group, false);
+        let projected = display(&bytes, true);
+        let raw = display_with_layout_edit(&bytes, true, force_group_fallback).0;
+        let expected = projected["pages"][0]["primitives"].as_array().unwrap();
+        let actual = raw["pages"][0]["primitives"].as_array().unwrap();
+        assert_eq!(text(actual), "Nested");
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual["kind"], expected["kind"]);
+            for field in ["x", "y", "w", "h", "baselineY"] {
+                if let Some(expected) = expected[field].as_f64() {
+                    assert!((actual[field].as_f64().unwrap() - expected).abs() < 0.01);
+                }
+            }
+            if let Some(expected) = expected["rotationDeg"].as_f64() {
+                assert!((actual["rotationDeg"].as_f64().unwrap() - expected).abs() < 0.01);
+            }
+            if let Some(glyphs) = actual["glyphs"].as_array() {
+                for (actual, expected) in glyphs.iter().zip(expected["glyphs"].as_array().unwrap())
+                {
+                    for axis in ["x", "y"] {
+                        assert!(
+                            (actual[axis].as_f64().unwrap() - expected[axis].as_f64().unwrap())
+                                .abs()
+                                < 0.01
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grouped_paragraph_anchors_move_labels_onto_the_page() {
+    for (width, height, viewport, x, y, child_width, child_height, offset) in [
+        (
+            1386272,
+            1937650,
+            r#"<a:chOff x="-4445" y="-373191"/><a:chExt cx="1386274" cy="1937651"/>"#,
+            119449,
+            326558,
+            1262380,
+            247650,
+            49479,
+        ),
+        (
+            1800225,
+            362585,
+            r#"<a:chOff x="0" y="0"/><a:chExt cx="1800225" cy="362585"/>"#,
+            85725,
+            0,
+            1586230,
+            362585,
+            2239645,
+        ),
+    ] {
+        let group = text_group(
+            &group_text_child("Label", x, y, child_width, child_height),
+            width,
+            height,
+            viewport,
+        );
+        let anchor = ANCHOR
+            .replace(
+                "<wp:posOffset>0</wp:posOffset>",
+                &format!("<wp:posOffset>{offset}</wp:posOffset>"),
+            )
+            .replace(
+                r#"cx="2743200" cy="1371600""#,
+                &format!(r#"cx="{width}" cy="{height}""#),
+            );
+        let group = group
+            .replace(&format!(r#"<wp:inline><wp:extent cx="{width}" cy="{height}"/><wp:docPr id="1" name="Group"/>"#), &anchor)
+            .replace("</wp:inline>", "</wp:anchor>");
+        let bytes = rewrite_document(&document(&group, false), |xml| {
+            xml.replace("<w:body>", r#"<w:body><w:p><w:pPr><w:spacing w:line="12000" w:lineRule="exact"/></w:pPr><w:r><w:t>Spacer</w:t></w:r></w:p>"#)
+        });
+        let shown = display(&bytes, true);
+        let pages = shown["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 2);
+        assert!(!text(pages[0]["primitives"].as_array().unwrap()).contains("Label"));
+        let primitives = pages[1]["primitives"].as_array().unwrap();
+        assert_eq!(text(primitives).matches("Label").count(), 1);
+        let (_, y) = glyph_origin(first_glyph(primitives, "Label"));
+        assert!(y >= 0.0 && y < pages[1]["height"].as_f64().unwrap());
+    }
+}
+
+#[test]
+fn grouped_fixed_text_body_does_not_paint_over_its_caption() {
+    let content = (0..40)
+        .map(|_| "<w:p><w:r><w:t>Inside</w:t></w:r></w:p>")
+        .collect::<String>();
+    let body = group_text_child("Inside", 0, -60305, 3552825, 1712595).replace(
+        "<w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:t>Inside</w:t></w:r></w:p>",
+        &content,
+    );
+    let caption = group_text_child("Caption", 34505, 1727703, 3444875, 266700);
+    let group = text_group(
+        &format!("{body}{caption}"),
+        3552825,
+        2052955,
+        r#"<a:chOff x="0" y="-60305"/><a:chExt cx="3552825" cy="2054708"/>"#,
+    );
+    let shown = display(&document(&group, false), true);
+    let primitives = shown["pages"][0]["primitives"].as_array().unwrap();
+    let caption_y = glyph_origin(first_glyph(primitives, "Caption")).1;
+    let mut inside: Vec<_> = primitives
+        .iter()
+        .filter(|p| {
+            matches!(p["kind"].as_str(), Some("text" | "glyphRun"))
+                && p["text"].as_str().is_some_and(|text| {
+                    !text.is_empty() && ("Inside".starts_with(text) || text.starts_with("Inside"))
+                })
+        })
+        .map(|p| glyph_origin(p).1)
+        .collect();
+    inside.sort_by(f64::total_cmp);
+    inside.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    assert!(!inside.is_empty() && inside.len() < 40);
+    assert!(inside.iter().all(|y| *y < caption_y));
+    assert_eq!(text(primitives).matches("Caption").count(), 1);
+}
+
+#[test]
+fn grouped_alternate_content_label_is_painted_once_with_charts() {
+    let child = group_text_child("Q1 | Q2", -577, 3111, 9296, 3239)
+        .replace(r#"w:val="20""#, r#"w:val="32""#)
+        .replace(
+            r#"lIns="0" tIns="0" rIns="0" bIns="0""#,
+            r#"lIns="91440" tIns="45720" rIns="91440" bIns="45720""#,
+        );
+    let group = text_group(
+        &child,
+        997591,
+        996950,
+        r#"<a:chOff x="-626" y="-179"/><a:chExt cx="9360" cy="9360"/>"#,
+    );
+    let fallback = group.replace("Q1 | Q2", "Fallback");
+    let alternate = format!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="wpg">{group}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+    );
+    let chart = r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rChart"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#;
+    let mut parts =
+        ooxml_opc::unzip_parts(&document(&format!("{alternate}{chart}"), false)).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "word/_rels/document.xml.rels" {
+            *bytes = std::str::from_utf8(bytes).unwrap().replace("</Relationships>", r#"<Relationship Id="rChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/></Relationships>"#).into_bytes();
+        } else if path == "[Content_Types].xml" {
+            *bytes = std::str::from_utf8(bytes).unwrap().replace("</Types>", r#"<Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#).into_bytes();
+        }
+    }
+    parts.push(("word/charts/chart1.xml".into(), br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>Quarter</c:v></c:pt></c:strLit></c:cat><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>4</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_vec()));
+    let shown = display(&ooxml_opc::rezip_parts(&parts).unwrap(), true);
+    assert!(shown["pages"].as_array().unwrap().iter().any(|page| {
+        page["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|primitive| !primitive["chart"].is_null())
+    }));
+    let painted: String = shown["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|page| text(page["primitives"].as_array().unwrap()))
+        .collect();
+    assert_eq!(painted.matches("Q1 | Q2").count(), 1);
+    assert!(!painted.contains("Fallback"));
+}
+
+#[test]
+fn grouped_vertical_and_rotated_text_uses_the_child_frame() {
+    for (vertical, rotation, expected) in [
+        ("vert", 0, 90.0),
+        ("vert270", 0, -90.0),
+        ("horz", 5400000, 90.0),
+    ] {
+        let child = group_text_child("Turn", 952500, 476250, 952500, 476250)
+            .replace("<a:xfrm>", &format!(r#"<a:xfrm rot="{rotation}">"#))
+            .replace(
+                "<wps:bodyPr ",
+                &format!(r#"<wps:bodyPr vert="{vertical}" "#),
+            );
+        let group = text_group(
+            &child,
+            3810000,
+            1905000,
+            r#"<a:chOff x="0" y="0"/><a:chExt cx="3810000" cy="1905000"/>"#,
+        );
+        let shown = display(&document(&group, false), true);
+        let primitives = shown["pages"][0]["primitives"].as_array().unwrap();
+        assert_eq!(text(primitives), "Turn");
+        let glyph = first_glyph(primitives, "Turn");
+        assert!((glyph["rotationDeg"].as_f64().unwrap() - expected).abs() < 0.01);
+        let clip = &glyph["clipGroup"]["clip"];
+        let (x, y) = glyph_origin(glyph);
+        assert!(x >= clip["x"].as_f64().unwrap());
+        assert!(y >= clip["y"].as_f64().unwrap());
+        assert!(x < clip["x"].as_f64().unwrap() + clip["w"].as_f64().unwrap());
+        assert!(y < clip["y"].as_f64().unwrap() + clip["h"].as_f64().unwrap());
+    }
+}
+
+#[test]
+fn nested_group_no_wrap_text_keeps_one_line_inside_its_box() {
+    let child = group_text_child("One line in the box", 309, 1839, 3375, 363)
+        .replace("<wps:bodyPr ", r#"<wps:bodyPr wrap="none" "#);
+    let nested = format!(
+        r#"<wpg:grpSp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9069" cy="4570"/><a:chOff x="0" y="0"/><a:chExt cx="9069" cy="4570"/></a:xfrm></wpg:grpSpPr><wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x="266" y="0"/><a:ext cx="8803" cy="4570"/><a:chOff x="266" y="0"/><a:chExt cx="8803" cy="4570"/></a:xfrm></wpg:grpSpPr>{child}</wpg:grpSp></wpg:grpSp>"#
+    );
+    let group = text_group(
+        &nested,
+        5779090,
+        3074670,
+        r#"<a:chOff x="0" y="0"/><a:chExt cx="9074" cy="4842"/>"#,
+    );
+    let bytes = document(&group, false);
+    for shown in [
+        display(&bytes, true),
+        display_with_layout_edit(&bytes, true, force_group_fallback).0,
+    ] {
+        let primitives = shown["pages"][0]["primitives"].as_array().unwrap();
+        assert_eq!(text(primitives), "One line in the box");
+        let glyph = first_glyph(primitives, "One line in the box");
+        let clip = &glyph["clipGroup"]["clip"];
+        let (x, y) = glyph_origin(glyph);
+        assert!(
+            x >= clip["x"].as_f64().unwrap()
+                && x < clip["x"].as_f64().unwrap() + clip["w"].as_f64().unwrap()
+        );
+        assert!(
+            y >= clip["y"].as_f64().unwrap()
+                && y < clip["y"].as_f64().unwrap() + clip["h"].as_f64().unwrap()
+        );
+    }
+}
+
+fn first_glyph<'a>(primitives: &'a [Value], label: &str) -> &'a Value {
+    primitives
+        .iter()
+        .find(|p| {
+            p["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty() && label.starts_with(text))
+        })
+        .unwrap()
+}
+
+fn grouped_drawing(picture_first: bool) -> String {
+    let text_box = |text| {
+        format!(
+            r#"<wps:wsp><wps:cNvPr id="2"/><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="95250" y="47625"/><a:ext cx="952500" cy="476250"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"#
+        )
+    };
+    let picture = &PICTURE[PICTURE.find("<pic:pic>").unwrap()
+        ..PICTURE.find("</pic:pic>").unwrap() + "</pic:pic>".len()];
+    let boxes = format!("{}{}", text_box("Alpha"), text_box("Beta"));
+    let children = if picture_first {
+        format!("{picture}{boxes}")
+    } else {
+        format!("{boxes}{picture}")
+    };
+    format!(
+        r#"<w:drawing><wp:inline><wp:extent cx="3810000" cy="1905000"/><wp:docPr id="1" name="Group"/><a:graphic><a:graphicData><wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3810000" cy="1905000"/><a:chOff x="95250" y="47625"/><a:chExt cx="1905000" cy="952500"/></a:xfrm></wpg:grpSpPr>{children}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+    )
+}
+
+fn parsed_groups(value: &Value) -> Vec<&Value> {
+    let mut groups = Vec::new();
+    match value {
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("shape")
+                && object.contains_key("scene")
+            {
+                groups.push(value);
+            } else {
+                for child in object.values() {
+                    groups.extend(parsed_groups(child));
+                }
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                groups.extend(parsed_groups(child));
+            }
+        }
+        _ => {}
+    }
+    groups
+}
+
+fn parsed_document(bytes: &[u8]) -> Value {
+    serde_json::to_value(
+        docx_parse::parse_docx_s9_wire(bytes, Default::default())
+            .unwrap()
+            .document
+            .package
+            .document,
+    )
+    .unwrap()
+}
+
+#[test]
+fn identical_groups_in_one_run_each_keep_their_stories() {
+    let group = grouped_drawing(true);
+    let parsed = parsed_document(&document(&format!("{group}{group}"), false));
+    let groups = parsed_groups(&parsed);
+    assert_eq!(groups.len(), 2);
+    for group in groups {
+        for (index, label) in ["Alpha", "Beta"].iter().enumerate() {
+            assert_eq!(
+                group["children"][index]["textBody"]["content"][0]["content"][0]["content"][0]["text"],
+                *label
+            );
+            assert_eq!(
+                group["scene"]["root"]["children"][index + 1]["shape"]["textBody"],
+                group["children"][index]["textBody"]
+            );
+        }
+    }
+}
+
+#[test]
+fn grouped_stories_follow_inline_containers_and_selected_alternate_branch() {
+    let group = grouped_drawing(true);
+    let run = format!("<w:r>{group}</w:r>");
+    let wrappers = [
+        format!(r#"<w:hyperlink w:anchor="target">{run}</w:hyperlink>"#),
+        format!(r#"<w:fldSimple w:instr="REF target">{run}</w:fldSimple>"#),
+        format!("<w:sdt><w:sdtPr/><w:sdtContent>{run}</w:sdtContent></w:sdt>"),
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>REF target</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{run}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        ),
+    ];
+    for wrapper in wrappers {
+        let bytes = rewrite_document(&document(&group, false), |xml| xml.replace(&run, &wrapper));
+        let parsed = parsed_document(&bytes);
+        let groups = parsed_groups(&parsed);
+        assert!(!groups.is_empty());
+        for group in groups {
+            let bodies = group["children"].to_string();
+            assert!(bodies.contains("Alpha") && bodies.contains("Beta"));
+        }
+    }
+    for choice in [group.clone(), "<w:drawing/>".into()] {
+        let fallback = group.replace("Alpha", "FallbackAlpha");
+        let alternate = format!(
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="wpg">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+        );
+        let parsed = parsed_document(&document(&alternate, false));
+        let groups = parsed_groups(&parsed);
+        assert_eq!(groups.len(), 1);
+        let body = groups[0]["children"][0]["textBody"].to_string();
+        assert!(body.contains(if choice == group {
+            "\"Alpha\""
+        } else {
+            "FallbackAlpha"
+        }));
+    }
+}
+
+#[test]
+fn grouped_picture_projection_preserves_enriched_stories_and_media_modes() {
+    use crate::bridge::group_pictures::project;
+    use crate::{EditingDoc, SegmentContent};
+
+    for (picture_first, ids) in [(true, true), (false, true), (true, false)] {
+        let mut group = grouped_drawing(picture_first);
+        if !ids {
+            group = group
+                .replace(r#"<wp:docPr id="1" name="Group"/>"#, "")
+                .replace(r#"<wps:cNvPr id="2"/>"#, "");
+        }
+        let bytes = document(&group, false);
+        let doc = EditingDoc::new(1);
+        crate::seed::seed_with_layout_tokens(&doc, &bytes).unwrap();
+        let sources = doc.source_index().unwrap().group_picture_sources();
+        let shape = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .find_map(|segment| {
+                let SegmentContent::OtherEmbed { kind, payload } = segment.content else {
+                    return None;
+                };
+                if kind != "shape" {
+                    return None;
+                }
+                let yrs::Any::String(json) = payload.get("shapeJson")? else {
+                    return None;
+                };
+                serde_json::from_str::<Value>(json).ok()
+            })
+            .unwrap();
+        for media_tokens in [true, false] {
+            let projected = project(&shape, "body", &sources, media_tokens).unwrap();
+            let children = projected["children"].as_array().unwrap();
+            assert_eq!(children.len(), 3);
+            let picture = children
+                .iter()
+                .find(|child| child["fillPaint"]["kind"] == "picture")
+                .unwrap();
+            let src = picture["fillPaint"]["picture"]["src"].as_str().unwrap();
+            assert!(if media_tokens {
+                src == "media:0"
+            } else {
+                src.starts_with("data:image/png;base64,")
+            });
+            let bodies: Vec<_> = children
+                .iter()
+                .filter_map(|child| child.get("textBody"))
+                .collect();
+            assert_eq!(bodies.len(), 2);
+            assert!(bodies[0].to_string().contains("Alpha"));
+            assert!(bodies[1].to_string().contains("Beta"));
+            let lowered = super::lower_shape_json(
+                &projected,
+                1,
+                &crate::bridge::RenderEnv {
+                    media_tokens,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for child in lowered.children {
+                assert_eq!(child.pm_start, None);
+                assert_eq!(child.doc_start, None);
+                assert_eq!(child.doc_end, None);
+            }
+            let shown = display(&bytes, media_tokens);
+            assert_eq!(
+                text(shown["pages"][0]["primitives"].as_array().unwrap()),
+                "AlphaBeta"
+            );
+        }
+        for field in ["size", "transform", "children"] {
+            let mut edited = shape.clone();
+            edited[field] = json!({"edited": true});
+            assert!(project(&edited, "body", &sources, false).is_none());
+        }
+    }
+}
+
+#[test]
+fn skipped_rotated_group_picture_does_not_shift_text_bodies() {
+    let group = grouped_drawing(true)
+        .replace("<pic:blipFill>", r#"<pic:blipFill rotWithShape="0">"#)
+        .replace("<pic:spPr><a:xfrm>", r#"<pic:spPr><a:xfrm rot="5400000">"#);
+    let shown = display(&document(&group, false), false);
+    let primitives = shown["pages"][0]["primitives"].as_array().unwrap();
+    assert_eq!(text(primitives), "AlphaBeta");
+    assert!(
+        primitives
+            .iter()
+            .all(|primitive| primitive["fillPaint"]["kind"] != "picture")
+    );
 }

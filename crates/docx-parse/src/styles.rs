@@ -12,7 +12,7 @@ use crate::formatting::{
 };
 use crate::settings::is_valid_utf8_xml_text;
 use crate::theme::Theme;
-use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
+use crate::xml::{ParseBudget, ParseError, XmlElement, parse_on_off, parse_xml};
 
 pub type StyleMap = IndexMap<String, Style>;
 
@@ -134,11 +134,13 @@ pub fn parse_style_definitions(
     };
     let doc_defaults = parse_doc_defaults(root.child("w", "docDefaults"), theme);
     let latent_styles = root.child("w", "latentStyles").map(|element| LatentStyles {
-        def_locked_state: element.attribute(Some("w"), "defLockedState") == Some("1"),
+        def_locked_state: element.parse_boolean_attribute(Some("w"), "defLockedState")
+            == Some(true),
         def_ui_priority: element.parse_numeric_attribute(Some("w"), "defUIPriority", 1.0),
-        def_semi_hidden: element.attribute(Some("w"), "defSemiHidden") == Some("1"),
-        def_unhide_when_used: element.attribute(Some("w"), "defUnhideWhenUsed") == Some("1"),
-        def_q_format: element.attribute(Some("w"), "defQFormat") == Some("1"),
+        def_semi_hidden: element.parse_boolean_attribute(Some("w"), "defSemiHidden") == Some(true),
+        def_unhide_when_used: element.parse_boolean_attribute(Some("w"), "defUnhideWhenUsed")
+            == Some(true),
+        def_q_format: element.parse_boolean_attribute(Some("w"), "defQFormat") == Some(true),
         count: element.parse_numeric_attribute(Some("w"), "count", 1.0),
     });
     let styles = parse_style_map(Some(root), theme, part, budget)?
@@ -187,8 +189,8 @@ fn parse_style(
 ) -> Result<Style, ParseError> {
     let default = element
         .attribute(Some("w"), "default")
-        .filter(|raw| !raw.is_empty())
-        .map(|raw| matches!(raw, "1" | "true"));
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_on_off(value) == Some(true));
     let mut style = Style {
         style_id: element
             .attribute(Some("w"), "styleId")
@@ -404,6 +406,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_on_default_style() {
+        let definitions = parse(
+            r#"<w:styles><w:style w:type="paragraph" w:styleId="Normal" w:default="on"/></w:styles>"#,
+        );
+        assert_eq!(definitions.styles[0].default, Some(true));
+        let styles = definitions
+            .styles
+            .into_iter()
+            .map(|style| (style.style_id.clone(), style))
+            .collect();
+        assert_eq!(
+            get_default_paragraph_style(&styles).unwrap().style_id,
+            "Normal"
+        );
+    }
+
+    #[test]
+    fn preserves_invalid_and_unspecified_default_style_values() {
+        for (attribute, expected) in [
+            (r#" w:default="garbage""#, Some(false)),
+            (r#" w:default="""#, None),
+            ("", None),
+        ] {
+            let definitions = parse(&format!(
+                "<w:styles><w:style w:type=\"paragraph\" w:styleId=\"Normal\"{attribute}/></w:styles>"
+            ));
+            assert_eq!(definitions.styles[0].default, expected);
+        }
+    }
+
+    #[test]
     fn parses_defaults_latent_flags_and_resolves_all_style_property_bags() {
         let definitions = parse(
             r#"<w:styles><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:latentStyles w:defLockedState="true" w:defUIPriority="99" w:defQFormat="1" w:count="3garbage"/><w:style w:type="table" w:styleId="Base"><w:pPr><w:spacing w:before="100"/></w:pPr><w:rPr><w:b/></w:rPr><w:tblPr><w:tblW w:w="5000" w:type="dxa"/></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:i/></w:rPr></w:tblStylePr></w:style><w:style w:type="table" w:styleId="Child" w:default="true"><w:basedOn w:val="Base"/><w:pPr><w:spacing w:after="200"/></w:pPr><w:tblStylePr w:type="firstRow"><w:rPr><w:color w:val="FF0000"/></w:rPr></w:tblStylePr></w:style></w:styles>"#,
@@ -413,7 +446,7 @@ mod tests {
             Some(22.0)
         );
         let latent = definitions.latent_styles.unwrap();
-        assert!(!latent.def_locked_state);
+        assert!(latent.def_locked_state);
         assert!(latent.def_q_format);
         assert_eq!(latent.count, Some(3.0));
         let latent_json = serde_json::to_value(&latent).unwrap();

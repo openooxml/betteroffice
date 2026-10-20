@@ -52,7 +52,7 @@ use ooxml_opc::PackageBytes;
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
+use yrs::{Any, Assoc, IndexedSequence, ReadTxn, StickyIndex, Subscription, Transact};
 
 use crate::batch::outcome_json;
 use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
@@ -2326,8 +2326,10 @@ impl EditSession {
         ranges: Vec<f64>,
     ) -> Result<Vec<f64>, JsValue> {
         let ranges: Vec<(i64, i64)> = ranges
-            .chunks_exact(2)
-            .map(|pair| (pair[0] as i64, pair[1] as i64))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[from, to]| (from as i64, to as i64))
             .collect();
         let batches = self
             .engine
@@ -5071,8 +5073,7 @@ impl EditSession {
     /// Whether the document has a story with this id.
     pub fn has_story(&self, story: &str) -> bool {
         let txn = self.engine.doc().yrs_doc().transact();
-        txn.get_map(STORIES)
-            .is_some_and(|stories| stories.contains_key(&txn, story))
+        crate::story_ref(&txn, story).is_ok()
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted
@@ -5089,7 +5090,9 @@ impl EditSession {
         let Some(stories) = txn.get_map(STORIES) else {
             return Vec::new();
         };
-        let mut ids: Vec<String> = stories.iter(&txn).map(|(id, _)| id.to_string()).collect();
+        let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_string())
+            .collect();
         ids.sort();
         ids
     }
@@ -5619,6 +5622,7 @@ pub fn render_docx_markdown_with_pages_json(
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+    use yrs::Map;
 
     #[test]
     fn line_break_inserts_one_inline_unit_and_is_undoable() {

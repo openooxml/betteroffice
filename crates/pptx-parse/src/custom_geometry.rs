@@ -35,7 +35,7 @@ pub(crate) fn parse_custom_geometry(
     let available = MAX_CUSTOM_PATH_COMMANDS.min(budget.geometry_commands_left());
     let mut remaining = available;
     for path in path_list.child_elements() {
-        if path.local_name() != "path" || remaining == 0 {
+        if path.local_name() != "path" {
             continue;
         }
         let (Some(width), Some(height)) = (
@@ -44,10 +44,21 @@ pub(crate) fn parse_custom_geometry(
         ) else {
             continue;
         };
-        if let Some(parsed) = parse_custom_path(path, width, height, &guides, &mut remaining)
-            && !parsed.commands.is_empty()
+        let mut budget_exceeded = false;
+        if let Some(parsed) = parse_custom_path(
+            path,
+            width,
+            height,
+            &guides,
+            &mut remaining,
+            &mut budget_exceeded,
+        ) && !parsed.commands.is_empty()
         {
             paths.push(parsed);
+        }
+        if budget_exceeded && available == budget.geometry_commands_left() {
+            budget.spend_geometry_commands(available);
+            return None;
         }
     }
     budget.spend_geometry_commands(available - remaining);
@@ -84,12 +95,17 @@ fn parse_custom_path(
     height: f64,
     guides: &BTreeMap<String, GuideValue>,
     remaining: &mut usize,
+    budget_exceeded: &mut bool,
 ) -> Option<CustomGeometryPath> {
     let mut commands = Vec::new();
     let mut current = None;
     let mut start = None;
     for command in path.child_elements() {
-        *remaining = remaining.checked_sub(1)?;
+        let Some(left) = remaining.checked_sub(1) else {
+            *budget_exceeded = true;
+            return None;
+        };
+        *remaining = left;
         let points: Vec<_> = command
             .child_elements()
             .take(4)
@@ -123,7 +139,15 @@ fn parse_custom_path(
                 }
             }
             ("arcTo", []) => {
-                let arc = arc_to_cubics(command, current?, width, height, *remaining + 1, guides)?;
+                let arc = arc_to_cubics(
+                    command,
+                    current?,
+                    width,
+                    height,
+                    *remaining + 1,
+                    guides,
+                    budget_exceeded,
+                )?;
                 *remaining = remaining.checked_sub(arc.len().saturating_sub(1))?;
                 if let Some(GeometryPathCommand::Cubic { x, y, .. }) = arc.last() {
                     current = Some((*x, *y));
@@ -198,6 +222,7 @@ fn arc_to_cubics(
     height: f64,
     remaining: usize,
     guides: &BTreeMap<String, GuideValue>,
+    budget_exceeded: &mut bool,
 ) -> Option<Vec<GeometryPathCommand>> {
     let rx = coordinate(arc, "wR", guides)?;
     let ry = coordinate(arc, "hR", guides)?;
@@ -205,7 +230,11 @@ fn arc_to_cubics(
         (coordinate(arc, "stAng", guides)?.rem_euclid(21_600_000.0) / 60_000.0).to_radians();
     let sweep = (coordinate(arc, "swAng", guides)? / 60_000.0).to_radians();
     let remaining = remaining.min(MAX_ARC_SEGMENTS);
-    if rx <= 0.0 || ry <= 0.0 || sweep.abs() > remaining as f64 * FRAC_PI_2 {
+    if rx <= 0.0 || ry <= 0.0 || sweep.abs() > MAX_ARC_SEGMENTS as f64 * FRAC_PI_2 {
+        return None;
+    }
+    if sweep.abs() > remaining as f64 * FRAC_PI_2 {
+        *budget_exceeded = true;
         return None;
     }
     if sweep == 0.0 {
@@ -215,7 +244,11 @@ fn arc_to_cubics(
     let start = ellipse_angle(start, rx, ry);
     let sweep = end - start;
     let count = (sweep.abs() / FRAC_PI_2).ceil() as usize;
-    if count == 0 || count > remaining {
+    if count == 0 || count > MAX_ARC_SEGMENTS {
+        return None;
+    }
+    if count > remaining {
+        *budget_exceeded = true;
         return None;
     }
     let (rx, ry) = normalized_point(rx, ry, width, height)?;
@@ -415,6 +448,34 @@ mod tests {
             10
         );
         assert_eq!(budget.geometry_commands_left(), 0);
+    }
+
+    #[test]
+    fn package_budget_keeps_two_path_shapes_whole() {
+        let path = format!(
+            "<a:path w=\"200\" h=\"100\">{}</a:path>",
+            "<a:moveTo><a:pt x=\"0\" y=\"0\"/></a:moveTo>".repeat(6)
+        );
+        let limits = ParseLimits::default();
+        for second in [
+            path.as_str(),
+            r#"<a:path w="200" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:arcTo wR="30" hR="30" stAng="0" swAng="27000000"/></a:path>"#,
+        ] {
+            let paths = format!("{path}{second}");
+            for left in [10, 6, 12] {
+                let mut budget = ParseBudget::new(&limits);
+                budget.spend_geometry_commands(budget.geometry_commands_left() - left);
+                let parsed = parse_in(&paths, "", Some((400.0, 200.0)), &mut budget);
+                if left < 12 {
+                    assert!(parsed.is_none(), "{left} commands cannot keep both paths");
+                } else {
+                    let parsed = parsed.expect("both paths fit exactly");
+                    assert_eq!(parsed.len(), 2);
+                    assert!(parsed.iter().all(|path| path.commands.len() == 6));
+                }
+                assert_eq!(budget.geometry_commands_left(), 0);
+            }
+        }
     }
 
     #[test]

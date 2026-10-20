@@ -147,6 +147,10 @@ export interface TextCmd {
    */
   ghost?: boolean;
   chart?: boolean;
+  rotationDeg?: number;
+  rotationBox?: Rect;
+  rotationValign?: 'top' | 'center' | 'bottom';
+  stacked?: boolean;
 }
 
 export interface NumberFormatLayout {
@@ -176,6 +180,8 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
   startRow: number;
   startCol: number;
+  hiddenRowSpans?: [number, number][];
+  hiddenColSpans?: [number, number][];
   rowIndices?: number[];
   colIndices?: number[];
   rowOffsets: number[];

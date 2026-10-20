@@ -35,6 +35,11 @@ Font bytes are supplied by the host and registered with the Rust shaper; pair
 with [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts)
 for metric-compatible open faces.
 
+`PptxEditor` defaults to the worker-owned async editor: `onReady` receives a
+`PptxAsyncEditorApi` whose reads, exports and `handleAsync()` return promises.
+Deprecated `legacySyncApi` selects the sync hybrid runtime with the synchronous
+`handle` and `save()`, and is removed in 0.6.0.
+
 ## Edit
 
 Click text to place the Rust-computed caret, type to edit the yrs story and
@@ -42,8 +47,9 @@ trigger Rust reflow, drag or resize shapes on the canvas, or use the toolbar
 for bold, italic, size, color, slides, text boxes, image insertion, and shape ordering.
 
 Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `fileName`,
-`onReady` (exposes the core `PresentationHandle`, the editor's `commands`, a
-`refresh` callback for host-driven edits, `refreshProposals`, and `save`),
+`onReady` (the async editor API above; with `legacySyncApi`, the core
+`PresentationHandle`, the editor's `commands`, a `refresh` callback for
+host-driven edits, `refreshProposals`, and `save`),
 `onChange` (deck snapshots), `onError`, `onSave` (receives the saved bytes;
 without it, saving downloads the file), `readOnly`, `toolbar`, and `showToolbar`.
 
@@ -175,8 +181,8 @@ replaced while input flushes.
 
 ## Host plugins
 
-Host-owned tools (review aids, checks, templates) require `legacySyncApi={true}`
-and install through the `plugins` prop. A plugin contributes a docked panel, an
+Host-owned tools (review aids, checks, templates) install through the `plugins`
+prop on the default editor and with `legacySyncApi`. A plugin contributes a docked panel, an
 overlay and commands, and works through restricted clients rather than the editor
 API or the presentation handle:
 
@@ -208,7 +214,6 @@ const review = definePptxPlugin<State>({
 });
 
 <PptxEditor
-  legacySyncApi
   file={bytes}
   fonts={fonts}
   plugins={[review]}

@@ -45,10 +45,11 @@ use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
 use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments, utf16_len};
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
-    BlockExtent, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock, ImageExtent,
-    ImageFragment, ImageRunPosition, Input, Layout, LayoutBlock, MeasuredBlock, ParagraphBlock,
-    ParagraphExtent, ParagraphFragment, ReservedBlock, ReservedFragment, Run, SectionBreakType,
-    ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent, TextBoxFragment,
+    BlockExtent, BlockId, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock,
+    ImageExtent, ImageFragment, ImageRunPosition, Input, Layout, LayoutBlock, MeasuredBlock,
+    ParagraphBlock, ParagraphExtent, ParagraphFragment, ReservedBlock, ReservedFragment, Run,
+    SectionBreakType, ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent,
+    TextBoxFragment,
 };
 
 /// Default page size (US Letter in pixels at 96 DPI).
@@ -460,6 +461,22 @@ pub fn layout_document(input: &mut Input) -> Result<Layout, LayoutError> {
 
 /// Full placement while retaining clean page-start checkpoints in Rust.
 pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLayout, LayoutError> {
+    layout_document_recording_columns(input, None)
+}
+
+/// Placement with each flow fragment's containing column width.
+pub fn layout_document_with_column_widths(
+    input: &mut Input,
+) -> Result<(Layout, Vec<(BlockId, f64)>), LayoutError> {
+    let mut widths = Vec::new();
+    let run = layout_document_recording_columns(input, Some(&mut widths))?;
+    Ok((run.layout, widths))
+}
+
+fn layout_document_recording_columns(
+    input: &mut Input,
+    column_widths: Option<&mut Vec<(BlockId, f64)>>,
+) -> Result<CheckpointedLayout, LayoutError> {
     let measured = &mut input.measured;
     let options = &input.options;
 
@@ -507,6 +524,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
 
     let mut paginator = origin_paginator(&initial_config, &plan, options)?;
+    paginator.fragment_column_widths = column_widths.as_ref().map(|_| Vec::new());
 
     let placement = place::<u64>(
         measured,
@@ -525,6 +543,9 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     }
 
     let page_count = paginator.pages.len();
+    if let Some(widths) = column_widths {
+        *widths = paginator.fragment_column_widths.take().unwrap_or_default();
+    }
     Ok(CheckpointedLayout {
         layout: Layout {
             page_size,
@@ -918,7 +939,7 @@ fn place<F: PartialEq>(
         paginator.balances_region()
     };
     if balances {
-        hooks::balance_terminal_continuous_text_columns(
+        hooks::balance_terminal_continuous_text_columns_with_marks(
             measured,
             paginator,
             section_start(plan, section_idx),
@@ -926,11 +947,13 @@ fn place<F: PartialEq>(
                 .get(section_idx)
                 .copied()
                 .unwrap_or(measured.len()),
+            &plan.section_marks,
         )?;
         paginator.mark_balanced_region();
     }
 
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
+        let section_mark = plan.section_marks[i];
         let mut checkpointed_page = None;
         if let Some((page_index, page_number, flow)) = paginator.clean_page_start() {
             let checkpoint = LayoutCheckpoint {
@@ -943,7 +966,7 @@ fn place<F: PartialEq>(
             if let Some(converged) =
                 convergence.and_then(|value| value.retained_match(&checkpoint, None))
             {
-                paginator.pages.truncate(page_index);
+                paginator.truncate_pages(page_index);
                 return Ok(PlacementOutcome {
                     checkpoints,
                     placed_blocks,
@@ -956,13 +979,14 @@ fn place<F: PartialEq>(
         let fragments_before = paginator.page_fragment_counts();
         // pageBreakBefore, or a hard page-break run, forces a fresh page and
         // keeps the paragraph's space-before net of the previous space-after
-        if let Some(authored) = hooks::breaks_before_block(&mb.block)? {
+        if !section_mark && let Some(authored) = hooks::breaks_before_block(&mb.block)? {
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
         // at the head of a keep-with-next group, move to a fresh column when the
         // whole group would otherwise straddle the boundary
-        if let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
+        if !section_mark
+            && let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
             && !plan.keep_with_next.interior_members.contains(&i)
         {
             let state_idx = paginator.get_current();
@@ -1022,7 +1046,7 @@ fn place<F: PartialEq>(
                         "layoutParagraph: expected paragraph measure".into(),
                     ));
                 };
-                layout_paragraph(block, measure, paginator)?;
+                layout_paragraph(block, measure, paginator, section_mark)?;
             }
 
             LayoutBlock::Table(block) => {
@@ -1140,11 +1164,12 @@ fn place<F: PartialEq>(
                         > 1.0
                     && !section_ends_with_next_column(plan, section_idx + 1)
                 {
-                    hooks::balance_terminal_continuous_text_columns(
+                    hooks::balance_terminal_continuous_text_columns_with_marks(
                         measured,
                         paginator,
                         i + 1,
                         next_break_index.unwrap_or(measured.len()),
+                        &plan.section_marks,
                     )?;
                     paginator.mark_balanced_region();
                 }
@@ -1193,7 +1218,7 @@ fn place<F: PartialEq>(
                         .as_deref(),
                 )
             }) {
-                paginator.pages.truncate(page_index);
+                paginator.truncate_pages(page_index);
                 return Ok(PlacementOutcome {
                     checkpoints,
                     placed_blocks,
@@ -1527,8 +1552,7 @@ fn paragraph_fragment_height(before: f64, lines_height: f64) -> f64 {
 /// Lines are fitted greedily, and a fragment always takes at least one line so
 /// an oversized line cannot stall the walk. A line's `floatSkipBefore` counts
 /// toward the fragment height, which is what makes following blocks flow below
-/// the float instead of over it. A paragraph with no measured lines still emits
-/// a zero-height fragment, because its spacing must still advance the pen.
+/// the float instead of over it.
 ///
 /// Two rules can move lines before they are placed. `w:keepLines` advances to a
 /// fresh column when the whole paragraph fits a column but not the space left
@@ -1545,6 +1569,7 @@ fn layout_paragraph(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
     paginator: &mut Paginator,
+    section_mark: bool,
 ) -> Result<(), LayoutError> {
     // an unknown run kind can't be re-emitted faithfully in resolved lines
     if block.runs.iter().any(|r| matches!(r, Run::Unsupported)) {
@@ -1553,15 +1578,16 @@ fn layout_paragraph(
 
     let lines = &measure.lines;
     if lines.is_empty() {
-        // no measured lines: a zero-height fragment still advances the pen by
-        // its spacing
-        let space_before = get_spacing_before(block);
-        let space_after = get_spacing_after(block);
+        let (space_before, space_after) = if section_mark {
+            (0.0, 0.0)
+        } else {
+            (get_spacing_before(block), get_spacing_after(block))
+        };
         let state_idx = paginator.get_current();
         let column_index = paginator.state(state_idx).column_index;
         let pen_y = paginator.state(state_idx).pen_y;
 
-        let fragment = Fragment::Paragraph(ParagraphFragment {
+        let fragment = ParagraphFragment {
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: pen_y + paginator.leading_spacing(space_before),
@@ -1574,9 +1600,18 @@ fn layout_paragraph(
             carried_from_prev: None,
             carried_to_next: None,
             resolved_lines: Some(Vec::new()),
-        });
+        };
 
-        paginator.add_fragment(fragment, 0.0, space_before, space_after);
+        if section_mark {
+            paginator.push_section_mark(fragment);
+        } else {
+            paginator.add_fragment(
+                Fragment::Paragraph(fragment),
+                0.0,
+                space_before,
+                space_after,
+            );
+        }
         return Ok(());
     }
 
@@ -1807,6 +1842,18 @@ fn layout_reserved(block: &ReservedBlock, measure: &ImageExtent, paginator: &mut
 /// Places anchored shapes at page coordinates.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
     if block.position.is_some() {
+        if block.scene.is_some()
+            && shape_has_text(block)
+            && let Some(position) = &block.position
+            && !position.use_simple_pos.unwrap_or(false)
+            && let Some(vertical) = &position.vertical
+            && matches!(vertical.relative_to.as_deref(), Some("paragraph" | "line"))
+        {
+            let required = vertical.pos_offset.unwrap_or(0.0).max(0.0) + measure.height;
+            if required <= paginator.get_column_capacity() {
+                paginator.ensure_fits(required);
+            }
+        }
         let (x, y) = resolve_object_position(
             block.position.as_ref(),
             measure.width,
@@ -1852,6 +1899,14 @@ fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Pagin
         z_index: None,
     });
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
+}
+
+fn shape_has_text(shape: &ShapeBlock) -> bool {
+    shape
+        .inner_text
+        .as_ref()
+        .is_some_and(|paragraphs| !paragraphs.is_empty())
+        || shape.children.iter().any(shape_has_text)
 }
 
 /// Charts use the same bbox placement rule as an in-flow image.

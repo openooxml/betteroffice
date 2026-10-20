@@ -627,7 +627,8 @@ impl Sheet {
             .cells
             .keys()
             .map(|&(row, col)| CellRange::new(CellRef::new(row, col), CellRef::new(row, col)))
-            .chain(self.hyperlinks.iter().map(|link| link.range));
+            .chain(self.hyperlinks.iter().map(|link| link.range))
+            .chain(self.merges.iter().copied());
         let first = bounds.next()?;
         let (mut min_r, mut max_r, mut min_c, mut max_c) = (
             first.start.row,

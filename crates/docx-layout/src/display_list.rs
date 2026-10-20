@@ -4505,23 +4505,22 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     let content_width = (page.size.w - margins.left - margins.right).max(0.0);
     let content_bottom = page.size.h - margins.bottom;
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
-        let mut cursor = page.margins.left;
-        for index in 0..columns.count.saturating_sub(1) {
-            let width = columns
+        let rectangles = crate::page_flow::unequal_column_rectangles(
+            content_width,
+            columns.count,
+            columns.gap,
+            columns
                 .columns
-                .get(index)
-                .and_then(|column| column.width)
-                .unwrap_or(0.0);
-            let space = columns
-                .columns
-                .get(index)
-                .and_then(|column| column.space)
-                .unwrap_or(columns.gap);
-            cursor += width;
+                .iter()
+                .map(|column| (column.width, column.space)),
+        );
+        for pair in rectangles.windows(2) {
+            let right = pair[0].0 + pair[0].1;
+            let x = page.margins.left + (right + pair[1].0) / 2.0;
             prims.push(Primitive::Line(LinePrimitive {
-                x1: px(cursor + space / 2.0),
+                x1: px(x),
                 y1: px(margins.top),
-                x2: px(cursor + space / 2.0),
+                x2: px(x),
                 y2: px(content_bottom),
                 stroke_width: px(0.5),
                 color: "#000000".to_string(),
@@ -4533,7 +4532,6 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
                 border_owner: None,
                 attrs: DocAttrs::default(),
             }));
-            cursor += space;
         }
         return;
     }
@@ -4579,55 +4577,23 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     };
     let count = columns.count.clamp(1, 45);
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
-        let mut widths = Vec::with_capacity(count);
-        let mut gaps = Vec::with_capacity(count);
-        for index in 0..count {
-            let width = columns
+        let bounds = crate::page_flow::unequal_column_rectangles(
+            content_width,
+            count,
+            columns.gap,
+            columns
                 .columns
-                .get(index)
-                .and_then(|column| column.width)
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .unwrap_or(0.0);
-            let gap = columns
-                .columns
-                .get(index)
-                .and_then(|column| column.space)
-                .filter(|value| value.is_finite() && *value >= 0.0)
-                .unwrap_or_else(|| columns.gap.max(0.0));
-            widths.push(width);
-            gaps.push(gap);
-        }
-        let gap_total: f64 = gaps.iter().take(count.saturating_sub(1)).sum();
-        let known_total: f64 = widths.iter().sum();
-        let missing = widths.iter().filter(|width| **width <= 0.0).count();
-        let fallback = if missing > 0 {
-            (content_width - gap_total - known_total).max(0.0) / missing as f64
-        } else {
-            0.0
-        };
-        for width in &mut widths {
-            if *width <= 0.0 {
-                *width = fallback;
-            }
-        }
-        let widths_total: f64 = widths.iter().sum();
-        if widths_total + gap_total > content_width && widths_total > 0.0 {
-            let scale = (content_width - gap_total).max(0.0) / widths_total.max(1.0);
-            for width in &mut widths {
-                *width *= scale;
-            }
-        }
-        let mut x = page.margins.left;
-        let mut bounds = Vec::with_capacity(count);
-        for index in 0..count {
-            bounds.push(DisplayBounds {
-                x: px(x),
-                y: px(margins.top),
-                width: px(widths[index]),
-                height: px(content_height),
-            });
-            x += widths[index] + if index + 1 < count { gaps[index] } else { 0.0 };
-        }
+                .iter()
+                .map(|column| (column.width, column.space)),
+        )
+        .into_iter()
+        .map(|(x, width)| DisplayBounds {
+            x: px(page.margins.left + x),
+            y: px(margins.top),
+            width: px(width),
+            height: px(content_height),
+        })
+        .collect();
         return (content, bounds);
     }
 
@@ -5468,7 +5434,32 @@ fn build_display_list_selected(
                     else {
                         continue;
                     };
+                    let stamp_from = prims.len();
                     emit_table_fragment(&mut prims, tf, block, measure, &ctx);
+                    if page.columns.as_ref().is_some_and(|columns| {
+                        columns.count > 1 && columns.equal_width == Some(false)
+                    }) && tf.width < table_total_width(measure)
+                    {
+                        let clip = ClipRect {
+                            x: Some(px(tf.x)),
+                            y: Some(px(tf.y)),
+                            w: Some(px(tf.width.max(0.0))),
+                            h: Some(px(tf.height.max(0.0))),
+                        };
+                        for primitive in &mut prims[stamp_from..] {
+                            let attrs = match primitive {
+                                Primitive::Line(line) => Some(&mut line.attrs),
+                                other => doc_attrs_mut(other),
+                            };
+                            if let Some(attrs) = attrs {
+                                apply_clip_group(
+                                    attrs,
+                                    format!("clip-{}-column", block_key(&tf.block_id)),
+                                    clip.clone(),
+                                );
+                            }
+                        }
+                    }
                 }
                 FragmentIn::Image(imf) => {
                     prev_para_borders = None;
@@ -8518,6 +8509,50 @@ fn emit_shape_fragment(
     block: &ShapeBlockIn,
     ctx: &RenderCtx<'_>,
 ) {
+    let clip = block.scene.as_ref().and_then(|scene| {
+        matches!(
+            scene.pointer("/root/kind").and_then(Value::as_str),
+            Some("group" | "canvas")
+        )
+        .then(|| shape_text_bounds(frag, block))
+    });
+    emit_shape_fragment_with_clip(prims, frag, block, ctx, clip);
+}
+
+fn shape_text_bounds(frag: &ShapeFragmentIn, block: &ShapeBlockIn) -> ClipRect {
+    let rotation = block
+        .transform
+        .as_ref()
+        .and_then(|transform| transform.rotation)
+        .unwrap_or(0.0);
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let width = frag.width * cos.abs() + frag.height * sin.abs();
+    let height = frag.width * sin.abs() + frag.height * cos.abs();
+    ClipRect {
+        x: Some(px(frag.x + (frag.width - width) / 2.0)),
+        y: Some(px(frag.y + (frag.height - height) / 2.0)),
+        w: Some(px(width)),
+        h: Some(px(height)),
+    }
+}
+
+fn emit_shape_fragment_with_clip(
+    prims: &mut Vec<Primitive>,
+    frag: &ShapeFragmentIn,
+    block: &ShapeBlockIn,
+    ctx: &RenderCtx<'_>,
+    group_clip: Option<ClipRect>,
+) {
+    let group_clip = if !block.children.is_empty() {
+        group_clip.map(|clip| {
+            let mut attrs = DocAttrs::default();
+            apply_clip_group(&mut attrs, String::new(), clip);
+            apply_clip_group(&mut attrs, String::new(), shape_text_bounds(frag, block));
+            attrs.clip_group.unwrap().clip.unwrap()
+        })
+    } else {
+        group_clip
+    };
     let stamp_from = prims.len();
     let block_ref = BlockRef::of(&frag.block_id);
     let mut attrs = block_ref.attrs();
@@ -8606,7 +8641,22 @@ fn emit_shape_fragment(
             })
             .collect();
         let content_height = flow.height();
-        let available_height = (frag.height - margin_top - margin_bottom).max(0.0);
+        let properties = block.text_body_properties.as_ref();
+        let vertical = properties
+            .and_then(|properties| properties.get("vertical"))
+            .and_then(Value::as_str);
+        let vertical_rotation = match vertical {
+            Some("vertical") => 90.0,
+            Some("vertical270") => -90.0,
+            _ => 0.0,
+        };
+        let body_width = (frag.width - margin_left - margin_right).max(0.0);
+        let body_height = (frag.height - margin_top - margin_bottom).max(0.0);
+        let (content_width, available_height) = if vertical_rotation != 0.0 {
+            (body_height, body_width)
+        } else {
+            (body_width, body_height)
+        };
         let anchor = block
             .text_body_properties
             .as_ref()
@@ -8617,13 +8667,40 @@ fn emit_shape_fragment(
             Some("bottom") => (available_height - content_height).max(0.0),
             _ => 0.0,
         };
-        let content_x = frag.x + margin_left;
-        let content_width = (frag.width - margin_left - margin_right).max(0.0);
+        let content_x = frag.x + margin_left + (body_width - content_width) / 2.0;
+        let content_y = frag.y + margin_top + (body_height - available_height) / 2.0;
+        let text_start = prims.len();
+        let bounded = group_clip.is_some()
+            && properties
+                .and_then(|properties| properties.get("autoFit"))
+                .and_then(Value::as_str)
+                != Some("shape")
+            && properties
+                .and_then(|properties| properties.get("verticalOverflow"))
+                .and_then(Value::as_str)
+                != Some("overflow");
         for (i, para) in block.inner_text.iter().enumerate() {
             let (Some(pm), Some(&top)) = (block.inner_measures.get(i), tops.get(i)) else {
                 continue;
             };
-            let para_y = frag.y + margin_top + anchor_offset + top;
+            let y_offset = anchor_offset + top;
+            let para_y = content_y + y_offset;
+            let mut line_y = y_offset;
+            let to_line = if bounded {
+                pm.lines
+                    .iter()
+                    .take_while(|line| {
+                        let fits = line_y + line.ascent <= available_height + 1e-6;
+                        line_y += line.line_height;
+                        fits
+                    })
+                    .count()
+            } else {
+                pm.lines.len()
+            };
+            if to_line == 0 {
+                break;
+            }
             let synthetic = ParagraphFragmentIn {
                 block_id: para.id.clone(),
                 x: content_x,
@@ -8631,7 +8708,7 @@ fn emit_shape_fragment(
                 width: content_width,
                 height: pm.total_height,
                 from_line: 0,
-                to_line: pm.lines.len(),
+                to_line,
                 pm_start: para.pm_start,
                 pm_end: para.pm_end,
                 carried_from_prev: None,
@@ -8640,6 +8717,51 @@ fn emit_shape_fragment(
             emit_paragraph_fragment(
                 prims, &synthetic, para, pm, ctx, content_x, para_y, None, None, true, true,
             );
+        }
+        let shape_rotation = if properties
+            .and_then(|properties| properties.get("upright"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            0.0
+        } else {
+            block
+                .transform
+                .as_ref()
+                .and_then(|transform| transform.rotation)
+                .unwrap_or(0.0)
+        };
+        let rotation = shape_rotation
+            + vertical_rotation
+            + properties
+                .and_then(|properties| properties.get("rotation"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+        rotate_shape_text(
+            &mut prims[text_start..],
+            (frag.x + frag.width / 2.0, frag.y + frag.height / 2.0),
+            rotation,
+        );
+        if let Some(group_clip) = &group_clip {
+            let clip = if bounded {
+                shape_text_bounds(frag, block)
+            } else {
+                group_clip.clone()
+            };
+            for primitive in &mut prims[text_start..] {
+                if let Some(attrs) = doc_attrs_mut(primitive) {
+                    apply_clip_group(
+                        attrs,
+                        format!("shape-text:{}", block_key(&block.id)),
+                        group_clip.clone(),
+                    );
+                    apply_clip_group(
+                        attrs,
+                        format!("shape-text:{}", block_key(&block.id)),
+                        clip.clone(),
+                    );
+                }
+            }
         }
     }
 
@@ -8657,10 +8779,70 @@ fn emit_shape_fragment(
             is_anchored: None,
             z_index: None,
         };
-        emit_shape_fragment(prims, &child_frag, child, ctx);
+        emit_shape_fragment_with_clip(prims, &child_frag, child, ctx, group_clip.clone());
     }
 
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
+}
+
+fn rotate_shape_text(primitives: &mut [Primitive], center: (f64, f64), rotation: f64) {
+    if rotation == 0.0 {
+        return;
+    }
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let delta = |x: f64, y: f64| {
+        let dx = x - center.0;
+        let dy = y - center.1;
+        (
+            center.0 + cos * dx - sin * dy - x,
+            center.1 + sin * dx + cos * dy - y,
+        )
+    };
+    for primitive in primitives {
+        match primitive {
+            Primitive::Text(text) => {
+                let size = text
+                    .font
+                    .split_whitespace()
+                    .find_map(|part| {
+                        part.strip_suffix("px")
+                            .and_then(|size| size.parse::<f64>().ok())
+                    })
+                    .unwrap_or(11.0 * 96.0 / 72.0);
+                let (dx, dy) = delta(
+                    num_f64(&text.x) + num_f64(&text.width) / 2.0,
+                    num_f64(&text.baseline_y) - size * 0.2,
+                );
+                text.x = px(num_f64(&text.x) + dx);
+                text.baseline_y = px(num_f64(&text.baseline_y) + dy);
+                text.rotation_deg = Some(px(rotation));
+                text.paint_clip = None;
+            }
+            Primitive::GlyphRun(run) => {
+                let Some(first) = run.glyphs.first() else {
+                    continue;
+                };
+                let left = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x)
+                    .fold(f64::INFINITY, f64::min);
+                let right = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x + glyph.advance)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let (dx, dy) = delta((left + right) / 2.0, first.y - run.size * 0.2);
+                for glyph in &mut run.glyphs {
+                    glyph.x += dx;
+                    glyph.y += dy;
+                }
+                run.rotation_deg = Some(px(rotation));
+                run.paint_clip = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 fn shape_fill_color(fill: Option<&ShapeFillIn>) -> Option<String> {
@@ -9516,6 +9698,7 @@ struct CellPaint {
     grid_index: usize,
     cell_y: f64,
     cell_h: f64,
+    content_h: f64,
     is_first_row: bool,
     selectable: bool,
 }
@@ -9681,6 +9864,7 @@ impl TablePaintPlan {
                 grid_index,
                 cell_y: to_frag_y(row_tops.get(g.row_index).copied().unwrap_or(0.0)),
                 cell_h: span_height(g),
+                content_h: span_height(g),
                 is_first_row: false,
                 selectable: false,
             });
@@ -9694,13 +9878,25 @@ impl TablePaintPlan {
                 if g.row_index != vr.row_index {
                     continue;
                 }
+                let cell_h = if g.row_span > 1 {
+                    span_height(g)
+                } else {
+                    row_h
+                };
                 paints.push(CellPaint {
                     grid_index,
                     cell_y: vr.frag_y,
-                    cell_h: if g.row_span > 1 {
-                        span_height(g)
+                    cell_h,
+                    content_h: if vr.band_height.is_some() {
+                        measure
+                            .rows
+                            .iter()
+                            .skip(g.row_index)
+                            .take(g.row_span)
+                            .map(|row| row.height)
+                            .sum()
                     } else {
-                        row_h
+                        cell_h
                     },
                     is_first_row: g.row_index == 0 || vr.is_first_in_fragment,
                     selectable: true,
@@ -10240,7 +10436,7 @@ pub(crate) fn emit_table_fragment(
                 &CellPaintRef::from(p.g),
                 cx,
                 content_y,
-                p.cell_h,
+                paint.content_h,
                 is_first_col,
                 content_clip_top,
                 content_clip_bottom,
@@ -11403,7 +11599,7 @@ fn visit_table_fragment(
             &CellPaintRef::from(g),
             frag.x + g.x,
             content_y,
-            paint.cell_h,
+            paint.content_h,
             is_first_grid_column(g, block, measure),
             clip_top,
             clip_bottom,
@@ -12910,6 +13106,56 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unequal_column_bounds_and_separators_match_placement() {
+        for (count, widths, expected) in [
+            (
+                3,
+                vec![100.0],
+                vec![(20.0, 100.0), (140.0, 130.0), (290.0, 130.0)],
+            ),
+            (2, vec![300.0, 200.0], vec![(20.0, 228.0), (268.0, 152.0)]),
+        ] {
+            let columns = serde_json::json!({
+                "count": count, "gap": 20, "equalWidth": false, "separator": true,
+                "columns": widths.into_iter().map(|width| serde_json::json!({
+                    "width": width,
+                })).collect::<Vec<_>>(),
+            });
+            let margins = serde_json::json!({
+                "top": 20, "right": 20, "bottom": 20, "left": 20,
+            });
+            let page: PageIn = serde_json::from_value(serde_json::json!({
+                "size": {"w": 440, "h": 500}, "margins": margins, "columns": columns,
+            }))
+            .unwrap();
+            let paginator = crate::page_flow::Paginator::new(
+                crate::types::Size { w: 440.0, h: 500.0 },
+                serde_json::from_value(margins).unwrap(),
+                serde_json::from_value(columns).unwrap(),
+                None,
+            )
+            .unwrap();
+            let (_, bounds) = page_content_geometry(&page);
+            let mut separators = Vec::new();
+            emit_column_separators(&mut separators, &page);
+            assert_eq!(bounds.len(), expected.len());
+            assert_eq!(separators.len(), expected.len() - 1);
+            for (index, (x, width)) in expected.iter().copied().enumerate() {
+                assert!((paginator.get_column_x(index) - x).abs() < 1e-9);
+                assert!((paginator.get_column_width(index) - width).abs() < 1e-9);
+                assert_eq!(bounds[index].x, px(x));
+                assert_eq!(bounds[index].width, px(width));
+                assert!(x + width <= 420.0);
+                if let Some(Primitive::Line(line)) = separators.get(index) {
+                    let separator_x = (x + width + expected[index + 1].0) / 2.0;
+                    assert_eq!(line.x1, px(separator_x));
+                    assert_eq!(line.x2, px(separator_x));
+                }
+            }
+        }
+    }
 
     #[test]
     fn image_and_text_box_positions_ignore_legacy_metadata() {

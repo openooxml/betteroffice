@@ -144,6 +144,111 @@ fn structured_export_describes_the_ole_preview_as_one_image() {
     assert_eq!(part.as_deref(), Some("word/media/image.png"));
 }
 
+fn vml_group_document(inline_control: bool) -> Vec<u8> {
+    let group = r#"<w:pict><v:group coordsize="1000,1000" style="width:72pt;height:36pt"><v:shape style="left:0;top:0;width:500;height:500"><v:imagedata r:id="rIdImage"/></v:shape><v:shape style="left:500;top:500;width:500;height:500"><v:imagedata r:id="rIdImage"/></v:shape></v:group></w:pict>"#;
+    let mut parts = ooxml_opc::unzip_parts(&ole_document(false, inline_control)).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    *xml = std::str::from_utf8(xml)
+        .unwrap()
+        .replace(INLINE_OLE, group)
+        .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn vml_group_previews_share_one_atom_in_body_and_inline_control() {
+    for inline_control in [false, true] {
+        let doc = EditingDoc::new(74317);
+        seed_from_docx(&doc, &vml_group_document(inline_control)).unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("expected body paragraph");
+        };
+        let images: Vec<_> = paragraph
+            .runs
+            .iter()
+            .filter_map(|run| match run {
+                Run::Image(image) => Some(image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 2);
+        let start = if inline_control { 3.0 } else { 2.0 };
+        for image in images {
+            assert_eq!((image.width, image.height), (48.0, 24.0));
+            assert_eq!(
+                (image.pm_start, image.pm_end),
+                (Some(start), Some(start + 1.0))
+            );
+        }
+        let Run::Text(tail) = paragraph.runs.last().unwrap() else {
+            panic!("expected text after the group");
+        };
+        assert_eq!(tail.text, "B");
+        assert_eq!(
+            (tail.pm_start, tail.pm_end),
+            (Some(start + 1.0), Some(start + 2.0))
+        );
+    }
+}
+
+#[test]
+fn negative_vml_group_z_index_keeps_its_position_behind_text() {
+    let mut parts = ooxml_opc::unzip_parts(&vml_group_document(false)).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    *xml = std::str::from_utf8(xml)
+        .unwrap()
+        .replace(
+            "style=\"width:72pt;height:36pt\"",
+            "style=\"position:absolute;z-index:-10;margin-left:12pt;width:72pt;height:36pt\"",
+        )
+        .into_bytes();
+    let doc = EditingDoc::new(74319);
+    seed_from_docx(&doc, &ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+        panic!("expected body paragraph");
+    };
+    let images: Vec<_> = paragraph
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            Run::Image(image) => Some(image),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 2);
+    for image in images {
+        assert_eq!(image.wrap_type.as_deref(), Some("behind"));
+        let position = image.position.as_ref().unwrap();
+        assert_eq!(position.behind_doc, Some(true));
+        assert_eq!(position.relative_height, Some(0));
+    }
+}
+
+#[test]
+fn structured_export_keeps_a_vml_group_image_preview() {
+    let doc = EditingDoc::new(74318);
+    seed_from_docx(&doc, &vml_group_document(false)).unwrap();
+    let exported = doc
+        .export_structured(&ExportOptions::new(RevisionView::Accepted))
+        .unwrap();
+    let BlockKind::Paragraph { paragraph } = &exported.content.stories[0].blocks[0].content else {
+        panic!("expected body paragraph");
+    };
+    assert_eq!(paragraph.inlines.len(), 3);
+    assert!(
+        matches!(&paragraph.inlines[1].content, InlineKind::Image { relationship_id, .. }
+        if relationship_id.as_deref() == Some("rIdImage"))
+    );
+}
+
 #[test]
 fn first_page_floating_ole_header_keeps_body_below_its_preview() {
     let font = docx_layout::register_measure_font_bytes(include_bytes!(

@@ -9,6 +9,7 @@ use ooxml_drawingml::{
     TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
     preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
+    style_reference_color,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -128,6 +129,12 @@ impl SubstitutionLog {
     }
 }
 
+struct CachedBaselineStory {
+    body: TextBody,
+    theme: Theme,
+    story: StorySnapshot,
+}
+
 pub struct SlideRenderer {
     fonts: FontStore,
     faces: HashMap<(String, bool, bool), FontFace>,
@@ -140,6 +147,7 @@ pub struct SlideRenderer {
     font_count: usize,
     /// Laid-out text reused across display-list builds and slides.
     text_layouts: Mutex<TextLayoutCache>,
+    baseline_stories: Mutex<HashMap<String, CachedBaselineStory>>,
 }
 
 impl Default for SlideRenderer {
@@ -158,6 +166,7 @@ impl SlideRenderer {
             fallback_family: None,
             font_count: 0,
             text_layouts: Mutex::new(TextLayoutCache::default()),
+            baseline_stories: Mutex::new(HashMap::new()),
         }
     }
 
@@ -431,8 +440,13 @@ impl SlideRenderer {
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
             .unwrap_or(&default_format_scheme);
+        let slide_background = if deck_slide.background_edited {
+            Some(BackgroundSource::from_edit(deck_slide.background.as_ref()))
+        } else {
+            parsed_slide.map(BackgroundSource::from_slide)
+        };
         let background_source = [
-            parsed_slide.map(BackgroundSource::from_slide),
+            slide_background,
             layout.map(BackgroundSource::from_layout),
             master.map(BackgroundSource::from_master),
         ]
@@ -485,6 +499,7 @@ impl SlideRenderer {
             parsed_slide,
             primitives: Vec::new(),
             hit_regions: Vec::new(),
+            autofit: HashMap::new(),
             substitutions: SubstitutionLog::default(),
             shape_count: 0,
             line_count: 0,
@@ -495,6 +510,10 @@ impl SlideRenderer {
             media_parts: None,
             chart_parts: None,
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
+            slide_width: width,
+            slide_height: height,
+            background_paint: background.clone(),
+            background_picture: background_picture.cloned(),
         };
         let root_space = Space::root();
         if let Some(picture) = background_picture
@@ -503,6 +522,9 @@ impl SlideRenderer {
             let background_dpi = builder
                 .media_part(&asset_id)
                 .and_then(|part| image_dpi(&part.bytes));
+            let tile = picture_fill_tile(picture, background_dpi);
+            let (crop, destination) = picture_fill_crop(picture).placement(0.0, 0.0, width, height);
+            let destination = if tile.is_some() { None } else { destination };
             builder.primitives.push(Primitive::Image {
                 geometry_fallback: false,
                 object_id: 0,
@@ -513,9 +535,16 @@ impl SlideRenderer {
                 w: width,
                 h: height,
                 asset_id: Some(asset_id),
-                effects: Vec::new(),
-                crop: picture_fill_crop(picture),
-                tile: picture_fill_tile(picture, background_dpi),
+                effects: image_effects_with_placeholder(
+                    &picture.effects,
+                    theme,
+                    background_source
+                        .as_ref()
+                        .and_then(|source| source.reference),
+                ),
+                crop,
+                destination,
+                tile,
                 path: None,
                 stroke: None,
                 shadow: None,
@@ -533,6 +562,7 @@ impl SlideRenderer {
                         shape,
                         &format!("master:{}:{index}", master.part_path),
                         root_space,
+                        false,
                     )?;
                 }
             }
@@ -544,6 +574,7 @@ impl SlideRenderer {
                         shape,
                         &format!("layout:{}:{index}", layout.part_path),
                         root_space,
+                        false,
                     )?;
                 }
             }
@@ -561,7 +592,67 @@ impl SlideRenderer {
             },
             font_substitutions: builder.substitutions.entries,
             hit_regions: builder.hit_regions,
+            autofit: builder.autofit,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn save(&self, session: &pptx_edit::DeckSession) -> pptx_edit::EditResult<Vec<u8>> {
+        if self.fallback_font().is_none() {
+            return session.save();
+        }
+        session.save_with_autofit_resolver(|snapshot, baseline| {
+            let mut autofit = HashMap::new();
+            for (index, slide) in snapshot.slides.iter().enumerate() {
+                let base = baseline.slides.iter().find(|base| base.id == slide.id);
+                let parents = SlideParents::resolve(
+                    session.package(),
+                    slide.source_part_path.as_deref(),
+                    slide.layout_part_path.as_deref(),
+                );
+                if !has_autofit_edits(
+                    &slide.shapes,
+                    base.map_or(&[], |base| &base.shapes),
+                    &parents,
+                ) {
+                    continue;
+                }
+                let rendered = self
+                    .layout_slide(session.package(), snapshot, index)
+                    .map_err(|error| pptx_edit::EditError::Write(error.to_string()))?;
+                autofit.extend(rendered.autofit);
+            }
+            Ok(autofit)
+        })
+    }
+
+    fn story_edited(&self, story: &StorySnapshot, body: &TextBody, theme: &Theme) -> bool {
+        let Ok(mut cache) = self.baseline_stories.lock() else {
+            return pptx_edit::baseline_story(&story.id, body, Some(theme))
+                .is_ok_and(|baseline| baseline != *story);
+        };
+        if let Some(cached) = cache.get(&story.id)
+            && cached.body == *body
+            && cached.theme == *theme
+        {
+            return cached.story != *story;
+        }
+        let Ok(baseline) = pptx_edit::baseline_story(&story.id, body, Some(theme)) else {
+            return false;
+        };
+        let edited = baseline != *story;
+        if cache.len() >= 128 {
+            cache.clear();
+        }
+        cache.insert(
+            story.id.clone(),
+            CachedBaselineStory {
+                body: body.clone(),
+                theme: theme.clone(),
+                story: baseline,
+            },
+        );
+        edited
     }
 
     /// Whether a face was registered under `family` itself, rather than one
@@ -630,6 +721,46 @@ impl SlideRenderer {
     }
 }
 
+fn has_autofit_edits(
+    current: &[ShapeSnapshot],
+    baseline: &[ShapeSnapshot],
+    parents: &SlideParents<'_>,
+) -> bool {
+    current.iter().any(|shape| {
+        let base = baseline.iter().find(|base| base.id == shape.id);
+        if has_autofit_edits(
+            &shape.children,
+            base.map_or(&[], |base| &base.children),
+            parents,
+        ) {
+            return true;
+        }
+        if base.is_some_and(|base| base.text_stories == shape.text_stories) {
+            return false;
+        }
+        let original = parents
+            .slide
+            .and_then(|slide| find_node(&slide.shapes, shape.source_id));
+        let layout = shape.placeholder.as_ref().and_then(|placeholder| {
+            parents
+                .layout
+                .and_then(|layout| find_placeholder(&layout.shapes, placeholder))
+        });
+        let master = shape.placeholder.as_ref().and_then(|placeholder| {
+            parents
+                .master
+                .and_then(|master| find_placeholder(&master.shapes, placeholder))
+        });
+        matches!(
+            [original, layout, master]
+                .into_iter()
+                .flatten()
+                .find_map(|node| node_text(node)?.autofit.as_ref()),
+            Some(TextAutofit::Normal { .. })
+        )
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -655,6 +786,15 @@ struct BackgroundSource<'a> {
 }
 
 impl<'a> BackgroundSource<'a> {
+    /// An edited slide background, which replaces the part's `p:bg` whole.
+    fn from_edit(fill: Option<&'a ShapeFill>) -> Self {
+        Self {
+            fill,
+            picture: None,
+            reference: None,
+        }
+    }
+
     fn from_slide(slide: &'a Slide) -> Self {
         Self {
             fill: slide.background.as_ref(),
@@ -689,6 +829,7 @@ pub struct RenderedSlide {
     /// Families the slide asked for that no registered face matched.
     pub font_substitutions: Vec<FontSubstitution>,
     hit_regions: Vec<HitRegion>,
+    autofit: HashMap<String, TextAutofit>,
 }
 
 impl RenderedSlide {
@@ -704,7 +845,7 @@ impl RenderedSlide {
                 if !inside_shape && !(text.overflow && region.hit_rect.contains(text_x, text_y)) {
                     continue;
                 }
-                if let Some(line) = nearest_line(&text.lines, text_y)
+                if let Some(line) = nearest_line(&text.lines, text_x, text_y)
                     && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
                         (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
                     })
@@ -737,6 +878,7 @@ struct LayoutBuilder<'a> {
     parsed_slide: Option<&'a Slide>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
+    autofit: HashMap<String, TextAutofit>,
     substitutions: SubstitutionLog,
     shape_count: usize,
     line_count: usize,
@@ -751,6 +893,10 @@ struct LayoutBuilder<'a> {
     chart_parts: Option<HashMap<(&'a str, Option<&'a str>), &'a ChartPart>>,
     /// The number a `slidenum` field resolves to on this slide.
     slide_number: i64,
+    slide_width: f32,
+    slide_height: f32,
+    background_paint: Option<Paint>,
+    background_picture: Option<PictureFill>,
 }
 
 impl<'a> LayoutBuilder<'a> {
@@ -831,7 +977,7 @@ impl<'a> LayoutBuilder<'a> {
                 .or_else(|| layout_node.and_then(node_group_transform))
                 .or_else(|| master_node.and_then(node_group_transform));
             let child_space = group_transform
-                .map(|transform| Space::for_group(rect, transform))
+                .map(|transform| space.for_group(rect, transform))
                 .unwrap_or(space);
             for child in &shape.children {
                 self.render_snapshot_shape(child, child_space)?;
@@ -846,7 +992,20 @@ impl<'a> LayoutBuilder<'a> {
         let picture = effective_fill
             .filter(|fill| fill.fill_type == PICTURE_FILL)
             .and_then(|_| picture_fill(&inherited));
-        let fill = effective_fill.and_then(|fill| paint(fill, self.theme));
+        let use_bg_fill = shape.kind == ShapeKind::Shape && node_use_bg_fill(original);
+        let background_picture = use_bg_fill
+            .then(|| self.background_picture.clone())
+            .flatten();
+        let picture = if use_bg_fill {
+            background_picture.as_ref()
+        } else {
+            picture
+        };
+        let fill = if use_bg_fill {
+            self.background_paint.clone()
+        } else {
+            effective_fill.and_then(|fill| paint(fill, self.theme))
+        };
         let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
             inherited_outline
         } else {
@@ -900,33 +1059,34 @@ impl<'a> LayoutBuilder<'a> {
                 if shape.geometry == "custom" && !paths.is_empty() {
                     geometry_fallback = false;
                 }
-                self.push_shape(
-                    Primitive::Shape {
-                        clip: None,
-                        even_odd: false,
-                        object_id: shape.source_id,
-                        shape_id: Some(stable_id.clone()),
-                        name: shape.name.clone(),
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                        geometry: shape.geometry.clone(),
-                        path,
-                        geometry_fallback,
-                        adjust_values: shape
-                            .adjust_values
-                            .iter()
-                            .map(|(name, value)| (name.clone(), *value as f32))
-                            .collect(),
-                        fill,
-                        stroke: outline,
-                        shadow,
-                        transform,
-                    },
-                    paths,
-                    picture,
-                )?;
+                let primitive = Primitive::Shape {
+                    clip: None,
+                    even_odd: false,
+                    object_id: shape.source_id,
+                    shape_id: Some(stable_id.clone()),
+                    name: shape.name.clone(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    geometry: shape.geometry.clone(),
+                    path,
+                    geometry_fallback,
+                    adjust_values: shape
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
+                    fill,
+                    stroke: outline,
+                    shadow,
+                    transform,
+                };
+                if use_bg_fill {
+                    self.push_background_shape(primitive, paths, picture)?;
+                } else {
+                    self.push_shape(primitive, paths, picture)?;
+                }
             }
             ShapeKind::Picture => {
                 let source = picture_source(original);
@@ -962,6 +1122,7 @@ impl<'a> LayoutBuilder<'a> {
             ShapeKind::Group => unreachable!(),
         }
         let body_cascade = BodyCascade {
+            fit_to_box: false,
             primary: original.and_then(node_text),
             layout: layout_node.and_then(node_text),
             master: master_node.and_then(node_text),
@@ -974,7 +1135,15 @@ impl<'a> LayoutBuilder<'a> {
         let text = match shape.kind {
             ShapeKind::GraphicFrame => None,
             ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
-                shape.text_stories.first().map(content_from_story)
+                shape.text_stories.first().map(|story| {
+                    let mut content = content_from_story(story);
+                    content.refit_autofit =
+                        matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
+                            && body_cascade.primary.is_some_and(|body| {
+                                self.renderer.story_edited(story, body, self.theme)
+                            });
+                    content
+                })
             }
         };
         let text_hit = if let Some(content) = text {
@@ -1006,6 +1175,7 @@ impl<'a> LayoutBuilder<'a> {
         shape: &ShapeNode,
         stable_id: &str,
         space: Space,
+        fit_text: bool,
     ) -> Result<(), RenderError> {
         self.charge_shape()?;
         if node_base(shape).hidden {
@@ -1013,9 +1183,14 @@ impl<'a> LayoutBuilder<'a> {
         }
         if let ShapeNode::Group(group) = shape {
             let rect = space.map_transform(&group.base.transform);
-            let child_space = Space::for_group(rect, &group.base.transform);
+            let child_space = space.for_group(rect, &group.base.transform);
             for (index, child) in group.children.iter().enumerate() {
-                self.render_parsed_shape(child, &format!("{stable_id}:{index}"), child_space)?;
+                self.render_parsed_shape(
+                    child,
+                    &format!("{stable_id}:{index}"),
+                    child_space,
+                    fit_text,
+                )?;
             }
             return Ok(());
         }
@@ -1029,16 +1204,28 @@ impl<'a> LayoutBuilder<'a> {
         match shape {
             ShapeNode::Shape(value) => {
                 let resolved_fill = self.resolved_fill(&[Some(shape)]);
-                let fill = resolved_fill
-                    .as_ref()
-                    .and_then(|fill| paint(fill, self.theme));
+                let use_bg_fill = value.use_bg_fill;
+                let background_picture = use_bg_fill
+                    .then(|| self.background_picture.clone())
+                    .flatten();
+                let fill = if use_bg_fill {
+                    self.background_paint.clone()
+                } else {
+                    resolved_fill
+                        .as_ref()
+                        .and_then(|fill| paint(fill, self.theme))
+                };
                 let outline = self
                     .resolved_outline(&[Some(shape)])
                     .and_then(|outline| stroke(&outline, self.theme));
-                let picture = resolved_fill
-                    .as_ref()
-                    .filter(|fill| fill.fill_type == PICTURE_FILL)
-                    .and(value.picture_fill.as_deref());
+                let picture = if use_bg_fill {
+                    background_picture.as_ref()
+                } else {
+                    resolved_fill
+                        .as_ref()
+                        .filter(|fill| fill.fill_type == PICTURE_FILL)
+                        .and(value.picture_fill.as_deref())
+                };
                 let shadow = value
                     .effects
                     .as_ref()
@@ -1062,33 +1249,34 @@ impl<'a> LayoutBuilder<'a> {
                 if value.geometry == "custom" && !value.paths.is_empty() {
                     geometry_fallback = false;
                 }
-                self.push_shape(
-                    Primitive::Shape {
-                        clip: None,
-                        even_odd: false,
-                        object_id: base.id,
-                        shape_id: Some(stable_id.to_owned()),
-                        name: base.name.clone(),
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                        geometry: value.geometry.clone(),
-                        path,
-                        geometry_fallback,
-                        adjust_values: value
-                            .adjust_values
-                            .iter()
-                            .map(|(name, value)| (name.clone(), *value as f32))
-                            .collect(),
-                        fill,
-                        stroke: outline,
-                        shadow,
-                        transform,
-                    },
-                    &value.paths,
-                    picture,
-                )?;
+                let primitive = Primitive::Shape {
+                    clip: None,
+                    even_odd: false,
+                    object_id: base.id,
+                    shape_id: Some(stable_id.to_owned()),
+                    name: base.name.clone(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    geometry: value.geometry.clone(),
+                    path,
+                    geometry_fallback,
+                    adjust_values: value
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
+                    fill,
+                    stroke: outline,
+                    shadow,
+                    transform,
+                };
+                if use_bg_fill {
+                    self.push_background_shape(primitive, &value.paths, picture)?;
+                } else {
+                    self.push_shape(primitive, &value.paths, picture)?;
+                }
             }
             ShapeNode::Picture(value) => {
                 let outline = self
@@ -1143,6 +1331,7 @@ impl<'a> LayoutBuilder<'a> {
                 geometry_text_inset(Some(shape), rect),
                 content,
                 BodyCascade {
+                    fit_to_box: fit_text,
                     primary: Some(body),
                     layout: None,
                     master: None,
@@ -1177,11 +1366,13 @@ impl<'a> LayoutBuilder<'a> {
         media_part_path: Option<&str>,
         effects: &[BlipEffect],
         crop: Option<&PictureCrop>,
-        mask: PictureMask,
-        outline: Option<Stroke>,
+        mut mask: PictureMask,
+        mut outline: Option<Stroke>,
         shadow: Option<Shadow>,
     ) {
-        if effects.is_empty()
+        let separate_outline = mask.outline_path.is_some();
+        let metafile = !mask.empty
+            && effects.is_empty()
             && self.push_metafile(
                 object_id,
                 name,
@@ -1190,52 +1381,66 @@ impl<'a> LayoutBuilder<'a> {
                 media_part_path,
                 crop,
                 &mask,
-            )
-        {
-            if let Some(outline) = outline {
-                self.primitives.push(Primitive::Shape {
-                    clip: None,
-                    even_odd: false,
-                    object_id,
-                    shape_id: Some(shape_id.to_owned()),
-                    name: name.to_owned(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    geometry: "rect".to_owned(),
-                    path: mask
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0)),
-                    geometry_fallback: mask.geometry_fallback,
-                    adjust_values: BTreeMap::new(),
-                    fill: None,
-                    stroke: Some(outline),
-                    shadow: None,
-                    transform,
-                });
-            }
-            return;
+            );
+        if !mask.empty && !metafile {
+            let (crop, destination) = crop
+                .map(image_crop)
+                .unwrap_or_default()
+                .placement(rect.x, rect.y, rect.w, rect.h);
+            self.primitives.push(Primitive::Image {
+                object_id,
+                shape_id: Some(shape_id.to_owned()),
+                name: name.to_owned(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                asset_id: media_part_path.map(str::to_owned),
+                effects: image_effects(effects, self.theme),
+                crop,
+                destination,
+                tile: None,
+                path: mask.path.take(),
+                geometry_fallback: mask.geometry_fallback,
+                stroke: if separate_outline {
+                    None
+                } else {
+                    outline.take()
+                },
+                shadow,
+                transform,
+            });
         }
-        self.primitives.push(Primitive::Image {
-            object_id,
-            shape_id: Some(shape_id.to_owned()),
-            name: name.to_owned(),
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
-            asset_id: media_part_path.map(str::to_owned),
-            effects: image_effects(effects, self.theme),
-            crop: crop.map(image_crop).unwrap_or_default(),
-            tile: None,
-            path: mask.path,
-            geometry_fallback: mask.geometry_fallback,
-            stroke: outline,
-            shadow,
-            transform,
-        });
+        if (metafile || separate_outline)
+            && let Some(outline) = outline
+        {
+            let path = mask
+                .outline_path
+                .or(mask.path)
+                .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
+            if path.is_empty() {
+                return;
+            }
+            self.primitives.push(Primitive::Shape {
+                clip: None,
+                even_odd: false,
+                object_id,
+                shape_id: Some(shape_id.to_owned()),
+                name: name.to_owned(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                geometry: if separate_outline { "custom" } else { "rect" }.to_owned(),
+                path,
+                geometry_fallback: mask.geometry_fallback,
+                adjust_values: BTreeMap::new(),
+                fill: None,
+                stroke: Some(outline),
+                shadow: None,
+                transform,
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1367,7 +1572,7 @@ impl<'a> LayoutBuilder<'a> {
                     .and_then(|path| self.media_part(path))
                     .and_then(|part| image_dpi(&part.bytes));
                 self.primitives
-                    .push(picture_filled(primitive, picture, dpi));
+                    .push(picture_filled(primitive, picture, dpi, self.theme));
             }
             return Ok(());
         }
@@ -1401,9 +1606,134 @@ impl<'a> LayoutBuilder<'a> {
                 .and_then(|path| self.media_part(path))
                 .and_then(|part| image_dpi(&part.bytes));
             self.primitives
-                .push(picture_filled(primitive, picture, dpi));
+                .push(picture_filled(primitive, picture, dpi, self.theme));
         }
         Ok(())
+    }
+
+    fn push_background_shape(
+        &mut self,
+        primitive: Primitive,
+        paths: &[CustomGeometryPath],
+        picture: Option<&PictureFill>,
+    ) -> Result<(), RenderError> {
+        let start = self.primitives.len();
+        self.push_shape(primitive, paths, None)?;
+        let parts = self.primitives.split_off(start);
+        let picture = picture.filter(|fill| fill.media_part_path.is_some());
+        let dpi = picture
+            .and_then(|fill| fill.media_part_path.as_deref())
+            .and_then(|path| self.media_part(path))
+            .and_then(|part| image_dpi(&part.bytes));
+        for mut part in parts {
+            if self.slide_width > 0.0
+                && self.slide_height > 0.0
+                && matches!(&part, Primitive::Shape { fill, shadow, .. } if fill.is_some() || shadow.is_some())
+            {
+                self.charge_shape()?;
+                let slide = self.slide_background_primitive(part.clone(), picture, dpi);
+                self.primitives.push(slide);
+            }
+            if let Primitive::Shape { fill, shadow, .. } = &mut part {
+                *fill = None;
+                *shadow = None;
+            }
+            self.primitives.push(part);
+        }
+        Ok(())
+    }
+
+    fn slide_background_primitive(
+        &self,
+        primitive: Primitive,
+        picture: Option<&PictureFill>,
+        dpi: Option<f32>,
+    ) -> Primitive {
+        let Primitive::Shape {
+            object_id,
+            name,
+            geometry,
+            path,
+            geometry_fallback,
+            adjust_values,
+            fill,
+            stroke,
+            shadow,
+            even_odd,
+            x,
+            y,
+            w,
+            h,
+            transform,
+            ..
+        } = primitive
+        else {
+            return primitive;
+        };
+        let placement = BackgroundTransform::for_shape(PxRect { x, y, w, h }, transform);
+        let shadow = shadow.map(|mut shadow| {
+            if shadow.paths.is_empty() {
+                shadow.paths.push(crate::ShadowPath {
+                    path: path.clone(),
+                    fill: fill.is_some(),
+                    stroke,
+                });
+            }
+            for part in &mut shadow.paths {
+                part.path = slide_background_path(
+                    &part.path,
+                    placement,
+                    self.slide_width,
+                    self.slide_height,
+                );
+            }
+            shadow
+        });
+        let path = slide_background_path(&path, placement, self.slide_width, self.slide_height);
+        if let Some(picture) = picture.filter(|_| fill.is_some()) {
+            let tile = picture_fill_tile(picture, dpi);
+            let (crop, destination) =
+                picture_fill_crop(picture).placement(0.0, 0.0, self.slide_width, self.slide_height);
+            let destination = if tile.is_some() { None } else { destination };
+            return Primitive::Image {
+                object_id,
+                shape_id: None,
+                name,
+                x: 0.0,
+                y: 0.0,
+                w: self.slide_width,
+                h: self.slide_height,
+                asset_id: picture.media_part_path.clone(),
+                effects: Vec::new(),
+                crop,
+                destination,
+                tile,
+                path: Some(path),
+                geometry_fallback,
+                stroke: None,
+                shadow,
+                transform: Transform::default(),
+            };
+        }
+        Primitive::Shape {
+            clip: None,
+            even_odd,
+            object_id,
+            shape_id: None,
+            name,
+            x: 0.0,
+            y: 0.0,
+            w: self.slide_width,
+            h: self.slide_height,
+            geometry,
+            path,
+            geometry_fallback,
+            adjust_values,
+            fill,
+            stroke: None,
+            shadow,
+            transform: Transform::default(),
+        }
     }
 
     /// Plots a chart or table frame, or keeps the placeholder for graphics
@@ -1506,16 +1836,24 @@ impl<'a> LayoutBuilder<'a> {
                 .iter()
                 .find(|drawing| drawing.part_path == *part_path)
         {
-            // The drawing's shapes are written in the frame's own coordinates,
-            // at the slide's scale, so they only need the frame's origin.
+            let (scale_x, scale_y) = drawing
+                .synthesis_extent
+                .filter(|[width, height]| *width > 0 && *height > 0)
+                .map(|[width, height]| (rect.w / width as f32, rect.h / height as f32))
+                .unwrap_or((frame_space.scale_x, frame_space.scale_y));
             let space = Space {
                 origin_x: rect.x,
                 origin_y: rect.y,
-                scale_x: frame_space.scale_x,
-                scale_y: frame_space.scale_y,
+                scale_x,
+                scale_y,
             };
             for (index, shape) in drawing.shapes.iter().enumerate() {
-                self.render_parsed_shape(shape, &format!("{shape_id}:{index}"), space)?;
+                self.render_parsed_shape(
+                    shape,
+                    &format!("{shape_id}:{index}"),
+                    space,
+                    drawing.synthesis_extent.is_some(),
+                )?;
             }
             return Ok(());
         }
@@ -1627,6 +1965,7 @@ impl<'a> LayoutBuilder<'a> {
                     &content,
                     cell_cascade(&cell.text, &inherited),
                     columns[column + span] - columns[column],
+                    heights[row_index..row_index + row_span].iter().sum(),
                 )?;
                 if row_span == 1 {
                     heights[row_index] = heights[row_index].max(height);
@@ -1729,6 +2068,7 @@ impl<'a> LayoutBuilder<'a> {
         content: &TextContent,
         cascade: BodyCascade<'_>,
         width: f32,
+        height: f32,
     ) -> Result<f32, RenderError> {
         if TextFlow::from_body_vert(cascade.vertical()) != TextFlow::Horizontal {
             return Ok(0.0);
@@ -1750,9 +2090,18 @@ impl<'a> LayoutBuilder<'a> {
             x: 0.0,
             y: 0.0,
             w: (width - emu_to_px(left + right)).max(1.0),
-            h: 0.0,
+            h: (height - emu_to_px(top + bottom)).max(1.0),
         };
-        let text = self.layout_text(&resolved, rect, 1.0, false, true)?;
+        let text = if cascade.num_col() > 1 {
+            self.layout_text_columns(
+                &resolved,
+                rect,
+                cascade,
+                autofit_font_scale(cascade.autofit()),
+            )?
+        } else {
+            self.layout_text(&resolved, rect, 1.0, false, true)?
+        };
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
@@ -1792,7 +2141,7 @@ impl<'a> LayoutBuilder<'a> {
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
         self.substitutions.enter_shape(shape_id);
-        let resolved = resolve_content(
+        let mut resolved = resolve_content(
             self.renderer,
             self.theme,
             &content,
@@ -1816,10 +2165,86 @@ impl<'a> LayoutBuilder<'a> {
             w: (text_rect.w - emu_to_px(left + right) - preset_x * 2.0).max(1.0),
             h: (text_rect.h - emu_to_px(top + bottom) - preset_y * 2.0).max(1.0),
         };
-        let scale = autofit_font_scale(cascade.autofit());
-        let stacked = flow == TextFlow::Stacked;
-        let mut laid_out =
-            self.layout_text(&resolved, content_rect, scale, stacked, cascade.wraps())?;
+        let mut scale = if content.refit_autofit {
+            let steps = [
+                (100_000, 0),
+                (100_000, 10_000),
+                (100_000, 20_000),
+                (92_500, 20_000),
+                (85_000, 20_000),
+                (77_500, 20_000),
+                (70_000, 20_000),
+                (62_500, 20_000),
+                (55_000, 20_000),
+                (47_500, 20_000),
+                (40_000, 20_000),
+                (32_500, 20_000),
+                (25_000, 20_000),
+            ];
+            let mut low = 0;
+            let mut high = steps.len() - 1;
+            while low < high {
+                let mid = (low + high) / 2;
+                let (scale, reduction) = steps[mid];
+                for paragraph in &mut resolved.paragraphs {
+                    paragraph.line_space_reduction = reduction as f32 / 100_000.0;
+                }
+                let text = self.layout_text_columns(
+                    &resolved,
+                    content_rect,
+                    cascade,
+                    scale as f32 / 100_000.0,
+                )?;
+                if text.total_height <= content_rect.h
+                    && text.lines.iter().all(|line| {
+                        line.x >= content_rect.x
+                            && visible_right(line)
+                                <= content_rect.x + content_rect.w + FIT_EPSILON_PX
+                    })
+                {
+                    high = mid;
+                } else {
+                    low = mid + 1;
+                }
+            }
+            let (scale, reduction) = steps[low];
+            for paragraph in &mut resolved.paragraphs {
+                paragraph.line_space_reduction = reduction as f32 / 100_000.0;
+            }
+            self.autofit.insert(
+                content.story_id.clone(),
+                TextAutofit::Normal {
+                    font_scale: Some(f64::from(scale) / 100_000.0),
+                    line_space_reduction: Some(f64::from(reduction) / 100_000.0),
+                },
+            );
+            scale as f32 / 100_000.0
+        } else {
+            autofit_font_scale(cascade.autofit())
+        };
+        let mut laid_out = self.layout_text_columns(&resolved, content_rect, cascade, scale)?;
+        if cascade.fit_to_box {
+            let largest_font = resolved
+                .paragraphs
+                .iter()
+                .flat_map(|paragraph| &paragraph.runs)
+                .map(|run| run.style.font_size_pt)
+                .fold(1.0_f32, f32::max);
+            let minimum_scale = 1.0 / largest_font;
+            while laid_out.total_height > content_rect.h
+                || laid_out
+                    .lines
+                    .iter()
+                    .any(|line| line.x + line.width > content_rect.x + content_rect.w)
+            {
+                let next_scale = (scale * 0.8).max(minimum_scale);
+                if next_scale >= scale {
+                    break;
+                }
+                scale = next_scale;
+                laid_out = self.layout_text_columns(&resolved, content_rect, cascade, scale)?;
+            }
+        }
         self.line_count += laid_out.lines.len();
         if self.line_count > MAX_TEXT_LINES {
             return Err(RenderError::ResourceLimit(format!(
@@ -1869,7 +2294,15 @@ impl<'a> LayoutBuilder<'a> {
                     .collect(),
             })
             .collect();
-        let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
+        let (left, right) = (text_rect.x - 0.5, text_rect.x + text_rect.w + 0.5);
+        let horizontal_overflow = laid_out.lines.iter().any(|line| {
+            line.runs
+                .iter()
+                .filter(|run| !run.text.trim().is_empty())
+                .any(|run| run.x < left || run.x + run.width > right)
+        });
+        let overflow = !cascade.clips_overflow()
+            && (laid_out.total_height > content_rect.h || horizontal_overflow);
         let text_shadow = cascade.text_shadow().and_then(|effects| {
             shadow(
                 effects,
@@ -1905,6 +2338,35 @@ impl<'a> LayoutBuilder<'a> {
             transform: text_transform,
             lines,
         })
+    }
+
+    fn layout_text_columns(
+        &self,
+        resolved: &ResolvedContent,
+        rect: PxRect,
+        cascade: BodyCascade<'_>,
+        scale: f32,
+    ) -> Result<LayoutText, RenderError> {
+        let flow = TextFlow::from_body_vert(cascade.vertical());
+        let stacked = flow == TextFlow::Stacked;
+        let columns = if flow == TextFlow::Horizontal {
+            cascade.num_col()
+        } else {
+            1
+        };
+        let gap = emu_to_px(cascade.spc_col()).min(
+            (rect.w - f32::from(columns)).max(0.0) / f32::from(columns.saturating_sub(1).max(1)),
+        );
+        let column_rect = PxRect {
+            w: ((rect.w - f32::from(columns - 1) * gap) / f32::from(columns)).max(1.0),
+            ..rect
+        };
+        let mut laid_out =
+            self.layout_text(resolved, column_rect, scale, stacked, cascade.wraps())?;
+        if columns > 1 {
+            flow_text_columns(&mut laid_out, column_rect, columns, gap, cascade.rtl_col());
+        }
+        Ok(laid_out)
     }
 
     /// `layout_content` behind the renderer cache.
@@ -2021,6 +2483,7 @@ fn style_text_body(style: &ResolvedCellStyle) -> TextBody {
 
 fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<'a> {
     BodyCascade {
+        fit_to_box: false,
         primary: Some(text),
         layout: None,
         master: Some(inherited),
@@ -2134,6 +2597,38 @@ impl TextFlow {
 }
 
 /// Mirrors the lines within the block they occupy, keeping the block in place.
+/// The right edge of a line's ink: blanks that hang past the end of a wrapped
+/// line, or that were just typed, do not count, as in `aligned_slice`.
+fn visible_right(line: &PositionedTextLine) -> f32 {
+    let last = line.runs.iter().rev().find_map(|run| {
+        let visible = run.text.trim_end_matches(char::is_whitespace);
+        (!visible.is_empty()).then(|| {
+            (
+                run.end - utf16_len(&run.text[visible.len()..]),
+                run.letter_spacing_px,
+            )
+        })
+    });
+    let Some((end, tracking)) = last else {
+        return line.x;
+    };
+    let right = line
+        .caret_stops
+        .iter()
+        .filter(|stop| stop.position <= end)
+        .map(|stop| stop.x)
+        .fold(line.x, f32::max);
+    let ends_at_right = line
+        .caret_stops
+        .iter()
+        .any(|stop| stop.position == end && stop.x >= right);
+    if ends_at_right {
+        right - tracking
+    } else {
+        right
+    }
+}
+
 fn reverse_line_order(lines: &mut [PositionedTextLine]) {
     let Some(top) = lines.iter().map(|line| line.y).reduce(f32::min) else {
         return;
@@ -2166,6 +2661,7 @@ fn text_transform(shape: Transform, flow: TextFlow) -> Transform {
 
 #[derive(Clone, Copy)]
 struct BodyCascade<'a> {
+    fit_to_box: bool,
     primary: Option<&'a TextBody>,
     layout: Option<&'a TextBody>,
     master: Option<&'a TextBody>,
@@ -2215,6 +2711,22 @@ impl BodyCascade<'_> {
             .and_then(|body| body.vertical.as_deref())
             .or_else(|| self.layout.and_then(|body| body.vertical.as_deref()))
             .or_else(|| self.master.and_then(|body| body.vertical.as_deref()))
+    }
+
+    fn num_col(&self) -> u8 {
+        cascade_value(self.primary, self.layout, self.master, |body| body.num_col)
+            .unwrap_or(1)
+            .clamp(1, 16)
+    }
+
+    fn spc_col(&self) -> i64 {
+        cascade_value(self.primary, self.layout, self.master, |body| body.spc_col)
+            .unwrap_or(0)
+            .max(0)
+    }
+
+    fn rtl_col(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| body.rtl_col).unwrap_or(false)
     }
 
     fn space_first_last_para(&self) -> bool {
@@ -2309,6 +2821,7 @@ fn cascade_value<T: Copy>(
 #[derive(Clone)]
 struct TextContent {
     story_id: String,
+    refit_autofit: bool,
     paragraphs: Vec<ContentParagraph>,
 }
 
@@ -2329,6 +2842,7 @@ struct ContentRun {
 fn content_from_story(story: &StorySnapshot) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
+        refit_autofit: false,
         paragraphs: story
             .paragraphs
             .iter()
@@ -2368,6 +2882,7 @@ fn content_from_body(
 ) -> TextContent {
     TextContent {
         story_id: format!("inherited:{story_id}"),
+        refit_autofit: false,
         paragraphs: body
             .paragraphs
             .iter()
@@ -3046,6 +3561,7 @@ fn chart_text_primitive(
             }],
         }],
         lines: vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y: baseline - line_box.ascent,
             width,
@@ -3373,6 +3889,33 @@ fn layout_content(
     })
 }
 
+fn flow_text_columns(text: &mut LayoutText, rect: PxRect, columns: u8, gap: f32, rtl: bool) {
+    let trailing_space = text.lines.last().map_or(0.0, |line| {
+        text.total_height - (line.y + line.height - rect.y)
+    });
+    let mut column = 0;
+    let mut column_start = rect.y;
+    let mut has_lines = false;
+    let mut total_height = 0.0_f32;
+    for line in &mut text.lines {
+        let mut y = line.y - column_start;
+        if has_lines && y + line.height > rect.h && column + 1 < columns {
+            column += 1;
+            column_start = line.y;
+            y = 0.0;
+        }
+        let visual_column = if rtl { columns - 1 - column } else { column };
+        line.column_offset = f32::from(visual_column) * (rect.w + gap);
+        shift_line(line, line.column_offset, rect.y + y - line.y);
+        total_height = total_height.max(y + line.height);
+        has_lines = true;
+    }
+    if let Some(last) = text.lines.last() {
+        total_height = total_height.max(last.y + last.height - rect.y + trailing_space);
+    }
+    text.total_height = total_height;
+}
+
 /// Height of a `spcBef` or `spcAft`, whose percentages measure a single line.
 fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale: f32) -> f32 {
     let height = match spacing {
@@ -3446,6 +3989,9 @@ const NO_WRAP_WIDTH_PX: f32 = 1.0e6;
 
 /// A stop the pen already sits on does not hold the tab.
 const TAB_EPSILON_PX: f32 = 0.01;
+/// Slack for a right-aligned line, whose summed advances can land a rounding
+/// step past the edge it was placed against.
+const FIT_EPSILON_PX: f32 = 0.01;
 
 /// Width one tab takes. The stop is chosen from `offset` — where PowerPoint's
 /// pen would be — and the width is measured from `pen`, where ours is; the two
@@ -3496,6 +4042,7 @@ fn layout_paragraph(
             points_to_px(autofit_size_pt(style.font_size_pt, scale)),
         );
         return Ok(vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y,
             width: 0.0,
@@ -3600,6 +4147,7 @@ fn layout_paragraph(
             mirror_line(&mut runs, &mut caret_stops, line_x, line_width);
         }
         output.push(PositionedTextLine {
+            column_offset: 0.0,
             x: line_x,
             y: line_y,
             width: line_width,
@@ -4435,6 +4983,43 @@ impl PxRect {
 }
 
 #[derive(Clone, Copy)]
+struct BackgroundTransform {
+    xx: f64,
+    xy: f64,
+    yx: f64,
+    yy: f64,
+    tx: f64,
+    ty: f64,
+}
+
+impl BackgroundTransform {
+    fn for_shape(rect: PxRect, transform: Transform) -> Self {
+        let (sin, cos) = f64::from(transform.rotation_deg).to_radians().sin_cos();
+        let width = f64::from(rect.w);
+        let height = f64::from(rect.h);
+        let flipped_width = if transform.flip_h { -width } else { width };
+        let flipped_height = if transform.flip_v { -height } else { height };
+        let (xx, xy) = (cos * flipped_width, -sin * flipped_height);
+        let (yx, yy) = (sin * flipped_width, cos * flipped_height);
+        Self {
+            xx,
+            xy,
+            yx,
+            yy,
+            tx: f64::from(rect.x) + width / 2.0 - (xx + xy) / 2.0,
+            ty: f64::from(rect.y) + height / 2.0 - (yx + yy) / 2.0,
+        }
+    }
+
+    fn point(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.xx * x + self.xy * y + self.tx,
+            self.yx * x + self.yy * y + self.ty,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Space {
     origin_x: f32,
     origin_y: f32,
@@ -4461,7 +5046,7 @@ impl Space {
         }
     }
 
-    fn for_group(rect: PxRect, transform: &ShapeTransform) -> Self {
+    fn for_group(self, rect: PxRect, transform: &ShapeTransform) -> Self {
         let child_width = transform.child_width.unwrap_or(transform.width);
         let child_height = transform.child_height.unwrap_or(transform.height);
         if child_width == 0 || child_height == 0 {
@@ -4471,9 +5056,11 @@ impl Space {
         let scale_y = safe_geometry(rect.h / child_height as f32);
         let child_x = transform.child_x.unwrap_or_default() as f32;
         let child_y = transform.child_y.unwrap_or_default() as f32;
+        let origin_x = safe_geometry(rect.x - child_x * scale_x);
+        let origin_y = safe_geometry(rect.y - child_y * scale_y);
         Self {
-            origin_x: safe_geometry(rect.x - child_x * scale_x),
-            origin_y: safe_geometry(rect.y - child_y * scale_y),
+            origin_x,
+            origin_y,
             scale_x,
             scale_y,
         }
@@ -4531,14 +5118,18 @@ fn local_point(rect: PxRect, transform: Transform, x: f32, y: f32) -> (f32, f32)
     (center_x + local_x, center_y + local_y)
 }
 
-fn nearest_line(lines: &[PositionedTextLine], y: f32) -> Option<&PositionedTextLine> {
-    lines.iter().min_by(|left, right| {
-        distance_to_interval(y, left.y, left.y + left.height).total_cmp(&distance_to_interval(
-            y,
-            right.y,
-            right.y + right.height,
-        ))
-    })
+fn nearest_line(lines: &[PositionedTextLine], x: f32, y: f32) -> Option<&PositionedTextLine> {
+    let columns = lines
+        .windows(2)
+        .any(|pair| pair[1].column_offset != pair[0].column_offset);
+    let distance = |line: &PositionedTextLine| {
+        let dx = distance_to_interval(x, line.x, line.x + line.width);
+        let dy = distance_to_interval(y, line.y, line.y + line.height);
+        if columns { dx * dx + dy * dy } else { dy }
+    };
+    lines
+        .iter()
+        .min_by(|left, right| distance(left).total_cmp(&distance(right)))
 }
 
 fn distance_to_interval(value: f32, start: f32, end: f32) -> f32 {
@@ -4850,7 +5441,20 @@ fn resolved_transform_value(
 
 /// Resolves bitmap effect colours against the theme.
 fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
-    let rgba = |color: Option<&ColorValue>| resolve_color_value_to_rgba_hex(color, Some(theme));
+    image_effects_with_placeholder(effects, theme, None)
+}
+
+fn image_effects_with_placeholder(
+    effects: &[BlipEffect],
+    theme: &Theme,
+    reference: Option<&StyleReference>,
+) -> Vec<ImageEffect> {
+    let rgba = |color: Option<&ColorValue>| {
+        let color = color?;
+        let substituted =
+            reference.and_then(|reference| style_reference_color(color, reference, theme));
+        resolve_color_value_to_rgba_hex(Some(substituted.as_ref().unwrap_or(color)), Some(theme))
+    };
     effects
         .iter()
         .filter_map(|effect| match effect {
@@ -5080,9 +5684,9 @@ fn picture_asset_id(shape: &ShapeSnapshot) -> Option<String> {
     })
 }
 
-/// Clamps outsets and discards empty crops.
+/// Discards empty source rectangles.
 fn image_crop(crop: &PictureCrop) -> ImageCrop {
-    let fraction = |value: i32| (value as f32 / 100_000.0).clamp(0.0, 1.0);
+    let fraction = |value: i32| (value as f32 / 100_000.0).min(1.0);
     let cropped = ImageCrop {
         left: fraction(crop.left),
         top: fraction(crop.top),
@@ -5100,12 +5704,40 @@ fn image_crop(crop: &PictureCrop) -> ImageCrop {
 #[derive(Default)]
 struct PictureMask {
     path: Option<Vec<GeometryPathCommand>>,
+    outline_path: Option<Vec<GeometryPathCommand>>,
+    empty: bool,
     geometry_fallback: bool,
 }
 
 fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     if picture.geometry.is_empty() || picture.geometry == "rect" || rect.h <= 0.0 {
         return PictureMask::default();
+    }
+    if picture.geometry == "custom" && !picture.paths.is_empty() {
+        let path: Vec<_> = picture
+            .paths
+            .iter()
+            .filter(|path| !path.no_fill)
+            .flat_map(|path| path.commands.iter().cloned())
+            .collect();
+        let outline_path = picture
+            .paths
+            .iter()
+            .any(|path| path.no_fill || path.no_stroke)
+            .then(|| {
+                picture
+                    .paths
+                    .iter()
+                    .filter(|path| !path.no_stroke)
+                    .flat_map(|path| path.commands.iter().cloned())
+                    .collect()
+            });
+        return PictureMask {
+            empty: path.is_empty(),
+            path: (!path.is_empty()).then_some(path),
+            outline_path,
+            geometry_fallback: false,
+        };
     }
     let (path, geometry_fallback) = geometry_path_with_fallback(
         &picture.geometry,
@@ -5115,7 +5747,65 @@ fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     PictureMask {
         path: (!path.is_empty()).then_some(path),
         geometry_fallback,
+        ..PictureMask::default()
     }
+}
+
+fn node_use_bg_fill(node: Option<&ShapeNode>) -> bool {
+    matches!(node, Some(ShapeNode::Shape(shape)) if shape.use_bg_fill)
+}
+
+fn slide_background_path(
+    path: &[GeometryPathCommand],
+    placement: BackgroundTransform,
+    slide_width: f32,
+    slide_height: f32,
+) -> Vec<GeometryPathCommand> {
+    if slide_width <= 0.0 || slide_height <= 0.0 {
+        return path.to_vec();
+    }
+    let map = |x: f64, y: f64| {
+        let (x, y) = placement.point(x, y);
+        (x / f64::from(slide_width), y / f64::from(slide_height))
+    };
+    path.iter()
+        .map(|command| match *command {
+            GeometryPathCommand::Move { x, y } => {
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Move { x, y }
+            }
+            GeometryPathCommand::Line { x, y } => {
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Line { x, y }
+            }
+            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+                let (cpx, cpy) = map(cpx, cpy);
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Quad { cpx, cpy, x, y }
+            }
+            GeometryPathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                let (cp1x, cp1y) = map(cp1x, cp1y);
+                let (cp2x, cp2y) = map(cp2x, cp2y);
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Cubic {
+                    cp1x,
+                    cp1y,
+                    cp2x,
+                    cp2y,
+                    x,
+                    y,
+                }
+            }
+            GeometryPathCommand::Close => GeometryPathCommand::Close,
+        })
+        .collect()
 }
 
 fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
@@ -5142,6 +5832,7 @@ fn picture_filled(
     primitive: Primitive,
     picture: Option<&PictureFill>,
     dpi: Option<f32>,
+    theme: &Theme,
 ) -> Primitive {
     let Some(picture) = picture else {
         return primitive;
@@ -5162,24 +5853,30 @@ fn picture_filled(
             shadow,
             transform,
             ..
-        } => Primitive::Image {
-            object_id,
-            shape_id,
-            name,
-            x,
-            y,
-            w,
-            h,
-            asset_id: picture.media_part_path.clone(),
-            effects: Vec::new(),
-            crop: picture_fill_crop(picture),
-            tile: picture_fill_tile(picture, dpi),
-            path: (geometry != "rect").then_some(path),
-            geometry_fallback,
-            stroke,
-            shadow,
-            transform,
-        },
+        } => {
+            let tile = picture_fill_tile(picture, dpi);
+            let (crop, destination) = picture_fill_crop(picture).placement(x, y, w, h);
+            let destination = if tile.is_some() { None } else { destination };
+            Primitive::Image {
+                object_id,
+                shape_id,
+                name,
+                x,
+                y,
+                w,
+                h,
+                asset_id: picture.media_part_path.clone(),
+                effects: image_effects(&picture.effects, theme),
+                crop,
+                destination,
+                tile,
+                path: (geometry != "rect").then_some(path),
+                geometry_fallback,
+                stroke,
+                shadow,
+                transform,
+            }
+        }
         other => other,
     }
 }
@@ -5550,6 +6247,7 @@ mod tests {
                 ..PictureCrop::default()
             }),
             ImageCrop {
+                left: -0.05,
                 right: 0.2,
                 ..ImageCrop::default()
             }
@@ -5567,6 +6265,7 @@ mod tests {
     #[test]
     fn only_a_picture_with_its_own_geometry_gets_a_mask() {
         let mut picture = Picture {
+            aspect_ratio_locked: false,
             base: ShapeBase {
                 id: 1,
                 name: "Photo".to_owned(),
@@ -5580,6 +6279,7 @@ mod tests {
             effects: Vec::new(),
             crop: PictureCrop::default(),
             geometry: "rect".to_owned(),
+            paths: Vec::new(),
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
@@ -5610,6 +6310,310 @@ mod tests {
     }
 
     #[test]
+    fn custom_geometry_picture_is_clipped_through_layout_and_save() {
+        let mut source = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let part = "ppt/slides/slide1.xml";
+        let picture = r#"<p:pic><p:nvPicPr><p:cNvPr id="4242" name="Triangle"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:custGeom><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:pic>"#;
+        let xml = std::str::from_utf8(source.part_bytes(part).unwrap())
+            .unwrap()
+            .replace("</p:spTree>", &format!("{picture}</p:spTree>"));
+        assert!(source.replace_part(part, xml.clone().into_bytes()));
+        let bytes = pptx_parse::write_pptx(&source).unwrap();
+        let session = DeckSession::open(&bytes, 289).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let Primitive::Image {
+            path,
+            geometry_fallback,
+            stroke,
+            ..
+        } = image
+        else {
+            unreachable!()
+        };
+        assert!(!geometry_fallback);
+        assert_eq!(
+            path.as_ref().unwrap(),
+            &vec![
+                GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert_eq!(stroke.as_ref().unwrap().color, "#0000FF");
+        let saved = session.save().unwrap();
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        assert_eq!(reopened.part_bytes(part).unwrap(), xml.as_bytes());
+    }
+
+    fn layout_custom_geometry_picture(path_a_fill: &str, path_b_stroke: &str) -> RenderedSlide {
+        let mut source = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let part = "ppt/slides/slide1.xml";
+        let picture = format!(
+            r#"<p:pic><p:nvPicPr><p:cNvPr id="4242" name="Custom picture"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr><a:xfrm rot="5400000" flipH="1"><a:off x="914400" y="457200"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:custGeom><a:pathLst><a:path w="100" h="100" fill="{path_a_fill}" stroke="0"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path><a:path w="100" h="100" fill="none" stroke="{path_b_stroke}"><a:moveTo><a:pt x="25" y="25"/></a:moveTo><a:lnTo><a:pt x="75" y="25"/></a:lnTo></a:path></a:pathLst></a:custGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:pic>"#
+        );
+        let xml = std::str::from_utf8(source.part_bytes(part).unwrap())
+            .unwrap()
+            .replace("</p:spTree>", &format!("{picture}</p:spTree>"));
+        assert!(source.replace_part(part, xml.into_bytes()));
+        let bytes = pptx_parse::write_pptx(&source).unwrap();
+        let session = DeckSession::open(&bytes, 290).unwrap();
+        renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn custom_geometry_picture_path_flags_control_mask_and_outline() {
+        let rendered = layout_custom_geometry_picture("norm", "1");
+        let primitives = &rendered.display_list.primitives;
+        let index = primitives
+            .iter()
+            .position(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let Primitive::Image {
+            path,
+            stroke,
+            shape_id,
+            transform,
+            x,
+            y,
+            w,
+            h,
+            ..
+        } = &primitives[index]
+        else {
+            panic!("expected image");
+        };
+        assert_eq!(
+            path.as_ref().unwrap(),
+            &vec![
+                GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert!(stroke.is_none());
+        let Primitive::Shape {
+            object_id: 4242,
+            path,
+            fill: None,
+            stroke: Some(stroke),
+            shape_id: outline_id,
+            transform: outline_transform,
+            x: outline_x,
+            y: outline_y,
+            w: outline_w,
+            h: outline_h,
+            ..
+        } = &primitives[index + 1]
+        else {
+            panic!("expected stroke-only outline immediately after image");
+        };
+        assert_eq!(shape_id, outline_id);
+        assert_eq!(transform, outline_transform);
+        assert_eq!((x, y, w, h), (outline_x, outline_y, outline_w, outline_h));
+        assert_eq!(
+            path,
+            &vec![
+                GeometryPathCommand::Move { x: 0.25, y: 0.25 },
+                GeometryPathCommand::Line { x: 0.75, y: 0.25 },
+            ]
+        );
+        assert_eq!(stroke.color, "#0000FF");
+        assert_eq!(
+            primitives
+                .iter()
+                .filter(|p| matches!(
+                    p,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    } | Primitive::Shape {
+                        object_id: 4242,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn custom_geometry_picture_without_filled_paths_emits_only_its_outline() {
+        for stroked in [true, false] {
+            let rendered = layout_custom_geometry_picture("none", if stroked { "1" } else { "0" });
+            let primitives: Vec<_> = rendered
+                .display_list
+                .primitives
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p,
+                        Primitive::Image {
+                            object_id: 4242,
+                            ..
+                        } | Primitive::Shape {
+                            object_id: 4242,
+                            ..
+                        }
+                    )
+                })
+                .collect();
+            assert!(
+                primitives
+                    .iter()
+                    .all(|p| !matches!(p, Primitive::Image { .. }))
+            );
+            assert_eq!(primitives.len(), usize::from(stroked));
+            if stroked {
+                let Primitive::Shape {
+                    path,
+                    fill: None,
+                    stroke: Some(stroke),
+                    ..
+                } = primitives[0]
+                else {
+                    panic!("expected stroke-only outline");
+                };
+                assert_eq!(
+                    path,
+                    &vec![
+                        GeometryPathCommand::Move { x: 0.25, y: 0.25 },
+                        GeometryPathCommand::Line { x: 0.75, y: 0.25 },
+                    ]
+                );
+                assert_eq!(stroke.color, "#0000FF");
+            }
+        }
+    }
+
+    #[test]
+    fn a_negative_picture_crop_offsets_the_image_inside_its_frame() {
+        assert_picture_outset(
+            PictureCrop {
+                top: -36_890,
+                bottom: 36_890,
+                ..PictureCrop::default()
+            },
+            (100.0, 86.89, 200.0, 63.11),
+            ImageCrop {
+                bottom: 0.3689,
+                ..ImageCrop::default()
+            },
+        );
+    }
+
+    #[test]
+    fn mixed_picture_crops_keep_insets_and_outsets_on_both_axes() {
+        assert_picture_outset(
+            PictureCrop {
+                left: 7_795,
+                top: -36_890,
+                right: -5_518,
+                bottom: 36_890,
+            },
+            (100.0, 86.89, 200.0 * 0.92205 / 0.97723, 63.11),
+            ImageCrop {
+                left: 0.07795,
+                bottom: 0.3689,
+                ..ImageCrop::default()
+            },
+        );
+        assert_picture_outset(
+            PictureCrop {
+                left: -25_000,
+                top: 20_000,
+                right: 50_000,
+                bottom: -20_000,
+            },
+            (100.0 + 200.0 / 3.0, 50.0, 400.0 / 3.0, 80.0),
+            ImageCrop {
+                top: 0.2,
+                right: 0.5,
+                ..ImageCrop::default()
+            },
+        );
+    }
+
+    fn assert_picture_outset(crop: PictureCrop, dest: (f32, f32, f32, f32), kept: ImageCrop) {
+        let fixture = include_bytes!("../tests/fixtures/picture-crop-mask.pptx");
+        let mut package = pptx_parse::parse_pptx(fixture).unwrap();
+        let picture = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find_map(|node| match node {
+                ShapeNode::Picture(picture) if picture.base.id == 90 => Some(picture),
+                _ => None,
+            })
+            .unwrap();
+        picture.crop = crop;
+        let session = DeckSession::from_package_with_source(package, fixture, 289).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| matches!(primitive, Primitive::Image { object_id: 90, .. }))
+            .unwrap();
+        let Primitive::Image {
+            x,
+            y,
+            w,
+            h,
+            crop,
+            destination,
+            path,
+            ..
+        } = image
+        else {
+            unreachable!()
+        };
+        assert_eq!((*x, *y, *w, *h), (100.0, 50.0, 200.0, 100.0));
+        let destination = destination.unwrap();
+        for (actual, expected) in [
+            (destination.x, dest.0),
+            (destination.y, dest.1),
+            (destination.w, dest.2),
+            (destination.h, dest.3),
+        ] {
+            assert!((actual - expected).abs() < 0.001, "{actual} != {expected}");
+        }
+        assert_eq!(*crop, kept);
+        assert_eq!(
+            path.as_ref().unwrap()[0],
+            GeometryPathCommand::Move { x: 1.0, y: 0.5 }
+        );
+    }
+
+    #[test]
     fn a_fixture_picture_keeps_its_crop_mask_and_outline_through_layout() {
         let session = DeckSession::open(
             include_bytes!("../tests/fixtures/picture-crop-mask.pptx"),
@@ -5625,6 +6629,12 @@ mod tests {
             .iter()
             .find(|primitive| matches!(primitive, Primitive::Image { object_id: 90, .. }))
             .unwrap();
+        assert!(
+            serde_json::to_value(image)
+                .unwrap()
+                .get("destination")
+                .is_none()
+        );
         let Primitive::Image {
             x,
             y,
@@ -5674,6 +6684,7 @@ mod tests {
             h: 20.0,
         };
         let line = |y: f32, height: f32| PositionedTextLine {
+            column_offset: 0.0,
             x: 10.0,
             y,
             width: 200.0,
@@ -6356,7 +7367,7 @@ mod tests {
                 BlipEffect::Duotone {
                     shadow: Some(ColorValue {
                         theme_color: Some("background2".to_owned()),
-                        theme_shade: Some("73".to_owned()),
+                        transforms: vec![ooxml_drawingml::ColorTransform::Shade(0.45)],
                         ..ColorValue::default()
                     }),
                     highlight: Some(ColorValue {
@@ -6373,7 +7384,7 @@ mod tests {
             effects,
             vec![
                 ImageEffect::Duotone {
-                    shadow: "#737373FF".to_owned(),
+                    shadow: "#B3B3B3FF".to_owned(),
                     highlight: "#FFFFFFFF".to_owned(),
                 },
                 ImageEffect::BiLevel { threshold: 0.25 },
@@ -7355,6 +8366,7 @@ mod tests {
         let picture = PictureFill {
             relationship_id: None,
             media_part_path: Some("ppt/media/image1.png".to_owned()),
+            effects: Vec::new(),
             tile: None,
             crop: PictureCrop::default(),
             fill_rect: PictureCrop {
@@ -7402,6 +8414,230 @@ mod tests {
         assert_eq!(
             referenced.display_list.primitives[0],
             rendered.display_list.primitives[0]
+        );
+    }
+
+    #[test]
+    fn a_theme_background_picture_resolves_effects_with_the_master_reference_color() {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        for (path, bytes) in &mut parts {
+            if path == "ppt/slides/slide1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, "");
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/slideMasters/slideMaster1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, r#"<p:bg><p:bgRef idx="1001"><a:schemeClr val="accent1"><a:shade val="50000"/><a:alpha val="50000"/></a:schemeClr></p:bgRef></p:bg>"#);
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/theme/theme1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<a:bgFillStyleLst>").unwrap();
+                let end = xml.find("</a:bgFillStyleLst>").unwrap() + "</a:bgFillStyleLst>".len();
+                xml.replace_range(start..end, r#"<a:bgFillStyleLst><a:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="background"><a:duotone><a:schemeClr val="phClr"><a:shade val="50000"/></a:schemeClr><a:schemeClr val="phClr"><a:tint val="50000"/><a:alpha val="25000"/></a:schemeClr></a:duotone><a:clrChange><a:clrFrom><a:schemeClr val="phClr"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"/></a:clrTo></a:clrChange></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill></a:bgFillStyleLst>"#);
+                *bytes = xml.into_bytes();
+            }
+        }
+        parts.push((
+            "ppt/theme/_rels/theme1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="background" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"#.to_vec(),
+        ));
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut package = pptx_parse::parse_pptx(&source).unwrap();
+        package.themes[0].theme.color_scheme.accent1 = "808080".to_owned();
+        let session = DeckSession::open(&source, 8_321).unwrap();
+        let rendered = renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the theme background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Duotone {
+                    shadow: "#42424280".to_owned(),
+                    highlight: "#C4C4C440".to_owned(),
+                },
+                ImageEffect::ColorChange {
+                    from: "#5C5C5C80".to_owned(),
+                    to: "#FFFFFFFF".to_owned(),
+                    use_alpha: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_318).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "effects": [
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.1, "contrast": -0.2 }
+            ]
+        }))
+        .unwrap();
+        package.slides[0].background_picture = Some(Box::new(picture));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Alpha { amount: 0.2 },
+                ImageEffect::Luminance {
+                    brightness: 0.1,
+                    contrast: -0.2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shape_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_319).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "tile": { "scaleX": 0.5, "scaleY": 0.5 },
+            "effects": [{ "type": "alpha", "amount": 0.2 }]
+        }))
+        .unwrap();
+        package.masters[0]
+            .shapes
+            .push(ShapeNode::Shape(pptx_parse::Shape {
+                has_preset_geometry: true,
+                effects: None,
+                base: pptx_parse::ShapeBase {
+                    id: 9_002,
+                    name: "Filled".to_owned(),
+                    description: None,
+                    hidden: false,
+                    placeholder: None,
+                    transform: ShapeTransform {
+                        x: 0,
+                        y: 0,
+                        width: 1_000_000,
+                        height: 1_000_000,
+                        ..ShapeTransform::default()
+                    },
+                },
+                geometry: "rect".to_owned(),
+                adjust_values: BTreeMap::new(),
+                paths: Vec::new(),
+                use_bg_fill: false,
+                style: None,
+                fill: Some(ShapeFill::named("picture")),
+                picture_fill: Some(Box::new(picture)),
+                outline: None,
+                text: None,
+            }));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 9_002,
+                        ..
+                    }
+                )
+            })
+            .expect("the picture-filled master shape paints as an image");
+        let Primitive::Image { effects, tile, .. } = image else {
+            unreachable!()
+        };
+        assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
+        assert!(tile.is_some());
+    }
+
+    #[test]
+    fn an_edited_slide_background_paints_before_the_deck_is_saved() {
+        let session = DeckSession::open(FIXTURE, 8_303).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        let context = EditCtx::local("background");
+        let painted = |session: &DeckSession| {
+            renderer()
+                .layout_scoped_slide(session.package(), &session.slide_scope(0).unwrap())
+                .unwrap()
+                .display_list
+                .background
+        };
+        let declared = painted(&session);
+        let mut inherited = session.package().clone();
+        inherited.slides[0].background = None;
+        let inherited = renderer()
+            .layout_slide(&inherited, &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list
+            .background;
+        assert_ne!(inherited, declared);
+
+        session
+            .set_slide_background(
+                &context,
+                &slide_id,
+                Some(&ShapeFill {
+                    fill_type: "solid".to_owned(),
+                    color: Some(ColorValue {
+                        rgb: Some("0F1720".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    gradient: None,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            painted(&session),
+            Some(Paint::Solid {
+                color: "#0F1720".to_owned()
+            })
+        );
+
+        session
+            .set_slide_background(&context, &slide_id, None)
+            .unwrap();
+        assert_eq!(painted(&session), inherited);
+    }
+
+    #[test]
+    fn a_scheme_alias_background_paints_its_theme_colour() {
+        let session = DeckSession::open(FIXTURE, 8_304).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        session
+            .set_slide_background(
+                &EditCtx::local("background"),
+                &slide_id,
+                Some(&ShapeFill {
+                    fill_type: "solid".to_owned(),
+                    color: Some(ColorValue {
+                        theme_color: Some("bg1".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    gradient: None,
+                }),
+            )
+            .unwrap();
+        let rendered = renderer()
+            .layout_scoped_slide(session.package(), &session.slide_scope(0).unwrap())
+            .unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#FFFFFF".to_owned()
+            })
         );
     }
 
@@ -7651,6 +8887,7 @@ mod tests {
                 primitives: Vec::new(),
             },
             font_substitutions: Vec::new(),
+            autofit: HashMap::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "rotated".to_owned(),
                 rect: PxRect {
@@ -7702,6 +8939,7 @@ mod tests {
                 primitives: Vec::new(),
             },
             font_substitutions: Vec::new(),
+            autofit: HashMap::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "mirrored".to_owned(),
                 rect: PxRect {
@@ -7739,6 +8977,7 @@ mod tests {
                         TextFlow::Horizontal,
                     ),
                     lines: vec![PositionedTextLine {
+                        column_offset: 0.0,
                         x: 110.0,
                         y: 110.0,
                         width: 100.0,
@@ -7792,6 +9031,7 @@ mod tests {
                 primitives: Vec::new(),
             },
             font_substitutions: Vec::new(),
+            autofit: HashMap::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "sideways".to_owned(),
                 hit_rect: rect,
@@ -7803,6 +9043,7 @@ mod tests {
                     rect: TextFlow::Vert270.layout_rect(rect),
                     transform: text_transform(shape, TextFlow::Vert270),
                     lines: vec![PositionedTextLine {
+                        column_offset: 0.0,
                         x: 60.0,
                         y: 150.0,
                         width: 100.0,
@@ -7935,6 +9176,7 @@ mod tests {
                 },
                 geometry: "rect".to_owned(),
                 adjust_values: BTreeMap::new(),
+                use_bg_fill: false,
                 paths: Vec::new(),
                 style: None,
                 fill: None,
@@ -7943,6 +9185,9 @@ mod tests {
                 text: Some(TextBody {
                     vertical_overflow: None,
                     horizontal_overflow: None,
+                    num_col: None,
+                    spc_col: None,
+                    rtl_col: None,
                     wrap: None,
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
@@ -7988,6 +9233,287 @@ mod tests {
                 )
             })
             .expect("the master text box was laid out")
+    }
+
+    fn text_columns_body() -> TextBody {
+        let body = TextBody {
+            anchor: Some("t".to_owned()),
+            inset_left: Some(95_250),
+            inset_right: Some(95_250),
+            inset_top: Some(47_625),
+            inset_bottom: Some(47_625),
+            paragraphs: vec![pptx_parse::TextParagraph {
+                properties: ParagraphProperties {
+                    line_spacing: Some(LineSpacing::Points { value: 12.0 }),
+                    ..ParagraphProperties::default()
+                },
+                runs: vec![pptx_parse::TextRun {
+                    text: "first\nsecond\nthird\nfourth\nfifth".to_owned(),
+                    properties: RunProperties {
+                        font_size_pt: Some(12.0),
+                        font_family: Some("Arial".to_owned()),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                }],
+                ..pptx_parse::TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        let mut json = serde_json::to_value(body).unwrap();
+        json["numCol"] = 2.into();
+        json["spcCol"] = 95_250.into();
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn text_columns_slide(body: TextBody) -> RenderedSlide {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_012).unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        snapshot.slides[0].shapes.clear();
+        let mut shape = package.slides[0]
+            .shapes
+            .iter()
+            .find_map(|node| match node {
+                ShapeNode::Shape(shape) if shape.text.is_some() => Some(shape.clone()),
+                _ => None,
+            })
+            .unwrap();
+        shape.base.id = 9_002;
+        shape.base.placeholder = None;
+        shape.base.transform = ShapeTransform {
+            x: 0,
+            y: 0,
+            width: 2_000_250,
+            height: 428_625,
+            ..ShapeTransform::default()
+        };
+        shape.geometry = "rect".to_owned();
+        shape.text = Some(body);
+        package.masters[0].shapes = vec![ShapeNode::Shape(shape)];
+        package.layouts[0].shapes.clear();
+        renderer().layout_slide(&package, &snapshot, 0).unwrap()
+    }
+
+    fn text_columns_lines(rendered: &RenderedSlide) -> &[PositionedTextLine] {
+        rendered
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    object_id: 9_002,
+                    lines,
+                    ..
+                } => Some(lines.as_slice()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn text_columns_fill_then_continue_at_the_next_column() {
+        let rendered = text_columns_slide(text_columns_body());
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 5);
+        assert!((lines[0].x - 10.0).abs() < 0.01);
+        assert!((lines[1].x - 10.0).abs() < 0.01);
+        assert!((lines[2].x - 110.0).abs() < 0.01, "{:?}", lines[2]);
+        assert!((lines[2].y - lines[0].y).abs() < 0.01);
+        assert!((lines[3].y - lines[1].y).abs() < 0.01);
+        assert!(lines[4].y + lines[4].height > 40.0);
+        let stop = &lines[2].caret_stops[0];
+        assert!((stop.x - lines[2].x).abs() < 0.01);
+        assert!((lines[2].runs[0].x - lines[2].x).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_column_hit_testing_keeps_the_row_right_of_a_short_line() {
+        let mut body = text_columns_body();
+        body.num_col = None;
+        body.paragraphs[0].runs[0].text = "i\na considerably longer line".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].end, 2);
+        let x = lines[0].x + 150.0;
+        let y = lines[0].y + lines[0].height / 2.0;
+        assert!(matches!(
+            rendered.hit_test(x, y),
+            Some(HitTestResult::Text { position: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn single_column_hit_testing_keeps_the_row_in_reversed_vertical_flow() {
+        let mut body = text_columns_body();
+        body.num_col = None;
+        body.vertical = Some("mongolianVert".to_owned());
+        body.paragraphs[0].properties.alignment = Some("ctr".to_owned());
+        body.paragraphs[0].runs[0].text = "i\nwide".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].y > lines[1].y);
+        assert!(lines[0].x > lines[1].x);
+        let x = lines[1].x;
+        let y = lines[0].y + lines[0].height / 2.0;
+        assert_eq!(nearest_line(lines, x, y).unwrap().start, lines[0].start);
+    }
+
+    #[test]
+    fn text_columns_keep_their_origin_for_centered_short_lines() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].properties.alignment = Some("ctr".to_owned());
+        body.paragraphs[0].runs[0].text = "i\ni\ni".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].x > 10.0);
+        assert!(lines[2].x > 110.0);
+        let json = serde_json::to_value(lines).unwrap();
+        assert!(json[0].get("columnOffset").is_none());
+        assert_eq!(json[2]["columnOffset"], 100.0);
+        assert!((lines[2].x - lines[0].x - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_hit_test_finds_a_caret_in_column_two() {
+        let rendered = text_columns_slide(text_columns_body());
+        let lines = text_columns_lines(&rendered);
+        assert!(matches!(
+            rendered.hit_test(110.0, lines[0].y + lines[0].height / 2.0),
+            Some(HitTestResult::Text { position, .. }) if position == lines[2].start
+        ));
+    }
+
+    #[test]
+    fn text_columns_wrap_to_the_column_width() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].runs[0].text =
+            "several words that must wrap within each narrow column".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|line| line.width <= 90.01));
+        assert!((lines[2].x - 110.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_anchor_the_whole_block() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].runs[0].text = "first\nsecond\nthird\nfourth".to_owned();
+        let top = text_columns_slide(body.clone());
+        let top_lines = text_columns_lines(&top);
+        for (anchor, shift) in [("ctr", 1.5), ("b", 3.0)] {
+            body.anchor = Some(anchor.to_owned());
+            let rendered = text_columns_slide(body.clone());
+            for (line, original) in text_columns_lines(&rendered).iter().zip(top_lines) {
+                assert!((line.y - original.y - shift).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn text_columns_use_the_stored_normal_autofit_scale() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].properties.line_spacing = None;
+        body.autofit = Some(TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: None,
+        });
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert!((lines[3].x - 110.0).abs() < 0.01);
+        assert!((lines[3].y - lines[0].y).abs() < 0.01);
+        assert!((lines[0].runs[0].font_size_px - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_follow_right_to_left_column_order() {
+        let mut json = serde_json::to_value(text_columns_body()).unwrap();
+        json["rtlCol"] = true.into();
+        let rendered = text_columns_slide(serde_json::from_value(json).unwrap());
+        let lines = text_columns_lines(&rendered);
+        assert!((lines[0].x - 110.0).abs() < 0.01);
+        assert!((lines[2].x - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_leave_vertical_and_single_column_layout_unchanged() {
+        for vertical in [None, Some("vert"), Some("vert270"), Some("wordArtVert")] {
+            let mut json = serde_json::to_value(text_columns_body()).unwrap();
+            json["vertical"] = serde_json::to_value(vertical).unwrap();
+            json["numCol"] = 1.into();
+            let single = text_columns_slide(serde_json::from_value(json.clone()).unwrap());
+            if vertical.is_some() {
+                json["numCol"] = 2.into();
+            } else {
+                json.as_object_mut().unwrap().remove("numCol");
+            }
+            let other = text_columns_slide(serde_json::from_value(json).unwrap());
+            assert_eq!(
+                serde_json::to_value(&single.display_list).unwrap(),
+                serde_json::to_value(&other.display_list).unwrap()
+            );
+        }
+        let mut body = text_columns_body();
+        let natural = text_columns_slide(body.clone());
+        body.autofit = Some(TextAutofit::Shape);
+        let shape_fit = text_columns_slide(body);
+        assert_eq!(
+            serde_json::to_value(&natural.display_list).unwrap(),
+            serde_json::to_value(&shape_fit.display_list).unwrap()
+        );
+    }
+
+    #[test]
+    fn text_columns_inherit_properties_and_keep_explicit_overrides() {
+        let master = text_columns_body();
+        let layout = TextBody {
+            spc_col: Some(190_500),
+            rtl_col: Some(true),
+            ..TextBody::default()
+        };
+        let primary = TextBody::default();
+        let mut cascade = cell_cascade(&primary, &master);
+        cascade.layout = Some(&layout);
+        assert_eq!(cascade.num_col(), 2);
+        assert_eq!(cascade.spc_col(), 190_500);
+        assert!(cascade.rtl_col());
+        let primary = TextBody {
+            num_col: Some(1),
+            spc_col: Some(0),
+            rtl_col: Some(false),
+            ..TextBody::default()
+        };
+        cascade.primary = Some(&primary);
+        assert_eq!(cascade.num_col(), 1);
+        assert_eq!(cascade.spc_col(), 0);
+        assert!(!cascade.rtl_col());
+    }
+
+    #[test]
+    fn text_columns_keep_paragraph_spacing_inside_a_column() {
+        let mut body = text_columns_body();
+        let mut first = body.paragraphs[0].clone();
+        first.runs[0].text = "first".to_owned();
+        first.properties.space_after = Some(LineSpacing::Points { value: 3.0 });
+        let mut second = body.paragraphs[0].clone();
+        second.runs[0].text = "second\nthird".to_owned();
+        second.properties.space_before = Some(LineSpacing::Points { value: 6.0 });
+        let mut third = body.paragraphs[0].clone();
+        third.runs[0].text = "fourth".to_owned();
+        third.properties.space_before = Some(LineSpacing::Points { value: 3.0 });
+        body.paragraphs = vec![first, second, third];
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 4);
+        assert!((lines[1].x - 110.0).abs() < 0.01);
+        assert!((lines[1].y - 5.0).abs() < 0.01);
+        assert!((lines[3].y - 41.0).abs() < 0.01);
     }
 
     #[test]
@@ -8659,6 +10185,82 @@ mod tests {
     }
 
     #[test]
+    fn normal_autofit_refits_edited_text_and_restores_stored_scale_on_undo() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let parsed = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find_map(|node| match node {
+                ShapeNode::Shape(shape) if shape.text.is_some() => Some(shape),
+                _ => None,
+            })
+            .unwrap();
+        parsed.base.transform.width = 2_476_500;
+        parsed.base.transform.height = 952_500;
+        parsed.base.placeholder = None;
+        let body = parsed.text.as_mut().unwrap();
+        body.autofit = Some(TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: Some(0.1),
+        });
+        body.paragraphs.truncate(1);
+        body.paragraphs[0].runs.truncate(1);
+        body.paragraphs[0].runs[0].text = "Start".into();
+        body.paragraphs[0].runs[0].properties.font_size_pt = Some(24.0);
+        let session = DeckSession::from_package(package, 8_004).unwrap();
+        session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+        let initial = session.snapshot().unwrap();
+        let shape = initial.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| !shape.text_stories.is_empty())
+            .unwrap();
+        let story = &shape.text_stories[0];
+        let renderer = renderer();
+        let lines = |snapshot: &DeckSnapshot| {
+            renderer
+                .layout_slide(session.package(), snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .into_iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        shape_id: Some(id),
+                        lines,
+                        ..
+                    } if id == shape.id => Some(lines),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let before = lines(&initial);
+        assert!((before[0].runs[0].font_size_px - points_to_px(12.0)).abs() < 0.01);
+        session
+            .insert_text(
+                &EditCtx::local("test"),
+                &story.id,
+                story.length - 1,
+                &" words that must shrink to stay inside the box".repeat(8),
+                &TextStyle::default(),
+            )
+            .unwrap();
+        let after = lines(&session.snapshot().unwrap());
+        let bottom = emu_to_px(shape.y + shape.height);
+        assert!(
+            after
+                .iter()
+                .all(|line| line.y + line.height <= bottom + 0.01),
+            "typed text must fit inside its shape"
+        );
+        session.add_undo_barrier();
+        assert!(session.undo());
+        assert_eq!(lines(&session.snapshot().unwrap()), before);
+        assert!(session.redo());
+        assert_eq!(lines(&session.snapshot().unwrap()), after);
+    }
+
+    #[test]
     fn normal_autofit_steps_the_type_down_by_its_stored_scale() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_003).unwrap();
@@ -8671,8 +10273,6 @@ mod tests {
             .unwrap();
         let shape_id = shape.id.clone();
         let source_id = shape.source_id;
-        let story_id = shape.text_stories[0].id.clone();
-        let index = shape.text_stories[0].length - 1;
         let parsed = package.slides[0]
             .shapes
             .iter_mut()
@@ -8692,15 +10292,6 @@ mod tests {
                 &shape_id,
                 2_000_000,
                 500_000,
-            )
-            .unwrap();
-        session
-            .insert_text(
-                &EditCtx::local("test"),
-                &story_id,
-                index,
-                " text that must shrink",
-                &TextStyle::default(),
             )
             .unwrap();
         let snapshot = session.snapshot().unwrap();
@@ -9026,6 +10617,7 @@ mod tests {
             bytes: media,
         });
         let picture = pptx_parse::Picture {
+            aspect_ratio_locked: false,
             effects: Vec::new(),
             shape_effects: None,
             base: pptx_parse::ShapeBase {
@@ -9044,6 +10636,7 @@ mod tests {
             media_part_path: Some("ppt/media/logo.emf".to_owned()),
             crop,
             geometry: "rect".to_owned(),
+            paths: Vec::new(),
             adjust_values: BTreeMap::new(),
             style: None,
             fill: None,
@@ -9484,6 +11077,7 @@ mod tests {
         assert!(!slide_number(12).matches(&indexed));
 
         let snapshot = ShapeSnapshot {
+            aspect_ratio_locked: false,
             id: "placeholder".to_owned(),
             source_id: 1,
             kind: ShapeKind::Shape,
@@ -9497,6 +11091,7 @@ mod tests {
             flip_v: false,
             inherited: None,
             hidden: false,
+            text_box: false,
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
             placeholder: Some(title.clone()),
@@ -9531,6 +11126,7 @@ mod tests {
             },
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
+            use_bg_fill: false,
             fill: None,
             picture_fill: None,
             outline: None,
@@ -10107,5 +11703,289 @@ mod tests {
         assert!((trebuchet[0].width - consolas[0].width).abs() > 1.0);
         assert_eq!(consolas, render(&new_renderer(), "Consolas"));
         assert_eq!(trebuchet, render(&renderer, "Trebuchet MS"));
+    }
+
+    fn smartart_test_deck(
+        data_xml: Option<&[u8]>,
+        layout_xml: Option<&[u8]>,
+        include_drawing_rel: bool,
+    ) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="901" name="SmartArt Diagram"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdData1" r:lo="rIdLayout1" r:qs="" r:cs=""/></a:graphicData></a:graphic></p:graphicFrame>"#;
+        let mut rels = String::from(
+            r#"<Relationship Id="rIdData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>"#,
+        );
+        if layout_xml.is_some() {
+            rels.push_str(
+                r#"<Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout" Target="../diagrams/layout1.xml"/>"#,
+            );
+        }
+        if include_drawing_rel {
+            rels.push_str(
+                r#"<Relationship Id="rIdDrawing1" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing1.xml"/>"#,
+            );
+        }
+        for (path, bytes) in &mut parts {
+            let edited = match path.as_str() {
+                "ppt/slides/slide1.xml" => String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("</p:spTree>", &format!("{frame}</p:spTree>")),
+                "ppt/slides/_rels/slide1.xml.rels" => String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("</Relationships>", &format!("{rels}</Relationships>")),
+                _ => continue,
+            };
+            *bytes = edited.into_bytes();
+        }
+        if let Some(data) = data_xml {
+            parts.push(("ppt/diagrams/data1.xml".to_owned(), data.to_vec()));
+        }
+        parts.push((
+            "ppt/diagrams/drawing1.xml".to_owned(),
+            br#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:spTree><dsp:nvGrpSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvGrpSpPr/></dsp:nvGrpSpPr><dsp:grpSpPr/></dsp:spTree></dsp:drawing>"#.to_vec(),
+        ));
+        if let Some(layout) = layout_xml {
+            parts.push(("ppt/diagrams/layout1.xml".to_owned(), layout.to_vec()));
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn synthesized_smartart_deck(text: &str) -> Vec<u8> {
+        let data = format!(
+            r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="p1"><dgm:t><a:p><a:r><a:t>{text}</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst></dgm:dataModel>"#
+        );
+        smartart_test_deck(Some(data.as_bytes()), None, false)
+    }
+
+    #[test]
+    fn synthesized_smartart_boxes_follow_frame_resize() {
+        let deck = synthesized_smartart_deck("Resize me");
+        let session = DeckSession::open(&deck, 8_033).unwrap();
+        let initial = session.snapshot().unwrap();
+        let frame = initial.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == "SmartArt Diagram")
+            .unwrap();
+        let prefix = format!("{}:", frame.id);
+        let boxes = |session: &DeckSession| {
+            renderer()
+                .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .into_iter()
+                .filter_map(|primitive| match primitive {
+                    Primitive::Shape {
+                        shape_id: Some(id),
+                        x,
+                        y,
+                        w,
+                        h,
+                        ..
+                    } if id.starts_with(&prefix) => Some((x, y, w, h)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = boxes(&session);
+        assert_eq!(before.len(), 1);
+        session
+            .resize_shape(
+                &EditCtx::local("test"),
+                &initial.slides[0].id,
+                &frame.id,
+                1_828_800,
+                3_657_600,
+            )
+            .unwrap();
+        let after = boxes(&session);
+        assert_eq!(after.len(), before.len());
+        for ((x, y, w, h), (rx, ry, rw, rh)) in before.iter().zip(&after) {
+            assert!(
+                (rw - w * 0.5).abs() < 0.01,
+                "box width must follow frame resize"
+            );
+            assert!(
+                (rh - h * 2.0).abs() < 0.01,
+                "box height must follow frame resize"
+            );
+            assert!((rx - 96.0 - (x - 96.0) * 0.5).abs() < 0.01);
+            assert!((ry - 96.0 - (y - 96.0) * 2.0).abs() < 0.01);
+        }
+        let reopened = DeckSession::open(&session.save().unwrap(), 8_034).unwrap();
+        for (current, saved) in after.iter().zip(boxes(&reopened)) {
+            assert!((current.0 - saved.0).abs() < 0.01 && (current.1 - saved.1).abs() < 0.01);
+            assert!((current.2 - saved.2).abs() < 0.01 && (current.3 - saved.3).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn synthesized_smartart_fits_long_text_inside_its_box() {
+        let text = "A long paragraph with several process details that must remain inside the diagram box. ".repeat(12);
+        let deck = synthesized_smartart_deck(&text);
+        let session = DeckSession::open(&deck, 8_035).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let frame = snapshot.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == "SmartArt Diagram")
+            .unwrap();
+        let prefix = format!("{}:", frame.id);
+        for (width, height) in [(3_657_600, 1_828_800), (1_828_800, 914_400)] {
+            session
+                .resize_shape(
+                    &EditCtx::local("test"),
+                    &snapshot.slides[0].id,
+                    &frame.id,
+                    width,
+                    height,
+                )
+                .unwrap();
+            let rendered = renderer()
+                .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+                .unwrap();
+            let mut found = false;
+            for primitive in &rendered.display_list.primitives {
+                if let Primitive::TextBox {
+                    shape_id: Some(id),
+                    x,
+                    y,
+                    w,
+                    h,
+                    lines,
+                    overflow,
+                    ..
+                } = primitive
+                    && id.starts_with(&prefix)
+                {
+                    found = true;
+                    assert!(!lines.is_empty());
+                    assert!(!overflow, "synthesized text must fit vertically");
+                    for line in lines {
+                        assert!(line.x >= x - 0.01 && line.y >= y - 0.01);
+                        assert!(
+                            line.x + line.width <= x + w + 0.01,
+                            "text line exceeds box width"
+                        );
+                        assert!(
+                            line.y + line.height <= y + h + 0.01,
+                            "text line exceeds box height"
+                        );
+                    }
+                    assert_eq!(lines.last().unwrap().end as usize, text.trim_end().len());
+                }
+            }
+            assert!(found);
+        }
+    }
+
+    #[test]
+    fn a_text_free_diagram_with_an_empty_drawing_renders_no_placeholder() {
+        let data = br#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="{0}" type="doc"/><dgm:pt modelId="{1}" type="pres"/></dgm:ptLst><dgm:cxnLst/></dgm:dataModel>"#;
+        for include_drawing_rel in [true, false] {
+            let deck = smartart_test_deck(Some(data), None, include_drawing_rel);
+            let session = DeckSession::open(&deck, 8_030).unwrap();
+            let rendered = renderer()
+                .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+                .unwrap();
+            assert!(
+                !rendered
+                    .display_list
+                    .primitives
+                    .iter()
+                    .any(|primitive| matches!(primitive, Primitive::Placeholder { .. }))
+            );
+        }
+
+        let missing_data = smartart_test_deck(None, None, false);
+        let session = DeckSession::open(&missing_data, 8_031).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        assert!(rendered.display_list.primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                Primitive::Placeholder { name, label, .. }
+                    if name == "SmartArt Diagram" && label.as_deref() == Some("Diagram")
+            )
+        }));
+    }
+
+    #[test]
+    fn a_diagram_with_empty_drawing_synthesizes_boxes_within_its_frame_and_round_trips() {
+        let data = br#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="doc" type="doc"/><dgm:pt modelId="p1"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Alpha</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="c1"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Alpha detail</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="p2"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Beta</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="c2"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Beta detail</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dgm:cxnLst><dgm:cxn modelId="x1" srcId="doc" destId="p1" srcOrd="0"/><dgm:cxn modelId="x2" srcId="doc" destId="p2" srcOrd="1"/><dgm:cxn modelId="x3" srcId="p1" destId="c1" srcOrd="0"/><dgm:cxn modelId="x4" srcId="p2" destId="c2" srcOrd="0"/></dgm:cxnLst></dgm:dataModel>"#;
+        let layout = br#"<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:microsoft.com/office/officeart/2005/8/layout/hList1"/>"#;
+        let deck = smartart_test_deck(Some(data), Some(layout), false);
+        let session = DeckSession::open(&deck, 8_032).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let diagram_shape_id = snapshot.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == "SmartArt Diagram")
+            .unwrap()
+            .id
+            .clone();
+        let prefix = format!("{diagram_shape_id}:");
+        let rendered = renderer()
+            .layout_slide(session.package(), &snapshot, 0)
+            .unwrap();
+        assert!(
+            !rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(primitive, Primitive::Placeholder { .. }))
+        );
+        let boxes: Vec<_> = rendered
+            .display_list
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Shape {
+                    shape_id: Some(id),
+                    x,
+                    y,
+                    w,
+                    h,
+                    ..
+                } if id.starts_with(&prefix) => Some((*x, *y, *w, *h)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(boxes.len(), 2);
+        for (x, y, w, h) in boxes {
+            assert!(
+                x >= 96.0 && y >= 96.0,
+                "box ({x}, {y}) outside frame origin"
+            );
+            assert!(w > 0.0 && h > 0.0);
+            assert!(
+                x + w <= 96.0 + 384.0 + 0.01 && y + h <= 96.0 + 192.0 + 0.01,
+                "box ({x}, {y}, {w}, {h}) exceeds frame bounds"
+            );
+        }
+        let texts: Vec<_> = rendered
+            .display_list
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    shape_id: Some(id),
+                    paragraphs,
+                    ..
+                } if id.starts_with(&prefix) => Some(paragraphs),
+                _ => None,
+            })
+            .flat_map(|paragraphs| paragraphs.iter().flat_map(|paragraph| &paragraph.runs))
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(texts, ["Alpha", "Alpha detail", "Beta", "Beta detail"]);
+
+        let saved = session.save().unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&saved).unwrap(),
+            ooxml_opc::unzip_parts(&deck).unwrap()
+        );
     }
 }

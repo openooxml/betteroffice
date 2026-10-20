@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { resolveImageLayoutAttrs, type ImageLayoutCurrentAttrs, type ImageLayoutTarget } from '@betteroffice/docx/docx';
 import type { EndnoteProperties, FootnoteProperties } from '@betteroffice/docx/types/document';
 import type { DocxCommandSelection } from '@betteroffice/docx/yrs';
@@ -53,6 +53,8 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   const [image, setImage] = useState<{ query: WorkerPropertyQuery; position: boolean } | null>(null);
   const [notes, setNotes] = useState<WorkerPropertyQuery | null>(null);
   const [link, setLink] = useState<WorkerLink | null>(null);
+  const linkRequest = useRef(0);
+  const closeLink = useCallback(() => { linkRequest.current++; setLink(null); }, []);
   const [split, setSplit] = useState<{ defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number };
     apply(rows: number, columns: number): Promise<DocxCommandResult> } | null>(null);
   const openSplitCell = useCallback((defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
@@ -62,8 +64,9 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   const openTableProperties = useCallback((initial: TableProperties,
     apply: (props: TableProperties) => Promise<DocxCommandResult>) => { setTableProps({ initial, apply }); }, []);
   const report = (error: unknown) => props.onError?.(error instanceof Error ? error : new Error(String(error)));
-  useEffect(() => { setImage(null); setNotes(null); setLink(null); setSplit(null); setTableProps(null); },
-    [state.view?.identity.session, state.view?.identity.incarnation, state.view?.identity.epoch]);
+  useEffect(() => { setImage(null); setNotes(null); closeLink(); setSplit(null); setTableProps(null);
+    return () => { linkRequest.current++; }; },
+    [closeLink, state.view?.identity.session, state.view?.identity.incarnation, state.view?.identity.epoch]);
   const openImage = async (position = false) => {
     try {
       await controller.ref.flushPendingInput();
@@ -89,8 +92,11 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
       targetSelection, replaceText: range.start.paraId === range.end.paraId && (collapsed || hyperlink !== null) };
   };
   const openLink = async () => {
+    if (link) return { ok: true, status: 'opened' } as const;
+    const request = ++linkRequest.current;
     try {
-      setLink(await readLink());
+      const opened = await readLink();
+      if (request === linkRequest.current) setLink(current => current ?? opened);
       return { ok: true, status: 'opened' } as const;
     } catch (error) { report(error); return { ok: false, failure: { code: 'command-failed', message: 'Link properties are unavailable.' } } as const; }
   };
@@ -115,7 +121,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
     return true;
   };
   const applyLink = async (data: HyperlinkData | null) => {
-    if (link && await writeLink(link, data)) setLink(null);
+    if (link && await writeLink(link, data)) closeLink();
   };
   const changeLinkAtCaret = async (data: HyperlinkData | null) => {
     try {
@@ -186,7 +192,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
       {page.showPageSetup && <PageSetupDialog isOpen onClose={page.close} currentProps={page.currentProps} onApply={page.handlePageSetupApply} />}
       {watermark.showWatermark && <WatermarkDialog isOpen onClose={watermark.close} current={watermark.currentWatermark}
         presets={props.watermarkPresets} onApply={watermark.handleWatermarkApply} />}
-      {link && <HyperlinkDialog isOpen onClose={() => setLink(null)} isEditing={hyperlink !== null} selectedText={link.initialData.displayText}
+      {link && <HyperlinkDialog isOpen onClose={closeLink} isEditing={hyperlink !== null} selectedText={link.initialData.displayText}
         initialData={link.initialData} onSubmit={applyLink}
         onRemove={hyperlink ? () => { void applyLink(null); } : undefined} />}
       {notes?.value?.kind === 'section' && <FootnotePropertiesDialog isOpen onClose={() => setNotes(null)} onApply={applyNotes}

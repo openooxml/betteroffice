@@ -1578,14 +1578,14 @@ test('p4_paragraph_join_end_type_survives_first_deletion_reply', async () => {
     await act(async () => { value.release(); await value.flush(); });
     const intents = value.sent.slice(value.start);
     expect(intents.map((intent) => intent.kind)).toEqual(['deleteBackward', 'moveSelection', 'insertText']);
-    expect(value.outcomes.get(intents[0].seq)).toMatchObject({ status: 'noop', committed: false });
+    expect(value.outcomes.get(intents[0].seq)).toMatchObject({ status: 'applied', committed: true });
     expect(value.outcomes.get(intents[1].seq)).toMatchObject({ status: 'applied', committed: false });
     expect(value.outcomes.get(intents[2].seq)).toMatchObject({ status: 'applied', committed: true });
     for (const [index, intent] of intents.slice(1).entries()) {
       expect(intent.afterSeq).toBe(intents[index].seq);
       expect('at' in intent.payload ? intent.payload.at : undefined).toEqual({ source: 'afterSeq', seq: intents[index].seq });
     }
-    expect(await value.savedParagraphs()).toEqual(['a', 'bcY']);
+    expect(await value.savedParagraphs()).toEqual(['abcY']);
     expect(value.errors).not.toHaveBeenCalled();
     expect(value.sent[value.start + 1]).toMatchObject({ payload: { motion: 'lineEnd', extend: false } });
   } finally { await value.dispose(); }
@@ -1674,7 +1674,25 @@ test('p5_blank_click_then_text_click_keeps_held_typing', async () => {
       beforeInput(value.input, 'insertText', 'Y');
     });
     await held;
-    await value.finish('aXbcY', ['insertText', 'selectAtPoint', 'insertText']);
+    await value.finish('aXbcY', ['insertText', 'setSelection', 'selectAtPoint', 'insertText']);
+    expect(value.sent[value.start + 1]).toMatchObject({ payload: { selection: null } });
+  } finally { await value.dispose(); }
+});
+
+test.each(['X', 'XY'])('p5_blank_click_keeps_held_typing_without_a_followup (%s)', async (text) => {
+  const value = await mountedRealSession('abc', 1);
+  try {
+    const held = value.hold();
+    await act(async () => {
+      for (const character of text) beforeInput(value.input, 'insertText', character);
+      value.click({ x: value.confirmed.displayList.width - 1, y: value.confirmed.displayList.height - 1 });
+    });
+    await held;
+    expect(value.sent.slice(value.start).map((intent) => intent.kind)).toEqual(['insertText']);
+    await value.finish(`a${text}bc`, [...Array.from(text, () => 'insertText'), 'setSelection']);
+    expect(value.sent[value.start + text.length]).toMatchObject({ payload: { selection: null } });
+    expect(value.client.state.selection).toBeNull();
+    expect(paintedViews[paintedViews.length - 1]?.selection).toBeNull();
   } finally { await value.dispose(); }
 });
 

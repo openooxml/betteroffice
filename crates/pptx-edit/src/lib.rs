@@ -42,6 +42,8 @@ pub use batch::{
     EditTarget, EditValidation, FillGuard, MAX_REQUEST_BYTES, OutlineGuard, RectGuard, SlideTarget,
     TargetEdge, TextGuard, ValidationOutcome, outcome_json, oversized_request,
 };
+#[doc(hidden)]
+pub use deck::baseline_snapshot;
 pub use model::*;
 pub use ooxml_drawingml::{ColorValue, GradientFill, GradientStop, ShapeFill};
 #[doc(hidden)]
@@ -49,6 +51,8 @@ pub use peer::{PeerError, PeerFont};
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
+#[doc(hidden)]
+pub use story::baseline_story;
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
     ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,
@@ -418,6 +422,11 @@ impl DeckSession {
         self.undo.borrow_mut().redo()
     }
 
+    /// Clears local undo and redo history.
+    pub fn clear_undo_history(&self) {
+        self.undo.borrow_mut().clear();
+    }
+
     pub fn can_undo(&self) -> bool {
         self.undo.borrow().can_undo()
     }
@@ -463,9 +472,7 @@ pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
     Doc::with_options(doc_options(client_id))
 }
 
-/// A doc an undo manager attaches to. Clearing the redo stack unkeeps the parents of deleted
-/// items the undo stack still keeps, so collecting such a parent would free what they point to;
-/// these docs collect only while opening and until their undo manager first pushes a stack item.
+/// Defers Yrs GC while undo items or keep flags left by replay reference deleted parents.
 pub(crate) fn session_doc(client_id: u64) -> Doc {
     let mut options = doc_options(client_id);
     options.skip_gc = true;

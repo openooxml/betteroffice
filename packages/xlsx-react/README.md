@@ -24,6 +24,12 @@ import { XlsxEditor } from "@betteroffice/xlsx-react";
 
 `file` is a `Uint8Array` of `.xlsx` bytes; omit it to render an empty frame.
 
+`XlsxEditor` defaults to the worker-owned async editor: `onReady` receives an
+`XlsxAsyncEditorApi` with `commands`, `whenHydrated()`, `recoverySave()` and
+promise-returning renders and exports. Deprecated `legacySyncApi` selects the
+sync hybrid runtime with the `XlsxEditorApi` described under host editing
+controls, and is removed in 0.6.0.
+
 ## Open and save
 
 ```tsx
@@ -55,8 +61,8 @@ export function App() {
 
 Without `onSave`, the save button downloads the edited bytes.
 
-Props: `file`, `fileName`, `onSave`, `onSaveRequest`, `onChange`, `onReady` (a handle for
-host/agent-driven edits and the editor's `commands`), `collaboration`, `i18n`,
+Props: `file`, `fileName`, `onSave`, `onSaveRequest`, `onChange`, `onReady` (the editor API above,
+with the editor's `commands`), `collaboration`, `i18n`,
 `readOnly`, `toolbar`, `showToolbar`, and `className`.
 
 ## Host editing controls
@@ -68,7 +74,7 @@ it. Promises are awaited and concurrent requests are coalesced. `onSave` still
 receives the resulting bytes when built-in saving continues. A request waiting
 on a replaced or closed document is discarded.
 
-The API received by `onReady` exposes `flushPendingInput(): Promise<void>`.
+With `legacySyncApi`, the API received by `onReady` exposes `flushPendingInput(): Promise<void>`.
 Await it before inspecting or mutating the core from a host workflow, then call
 `api.save()` for explicit serialization without re-entering `onSaveRequest`.
 `save()` remains synchronous and rejects while asynchronous input is pending.

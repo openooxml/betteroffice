@@ -249,7 +249,9 @@ function validOp(value: unknown): boolean {
       return args.length === 4 && args.slice(0, 3).every(integer) && typeof args[3] === 'string';
     case 'editCells':
       return args.length === 2 && integer(args[0]) && Array.isArray(args[1]) &&
-        Array.from(args[1]).every((edit) => point(edit) && record(edit) && typeof edit.input === 'string');
+        Array.from(args[1]).every((edit) => point(edit) && record(edit) && typeof edit.input === 'string' &&
+          (edit.copyFrom === undefined || record(edit.copyFrom) && point(edit.copyFrom) &&
+            (edit.copyFrom.row as number) < 1_048_576 && (edit.copyFrom.col as number) < 16_384));
     case 'applyEdits': return args.length === 1 && editRequest(args[0]);
     case 'applyOps':
       return args.length === 1 && Array.isArray(args[0]) &&

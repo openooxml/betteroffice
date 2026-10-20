@@ -1,12 +1,13 @@
 import { retainedFramePageById, type RetainedFrame } from '../layout/render/frameDelta';
+import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
 import type { DisplayList, DisplayPage } from '../layout/render/displayList';
-import { createDisplayListQueries, type DisplayListQueries, type DisplayListVisualLine } from '../layout/render/displayListQueries';
+import { createDisplayListQueries, type DisplayListQueries, type DisplayListRect, type DisplayListVisualLine } from '../layout/render/displayListQueries';
 import { loadedRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { findWordBoundaries } from '../utils/textSelection';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import { commandSelectionRange, readCommandSelection, resolveCommandSelection } from './residentCommandAnchors';
-import { resolvePointerCellRange, resolveShiftArrowCellRange } from './residentCommandTableSelection';
+import { cellSelectionHeadPosition, resolvePointerCellRange, resolveShiftArrowCellRange } from './residentCommandTableSelection';
 import type { YrsLoc, YrsStoryRange, YrsTableRange } from './index';
 import type {
   DocxCommandApplyContext,
@@ -203,6 +204,39 @@ function queriesFor(reads: SelectionReads, frame: RetainedFrame, root = 'body'):
   return queries;
 }
 
+function rootFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, at: YrsLoc): string {
+  const cached = reads.roots.get(at.story);
+  if (cached) return cached;
+  const roots = /^(body|(?:hf|fn|en):[^:]+)$/u.test(at.story)
+    ? [at.story] : ['body', ...engine.geometryReader.storyIds().filter((story) => /^(hf|fn|en):/u.test(story))];
+  for (const story of roots) {
+    if (indexFor(reads, engine, story).projection(story)?.positionForLoc(at) != null) {
+      if (reads.roots.size >= 32) reads.roots.clear();
+      reads.roots.set(at.story, story);
+      return story;
+    }
+  }
+  return at.story;
+}
+
+export function readDocxSelectionFocus(
+  engine: ResidentDocxCommandEngine, selection: DocxCommandSelection, layout: DocxCommandSelectionLayout
+): DisplayListRect | null {
+  const reads = readsFor(engine);
+  const root = rootFor(reads, engine, selection.focus);
+  const position = indexFor(reads, engine, root).positionOf(selection.focus, root);
+  return position === null ? null : caretAt(queriesFor(reads, layout.frame, root), position);
+}
+
+function caretAt(queries: DisplayListQueries, position: number): DisplayListRect | null {
+  const caret = queries.caretRect(position);
+  if (caret && caret.height > 0) return caret;
+  const forward = queries.rangeRects(position, position + 1)[0];
+  if (forward && forward.height > 0) return { ...forward, width: 0 };
+  const previous = position > 0 ? queries.rangeRects(position - 1, position).at(-1) : undefined;
+  return previous && previous.height > 0 ? { ...previous, x: previous.x + previous.width, width: 0 } : null;
+}
+
 function lineAt(queries: DisplayListQueries, position: number): DisplayListVisualLine | null {
   const caret = queries.caretRect(position);
   if (!caret) return null;
@@ -214,6 +248,64 @@ function lineAt(queries: DisplayListQueries, position: number): DisplayListVisua
     if (!best || distance(line) < distance(best)) best = line;
   }
   return best;
+}
+
+function pageMove(queries: DisplayListQueries, position: number, direction: 'up' | 'down', goalX: number, distance: number,
+  documentWidth: number, rootSize: number): number | null {
+  const caret = caretAt(queries, position);
+  if (!caret) return null;
+  let top = 0;
+  const pages = queries.displayList.pages.map(page => {
+    const entry = { page, top };
+    top += page.height + CANVAS_PAGE_GAP_PX;
+    return entry;
+  });
+  const current = pages.find(({ page }) => page.pageIndex === caret.pageIndex);
+  if (!current) return null;
+  const origin = current.top + caret.y + caret.height / 2;
+  const target = origin + (direction === 'down' ? distance : -distance);
+  const lines = new Map<number, readonly DisplayListVisualLine[]>();
+  const linesFor = (pageIndex: number) => {
+    let pageLines = lines.get(pageIndex);
+    if (!pageLines) {
+      const page = pages.find(({ page }) => page.pageIndex === pageIndex)!.page;
+      pageLines = [...queries.visualLinesOnPage(pageIndex), ...page.primitives.flatMap<DisplayListVisualLine>(primitive =>
+        primitive.kind === 'image' && primitive.docStart !== undefined && primitive.docEnd !== undefined
+          ? [{ pageIndex, x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h,
+            baseline: primitive.y + primitive.h, from: primitive.docStart, to: primitive.docEnd }] : [])]
+        .sort((a, b) => a.y - b.y || a.x - b.x);
+      lines.set(pageIndex, pageLines);
+    }
+    return pageLines;
+  };
+  const firstPage = pages.find(({ page }) => !page.unbuilt && linesFor(page.pageIndex).length);
+  const lastPage = [...pages].reverse().find(({ page }) => !page.unbuilt && linesFor(page.pageIndex).length);
+  if (!firstPage || !lastPage) return null;
+  const first = linesFor(firstPage.page.pageIndex)[0]!;
+  const last = linesFor(lastPage.page.pageIndex).at(-1)!;
+  if (target < firstPage.top + first.y && !pages.some(({ page }) => page.pageIndex < first.pageIndex && page.unbuilt)) return 0;
+  if (target > lastPage.top + last.y + last.height && !pages.some(({ page }) => page.pageIndex > last.pageIndex && page.unbuilt)) return rootSize;
+  const pageDistance = (entry: typeof pages[number]) => Math.max(entry.top - target, 0, target - entry.top - entry.page.height);
+  let nearest: DisplayListVisualLine | undefined;
+  let best = Infinity;
+  for (const entry of pages.sort((a, b) => pageDistance(a) - pageDistance(b))) {
+    if (pageDistance(entry) > best) break;
+    if (entry.page.unbuilt) continue;
+    for (const line of linesFor(entry.page.pageIndex)) {
+      const center = entry.top + line.y + line.height / 2;
+      if (line.pageIndex === caret.pageIndex && line.from <= position && position <= line.to &&
+        Math.abs(center - origin) < Math.max(line.height, caret.height)) continue;
+      if (direction === 'down' ? center <= origin : center >= origin) continue;
+      const gap = Math.abs(center - target);
+      if (gap < best) { nearest = line; best = gap; }
+    }
+  }
+  if (!nearest) return direction === 'down' ? rootSize : 0;
+  const pageIndex = nearest.pageIndex;
+  const page = pages.find(({ page }) => page.pageIndex === pageIndex)!.page;
+  const x = goalX - (documentWidth - page.width) / 2;
+  return queries.hitTestRegions(nearest.pageIndex, x, nearest.y + nearest.height / 2)?.pos ??
+    (x > nearest.x + nearest.width / 2 ? nearest.to : nearest.from);
 }
 
 /** @internal */
@@ -238,20 +330,6 @@ export function resolveDocxSelectionIntent(
     return { status: 'clamped', selection: base, range };
   };
   const reads = readsFor(engine);
-  const rootFor = (at: YrsLoc): string => {
-    const cached = reads.roots.get(at.story);
-    if (cached) return cached;
-    const roots = /^(body|(?:hf|fn|en):[^:]+)$/u.test(at.story)
-      ? [at.story] : ['body', ...reader.storyIds().filter((story) => /^(hf|fn|en):/u.test(story))];
-    for (const story of roots) {
-      if (indexFor(reads, engine, story).projection(story)?.positionForLoc(at) != null) {
-        if (reads.roots.size >= 32) reads.roots.clear();
-        reads.roots.set(at.story, story);
-        return story;
-      }
-    }
-    return at.story;
-  };
   const atDisplay = (root: string, position: number): YrsLoc | null => {
     return locationAt(reads, engine, root, position);
   };
@@ -274,14 +352,19 @@ export function resolveDocxSelectionIntent(
     } else if (navigation.unit === 'document-boundary') {
       const edge = backward ? spans[0]! : spans.at(-1)!;
       focus = { story: focus.story, paraId: edge.paraId, offset: backward ? 0 : edge.length };
-    } else if (navigation.unit === 'line' && input.readLayout) {
+    } else if ((navigation.unit === 'line' || navigation.unit === 'page') && input.readLayout) {
       const layout = input.readLayout();
-      const root = rootFor(focus);
+      const origin = navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus;
+      const root = rootFor(reads, engine, origin);
       const queries = queriesFor(reads, layout.frame, root);
-      const position = indexFor(reads, engine, root).positionOf(focus, root);
+      const position = indexFor(reads, engine, root).positionOf(origin, root);
       if (position !== null && queries.isReady()) {
         if (navigation.direction === 'up' || navigation.direction === 'down') {
-          const movement = queries.verticalMove(position, navigation.direction, navigation.goalX);
+          const movement = navigation.unit === 'page'
+            ? { position: pageMove(queries, position, navigation.direction, navigation.goalX, navigation.distance,
+              layout.frame.pages.reduce((width, { page }) => Math.max(width, page.width), 0),
+              indexFor(reads, engine, root).projection(root)!.size) ?? position, goalX: navigation.goalX }
+            : queries.verticalMove(position, navigation.direction, navigation.goalX);
           if (movement) {
             focus = atDisplay(root, movement.position) ?? focus;
             goalX = movement.goalX;
@@ -291,6 +374,8 @@ export function resolveDocxSelectionIntent(
           if (line) focus = atDisplay(root, backward ? line.from : line.to) ?? focus;
         }
       }
+    } else if (navigation.unit === 'page') {
+      goalX = navigation.goalX;
     } else if (navigation.unit === 'line' || navigation.unit === 'paragraph') {
       if (navigation.direction === 'up' || navigation.direction === 'down') {
         paragraph = Math.max(0, Math.min(spans.length - 1, paragraph + (backward ? -1 : 1)));

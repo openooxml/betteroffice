@@ -9,7 +9,7 @@ use crate::scalars::{
 };
 use crate::tabs::TabStop;
 use crate::theme::{Theme, resolve_theme_font_ref};
-use crate::xml::XmlElement;
+use crate::xml::{XmlElement, parse_on_off};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -641,12 +641,12 @@ pub fn parse_paragraph_properties(
         value.line_spacing_rule = attribute_nonempty(spacing, "lineRule");
         value.before_autospacing = spacing
             .attribute(Some("w"), "beforeAutospacing")
-            .filter(|raw| !raw.is_empty())
-            .map(|raw| matches!(raw, "1" | "true"));
+            .filter(|value| !value.is_empty())
+            .map(|value| parse_on_off(value) == Some(true));
         value.after_autospacing = spacing
             .attribute(Some("w"), "afterAutospacing")
-            .filter(|raw| !raw.is_empty())
-            .map(|raw| matches!(raw, "1" | "true"));
+            .filter(|value| !value.is_empty())
+            .map(|value| parse_on_off(value) == Some(true));
     }
     if let Some(indent) = p_pr.child("w", "ind") {
         value.indent_left = indent.parse_numeric_attribute(Some("w"), "left", 1.0);
@@ -1504,6 +1504,65 @@ fn overlay<T: Clone>(target: &mut Option<T>, source: &Option<T>) {
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+
+    #[test]
+    fn parses_case_insensitive_boolean_run_properties() {
+        for (attribute, expected) in [
+            ("", true),
+            (r#" w:val="""#, true),
+            (r#" w:val="garbage""#, true),
+            (r#" w:val="OFF""#, false),
+            (r#" w:val=" false ""#, false),
+        ] {
+            let element = root(&format!("<w:rPr><w:b{attribute}/></w:rPr>"));
+            let formatting = parse_run_properties(Some(&element), None).unwrap();
+            assert_eq!(formatting.bold, Some(expected));
+        }
+    }
+
+    #[test]
+    fn parses_on_off_paragraph_autospacing() {
+        for (before, after, expected) in [
+            ("on", "On", true),
+            ("off", "off", false),
+            ("garbage", " ", false),
+        ] {
+            let element = root(&format!(
+                r#"<w:pPr><w:spacing w:beforeAutospacing="{before}" w:afterAutospacing="{after}"/></w:pPr>"#
+            ));
+            let formatting = parse_paragraph_properties(Some(&element), None).unwrap();
+            assert_eq!(formatting.before_autospacing, Some(expected));
+            assert_eq!(formatting.after_autospacing, Some(expected));
+            let xml = crate::serializer::serialize_paragraph_formatting(
+                Some(&formatting),
+                None,
+                None,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+            let canonical = if expected { "1" } else { "0" };
+            assert!(xml.contains(&format!(r#"w:beforeAutospacing="{canonical}""#)));
+            assert!(xml.contains(&format!(r#"w:afterAutospacing="{canonical}""#)));
+            assert_eq!(
+                parse_paragraph_properties(Some(&root(&xml)), None),
+                Some(formatting)
+            );
+        }
+    }
+
+    #[test]
+    fn absent_or_empty_paragraph_autospacing_is_unspecified() {
+        for attributes in ["", r#" w:beforeAutospacing="" w:afterAutospacing="""#] {
+            let element = root(&format!(
+                "<w:pPr><w:spacing w:before=\"20\"{attributes}/></w:pPr>"
+            ));
+            let formatting = parse_paragraph_properties(Some(&element), None).unwrap();
+            assert_eq!(formatting.before_autospacing, None);
+            assert_eq!(formatting.after_autospacing, None);
+        }
+    }
 
     #[test]
     fn line_unit_paragraph_spacing_survives_parsing_merging_and_serialization() {

@@ -15,7 +15,10 @@ pub use formatting::{
     NumberFormatMutation, PreservedCellFormat, StylePatch, StyleProperty, TextWrapping,
     VerticalAlignment,
 };
-pub use input::{ParsedInput, cell_state_for_input, cell_state_for_input_no_eval, parse_input};
+pub use input::{
+    ParsedInput, cell_state_for_input, cell_state_for_input_no_eval, cell_state_from_parsed,
+    parse_input, parse_input_with_context,
+};
 pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
 pub use remap::insertion_keeps_chart_anchor_on_grid;

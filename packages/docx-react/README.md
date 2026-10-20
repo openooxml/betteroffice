@@ -25,7 +25,7 @@ import '@betteroffice/docx-react/styles.css';
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
 
-`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` currently uses the hybrid runtime until worker-only collaboration is available.
+`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` runs on the worker-only editor too.
 
 ## Edit a document
 
@@ -621,9 +621,11 @@ of memory with a fresh one, once per editor. A `documentBuffer` reopens at the l
 checkpoint the worker took and replays the edits since it, so undo reaches back only
 to that checkpoint; a `document` reopens and replays every edit. If the replacement
 fails too, the editor reports a `SessionFailure` error with its `code`, such as
-`out-of-memory`, through `onError` and stops editing.
+`out-of-memory`, through `onError` and stops editing. With `collaboration`, the
+worker-only editor does not replace a failed worker; it reports the failure
+through `onError`.
 
-The `legacySyncApi` and `collaboration` editors replace a worker that runs out of
+`legacySyncApi` editors replace a worker that runs out of
 memory once. If that one runs out too, they report `ResidentWorkerOutOfMemoryError`
 from `@betteroffice/docx/yrs` through `onError`, with the worker's memories at that
 point, and stop rendering. Any other worker failure moves their work to the main thread.

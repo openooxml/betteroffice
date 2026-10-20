@@ -5,6 +5,7 @@ use pptx_parse::{RunProperties, TextBody};
 use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
+use yrs::updates::{decoder::Decode, encoder::Encode};
 use yrs::{
     Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex, Text,
     TextPrelim, TextRef, Transact, TransactionMut,
@@ -13,8 +14,8 @@ use yrs::{
 use crate::model::validate_xml_text;
 use crate::{
     CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND,
-    ParagraphSnapshot, STORIES, StorySnapshot, TextCaps, TextReceipt, TextRunSnapshot, TextStyle,
-    TextStylePatch,
+    ParagraphSnapshot, ParagraphSource, STORIES, StorySnapshot, TextCaps, TextReceipt,
+    TextRunSnapshot, TextStyle, TextStylePatch,
 };
 
 const UNDERLINE_TYPES: [&str; 18] = [
@@ -433,6 +434,25 @@ impl DeckSession {
         let old_middle = old_count - prefix - suffix;
         let new_middle = new_count - prefix - suffix;
         let old_starts = paragraph_offsets(&previous);
+        if old_middle > new_middle {
+            let fields =
+                crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
+            let txn = self.doc.transact();
+            let story = story_ref(&txn, story_id)?;
+            let properties = paragraph_projections(&story, &txn, story_id);
+            let first = prefix + new_middle - usize::from(suffix == 0);
+            let end = old_count - suffix + usize::from(suffix > 0);
+            if properties[first..end].iter().any(|(_, map, _)| {
+                map_string(map, &txn, PARA_ID).is_some_and(|id| fields.contains(&id))
+                    || matches!(map.get(&txn, "hasFields"), Some(Out::Any(Any::Bool(true))))
+            }) {
+                let start = old_starts[prefix + new_middle] - u32::from(suffix == 0);
+                return Err(EditError::ParagraphBoundary {
+                    start,
+                    end: start + 1,
+                });
+            }
+        }
         let mut templates = vec![None; new_count];
         if new_middle > old_middle {
             let (range, template) = if suffix > 0 {
@@ -489,7 +509,7 @@ impl DeckSession {
                         self.delete_text(context, story_id, start, end)?;
                     }
                     let marker = if suffix > 0 { start } else { start - 1 };
-                    self.delete_paragraph_break(context, story_id, marker)?;
+                    self.remove_replacement_paragraph(context, story_id, marker, suffix == 0)?;
                 }
             }
             let current = self.story(story_id)?;
@@ -597,7 +617,7 @@ impl DeckSession {
     ) -> EditResult<()> {
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
-        let marker = selected_pilcrows(&story, &txn, paragraph_start, paragraph_start)
+        let marker = selected_pilcrows(&story, &txn, story_id, paragraph_start, paragraph_start)
             .pop()
             .ok_or_else(|| EditError::InvalidState("missing replacement paragraph".into()))?;
         let level = f64::from(properties.level);
@@ -615,6 +635,9 @@ impl DeckSession {
                     marker.remove(&mut txn, key);
                 }
             }
+        }
+        if properties.source_paragraphs.is_empty() {
+            marker.remove(&mut txn, "sourceParagraphs");
         }
         Ok(())
     }
@@ -715,6 +738,111 @@ impl DeckSession {
         })
     }
 
+    pub fn delete_text_joining_paragraphs(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+    ) -> EditResult<TextReceipt> {
+        if start == end {
+            return self.delete_text(context, story_id, start, end);
+        }
+        let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
+        let source_xml = self.source_paragraph_xml(story_id)?;
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        check_text_bounds(&story, &txn, start, end)?;
+        let final_index = final_pilcrow_index(&story, &txn)?;
+        if start <= final_index && final_index < end {
+            return Err(EditError::ParagraphBoundary { start, end });
+        }
+        let markers = paragraph_markers(&story, &txn);
+        let first = markers
+            .iter()
+            .position(|(index, _)| *index >= start)
+            .unwrap();
+        let last = markers.iter().position(|(index, _)| *index >= end).unwrap();
+        let properties = paragraph_projections(&story, &txn, story_id);
+        if first != last {
+            if properties[first..=last].iter().any(|(_, map, _)| {
+                map_string(map, &txn, PARA_ID).is_some_and(|id| fields.contains(&id))
+                    || matches!(map.get(&txn, "hasFields"), Some(Out::Any(Any::Bool(true))))
+            }) {
+                return Err(EditError::ParagraphBoundary { start, end });
+            }
+            let mut sources = Vec::new();
+            for (_, map, joined_sources) in &properties[first..=last] {
+                let paragraph_sources = if joined_sources.is_empty() {
+                    let id = map_string(map, &txn, PARA_ID).unwrap_or_default();
+                    let xml = map_string(map, &txn, "preservedXml").or_else(|| {
+                        let index = id
+                            .strip_prefix(&format!("para:{story_id}:"))?
+                            .parse::<usize>()
+                            .ok()?;
+                        source_xml.get(index).cloned()
+                    });
+                    vec![ParagraphSource { id, xml }]
+                } else {
+                    joined_sources.clone()
+                };
+                for source in paragraph_sources {
+                    if !sources
+                        .iter()
+                        .any(|previous: &ParagraphSource| previous.id == source.id)
+                    {
+                        sources.push(source);
+                    }
+                }
+            }
+            let source_json = serde_json::to_string(&sources)
+                .map_err(|error| EditError::Json(error.to_string()))?;
+            let values: Vec<_> = properties[first]
+                .1
+                .iter(&txn)
+                .filter_map(|(key, value)| match value {
+                    Out::Any(value) if key != "joinPosition" => Some((key.to_owned(), value)),
+                    _ => None,
+                })
+                .collect();
+            let position = story
+                .sticky_index(&txn, markers[first].0, Assoc::After)
+                .unwrap();
+            let supersedes = paragraph_join_records(&story, &txn, &markers)
+                .into_iter()
+                .filter_map(|(offset, key, _)| {
+                    let index = markers.iter().position(|(index, _)| *index >= offset)?;
+                    (first <= index && index <= last).then(|| Any::String(key.into()))
+                })
+                .collect();
+            let record = markers.last().unwrap().1.insert(
+                &mut txn,
+                self.next_id("join"),
+                MapPrelim::default(),
+            );
+            for (key, value) in values {
+                record.insert(&mut txn, key, value);
+            }
+            record.insert(
+                &mut txn,
+                "joinPosition",
+                Any::Buffer(position.encode_v1().into()),
+            );
+            record.insert(&mut txn, "joinSupersedes", Any::Array(supersedes));
+            record.insert(&mut txn, "sourceParagraphs", source_json);
+        }
+        let text = text_in_range(&story, &txn, start, end);
+        if end > start {
+            story.remove_range(&mut txn, start, end - start);
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end,
+            text,
+        })
+    }
+
     pub fn format_text(
         &self,
         context: &crate::EditCtx,
@@ -771,7 +899,7 @@ impl DeckSession {
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
-        let pilcrows = selected_pilcrows(&story, &txn, start, end);
+        let pilcrows = selected_pilcrows(&story, &txn, story_id, start, end);
         for pilcrow in pilcrows {
             match alignment {
                 Some(alignment) => {
@@ -796,7 +924,8 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
-        let story = {
+        let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
+        let (story, has_fields, inherited) = {
             let txn = self.doc.transact();
             let story = story_ref(&txn, story_id)?;
             let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -806,7 +935,29 @@ impl DeckSession {
                     length: final_pilcrow,
                 });
             }
-            story
+            let (offset, properties, sources) = paragraph_projections(&story, &txn, story_id)
+                .into_iter()
+                .find(|(offset, _, _)| *offset >= index)
+                .unwrap();
+            let has_fields = map_string(&properties, &txn, PARA_ID)
+                .is_some_and(|id| fields.contains(&id))
+                || matches!(
+                    properties.get(&txn, "hasFields"),
+                    Some(Out::Any(Any::Bool(true)))
+                );
+            let marker = paragraph_markers(&story, &txn)
+                .into_iter()
+                .find(|(position, _)| *position == offset)
+                .unwrap()
+                .1;
+            let inherited = if marker == properties {
+                None
+            } else {
+                let sources = serde_json::to_string(&sources)
+                    .map_err(|error| EditError::Json(error.to_string()))?;
+                Some((marker, properties, sources))
+            };
+            (story, has_fields, inherited)
         };
         let paragraph_id = self.next_id("para");
         let mut txn = self.transact_for(context);
@@ -819,6 +970,24 @@ impl DeckSession {
         pilcrow.insert(&mut txn, KIND, PILCROW_KIND);
         pilcrow.insert(&mut txn, PARA_ID, paragraph_id);
         pilcrow.insert(&mut txn, "level", 0_f64);
+        if has_fields {
+            pilcrow.insert(&mut txn, "hasFields", true);
+        }
+        if let Some((marker, properties, sources)) = inherited {
+            for target in [marker, pilcrow] {
+                for key in ["alignment", "level", "bulletJson", "preservedXml"] {
+                    match properties.get(&txn, key) {
+                        Some(Out::Any(value)) => {
+                            target.insert(&mut txn, key, value);
+                        }
+                        _ => {
+                            target.remove(&mut txn, key);
+                        }
+                    }
+                }
+                target.insert(&mut txn, "sourceParagraphs", sources.as_str());
+            }
+        }
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
             start: index,
@@ -833,7 +1002,7 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
-        let mut txn = self.transact_for(context);
+        let txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index >= final_pilcrow {
@@ -860,13 +1029,55 @@ impl DeckSession {
                 end: index.saturating_add(1),
             });
         }
+        drop(txn);
+        self.delete_text_joining_paragraphs(context, story_id, index, index + 1)
+    }
+
+    fn remove_replacement_paragraph(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        index: u32,
+        empty_after: bool,
+    ) -> EditResult<()> {
+        let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        let markers = paragraph_markers(&story, &txn);
+        let selected = markers
+            .iter()
+            .position(|(offset, _)| *offset == index)
+            .ok_or(EditError::ParagraphBoundary {
+                start: index,
+                end: index + 1,
+            })?;
+        let start = selected
+            .checked_sub(1)
+            .map_or(0, |previous| markers[previous].0 + 1);
+        let properties = paragraph_projections(&story, &txn, story_id);
+        let empty = if empty_after {
+            markers
+                .get(selected + 1)
+                .is_some_and(|(offset, _)| *offset == index + 1)
+        } else {
+            start == index
+        };
+        if !empty
+            || selected + 1 >= markers.len()
+            || properties[selected..=selected + 1]
+                .iter()
+                .any(|(_, map, _)| {
+                    map_string(map, &txn, PARA_ID).is_some_and(|id| fields.contains(&id))
+                        || matches!(map.get(&txn, "hasFields"), Some(Out::Any(Any::Bool(true))))
+                })
+        {
+            return Err(EditError::ParagraphBoundary {
+                start: index,
+                end: index + 1,
+            });
+        }
         story.remove_range(&mut txn, index, 1);
-        Ok(TextReceipt {
-            story_id: story_id.to_owned(),
-            start: index,
-            end: index + 1,
-            text: "\n".to_owned(),
-        })
+        Ok(())
     }
 }
 
@@ -916,7 +1127,7 @@ fn valid_kern(value: &Any) -> bool {
 
 /// The snapshot `snapshot_story` reads back from a story `seed_story` wrote,
 /// computed without materializing a scratch document.
-pub(crate) fn baseline_story(
+pub fn baseline_story(
     story_id: &str,
     body: &TextBody,
     theme: Option<&Theme>,
@@ -925,6 +1136,7 @@ pub(crate) fn baseline_story(
     let mut length = 1_u32;
     if body.paragraphs.is_empty() {
         paragraphs.push(ParagraphSnapshot {
+            source_paragraphs: Vec::new(),
             id: format!("para:{story_id}:0"),
             preserved_xml: None,
             alignment: None,
@@ -967,6 +1179,7 @@ pub(crate) fn baseline_story(
                 .transpose()
                 .map_err(|error| EditError::Json(error.to_string()))?;
             paragraphs.push(ParagraphSnapshot {
+                source_paragraphs: Vec::new(),
                 id: format!("para:{story_id}:{paragraph_index}"),
                 preserved_xml: None,
                 alignment: paragraph.properties.alignment.clone(),
@@ -1003,19 +1216,22 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
     validate_story(story, txn, story_id)?;
     let mut paragraphs = Vec::new();
     let mut runs = Vec::new();
+    let projections = paragraph_projections(story, txn, story_id);
     for diff in story.diff(txn, YChange::identity) {
         match diff.insert {
             Out::Any(Any::String(text)) => runs.push(TextRunSnapshot {
                 text: text.to_string(),
                 style: style_from_attrs(diff.attributes.as_deref()),
             }),
-            Out::YMap(map) => {
+            Out::YMap(_) => {
+                let (_, map, sources) = &projections[paragraphs.len()];
                 paragraphs.push(ParagraphSnapshot {
-                    id: map_string(&map, txn, PARA_ID).unwrap_or_default(),
-                    preserved_xml: map_string(&map, txn, "preservedXml"),
-                    alignment: map_string(&map, txn, "alignment"),
-                    level: map_number(&map, txn, "level").unwrap_or_default() as u32,
-                    bullet_json: map_string(&map, txn, "bulletJson"),
+                    source_paragraphs: sources.clone(),
+                    id: map_string(map, txn, PARA_ID).unwrap_or_default(),
+                    preserved_xml: map_string(map, txn, "preservedXml"),
+                    alignment: map_string(map, txn, "alignment"),
+                    level: map_number(map, txn, "level").unwrap_or_default() as u32,
+                    bullet_json: map_string(map, txn, "bulletJson"),
                     runs: std::mem::take(&mut runs),
                 });
             }
@@ -1043,13 +1259,10 @@ fn final_pilcrow_index<T: ReadTxn>(story: &TextRef, txn: &T) -> EditResult<u32> 
 
 fn check_text_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> EditResult<()> {
     check_text_bounds(story, txn, start, end)?;
-    let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let item_length = out_len(&diff.insert);
-        if matches!(diff.insert, Out::YMap(_)) && start <= offset && offset < end {
+    for (index, _) in paragraph_markers(story, txn) {
+        if start <= index && index < end {
             return Err(EditError::ParagraphBoundary { start, end });
         }
-        offset += item_length;
     }
     Ok(())
 }
@@ -1073,22 +1286,169 @@ pub(crate) fn selects_paragraph(start: u32, end: u32, paragraph_start: u32, pilc
 }
 
 /// The pilcrow of every paragraph the range touches, as [`selects_paragraph`] decides.
-fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> Vec<MapRef> {
+fn selected_pilcrows<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    story_id: &str,
+    start: u32,
+    end: u32,
+) -> Vec<MapRef> {
     let start = start.min(story.len(txn).saturating_sub(1));
     let mut pilcrows = Vec::new();
     let mut paragraph_start = 0;
-    let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let item_length = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert {
-            if selects_paragraph(start, end, paragraph_start, offset) {
-                pilcrows.push(map);
-            }
-            paragraph_start = offset + item_length;
+    for (offset, map, _) in paragraph_projections(story, txn, story_id) {
+        if selects_paragraph(start, end, paragraph_start, offset) {
+            pilcrows.push(map);
         }
-        offset += item_length;
+        paragraph_start = offset + 1;
     }
     pilcrows
+}
+
+fn paragraph_markers<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)> {
+    let mut markers = Vec::new();
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let length = out_len(&diff.insert);
+        if let Out::YMap(map) = diff.insert {
+            markers.push((offset, map));
+        }
+        offset += length;
+    }
+    markers
+}
+
+fn source_paragraphs<T: ReadTxn>(map: &MapRef, txn: &T) -> Vec<ParagraphSource> {
+    map_string(map, txn, "sourceParagraphs")
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+fn paragraph_projections<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    story_id: &str,
+) -> Vec<(u32, MapRef, Vec<ParagraphSource>)> {
+    let markers = paragraph_markers(story, txn);
+    let mut result: Vec<_> = markers
+        .iter()
+        .map(|(offset, map)| {
+            let sources = if map.contains_key(txn, "sourceParagraphs") {
+                source_paragraphs(map, txn)
+            } else {
+                Vec::new()
+            };
+            (*offset, map.clone(), sources)
+        })
+        .collect();
+    let mut joins = paragraph_join_records(story, txn, &markers);
+    let superseded: std::collections::HashSet<_> = joins
+        .iter()
+        .flat_map(|(_, _, map)| match map.get(txn, "joinSupersedes") {
+            Some(Out::Any(Any::Array(keys))) => keys
+                .iter()
+                .filter_map(|key| match key {
+                    Any::String(key) => Some(key.to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect();
+    joins.retain(|(_, key, _)| !superseded.contains(key));
+    joins.sort_by_key(|(offset, key, map)| {
+        (
+            *offset,
+            source_paragraphs(map, txn).first().and_then(|source| {
+                source
+                    .id
+                    .strip_prefix(&format!("para:{story_id}:"))?
+                    .parse::<usize>()
+                    .ok()
+            }),
+            key.clone(),
+        )
+    });
+    let mut projected = vec![false; result.len()];
+    for (offset, _, map) in joins {
+        let Some(index) = markers.iter().position(|(index, _)| *index >= offset) else {
+            continue;
+        };
+        if !projected[index] {
+            result[index].1 = map.clone();
+            projected[index] = true;
+        }
+        for source in source_paragraphs(&map, txn) {
+            if !result[index]
+                .2
+                .iter()
+                .any(|previous| previous.id == source.id)
+            {
+                result[index].2.push(source);
+            }
+        }
+    }
+    result
+}
+
+pub(crate) fn materialize_paragraph_joins(
+    target: &TextRef,
+    txn: &mut TransactionMut<'_>,
+    source_id: &str,
+) -> EditResult<()> {
+    let source = story_ref(txn, source_id)?;
+    let markers = paragraph_markers(&source, txn);
+    if paragraph_join_records(&source, txn, &markers).is_empty() {
+        return Ok(());
+    }
+    let projections = paragraph_projections(&source, txn, source_id);
+    for ((_, target), (_, properties, sources)) in
+        paragraph_markers(target, txn).into_iter().zip(projections)
+    {
+        let values: Vec<_> = properties
+            .iter(txn)
+            .filter_map(|(key, value)| match value {
+                Out::Any(value) if !matches!(key, "joinPosition" | "joinSupersedes") => {
+                    Some((key.to_owned(), value))
+                }
+                _ => None,
+            })
+            .collect();
+        target.clear(txn);
+        for (key, value) in values {
+            target.insert(txn, key, value);
+        }
+        if !sources.is_empty() {
+            let json = serde_json::to_string(&sources)
+                .map_err(|error| EditError::Json(error.to_string()))?;
+            target.insert(txn, "sourceParagraphs", json);
+        }
+    }
+    Ok(())
+}
+
+fn paragraph_join_records<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    markers: &[(u32, MapRef)],
+) -> Vec<(u32, String, MapRef)> {
+    let Some((_, last)) = markers.last() else {
+        return Vec::new();
+    };
+    let branch = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(story));
+    last.iter(txn)
+        .filter_map(|(key, value)| {
+            if !key.starts_with("join:") {
+                return None;
+            }
+            let Out::YMap(map) = value else { return None };
+            let Some(Out::Any(Any::Buffer(bytes))) = map.get(txn, "joinPosition") else {
+                return None;
+            };
+            let position = StickyIndex::decode_v1(&bytes).ok()?.get_offset(txn)?;
+            (position.branch == branch).then(|| (position.index, key.to_owned(), map))
+        })
+        .collect()
 }
 
 fn paragraph_text_segments<T: ReadTxn>(
@@ -1120,7 +1480,7 @@ fn text_in_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> 
     let mut offset = 0;
     for diff in story.diff(txn, YChange::identity) {
         let length = out_len(&diff.insert);
-        if let Out::Any(Any::String(text)) = diff.insert {
+        if let Out::Any(Any::String(ref text)) = diff.insert {
             let overlap_start = start.saturating_sub(offset).min(length);
             let overlap_end = end.saturating_sub(offset).min(length);
             if overlap_end > overlap_start {
@@ -1129,6 +1489,12 @@ fn text_in_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> 
                     &utf16[overlap_start as usize..overlap_end as usize],
                 ));
             }
+        } else if matches!(diff.insert, Out::YMap(_))
+            && start <= offset
+            && offset < end
+            && offset < story.len(txn) - 1
+        {
+            output.push('\n');
         }
         offset += length;
         if offset >= end {

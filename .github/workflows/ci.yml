@@ -15,14 +15,52 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Jobs run on a fresh kyora VM of the leanest class that fits; the two shortest (Security audit, Native gate)
-  # stay GitHub-hosted. Fork pull requests stay GitHub-hosted, and BO_CI_RUNNER=ubuntu-latest moves all back.
+  # The router fills the account's free GitHub-hosted runners first; a job that does not fit, or every job when
+  # the router cannot count, runs on a fresh kyora VM of the leanest class that fits. The router itself runs on
+  # kyora, so it never queues behind the GitHub-hosted limit it measures. The two shortest (Security audit, Native
+  # gate) stay GitHub-hosted. Fork pull requests stay GitHub-hosted, BO_CI_RUNNER pins every job to one label,
+  # BO_CI_SPILL=off keeps them on kyora, and BO_CI_GH_LIMIT/BO_CI_GH_RESERVE size the GitHub share.
+  route:
+    name: Route runners
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      packages: ${{ steps.route.outputs.packages }}
+      python: ${{ steps.route.outputs.python }}
+      package_tests: ${{ steps.route.outputs.package_tests }}
+      rust: ${{ steps.route.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        continue-on-error: true
+        with:
+          sparse-checkout: scripts/ci-route.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Route the jobs
+        id: route
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROUTE_GROUPS: packages python package_tests:2 rust
+          ROUTE_PEER_SLOTS: 3
+          BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
+          BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
+          BO_CI_SPILL: ${{ vars.BO_CI_SPILL }}
+          BO_CI_RUNNER: ${{ vars.BO_CI_RUNNER }}
+        run: node scripts/ci-route.mjs
+
   packages:
     name: Package gate
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
+    needs: route
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.packages || 'kyora-4x8' }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -44,7 +82,7 @@ jobs:
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
       # rust-cache prunes the workspace's own artifacts, and wasm-opt costs minutes per module.
-      - uses: actions/cache@v6
+      - uses: actions/cache@v6.1.0
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
@@ -106,14 +144,16 @@ jobs:
 
   package-tests:
     name: Package tests (${{ matrix.shard }}/2)
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x8' }}
-    timeout-minutes: 60
+    needs: route
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.package_tests || 'kyora-8x8' }}
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -133,7 +173,7 @@ jobs:
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@v6.1.0
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
@@ -153,7 +193,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -175,13 +215,20 @@ jobs:
 
   rust:
     name: Rust gate
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-8x16' }}
+    needs: route
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.rust || 'kyora-8x16' }}
     timeout-minutes: 90
     # Full debuginfo in every test binary fills a kyora VM's disk; backtraces keep file:line.
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
+
+      # A GitHub-hosted runner has too little free disk for the workspace's test binaries.
+      - name: Free disk space
+        if: runner.environment == 'github-hosted'
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
 
       - name: Detect Rust workspace
         id: ws
@@ -209,6 +256,7 @@ jobs:
           cargo clippy -p betteroffice-drawingml --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-metafile --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-docx-parse --all-targets --features tiff,metafile -- -D warnings
+          cargo clippy -p betteroffice-docx-edit --all-targets --features wasm -- -D warnings
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
@@ -263,10 +311,12 @@ jobs:
 
   python:
     name: Python gate
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
+    needs: route
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.python || 'kyora-4x8' }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-python@v7
         with:
@@ -296,7 +346,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -319,7 +369,7 @@ jobs:
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@v6.1.0
         with:
           path: target/wasm-pack
           key: wasm-pack-${{ steps.wasm.outputs.key }}
