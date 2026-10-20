@@ -1554,6 +1554,10 @@ impl<'a> LayoutBuilder<'a> {
         });
         let path = slide_background_path(&path, placement, self.slide_width, self.slide_height);
         if let Some(picture) = picture.filter(|_| fill.is_some()) {
+            let tile = picture_fill_tile(picture, dpi);
+            let (crop, destination) =
+                picture_fill_crop(picture).placement(0.0, 0.0, self.slide_width, self.slide_height);
+            let destination = if tile.is_some() { None } else { destination };
             return Primitive::Image {
                 object_id,
                 shape_id: None,
@@ -1564,8 +1568,9 @@ impl<'a> LayoutBuilder<'a> {
                 h: self.slide_height,
                 asset_id: picture.media_part_path.clone(),
                 effects: Vec::new(),
-                crop: picture_fill_crop(picture),
-                tile: picture_fill_tile(picture, dpi),
+                crop,
+                destination,
+                tile,
                 path: Some(path),
                 geometry_fallback,
                 stroke: None,

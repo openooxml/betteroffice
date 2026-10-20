@@ -678,6 +678,7 @@ fn fallback_shape(
         geometry: shape_type.to_owned(),
         paths: Vec::new(),
         adjust_values: BTreeMap::new(),
+        use_bg_fill: false,
         style: None,
         fill: Some(ShapeFill {
             fill_type: "solid".to_owned(),
