@@ -418,6 +418,8 @@ pub struct TextRun {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionedTextLine {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub column_offset: f32,
     pub x: f32,
     pub y: f32,
     pub width: f32,

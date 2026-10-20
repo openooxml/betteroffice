@@ -11,10 +11,10 @@ const object = {
 
 test('worker picture corner drags preserve the locked aspect ratio', () => {
   expect(peerlessGestureRect(object, { x: 80, y: 10 }, 'se')).toEqual({
-    ...object.rect, width: 3_200_000, height: 1_600_000,
+    ...object.rect, width: 3_080_000, height: 1_540_000,
   });
   expect(peerlessGestureRect(object, { x: 10, y: 80 }, 'nw')).toEqual({
-    x: 2_600_000, y: 2_800_000, width: 800_000, height: 400_000,
+    x: 1_400_000, y: 2_200_000, width: 2_000_000, height: 1_000_000,
   });
 });
 

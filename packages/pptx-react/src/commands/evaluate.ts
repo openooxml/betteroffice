@@ -390,7 +390,10 @@ function evaluate<K extends PptxCommandId>(
     case 'bold':
     case 'italic':
     case 'underline':
-      return { gate: textGate(env), active: current?.[id as 'bold' | 'italic' | 'underline'] };
+      return {
+        gate: textGate(env),
+        active: current?.[id as 'bold' | 'italic' | 'underline'] ?? false,
+      };
     case 'fontFamily': {
       const families = env.fontFamilies;
       return result<'fontFamily'>({

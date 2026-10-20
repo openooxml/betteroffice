@@ -138,7 +138,8 @@ export type DocxNavigationIntent =
     direction: 'backward' | 'forward';
     extend: boolean;
   }
-  | { unit: 'line'; direction: 'up' | 'down'; extend: boolean; goalX: number };
+  | { unit: 'line'; direction: 'up' | 'down'; extend: boolean; goalX: number }
+  | { unit: 'page'; direction: 'up' | 'down'; extend: boolean; goalX: number; distance: number };
 
 /** @internal Captured retained-frame identity; pageId is the decimal retained page ID. */
 export interface DocxCommandPageIdentity {
@@ -385,6 +386,7 @@ export interface DocxCommandFramePayload {
   caret: YrsResidentCaretSnapshot;
   layoutRevision: number;
   selectionRects?: DisplayListRect[];
+  selectionFocus?: DisplayListRect;
   documentVersion?: string;
   layoutMeta?: LayoutMetaV1;
   layoutProvisional?: boolean;

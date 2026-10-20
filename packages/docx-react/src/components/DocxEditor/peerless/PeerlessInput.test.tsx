@@ -20,7 +20,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment'> = {}) {
+function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment' | 'caretHostRef' | 'zoom'> = {}) {
   const submitted: string[] = [];
   const entries: Array<{
     payload: DocxCommandPayload; options: SubmitOptions<PeerlessEchoIntent>; ticket: CommandTicket;
@@ -88,6 +88,136 @@ function beforeinput(textarea: HTMLTextAreaElement, inputType: string, data: str
     bubbles: true, cancelable: true, inputType, data,
   })); });
 }
+
+test('page_keys_use_zoomed_viewport_distance_and_wait_for_fresh_predecessor_geometry', async () => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  scroller.style.zoom = '1.25';
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2400 } });
+  const host = document.createElement('div');
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const input = mount(false, { caretHostRef: { current: host }, zoom: 1.5 });
+  try {
+    const geometry: PeerlessFrameGeometry = {
+      identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+      pages: [], caret: { x: 80, y: 10, width: 1, height: 12 }, selectionRects: [],
+    };
+    act(() => { input.viewStore.installFrameGeometry(geometry); });
+    const down = new KeyboardEvent('keydown', { key: 'PageDown', bubbles: true, cancelable: true });
+    act(() => { fireEvent(input.textarea, down); });
+    fireEvent.keyDown(input.textarea, { key: 'PageDown', repeat: true, shiftKey: true });
+    fireEvent.keyDown(input.textarea, { key: 'PageUp' });
+    await input.waitForSubmitted(1);
+    expect(down.defaultPrevented).toBe(true);
+    expect(input.submitted).toEqual(['navigate']);
+    expect(input.entries[0]!.payload).toEqual({ unit: 'page', direction: 'down', extend: false, goalX: 80, distance: 400 });
+    expect(input.entries[0]!.options.fence).toBe(true);
+    expect(input.entries[0]!.options.echo).toBeUndefined();
+    input.entries[0]!.settle({ status: 'applied', seq: 1 }, {
+      anchor: { story: 'body', paraId: 'p', offset: 10 }, focus: { story: 'body', paraId: 'p', offset: 10 },
+    });
+    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    expect(input.entries).toHaveLength(1);
+    act(() => { input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: 1,
+      caret: { x: 30, y: 410, width: 1, height: 12 } }); });
+    await input.waitForSubmitted(2);
+    expect(input.entries[1]!.payload).toEqual({ unit: 'page', direction: 'down', extend: true, goalX: 80, distance: 400 });
+    expect(input.entries[1]!.options.after).toBe(input.entries[0]!.ticket);
+    input.entries[1]!.settle({ status: 'applied', seq: 2 });
+    act(() => { input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: 2,
+      caret: null, selectionFocus: { x: 50, y: 810, width: 1, height: 12 },
+      selectionRects: [{ x: 10, y: 10, width: 40, height: 12 }] }); });
+    await input.waitForSubmitted(3);
+    expect(input.entries[2]!.payload).toEqual({ unit: 'page', direction: 'up', extend: false, goalX: 80, distance: 400 });
+    expect(input.entries[2]!.options.after).toBe(input.entries[1]!.ticket);
+    input.entries[2]!.settle({ status: 'applied', seq: 3 });
+    act(() => { input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: 3,
+      caret: { x: 35, y: 410, width: 1, height: 12 } }); });
+    fireEvent.keyDown(input.textarea, { key: 'ArrowDown' });
+    await input.waitForSubmitted(4);
+    expect(input.entries[3]!.payload).toEqual({ unit: 'line', direction: 'down', extend: false, goalX: 80 });
+    expect(scroller.scrollTop).toBe(0);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+    scroller.remove();
+  }
+});
+
+test('page_keys_admit_behind_a_pending_input_command_before_any_caret_arrives', async () => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2400 } });
+  const host = document.createElement('div');
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const input = mount(false, { caretHostRef: { current: host } });
+  try {
+    fireEvent.keyDown(input.textarea, { key: 'ArrowRight' });
+    await input.waitForSubmitted(1);
+    fireEvent.keyDown(input.textarea, { key: 'PageDown', shiftKey: true });
+    const caret = { story: 'body', paraId: 'p', offset: 1 };
+    input.entries[0]!.settle({ status: 'applied', seq: 1 }, { anchor: caret, focus: caret });
+    act(() => { input.viewStore.installFrameGeometry({ identity: input.snapshot.identity, coversThroughSeq: 1,
+      frameEpoch: 1, layoutRevision: 1, pages: [], caret: { x: 40, y: 10, width: 1, height: 12 }, selectionRects: [] }); });
+    await input.waitForSubmitted(2);
+    expect(input.entries[1]!.payload).toEqual({ unit: 'page', direction: 'down', extend: true, goalX: 40, distance: 600 });
+    expect(input.entries[1]!.options.after).toBe(input.entries[0]!.ticket);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+    scroller.remove();
+  }
+});
+
+test.each([false, true])('shift_page_down_reveals_the_landing_with_cell_rects=%s_without_scrolling_on_keydown', async (cells) => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2400 } });
+  const host = document.createElement('div');
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const bounds = (top: number) => ({ x: 0, y: top, top, bottom: top + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  scroller.getBoundingClientRect = () => bounds(0);
+  host.getBoundingClientRect = () => bounds(-scroller.scrollTop);
+  const input = mount(false, { caretHostRef: { current: host } });
+  try {
+    const anchor = { story: 'body', paraId: 'start', offset: 0 };
+    input.snapshot.workerSelection = { anchor, focus: anchor };
+    act(() => {
+      input.textarea.focus();
+      input.viewStore.installFrameGeometry({
+        identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+        pages: [], caret: { x: 80, y: 50, width: 1, height: 12 }, selectionRects: [],
+      });
+      input.refresh();
+    });
+    fireEvent.keyDown(input.textarea, { key: 'PageDown', shiftKey: true });
+    await input.waitForSubmitted(1);
+    expect(scroller.scrollTop).toBe(0);
+    input.entries[0]!.settle({ status: 'applied', seq: 1 }, {
+      anchor, focus: cells ? anchor : { story: 'body', paraId: 'later', offset: 0 },
+    });
+    act(() => {
+      input.viewStore.installFrameGeometry({
+        identity: input.snapshot.identity, coversThroughSeq: 1, frameEpoch: 2, layoutRevision: 1,
+        pages: [], caret: null, selectionFocus: cells ? undefined : { x: 20, y: 650, width: 1, height: 12 },
+        selectionRects: [{ x: 80, y: 50, width: 100, height: 12 }, { x: 20, y: 650, width: 0, height: 12 }],
+      });
+      input.refresh();
+    });
+    expect(scroller.scrollTop).toBe(86);
+    act(() => { fireEvent.scroll(scroller); });
+    expect(scroller.scrollTop).toBe(86);
+    expect(Number.parseFloat(input.textarea.style.top)).toBe(564);
+    expect(document.activeElement).toBe(input.textarea);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+    scroller.remove();
+  }
+});
 
 test('a held submission failure does not report applied composition text as recoverable', async () => {
   const recovered: string[] = [];

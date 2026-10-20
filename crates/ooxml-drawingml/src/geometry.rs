@@ -161,6 +161,7 @@ pub fn preset_geometry_to_path(
         "line" | "straightConnector1" => {
             vec![C::Move { x: 0.0, y: 0.0 }, C::Line { x: 1.0, y: 1.0 }]
         }
+        "lineInv" => vec![C::Move { x: 0.0, y: 1.0 }, C::Line { x: 1.0, y: 0.0 }],
         "triangle" | "isosTriangle" => {
             let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.5);
             polygon(&[(adjustment, 0.0), (1.0, 1.0), (0.0, 1.0)])

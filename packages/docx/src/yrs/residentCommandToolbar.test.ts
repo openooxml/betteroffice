@@ -17,6 +17,10 @@ test('worker_selection_formatting_and_list_commands_cover_multiple_paragraphs', 
   expect(arm.engine.paragraphs('body').every(p => p.properties.numPr == null)).toBe(true);
   expect(execute(arm, command(arm, 'changeIndent', { direction: 'increase' }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').map(p => p.properties.indentLeft)).toEqual([720, 720]);
+  expect(execute(arm, command(arm, 'changeIndent', { direction: 'decrease' }))).toMatchObject({ status: 'applied' });
+  expect(arm.engine.paragraphs('body').map(p => p.properties.indentLeft)).toEqual([0, 0]);
+  execute(arm, command(arm, 'changeIndent', { direction: 'decrease' }));
+  expect(arm.engine.paragraphs('body').map(p => p.properties.indentLeft)).toEqual([0, 0]);
 }, TIMEOUT);
 
 test('collapsed_toolbar_marks_follow_insertions_and_insertion_refusals_are_atomic', async () => {

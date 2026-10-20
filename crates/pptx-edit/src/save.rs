@@ -671,6 +671,7 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: shape.geometry.clone(),
+        text_box: shape.text_box,
         x: shape.x,
         y: shape.y,
         width: shape.width,
@@ -696,6 +697,7 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: "rect".to_owned(),
+        text_box: false,
         x: shape.x,
         y: shape.y,
         width: shape.width,

@@ -154,6 +154,7 @@ pub struct RunWrite {
 pub struct ShapeAdd {
     pub name: String,
     pub geometry: String,
+    pub text_box: bool,
     pub x: i64,
     pub y: i64,
     pub width: i64,
@@ -2132,6 +2133,16 @@ fn color_element(color: &ColorValue, prefixes: &Prefixes) -> Option<XmlElement> 
     } else {
         return None;
     };
+    if !color.transforms.is_empty() {
+        for transform in color.drawingml_transforms() {
+            let mut child = XmlElement::new(prefixes.drawing(transform.xml_name()));
+            if let Some(value) = transform.xml_value() {
+                child = child.with_attribute("val", value);
+            }
+            element = element.with_child(child);
+        }
+        return Some(element);
+    }
     let fractions = [
         ("alpha", color.alpha),
         ("lumMod", color.luminance_modulation),
@@ -3034,7 +3045,8 @@ fn is_flattened_colour_snapshot(
     let (Some(authored), Some(requested)) = (authored, requested) else {
         return false;
     };
-    if requested.theme_color.is_some()
+    if !requested.transforms.is_empty()
+        || requested.theme_color.is_some()
         || requested.theme_tint.is_some()
         || requested.theme_shade.is_some()
         || requested.auto.is_some()
@@ -3044,7 +3056,10 @@ fn is_flattened_colour_snapshot(
     {
         return false;
     }
-    if requested.alpha.is_some() && requested.alpha != authored.alpha {
+    if requested.alpha.is_some()
+        && ooxml_drawingml::resolve_color_value_alpha(requested)
+            != ooxml_drawingml::resolve_color_value_alpha(authored)
+    {
         return false;
     }
     resolve_color_value_to_hex_with_theme(Some(authored), theme)
@@ -3322,13 +3337,17 @@ fn shape_element(
         ));
     }
     let shape_id = alloc_shape_id(next_shape_id, part)?;
+    let mut non_visual_properties = XmlElement::new(prefixes.presentation("cNvSpPr"));
+    if add.text_box {
+        non_visual_properties.set_attribute("txBox", "1");
+    }
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
                 .with_attribute("id", shape_id.to_string())
                 .with_attribute("name", add.name.clone()),
         )
-        .with_child(XmlElement::new(prefixes.presentation("cNvSpPr")))
+        .with_child(non_visual_properties)
         .with_child(XmlElement::new(prefixes.presentation("nvPr")));
     let transform = XmlElement::new(prefixes.drawing("xfrm"))
         .with_child(
@@ -3683,6 +3702,155 @@ mod tests {
     use crate::xml::{ParseBudget, parse_xml};
 
     #[test]
+    fn a_labelled_ellipse_is_not_written_as_a_text_box() {
+        let add = ShapeAdd {
+            name: "Labelled ellipse".to_owned(),
+            geometry: "ellipse".to_owned(),
+            text_box: false,
+            x: 0,
+            y: 0,
+            width: 1_000_000,
+            height: 500_000,
+            adjust_values: BTreeMap::new(),
+            fill: None,
+            outline: None,
+            paragraphs: Some(vec![ParagraphWrite {
+                source_paragraphs: Vec::new(),
+                source_index: None,
+                preserved_xml: None,
+                rebuild: true,
+                properties_changed: true,
+                alignment: None,
+                level: 0,
+                bullet: None,
+                runs: vec![RunWrite {
+                    text: "Ellipse label".to_owned(),
+                    properties: RunProperties::default(),
+                }],
+            }]),
+            picture: None,
+        };
+        let mut root = XmlElement::new("p:sld");
+        let prefixes = Prefixes::from_root(&mut root);
+        let shape = shape_element(&add, &mut Some(2), &prefixes, "ppt/slides/slide1.xml").unwrap();
+        assert!(shape.child("txBody").unwrap().child("p").is_some());
+        assert_eq!(
+            shape
+                .child("spPr")
+                .unwrap()
+                .child("prstGeom")
+                .unwrap()
+                .attribute("prst"),
+            Some("ellipse")
+        );
+        assert_eq!(
+            shape
+                .child("nvSpPr")
+                .unwrap()
+                .child("cNvSpPr")
+                .unwrap()
+                .attribute("txBox"),
+            None
+        );
+    }
+
+    #[test]
+    fn changing_outline_width_preserves_unchanged_color_source() {
+        let limits = ParseLimits::default();
+        let mut properties = parse_xml(
+            br#"<p:spPr><a:ln w="9525"><a:solidFill><a:schemeClr val="accent1"><a:tint val="50%"/><a:lumMod val="60000"/><a:extLst/></a:schemeClr></a:solidFill></a:ln></p:spPr>"#,
+            "shape.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let original_color = properties
+            .child("ln")
+            .unwrap()
+            .child("solidFill")
+            .unwrap()
+            .clone();
+        let mut outline =
+            crate::drawing::parse_outline_element(properties.child("ln").unwrap()).unwrap();
+        outline.width = Some(19050.0);
+        let prefixes = Prefixes::from_root(&mut properties);
+        set_outline(&mut properties, &outline, &prefixes);
+        let line = properties.child("ln").unwrap();
+        assert_eq!(line.attribute("w"), Some("19050"));
+        assert_eq!(line.child("solidFill"), Some(&original_color));
+    }
+
+    #[test]
+    fn rebuilt_color_preserves_transform_order_and_exact_percentages() {
+        let limits = ParseLimits::default();
+        let source = parse_xml(
+            br#"<a:solidFill><a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="75000"/><a:shade val="12345"/><a:shade val="60000"/><a:hueOff val="-5400000"/><a:comp/><a:alpha val="50000"/></a:srgbClr></a:solidFill>"#,
+            "color.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let color = crate::drawing::parse_color_container(&source).unwrap();
+        let mut properties = XmlElement::new("p:spPr");
+        let prefixes = Prefixes::from_root(&mut properties);
+        let written = color_element(&color, &prefixes).unwrap();
+        assert_eq!(
+            written
+                .child_elements()
+                .map(|child| (child.local_name(), child.attribute("val")))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tint", Some("50000")),
+                ("lumMod", Some("75000")),
+                ("shade", Some("12345")),
+                ("shade", Some("60000")),
+                ("hueOff", Some("-5400000")),
+                ("comp", None),
+                ("alpha", Some("50000")),
+            ]
+        );
+        assert_eq!(
+            crate::drawing::parse_color_container(
+                &XmlElement::new("a:solidFill").with_child(written)
+            ),
+            Some(color)
+        );
+    }
+
+    #[test]
+    fn mixed_color_alpha_survives_serialization() {
+        use ooxml_drawingml::{ColorTransform, resolve_color_value_to_rgba_hex};
+
+        for step in [None, Some(ColorTransform::AlphaMod(0.5))] {
+            let color = ColorValue {
+                rgb: Some("112233".to_owned()),
+                theme_tint: Some("00".to_owned()),
+                alpha: Some(0.25),
+                transforms: std::iter::once(ColorTransform::Tint(1.0))
+                    .chain(step)
+                    .collect(),
+                ..Default::default()
+            };
+            let mut properties = XmlElement::new("p:spPr");
+            let prefixes = Prefixes::from_root(&mut properties);
+            let written = color_element(&color, &prefixes).unwrap();
+            assert_eq!(written.child("alpha").is_some(), step.is_none());
+            assert_eq!(written.child_elements().count(), 2);
+            let reopened = crate::drawing::parse_color_container(
+                &XmlElement::new("a:solidFill").with_child(written),
+            )
+            .unwrap();
+            let expected = if step.is_none() {
+                "#11223340"
+            } else {
+                "#11223380"
+            };
+            assert_eq!(
+                resolve_color_value_to_rgba_hex(Some(&reopened), None).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn a_new_gradient_outline_writes_its_stops_and_angle() {
         let package =
             crate::parse_pptx(include_bytes!("../tests/fixtures/gradient-outline.pptx")).unwrap();
@@ -3897,6 +4065,51 @@ mod tests {
 
         let xml = String::from_utf8(serialize_xml(&root)).unwrap();
         assert!(xml.contains(r#"<a:srgbClr val="0F1720"/>"#), "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn a_patched_use_bg_fill_shape_keeps_the_attribute() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    fill: Some(ShapeFill {
+                        color: Some(ColorValue::from_attribute("DC2626")),
+                        ..ShapeFill::named("solid")
+                    }),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+
+        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
+        assert!(xml.contains(r#"useBgFill="1""#), "{xml}");
         assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
     }
 

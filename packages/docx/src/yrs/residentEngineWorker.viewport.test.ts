@@ -112,7 +112,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       state.retainedFrame.frameEpoch = revision;
       return { bytes, delta, caret: engine.residentCaretSnapshot() };
     },
-    readCellSelection, readResidentCellSelectionRects,
+    readCellSelection, readDocxSelectionFocus: () => null, readResidentCellSelectionRects,
     projectCommandEchoContext: () => undefined,
     commandEchoGlyphs: () => ({ provider: () => undefined, unsent: () => [], sent() {} }),
     readResidentRangeHighlights: async () => ({ rects: [[]] }),

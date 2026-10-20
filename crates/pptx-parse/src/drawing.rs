@@ -679,6 +679,7 @@ fn fallback_shape(
         geometry: shape_type.to_owned(),
         paths: Vec::new(),
         adjust_values: BTreeMap::new(),
+        use_bg_fill: false,
         style: None,
         fill: Some(ShapeFill {
             fill_type: "solid".to_owned(),
@@ -710,6 +711,9 @@ fn fallback_shape(
             wrap: Some(true),
             vertical_overflow: None,
             horizontal_overflow: None,
+            num_col: None,
+            spc_col: None,
+            rtl_col: None,
             inset_left: None,
             inset_top: None,
             inset_right: None,
@@ -807,6 +811,7 @@ fn parse_shape(
         ),
         geometry: parse_geometry(properties),
         has_preset_geometry: properties.is_some_and(|value| value.child("prstGeom").is_some()),
+        use_bg_fill: element.attribute("useBgFill").is_some_and(parse_bool),
         adjust_values: parse_adjust_values(properties, parse_shape_extent(transform)),
         fill: properties.and_then(parse_fill),
         picture_fill: properties
@@ -817,7 +822,7 @@ fn parse_shape(
         style: parse_shape_style(element.child("style"), properties).map(Box::new),
         text: element
             .child("txBody")
-            .map(|body| parse_text_body(body, part, budget))
+            .map(|body| parse_text_body_raw(body, part, budget))
             .transpose()?,
     })
 }
@@ -1778,12 +1783,12 @@ fn parse_color_element(color: &XmlElement) -> Option<ColorValue> {
         },
         _ => return None,
     };
-    parsed.theme_tint = color.child("tint").and_then(color_modifier);
-    parsed.theme_shade = color.child("shade").and_then(color_modifier);
-    parsed.luminance_modulation = color.child("lumMod").and_then(color_fraction);
-    parsed.luminance_offset = color.child("lumOff").and_then(color_fraction);
-    parsed.saturation_modulation = color.child("satMod").and_then(color_fraction);
-    parsed.alpha = color.child("alpha").and_then(color_fraction);
+    parsed.transforms = color
+        .child_elements()
+        .filter_map(|child| {
+            ooxml_drawingml::ColorTransform::from_xml(child.local_name(), child.attribute("val"))
+        })
+        .collect();
     Some(parsed)
 }
 
@@ -1812,28 +1817,6 @@ fn preset_color(value: &str) -> Option<&'static str> {
     }
 }
 
-/// A `ST_Percentage` in thousandths of a percent, as a fraction.
-fn color_fraction(element: &XmlElement) -> Option<f64> {
-    let value = element.attribute("val")?.trim();
-    let value = value
-        .strip_suffix('%')
-        .map(|percent| percent.parse::<f64>().map(|value| value * 1_000.0))
-        .unwrap_or_else(|| value.parse::<f64>())
-        .ok()?;
-    (value.is_finite() && (0.0..=1_000_000.0).contains(&value)).then_some(value / 100_000.0)
-}
-
-fn color_modifier(element: &XmlElement) -> Option<String> {
-    let value = element.attribute("val")?.parse::<f64>().ok()?;
-    if !value.is_finite() || !(0.0..=100_000.0).contains(&value) {
-        return None;
-    }
-    Some(format!(
-        "{:02X}",
-        (value / 100_000.0 * 255.0).round() as i64
-    ))
-}
-
 fn parse_crop(element: Option<&XmlElement>) -> PictureCrop {
     let Some(element) = element else {
         return PictureCrop::default();
@@ -1851,6 +1834,30 @@ pub(crate) fn parse_text_body(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<TextBody, PptxError> {
+    let mut body = parse_text_body_raw(element, part, budget)?;
+    normalize_text_columns(&mut body, 1);
+    Ok(body)
+}
+
+pub(crate) fn normalize_text_columns(body: &mut TextBody, inherited_columns: u8) {
+    if body.num_col == Some(1) && inherited_columns <= 1 {
+        body.num_col = None;
+    }
+    if body.num_col.unwrap_or(inherited_columns) <= 1 && inherited_columns <= 1 {
+        if body.spc_col == Some(0) {
+            body.spc_col = None;
+        }
+        if body.rtl_col == Some(false) {
+            body.rtl_col = None;
+        }
+    }
+}
+
+fn parse_text_body_raw(
+    element: &XmlElement,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<TextBody, PptxError> {
     let body_properties = element.child("bodyPr");
     let mut paragraphs = Vec::new();
     for paragraph in element.children_named("p") {
@@ -1864,6 +1871,13 @@ pub(crate) fn parse_text_body(
         vertical: body_properties
             .and_then(|value| value.attribute("vert"))
             .map(str::to_owned),
+        num_col: numeric_attribute(body_properties, "numCol")
+            .filter(|value| (1..=16).contains(value))
+            .map(|value| value as u8),
+        spc_col: numeric_attribute(body_properties, "spcCol").filter(|value| *value >= 0),
+        rtl_col: body_properties
+            .and_then(|value| value.attribute("rtlCol"))
+            .map(parse_bool),
         compat_line_spacing: body_properties
             .and_then(|value| value.attribute("compatLnSpc"))
             .map(parse_bool),
@@ -2204,7 +2218,100 @@ mod tests {
     use super::*;
     use crate::ParseLimits;
     use crate::xml::parse_xml;
-    use ooxml_drawingml::GeometryPathCommand;
+    use ooxml_drawingml::{ColorTransform, GeometryPathCommand};
+
+    #[test]
+    fn legacy_color_json_keeps_its_resolution_and_serialized_shape() {
+        let source = serde_json::json!({
+            "rgb": "204060",
+            "themeTint": "80",
+            "alpha": 0.5,
+        });
+        let color: ColorValue = serde_json::from_value(source.clone()).unwrap();
+        assert!(color.transforms.is_empty());
+        assert_eq!(serde_json::to_value(&color).unwrap(), source);
+        assert_eq!(
+            ooxml_drawingml::resolve_color_value_to_rgba_hex(Some(&color), None).as_deref(),
+            Some("#8F9FAF80")
+        );
+    }
+
+    #[test]
+    fn malformed_legacy_transforms_do_not_change_the_color() {
+        for (name, maximum) in [
+            ("tint", 100_000),
+            ("shade", 100_000),
+            ("lumMod", 1_000_000),
+            ("lumOff", 1_000_000),
+            ("satMod", 1_000_000),
+            ("alpha", 1_000_000),
+        ] {
+            for value in [-1, maximum + 1] {
+                let xml =
+                    format!(r#"<a:srgbClr val="4472C4"><a:{name} val="{value}"/></a:srgbClr>"#);
+                let limits = ParseLimits::default();
+                let root =
+                    parse_xml(xml.as_bytes(), "color.xml", &mut ParseBudget::new(&limits)).unwrap();
+                let color = parse_color_element(&root).unwrap();
+                assert!(color.transforms.is_empty(), "{xml}");
+                assert_eq!(
+                    ooxml_drawingml::resolve_color_value_to_rgba_hex(Some(&color), None).as_deref(),
+                    Some("#4472C4FF"),
+                    "{xml}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drawingml_palette_colors_match_reference_values() {
+        for (rgb, modifiers, expected) in [
+            ("4472C4", r#"<a:tint val="40000"/>"#, "#CFD5EA"),
+            ("4472C4", r#"<a:tint val="20000"/>"#, "#E9EBF5"),
+            ("4F81BD", r#"<a:tint val="60000"/>"#, "#B2C1DB"),
+            ("000000", r#"<a:tint val="50000"/>"#, "#BCBCBC"),
+            ("4472C4", r#"<a:shade val="50000"/>"#, "#2F528F"),
+            ("4F81BD", r#"<a:shade val="50000"/>"#, "#385D8A"),
+            (
+                "4472C4",
+                r#"<a:lumMod val="60000"/><a:lumOff val="40000"/>"#,
+                "#8FAADC",
+            ),
+            ("4472C4", r#"<a:lumMod val="75000"/>"#, "#2F5597"),
+            ("6254E7", r#"<a:tint val="50000"/>"#, "#C5C3F3"),
+        ] {
+            let xml = format!(r#"<a:srgbClr val="{rgb}">{modifiers}</a:srgbClr>"#);
+            let limits = ParseLimits::default();
+            let root =
+                parse_xml(xml.as_bytes(), "color.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let color = parse_color_element(&root).unwrap();
+            assert_eq!(
+                ooxml_drawingml::resolve_color_value_to_hex(Some(&color)).as_deref(),
+                Some(expected),
+                "{xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn drawingml_color_transforms_follow_document_order() {
+        for (modifiers, expected) in [
+            (r#"<a:tint val="50000"/><a:lumMod val="50000"/>"#, "#3F5493"),
+            (r#"<a:lumMod val="50000"/><a:tint val="50000"/>"#, "#BDBFC6"),
+            (r#"<a:shade val="50000"/><a:shade val="50000"/>"#, "#203A68"),
+        ] {
+            let xml = format!(r#"<a:srgbClr val="4472C4">{modifiers}</a:srgbClr>"#);
+            let limits = ParseLimits::default();
+            let root =
+                parse_xml(xml.as_bytes(), "color.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let color = parse_color_element(&root).unwrap();
+            assert_eq!(
+                ooxml_drawingml::resolve_color_value_to_hex(Some(&color)).as_deref(),
+                Some(expected),
+                "{xml}"
+            );
+        }
+    }
 
     #[test]
     fn a_kern_threshold_reads_in_points_within_the_schema_range() {
@@ -2452,6 +2559,39 @@ mod tests {
             picture.media_part_path.as_deref(),
             Some("ppt/media/vector.svg")
         );
+    }
+
+    #[test]
+    fn a_use_bg_fill_shape_records_the_attribute() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="Background"/><p:nvPr/></p:nvSpPr><p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style></p:sp><p:sp useBgFill="0"><p:nvSpPr><p:cNvPr id="3" name="Plain"/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="Unmarked"/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let values: Vec<serde_json::Value> = data
+            .shapes
+            .iter()
+            .map(|node| {
+                let ShapeNode::Shape(shape) = node else {
+                    panic!("expected a shape");
+                };
+                serde_json::to_value(shape).unwrap()
+            })
+            .collect();
+        assert_eq!(values[0]["useBgFill"], serde_json::json!(true));
+        assert_eq!(values[1]["useBgFill"], serde_json::Value::Null);
+        assert_eq!(values[2]["useBgFill"], serde_json::Value::Null);
     }
 
     #[test]
@@ -2795,14 +2935,14 @@ mod tests {
                     }),
                     to: Some(ColorValue {
                         rgb: Some("FFFFFF".to_owned()),
-                        alpha: Some(0.0),
+                        transforms: vec![ColorTransform::Alpha(0.0)],
                         ..ColorValue::default()
                     }),
                 },
                 BlipEffect::Duotone {
                     shadow: Some(ColorValue {
                         theme_color: Some("background2".to_owned()),
-                        theme_shade: Some("73".to_owned()),
+                        transforms: vec![ColorTransform::Shade(0.45)],
                         ..ColorValue::default()
                     }),
                     highlight: Some(ColorValue {
@@ -3162,6 +3302,77 @@ mod tests {
         assert!(json.get("verticalOverflow").is_none());
         assert!(json.get("horizontalOverflow").is_none());
         assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), *body);
+    }
+
+    #[test]
+    fn text_columns_parse_count_spacing_and_direction() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:txBody><a:bodyPr numCol="2" spcCol="457200" rtlCol="1"/><a:p/></p:txBody>"#,
+            "text.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["numCol"], 2);
+        assert_eq!(json["spcCol"], 457_200);
+        assert_eq!(json["rtlCol"], true);
+        assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), body);
+    }
+
+    #[test]
+    fn text_columns_default_and_invalid_attributes_keep_the_legacy_json() {
+        for count in ["", "0", "17", "-1", "two"] {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(r#"<p:txBody><a:bodyPr numCol="{count}"/><a:p/></p:txBody>"#);
+            let root = parse_xml(xml.as_bytes(), "text.xml", &mut budget).unwrap();
+            let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+            let json = serde_json::to_value(body).unwrap();
+            assert!(json.get("numCol").is_none(), "{count}");
+            assert!(json.get("spcCol").is_none());
+            assert!(json.get("rtlCol").is_none());
+        }
+    }
+
+    #[test]
+    fn text_columns_default_attributes_serialize_identically_to_absent_attributes() {
+        let parse = |attributes: &str| {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(r#"<p:txBody><a:bodyPr {attributes}/><a:p/></p:txBody>"#);
+            let root = parse_xml(xml.as_bytes(), "text.xml", &mut budget).unwrap();
+            serde_json::to_vec(&parse_text_body(&root, "text.xml", &mut budget).unwrap()).unwrap()
+        };
+        let absent = parse("");
+        for attributes in [
+            r#"rtlCol="0""#,
+            r#"spcCol="0""#,
+            r#"numCol="1""#,
+            r#"numCol="1" rtlCol="0" spcCol="0""#,
+        ] {
+            assert_eq!(parse(attributes), absent, "{attributes}");
+        }
+    }
+
+    #[test]
+    fn text_columns_preserve_the_maximum_column_count() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:txBody><a:bodyPr numCol="16" spcCol="0" rtlCol="0"/><a:p/></p:txBody>"#,
+            "text.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["numCol"], 16);
+        assert_eq!(json["spcCol"], 0);
+        assert_eq!(json["rtlCol"], false);
+        assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), body);
     }
 
     #[test]
@@ -3807,8 +4018,10 @@ mod tests {
         assert!(!shadow.rotate_with_shape);
         let color = shadow.color.expect("the shadow should have a colour");
         assert_eq!(color.theme_color.as_deref(), Some("background1"));
-        assert_eq!(color.luminance_modulation, Some(0.5));
-        assert_eq!(color.alpha, Some(0.4));
+        assert_eq!(
+            color.transforms,
+            vec![ColorTransform::LumMod(0.5), ColorTransform::Alpha(0.4)]
+        );
 
         assert_eq!(effects_of(&data.shapes[1]), None);
         assert_eq!(effects_of(&data.shapes[2]), None);

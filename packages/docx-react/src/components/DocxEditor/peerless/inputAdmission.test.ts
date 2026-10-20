@@ -230,6 +230,26 @@ test('read-only admission forwards the host proposal grant and refuses proposals
   admission.dispose();
 });
 
+test('pending inputs count unacked edits and selections but not environment or mode commands', async () => {
+  const { admission, submitted } = lane();
+  try {
+    admission.setReadOnly(false);
+    admitIntent(admission, { kind: 'setRenderEnvironment', payload: { themeColors: {}, showHiddenText: true } }, { fence: true });
+    expect(admission.getSnapshot().pendingInputs).toBe(0);
+    admitIntent(admission, { kind: 'insertText', payload: { text: 'a' } });
+    expect(admission.getSnapshot().pendingInputs).toBe(1);
+    for (const [index, entry] of submitted.entries()) entry.settle({ status: 'applied', seq: index + 1 });
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    expect(admission.getSnapshot().pendingInputs).toBe(0);
+    admitIntent(admission, { kind: 'insertText', payload: { text: 'b' } });
+    expect(admission.getSnapshot().pendingInputs).toBe(1);
+  } finally { admission.dispose(); }
+  expect(admission.getSnapshot().pendingInputs).toBe(0);
+  submitted.at(-1)!.settle({ status: 'applied', seq: submitted.length });
+  for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  expect(admission.getSnapshot().pendingInputs).toBe(0);
+});
+
 function lane() {
   let selectionThroughSeq = 0;
   let selection: DocxCommandSelection = {

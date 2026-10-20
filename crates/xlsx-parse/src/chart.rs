@@ -80,11 +80,74 @@ pub fn chart_space(part: &[u8], theme: &Theme) -> Option<ChartSpace> {
     #[cfg(feature = "test-counters")]
     CHART_SPACE_DECODES.set(CHART_SPACE_DECODES.get().wrapping_add(1));
     let root = parse_tree(part).ok()?;
-    if has_3d_plot(&root, 0) {
+    if has_surface_3d_plot(&root, 0) {
         return None;
     }
     let drawing_theme = drawing_theme(theme);
-    parse_chart_space(&ChartNode::new(&root, &drawing_theme))
+    let mut space = parse_chart_space(&ChartNode::new(&root, &drawing_theme))?;
+    drop_depth_axes(&root, &mut space);
+    Some(space)
+}
+
+/// A 3-D surface flattens to a wireframe grid that no longer follows its
+/// values, so it stays refused.
+fn has_surface_3d_plot(element: &Element, depth: usize) -> bool {
+    element.local_name() == "surface3DChart"
+        || (depth < MAX_DEPTH
+            && element
+                .child_elements()
+                .any(|child| has_surface_3d_plot(child, depth + 1)))
+}
+
+/// A 3-D bar, line or area plot names a third axis for its depth, often `0`
+/// with no axis behind it. Drawn flat there is no depth axis, so that id is
+/// dropped; a third id that names a category or value axis stays and is
+/// validated like any other.
+fn drop_depth_axes(root: &Element, space: &mut ChartSpace) {
+    let Some(plot_area) = root
+        .child_elements()
+        .find(|child| child.local_name() == "chart")
+        .and_then(|chart| {
+            chart
+                .child_elements()
+                .find(|child| child.local_name() == "plotArea")
+        })
+    else {
+        return;
+    };
+    let plots = plot_area
+        .child_elements()
+        .filter(|child| child.local_name().ends_with("Chart"))
+        .collect::<Vec<_>>();
+    if plots.len() != space.plot_groups.len() {
+        return;
+    }
+    let axes = space.axis_list.as_deref().unwrap_or_default();
+    for (plot, group) in plots.iter().zip(&mut space.plot_groups) {
+        if !matches!(
+            plot.local_name(),
+            "bar3DChart" | "line3DChart" | "area3DChart"
+        ) || group.axis_ids.len() != 3
+        {
+            continue;
+        }
+        let depth = &group.axis_ids[2];
+        if axes
+            .iter()
+            .filter(|axis| axis.id.as_deref().is_some_and(|id| same_axis_id(id, depth)))
+            .all(|axis| axis.axis_type == "series")
+        {
+            group.axis_ids.truncate(2);
+        }
+    }
+}
+
+fn same_axis_id(first: &str, second: &str) -> bool {
+    let (first, second) = (first.trim(), second.trim());
+    match (first.parse::<i128>(), second.parse::<i128>()) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => first == second,
+    }
 }
 
 /// Upper bound on the references one part may have projected, so a hostile
@@ -402,14 +465,6 @@ fn names_a_foreign_vocabulary(part: &[u8]) -> bool {
     ["pivotSource", "externalData", "sqref", "chartex"]
         .iter()
         .any(|needle| text.contains(needle))
-}
-
-fn has_3d_plot(element: &Element, depth: usize) -> bool {
-    element.local_name().ends_with("3DChart")
-        || (depth < MAX_DEPTH
-            && element
-                .child_elements()
-                .any(|child| has_3d_plot(child, depth + 1)))
 }
 
 /// A chart element with the workbook theme bound to it, so scheme colors

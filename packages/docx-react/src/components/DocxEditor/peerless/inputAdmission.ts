@@ -23,6 +23,7 @@ export interface PeerlessAdmissionSnapshot {
   readOnly: boolean;
   tail: CommandTicket | undefined;
   originalUnackedIntents: number;
+  pendingInputs: number;
   echoEnabled: boolean;
   echoDisabledReason: 'context-cap' | 'intent-cap' | 'fence' | 'unsupported-shaping' | null;
   compositionSlot: number | null;
@@ -93,6 +94,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     release(result: PeerlessAdmissionResult): void; drop(error: Error): void }> = [];
   let tail: CommandTicket | undefined;
   let originalUnackedIntents = 0;
+  let pendingInputs = 0;
   let echoDisabledReason: PeerlessAdmissionSnapshot['echoDisabledReason'] = null;
   let compositionSlot: number | null = null;
   let nextSlot = 0;
@@ -160,7 +162,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       const throughSeq = Math.max(predecessor?.seq ?? 0, snapshot.throughSeq, session.state.throughSeq);
       if (!geometry || geometry.coversThroughSeq < throughSeq) return;
       const rect = direction === 'down' ? geometry.selectionRects.at(-1) : geometry.selectionRects[0];
-      const goalX = geometry.caret ? verticalGoal ?? geometry.caret.x
+      const focus = geometry.caret ?? geometry.selectionFocus;
+      const goalX = focus ? verticalGoal ?? focus.x
         : rect ? rect.x + (direction === 'down' ? rect.width : 0)
           : verticalGoal ?? geometry.pages[0]?.bounds.x ?? 0;
       finish();
@@ -304,6 +307,11 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         (intent.kind === 'formatRange' && !workerSelection())
         ? defer(after, waitForSelection, send, vertical) : send(after)!;
       track(ticket, isRevision(intent));
+      if (!environment) {
+        pendingInputs += 1;
+        const done = () => { if (!disposed) pendingInputs -= 1; };
+        void ticket.ack.then(done, done);
+      }
       return { status: 'submitted', ticket, echoEnabled: echo !== undefined };
     } catch (error) {
       if (!counted) releaseCount();
@@ -319,7 +327,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     },
     getSnapshot: () => ({
       readOnly: readOnly(),
-      tail, originalUnackedIntents, echoEnabled: echoDisabledReason === null,
+      tail, originalUnackedIntents, pendingInputs, echoEnabled: echoDisabledReason === null,
       echoDisabledReason, compositionSlot, heldIntents: held.length,
     }),
     setSuggesting(author) { suggesting = author; },
@@ -393,6 +401,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       cancellations.clear();
       for (const entry of held.splice(0)) entry.drop(disposedError());
       pending.clear();
+      pendingInputs = 0;
       modeListeners.clear();
       tail = undefined;
       compositionSlot = null;

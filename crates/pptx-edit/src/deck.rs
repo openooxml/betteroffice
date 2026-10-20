@@ -609,6 +609,7 @@ impl DeckSession {
         shape.insert(&mut txn, "id", shape_id.as_str());
         shape.insert(&mut txn, "sourceId", 0_f64);
         shape.insert(&mut txn, "kind", "shape");
+        shape.insert(&mut txn, "textBox", true);
         shape.insert(&mut txn, "name", draft.name.as_str());
         shape.insert(&mut txn, "x", draft.rect.x as f64);
         shape.insert(&mut txn, "y", draft.rect.y as f64);
@@ -1539,11 +1540,17 @@ fn merge_source_text_body(
     let mut changed = target.list_style != source.list_style
         || target.default_list_style != source.default_list_style
         || target.compat_line_spacing != source.compat_line_spacing
+        || target.num_col != source.num_col
+        || target.spc_col != source.spc_col
+        || target.rtl_col != source.rtl_col
         || target.vertical_overflow != source.vertical_overflow
         || target.horizontal_overflow != source.horizontal_overflow;
     target.vertical_overflow = source.vertical_overflow;
     target.horizontal_overflow = source.horizontal_overflow;
     target.compat_line_spacing = source.compat_line_spacing;
+    target.num_col = source.num_col;
+    target.spc_col = source.spc_col;
+    target.rtl_col = source.rtl_col;
     target.list_style.clone_from(&source.list_style);
     target
         .default_list_style
@@ -2369,6 +2376,25 @@ fn validate_background_color(color: &ColorValue) -> EditResult<()> {
             )));
         }
     }
+    for transform in &color.transforms {
+        use ooxml_drawingml::ColorTransform::*;
+
+        let valid = match *transform {
+            Tint(value) | Shade(value) | LumMod(value) | LumOff(value) | SatMod(value)
+            | Alpha(value) => value.is_finite() && (0.0..=1.0).contains(&value),
+            Hue(value) | HueMod(value) | HueOff(value) | Sat(value) | SatOff(value)
+            | Lum(value) | Red(value) | RedMod(value) | RedOff(value) | Green(value)
+            | GreenMod(value) | GreenOff(value) | Blue(value) | BlueMod(value) | BlueOff(value)
+            | AlphaMod(value) | AlphaOff(value) => value.is_finite(),
+            Comp | Inv | Gray | Gamma | InvGamma => true,
+        };
+        if !valid {
+            return Err(EditError::InvalidFill(format!(
+                "background colour transform {} has an invalid value",
+                transform.xml_name()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -2492,6 +2518,7 @@ pub(crate) fn shape_parts<T: ReadTxn>(
         flip_v: map_bool(&shape, txn, "flipV").unwrap_or_default(),
         inherited: None,
         hidden: map_bool(&shape, txn, "hidden").unwrap_or_default(),
+        text_box: map_bool(&shape, txn, "textBox").unwrap_or_default(),
         aspect_ratio_locked: map_bool(&shape, txn, "aspectRatioLocked").unwrap_or_default(),
         geometry: required_string(&shape, txn, "geometry")?,
         adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
@@ -2696,6 +2723,7 @@ fn baseline_shape(
         flip_v: transform.flip_v,
         inherited: None,
         hidden: base.hidden,
+        text_box: false,
         aspect_ratio_locked: matches!(shape, ShapeNode::Picture(picture) if picture.aspect_ratio_locked),
         geometry,
         adjust_values,
@@ -4034,6 +4062,19 @@ mod tests {
         assert!(merge_source_chart_properties(&mut target, &source));
         assert_eq!(target, source);
         assert!(!merge_source_chart_properties(&mut target, &source));
+    }
+
+    #[test]
+    fn text_columns_are_restored_when_a_source_is_reattached() {
+        let mut json = serde_json::to_value(pptx_parse::TextBody::default()).unwrap();
+        json["numCol"] = 2.into();
+        json["spcCol"] = 457_200.into();
+        json["rtlCol"] = true.into();
+        let source = serde_json::from_value(json).unwrap();
+        let mut target = pptx_parse::TextBody::default();
+        assert!(merge_source_text_body(&mut target, &source));
+        assert_eq!(target, source);
+        assert!(!merge_source_text_body(&mut target, &source));
     }
 
     #[test]

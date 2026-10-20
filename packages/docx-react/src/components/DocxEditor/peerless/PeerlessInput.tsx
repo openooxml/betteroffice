@@ -50,22 +50,24 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const position = () => {
       const state = viewStore.getSnapshot();
       const geometry = state.geometry;
-      if (composing.current || !geometry?.caret || geometry.coversThroughSeq < state.throughSeq) return;
+      const cellFocus = !geometry?.caret && !geometry?.selectionFocus ? geometry?.selectionRects.at(-1) : undefined;
+      const focus = geometry?.caret ?? geometry?.selectionFocus ?? cellFocus;
+      if (composing.current || !geometry || !focus || geometry.coversThroughSeq < state.throughSeq) return;
       const host = props.caretHostRef?.current;
       const bounds = host?.getBoundingClientRect();
       const zoom = props.zoom ?? 1;
       const scale = effectiveZoom(element);
-      const top = (bounds?.top ?? 0) + geometry.caret.y * zoom;
-      const height = Math.max(1, geometry.caret.height * zoom);
-      element.style.left = `${((bounds?.left ?? 0) + geometry.caret.x * zoom) / scale}px`;
+      const top = (bounds?.top ?? 0) + focus.y * zoom;
+      const height = Math.max(1, focus.height * zoom);
+      element.style.left = `${((bounds?.left ?? 0) + focus.x * zoom) / scale}px`;
       element.style.top = `${top / scale}px`;
       element.style.height = `${height / scale}px`;
       const selection = state.workerSelection;
       const key = selection ? JSON.stringify([selection.anchor.story, selection.anchor.paraId, selection.anchor.offset,
-        selection.focus.story, selection.focus.paraId, selection.focus.offset]) : '';
+        selection.focus.story, selection.focus.paraId, selection.focus.offset, cellFocus]) : '';
       const changed = key !== revealed.current;
       revealed.current = key;
-      if (!changed || !host || state.editState?.readOnly || document.activeElement !== element) return;
+      if (!changed || !host || document.activeElement !== element) return;
       const scroller = findVerticalScrollParentOrRoot(host);
       const delta = scrollIntoViewDelta(scrollViewport(scroller), top, top + height, 24);
       if (delta) scroller.scrollTop += delta;
@@ -117,6 +119,15 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         : event.key === 'Delete' ? 'deleteContentForward'
         : event.key === 'Enter' ? 'insertParagraph' : null;
       active = { id: ++nextEventId, phase: 'start', inputType, keyboard: true };
+      let pageDistance: number | undefined;
+      if ((event.key === 'PageUp' || event.key === 'PageDown') && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        const snapshot = viewStore.getSnapshot();
+        if (snapshot.geometry?.caret || snapshot.workerSelection || admission.session.state.selection || admission.getSnapshot().pendingInputs > 0) {
+          const host = callbacks.current.caretHostRef?.current ?? element;
+          const viewport = scrollViewport(findVerticalScrollParentOrRoot(host));
+          pageDistance = viewport.height * viewport.zoom / (effectiveZoom(host) * (callbacks.current.zoom ?? 1));
+        }
+      }
       if (tableTab) {
         event.preventDefault();
         state = { ...state, lastHandledEventId: active.id };
@@ -127,7 +138,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       }
       else dispatch({ source: 'keydown', eventId: active.id, inputTime: event.timeStamp,
         key: event.key, code: event.code, shift: event.shiftKey, alt: event.altKey,
-        ctrl: event.ctrlKey, meta: event.metaKey,
+        ctrl: event.ctrlKey, meta: event.metaKey, pageDistance,
       }, event);
       if (isReadOnly() && (inputType !== null || (!(event.ctrlKey || event.metaKey || event.altKey) && event.key.length === 1))) {
         event.preventDefault();

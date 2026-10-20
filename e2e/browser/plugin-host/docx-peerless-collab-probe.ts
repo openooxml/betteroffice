@@ -1,6 +1,7 @@
 export interface DocxPeerlessCollaborationProbe {
   errors: string[];
   ready: Promise<void>;
+  load(bytes: number[]): Promise<void>;
   text(index: number, view?: 'accepted' | 'original'): Promise<string>;
   painted(index: number): string;
   generation(index: number): number;

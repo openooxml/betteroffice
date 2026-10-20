@@ -45,10 +45,11 @@ use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
 use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments, utf16_len};
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
-    BlockExtent, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock, ImageExtent,
-    ImageFragment, ImageRunPosition, Input, Layout, LayoutBlock, MeasuredBlock, ParagraphBlock,
-    ParagraphExtent, ParagraphFragment, ReservedBlock, ReservedFragment, Run, SectionBreakType,
-    ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent, TextBoxFragment,
+    BlockExtent, BlockId, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock,
+    ImageExtent, ImageFragment, ImageRunPosition, Input, Layout, LayoutBlock, MeasuredBlock,
+    ParagraphBlock, ParagraphExtent, ParagraphFragment, ReservedBlock, ReservedFragment, Run,
+    SectionBreakType, ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent,
+    TextBoxFragment,
 };
 
 /// Default page size (US Letter in pixels at 96 DPI).
@@ -460,6 +461,22 @@ pub fn layout_document(input: &mut Input) -> Result<Layout, LayoutError> {
 
 /// Full placement while retaining clean page-start checkpoints in Rust.
 pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLayout, LayoutError> {
+    layout_document_recording_columns(input, None)
+}
+
+/// Placement with each flow fragment's containing column width.
+pub fn layout_document_with_column_widths(
+    input: &mut Input,
+) -> Result<(Layout, Vec<(BlockId, f64)>), LayoutError> {
+    let mut widths = Vec::new();
+    let run = layout_document_recording_columns(input, Some(&mut widths))?;
+    Ok((run.layout, widths))
+}
+
+fn layout_document_recording_columns(
+    input: &mut Input,
+    column_widths: Option<&mut Vec<(BlockId, f64)>>,
+) -> Result<CheckpointedLayout, LayoutError> {
     let measured = &mut input.measured;
     let options = &input.options;
 
@@ -507,6 +524,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
 
     let mut paginator = origin_paginator(&initial_config, &plan, options)?;
+    paginator.fragment_column_widths = column_widths.as_ref().map(|_| Vec::new());
 
     let placement = place::<u64>(
         measured,
@@ -525,6 +543,9 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     }
 
     let page_count = paginator.pages.len();
+    if let Some(widths) = column_widths {
+        *widths = paginator.fragment_column_widths.take().unwrap_or_default();
+    }
     Ok(CheckpointedLayout {
         layout: Layout {
             page_size,

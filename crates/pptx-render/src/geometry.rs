@@ -55,6 +55,22 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
                 | "horizontalScroll"
                 | "wave"
                 | "doubleWave"
+                | "bevel"
+                | "bracePair"
+                | "bracketPair"
+                | "ellipseRibbon2"
+                | "flowChartOr"
+                | "flowChartPunchedTape"
+                | "flowChartSummingJunction"
+                | "funnel"
+                | "leftRightCircularArrow"
+                | "leftRightRibbon"
+                | "mathDivide"
+                | "pieWedge"
+                | "plaque"
+                | "plaqueTabs"
+                | "smileyFace"
+                | "sun"
         )
     {
         stroke.join = Some("round".to_owned());
@@ -400,6 +416,20 @@ mod tests {
             "curvedDownArrow",
             "verticalScroll",
             "horizontalScroll",
+            "bevel",
+            "bracePair",
+            "bracketPair",
+            "chartPlus",
+            "chartStar",
+            "chartX",
+            "ellipseRibbon2",
+            "flowChartMultidocument",
+            "flowChartOfflineStorage",
+            "flowChartOr",
+            "flowChartSort",
+            "flowChartSummingJunction",
+            "leftRightRibbon",
+            "smileyFace",
         ] {
             let source = serde_json::from_value(serde_json::json!({
                 "kind": "shape", "objectId": 1, "name": "shadow", "geometry": geometry,

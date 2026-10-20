@@ -6921,4 +6921,19 @@ mod tests {
         ]);
         assert!(image_outline(&values, &RenderEnv::default()).is_none());
     }
+
+    #[test]
+    fn image_outlines_read_legacy_and_ordered_colour_modifiers_alike() {
+        for color in [
+            json!({"rgb":"FFFFFF","luminanceModulation":0.75}),
+            json!({"rgb":"FFFFFF","transforms":[{"kind":"lumMod","value":0.75}]}),
+        ] {
+            let values = HashMap::from([(
+                "borderColorValue".to_owned(),
+                serde_json::from_value::<Any>(color).unwrap(),
+            )]);
+            let outline = image_outline(&values, &RenderEnv::default()).unwrap();
+            assert_eq!(outline.color.as_deref(), Some("#BFBFBF"));
+        }
+    }
 }

@@ -52,7 +52,7 @@ use ooxml_opc::PackageBytes;
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
+use yrs::{Any, Assoc, IndexedSequence, ReadTxn, StickyIndex, Subscription, Transact};
 
 use crate::batch::outcome_json;
 use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
@@ -2326,8 +2326,10 @@ impl EditSession {
         ranges: Vec<f64>,
     ) -> Result<Vec<f64>, JsValue> {
         let ranges: Vec<(i64, i64)> = ranges
-            .chunks_exact(2)
-            .map(|pair| (pair[0] as i64, pair[1] as i64))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[from, to]| (from as i64, to as i64))
             .collect();
         let batches = self
             .engine
@@ -5620,6 +5622,7 @@ pub fn render_docx_markdown_with_pages_json(
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+    use yrs::Map;
 
     #[test]
     fn line_break_inserts_one_inline_unit_and_is_undoable() {

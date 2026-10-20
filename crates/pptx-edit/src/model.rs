@@ -141,6 +141,8 @@ pub struct ShapeSnapshot {
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "is_false")]
+    pub text_box: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub aspect_ratio_locked: bool,
     pub geometry: String,
     pub adjust_values: BTreeMap<String, f64>,

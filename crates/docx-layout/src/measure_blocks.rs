@@ -68,6 +68,16 @@ pub struct FloatPageGeometry {
     pub content_height: f64,
 }
 
+const MAX_COLUMN_ZONE_Y: f64 = 10_000_000.0;
+
+/// Paragraph-relative column slots selected by pagination.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnWidthBand {
+    pub top: f64,
+    pub bottom: f64,
+    pub width: f64,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeasurementConfig {
@@ -726,6 +736,27 @@ pub fn measure_blocks_with_table_frames(
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<BlockExtent>, String> {
+    measure_blocks_with_column_frames(
+        blocks,
+        widths,
+        table_frames,
+        config,
+        page_geometry,
+        shape_offsets,
+        &BTreeMap::new(),
+    )
+}
+
+/// Measures flow in pagination's column slots.
+pub fn measure_blocks_with_column_frames(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+    column_bands: &BTreeMap<usize, Vec<ColumnWidthBand>>,
+) -> Result<Vec<BlockExtent>, String> {
     let default_width = widths.first().copied().unwrap_or(0.0);
     let (extracted, _) = extract_floating_zones_recorded(
         blocks,
@@ -739,15 +770,35 @@ pub fn measure_blocks_with_table_frames(
     )?;
     let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
     let marks = section_break_marks(blocks);
-    measure_float_flow(
-        blocks,
-        widths,
-        default_width,
-        config,
-        &paragraph_zones,
-        &zones_by_anchor,
-        &marks,
-    )
+    if column_bands.is_empty() {
+        return measure_float_flow(
+            blocks,
+            widths,
+            default_width,
+            config,
+            &paragraph_zones,
+            &zones_by_anchor,
+            &marks,
+        );
+    }
+    let mut flow = FlowState::default();
+    blocks
+        .iter_mut()
+        .enumerate()
+        .map(|(index, block)| {
+            flow.measure(
+                index,
+                block,
+                widths,
+                default_width,
+                config,
+                &paragraph_zones,
+                &zones_by_anchor,
+                &marks,
+                column_bands.get(&index).map(Vec::as_slice),
+            )
+        })
+        .collect()
 }
 
 /// Whether float measurement clears its floating zones at `block`: page,
@@ -1059,6 +1110,7 @@ fn measure_float_flow(
             paragraph_zones,
             zones_by_anchor,
             section_break_marks,
+            None,
         )?);
     }
     Ok(measured)
@@ -1089,6 +1141,7 @@ fn measure_float_flow_recorded(
                 paragraph_zones,
                 zones_by_anchor,
                 section_break_marks,
+                None,
             )
         });
         let unknown = FontChainDependencies::unknown();
@@ -1120,6 +1173,7 @@ impl FlowState {
         paragraph_zones: &ParagraphZones,
         zones_by_anchor: &AnchorZones,
         section_break_marks: &[bool],
+        column_bands: Option<&[ColumnWidthBand]>,
     ) -> Result<BlockExtent, String> {
         let Self {
             cumulative_y,
@@ -1152,11 +1206,38 @@ impl FlowState {
                 active_zones.clone_from(zones);
             }
         }
-        let width = widths.get(index).copied().unwrap_or(default_width);
+        let mut width = widths.get(index).copied().unwrap_or(default_width);
+        let column_bands = match column_bands {
+            Some(bands)
+                if active_zones.len() + bands.iter().filter(|band| band.width < width).count()
+                    > MAX_ACTIVE_ZONES =>
+            {
+                width = bands.iter().map(|band| band.width).fold(width, f64::min);
+                None
+            }
+            bands => bands,
+        };
         // A bare paragraph mark carrying section properties is the section
         // break itself and prints no line, unless it is everything its section
         // holds: Word lays such a section out one line tall.
-        let extent = if section_break_marks.get(index).copied().unwrap_or(false) {
+        let mut local_zones = Vec::new();
+        let zones = if let Some(bands) = column_bands {
+            local_zones.clone_from(active_zones);
+            local_zones.extend(bands.iter().filter(|band| band.width < width).map(|band| {
+                FloatingZone {
+                    left_margin: 0.0,
+                    right_margin: width - band.width,
+                    top_y: band.top + *cumulative_y,
+                    bottom_y: (band.bottom + *cumulative_y).min(MAX_COLUMN_ZONE_Y),
+                    segments: Vec::new(),
+                    full_width_block: false,
+                }
+            }));
+            local_zones.as_slice()
+        } else {
+            active_zones.as_slice()
+        };
+        let mut extent = if section_break_marks.get(index).copied().unwrap_or(false) {
             BlockExtent::Paragraph(ParagraphExtent {
                 lines: Vec::new(),
                 total_height: 0.0,
@@ -1166,10 +1247,29 @@ impl FlowState {
                 block,
                 width,
                 config,
-                (!active_zones.is_empty()).then_some(active_zones.as_slice()),
+                (!zones.is_empty()).then_some(zones),
                 *cumulative_y,
             )?
         };
+        if let (Some(bands), BlockExtent::Paragraph(paragraph)) = (column_bands, &mut extent) {
+            // Fragment widths already include the column inset used while shaping.
+            let mut y = match block {
+                LayoutBlock::Paragraph(block) => {
+                    crate::paragraph_spacing::get_spacing_before(block)
+                }
+                _ => 0.0,
+            };
+            for line in &mut paragraph.lines {
+                y += line.float_skip_before.unwrap_or(0.0);
+                if let Some(band) = bands.iter().find(|band| band.top <= y && y < band.bottom) {
+                    let column_inset = width - band.width;
+                    line.right_offset = line
+                        .right_offset
+                        .map(|offset| (offset - column_inset).max(0.0));
+                }
+                y += line.line_height;
+            }
+        }
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
             && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
         {
@@ -1278,6 +1378,7 @@ impl FloatFlow {
                     &self.paragraph_zones,
                     &self.zones_by_anchor,
                     &self.marks,
+                    None,
                 )
             });
             dependencies.extend(&self.zone_dependencies[index]);
@@ -3613,6 +3714,45 @@ mod tests {
             defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn column_bands_past_the_zone_limit_measure_at_the_narrowest_slot() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind":"paragraph","id":"long","runs":[{"kind":"text","text":"word ".repeat(2000)}]}
+        ]))
+        .unwrap();
+        let mut bands: Vec<_> = (0..450)
+            .map(|slot| ColumnWidthBand {
+                top: slot as f64 * 14.0,
+                bottom: (slot + 1) as f64 * 14.0,
+                width: if slot % 2 == 0 { 300.0 } else { 200.0 },
+            })
+            .collect();
+        bands.last_mut().unwrap().bottom = f64::INFINITY;
+        let measures = measure_blocks_with_column_frames(
+            &mut blocks,
+            &[300.0],
+            &[] as &[bool],
+            &config,
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, bands)]),
+        )
+        .unwrap();
+        let BlockExtent::Paragraph(paragraph) = &measures[0] else {
+            panic!()
+        };
+        assert!(paragraph.lines.len() > 200);
+        assert!(
+            paragraph
+                .lines
+                .iter()
+                .all(|line| line.synthetic_fallback != Some(true) && line.width <= 210.0)
+        );
     }
 
     #[test]

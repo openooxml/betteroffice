@@ -1415,6 +1415,123 @@ fn a_resized_inherited_placeholder_keeps_its_inherited_offset() {
 }
 
 #[test]
+fn added_text_boxes_save_their_identity_without_changing_existing_shapes() {
+    for text in ["", "Saved note"] {
+        let session = open();
+        let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+        let rect = ShapeRect {
+            x: 100_000,
+            y: 200_000,
+            width: 3_000_000,
+            height: 500_000,
+        };
+        session
+            .add_text_box(
+                &context(),
+                &slide_id,
+                &pptx_edit::ShapeDraft {
+                    name: "Note".to_owned(),
+                    rect,
+                    text: text.to_owned(),
+                    style: TextStyle::default(),
+                },
+            )
+            .unwrap();
+        session
+            .add_shape(
+                &context(),
+                &slide_id,
+                &PresetShapeDraft {
+                    name: "Text Box".to_owned(),
+                    geometry: "rect".to_owned(),
+                    rect,
+                    fill: None,
+                },
+            )
+            .unwrap();
+
+        let saved = session.save().unwrap();
+        let saved_parts = parts(&saved);
+        let slide = part_text(&saved_parts, "ppt/slides/slide2.xml");
+        let mut added = slide.rsplit("<p:sp>");
+        let rectangle = added.next().unwrap();
+        let text_box = added.next().unwrap();
+        assert!(text_box.contains(r#"<p:cNvSpPr txBox="1"/>"#));
+        assert!(text_box.contains(r#"<a:off x="100000" y="200000"/>"#));
+        assert!(text_box.contains(r#"<a:ext cx="3000000" cy="500000"/>"#));
+        assert!(text_box.contains("<a:bodyPr/>"));
+        if !text.is_empty() {
+            assert!(text_box.contains(&format!("<a:t>{text}</a:t>")));
+        }
+        assert!(rectangle.contains("<p:cNvSpPr/>"));
+        assert!(!rectangle.contains("txBox="));
+        for source in SLIDE2.split("<p:sp>").skip(1) {
+            let (shape, _) = source.split_once("</p:sp>").unwrap();
+            assert!(slide.contains(&format!("<p:sp>{shape}</p:sp>")));
+        }
+        for (path, bytes) in parts(&fixture(256)) {
+            if path != "ppt/slides/slide2.xml" {
+                assert_eq!(saved_parts.get(&path), Some(&bytes), "{path}");
+            }
+        }
+        let reopened = DeckSession::open(&saved, 12).unwrap();
+        assert_eq!(parts(&reopened.save().unwrap()), saved_parts);
+    }
+}
+
+#[test]
+fn a_remote_labelled_shape_without_a_text_box_marker_saves_as_a_shape() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, ReadTxn, Transact, Update};
+
+    let source = open();
+    let slide_id = source.snapshot().unwrap().slides[1].id.clone();
+    let receipt = source
+        .add_text_box(
+            &context(),
+            &slide_id,
+            &pptx_edit::ShapeDraft {
+                name: "Labelled ellipse".to_owned(),
+                rect: ShapeRect {
+                    x: 100_000,
+                    y: 200_000,
+                    width: 3_000_000,
+                    height: 500_000,
+                },
+                text: "Ellipse label".to_owned(),
+                style: TextStyle::default(),
+            },
+        )
+        .unwrap();
+    let doc = Doc::new();
+    let mut txn = doc.transact_mut();
+    txn.apply_update(Update::decode_v1(&source.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let shapes = txn.get_map("pptx:shapes").unwrap();
+    let shape = shapes
+        .get(&txn, &receipt.shape_id)
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    shape.remove(&mut txn, "textBox");
+    shape.insert(&mut txn, "geometry", "ellipse");
+    let update = txn.encode_state_as_update_v1(&Default::default());
+    drop(txn);
+
+    let peer = DeckSession::open(&fixture(256), 12).unwrap();
+    peer.apply_update_v1(&update).unwrap();
+    let snapshot = peer.snapshot().unwrap();
+    let shape = snapshot.slides[1].shapes.last().unwrap();
+    assert_eq!(shape.text_stories[0].plain_text(), "Ellipse label");
+    let saved = parts(&peer.save().unwrap());
+    let slide = part_text(&saved, "ppt/slides/slide2.xml");
+    let added = slide.rsplit("<p:sp>").next().unwrap();
+    assert!(added.contains(r#"<a:prstGeom prst="ellipse">"#));
+    assert!(added.contains("<a:t>Ellipse label</a:t>"));
+    assert!(!added.contains("txBox="));
+}
+
+#[test]
 fn a_shape_added_to_an_emptied_slide_lands_after_the_group_properties() {
     let session = open();
     let snapshot = session.snapshot().unwrap();

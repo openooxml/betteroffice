@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
+import { LABEL, parseGroups } from './ci-route.mjs';
 
 const REPOSITORY = 'openooxml/betteroffice';
 const KYORA_CLASSES = ['kyora-4x8', 'kyora-8x8', 'kyora-8x16', 'kyora-16x32'];
@@ -26,6 +27,7 @@ const VARIABLES: Record<string, Record<string, string>> = {
   unset: {},
   'BO_CI_RUNNER=ubuntu-latest': { BO_CI_RUNNER: 'ubuntu-latest' },
   'BO_CI_RUNNER=kyora-8x8': { BO_CI_RUNNER: 'kyora-8x8' },
+  'BO_CI_SPILL=off': { BO_CI_SPILL: 'off' },
 };
 
 // GitHub's expression language as far as runs-on uses it: context paths, string and keyword
@@ -146,17 +148,19 @@ const jobs = readdirSync(directory)
       typeof workflow.on === 'string' ? [workflow.on] : Array.isArray(workflow.on) ? workflow.on : Object.keys(workflow.on);
     return Object.entries<any>(workflow.jobs).flatMap(([id, job]) => {
       const readsMatrix = JSON.stringify(job['runs-on'] ?? '').includes('matrix.');
+      const legs = () => (readsMatrix || !job.strategy?.matrix ? 1 : combinations(job.strategy.matrix).length);
       return (readsMatrix ? combinations(job.strategy?.matrix) : [{}]).map((matrix) => {
+        // A router output names the GitHub-hosted label for its group; an empty one leaves the job on kyora.
+        const runsOn = (github: object, vars: object, outputs: Record<string, string> = {}) =>
+          job.uses ? [REUSABLE] : resolve(job['runs-on'], { github, vars, matrix, needs: { route: { outputs } } });
         const runners: Record<string, Record<string, string[]>> = {};
         for (const [event, github] of Object.entries(EVENTS)) {
           runners[event] = {};
-          for (const [variables, vars] of Object.entries(VARIABLES)) {
-            runners[event][variables] = job.uses ? [REUSABLE] : resolve(job['runs-on'], { github, vars, matrix });
-          }
+          for (const [variables, vars] of Object.entries(VARIABLES)) runners[event][variables] = runsOn(github, vars);
         }
         const suffix =
           typeof matrix.name === 'string' ? ` (${matrix.name})` : Object.keys(matrix).length > 0 ? ` ${JSON.stringify(matrix)}` : '';
-        return { name: `${file} ${id}${suffix}`, workflow, triggers, job, runners };
+        return { name: `${file} ${id}${suffix}`, file, id, workflow, triggers, job, legs, runsOn, runners };
       });
     });
   });
@@ -173,15 +177,23 @@ const resolved = (runners: Record<string, Record<string, string[]>>) =>
 const kyoraJobs = jobs.filter(({ runners }) =>
   resolved(runners).some((labels) => labels[0] !== REUSABLE && !githubHosted(labels))
 );
+const routers = jobs.filter(({ id }) => id === 'route');
+const groupsOf = (router: (typeof jobs)[number]) =>
+  parseGroups(router.job.steps.find((step: any) => step.id === 'route').env.ROUTE_GROUPS) as { name: string; slots: number }[];
+const everyGroup = Object.fromEntries(routers.flatMap((router) => groupsOf(router).map(({ name }) => [name, LABEL])));
 
 describe('CI runner routing', () => {
-  test('every CI and End-to-end Linux job but the two shortest and the timings upload runs on its kyora class', () => {
+  test('with nothing routed, every CI and End-to-end Linux job but the routers, the two shortest and the timings upload runs on its kyora class', () => {
     expect(Object.fromEntries(kyoraJobs.map(({ name, runners }) => [name, runners['push to main'].unset]))).toEqual({
       'ci.yml packages': ['kyora-4x8'],
       'ci.yml package-tests': ['kyora-8x8'],
       'ci.yml rust': ['kyora-8x16'],
       'ci.yml python': ['kyora-4x8'],
-      'e2e.yml scenarios': ['kyora-8x8'],
+      'ci.yml route': ['kyora-4x8'],
+      'e2e.yml route': ['kyora-4x8'],
+      'e2e.yml scenarios (Corpus scenarios)': ['kyora-8x8'],
+      'e2e.yml scenarios (Browser editors (1/2))': ['kyora-8x8'],
+      'e2e.yml scenarios (Browser editors (2/2))': ['kyora-8x8'],
     });
     const hosted = jobs.filter((entry) => /^(ci|e2e)\.yml /.test(entry.name) && !kyoraJobs.includes(entry));
     expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'e2e.yml publish']);
@@ -210,13 +222,71 @@ describe('CI runner routing', () => {
     }
   });
 
+  test('each workflow has one kyora router, placed without its own outputs, whose groups are exactly the jobs that read them', () => {
+    expect(routers.map(({ name }) => name).sort()).toEqual(['ci.yml route', 'e2e.yml route']);
+    for (const router of routers) {
+      const { name, file, job } = router;
+      expect(router.runsOn(EVENTS['push to main'], {}, everyGroup), name).toEqual(router.runners['push to main'].unset);
+      expect(job.permissions, name).toEqual({ actions: 'read', contents: 'read' });
+      for (const step of job.steps) expect(step['continue-on-error'], `${name}: ${step.name ?? step.uses}`).toBe(true);
+      const groups = groupsOf(router);
+      expect(job.outputs, name).toEqual(
+        Object.fromEntries(groups.map((group) => [group.name, `\${{ steps.route.outputs.${group.name} }}`]))
+      );
+      const routed = kyoraJobs.filter((entry) => entry.file === file && entry.id !== 'route');
+      const readers = new Map<string, string[]>();
+      for (const group of groups) {
+        const moved = routed.filter((entry) => githubHosted(entry.runsOn(EVENTS['push to main'], {}, { [group.name]: LABEL })));
+        expect(moved.reduce((slots, entry) => slots + entry.legs(), 0), `${name}: ${group.name}`).toBe(group.slots);
+        for (const entry of moved) readers.set(entry.name, [...(readers.get(entry.name) ?? []), group.name]);
+      }
+      for (const entry of routed) {
+        expect(readers.get(entry.name), entry.name).toHaveLength(1);
+        expect(entry.job.needs, entry.name).toBe('route');
+        // A failed router must not skip a required job, which would count as passed.
+        expect(entry.job.if, entry.name).toBe('${{ !cancelled() }}');
+      }
+    }
+  });
+
+  test('each router declares the total slots of the other routers as ROUTE_PEER_SLOTS', () => {
+    for (const router of routers) {
+      const env = router.job.steps.find((step: any) => step.id === 'route').env;
+      const peerSlots = routers
+        .filter((other) => other !== router)
+        .flatMap((other) => groupsOf(other))
+        .reduce((sum, { slots }) => sum + slots, 0);
+      const raw = String(env.ROUTE_PEER_SLOTS ?? '');
+      const declared = /^\d+$/.test(raw)
+        ? Number(raw)
+        : Number(raw.match(/^\$\{\{\s*github\.event_name == 'workflow_dispatch' && '0' \|\| '(\d+)'\s*\}\}$/)?.[1]);
+      expect(declared, router.name).toBe(peerSlots);
+    }
+  });
+
+  test('routed jobs run GitHub-hosted unless the pull request is a fork, BO_CI_RUNNER pins them or BO_CI_SPILL is off', () => {
+    for (const entry of kyoraJobs.filter(({ id }) => id !== 'route')) {
+      for (const event of TRUSTED) {
+        expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual([LABEL]);
+        expect(entry.runsOn(EVENTS[event], VARIABLES['BO_CI_RUNNER=kyora-8x8'], everyGroup), entry.name).toEqual(['kyora-8x8']);
+        expect(entry.runsOn(EVENTS[event], VARIABLES['BO_CI_SPILL=off'], everyGroup), entry.name).toEqual(
+          entry.runners['push to main'].unset
+        );
+      }
+      for (const event of UNTRUSTED) {
+        expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual(['ubuntu-latest']);
+      }
+    }
+  });
+
   test('kyora jobs read no secrets, write nothing, use no Docker and end before the class timeout', () => {
-    for (const { name, workflow, triggers, job } of kyoraJobs) {
+    for (const { name, id, workflow, triggers, job } of kyoraJobs) {
       expect(triggers, name).not.toContain('pull_request_target');
       expect(triggers, name).not.toContain('workflow_run');
       expect(JSON.stringify([workflow.env ?? null, workflow.defaults ?? null, job]), name).not.toMatch(/\bsecrets\b/);
       expect(workflow.permissions, name).toEqual({ contents: 'read' });
-      expect(job.permissions, name).toBeUndefined();
+      // The router reads the Actions API; every other kyora job keeps the workflow's read-only contents token.
+      expect(job.permissions, name).toEqual(id === 'route' ? { actions: 'read', contents: 'read' } : undefined);
       expect(job.services, name).toBeUndefined();
       expect(job.container, name).toBeUndefined();
       for (const step of job.steps) {

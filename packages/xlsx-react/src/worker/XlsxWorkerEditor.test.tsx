@@ -288,7 +288,9 @@ function promisedClipboard(completion?: Promise<void>) {
   const payloads: Promise<Blob>[] = [];
   const writes: Promise<void>[] = [];
   const copied: string[] = [];
+  const itemsWritten: Item[] = [];
   const write = mock((items: Item[]) => {
+    itemsWritten.push(items[0]);
     const payload = items[0].data['text/plain'];
     payloads.push(payload);
     const writing = payload.then(async (blob) => {
@@ -307,7 +309,20 @@ function promisedClipboard(completion?: Promise<void>) {
     if (originalWrite) Object.defineProperty(navigator.clipboard, 'write', originalWrite);
     else Reflect.deleteProperty(navigator.clipboard, 'write');
   });
-  return { write, payloads, writes, copied };
+  return { write, payloads, writes, copied, itemsWritten };
+}
+
+function markedClipboard(completion?: Promise<void>) {
+  const clipboard = promisedClipboard(completion);
+  const latest = () => clipboard.itemsWritten[clipboard.itemsWritten.length - 1];
+  replaceClipboard('readText', mock(async () => (await latest().data['text/plain']).text()));
+  replaceClipboard('read', mock(async () => {
+    const item = latest();
+    return item ? [{ types: ['text/plain', 'text/html'],
+      getType: async (type: string) => item.data[type],
+    } as unknown as ClipboardItem] : [];
+  }));
+  return clipboard;
 }
 
 function textClipboard() {
@@ -3094,7 +3109,7 @@ describe('peerless workbook worker editor', () => {
   it('large TSV paste submits through the editor without overflowing the argument stack', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
-    replaceClipboard('readText', mock(async () => Array.from({ length: 200_000 }, () => 'x').join('\n')));
+    replaceClipboard('readText', mock(async () => Array.from({ length: 100_000 }, () => 'x').join('\n')));
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
     await act(async () => {});
     const command = host.sent[0];
@@ -3102,9 +3117,37 @@ describe('peerless workbook worker editor', () => {
       activeCell: { row: 0, col: 0 },
     } } });
     if (command.kind !== 'editCells') throw new Error('Expected pasted cells');
-    expect(command.payload.args[1]).toHaveLength(200_000);
-    expect(command.payload.args[1][199_999]).toEqual({ row: 199_999, col: 0, input: 'x' });
+    expect(command.payload.args[1]).toHaveLength(100_000);
+    expect(command.payload.args[1][99_999]).toEqual({ row: 99_999, col: 0, input: 'x' });
     expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+  });
+
+  it('refuses TSV paste above the cell limit without changing the source', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    replaceClipboard('readText', mock(async () => Array.from({ length: 100_001 }, () => 'x').join('\n')));
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('100000-cell limit');
+    expect(host.sent).toEqual([]);
+    expect([...host.cells]).toEqual([['0:0:0', 'initial']]);
+    expect(host.hydrate).not.toHaveBeenCalled();
+    expect(host.attach).not.toHaveBeenCalled();
+  });
+
+  it('refuses rebased paste of an array snapshot before submitting a mutation', async () => {
+    const host = peerlessHarness();
+    const clipboard = markedClipboard();
+    const view = await mountPeerlessClipboard(host);
+    const cell = { a1: 'A1', input: '=SEQUENCE(2)', isFormula: true, isArrayFormula: true };
+    host.cellInputs.mockResolvedValueOnce({ sheet: 0, version: 'v1', cells: [[cell]] });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => fireEvent.keyDown(scroll, { key: 'c', ctrlKey: true }));
+    await act(async () => { await clipboard.writes[0]; });
+    await act(async () => fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true }));
+    expect(host.sent).toEqual([]);
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/array or spill/i);
+    expect(host.cells.get('0:0:0')).toBe('initial');
   });
 
   it('read-only proposal panel loads proposals through a worker read command', async () => {
@@ -3711,7 +3754,7 @@ describe('peerless workbook worker editor', () => {
     const formula = view.getByTestId('xlsx-formula-input');
     fireEvent.change(formula, { target: { value: 'draft' } });
     await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }));
-    expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('The cell entry before this could not be saved.');
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard write access/i);
     expect(view.queryByTestId('xlsx-error')).toBeNull();
     expect(clipboardReads(host)).toEqual([]);
     expect(clipboard.write).not.toHaveBeenCalled();
@@ -6043,7 +6086,7 @@ function reviewBatch(value: string, version = 'v1'): XlsxEditRequest {
     inputs: [[value]], expect: { cells: [[{ displayText: 'initial' }]] } }] };
 }
 
-function replaceClipboard(name: 'write' | 'writeText' | 'readText', value: unknown) {
+function replaceClipboard(name: 'write' | 'writeText' | 'readText' | 'read', value: unknown) {
   const original = Object.getOwnPropertyDescriptor(navigator.clipboard, name);
   Object.defineProperty(navigator.clipboard, name, { configurable: true, value });
   restorers.push(() => {

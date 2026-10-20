@@ -68,6 +68,7 @@ pub use xlsx_ops::{
     KeptFacets, NumberFormatMutation, Op, Proposal, ProposedEdit, Provenance, StylePatch,
     StyleProperty, TextWrapping, Transaction, VerticalAlignment,
 };
+pub use xlsx_parse::translate_formula;
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
     HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,

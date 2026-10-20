@@ -26,6 +26,7 @@ pub use chart::{ChartRefresh, ChartRefreshPlan, chart_space, preserved_chart_spa
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
+pub use formula::translate_formula;
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };

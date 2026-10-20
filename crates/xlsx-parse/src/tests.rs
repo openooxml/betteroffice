@@ -7326,13 +7326,89 @@ fn hostile_chart_markup_is_refused_not_survived() {
 
     assert!(crate::chart_space(b"<c:chartSpace xmlns:c=\"c\"/>", &Default::default()).is_none());
     assert!(crate::chart_space(b"not xml at all", &Default::default()).is_none());
+}
+
+#[test]
+fn three_d_depth_axes_drop_and_surfaces_stay_refused() {
+    let part = |plot: &str, ids: &str, extra_axis: &str| {
+        format!(
+            concat!(
+                r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:{plot}><c:barDir val="col"/><c:grouping val="stacked"/>"#,
+                r#"<c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>S!$A$1:$A$2</c:f>"#,
+                r#"<c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache>"#,
+                r#"</c:numRef></c:val></c:ser>{ids}</c:{plot}>"#,
+                r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>{extra_axis}"#,
+                r#"</c:plotArea></c:chart></c:chartSpace>"#,
+            ),
+            plot = plot,
+            ids = ids,
+            extra_axis = extra_axis,
+        )
+    };
+    let axis_ids = |xml: String| {
+        crate::chart_space(xml.as_bytes(), &Default::default())
+            .expect("chart")
+            .plot_groups[0]
+            .axis_ids
+            .clone()
+    };
+    let three = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="3"/>"#;
+    assert_eq!(axis_ids(part("bar3DChart", three, "")), ["1", "2"]);
+    assert_eq!(
+        axis_ids(part(
+            "bar3DChart",
+            three,
+            r#"<c:serAx><c:axId val="3"/><c:crossAx val="2"/></c:serAx>"#
+        )),
+        ["1", "2"]
+    );
+    let to_value = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="2"/>"#;
+    assert_eq!(axis_ids(part("bar3DChart", to_value, "")), ["1", "2", "2"]);
+    let padded = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="002"/>"#;
+    assert_eq!(axis_ids(part("bar3DChart", padded, "")), ["1", "2", "002"]);
+    assert_eq!(axis_ids(part("barChart", three, "")), ["1", "2", "3"]);
     assert!(
         crate::chart_space(
-            br#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:bar3DChart/></c:plotArea></c:chart></c:chartSpace>"#,
-            &Default::default(),
+            part("surface3DChart", three, "").as_bytes(),
+            &Default::default()
         )
         .is_none()
     );
+}
+
+#[test]
+fn three_d_charts_read_as_their_flat_families() {
+    for (flat_plot, deep_plot) in [
+        ("barChart", "bar3DChart"),
+        ("pieChart", "pie3DChart"),
+        ("lineChart", "line3DChart"),
+        ("areaChart", "area3DChart"),
+    ] {
+        let part = |plot: &str, view: &str| {
+            format!(
+                concat!(
+                    r#"<c:chartSpace xmlns:c="c"><c:chart>{view}<c:plotArea><c:{plot}>"#,
+                    r#"<c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>S!$A$1:$A$2</c:f>"#,
+                    r#"<c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache>"#,
+                    r#"</c:numRef></c:val></c:ser></c:{plot}></c:plotArea></c:chart></c:chartSpace>"#,
+                ),
+                plot = plot,
+                view = view,
+            )
+        };
+        let flat = crate::chart_space(part(flat_plot, "").as_bytes(), &Default::default())
+            .expect("flat chart");
+        let deep = crate::chart_space(
+            part(
+                deep_plot,
+                r#"<c:view3D><c:rotX val="15"/><c:rotY val="20"/></c:view3D>"#,
+            )
+            .as_bytes(),
+            &Default::default(),
+        )
+        .expect("3-D chart");
+        assert_eq!(deep, flat, "{deep_plot}");
+    }
 }
 
 /// A reference carrying markup-significant characters must come back escaped,

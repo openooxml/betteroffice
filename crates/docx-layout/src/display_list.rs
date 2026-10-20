@@ -4505,23 +4505,22 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     let content_width = (page.size.w - margins.left - margins.right).max(0.0);
     let content_bottom = page.size.h - margins.bottom;
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
-        let mut cursor = page.margins.left;
-        for index in 0..columns.count.saturating_sub(1) {
-            let width = columns
+        let rectangles = crate::page_flow::unequal_column_rectangles(
+            content_width,
+            columns.count,
+            columns.gap,
+            columns
                 .columns
-                .get(index)
-                .and_then(|column| column.width)
-                .unwrap_or(0.0);
-            let space = columns
-                .columns
-                .get(index)
-                .and_then(|column| column.space)
-                .unwrap_or(columns.gap);
-            cursor += width;
+                .iter()
+                .map(|column| (column.width, column.space)),
+        );
+        for pair in rectangles.windows(2) {
+            let right = pair[0].0 + pair[0].1;
+            let x = page.margins.left + (right + pair[1].0) / 2.0;
             prims.push(Primitive::Line(LinePrimitive {
-                x1: px(cursor + space / 2.0),
+                x1: px(x),
                 y1: px(margins.top),
-                x2: px(cursor + space / 2.0),
+                x2: px(x),
                 y2: px(content_bottom),
                 stroke_width: px(0.5),
                 color: "#000000".to_string(),
@@ -4533,7 +4532,6 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
                 border_owner: None,
                 attrs: DocAttrs::default(),
             }));
-            cursor += space;
         }
         return;
     }
@@ -4579,55 +4577,23 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     };
     let count = columns.count.clamp(1, 45);
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
-        let mut widths = Vec::with_capacity(count);
-        let mut gaps = Vec::with_capacity(count);
-        for index in 0..count {
-            let width = columns
+        let bounds = crate::page_flow::unequal_column_rectangles(
+            content_width,
+            count,
+            columns.gap,
+            columns
                 .columns
-                .get(index)
-                .and_then(|column| column.width)
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .unwrap_or(0.0);
-            let gap = columns
-                .columns
-                .get(index)
-                .and_then(|column| column.space)
-                .filter(|value| value.is_finite() && *value >= 0.0)
-                .unwrap_or_else(|| columns.gap.max(0.0));
-            widths.push(width);
-            gaps.push(gap);
-        }
-        let gap_total: f64 = gaps.iter().take(count.saturating_sub(1)).sum();
-        let known_total: f64 = widths.iter().sum();
-        let missing = widths.iter().filter(|width| **width <= 0.0).count();
-        let fallback = if missing > 0 {
-            (content_width - gap_total - known_total).max(0.0) / missing as f64
-        } else {
-            0.0
-        };
-        for width in &mut widths {
-            if *width <= 0.0 {
-                *width = fallback;
-            }
-        }
-        let widths_total: f64 = widths.iter().sum();
-        if widths_total + gap_total > content_width && widths_total > 0.0 {
-            let scale = (content_width - gap_total).max(0.0) / widths_total.max(1.0);
-            for width in &mut widths {
-                *width *= scale;
-            }
-        }
-        let mut x = page.margins.left;
-        let mut bounds = Vec::with_capacity(count);
-        for index in 0..count {
-            bounds.push(DisplayBounds {
-                x: px(x),
-                y: px(margins.top),
-                width: px(widths[index]),
-                height: px(content_height),
-            });
-            x += widths[index] + if index + 1 < count { gaps[index] } else { 0.0 };
-        }
+                .iter()
+                .map(|column| (column.width, column.space)),
+        )
+        .into_iter()
+        .map(|(x, width)| DisplayBounds {
+            x: px(page.margins.left + x),
+            y: px(margins.top),
+            width: px(width),
+            height: px(content_height),
+        })
+        .collect();
         return (content, bounds);
     }
 
@@ -5468,7 +5434,32 @@ fn build_display_list_selected(
                     else {
                         continue;
                     };
+                    let stamp_from = prims.len();
                     emit_table_fragment(&mut prims, tf, block, measure, &ctx);
+                    if page.columns.as_ref().is_some_and(|columns| {
+                        columns.count > 1 && columns.equal_width == Some(false)
+                    }) && tf.width < table_total_width(measure)
+                    {
+                        let clip = ClipRect {
+                            x: Some(px(tf.x)),
+                            y: Some(px(tf.y)),
+                            w: Some(px(tf.width.max(0.0))),
+                            h: Some(px(tf.height.max(0.0))),
+                        };
+                        for primitive in &mut prims[stamp_from..] {
+                            let attrs = match primitive {
+                                Primitive::Line(line) => Some(&mut line.attrs),
+                                other => doc_attrs_mut(other),
+                            };
+                            if let Some(attrs) = attrs {
+                                apply_clip_group(
+                                    attrs,
+                                    format!("clip-{}-column", block_key(&tf.block_id)),
+                                    clip.clone(),
+                                );
+                            }
+                        }
+                    }
                 }
                 FragmentIn::Image(imf) => {
                     prev_para_borders = None;
@@ -12924,6 +12915,56 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unequal_column_bounds_and_separators_match_placement() {
+        for (count, widths, expected) in [
+            (
+                3,
+                vec![100.0],
+                vec![(20.0, 100.0), (140.0, 130.0), (290.0, 130.0)],
+            ),
+            (2, vec![300.0, 200.0], vec![(20.0, 228.0), (268.0, 152.0)]),
+        ] {
+            let columns = serde_json::json!({
+                "count": count, "gap": 20, "equalWidth": false, "separator": true,
+                "columns": widths.into_iter().map(|width| serde_json::json!({
+                    "width": width,
+                })).collect::<Vec<_>>(),
+            });
+            let margins = serde_json::json!({
+                "top": 20, "right": 20, "bottom": 20, "left": 20,
+            });
+            let page: PageIn = serde_json::from_value(serde_json::json!({
+                "size": {"w": 440, "h": 500}, "margins": margins, "columns": columns,
+            }))
+            .unwrap();
+            let paginator = crate::page_flow::Paginator::new(
+                crate::types::Size { w: 440.0, h: 500.0 },
+                serde_json::from_value(margins).unwrap(),
+                serde_json::from_value(columns).unwrap(),
+                None,
+            )
+            .unwrap();
+            let (_, bounds) = page_content_geometry(&page);
+            let mut separators = Vec::new();
+            emit_column_separators(&mut separators, &page);
+            assert_eq!(bounds.len(), expected.len());
+            assert_eq!(separators.len(), expected.len() - 1);
+            for (index, (x, width)) in expected.iter().copied().enumerate() {
+                assert!((paginator.get_column_x(index) - x).abs() < 1e-9);
+                assert!((paginator.get_column_width(index) - width).abs() < 1e-9);
+                assert_eq!(bounds[index].x, px(x));
+                assert_eq!(bounds[index].width, px(width));
+                assert!(x + width <= 420.0);
+                if let Some(Primitive::Line(line)) = separators.get(index) {
+                    let separator_x = (x + width + expected[index + 1].0) / 2.0;
+                    assert_eq!(line.x1, px(separator_x));
+                    assert_eq!(line.x2, px(separator_x));
+                }
+            }
+        }
+    }
 
     #[test]
     fn image_and_text_box_positions_ignore_legacy_metadata() {
