@@ -4988,12 +4988,15 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
         return Some(format_number(value));
     }
     let section = &strip_modifiers(section)?;
-    if section.contains(['y', 'd', 'h', 's', 'E', 'e']) || section.contains("m/") {
+    let codes = codes(section);
+    if codes.contains([
+        'y', 'Y', 'm', 'M', 'd', 'D', 'h', 'H', 's', 'S', 'e', 'E', '/',
+    ]) {
         return None;
     }
     // A section with no digit placeholder writes only its literal text, which
     // is how `0;-0;"-"` draws a zero as a dash and `0;-0;` as nothing.
-    if !section.contains(['0', '#', '?']) {
+    if !codes.contains(['0', '#', '?']) {
         let (leading, trailing) = literals(section);
         return Some(leading + &trailing);
     }
@@ -5003,12 +5006,12 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
         None => (pattern.as_str(), None),
     };
     let digits = fraction_pattern.map_or(0, |fraction| fraction.len().min(9));
-    let percent = section.contains('%');
+    let percent = codes.contains('%');
     let scaled = if percent { value * 100.0 } else { value };
     let factor = 10_f64.powi(digits as i32);
     let rounded = (scaled.abs() * factor).round() / factor;
     let mut body = placeholder_digits(rounded, whole_pattern, fraction_pattern, digits);
-    if section.contains(',') {
+    if codes.contains(',') {
         body = group_thousands(&body);
     }
     let (leading, trailing) = literals(section);
@@ -5019,9 +5022,6 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
     out.push_str(&leading);
     out.push_str(&body);
     out.push_str(&trailing);
-    if percent {
-        out.push('%');
-    }
     Some(out)
 }
 
@@ -5087,11 +5087,29 @@ fn strip_modifiers(section: &str) -> Option<String> {
     Some(out)
 }
 
+/// A section's format codes, its quoted text, escaped characters and `_x` or
+/// `*x` blanks removed.
+fn codes(section: &str) -> String {
+    let mut out = String::new();
+    let mut chars = section.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => chars.by_ref().take_while(|c| *c != '"').for_each(drop),
+            '\\' | '_' | '*' => {
+                chars.next();
+            }
+            character => out.push(character),
+        }
+    }
+    out
+}
+
 /// The literal characters a format code puts before and after its digits.
 /// `"…"` is quoted text, `\x` an escaped character, and `_x` or `*x` a blank
-/// the width of `x`, which reads as nothing at all.
+/// the width of `x`, which reads as nothing at all. A bare `%` stays where it
+/// stands.
 fn literals(code: &str) -> (String, String) {
-    let placeholder = |c: char| matches!(c, '0' | '#' | '.' | ',' | '%' | '?');
+    let placeholder = |c: char| matches!(c, '0' | '#' | '.' | ',' | '?');
     let mut leading = String::new();
     let mut trailing = String::new();
     let mut past_digits = false;
@@ -9616,6 +9634,30 @@ mod tests {
         assert_eq!(format_with_code(-40.0, ledger).as_deref(), Some("$(40)"));
         assert_eq!(format_with_code(f64::NAN, "0.0"), None);
         assert_eq!(format_percent(0.5), "50%");
+    }
+
+    #[test]
+    fn a_quoted_or_escaped_percent_is_literal_text() {
+        for (value, code, want) in [
+            (18.4, "0.0\"%\"", "18.4%"),
+            (20.0, "0\"%\"", "20%"),
+            (18.4, "0.0\\%", "18.4%"),
+            (18.4, "0.0[$%]", "18.4%"),
+            (18.4, "0.0\"%\";-0.0\"%\"", "18.4%"),
+            (0.184, "0.0%", "18.4%"),
+            (0.184, "0.0%\" YoY\"", "18.4% YoY"),
+            (18.4, "0.0\" pct\"", "18.4 pct"),
+            (18.4, "0.0\" units\"", "18.4 units"),
+            (1234.5, "0\" a,b\"", "1235 a,b"),
+        ] {
+            assert_eq!(
+                format_with_code(value, code).as_deref(),
+                Some(want),
+                "{value} {code}"
+            );
+        }
+        assert_eq!(format_with_code(45000.0, "mmm\" sales\""), None);
+        assert_eq!(format_with_code(1.25, "# ?/?\" shares\""), None);
     }
 
     #[test]
