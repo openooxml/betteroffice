@@ -269,9 +269,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (!view || view.sheet !== sheet) return;
       const scale = zoomRef.current;
       const padding = 2 / scale;
-      setView(extendScrollExtent(scroll, view, {
+      const extended = extendScrollExtent(scroll, view, {
         ...geometry.rect, w: geometry.rect.w + padding, h: geometry.rect.h + padding,
-      }, scale));
+      }, scale);
+      revealedExtent.current = { sheet, contentWidth: extended.contentWidth, contentHeight: extended.contentHeight };
+      setView(extended);
       const target = nearestCellScroll(geometry.rect, cell, view, {
         x: scroll.scrollLeft / scale, y: scroll.scrollTop / scale,
         width: scroll.clientWidth / scale, height: scroll.clientHeight / scale,
@@ -446,6 +448,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     });
   };
   const geometryRevision = useRef(0);
+  const revealedExtent = useRef<{ sheet: number; contentWidth: number; contentHeight: number } | null>(null);
   const refreshSheetGeometry = useCallback((paint = false) => {
     const owner = ownerRef.current;
     if (!owner?.ready || owner.failure) return;
@@ -455,7 +458,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (ownerRef.current !== owner || !owner.current || owner.failure ||
         revision !== geometryRevision.current || activeRef.current !== next.sheet) return;
       const changedSheet = viewRef.current?.sheet !== next.sheet;
-      setView(next);
+      const revealed = revealedExtent.current;
+      if (revealed?.sheet !== next.sheet) revealedExtent.current = null;
+      setView(revealed?.sheet === next.sheet ? {
+        ...next,
+        contentWidth: Math.max(next.contentWidth, revealed.contentWidth),
+        contentHeight: Math.max(next.contentHeight, revealed.contentHeight),
+      } : next);
       if (paint || changedSheet) sourceRef.current?.schedule();
     }).catch((error) => {
       if (ownerRef.current === owner && owner.current && !owner.failure) owner.fail(error);
@@ -733,6 +742,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     setProposalsPanelOpen(false); formatSource.current = null;
     setCatalog(run?.session.editState.sheets ?? run?.session.state.sheets ?? []);
     navigation.current += 1;
+    revealedExtent.current = null;
     causalSelection.current = null;
     proposalsRevision.current++;
     proposalsMutation.current = 0;

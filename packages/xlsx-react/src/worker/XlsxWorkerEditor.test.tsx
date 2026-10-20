@@ -681,6 +681,23 @@ it('reveals an offscreen data edge and extends from the original anchor', async 
   expect(scroll.scrollTop).toBe(180 * 24 - 600 + 2);
 });
 
+it('keeps a revealed distant cell in reach after an edit refreshes the sheet bounds', async () => {
+  const host = peerlessHarness();
+  host.selectionData.mockResolvedValue({ edge: { row: 9_999, col: 0 } });
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true }); });
+  const extent = scroll.firstElementChild as HTMLElement;
+  expect(extent.style.height).toBe('240002px');
+  const reads = host.sheetView.mock.calls.length;
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'Delete' }); });
+  expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'applyOps' });
+  await act(async () => { for (const command of [...host.sent]) host.ack(command); });
+  expect(host.sheetView.mock.calls.length).toBeGreaterThan(reads);
+  expect(extent.style.height).toBe('240002px');
+  expect(extent.style.width).toBe('4000px');
+});
+
 for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
   it(`reveals the used-range corner with ${Object.keys(modifier)[0]}+End and retains it at 150% zoom`, async () => {
     const host = peerlessHarness();
