@@ -56,11 +56,18 @@ interface NavigationOptions {
   apply(selection: Selection): boolean | Promise<boolean>;
 }
 
+interface DeferredAction {
+  run(): void;
+  cancel?(): void;
+}
+
 interface NavigationBatch {
   context: NavigationContext;
-  keys: (KeyInput | (() => void))[];
+  keys: (KeyInput | DeferredAction)[];
   target?: Selection;
 }
+
+const isAction = (key: KeyInput | DeferredAction): key is DeferredAction => 'run' in key;
 
 function samePosition(first: NavigationContext, second: NavigationContext | null): boolean {
   return second !== null && first.owner === second.owner && first.sheet === second.sheet &&
@@ -76,16 +83,17 @@ function joins(batch: NavigationBatch, context: NavigationContext): boolean {
 export function createSelectionDataNavigation() {
   let pending: NavigationBatch | null = null;
   const drain = async (batch: NavigationBatch, options: NavigationOptions) => {
+    let replay = false;
     try {
       while (pending === batch && batch.keys.length > 0) {
         const key = batch.keys[0]!;
         const selected = options.context();
         if (!samePosition(batch.context, selected) || !selected) return;
-        if (typeof key === 'function') {
+        if (isAction(key)) {
           batch.keys.shift();
-          key();
+          key.run();
           const after = options.context();
-          if (!after) return;
+          if (!after) { replay = true; return; }
           batch.context = after;
           continue;
         }
@@ -114,6 +122,19 @@ export function createSelectionDataNavigation() {
       }
     } finally {
       if (pending === batch) pending = null;
+      const rest = batch.keys.splice(0);
+      while (rest.length > 0) {
+        const key = rest.shift()!;
+        if (isAction(key)) {
+          if (replay) key.run(); else key.cancel?.();
+          continue;
+        }
+        const context = replay && !pending ? options.context() : null;
+        if (!context) continue;
+        pending = { context, keys: [key, ...rest] };
+        void drain(pending, options);
+        break;
+      }
     }
   };
   return {
@@ -129,10 +150,10 @@ export function createSelectionDataNavigation() {
       pending = batch;
       void drain(batch, options);
     },
-    defer(context: NavigationContext | null, task: () => void, behindActions = false): boolean {
+    defer(context: NavigationContext | null, run: () => void, behindActions = false, cancel?: () => void): boolean {
       if (!pending || !context || !joins(pending, context)) return false;
-      if (behindActions && !pending.keys.some((key) => typeof key === 'function')) return false;
-      pending.keys.push(task);
+      if (behindActions && !pending.keys.some(isAction)) return false;
+      pending.keys.push({ run, cancel });
       return true;
     },
   };

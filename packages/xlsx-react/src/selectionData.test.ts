@@ -16,6 +16,7 @@ const right = { key: 'ArrowRight', ctrlKey: true };
 
 function navigation() {
   let current = { owner: {}, sheet: 0, navigation: 0, version: 'v1', selection: selectionAt({ row: 1, col: 1 }) };
+  let open = true;
   const query = mock(async (_context: typeof current, _direction: string | undefined): Promise<SelectionData> => ({
     edge: null, region: null,
   }));
@@ -27,11 +28,13 @@ function navigation() {
   return {
     get current() { return current; },
     update(next: Partial<typeof current>) { current = { ...current, ...next }; },
+    setOpen(value: boolean) { open = value; },
     query, apply,
     press: (key = right) => queue.enqueue(key, {
-      context: () => current, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), query, apply,
+      context: () => open ? current : null, limits: () => ({ rows: 100, cols: 20, rowsPerPage: 10 }), query, apply,
     }),
-    defer: (task: () => void, behindActions?: boolean) => queue.defer(current, task, behindActions),
+    defer: (task: () => void, behindActions?: boolean, cancel?: () => void) =>
+      queue.defer(current, task, behindActions, cancel),
   };
 }
 
@@ -76,6 +79,48 @@ describe('selection data navigation', () => {
     expect(nav.defer(() => {}, true)).toBe(true);
     first.resolve({ edge: null });
     await tick();
+  });
+
+  it('runs every action queued behind one that ends the jump queue', async () => {
+    const nav = navigation();
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise);
+    const seen: string[] = [];
+    nav.press();
+    nav.defer(() => { seen.push('open'); nav.setOpen(false); });
+    nav.defer(() => seen.push('b'), true);
+    nav.defer(() => seen.push('Enter'), true);
+    first.resolve({ edge: { row: 1, col: 4 } });
+    await tick();
+    expect(seen).toEqual(['open', 'b', 'Enter']);
+  });
+
+  it('resumes queued jumps after the action that ended the queue hands the grid back', async () => {
+    const nav = navigation();
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ edge: { row: 9, col: 4 } });
+    const seen: unknown[] = [];
+    nav.press();
+    nav.defer(() => nav.setOpen(false));
+    nav.defer(() => nav.setOpen(true), true);
+    nav.press({ key: 'ArrowDown', ctrlKey: true });
+    nav.defer(() => seen.push(nav.current.selection.focus), true);
+    first.resolve({ edge: { row: 1, col: 4 } });
+    await tick();
+    expect(seen).toEqual([{ row: 9, col: 4 }]);
+  });
+
+  it('cancels queued actions instead of running them when the selection moves away', async () => {
+    const nav = navigation();
+    const first = deferred<SelectionData>();
+    nav.query.mockReturnValueOnce(first.promise);
+    const seen: string[] = [];
+    nav.press();
+    nav.defer(() => seen.push('run'), false, () => seen.push('cancel'));
+    nav.update({ sheet: 1 });
+    first.resolve({ edge: { row: 1, col: 4 } });
+    await tick();
+    expect(seen).toEqual(['cancel']);
   });
 
   it('runs a later action at once when the selection moved away from a pending jump', async () => {
