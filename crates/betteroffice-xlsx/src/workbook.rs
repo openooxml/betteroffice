@@ -1392,9 +1392,12 @@ impl Workbook {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
         let (input, is_formula) = match sheet_ref.cell(cell) {
-            Some(cell) => match &cell.formula {
+            Some(stored) => match &stored.formula {
                 Some(formula) => (format!("={formula}"), true),
-                None => (value_to_input(&cell.value), false),
+                None => (
+                    value_to_input(&self.model, sheet, cell, &stored.value),
+                    false,
+                ),
             },
             None => (String::new(), false),
         };
@@ -4700,17 +4703,36 @@ fn proposal_alignment_value(
         .unwrap_or_default()
 }
 
-fn value_to_input(value: &CellValue) -> String {
+const LEAP_YEAR_SERIAL: f64 = 45_292.0;
+
+fn value_to_input(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    value: &CellValue,
+) -> String {
     match value {
         CellValue::Empty => String::new(),
         CellValue::Number { value } => value.to_string(),
         CellValue::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
         CellValue::Text { value } => {
-            if !matches!(xlsx_ops::parse_input(value), xlsx_ops::ParsedInput::Text(text) if text == *value)
-            {
-                format!("'{value}")
-            } else {
+            let style = workbook
+                .sheet(sheet)
+                .and_then(|sheet| sheet.effective_style(cell));
+            let format = workbook
+                .styles
+                .resolved_format(Some(style.unwrap_or(0)))
+                .number_format;
+            let stays_text = [None, Some(LEAP_YEAR_SERIAL)].into_iter().all(|now| {
+                matches!(
+                    xlsx_ops::parse_input_with_context(value, format.clone(), workbook.date_system, now).0,
+                    xlsx_ops::ParsedInput::Text(text) if text == *value
+                )
+            });
+            if stays_text {
                 value.clone()
+            } else {
+                format!("'{value}")
             }
         }
         CellValue::Error { value } => value.as_str().to_string(),

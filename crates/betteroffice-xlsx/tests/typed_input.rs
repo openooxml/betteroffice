@@ -259,3 +259,49 @@ fn structured_batch_and_proposal_apply_inferred_formats() {
         assert_cell(&workbook, 45292.0, 0);
     }
 }
+
+#[test]
+fn text_read_back_from_a_cell_stays_text_when_written_unchanged() {
+    let mut model = Workbook::open(&fixture(0, DateSystem::V1900))
+        .unwrap()
+        .model()
+        .clone();
+    model.styles.num_fmts.push((164, "dd.mm.yyyy".into()));
+    model.styles.cell_xfs.push(Xf {
+        num_fmt_id: Some(164),
+        ..Default::default()
+    });
+    let text = |value: &str| Cell {
+        value: CellValue::Text {
+            value: value.into(),
+        },
+        ..Default::default()
+    };
+    model.sheets[0].set_cell(CellRef::new(0, 0), text("1/15"));
+    model.sheets[0].set_cell(
+        CellRef::new(0, 1),
+        Cell {
+            style: Some(1),
+            ..text("15.01.2024")
+        },
+    );
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions {
+        now_serial: Some(45_000.25),
+    };
+    for (cell, value) in [
+        (CellRef::new(0, 0), "1/15"),
+        (CellRef::new(0, 1), "15.01.2024"),
+    ] {
+        let input = workbook.cell(SheetId(0), cell).unwrap().input;
+        workbook
+            .edit_cell(SheetId(0), cell, &input, options)
+            .unwrap();
+        assert_eq!(
+            workbook.model().sheets[0].cell(cell).unwrap().value,
+            CellValue::Text {
+                value: value.into()
+            }
+        );
+    }
+}
