@@ -16,6 +16,7 @@ use yrs::{
     Doc, IdSet, IndexedSequence, Map, Origin, Out, ReadTxn, Snapshot, Subscription, Text, Transact,
 };
 
+use crate::identity::{IdentityRepair, IdentityWatch};
 use crate::{COMMENTS, EditingDoc, STORIES};
 
 /// Undo capture window.
@@ -109,6 +110,7 @@ pub struct DocUndoManager {
     changed_stories: Arc<Mutex<Vec<String>>>,
     _popped: Subscription,
     doc: Doc,
+    identities: IdentityRepair,
     anchor_state: Arc<Mutex<AnchorState>>,
     _anchors: Subscription,
     _history: [Subscription; 2],
@@ -160,6 +162,12 @@ impl DocUndoManager {
         let mut inner = yrs::undo::UndoManager::<AnchorHistory>::with_options(options);
         let root = stories_root(&doc.yrs_doc().transact());
         inner.expand_scope(doc.yrs_doc(), &root);
+        let removed = doc
+            .yrs_doc()
+            .transact()
+            .get_map(crate::REMOVED_STORIES)
+            .expect("removed stories root is declared");
+        inner.expand_scope(doc.yrs_doc(), &removed);
         let comments = doc
             .yrs_doc()
             .transact()
@@ -198,11 +206,11 @@ impl DocUndoManager {
                     merge_boundaries(&mut latest.lock().unwrap(), &event.meta().0.lock().unwrap());
                 }
                 let comments_changed = event.has_changed(&comments)
+                    || event.has_changed(&removed)
                     || event.has_changed(&parts)
                     || event.has_changed(&properties)
                     || event.has_changed(&margins);
-                let mut changed: Vec<String> = stories_root(txn)
-                    .iter(txn)
+                let mut changed: Vec<String> = crate::live_stories(&stories_root(txn), txn)
                     .filter_map(|(story, value)| match value {
                         Out::YText(text) if comments_changed || event.has_changed(&text) => {
                             Some(story.to_owned())
@@ -237,6 +245,7 @@ impl DocUndoManager {
         };
         Self {
             doc: doc.doc.clone(),
+            identities: doc.identity_repair(),
             anchor_state,
             _anchors: anchors,
             _history: [added, updated],
@@ -266,20 +275,37 @@ impl DocUndoManager {
 
     pub fn undo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let identities = IdentityWatch::new(&self.doc);
         let applied = self.inner.undo_blocking();
         if applied {
-            self.restore_comment_boundaries();
+            self.restore_history(identities);
         }
         applied
     }
 
     pub fn redo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let identities = IdentityWatch::new(&self.doc);
         let applied = self.inner.redo_blocking();
         if applied {
-            self.restore_comment_boundaries();
+            self.restore_history(identities);
         }
         applied
+    }
+
+    fn restore_history(&self, identities: IdentityWatch) {
+        let changed = identities.changed();
+        drop(identities);
+        if changed {
+            let stories = self
+                .identities
+                .repair(&mut self.doc.transact_mut_with("system"));
+            let mut changed = lock(&self.changed_stories);
+            changed.extend(stories);
+            changed.sort();
+            changed.dedup();
+        }
+        self.restore_comment_boundaries();
     }
 
     fn restore_comment_boundaries(&self) {
@@ -296,8 +322,7 @@ impl DocUndoManager {
             return;
         }
         let mut txn = self.doc.transact_mut();
-        let Some(Out::YText(text)) = stories_root(&txn)
-            .iter(&txn)
+        let Some(Out::YText(text)) = crate::live_stories(&stories_root(&txn), &txn)
             .map(|(_, value)| value)
             .find(|value| matches!(value, Out::YText(_)))
         else {

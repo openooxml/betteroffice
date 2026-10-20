@@ -59,6 +59,10 @@ const GRIDLINE_WIDTH: f32 = 1.0;
 const PANE_DIVIDER_WIDTH: f32 = 2.0;
 const FONT_SIZE_PT: f32 = 11.0;
 const TEXT_PAD_PX: f32 = 2.0;
+/// one indent level (3 default-font spaces, §18.8.1); space width approximated as a fraction of `MAX_DIGIT_WIDTH_PX`.
+const INDENT_WIDTH_PX: f32 = 3.0 * (geometry::MAX_DIGIT_WIDTH_PX as f32 * 0.5);
+/// Excel's largest indent level.
+const MAX_INDENT: u32 = 255;
 // rough calibri-like ascent/descent as fractions of the font size.
 const ASCENT_RATIO: f32 = 0.7;
 const DESCENT_RATIO: f32 = 0.2;
@@ -108,6 +112,7 @@ struct AxisLayout {
     frozen: u32,
     scroll: f32,
     print_extent: Option<f32>,
+    truncated: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -119,7 +124,8 @@ struct AxisSpan {
 }
 
 impl AxisLayout {
-    fn new(
+    #[allow(clippy::too_many_arguments)]
+    fn new<I: Iterator<Item = (u32, u32)>>(
         limit: u32,
         last_sized: Option<u32>,
         frozen: u32,
@@ -127,15 +133,22 @@ impl AxisLayout {
         extent: f32,
         edge: impl Fn(u32) -> f32,
         at: impl Fn(f32) -> u32,
+        hidden: impl Fn(RangeInclusive<u32>) -> I,
+        max_tracks: usize,
     ) -> Self {
         let frozen = frozen.min(limit);
         let scroll = if frozen > 0 { scroll.max(0.0) } else { scroll };
         let frozen_extent = edge(frozen);
         let mut tracks = Vec::new();
+        let mut truncated = false;
         if frozen > 0 {
-            for index in 0..frozen {
+            for index in visible_indices(0..frozen, &hidden) {
                 let start = edge(index);
                 if start >= extent {
+                    break;
+                }
+                if tracks.len() == max_tracks {
+                    truncated = true;
                     break;
                 }
                 tracks.push(AxisTrack {
@@ -161,13 +174,17 @@ impl AxisLayout {
             let last = at((origin + body_extent).min(sheet_extent))
                 .max(first)
                 .min(end);
-            for index in first..=last {
+            for index in visible_indices(first..last + 1, &hidden) {
+                if tracks.len() == max_tracks {
+                    truncated = true;
+                    break;
+                }
                 let raw_start = edge(index) - scroll;
                 let raw_end = edge(index + 1) - scroll;
                 tracks.push(AxisTrack {
                     index,
                     raw_start,
-                    start: if frozen > 0 && index == first {
+                    start: if frozen > 0 {
                         raw_start.max(frozen_extent)
                     } else {
                         raw_start
@@ -192,6 +209,7 @@ impl AxisLayout {
             frozen,
             scroll,
             print_extent: None,
+            truncated,
         }
     }
 
@@ -245,11 +263,11 @@ impl AxisLayout {
                 end,
             });
         }
-        let first = self
-            .tracks
-            .binary_search_by_key(&start, |track| track.index)
-            .ok()?;
-        let track = self.tracks[first];
+        let first = self.tracks.partition_point(|track| track.index < start);
+        let track = *self.tracks.get(first)?;
+        if track.index > end || edge(start) != edge(track.index) {
+            return None;
+        }
         let raw_end = if track.pinned {
             edge(end.saturating_add(1).min(self.frozen))
         } else {
@@ -259,9 +277,31 @@ impl AxisLayout {
             raw_start: track.raw_start,
             raw_end,
             start: track.start,
-            end: raw_end,
+            end: if self.truncated {
+                raw_end.min(self.tracks.last()?.end)
+            } else {
+                raw_end
+            },
         })
     }
+}
+
+fn visible_indices<I: Iterator<Item = (u32, u32)>>(
+    range: Range<u32>,
+    hidden: impl FnOnce(RangeInclusive<u32>) -> I,
+) -> impl Iterator<Item = u32> {
+    let mut next = range.start;
+    let end = range.end;
+    let spans = (!range.is_empty()).then(|| hidden(range.start..=end - 1));
+    spans
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once((end, end)))
+        .flat_map(move |(first, last)| {
+            let visible = next..first;
+            next = last + 1;
+            visible
+        })
 }
 
 fn merge_grid_intervals(
@@ -444,6 +484,7 @@ fn viewport_axes(
     viewport: &Viewport,
     geometry: &GridGeometry,
     print: bool,
+    max_cells: Option<u64>,
 ) -> (AxisLayout, AxisLayout, u32, u32) {
     let (frozen_rows, frozen_cols) = if print {
         (0, 0)
@@ -461,6 +502,8 @@ fn viewport_axes(
             extent,
             |col| geometry.col_x(col),
             |x| geometry.col_at_x(x),
+            |cols| sheet.hidden_col_spans(cols),
+            usize::MAX,
         )
     };
     let mut cols = cols_axis(viewport.width);
@@ -474,6 +517,10 @@ fn viewport_axes(
         if cols_off_grid { 0.0 } else { viewport.height },
         |row| geometry.row_y(row),
         |y| geometry.row_at_y(y),
+        |rows| sheet.hidden_row_spans(rows),
+        max_cells.map_or(usize::MAX, |limit| {
+            (limit / cols.tracks.len().max(1) as u64) as usize
+        }),
     );
     if rows.tracks.is_empty()
         && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen)
@@ -491,8 +538,9 @@ pub fn visible_merged_ranges_with_geometry(
     sheet: &Sheet,
     viewport: &Viewport,
     geometry: &GridGeometry,
+    max_cells: Option<u64>,
 ) -> Vec<CellRange> {
-    let (rows, cols, _, _) = viewport_axes(sheet, viewport, geometry, false);
+    let (rows, cols, _, _) = viewport_axes(sheet, viewport, geometry, false, max_cells);
     sheet
         .merges
         .iter()
@@ -502,6 +550,28 @@ pub fn visible_merged_ranges_with_geometry(
                 && cols.intersects(range.start.col, range.end.col)
         })
         .collect()
+}
+
+fn viewport_for_axes(viewport: &Viewport, rows: &AxisLayout) -> Viewport {
+    Viewport {
+        height: if rows.truncated {
+            rows.tracks.last().map_or(0.0, |track| track.end)
+        } else {
+            viewport.height
+        },
+        ..*viewport
+    }
+}
+
+#[doc(hidden)]
+pub fn display_viewport_with_geometry(
+    sheet: &Sheet,
+    viewport: &Viewport,
+    geometry: &GridGeometry,
+    max_cells: u64,
+) -> Viewport {
+    let (rows, _, _, _) = viewport_axes(sheet, viewport, geometry, false, Some(max_cells));
+    viewport_for_axes(viewport, &rows)
 }
 
 #[derive(Clone, Copy)]
@@ -573,13 +643,23 @@ pub fn build_display_list_with_geometry<F, R>(
     viewport: &Viewport,
     ghosts: &[GhostEdit],
     geometry: &GridGeometry,
+    max_cells: Option<u64>,
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame_with_geometry(wb, sheet, viewport, ghosts, resolver, None, Some(geometry))
+    build_frame_with_geometry(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        resolver,
+        None,
+        Some(geometry),
+        max_cells,
+    )
 }
 
 pub fn build_print_display_list_with_charts<F, R>(
@@ -630,9 +710,11 @@ where
         resolver,
         print,
         geometry.as_ref(),
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_frame_with_geometry<F, R>(
     wb: &Workbook,
     sheet: SheetId,
@@ -641,6 +723,7 @@ fn build_frame_with_geometry<F, R>(
     mut resolver: F,
     print: Option<(&PrintMetrics, bool)>,
     geometry: Option<&GridGeometry>,
+    max_cells: Option<u64>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -666,6 +749,7 @@ where
             grid: GridMeta::default(),
             hyperlinks: Vec::new(),
             charts: Vec::new(),
+            truncated: false,
         });
     };
 
@@ -684,11 +768,14 @@ where
     let mut fx = FrameStyles::new(styles, sheet_ref);
     let geom = geometry.expect("sheet geometry initialized");
     let (rows, cols, frozen_rows, frozen_cols) =
-        viewport_axes(sheet_ref, viewport, geom, print.is_some());
+        viewport_axes(sheet_ref, viewport, geom, print.is_some(), max_cells);
+    let paint_viewport = viewport_for_axes(viewport, &rows);
 
     let grid = GridMeta {
         start_row: rows.start(),
         start_col: cols.start(),
+        hidden_row_spans: sheet_ref.hidden_row_spans(0..=MAX_ROWS - 1).collect(),
+        hidden_col_spans: sheet_ref.hidden_col_spans(0..=MAX_COLS - 1).collect(),
         row_indices: rows.indices(),
         col_indices: cols.indices(),
         row_offsets: rows.offsets(),
@@ -718,17 +805,20 @@ where
     };
     let merge_index = MergeIndex::new(&sheet_ref.merges, row_hint);
     let mut anchors = visible_anchors(sheet_ref, &rows, &cols, &merge_index);
-    if print.is_some() {
-        for merge in &sheet_ref.merges {
-            if rows.intersects(merge.start.row, merge.end.row)
-                && cols.intersects(merge.start.col, merge.end.col)
-                && let Some(cell) = sheet_ref.cell(merge.start)
-            {
-                anchors.push((merge.start, cell));
-            }
+    for merge in &sheet_ref.merges {
+        if (print.is_some()
+            || sheet_ref.row_hidden(merge.start.row)
+            || sheet_ref.col_hidden(merge.start.col))
+            && rows.intersects(merge.start.row, merge.end.row)
+            && cols.intersects(merge.start.col, merge.end.col)
+            && let Some(cell) = sheet_ref.cell(merge.start)
+        {
+            anchors.push((merge.start, cell));
         }
-        anchors.sort_unstable_by_key(|(at, _)| (at.row, at.col));
-        anchors.dedup_by_key(|(at, _)| (at.row, at.col));
+    }
+    anchors.sort_unstable_by_key(|(at, _)| (at.row, at.col));
+    anchors.dedup_by_key(|(at, _)| (at.row, at.col));
+    if print.is_some() {
         anchors.retain(|(at, _)| {
             geom.row_y(at.row) < viewport.y + viewport.height
                 && geom.col_x(at.col) < viewport.x + viewport.width
@@ -908,19 +998,26 @@ where
             .and_then(|f| f.family.clone())
             .or_else(|| print_font_family.clone());
 
+        let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
+        let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
+        let pad_width = print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi);
+        let indent_scale = print.map_or(1.0, |(m, _)| 96.0 / m.dpi);
+        let indent = xf.indent as f32 * INDENT_WIDTH_PX * indent_scale;
+        let (left_indent, right_indent) = match xf.h {
+            Some(HAlign::Left) => (indent, 0.0),
+            Some(HAlign::Right) => (0.0, indent),
+            _ => (0.0, 0.0),
+        };
         let tx = match align {
-            Align::Left => cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
-            Align::Right => {
-                cell_box.x + cell_box.w - print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi)
-            }
+            Align::Left => cell_box.x + left_pad + left_indent,
+            Align::Right => cell_box.x + cell_box.w - right_pad - right_indent,
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
-                left: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
-                width: (cell_box.w - print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi))
-                    .max(0.0),
+                left: cell_box.x + left_pad + left_indent,
+                width: (cell_box.w - pad_width - left_indent - right_indent).max(0.0),
                 parts,
                 general: match cell.value {
                     CellValue::Number { value }
@@ -1032,7 +1129,7 @@ where
     chart::render_charts(
         sheet_ref,
         geom,
-        viewport,
+        &paint_viewport,
         frozen_rows,
         frozen_cols,
         &mut commands,
@@ -1045,7 +1142,7 @@ where
             x1: x,
             y1: 0.0,
             x2: x,
-            y2: viewport.height,
+            y2: paint_viewport.height,
             width: PANE_DIVIDER_WIDTH,
             color: pane_divider_color.clone(),
             style: None,
@@ -1053,7 +1150,7 @@ where
             clip: None,
         });
     }
-    if let Some(y) = rows.divider {
+    if let Some(y) = rows.divider.filter(|y| *y < paint_viewport.height) {
         commands.push(DrawCmd::Line {
             x1: 0.0,
             y1: y,
@@ -1074,6 +1171,7 @@ where
         grid,
         hyperlinks,
         charts,
+        truncated: rows.truncated,
     })
 }
 
@@ -1592,7 +1690,6 @@ fn spill_clip(
     if matches!(align, Align::Right | Align::Center) {
         while first > 0
             && cols.tracks[first - 1].pinned == pane
-            && cols.tracks[first - 1].index + 1 == cols.tracks[first].index
             && blank(cols.tracks[first - 1].index)
         {
             first -= 1;
@@ -1602,7 +1699,6 @@ fn spill_clip(
     if matches!(align, Align::Left | Align::Center) {
         while last + 1 < cols.tracks.len()
             && cols.tracks[last + 1].pinned == pane
-            && cols.tracks[last].index + 1 == cols.tracks[last + 1].index
             && blank(cols.tracks[last + 1].index)
         {
             last += 1;
@@ -1764,6 +1860,7 @@ struct ResolvedXf {
     border: Option<ResolvedBorder>,
     h: Option<HAlign>,
     v: Option<VAlign>,
+    indent: u32,
     /// wrap_text or shrink_to_fit — both suppress text spill.
     wrap_or_shrink: bool,
 }
@@ -1928,11 +2025,16 @@ impl<'a> FrameStyles<'a> {
                     .as_ref()
                     .map(|edge| Self::resolve_edge(styles, edge)),
             });
-        let (h, v, wrap_or_shrink) = style
-            .and_then(|s| styles.alignment_for(s))
-            .map_or((None, None, false), |a| {
-                (a.h, a.v, a.wrap_text || a.shrink_to_fit)
-            });
+        let (h, v, indent, wrap_or_shrink) =
+            style
+                .and_then(|s| styles.alignment_for(s))
+                .map_or((None, None, 0, false), |a| {
+                    let indent = match a.h {
+                        Some(HAlign::Left | HAlign::Right) => a.indent.unwrap_or(0).min(MAX_INDENT),
+                        _ => 0,
+                    };
+                    (a.h, a.v, indent, a.wrap_text || a.shrink_to_fit)
+                });
         ResolvedXf {
             format_code,
             font,
@@ -1940,6 +2042,7 @@ impl<'a> FrameStyles<'a> {
             border,
             h,
             v,
+            indent,
             wrap_or_shrink,
         }
     }
@@ -2850,6 +2953,69 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn merges_starting_in_hidden_frozen_tracks_draw_in_the_body() {
+        for (hide_row, hide_col) in [(true, false), (false, true), (true, true)] {
+            let mut sheet = Sheet::new("Sheet1");
+            sheet.freeze_pane = Some(FreezePane::new(
+                if hide_row { 3 } else { 0 },
+                if hide_col { 3 } else { 0 },
+                CellRef::new(3, 3),
+            ));
+            for index in 1..3 {
+                if hide_row {
+                    sheet.row_heights.insert(index, 0.0);
+                }
+                if hide_col {
+                    sheet.col_widths.insert(index, 0.0);
+                }
+            }
+            sheet
+                .merges
+                .push(CellRange::new(CellRef::new(1, 1), CellRef::new(4, 4)));
+            sheet.set_cell(CellRef::new(1, 1), text_cell("merged"));
+            let mut wb = Workbook::default();
+            wb.sheets.push(sheet);
+            let geom = GridGeometry::new(&wb.sheets[0], &wb.styles);
+
+            for scroll in [0.0, 0.25] {
+                let dl = build_display_list(
+                    &wb,
+                    SheetId(0),
+                    &Viewport {
+                        x: scroll,
+                        y: scroll,
+                        width: 800.0,
+                        height: 600.0,
+                    },
+                )
+                .unwrap();
+                let clips = dl
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        DrawCmd::Text { text, clip, .. } => Some((&**text, *clip)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let x = geom.col_x(1) - if hide_col { 0.0 } else { scroll };
+                let y = geom.row_y(1) - if hide_row { 0.0 } else { scroll };
+                assert_eq!(
+                    clips,
+                    vec![(
+                        "merged",
+                        Rect {
+                            x,
+                            y,
+                            w: geom.col_x(5) - scroll - x,
+                            h: geom.row_y(5) - scroll - y,
+                        }
+                    )]
+                );
+            }
+        }
+    }
+
     fn ghost(row: u32, col: u32, old: &str, new: &str) -> GhostEdit {
         ghost_with_alignment_value(
             row,
@@ -3316,5 +3482,245 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn indent_shifts_left_aligned_text_and_general_text_ignores_it() {
+        let label = "of which: manufacturing";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 4.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf::default());
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Left),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell(label));
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                style: Some(1),
+                ..text_cell(label)
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            Cell {
+                style: Some(2),
+                ..text_cell(label)
+            },
+        );
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let texts: Vec<(f32, Rect)> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text { x, clip, .. } => Some((*x, *clip)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 3);
+        assert_eq!(texts[1].0, texts[0].0 + 2.0 * INDENT_WIDTH_PX);
+        assert_eq!(texts[2].0, texts[0].0);
+        assert_eq!(texts[1].1.w, texts[0].1.w);
+        assert_eq!(texts[2].1.w, texts[0].1.w);
+    }
+
+    #[test]
+    fn indent_shifts_right_aligned_number_left() {
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf::default());
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Right),
+                indent: Some(1),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(42.0));
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                style: Some(1),
+                ..num_cell(42.0)
+            },
+        );
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let nums: Vec<(f32, NumberFormatLayout)> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text {
+                    x,
+                    number_format: Some(layout),
+                    ..
+                } => Some((*x, layout.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nums.len(), 2);
+        assert_eq!(nums[1].0, nums[0].0 - INDENT_WIDTH_PX);
+        assert_eq!(nums[1].1.left, nums[0].1.left);
+        assert_eq!(nums[1].1.width, nums[0].1.width - INDENT_WIDTH_PX);
+    }
+
+    #[test]
+    fn indent_on_centered_text_changes_nothing() {
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Center),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Center),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Fill),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::CenterContinuous),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        for row in 0..4u32 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    style: Some(row),
+                    ..text_cell("label")
+                },
+            );
+        }
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
+        let xs: Vec<f32> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs.len(), 4);
+        assert_eq!(xs[1], xs[0]);
+        assert_eq!(xs[2], TEXT_PAD_PX);
+        assert_eq!(xs[3], xs[0]);
+    }
+
+    #[test]
+    fn print_mode_indent_scales_with_dpi() {
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.cell_xfs.push(Xf::default());
+        wb.styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Left),
+                indent: Some(2),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("plain"));
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                style: Some(1),
+                ..text_cell("indented")
+            },
+        );
+        wb.sheets.push(sheet);
+
+        let metrics = PrintMetrics {
+            dpi: 192.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 15.0,
+            default_column_width: None,
+            font_size_pt: 11.0,
+            font_family: "Calibri".into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        };
+        let dl = build_frame(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[],
+            |chart| {
+                Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                    part: chart.part.clone(),
+                })
+            },
+            Some((&metrics, false)),
+        )
+        .unwrap();
+        let xs: Vec<f32> = dl
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect();
+        let scale = 96.0 / metrics.dpi;
+        assert_eq!(xs, vec![3.0 * scale, (3.0 + 2.0 * INDENT_WIDTH_PX) * scale]);
     }
 }

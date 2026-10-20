@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
@@ -35,6 +36,7 @@ pub struct PreservedPackage {
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
+    pub(crate) text_runs: Arc<OnceLock<crate::rich_text::RichTextIndex>>,
 }
 
 impl PreservedPackage {
@@ -187,6 +189,7 @@ impl PreservedPackage {
             active_sheet,
             unpatchable_references,
             rich_shared_strings,
+            text_runs: Arc::new(OnceLock::new()),
         })
     }
 

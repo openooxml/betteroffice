@@ -4,19 +4,21 @@ import { submitButtonStyle, CANCEL_BUTTON_STYLE } from './cardUtils';
 import { useTranslation } from '../../i18n';
 
 export interface AddCommentCardProps extends SidebarItemRenderProps {
-  onSubmit?: (text: string) => void;
+  onSubmit?: (text: string) => void | Promise<boolean>;
   onCancel?: () => void;
 }
 
 export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCardProps) {
   const [text, setText] = useState('');
+  const [pending, setPending] = useState(false);
   const { t } = useTranslation();
 
-  const handleSubmit = () => {
-    if (text.trim()) {
-      onSubmit?.(text.trim());
-      setText('');
-    }
+  const handleSubmit = async () => {
+    if (!text.trim() || pending) return;
+    setPending(true);
+    const accepted = await onSubmit?.(text.trim());
+    setPending(false);
+    if (accepted !== false) setText('');
   };
 
   return (
@@ -34,13 +36,14 @@ export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCar
       <textarea
         ref={(el) => el?.focus({ preventScroll: true })}
         value={text}
+        readOnly={pending}
         onChange={(e) => setText(e.target.value)}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           e.stopPropagation();
           if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            handleSubmit();
+            void handleSubmit();
           }
           if (e.key === 'Escape') {
             onCancel?.();
@@ -74,9 +77,9 @@ export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCar
           {t('common.cancel')}
         </button>
         <button
-          onClick={handleSubmit}
-          disabled={!text.trim()}
-          style={submitButtonStyle(!!text.trim())}
+          onClick={() => { void handleSubmit(); }}
+          disabled={!text.trim() || pending}
+          style={submitButtonStyle(!!text.trim() && !pending)}
         >
           {t('common.comment')}
         </button>

@@ -247,6 +247,7 @@ function worker() {
     failPresent: null as number | null,
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
+      initializeComments() {},
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -1704,7 +1705,7 @@ test('d0_command_input_renews_scheduler_budget_and_idle_hold', async () => {
     let now = 2000;
     w.harness.now = () => now;
     const kinds = ['insertText', 'select', 'replaceSelection', 'deleteBackward', 'deleteForward',
-      'paragraphBreak', 'toggleMark', 'formatRange', 'clearFormatting', 'setParagraphAttrs', 'applyParagraphStyle'];
+      'paragraphBreak', 'lineBreak', 'toggleMark', 'formatRange', 'clearFormatting', 'setParagraphAttrs', 'applyParagraphStyle'];
     for (const [index, kind] of kinds.entries()) {
       expect(w.harness.scheduler!.budget()).toBe(24);
       await client.edit({ ...commandEnvelope(index + 1), kind });

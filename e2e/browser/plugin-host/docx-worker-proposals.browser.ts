@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import JSZip from 'jszip';
 import { pinnedEvaluate } from '../pinned-evaluate';
 
 interface DocxSessionParagraphAnchor {
@@ -94,6 +95,7 @@ interface WorkerProposalProbe {
     listContentControls(): Promise<{ ok: boolean; version: string; content?: { controls: unknown[] } }>;
     findContentControls(query: { kind: 'tag'; tag: string }): Promise<{ ok: boolean; version: string; content?: { controls: unknown[] } }>;
     readSelectionInfo(): Promise<{ selectedText: string; paragraphText: string } | null>;
+    save(): Promise<ArrayBuffer | null>;
     getSearchState(): { total: number; current: number } | null;
     commands: { execute(id: string, args: unknown): Promise<{ ok: boolean; failure?: { code: string } }> };
   } | null;
@@ -692,9 +694,8 @@ test(`${arm}: a worker viewer reads content controls and refuses revision comman
   });
   expect(reads.list).toMatchObject({ ok: true, content: { controls: [] } });
   expect(reads.find).toMatchObject({ ok: true, content: { controls: [] } });
-  const refusal = arm === 'hybrid' ? 'read-only' : 'unsupported-command';
-  expect(reads.accept).toMatchObject({ ok: false, failure: { code: refusal } });
-  expect(reads.reject).toMatchObject({ ok: false, failure: { code: refusal } });
+  expect(reads.accept).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(reads.reject).toMatchObject({ ok: false, failure: { code: 'read-only' } });
   const prepared = await prepare(page, arm, true);
   const proposed = snapshotOf(await pinnedEvaluate(page,
     (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
@@ -755,3 +756,28 @@ test(`${arm}: Find in a worker viewer steps through worker matches without the m
   await assertReplica(page, arm, true);
 });
 }
+
+test('default: review commands step through, wrap and accept tracked changes in an editable worker editor', async ({ page }) => {
+  await instrument(page);
+  await open(page, 'default', false, 'revisions=2&sidebar=closed');
+  const execute = (id: 'reviewNext' | 'reviewPrevious' | 'reviewAccept') => pinnedEvaluate(page, (command) =>
+    (window as unknown as ProbeWindow).__workerProposalProbe.editor!.commands.execute(command, null), id);
+  const selection = () => pinnedEvaluate(page, async () => {
+    const info = await (window as unknown as ProbeWindow).__workerProposalProbe.editor!.readSelectionInfo();
+    return info && { selectedText: info.selectedText, paragraphText: info.paragraphText };
+  });
+  const change = (pageNumber: number) =>
+    ({ selectedText: ' Existing insertion.', paragraphText: `Page ${pageNumber} paragraph 12: Original text. Existing insertion.` });
+  for (const [id, pageNumber] of [['reviewNext', 5], ['reviewNext', 6], ['reviewNext', 5], ['reviewPrevious', 6]] as const) {
+    expect(await execute(id)).toMatchObject({ ok: true, status: 'executed' });
+    await expect.poll(selection).toEqual(change(pageNumber));
+  }
+  expect(await execute('reviewAccept')).toMatchObject({ ok: true, status: 'executed' });
+  const saved = await pinnedEvaluate(page, async () => {
+    const bytes = await (window as unknown as ProbeWindow).__workerProposalProbe.editor!.save();
+    return bytes && Array.from(new Uint8Array(bytes));
+  });
+  const xml = await (await JSZip.loadAsync(Uint8Array.from(saved!))).file('word/document.xml')!.async('string');
+  expect(xml.match(/<w:ins\b/g)).toHaveLength(1);
+  expect(xml.match(/Existing insertion\./g)).toHaveLength(2);
+});

@@ -299,6 +299,12 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   initialZoom?: number;
   /** Whether to show hidden (vanished) text in the layout (default: false) */
   showHiddenText?: boolean;
+  /**
+   * Whether to show dashed, view-only guides at table cell edges without a border (default: false).
+   * The `tableGridlines` command toggles them; they are never saved, printed or exported.
+   * Worker-only editor only.
+   */
+  showTableGridlines?: boolean;
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
@@ -477,10 +483,9 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   measurementFontProvider?: BundledFontProvider;
 }
 
-export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange' | 'experimentalWorkerOpen'> {
+export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange'> {
   /** @deprecated Removed in 0.6.0. Omit for the async editor. */
   [LEGACY_SYNC_API_PROP]?: false;
-  experimentalWorkerOpen?: true;
   onChange?: undefined;
 }
 
@@ -579,7 +584,7 @@ export interface DocxEditorRef {
   exportStructuredWithPages: (
     options: DocxPageExportOptions
   ) => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
-  /** @deprecated Use {@link readPositionAtPoint}. Worker viewers return a cached answer or null while reading it. */
+  /** @deprecated Use {@link readPositionAtPoint}. Worker-only viewers return null; hybrid worker viewers may return a cached answer. */
   getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
   /** Reads the text under client coordinates after pending input commits. Worker viewers resolve it against the presented frame, retrying superseded reads. */
   readPositionAtPoint: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>;
@@ -621,9 +626,8 @@ export interface DocxEditorRef {
   scrollToParaId: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   /**
    * Scroll the paginated view to a specific display position.
-   * For Word `w14:paraId` use
-   * `scrollToParaId` instead.
-   * @example ref.current?.scrollToPosition(42)
+   * Requires `legacySyncApi`; worker navigation uses paragraph IDs.
+   * @deprecated Use {@link scrollToParagraph} with a paragraph ID.
    */
   scrollToPosition: (displayPosition: number) => void;
   /** @deprecated Use {@link scrollToComment}. Worker viewers start the async navigation and return true. */
@@ -635,8 +639,8 @@ export interface DocxEditorRef {
    * overlay highlights it, and scroll its start into view. The selection
    * persists until it next changes (there is no auto-clearing flash). No-op
    * for a malformed range or a `from` past the document end; `to` is clamped
-   * to the document size.
-   * @example ref.current?.highlightRange(10, 24)
+   * to the document size. Requires `legacySyncApi`.
+   * @deprecated Use {@link readPositionAtPoint} for worker text positions; use {@link scrollToParagraph} to select and reveal a paragraph.
    */
   highlightRange: (from: number, to: number) => void;
   /** Open print preview */

@@ -852,6 +852,7 @@ mod tests {
     #[test]
     fn renders_png_with_magic_bytes() {
         let dl = DisplayList {
+            truncated: false,
             width: 40.0,
             height: 20.0,
             commands: vec![
@@ -915,6 +916,7 @@ mod tests {
     #[test]
     fn rejects_malformed_color() {
         let dl = DisplayList {
+            truncated: false,
             width: 10.0,
             height: 10.0,
             commands: vec![DrawCmd::FillRect {

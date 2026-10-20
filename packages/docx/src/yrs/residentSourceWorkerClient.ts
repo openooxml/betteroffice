@@ -12,6 +12,10 @@ export interface ResidentEngineWorkerSourceOpened {
   stateVector: Uint8Array;
   hostJson?: string;
   preview?: ResidentEngineWorkerFrame;
+  /** The client id the opened replica writes with: a fresh one when the pinned id would reuse its clocks. */
+  clientId?: number;
+  /** The opened state's clock for `clientId`. */
+  clientClock?: number;
 }
 
 export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
@@ -114,12 +118,13 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     this.openedHeapLimit = reservation;
     try {
       const owned: ResidentSourceOpenRequest = source.bytes
-        ? { ...source, bytes: source.bytes.slice() } : source;
+        ? { ...source, bytes: source.bytes.slice(), ...(source.state ? { state: source.state.slice() } : {}) } : source;
       const initialUpdate = source.collaboration?.initialUpdate === undefined
         ? undefined : new Uint8Array(source.collaboration.initialUpdate);
       const requestSource = initialUpdate
         ? { ...owned, collaboration: { ...owned.collaboration!, initialUpdate } } : owned;
       const transfer: Transferable[] = owned.bytes ? [owned.bytes.buffer] : [];
+      if (owned.state) transfer.push(owned.state.buffer);
       if (initialUpdate) transfer.push(initialUpdate.buffer);
       const response = await this.request({ type: 'openSource', source: requestSource }, transfer);
       if (!response.sourceDocument || !response.stateVector) {
@@ -128,7 +133,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
       if (this.cutReservation === cut) this.cutReservation = null;
       if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
       return {
-        document: response.sourceDocument, hostJson: response.hostJson,
+        document: response.sourceDocument, hostJson: response.hostJson, clientId: response.clientId, clientClock: response.clientClock,
         stateVector: new Uint8Array(response.stateVector),
         ...(response.frame ? { preview: sourcePreviewFrame(response) } : {}),
       };

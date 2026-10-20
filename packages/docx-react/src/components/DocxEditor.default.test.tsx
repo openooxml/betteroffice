@@ -15,11 +15,17 @@ test('explicit runtime choices precede collaboration, capabilities and sync call
   const props = { collaboration: {}, onChange() {}, experimentalWorkerOpen: false as const };
   expect(chooseDocxEditorRoute({ ...props, [LEGACY_SYNC_API_PROP]: true })).toMatchObject({ route: 'hybrid', warning: expect.stringContaining('0.6.0') });
   expect(chooseDocxEditorRoute(props)).toEqual({ route: 'in-thread' });
-  expect(chooseDocxEditorRoute({ collaboration: {}, onChange() {} })).toMatchObject({ route: 'collaboration', warning: expect.stringContaining('worker-only collaboration') });
+  expect(chooseDocxEditorRoute({ collaboration: {}, onChange() {} })).toEqual({ route: 'capability-fallback' });
   expect(chooseDocxEditorRoute({ onChange() {} })).toEqual({ route: 'capability-fallback' });
 });
 
 test('sync callbacks are refused only on the default worker route', () => {
   expect(chooseDocxEditorRoute({ onChange() {} })).toEqual({ route: 'sync-api-error' });
   expect(chooseDocxEditorRoute({ onChange: undefined })).toEqual({ route: 'peerless' });
+});
+
+test('collaboration takes the default worker route', () => {
+  expect(chooseDocxEditorRoute({ collaboration: {} })).toEqual({ route: 'peerless' });
+  expect(chooseDocxEditorRoute({ collaboration: { initialUpdate: new Uint8Array([0]) } })).toEqual({ route: 'peerless' });
+  expect(chooseDocxEditorRoute({ collaboration: {}, onChange() {} })).toEqual({ route: 'sync-api-error' });
 });

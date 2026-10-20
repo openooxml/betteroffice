@@ -2,14 +2,27 @@ import { createDisplayListQueries, effectiveZoom, loadRustDisplayListQueryEngine
 import { createRenderedDomContext, type DisplayListPageProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarget } from '@betteroffice/docx/yrs';
 import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
-import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginSelection } from '../../../plugins/types';
+import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginRefusal, DocxPluginSelection } from '../../../plugins/types';
+import { pluginRefusal } from '../../../plugins/createPluginClients';
 import { WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
-import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
+import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 import { clientPointToPage } from './pagePoint';
+
+export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefined): string {
+  return view?.editState?.documentVersion ?? view?.geometry?.documentVersion ?? String(view?.version ?? 0);
+}
+
+/** The refusal a plugin read or navigation answers when the worker read rejected with `error`, or null to rethrow it. */
+export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerlessShellController>, 'getSnapshot'>, error: unknown): DocxPluginRefusal | null {
+  if (error instanceof WorkerReadSupersededError) return controller.getSnapshot().status === 'ready'
+    ? pluginRefusal('input-failed', error.message) : pluginRefusal('document-replaced');
+  return error instanceof Error && error.message === 'Peer-less editor is not ready'
+    ? pluginRefusal('document-replaced') : null;
+}
 
 /** `reservations` is the set the editor sends, which a frame's boxes answer for only once it was laid out with it. */
 export function createWorkerPluginGeometry(controller: ReturnType<typeof createPeerlessShellController>, pages: () => HTMLElement | null, layer: () => HTMLElement | null, changed: () => void,
-  navigate?: (target: { story: string; paraId: string }, focus: boolean) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null) {
+  navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null) {
   type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' }>;
   type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string) => Promise<DocxAnchorGeometryResult[]>;
   let current: { frame: PeerlessFrameGeometry; version: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries; readAll: ReadAll } | null = null;
@@ -189,12 +202,17 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
         if (!bounds?.width || !bounds.height) return null;
         const point = clientPointToPage(x, y, bounds, layout.zoom, frame.pages);
         if (!point || point.x < 0 || point.y < 0 || point.x > point.page.bounds.width || point.y > point.page.bounds.height) return null;
-        const result = await controller.readAt({ kind: 'pointPosition', expectVersion: review.version,
-          hit: { position: -1, pageIndex: point.page.page.pageIndex, region: 'body' }, nativePoint: {
-            page: point.page.page, x: point.x, y: point.y, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision,
-            clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
-          } }, review.version);
-        return shown() && result ? { ...result, layoutId: layout.id } : null;
+        try {
+          const result = await controller.readAt({ kind: 'pointPosition', expectVersion: review.version,
+            hit: { position: -1, pageIndex: point.page.page.pageIndex, region: 'body' }, nativePoint: {
+              page: point.page.page, x: point.x, y: point.y, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision,
+              clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+            } }, review.version);
+          return shown() && result ? { ...result, layoutId: layout.id } : null;
+        } catch (error) {
+          if (workerReadRefusal(controller, error)) return null;
+          throw error;
+        }
       },
       getAnchorGeometry: target => answer(target, true),
       readAnchorGeometries: targets => readAll(targets, true),
@@ -243,18 +261,31 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   };
   const navigation: DocxPluginNavigation = {
     async scrollToParagraph(target, options) {
+      const identity = controller.getSnapshot().view?.identity;
+      const check = () => {
+        const snapshot = controller.getSnapshot();
+        const view = snapshot.view;
+        if (snapshot.status !== 'ready' || !identity || !view || !sameView(identity, view.identity)) throw new WorkerReadSupersededError('Document was replaced');
+        if (workerDocumentVersion(view) !== options.expectVersion) throw new WorkerReadSupersededError('Worker read was superseded');
+      };
       const token = await controller.ref.readParagraphs({ view: 'accepted', paraIds: [] });
       if (!token.ok) return { ok: false, failure: { code: 'missing-target', message: token.failure.message } };
       if (token.version !== options.expectVersion) return { ok: false, failure: { code: 'stale-version', message: 'The document changed after that version' } };
+      check();
       const resolved = await controller.readAt({ kind: 'navigationTarget', ...target }, token.version);
+      check();
       if (typeof resolved === 'string') return { ok: false, failure: { code: resolved === 'ambiguous-target' ? 'ambiguous-target' : resolved === 'unsupported' ? 'unsupported' : 'missing-target', message: resolved } };
       if (navigate) {
-        if (!await navigate(target, options.focus === true)) return { ok: false, failure: { code: 'layout-unavailable', message: 'The paragraph could not be presented' } };
+        const revealed = await navigate(target, options.focus === true, token.version);
+        check();
+        if (!revealed) return { ok: false, failure: { code: 'layout-unavailable', message: 'The paragraph could not be presented' } };
         if (options.focus) controller.ref.focus();
         return { ok: true };
       }
       await controller.ref.whenLayoutComplete();
+      check();
       await update();
+      check();
       const source = current;
       if (!source || !valid(source.layout, source.frame)) return { ok: false, failure: { code: 'layout-unavailable', message: 'No rendered layout shows the paragraph' } };
       if (source.layout.version !== token.version) return { ok: false, failure: { code: 'stale-version', message: 'The document changed after that version' } };
@@ -264,6 +295,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       const container = source.geometry.dom.pagesContainer;
       const scroller = container.closest<HTMLElement>('.docx-editor__scroll-container');
       if (!scroller) return { ok: false, failure: { code: 'layout-unavailable', message: 'The scroll container is unavailable' } };
+      check();
       scroller.scrollTop += container.getBoundingClientRect().top - scroller.getBoundingClientRect().top + (page.bounds.y + rect.y) * source.layout.zoom - 24;
       if (options.focus) controller.ref.focus();
       return { ok: true };

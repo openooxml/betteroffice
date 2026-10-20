@@ -98,6 +98,7 @@ export const editsession_headings_json: (a: number, b: number, c: number) => [nu
 export const editsession_history_stories: (a: number) => [number, number];
 export const editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+export const editsession_insert_line_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
 export const editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -172,6 +173,7 @@ export const editsession_revision_stamps_json: (a: number, b: number, c: number)
 export const editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_section_margins_json: (a: number) => [number, number];
+export const editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
 export const editsession_select_story: (a: number, b: number, c: number) => void;

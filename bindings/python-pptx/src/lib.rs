@@ -75,6 +75,7 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
         }
         EditError::InvalidClientId(_)
         | EditError::InvalidGeometry(_)
+        | EditError::InvalidFill(_)
         | EditError::InvalidAdjustment(_)
         | EditError::InvalidText(_)
         | EditError::InvalidComment(_) => PyValueError::new_err(message),

@@ -11,7 +11,7 @@ use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
     After, Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id,
     adopt_pilcrow, block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before,
-    position_chunks, range_chunks, remove_units, snapshot_range, utf16_len,
+    past_leading_blocks, position_chunks, range_chunks, remove_units, snapshot_range, utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -188,7 +188,10 @@ pub(crate) fn suggest_delete(
         let overlap = overlap_end - overlap_start;
         match &chunk.kind {
             ChunkKind::Pilcrow(map) => {
-                if Some(chunk.start) == final_pilcrow || chunk.attr_active(DEL) {
+                if Some(chunk.start) == final_pilcrow
+                    || chunk.attr_active(DEL)
+                    || matches!(map.get(txn, crate::PPR_DEL), Some(Out::Any(value)) if value != Any::Null)
+                {
                     continue;
                 }
                 story.format(
@@ -341,6 +344,7 @@ impl EditingDoc {
                 ..Receipt::default()
             });
         }
+        at.index = past_leading_blocks(&story, txn, at.index);
         crate::identity::promote_at(self, txn, &at.story, &story, at.index);
         let chunks = position_chunks(&story, txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
@@ -472,6 +476,10 @@ impl EditingDoc {
         }
         let story = story_ref(txn, &range.story)?;
         check_range(&story, txn, range.start, len)?;
+        if len == 0 {
+            range.start = past_leading_blocks(&story, txn, range.start);
+            range.end = range.start;
+        }
         let chunks = range_chunks(&story, txn, &mut range);
         let len = range.end - range.start;
         let after = after_struck_text(&story, txn, ctx, &range, len, &chunks);
@@ -572,6 +580,10 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
+        if len == 0 {
+            range.start = past_leading_blocks(&story, &txn, range.start);
+            range.end = range.start;
+        }
         let chunks = range_chunks(&story, &txn, &mut range);
         let len = range.end - range.start;
         let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
@@ -650,6 +662,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        at.index = past_leading_blocks(&story, &txn, at.index);
         crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
@@ -681,6 +694,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        at.index = past_leading_blocks(&story, &txn, at.index);
         crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {

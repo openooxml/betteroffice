@@ -17,8 +17,14 @@ export type ResidentSourceOpenRequest = (
   heapLimitBytes?: number;
   generation?: string;
   digest?: string;
-  /** One replica seeds from bytes; joiners pass `initialUpdate`. Two seeds merge by story last-writer-wins. */
-  collaboration?: { clientId: number; initialUpdate?: Uint8Array };
+  /**
+   * One replica seeds from bytes; joiners pass `initialUpdate`. Two seeds merge by story last-writer-wins.
+   * `clientClock` is the highest clock of `clientId` the caller has held. A seed would write that id's clocks again
+   * and a joined state behind it would reuse later ones, so either opens under a fresh client id.
+   */
+  collaboration?: { clientId: number; initialUpdate?: Uint8Array; clientClock?: number };
+  /** Yrs state restored over the unseeded package of `bytes`, such as a command checkpoint. */
+  state?: Uint8Array;
 };
 
 export function validateResidentSource(source: ResidentSourceOpenRequest): void {
@@ -35,6 +41,10 @@ export function validateResidentSource(source: ResidentSourceOpenRequest): void 
     (source.cut.paragraphBudget !== undefined && (!Number.isSafeInteger(source.cut.paragraphBudget) || source.cut.paragraphBudget < 1)))) {
     throw new TypeError('Invalid DOCX source cut');
   }
+  if (source.state !== undefined && (!(source.state instanceof Uint8Array) || source.bytes === undefined ||
+    source.cut !== undefined || source.preview)) {
+    throw new TypeError('Invalid DOCX source state');
+  }
   if (source.preview !== undefined && typeof source.preview !== 'boolean') {
     if (!source.preview || typeof source.preview !== 'object') throw new TypeError('Invalid DOCX preview options');
     const pages = source.preview?.pages ?? 1;
@@ -42,7 +52,8 @@ export function validateResidentSource(source: ResidentSourceOpenRequest): void 
   }
   const collaboration = source.collaboration;
   if (collaboration !== undefined && (!collaboration || !Number.isSafeInteger(collaboration.clientId) || collaboration.clientId < 0 ||
-    (collaboration.initialUpdate !== undefined && !(collaboration.initialUpdate instanceof Uint8Array)))) {
+    (collaboration.initialUpdate !== undefined && !(collaboration.initialUpdate instanceof Uint8Array)) ||
+    (collaboration.clientClock !== undefined && (!Number.isSafeInteger(collaboration.clientClock) || collaboration.clientClock < 0)))) {
     throw new TypeError('Invalid DOCX collaboration options');
   }
 }

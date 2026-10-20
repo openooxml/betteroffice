@@ -6,7 +6,7 @@ import type { ResidentControlSnapshot } from './residentControls';
 import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residentProperties';
 import type { ResidentSectionSnapshot } from './residentSections';
 import type { YrsStoryRange } from './index';
-import type { ResidentReviewSnapshot } from './residentReview';
+import type { ResidentReviewSnapshot, ResidentReviewTarget, ResidentReviewTargetRanges } from './residentReview';
 import type { ResidentCommentInsertionRange } from './residentCommentProjection';
 import type { ResidentToolbarMetadata } from './residentToolbarMetadata';
 import type { LayoutMetaV1 } from './layoutMeta';
@@ -115,18 +115,20 @@ export interface ResidentProposalResponse {
 export type ResidentDocumentRead =
   | { kind: 'collabStateVector' }
   | { kind: 'collabDiff'; stateVector?: Uint8Array }
+  | { kind: 'collabDiffChunks'; stateVector: Uint8Array; maxChunkBytes: number }
   | { kind: 'collabPresence'; peers: ResidentPresencePeer[]; pages: [number, number]; expectVersion: string; expectFrameEpoch: number; expectLayoutRevision: number }
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
   | { kind: 'partSnapshot' }
   | { kind: 'properties'; target: ResidentPropertyTarget }
   | { kind: 'sectionProperties' }
-  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
+  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string; workerFonts?: boolean }
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'rangeHighlights'; ranges: YrsStoryRange[]; expectVersion: string; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'reviewSnapshot'; expectPreviewVersion?: number }
   | { kind: 'commentInsertionRange'; paraId: string; search?: string }
+  | { kind: 'commentSelectionRange'; selection: DocxCommandSelection }
   | { kind: 'toolbarMetadata' }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
@@ -143,6 +145,7 @@ export type ResidentDocumentRead =
   | { kind: 'navigationTarget'; story: string; paraId: string }
   | { kind: 'bookmarkTarget'; story: string; name: string }
   | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] }
+  | { kind: 'reviewTarget'; target: ResidentReviewTarget }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string; nativePoint?: DocxSelectionPointIntent }
   | {
       kind: 'selectionUnit';
@@ -158,12 +161,14 @@ export type ResidentDocumentRead =
   | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
   | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
-  | { kind: 'headings'; expectVersion: string };
+  | { kind: 'headings'; expectVersion: string }
+  | { kind: 'adjacentRevision'; selection: DocxCommandSelection | null; direction: 'next' | 'previous' };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
   collabStateVector: Uint8Array;
   collabDiff: Uint8Array;
+  collabDiffChunks: Uint8Array[];
   collabPresence: ResidentPresenceGeometry | null;
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;
@@ -176,6 +181,7 @@ export interface ResidentDocumentReadValues {
   rangeHighlights: ResidentRangeHighlights | null;
   reviewSnapshot: ResidentReviewSnapshot | null;
   commentInsertionRange: ResidentCommentInsertionRange;
+  commentSelectionRange: YrsStoryRange | null;
   toolbarMetadata: ResidentToolbarMetadata;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
@@ -189,6 +195,7 @@ export interface ResidentDocumentReadValues {
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   bookmarkTarget: { loc: YrsLoc; position: number } | null;
   anchorTargets: ProposalGeometryTarget[];
+  reviewTarget: ResidentReviewTargetRanges | null;
   searchText: ResidentSearchResult;
   findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;
@@ -202,6 +209,7 @@ export interface ResidentDocumentReadValues {
   bookmarkPosition: number | null;
   sidebar: DocxSidebarRead | null;
   headings: DocxOutlineHeading[] | null;
+  adjacentRevision: { revisionId: string } | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */
@@ -275,6 +283,8 @@ export type ResidentEngineWorkerRequest =
       id: number;
       type: 'save';
       comments: Comment[];
+      /** `host` when `comments` is the host's list and wins over the worker's own comments. @internal */
+      commentsSource?: 'host';
       host?: Document;
       stateVector?: Uint8Array;
       /** The editor peer's marked stories. @internal */
@@ -437,6 +447,10 @@ export type ResidentEngineWorkerResponse = (
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
       sourceDocument?: Document;
+      /** An `openSource` reply: the client id the opened replica writes with. */
+      clientId?: number;
+      /** An `openSource` reply: the opened state's clock for `clientId`. */
+      clientClock?: number;
       /** An `open` reply: the package cannot open as a preview; nothing was opened. */
       previewRefused?: boolean;
       /** A `fontRequirements` reply. */

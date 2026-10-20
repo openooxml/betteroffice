@@ -40,7 +40,7 @@ function position(value: unknown): value is DocxCommandPosition {
 }
 
 export function commandSelectionRange(
-  engine: ResidentDocxCommandEngine,
+  engine: Pick<ResidentDocxCommandEngine, 'geometryReader'>,
   selected: DocxCommandSelection
 ): YrsStoryRange | null {
   if (!selected || typeof selected !== 'object' || Array.isArray(selected) ||
@@ -94,6 +94,14 @@ export function readCommandSelection(
   const selection = { anchor, focus };
   const range = commandSelectionRange(engine, selection);
   return range ? { ok: true, selection, range } : { ok: false, reason: 'invalid-selection' };
+}
+
+/** The range a selection covers in the current document; positions carrying an issued sticky follow later edits. */
+export function currentSelectionRange(engine: ResidentDocxCommandEngine, selected: DocxCommandSelection): YrsStoryRange | null {
+  const state = commandStates.get(engine);
+  if (!state) return commandSelectionRange(engine, selected);
+  const read = readCommandSelection(engine, state, selected);
+  return read.ok ? read.range : null;
 }
 
 export function mintCommandSelection(

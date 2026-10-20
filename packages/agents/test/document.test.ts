@@ -55,7 +55,7 @@ describe('grep, read, propose, export', () => {
   test('preserves offsets across embeds and surrogate pairs', async () => {
     const doc = await open();
     const target = doc.session.paragraphs('body').find(p => p.text.startsWith('Before'))!;
-    doc.session.insertPageBreak({ story: 'body', paraId: target.paraId, offset: 6 });
+    doc.session.insertImage({ story: 'body', paraId: target.paraId, offset: 6 }, { rId: 'rIdImage' });
     const [hit] = doc.grep({ query: 'After 😀' }).matches;
     expect(hit.start).toBe(7);
     const p = doc.read(hit.ref);
@@ -101,7 +101,7 @@ describe('grep, read, propose, export', () => {
     expect(() => doc.propose({ author: 'test', edits: [0, 1].map(() => ({ ...hit, oldText: 'draft', newText: 'final' })) })).toThrow('non-touching');
     const [embed] = doc.grep({ query: 'Before' }).matches;
     const target = doc.session.paragraphs('body').find(p => p.text.startsWith('Before'))!;
-    doc.session.insertPageBreak({ story: 'body', paraId: target.paraId, offset: 6 });
+    doc.session.insertImage({ story: 'body', paraId: target.paraId, offset: 6 }, { rId: 'rIdImage' });
     const updated = doc.read(embed.ref);
     expect(() => doc.propose({ author: 'test', edits: [{ ...updated, start: 0, oldText: 'Before\ufffcAfter', newText: 'Removed' }] })).toThrow('embed');
     expect(doc.read(hit.ref)).toEqual(before);

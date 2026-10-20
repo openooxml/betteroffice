@@ -2916,7 +2916,7 @@ function sameJson(a: unknown, b: unknown): boolean {
   );
 }
 
-const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
+const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+(?:~\d+)?|:sdt\d+)$/;
 
 /** Page and column breaks the layout gives a block of their own, ahead of a paragraph. */
 const isBlockBreak = (item: InlineItem): boolean =>
@@ -3090,7 +3090,7 @@ class SaveContext {
     const candidates = payload.tblPr?._originalFormatting ? cells : [];
     for (const cell of candidates) {
       const story = asString(cell.tcPr?._sourceCellStory) ?? asString(cell.story);
-      const prefix = story?.match(/^(.*:t\d+):r\d+c\d+$/)?.[1];
+      const prefix = story?.match(/^(.*:t\d+):r\d+c\d+(?:~\d+)?$/)?.[1];
       const table = prefix ? this.sourceTables.get(prefix) : undefined;
       if (prefix && table) {
         source = { prefix, table };
@@ -3442,7 +3442,7 @@ class SaveContext {
             key,
             inputs,
             tableBaseline: this.payloadBaselines.get(payload),
-            tableSourcePrefix: asString(firstCell?.story)?.match(/^(.*:t\d+):r\d+c\d+$/)?.[1],
+            tableSourcePrefix: asString(firstCell?.story)?.match(/^(.*:t\d+):r\d+c\d+(?:~\d+)?$/)?.[1],
             children: contents ?? this.cellContents(payload, storyId),
           });
         }

@@ -2,6 +2,7 @@ import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
+import { breakRefusedWhileSuggesting, leadingBlockCount } from './sectionBreak';
 import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange } from './index';
 import {
   commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
@@ -23,6 +24,7 @@ import { resolveReservations, retainReservationOwners, validReservationsPayload 
 import { resolveResidentObject } from './residentObjectGeometry';
 import { createYrsPositionProjection, type YrsPositionProjection } from './yrsPositionProjection';
 import { applyClipboardFragment, validClipboardFragment } from './clipboardFragment';
+import { MAX_BUFFERED_BYTES } from '../collaboration/protocol';
 import type {
   DocxCommandApplyContext,
   DocxCommandApplyResult,
@@ -176,10 +178,25 @@ interface DocxCommandPolicy {
 
 /** Mirrors docx-edit's `MAX_UPDATE_BYTES`: the engine refuses a larger peer update. */
 export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
+/** What one chunked sync hands over: updates held within the largest `maxSyncBytes`, then its SyncStep2. */
+export const MAX_SYNC_CHUNKS_BYTES = MAX_BUFFERED_BYTES + MAX_UPDATE_BYTES;
+
+const peerUpdate = (update: unknown): update is ArrayBuffer =>
+  update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_UPDATE_BYTES;
 
 const DOCX_COMMAND_POLICIES = {
   applyRemoteUpdate: { keys: ['update'], exact: true, session: 'collaboration', origin: 'remote',
-    payload: ({ update }) => update instanceof ArrayBuffer && update.byteLength > 0 && update.byteLength <= MAX_UPDATE_BYTES },
+    payload: ({ update }) => peerUpdate(update) },
+  applyRemoteUpdateChunks: { keys: ['updates'], exact: true, session: 'collaboration', origin: 'remote',
+    payload: ({ updates }) => {
+      if (!Array.isArray(updates) || updates.length === 0) return false;
+      let total = 0;
+      for (const update of updates) {
+        if (!peerUpdate(update)) return false;
+        total += update.byteLength;
+      }
+      return total <= MAX_SYNC_CHUNKS_BYTES;
+    } },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
   setFontEnvironment: { keys: ['faces', 'chains', 'families'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
@@ -215,11 +232,11 @@ const DOCX_COMMAND_POLICIES = {
   selectTableCells: { keys: ['target'] },
   selectPoint: { keys: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'], exact: true },
   extendSelection: { keys: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'], exact: true },
-  deleteBackward: { keys: ['count'] }, deleteForward: { keys: ['count'] }, paragraphBreak: { keys: [] },
+  deleteBackward: { keys: ['count'] }, deleteForward: { keys: ['count'] }, paragraphBreak: { keys: [] }, lineBreak: { keys: [] },
   toggleMark: { keys: ['mark'] }, formatRange: { keys: ['delta'] }, clearFormatting: { keys: [] },
   setParagraphAttrs: { keys: ['attrs'] }, applyParagraphStyle: { keys: ['styleId'] },
   setReadOnly: { keys: ['readOnly'], exact: true },
-  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText', 'reservations'], exact: true },
+  setRenderEnvironment: { keys: ['themeColors', 'showHiddenText', 'showTableGridlines', 'reservations'], exact: true },
 } satisfies Record<DocxCommandKind, DocxCommandPolicy>;
 
 function commandPolicy(kind: string): DocxCommandPolicy | undefined {
@@ -382,6 +399,7 @@ function validCommandIntent(
     case 'setRenderEnvironment':
       if (!object(payload.themeColors) || !Object.values(payload.themeColors).every(value =>
         typeof value === 'string' && /^[0-9a-f]{6}$/i.test(value)) || !boolean(payload.showHiddenText) ||
+        (payload.showTableGridlines !== undefined && !boolean(payload.showTableGridlines)) ||
         (payload.reservations !== undefined && !validReservationsPayload(payload.reservations))) return refuse('invalid-payload');
       break;
   }
@@ -392,22 +410,28 @@ function collapsed(range: YrsStoryRange): boolean {
   return range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
 }
 
-function deleteRange(engine: ResidentDocxCommandEngine, range: YrsStoryRange, backward: boolean, count: number): YrsStoryRange | null {
+function deleteRange(engine: ResidentDocxCommandEngine, range: YrsStoryRange, backward: boolean, count: number, skipDeleted: boolean): YrsStoryRange | null {
   if (!collapsed(range)) return range;
   const spans = engine.geometryReader.paragraphSpans(range.story);
   let index = spans.findIndex(({ paraId }) => paraId === range.start.paraId);
   if (index < 0) return null;
   let offset = range.start.offset;
-  const paragraphs = new Map<number, string>();
-  const textAt = (index: number): string => {
-    let text = paragraphs.get(index);
-    if (text === undefined) {
-      text = (engine.paragraphSegments(range.story, [index])[0] ?? []).map((segment) =>
-        segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC'
-      ).join('');
-      paragraphs.set(index, text);
+  const paragraphs = new Map<number, { text: string; deleted: Array<[number, number]> }>();
+  const paragraphAt = (index: number) => {
+    let paragraph = paragraphs.get(index);
+    if (paragraph === undefined) {
+      paragraph = { text: '', deleted: [] };
+      for (const segment of engine.paragraphSegments(range.story, [index])[0] ?? []) {
+        const text = segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC';
+        if (skipDeleted && (segment.attributes.del != null ||
+          (segment.kind === 'pilcrow' && segment.properties.pPrDel != null))) {
+          paragraph.deleted.push([paragraph.text.length, paragraph.text.length + text.length]);
+        }
+        paragraph.text += text;
+      }
+      paragraphs.set(index, paragraph);
     }
-    return text;
+    return paragraph;
   };
   for (let left = count; left > 0; left -= 1) {
     if (backward) {
@@ -415,17 +439,32 @@ function deleteRange(engine: ResidentDocxCommandEngine, range: YrsStoryRange, ba
         if (index === 0) break;
         offset = spans[--index]!.length;
       } else {
-        const text = textAt(index);
+        const { text } = paragraphAt(index);
         offset -= 1;
         if (offset > 0 && /[\uDC00-\uDFFF]/u.test(text[offset]!) && /[\uD800-\uDBFF]/u.test(text[offset - 1]!)) offset -= 1;
       }
     } else {
+      if (skipDeleted) {
+        for (;;) {
+          const deleted = paragraphAt(index).deleted.find(([start, end]) => start <= offset && offset < end);
+          if (!deleted) break;
+          offset = deleted[1];
+          if (offset > spans[index]!.length) {
+            if (index === spans.length - 1) {
+              offset = spans[index]!.length;
+              break;
+            }
+            index += 1;
+            offset = 0;
+          }
+        }
+      }
       if (offset === spans[index]!.length) {
         if (index === spans.length - 1) break;
         index += 1;
         offset = 0;
       } else {
-        offset += textAt(index).codePointAt(offset)! > 0xffff ? 2 : 1;
+        offset += paragraphAt(index).text.codePointAt(offset)! > 0xffff ? 2 : 1;
       }
     }
   }
@@ -450,6 +489,7 @@ export function preflightDocxCommand(
     return { status: 'refused', reason, selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
   };
+  const readOnly = state.readOnly && !context.replayPreviouslyApplied;
   const error = { reason: 'invalid-payload' };
   if (!validCommandIntent(command, error, environment)) return refuse(error.reason);
   if (commandPolicy(command.kind)?.origin === 'remote') {
@@ -464,7 +504,7 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'setContentControlValue' || command.kind === 'addRepeatingItem' || command.kind === 'removeRepeatingItem') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveControlHandle(engine, command.payload.handle);
     if (!target) return refuse('stale-control');
@@ -472,13 +512,13 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'openPart' || command.kind === 'ensurePart' || command.kind === 'removePart') {
-    if (state.readOnly && command.kind !== 'openPart') return refuse('read-only');
+    if (readOnly && command.kind !== 'openPart') return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     if (!resolvePart(engine, command.payload) && (command.kind !== 'ensurePart' || !ensurePartDocument(engine, command.payload))) return refuse('unknown-part');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (propertyCommand(command.kind)) {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
     if (!('expectVersion' in command.payload) || command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const reason = propertyCommandTarget(engine, command);
@@ -486,7 +526,7 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'setSectionMargins' || command.kind === 'setTabStops' || command.kind === 'removeTabStop') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if ('suggesting' in command.payload && command.payload.suggesting !== undefined) return refuse('unsupported-suggesting');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     if (command.kind === 'setSectionMargins') {
@@ -526,18 +566,18 @@ export function preflightDocxCommand(
     }
   }
   if (command.kind === 'applyEdits') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     const validation = engine.proposalEngine.validateEdits(commandBatchRequest(command.payload));
     if (!validation.ok) return refuse(validation.failure.code);
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'replaceMatches') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'resizeObject' || command.kind === 'moveObject') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveResidentObject(engine, command.payload.handle);
@@ -548,12 +588,12 @@ export function preflightDocxCommand(
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'undo' || command.kind === 'redo') {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.basis.epoch !== context.basis.epoch) return refuse('stale-epoch');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (Object.hasOwn(reviewCommandKeys, command.kind)) {
-    if (state.readOnly && !grantedHostProposal(command as ReviewCommand)) return refuse('read-only');
+    if (readOnly && !grantedHostProposal(command as ReviewCommand)) return refuse('read-only');
     const reason = preflightReviewCommand(engine, state, command as ReviewCommand);
     if (reason) return refuse(reason);
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
@@ -568,7 +608,7 @@ export function preflightDocxCommand(
   }
   if ((command.kind === 'select' || command.kind === 'formatRange') && command.payload.selection === undefined) return refuse('invalid-selection');
   if (isTableCommandKind(command.kind)) {
-    if (state.readOnly) return refuse('read-only');
+    if (readOnly) return refuse('read-only');
     if (command.kind === 'setTableProperties' && command.payload.expectVersion !== undefined &&
       command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const tableResolved = resolveCommandSelection(engine, state, command, context);
@@ -582,7 +622,7 @@ export function preflightDocxCommand(
   const resolved = resolveCommandSelection(engine, state, command, context);
   if (!resolved.ok) return refuse(resolved.reason);
   if (command.kind === 'navigateCell') {
-    const cellNavigation = resolveCellNavigation(engine, resolved.selection, command.payload, state.readOnly);
+    const cellNavigation = resolveCellNavigation(engine, resolved.selection, command.payload, readOnly);
     if (cellNavigation === 'read-only') return refuse('read-only');
     if (!cellNavigation) return refuse('invalid-cell-target');
     return { status: 'ready', prepared: {
@@ -595,16 +635,12 @@ export function preflightDocxCommand(
       cells: cellsForCaret(engine, resolved.selection.focus.story),
     } };
   }
-  if (state.readOnly) return refuse('read-only');
-  if ((command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') && command.payload.suggesting) return refuse('unsupported-suggesting');
+  if (readOnly) return refuse('read-only');
+  if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
-    let leading = 0;
-    for (const segment of engine.paragraphSegments('body', [index])[0] ?? []) {
-      if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
-      leading += 1;
-    }
+    const leading = leadingBlockCount(engine.paragraphSegments('body', [index])[0] ?? []);
     if (resolved.range.start.offset < leading) return refuse('invalid-selection');
     if (command.kind === 'insertSectionBreak') {
       const properties = residentSectionPropertiesAt(engine, { story: 'body', ...resolved.range.start });
@@ -618,10 +654,11 @@ export function preflightDocxCommand(
     paragraphChanges: planResidentListChanges(engine, resolved.range, command.payload),
   } };
   let range = resolved.range;
-  if ((command.kind === 'insertText' || command.kind === 'replaceSelection') && state.storedMarks &&
+  if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
   if (command.kind === 'deleteBackward' || command.kind === 'deleteForward') {
-    const expanded = deleteRange(engine, range, command.kind === 'deleteBackward', command.payload.count ?? 1);
+    const expanded = deleteRange(engine, range, command.kind === 'deleteBackward', command.payload.count ?? 1,
+      command.kind === 'deleteForward' && command.payload.suggesting !== undefined);
     if (!expanded) return refuse('unsupported-delete-target');
     range = expanded;
   }
@@ -635,7 +672,7 @@ function sameSelection(left: DocxCommandSelection | null, right: DocxCommandSele
     left[key].paraId === right[key].paraId && left[key].offset === right[key].offset);
 }
 
-const CELL_RESET_KINDS = new Set(['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak']);
+const CELL_RESET_KINDS = new Set(['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'lineBreak']);
 
 function resetCellSelectionForEdit(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, kind: string): void {
   if (state.selection && CELL_RESET_KINDS.has(kind)) writeCellSelection(engine, cellsForCaret(engine, state.selection.focus.story));
@@ -655,11 +692,7 @@ function pastLeadingBlocks(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsLo
   const spans = engine.geometryReader.paragraphSpans(at.story);
   const index = spans.findIndex(span => span.paraId === at.paraId);
   if (index < 0) return null;
-  let leading = 0;
-  for (const segment of engine.paragraphSegments(at.story, [index])[0] ?? []) {
-    if (segment.kind !== 'embed' || !['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(segment.embedKind)) break;
-    leading += 1;
-  }
+  const leading = leadingBlockCount(engine.paragraphSegments(at.story, [index])[0] ?? []);
   return { ...at, offset: Math.min(spans[index]!.length, Math.max(leading, at.offset)) };
 }
 
@@ -940,6 +973,7 @@ function applyPreparedDocxCommand(
     state.storedMarks = null;
     const projected = result(applied.status);
     if (applied.comment) projected.editState!.comment = { seq: command.seq, ...applied.comment };
+    if (applied.commentChange) projected.editState!.commentChange = { seq: command.seq, ...applied.commentChange };
     return projected;
   }
   if (command.kind === 'setReadOnly') {
@@ -995,7 +1029,7 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak'].includes(command.kind) ||
+  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
     isTableCommandKind(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
@@ -1033,7 +1067,27 @@ function applyPreparedDocxCommand(
       if (!receipt.range) throw new Error('Delete receipt lacks range');
       if (state.storedMarks && (state.storedMarks.story !== receipt.range.story ||
         state.storedMarks.paraId !== receipt.range.start.paraId)) state.storedMarks = null;
-      caret({ story: receipt.range.story, ...receipt.range.start });
+      const advance = command.kind === 'deleteForward' && command.payload.suggesting !== undefined &&
+        selection.anchor.story === selection.focus.story && selection.anchor.paraId === selection.focus.paraId &&
+        selection.anchor.offset === selection.focus.offset;
+      caret({ story: receipt.range.story, ...(advance ? receipt.range.end : receipt.range.start) });
+      break;
+    }
+    case 'lineBreak': {
+      let at = { story: range.story, ...range.start };
+      if (!collapsed(range)) {
+        const removed = engine.deleteRange(range, command.payload.suggesting);
+        if (!removed.range) throw new Error('Delete receipt lacks range');
+        at = { story: removed.range.story, ...removed.range.start };
+      }
+      const receipt = engine.insertLineBreak(at, command.payload.suggesting);
+      if (!receipt.range) throw new Error('Line break receipt lacks range');
+      const stored = state.storedMarks;
+      if (stored) {
+        if (stored.clear) engine.clearFormatting(receipt.range);
+        if (Object.keys(stored.delta).length) engine.formatRange(receipt.range, stored.delta);
+      }
+      caret({ story: receipt.range.story, ...receipt.range.end });
       break;
     }
     case 'paragraphBreak': {
@@ -1073,9 +1127,8 @@ function applyPreparedDocxCommand(
         caret({ story, paraId: paragraph.paraId, offset: 0 });
       } else {
         if (command.kind === 'insertPageBreak') {
-          if (at.offset > 0) at = { story: at.story, paraId: engine.splitParagraph(at).secondParaId, offset: 0 };
-          engine.insertPageBreak(at);
-          caret({ ...at, offset: at.offset + 1 });
+          const target = engine.insertPageBreak(at);
+          caret({ ...target, offset: target.offset + 1 });
         } else {
           const properties = collapsed(range) ? prepared.sectionBreakProperties : residentSectionPropertiesAt(engine, at);
           if (!properties) throw new Error('Prepared command lacks section properties');
@@ -1111,16 +1164,24 @@ function applyPreparedDocxCommand(
 }
 
 export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engine, init, environment) => {
+  const recovery = init.recoveryState;
   const native = engine.selection();
   const first = !native && init.selection === undefined && engine.geometryReader.hasStory('body')
     ? engine.geometryReader.paragraphSpans('body')[0] : undefined;
   const fallback = first ? { story: 'body', paraId: first.paraId, offset: 0 } : null;
   const state: ResidentDocxCommandState = {
     readOnly: init.readOnly,
-    selection: init.selection !== undefined ? init.selection : native
+    selection: recovery ? structuredClone(recovery.selection) : init.selection !== undefined ? init.selection : native
       ? { anchor: native.anchor, focus: native.head } : fallback ? { anchor: fallback, focus: fallback } : null,
-    storedMarks: null, stickyPositions: new Map(), proposals: environment?.proposals ?? createProposalRegistry(engine.proposalEngine),
+    storedMarks: structuredClone(recovery?.storedMarks ?? null),
+    activePart: structuredClone(recovery?.activePart),
+    stickyPositions: new Map(structuredClone(recovery?.stickyPositions ?? [])),
+    proposals: environment?.proposals ?? createProposalRegistry(engine.proposalEngine),
   };
+  if (recovery) {
+    state.proposals!.mirror({ version: engine.proposalEngine.version(), proposals: recovery.proposals });
+    state.proposals!.mirror(null);
+  }
   if (state.selection) {
     const selected = {
       anchor: { story: state.selection.anchor.story, paraId: state.selection.anchor.paraId, offset: state.selection.anchor.offset },
@@ -1130,6 +1191,7 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
     engine.setSelection(selected.anchor, selected.focus);
     state.selection = mintCommandSelection(engine, state, selected);
   }
+  if (recovery?.cellSelection) engine.setCellSelection(recovery.cellSelection);
   registerCommandAnchorState(engine, state);
   let projection: { version: string; selection: DocxCommandSelection | null; editState: ReturnType<typeof projectDocxEditState> } | null = null;
   const remember = (result: DocxCommandApplyResult) => {
@@ -1179,5 +1241,10 @@ export const createResidentDocxCommandHooks: ResidentCommandHooksFactory = (engi
     },
     selection: () => projected().selection,
     editState: () => projected().editState,
+    recoveryState: () => ({
+      selection: projected().selection, storedMarks: state.storedMarks, activePart: state.activePart,
+      stickyPositions: [...state.stickyPositions], cellSelection: readCellSelection(engine),
+      proposals: state.proposals!.exportState(),
+    }),
   };
 };

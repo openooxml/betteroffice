@@ -75,7 +75,7 @@ describe('YrsSession searchText', () => {
     const session = await createYrsSession({ clientId: 76003 });
     try {
       const body = session.createStory('body', 'foobar');
-      session.insertPageBreak({ story: 'body', paraId: body.paraId, offset: 3 });
+      session.insertImage({ story: 'body', paraId: body.paraId, offset: 3 }, { rId: 'rIdImage' });
 
       expect(session.searchText('foobar')).toEqual([]);
       expect(session.searchText('foo')).toEqual([

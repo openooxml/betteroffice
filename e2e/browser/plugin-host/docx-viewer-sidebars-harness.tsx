@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import { DocxEditor, defineDocxPlugin, type DocxEditorRef } from '@betteroffice/docx-react';
 import { parseDocx, repackDocx } from '@betteroffice/docx/docx';
@@ -198,6 +198,10 @@ function Harness() {
   const [source, setSource] = useState<{ buffer?: ArrayBuffer; document?: Document } | null>(null);
   const pendingDocument = useRef<Document | null>(null);
   const editor = useRef<DocxEditorRef>(null);
+  const attachEditor = useCallback((value: DocxEditorRef | null) => {
+    editor.current = value;
+    probe.editor = value;
+  }, []);
   useEffect(() => {
     void (async () => {
       if (!publicFixture) {
@@ -219,7 +223,6 @@ function Harness() {
     });
   }, []);
   useEffect(() => {
-    probe.editor = editor.current;
     if (editor.current && pendingDocument.current) {
       const document = pendingDocument.current;
       pendingDocument.current = null;
@@ -230,8 +233,8 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <DocxEditor
-        legacySyncApi
-        ref={editor}
+        legacySyncApi={options.get('worker') !== '1'}
+        ref={attachEditor}
         documentBuffer={source.buffer}
         document={source.document}
         experimentalWorkerOpen

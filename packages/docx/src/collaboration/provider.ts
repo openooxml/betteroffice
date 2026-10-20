@@ -9,6 +9,7 @@ import {
   encodeSyncStep2,
   encodeUpdate,
   holdsOpenSyncClient,
+  MAX_BUFFERED_BYTES,
   MAX_FRAME_BYTES,
   maxSyncPayloadBytes,
   syncFrameBytes,
@@ -48,8 +49,6 @@ import { asyncReplicaFor } from './asyncReplica';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_SYNC_BYTES = 64 * 1024 * 1024;
-/** Upper bound for `maxPendingBytes` and `maxSyncBytes`. */
-const MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 /** What a held update costs beyond its bytes, so empty updates cannot pile up for free. */
 const HELD_UPDATE_OVERHEAD_BYTES = 64;
 const CURSOR_BROADCAST_INTERVAL_MS = 80;
@@ -656,7 +655,7 @@ export class CollaborationProvider {
     const connection = this.openEpoch;
     let messages: ReturnType<typeof decodeMessages>;
     try {
-      messages = decoded ?? decodeMessages(data.slice(), this.maxFrameBytes, this.maxMessagesPerFrame);
+      messages = decoded ?? decodeMessages(data, this.maxFrameBytes, this.maxMessagesPerFrame);
     } catch (cause) {
       this.failConnection(
         token,
@@ -815,8 +814,8 @@ export class CollaborationProvider {
             }
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             const applied = message.type === 'sync-step-2'
-              ? await applySync(this.asyncReplica!, held, message.update.slice())
-              : await this.asyncReplica!.applyUpdate(message.update.slice());
+              ? await applySync(this.asyncReplica!, held, message.update)
+              : await this.asyncReplica!.applyUpdate(message.update);
             if (!this.isCurrentOpen(token, connection)) return;
             if (message.type === 'sync-step-2') {
               this.syncJoinPending = false;

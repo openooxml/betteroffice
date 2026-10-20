@@ -3,8 +3,9 @@
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readResidentToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
-import { readResidentReviewSnapshot } from './residentReview';
+import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
 import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
+import { stateVectorClock } from '../collaboration/protocol';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -13,7 +14,7 @@ import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './reside
 import { createResidentCommandHost } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { releaseResidentSelectionReads } from './residentCommandSelection';
-import { readCommandStickyPosition } from './residentCommandAnchors';
+import { currentSelectionRange, readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
@@ -85,7 +86,7 @@ import {
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
-import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { readAdjacentRevision, readSidebar, readOutlineHeadings } from './sidebarReads';
 import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
 import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
@@ -130,6 +131,7 @@ let session: ResidentEngineSession | null = null;
 let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
 let commandHost: ResidentCommandHost | null = null;
 let releaseCommandHost: (() => void) | null = null;
+let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
 let commandInit: ResidentCommandInitRequest | null = null;
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
@@ -182,6 +184,11 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   if (init.rasterScale !== undefined) setCommandRasterScale(init.rasterScale);
   init.layoutInput = resolveLayoutReservationInput(engine, init.layoutInput, true);
   const input = JSON.parse(init.layoutInput || '{}');
+  const recoveredReservations = init.recoveryState?.layoutReservations;
+  if (recoveredReservations) {
+    input.renderEnv = { ...input.renderEnv, reservations: recoveredReservations.values };
+    init.layoutInput = JSON.stringify(input);
+  }
   let layoutInput = init.layoutWithRegions ? init.layoutInput : JSON.stringify({
     ...input, measured: [], retainOnly: true,
     workerOwned: { bodyStory: 'body', renderEnv: input.renderEnv, measurement: input.measurement },
@@ -189,7 +196,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   });
   if (!init.layoutWithRegions) engine.layoutDocumentJson(layoutInput);
   let layoutDirty = !init.layoutWithRegions;
-  let appliedReservations: DocxFrameReservations | undefined;
+  let appliedReservations: DocxFrameReservations | undefined = recoveredReservations?.set;
   let laidOutReservations: DocxFrameReservations | undefined;
   sessionFonts?.dispose();
   const fonts = new ResidentSessionFonts(engine, scope.fonts);
@@ -457,8 +464,20 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return { frame, layoutRevision };
     },
   });
-  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
-  const hooks = collaboration?.wrap(baseHooks) ?? baseHooks;
+  const changes: NonNullable<typeof commandFrameChanges> = {
+    pages: new Set<number>(), updates: [], layoutPreviewVersion, layoutStale: init.recoveryState !== undefined,
+  };
+  const wrapped = collaboration?.wrap(baseHooks) ?? baseHooks;
+  const hooks = { ...wrapped, ...(wrapped.recoveryState ? {
+    recoveryState: () => ({
+      ...wrapped.recoveryState!(),
+      comments: engine.commentRecoveryState?.(),
+      layoutReservations: {
+        values: (JSON.parse(init.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.reservations ?? {},
+        set: appliedReservations,
+      },
+    }),
+  } : {}) };
   commandFrameChanges = changes;
   const prefixNavigation = {
     character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
@@ -937,7 +956,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   commandInit = init;
+  commandQueries = queriesFor;
   releaseCommandHost = () => {
+    commandQueries = null;
     selectionQueries?.queries.dispose();
     selectionQueries = undefined;
     releaseResidentSelectionReads(engine);
@@ -1292,7 +1313,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
 
 function isUserInputCommand(kind: string): boolean {
   return kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
-    kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' ||
+    kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' || kind === 'lineBreak' ||
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
@@ -1430,6 +1451,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       throw new Error('Resident commands require a whole opened document');
     }
     if (commandHost) throw new Error('Resident commands are already initialized');
+    session.initializeComments(request.request.recoveryState?.comments);
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
     const init = { ...request.request };
     if (init.provisionalPages !== undefined &&
@@ -1507,8 +1529,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const started = performance.now();
     let opening: ResidentEngineSession | undefined;
     try {
-      opening = await createResidentEngineSession(source.heapLimitBytes, source.collaboration?.clientId);
-      const opened = adoptResidentSource(opening, source);
+      const pinned = source.collaboration;
+      const reseeded = pinned?.clientClock !== undefined && pinned.initialUpdate === undefined;
+      opening = await createResidentEngineSession(source.heapLimitBytes, reseeded ? undefined : pinned?.clientId);
+      let opened = adoptResidentSource(opening, source);
+      if (opened && !reseeded && pinned?.clientClock !== undefined &&
+        stateVectorClock(opening.encodeStateVector(), opening.clientId) < pinned.clientClock) {
+        destroySession(true);
+        opening = await createResidentEngineSession(source.heapLimitBytes);
+        opened = adoptResidentSource(opening, source);
+      }
       if (!opened) {
         opening.destroy();
         reply({ id: request.id, ok: true, previewRefused: true });
@@ -1517,12 +1547,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       const { document, hostJson } = opened;
       if (source.collaboration) collaboration = createResidentCollaboration(opening);
       const metadata = residentSourceMetadata(document);
+      const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity }, [stateVector]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -1721,9 +1752,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     pendingUpdates = [];
     const before = session.proposalEngine.version();
     try {
-      const projection = commandHost ? session.commentProjection() : null;
+      const projection = commandHost ? session.commentProjection(request.commentsSource !== 'host') : null;
       editorSaves.commentIds = projection?.sessionIds;
-      const comments = projection?.comments ?? request.comments;
+      const comments = request.commentsSource === 'host' ? request.comments : projection?.comments ?? request.comments;
       const saved = openedParsed ? await session.saveDocument(request.host, comments, editorSaves) : await session.save(
         new Uint8Array(openedSource!.bytes),
         openedSource!.hostJson,
@@ -1895,9 +1926,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       return;
     }
     let value: unknown;
+    let transfer: Transferable[] = [];
     switch (request.read.kind) {
       case 'commentInsertionRange':
         value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
+        break;
+      case 'commentSelectionRange':
+        value = currentSelectionRange(session, request.read.selection);
         break;
       case 'collabStateVector':
         value = session.encodeStateVector();
@@ -1905,6 +1940,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'collabDiff':
         value = readResidentCollaborationState(session, request.read.stateVector);
         break;
+      case 'collabDiffChunks': {
+        const chunks = session.encodeStateAsUpdateChunks(request.read.stateVector, request.read.maxChunkBytes);
+        transfer = chunks.map(chunk => chunk.buffer as ArrayBuffer);
+        value = chunks;
+        break;
+      }
       case 'collabPresence':
         value = !retainedFrame || engine.version() !== request.read.expectVersion || retainedLayoutVersion !== engine.version() ||
           request.read.expectFrameEpoch !== retainedFrame.frameEpoch || request.read.expectLayoutRevision !== layoutRevision
@@ -1965,13 +2006,25 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'sectionProperties':
         value = session.sectionProperties();
         break;
-      case 'exportStructuredWithPages':
+      case 'exportStructuredWithPages': {
         if (commandLayout?.complete()) postCommandFrame(0);
+        let currentRequest = request.read.currentRequest;
+        if (request.read.workerFonts === true && commandInit?.layoutWithRegions) {
+          try {
+            const input = JSON.parse(currentRequest);
+            const owned = JSON.parse(commandInit.layoutInput);
+            if (input?.measurement && typeof input.measurement === 'object' && !Array.isArray(input.measurement) && owned.measurement?.fontChains) {
+              input.measurement = { ...input.measurement, fontChains: owned.measurement.fontChains };
+              currentRequest = JSON.stringify(input);
+            }
+          } catch {}
+        }
         value = session.exportStructuredWithPagesJson(
           request.read.options,
-          resolveLayoutReservationInput(session, request.read.currentRequest)
+          resolveLayoutReservationInput(session, currentRequest)
         );
         break;
+      }
       case 'listContentControls':
         value = session.listContentControls(request.read.options);
         break;
@@ -1993,7 +2046,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         const review = !frame || layoutVersion !== engine.version() ||
           (commandHost && (published?.frameEpoch !== frame.frameEpoch || published?.previewVersion !== previewVersion)) ||
           (request.read.expectPreviewVersion !== undefined && request.read.expectPreviewVersion !== previewVersion)
-          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision);
+          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision, {
+            queries: (at, version) => commandQueries?.(at, version), index: displayPositionIndex(session),
+          });
         value = commandHost && review && (review.previewVersion !== previewVersion || review.version !== layoutVersion ||
           registry.snapshot().previewVersion !== previewVersion || engine.version() !== layoutVersion || retainedFrame?.frameEpoch !== frame?.frameEpoch)
           ? null : review;
@@ -2036,6 +2091,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.story,
           request.read.paraId
         );
+        break;
+      case 'reviewTarget':
+        value = readReviewTarget(session, request.read.target);
         break;
       case 'anchorTargets': {
         const reader = session.geometryReader;
@@ -2135,6 +2193,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'headings':
         value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
         break;
+      case 'adjacentRevision':
+        value = readAdjacentRevision(session.geometryReader, request.read.selection, request.read.direction,
+          new Set(proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds)));
+        break;
       case 'stickyAnchors': {
         const currentSession = session;
         value = request.read.locs.map((loc) => {
@@ -2147,7 +2209,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
     }
-    reply({ id: request.id, ok: true, read: { version: engine.version(), value } });
+    reply({ id: request.id, ok: true, read: { version: engine.version(), value } }, transfer);
     return;
   }
   if (request.type === 'layoutJson') {
@@ -3250,7 +3312,7 @@ async function replySourcePreview(
   preview: ResidentSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
@@ -3291,7 +3353,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;

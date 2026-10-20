@@ -11,7 +11,7 @@ import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { memoryPressureLevel, type DocxMemoryPressureLevel, type DocxMemoryStats } from '../memoryStats';
 import type { DocxInput } from '@betteroffice/docx/utils';
 import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
-import type { DocxCommandSelection, DocxEditState, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
+import type { DocxCommandSelection, ResidentDocumentRead, ResidentDocumentReadValues } from '@betteroffice/docx/yrs';
 import { createDocxCommandController, DocxCommandAdmissionError, type DocxCommandBinding } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandEnvironment } from '../../../commands/evaluate';
 import type { DocxCommandArgs, DocxCommandId, DocxCommandResult, DocxImageTransform } from '../../../commands/types';
@@ -25,8 +25,12 @@ import type { DocxHostSearch } from '../hooks/useHostSearch';
 import type { SelectionState } from '../types';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import { readPresentedReview, reviewDescribes, reviewMatches } from './workerReview';
-import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import { workerRevisions, type WorkerRevisionState } from './workerRevisions';
+import type { DocxProposalResult, DocxProposalSnapshot, ResidentReviewSnapshot, ResidentReviewTarget, YrsStoryRange } from '@betteroffice/docx/yrs';
+import type { Comment } from '@betteroffice/docx/types/content';
 
+import { LAYOUT_POLL_MS, LAYOUT_REFUSALS, LAYOUT_WAIT_MS, VIEWER_LAYOUT_WAIT_MS, type WorkerPageExportResult } from '../internals/workerOpenExport';
+import { routeViewerRefAccess } from '../hooks/useDocxEditorRefApi';
 import { PeerlessSyncApiError } from './contracts';
 export { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './contracts';
 
@@ -50,7 +54,11 @@ export interface PeerlessWorkerQuery<K extends ResidentDocumentRead['kind'] = Re
   selection: DocxCommandSelection | null | undefined;
 }
 
-interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
+export interface WorkerCommentDraft { binding: PeerlessEditSessionBinding; selection: DocxCommandSelection }
+export type WorkerCommentAction = { kind: 'add'; draft: WorkerCommentDraft; text: string } | { kind: 'reply'; id: number; text: string } |
+  { kind: 'resolve' | 'reopen' | 'delete'; id: number };
+
+interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'readOnly' | 'allowHostProposals' | 'onDocumentChange' | 'onSelectionChange' | 'onCommentsChange' | 'onCommentAdd' | 'onCommentResolve' | 'onCommentDelete' | 'onCommentReply' | 'onError' | 'onSave' | 'showFileOpen' | 'author' | 'onModeChange' | 'fontFamilies' | 'onFontsLoaded' | 'onFirstPagePainted' | 'onMemoryPressure' | 'memoryBudget'> {
   reviewTimeoutMs?: number;
   openTimeoutMs?: number;
   imagePropertiesAvailable?: boolean;
@@ -58,18 +66,26 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   onImageWrap?: (wrap: ImageLayoutTarget) => void | boolean | Promise<boolean | DocxCommandResult>;
   onImageTransform?: (action: DocxImageTransform) => void | boolean | Promise<boolean | DocxCommandResult>;
   zoom: number;
+  tableGridlines?: boolean;
   isDark?: boolean;
   focus(): void;
   onZoom?(zoom: number): void;
+  onTableGridlines?(visible: boolean): void;
   read: ResidentEngineWorkerClient['documentRead'];
   readAt?: ResidentEngineWorkerClient['documentReadAt'];
+  layoutRequest?(): string | null;
   search?: DocxHostSearch;
   save?(): Promise<ArrayBuffer>;
   loadBuffer?(buffer: DocxInput): Promise<void>;
+  loadDocument?(document: NonNullable<DocxEditorProps['document']>): Promise<void>;
   print?(preview?: boolean): Promise<void>;
   currentPage?(): number;
   scrollToPage?(number: number): void;
   scrollToParagraph?(paraId: string): Promise<boolean>;
+  scrollToReviewTarget?(target: ResidentReviewTarget): Promise<boolean>;
+  comments?(): Comment[];
+  hostComments?: Comment[];
+  commentsSidebar?: { open: boolean; control: DocxCommandEnvironment['sidebarControl']; toggle(): void };
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<ResidentFontEnvironment | void>;
@@ -104,6 +120,7 @@ export function createPeerlessShellController(initial: Options) {
   let reviewBinding: PeerlessEditSessionBinding | null = null;
   let reviewIdentity: PeerlessViewSnapshot['identity'] | null = null;
   let proposalTail: Promise<unknown> = Promise.resolve();
+  let revisions: { binding: PeerlessEditSessionBinding; key: string; value: WorkerRevisionState } | null = null;
   let documentKey: unknown;
   let generation = 0;
   let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
@@ -113,7 +130,7 @@ export function createPeerlessShellController(initial: Options) {
     if (resolved) borderPen = { ...borderPen, color: { rgb: resolved } };
   };
   const waiting = new Set<(error: Error) => void>();
-  const reviewReads = new WeakMap<PeerlessEditSessionBinding, Promise<ResidentReviewSnapshot>>();
+  const reviewReads = new WeakMap<PeerlessEditSessionBinding, { identity: PeerlessViewSnapshot['identity']; pending: Promise<ResidentReviewSnapshot> }>();
   const memoryStats = (): DocxMemoryStats => ({ limitBytes: WASM32_MEMORY_LIMIT_BYTES, main: [],
     worker: workerMemory?.map(sample => ({ ...sample })) ?? null });
   const mode = () => options.mode ?? internalMode;
@@ -136,9 +153,9 @@ export function createPeerlessShellController(initial: Options) {
   };
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
-    fontRevision = 0; fontFamilies = []; metadata = null; firstPainted = false; workerMemory = null;
+    fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; workerMemory = null;
     unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
-    batchResults.clear(); commentResults.clear(); snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
+    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
   const publish = () => { snapshot = { ...snapshot, mode: mode() }; updateAuthor(); commands.refresh(); for (const listener of listeners) listener();
@@ -158,10 +175,10 @@ export function createPeerlessShellController(initial: Options) {
       status: snapshot.status === 'failed' ? 'unavailable' : snapshot.status === 'opening' ? 'loading' : snapshot.status,
       readOnly: options.readOnly === true || (mode() !== 'viewing' && view?.editState?.readOnly === true),
       mode: mode(), modeControl: options.mode ? options.onModeChange ? 'host' : 'fixed' : 'internal',
-      sidebarOpen: false, sidebarControl: 'fixed', zoom: options.zoom, zoomWhileOpening: true, canOpen: options.showFileOpen !== false, canReportIssue: false,
+      sidebarOpen: options.commentsSidebar?.open ?? false, sidebarControl: options.commentsSidebar?.control ?? 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
-      supportedCommands: new Set(['zoom', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
-        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', ...FORMATTING_COMMANDS]),
+      supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
+        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', 'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
         'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
@@ -171,7 +188,7 @@ export function createPeerlessShellController(initial: Options) {
         fontSize: view?.editState?.effectiveFormatting?.fontSizePt ?? null } : null,
       table: view?.editState?.tableContext ? { isInTable: true, ...view.editState.tableContext,
         table: { attrs: { justification: view.editState.tableContext.justification } } } : null,
-      image: options.image !== undefined ? options.image : options.imagePropertiesAvailable ? { wrap: null } : null, revisions: [], revisionIds: new Set(), currentRevisionId: null,
+      image: options.image !== undefined ? options.image : options.imagePropertiesAvailable ? { wrap: null } : null, ...revisionEnvironment(view),
       styles: workerStyleOptions(metadata && metadata.binding === binding && metadata.version === view?.version ? metadata.value.styles : [], translate), fonts: [
         ...choices.map(font => ({ args: { family: getPrimaryFontFamily(font.fontFamily) || font.name }, label: font.name,
           preview: { fontFamily: font.fontFamily, group: font.category ?? 'other' } })),
@@ -180,8 +197,17 @@ export function createPeerlessShellController(initial: Options) {
       ], translate,
     };
   };
+  const revisionEnvironment = (view: PeerlessViewSnapshot | null | undefined) => {
+    const state = revisions?.binding === binding ? revisions?.value : null;
+    return { revisions: state?.navigation ?? [], revisionIds: state?.ids ?? new Set<string>(), currentRevisionId: view?.editState?.currentRevisionId ?? null };
+  };
   const queryOrigins = new WeakMap<object, { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number }>();
   const capture = () => binding;
+  const currentQuery = (result: object) => {
+    const origin = queryOrigins.get(result);
+    const view = binding?.viewStore.getSnapshot();
+    return !!origin && origin.binding === binding && !!view && sameIdentity(origin.identity, view.identity) && origin.version === view.version;
+  };
   const ready = () => {
     if (!binding || snapshot.status !== 'ready') throw new Error('Peer-less editor is not ready');
     return binding;
@@ -216,10 +242,10 @@ export function createPeerlessShellController(initial: Options) {
   };
   const read = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }): Promise<ResidentDocumentReadValues[K]> => {
     const current = await flush();
-    const version = current.viewStore.getSnapshot().version;
+    const view = current.viewStore.getSnapshot();
     const result = await options.read<K>(request);
     if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
-    if (version !== current.viewStore.getSnapshot().version) throw new WorkerReadSupersededError('Worker read was superseded');
+    if (view.version !== current.viewStore.getSnapshot().version || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity)) throw new WorkerReadSupersededError('Worker read was superseded');
     return result.value;
   };
   const readAt = async <K extends ResidentDocumentRead['kind']>(request: ResidentDocumentRead & { kind: K }, token: string): Promise<ResidentDocumentReadValues[K]> => {
@@ -239,21 +265,23 @@ export function createPeerlessShellController(initial: Options) {
   /** The last review read while it still describes the presented document and preview, whichever frame shows them. */
   const describedReview = () => currentReview(reviewDescribes);
   const readReview = (current: PeerlessEditSessionBinding, timeoutMs = options.reviewTimeoutMs ?? 30000): Promise<ResidentReviewSnapshot> => {
+    const identity = { ...current.viewStore.getSnapshot().identity };
     const pending = reviewReads.get(current);
-    if (pending) return pending;
+    if (pending && sameIdentity(pending.identity, identity)) return pending.pending;
     const deadline = Date.now() + timeoutMs;
     const request = (async () => {
       while (Date.now() < deadline) {
         const value = await readPresentedReview({ binding: current, current: () => binding, subscribe,
           read: options.read, readAt: options.readAt, timeoutMs: Math.max(0, deadline - Date.now()) });
-        if (binding !== current) throw new Error('Document was replaced');
+        if (binding !== current || !sameIdentity(identity, current.viewStore.getSnapshot().identity)) throw new Error('Document was replaced');
         if (!reviewMatches(current.viewStore.getSnapshot(), value)) continue;
-        reviewBinding = current; reviewIdentity = { ...current.viewStore.getSnapshot().identity }; reviewValue = value; publish();
+        reviewBinding = current; reviewIdentity = { ...current.viewStore.getSnapshot().identity }; reviewValue = value;
+        rememberComments(current, current.viewStore.getSnapshot(), value.uiComments); publish();
         if (reviewMatches(current.viewStore.getSnapshot(), value)) return value;
       }
       throw new Error('Review snapshot timed out');
-    })().finally(() => { reviewReads.delete(current); });
-    reviewReads.set(current, request);
+    })().finally(() => { if (reviewReads.get(current)?.pending === request) reviewReads.delete(current); });
+    reviewReads.set(current, { identity, pending: request });
     return request;
   };
   const presentedProposals = (current: PeerlessEditSessionBinding): Promise<DocxProposalSnapshot> => {
@@ -290,38 +318,45 @@ export function createPeerlessShellController(initial: Options) {
     proposalTail = pending.catch(() => {});
     return pending;
   };
+  const applyProposal = async (current: PeerlessEditSessionBinding, intent: ProposalIntent): Promise<DocxProposalResult> => {
+    if (binding !== current) throw new Error('Document was replaced');
+    const env = environment();
+    if ((env.readOnly || env.mode === 'viewing') && !options.allowHostProposals) return proposalFailure(current, intent, 'read-only');
+    let admitted = current.commands.submit(intent, { fence: true, hostProposal: options.allowHostProposals === true });
+    try {
+      while (admitted.status === 'held') admitted = await admitted.released;
+    } catch (error) {
+      if (binding !== current) throw new Error('Document was replaced');
+      throw error;
+    }
+    if (binding !== current) throw new Error('Document was replaced');
+    if (admitted.status === 'ignored') return proposalFailure(current, intent, admitted.reason);
+    const outcome = await admitted.ticket.ack;
+    if (binding !== current) throw new Error('Document was replaced');
+    if (outcome.status !== 'applied' && outcome.status !== 'noop') {
+      if (!outcome.reason) throw new Error('The worker did not confirm the proposal command');
+      return proposalFailure(current, intent, outcome.reason);
+    }
+    return { ok: true, snapshot: await presentedProposals(current) };
+  };
   const mutateProposal = (intent: ProposalIntent): Promise<DocxProposalResult> => {
     const captured = structuredClone(intent);
-    return proposalRound(async current => {
-      const env = environment();
-      if ((env.readOnly || env.mode === 'viewing') && !options.allowHostProposals) return proposalFailure(current, captured, 'read-only');
-      let admitted = current.commands.submit(captured, { fence: true, hostProposal: options.allowHostProposals === true });
-      try {
-        while (admitted.status === 'held') admitted = await admitted.released;
-      } catch (error) {
-        if (binding !== current) throw new Error('Document was replaced');
-        throw error;
-      }
-      if (binding !== current) throw new Error('Document was replaced');
-      if (admitted.status === 'ignored') return proposalFailure(current, captured, admitted.reason);
-      const outcome = await admitted.ticket.ack;
-      if (binding !== current) throw new Error('Document was replaced');
-      if (outcome.status !== 'applied' && outcome.status !== 'noop') {
-        if (!outcome.reason) throw new Error('The worker did not confirm the proposal command');
-        return proposalFailure(current, captured, outcome.reason);
-      }
-      return { ok: true, snapshot: await presentedProposals(current) };
-    });
+    return proposalRound(current => applyProposal(current, captured));
   };
-  const settleCommand = async (current: PeerlessEditSessionBinding, held: PeerlessAdmissionResult): Promise<DocxCommandResult> => {
-    const result = await released(held);
-    if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
-    if (result?.status !== 'submitted') return { ok: false, failure: { code: 'input-failed', message: 'Worker command was not admitted.' } };
-    const outcome = await result.ticket.ack;
-    if (current !== binding) return { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
-    if (outcome.status === 'applied' || outcome.status === 'noop') return { ok: true, status: outcome.status === 'applied' ? 'executed' : 'noop' };
-    return { ok: false, failure: { code: outcome.reason === 'read-only' ? 'read-only' : 'command-failed', message: outcome.reason ?? 'Worker command failed.' } };
+  const settleTicket = async (current: PeerlessEditSessionBinding, held: PeerlessAdmissionResult): Promise<{ result: DocxCommandResult; seq?: number }> => {
+    const replaced = { result: { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } } } as const;
+    const admitted = await released(held);
+    if (current !== binding) return replaced;
+    if (admitted?.status !== 'submitted') return { result: { ok: false, failure: { code: 'input-failed', message: 'Worker command was not admitted.' } } };
+    const outcome = await admitted.ticket.ack;
+    if (current !== binding) return replaced;
+    if (outcome.status === 'applied' || outcome.status === 'noop') return { result: { ok: true, status: outcome.status === 'applied' ? 'executed' : 'noop' }, seq: outcome.seq };
+    const code = outcome.reason === 'read-only' ? 'read-only' : outcome.reason === 'revision-required' ? 'revision-required'
+      : outcome.reason === 'unknown-revision' ? 'revision-not-found' : 'command-failed';
+    return { result: { ok: false, failure: { code, message: outcome.reason ?? 'Worker command failed.' } }, seq: outcome.seq };
   };
+  const settleCommand = async (current: PeerlessEditSessionBinding, held: PeerlessAdmissionResult): Promise<DocxCommandResult> =>
+    (await settleTicket(current, held)).result;
   const submit = (intent: PeerlessInputIntent): Promise<DocxCommandResult> => {
     const current = ready();
     return settleCommand(current, current.commands.submit(intent, { fence: true }));
@@ -337,6 +372,7 @@ export function createPeerlessShellController(initial: Options) {
     if (current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
     const value = await readAt<K>(request, native.version);
     if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
+    if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as ResidentDocumentReadValues['reviewSnapshot'])?.uiComments);
     const result = { version: native.version, value, selection: structuredClone(view.workerSelection) };
     queryOrigins.set(result, { binding: current, identity: view.identity, version: view.version });
     return result;
@@ -357,7 +393,7 @@ export function createPeerlessShellController(initial: Options) {
   };
   const commandBinding: DocxCommandBinding = {
     environment,
-    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'open', 'print', 'insertTable'].includes(id),
+    ordered: (id) => !FORMATTING_COMMANDS.has(id) && !['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'print', 'insertTable', 'reviewAccept', 'reviewReject'].includes(id),
     admit: async (operation) => {
       const current = binding;
       if (current && snapshot.status === 'ready') {
@@ -374,6 +410,15 @@ export function createPeerlessShellController(initial: Options) {
         return { ok: true, status: 'executed' };
       }
       if (id === 'undo' || id === 'redo') return submit({ kind: id, payload: {} });
+      if (id === 'reviewAccept' || id === 'reviewReject') {
+        const revisionId = (args as DocxCommandArgs['reviewAccept'])?.revisionId;
+        return submit({ kind: id === 'reviewAccept' ? 'acceptRevision' : 'rejectRevision', payload: revisionId ? { revisionId } : {} });
+      }
+      if (id === 'reviewNext' || id === 'reviewPrevious') {
+        const target = await query({ kind: 'adjacentRevision', selection: ready().viewStore.getSnapshot().workerSelection ?? null, direction: id === 'reviewNext' ? 'next' : 'previous' });
+        return target.value && await revealReviewTarget({ kind: 'revision', revisionId: target.value.revisionId }) ? { ok: true, status: 'executed' }
+          : { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } };
+      }
       if (id === 'strikethrough') return format({ kind: 'toggleStrike', payload: {} });
       if (id === 'superscript' || id === 'subscript') return format({ kind: 'toggleMark', payload: { mark: { type: id } } });
       if (id === 'clearFormatting') return format({ kind: 'clearFormatting', payload: {} });
@@ -516,9 +561,19 @@ export function createPeerlessShellController(initial: Options) {
         const delta = { color: nativeColor, other: { textColor: value } };
         return settleCommand(current, current.commands.format({ kind: 'formatRange', payload: { delta } }, { fence: true }));
       }
+      if (id === 'commentsSidebar' && options.commentsSidebar) {
+        options.commentsSidebar.toggle();
+        return { ok: true, status: options.commentsSidebar.control === 'internal' ? 'executed' : 'requested' };
+      }
       if (id === 'zoom') {
         options = { ...options, zoom: (args as { scale: number }).scale };
         options.onZoom?.(options.zoom);
+        publish();
+        return { ok: true, status: 'executed' };
+      }
+      if (id === 'tableGridlines') {
+        options = { ...options, tableGridlines: options.tableGridlines !== true };
+        options.onTableGridlines?.(options.tableGridlines === true);
         publish();
         return { ok: true, status: 'executed' };
       }
@@ -549,32 +604,176 @@ export function createPeerlessShellController(initial: Options) {
   };
   commands.attach(commandBinding);
   const batchResults = new Map<number, DocxEditResult>();
-  const commentResults = new Map<number, NonNullable<DocxEditState['comment']>>();
+  const appliedBatches = new Map<{ readonly seq: number | undefined }, { binding: PeerlessEditSessionBinding; applied: (view: PeerlessViewSnapshot) => void }>();
+  const commentResults = new Map<number, { id?: number; comments: Comment[] }>();
   let commentTail: Promise<unknown> = Promise.resolve();
-  const insertComment = (request: DocxCommentInsertion): Promise<number | null> => {
+  let commentList: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; comments: Comment[] } | null = null;
+  const commentsMatch = (view: PeerlessViewSnapshot) => commentList?.binding === binding &&
+    sameIdentity(commentList.identity, view.identity) && commentList.version <= view.version;
+  const rememberComments = (current: PeerlessEditSessionBinding, view: PeerlessViewSnapshot, comments: Comment[] | undefined) => {
+    const latest = current.viewStore.getSnapshot();
+    if (!comments || current !== binding || !sameIdentity(view.identity, latest.identity) || view.version !== latest.version) return;
+    if (commentList?.binding === current && sameIdentity(commentList.identity, view.identity) && commentList.version > view.version) return;
+    commentList = { binding: current, identity: { ...view.identity }, version: view.version, comments };
+  };
+  const flushComments = async () => {
+    const current = ready();
+    await commentTail;
+    if (current !== binding) throw new WorkerReadSupersededError('Document was replaced');
+    return flush();
+  };
+  const commentRound = <T>(refused: () => T, operation: (current: PeerlessEditSessionBinding) => Promise<T>, failed: (error: Error) => T = refused): Promise<T> => {
     const origin = binding;
     const pending = commentTail.then(async () => {
       const env = environment();
-      if (!origin || origin !== binding || env.readOnly || env.mode === 'viewing') return null;
+      if (!origin || origin !== binding || env.readOnly || env.mode === 'viewing') return refused();
       try {
         const current = await flush();
-        const target = await query({ kind: 'commentInsertionRange', paraId: request.paraId,
-          ...(request.search === undefined ? {} : { search: request.search }) });
-        if (!target.value || 'status' in target.value || current !== binding || origin !== current) return null;
-        const admitted = current.commands.submit({ kind: 'addComment', payload: { ranges: [target.value], author: request.author,
-          date: new Date().toISOString(), body: request.text, expectVersion: target.version } }, { fence: true });
-        if (admitted.status !== 'submitted') return null;
-        const outcome = await admitted.ticket.ack;
-        const added = outcome.seq === undefined ? undefined : commentResults.get(outcome.seq);
-        if (outcome.seq !== undefined) commentResults.delete(outcome.seq);
-        if (outcome.status !== 'applied' || binding !== current || !added) return null;
-        emit(options.onCommentsChange, added.comments);
-        return added.id;
-      } catch (error) { emit(options.onError, error instanceof Error ? error : new Error(String(error))); return null; }
+        return origin === current ? await operation(current) : refused();
+      } catch (error) {
+        const reported = error instanceof Error ? error : new Error(String(error));
+        emit(options.onError, reported);
+        return failed(reported);
+      }
     });
     commentTail = pending.catch(() => null);
     return pending;
   };
+  const commentTicket = async (current: PeerlessEditSessionBinding, intent: PeerlessInputIntent) => {
+    const { result, seq } = await settleTicket(current, current.commands.submit(intent, { fence: true }));
+    const comment = seq === undefined ? undefined : commentResults.get(seq);
+    if (seq !== undefined) commentResults.delete(seq);
+    return { result, comment: result.ok && result.status === 'executed' && binding === current ? comment : undefined };
+  };
+  const knownComments = (): Comment[] => options.hostComments ??
+    (snapshot.view && commentsMatch(snapshot.view) ? commentList!.comments : options.comments?.() ?? []);
+  const commentsChanged = (current: PeerlessEditSessionBinding, receipt: { comments: Comment[] } | undefined, change: (comments: Comment[]) => Comment[]) => {
+    const next = options.hostComments ? change(options.hostComments) : receipt?.comments;
+    if (next && binding === current) emit(options.onCommentsChange, next);
+  };
+  const hostOnly = (commentId: number) => !!options.hostComments?.some(comment => comment.id === commentId);
+  const addComment = async (current: PeerlessEditSessionBinding, payload: Extract<PeerlessInputIntent, { kind: 'addComment' }>['payload']) => {
+    const { result, comment } = await commentTicket(current, { kind: 'addComment', payload });
+    const added = comment?.comments.find(entry => entry.id === comment.id);
+    if (added) commentsChanged(current, comment, comments => [...comments, added]);
+    return { result, added: added ?? null };
+  };
+  const insertComment = (request: DocxCommentInsertion): Promise<number | null> => commentRound(() => null, async current => {
+    const target = await query({ kind: 'commentInsertionRange', paraId: request.paraId,
+      ...(request.search === undefined ? {} : { search: request.search }) });
+    if (!target.value || 'status' in target.value || current !== binding) return null;
+    return (await addComment(current, { ranges: [target.value], author: request.author, date: new Date().toISOString(), body: request.text, expectVersion: target.version })).added?.id ?? null;
+  });
+  const reply = (commentId: number, text: string, author: string): Promise<Comment | null> => commentRound(() => null, async current => {
+    const target = await query({ kind: 'reviewTarget', target: { kind: 'comment', id: commentId } });
+    if (current !== binding) return null;
+    if (!target.value?.ranges.length) {
+      if (target.value || !hostOnly(commentId)) return null;
+      const id = Math.max(-1, ...knownComments().map(comment => comment.id), ...(commentList?.comments ?? []).map(comment => comment.id)) + 1;
+      const added: Comment = { id, author, date: new Date().toISOString(), parentId: commentId,
+        content: [{ type: 'paragraph', formatting: {}, content: [{ type: 'run', formatting: {}, content: [{ type: 'text', text }] }] }] };
+      commentsChanged(current, undefined, comments => [...comments, added]);
+      return added;
+    }
+    return (await addComment(current, { ranges: target.value.ranges, author, date: new Date().toISOString(), body: text,
+      parentId: target.value.id, expectVersion: target.version })).added;
+  });
+  /** Adds a reply anchored where its parent is; null when the parent does not exist or the editor is read-only. */
+  const replyToComment = async (commentId: number, text: string, author: string): Promise<number | null> => (await reply(commentId, text, author))?.id ?? null;
+  const refusedComment = (): DocxCommandResult => {
+    const env = environment();
+    return { ok: false, failure: env.mode === 'viewing' ? { code: 'viewing-mode', message: 'The editor is viewing.' }
+      : env.readOnly ? { code: 'read-only', message: 'The editor is read-only.' } : { code: 'document-replaced', message: 'Document was replaced.' } };
+  };
+  const unknownComment: DocxCommandResult = { ok: false, failure: { code: 'command-failed', message: 'unknown-comment' } };
+  const replacedComment: DocxCommandResult = { ok: false, failure: { code: 'document-replaced', message: 'Document was replaced.' } };
+  const changeComments = (commentIds: number[], intent: (id: string, expectVersion: string) => PeerlessInputIntent,
+    change: (comments: Comment[], changed: number[]) => Comment[]): Promise<DocxCommandResult> =>
+    commentRound(refusedComment, async current => {
+      let receipt: { comments: Comment[] } | undefined;
+      const changed: number[] = [];
+      for (const commentId of commentIds) {
+        const target = await query({ kind: 'reviewTarget', target: { kind: 'comment', id: commentId } });
+        if (current !== binding) return replacedComment;
+        if (!target.value) {
+          if (hostOnly(commentId)) { changed.push(commentId); continue; }
+          if (commentId !== commentIds.at(-1)) continue;
+          if (changed.length) commentsChanged(current, receipt, comments => change(comments, changed));
+          return unknownComment;
+        }
+        const step = await commentTicket(current, intent(target.value.id, target.version));
+        if (!step.result.ok) {
+          if (changed.length) commentsChanged(current, receipt, comments => change(comments, changed));
+          return step.result;
+        }
+        receipt = step.comment ?? receipt;
+        changed.push(commentId);
+      }
+      commentsChanged(current, receipt, comments => change(comments, changed));
+      return { ok: true, status: 'executed' };
+    }, error => ({ ok: false, failure: { code: 'command-failed', message: error.message } }));
+  /** Marks a comment done or open again through the worker command queue. */
+  const setCommentDone = (commentId: number, done: boolean) => changeComments([commentId],
+    (id, expectVersion) => ({ kind: 'updateComment', payload: { id, patch: { done }, expectVersion } }),
+    comments => comments.map(comment => comment.id === commentId ? { ...comment, done: done || undefined } : comment));
+  /** Removes a comment through the worker command queue. */
+  const removeComment = (commentId: number) => changeComments([commentId],
+    (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }),
+    comments => comments.filter(comment => comment.id !== commentId));
+  const removeThread = (commentId: number) => changeComments(
+    [...knownComments().filter(comment => comment.parentId === commentId).map(comment => comment.id), commentId],
+    (id, expectVersion) => ({ kind: 'removeComment', payload: { id, expectVersion } }),
+    (comments, removed) => comments.filter(comment => !removed.includes(comment.id) && !(removed.includes(commentId) && comment.parentId === commentId)));
+  const commentable = (range: YrsStoryRange | null): range is YrsStoryRange => !!range && (range.story === 'body' || range.story.startsWith('body:')) &&
+    (range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset);
+  const editable = () => { const env = environment(); return !env.readOnly && env.mode !== 'viewing'; };
+  /** Captures the current body selection a new comment anchors; null when nothing commentable is selected. */
+  const beginComment = async (): Promise<WorkerCommentDraft | null> => {
+    if (!binding || snapshot.status !== 'ready' || !editable()) return null;
+    const current = await flush();
+    const selection = current.viewStore.getSnapshot().workerSelection;
+    if (!selection) return null;
+    const target = await query({ kind: 'commentSelectionRange', selection });
+    if (!commentable(target.value) || current !== binding || !editable() || JSON.stringify(target.selection) !== JSON.stringify(selection)) return null;
+    return { binding: current, selection: structuredClone(selection) };
+  };
+  const invalidRange: DocxCommandResult = { ok: false, failure: { code: 'command-failed', message: 'invalid-range' } };
+  const failedComment: DocxCommandResult = { ok: false, failure: { code: 'command-failed', message: 'Worker command failed.' } };
+  /** Runs a comment sidebar action and reports it to the host callbacks the way the hybrid editor does. */
+  const comment = async (action: WorkerCommentAction): Promise<DocxCommandResult> => {
+    const author = options.author ?? 'User';
+    const target = action.kind === 'add' ? undefined : knownComments().find(entry => entry.id === action.id);
+    if (action.kind === 'add') {
+      const { result, added } = await commentRound<{ result: DocxCommandResult; added: Comment | null }>(() => ({ result: refusedComment(), added: null }), async current => {
+        if (current !== action.draft.binding) return { result: replacedComment, added: null };
+        const target = await query({ kind: 'commentSelectionRange', selection: action.draft.selection });
+        if (current !== binding) return { result: replacedComment, added: null };
+        if (!commentable(target.value)) return { result: invalidRange, added: null };
+        return addComment(current, { ranges: [target.value], author, date: new Date().toISOString(), body: action.text, expectVersion: target.version });
+      }, error => ({ result: { ok: false, failure: { code: 'command-failed', message: error.message } }, added: null }));
+      if (!added) return result.ok ? failedComment : result;
+      emit(options.onCommentAdd, added);
+      return { ok: true, status: 'executed' };
+    }
+    if (action.kind === 'reply') {
+      const added = await reply(action.id, action.text, author);
+      if (!added) return failedComment;
+      if (target) emit<[Comment, Comment]>(options.onCommentReply && (([value, parent]: [Comment, Comment]) => options.onCommentReply?.(value, parent)), [added, target]);
+      return { ok: true, status: 'executed' };
+    }
+    if (action.kind === 'delete') {
+      const result = await removeThread(action.id);
+      if (result.ok && target) emit(options.onCommentDelete, target);
+      return result;
+    }
+    const result = await setCommentDone(action.id, action.kind === 'resolve');
+    if (result.ok && action.kind === 'resolve' && target) emit(options.onCommentResolve, { ...target, done: true });
+    return result;
+  };
+  const getComments = (): Comment[] => snapshot.status !== 'ready' ? [] : structuredClone(knownComments());
+  /** Selects a comment's or revision's first anchored range and scrolls it into view; false when it does not exist. */
+  const revealReviewTarget = (target: ResidentReviewTarget): Promise<boolean> =>
+    options.scrollToReviewTarget?.(target) ?? Promise.resolve(false);
   const batchPolicy = (request: DocxEditRequest) => {
     const env = environment();
     if (env.readOnly || env.mode === 'viewing') return { ok: false as const, version: request.expectVersion, failure: { code: 'read-only' as const, message: 'The editor is read-only' } };
@@ -582,7 +781,8 @@ export function createPeerlessShellController(initial: Options) {
     if (env.mode === 'suggesting' && stepIndex >= 0) return { ok: false as const, version: request.expectVersion, failure: { code: 'invalid-step' as const, stepIndex, message: 'Suggesting mode requires suggest metadata' } };
     return null;
   };
-  const applyEdits = async (request: DocxEditRequest, authorize: () => unknown = () => null) => {
+  /** `applied` runs with the view that first shows the batch applied, before that view is published. */
+  const applyEdits = async (request: DocxEditRequest, authorize: () => unknown = () => null, applied?: (view: PeerlessViewSnapshot) => void) => {
     const current = await flush();
     const denied = authorize();
     if (denied) return denied as DocxEditResult;
@@ -590,16 +790,98 @@ export function createPeerlessShellController(initial: Options) {
     if (policy) return policy;
     const admitted = current.commands.submit({ kind: 'applyEdits', payload: { request } }, { fence: true });
     if (admitted.status !== 'submitted') return { ok: false as const, version: request.expectVersion, failure: { code: 'read-only' as const, message: 'Worker batch was not admitted' } };
-    const outcome = await admitted.ticket.ack;
+    if (applied) appliedBatches.set(admitted.ticket, { binding: current, applied });
+    const outcome = await admitted.ticket.ack.finally(() => appliedBatches.delete(admitted.ticket));
     if (binding !== current) throw new Error('Document was replaced');
     const receipt = outcome.seq === undefined ? undefined : batchResults.get(outcome.seq);
     if (outcome.seq !== undefined) batchResults.delete(outcome.seq);
     if (receipt) return receipt;
     return { ok: false as const, version: request.expectVersion, failure: { code: (outcome.reason ?? 'unsupported') as import('@betteroffice/docx/yrs').DocxEditFailureCode, message: outcome.reason ?? 'Worker batch failed' } };
   };
+  const whenLayoutComplete: DocxEditorRef['whenLayoutComplete'] = ({ timeoutMs = 30000 } = {}) => new Promise<number>((resolve, reject) => {
+    let current: PeerlessEditSessionBinding | null = null;
+    let flushed = false;
+    let stop: (() => void) | undefined;
+    const settle = (error: Error | null) => {
+      clearTimeout(timeout); waits.delete(check); stop?.(); stop = undefined;
+      if (error) reject(error); else resolve(current?.viewStore.getSnapshot().geometry?.pages.length ?? 0);
+    };
+    const check = () => {
+      if (closed) return settle(new Error('Editor was closed'));
+      if (snapshot.error) return settle(snapshot.error);
+      if (current) {
+        if (binding !== current) return settle(new Error('Document was replaced'));
+        const view = current.viewStore.getSnapshot();
+        if (flushed && view.geometry && view.presentedThroughSeq >= view.throughSeq && !view.geometry.layoutProvisional) settle(null);
+        return;
+      }
+      if (snapshot.status !== 'ready' || !binding) return;
+      const opened = binding;
+      current = opened;
+      void flushAdmittedInput(opened).then(() => {
+        if (!waits.has(check)) return;
+        flushed = true; stop = opened.viewStore.subscribe(check); check();
+      }, (error: unknown) => { if (waits.has(check)) settle(error instanceof Error ? error : new Error(String(error))); });
+    };
+    const timeout = setTimeout(() => settle(new Error('Layout timed out')), timeoutMs);
+    waits.add(check);
+    check();
+  });
+  const exportStructuredWithPages: DocxEditorRef['exportStructuredWithPages'] = async (config) => {
+    const current = await opened();
+    await flush();
+    const view = current.viewStore.getSnapshot();
+    let request: string | null = null;
+    let superseded = false;
+    const assertCurrent = () => { if (binding !== current) throw new WorkerReadSupersededError('Document was replaced'); };
+    const moved = (): WorkerPageExportResult => {
+      superseded = true;
+      return { ok: false, version: view.editState?.documentVersion ?? view.geometry?.documentVersion ?? '',
+        failure: { code: 'stale-document', target: null, message: 'The document changed while exporting.' } };
+    };
+    const attempt = async (): Promise<WorkerPageExportResult> => {
+      assertCurrent();
+      request = options.layoutRequest?.() ?? null;
+      if (request === null) return { ok: false, version: view.editState?.documentVersion ?? '',
+        failure: { code: 'layout-unavailable', target: null, message: 'The fonts this document uses are not loaded yet.' } };
+      try {
+        const value = await read({ kind: 'exportStructuredWithPages', options: config, currentRequest: request, workerFonts: true });
+        assertCurrent();
+        return JSON.parse(value) as WorkerPageExportResult;
+      } catch (error) {
+        assertCurrent();
+        if (error instanceof WorkerReadSupersededError) return moved();
+        throw error;
+      }
+    };
+    const showsMarkup = () => {
+      if (request === null) return false;
+      const preview = (JSON.parse(request) as { renderEnv?: { revisionPreview?: object } }).renderEnv?.revisionPreview;
+      return !preview || Object.keys(preview).length === 0;
+    };
+    let result = await attempt();
+    if (config.expectLayoutVersion !== undefined || superseded) return result;
+    if (!result.ok && (LAYOUT_REFUSALS.has(result.failure.code) ||
+      (result.failure.code === 'unsupported-revision-layout' && showsMarkup()))) {
+      await whenLayoutComplete({ timeoutMs: VIEWER_LAYOUT_WAIT_MS }).catch(() => {});
+      assertCurrent();
+      result = await attempt();
+      if (superseded) return result;
+    }
+    const deadline = Date.now() + LAYOUT_WAIT_MS;
+    while (!result.ok && LAYOUT_REFUSALS.has(result.failure.code) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, LAYOUT_POLL_MS));
+      result = await attempt();
+      if (superseded) return result;
+    }
+    return result;
+  };
   const implemented = {
     commands: commands.store,
     insertComment,
+    insertCommentReply: replyToComment,
+    resolveComment: (commentId) => { void setCommentDone(commentId, true); },
+    getComments,
     proposeChanges: request => mutateProposal({ kind: 'propose', payload: request }),
     setProposalStates: request => mutateProposal({ kind: 'setProposalStates', payload: request }),
     withdrawProposals: request => mutateProposal({ kind: 'withdrawProposals', payload: request }),
@@ -607,36 +889,9 @@ export function createPeerlessShellController(initial: Options) {
     validateEdits: async (request) => { await flush(); return batchPolicy(request) ?? read({ kind: 'validateEdits', request }); },
     applyEdits: (request) => applyEdits(request),
     readPositionAtPoint: (x, y) => options.readPositionAtPoint?.(x, y) ?? Promise.resolve(null),
-    whenLayoutComplete: ({ timeoutMs = 30000 } = {}) => new Promise<number>((resolve, reject) => {
-      let current: PeerlessEditSessionBinding | null = null;
-      let flushed = false;
-      let stop: (() => void) | undefined;
-      const settle = (error: Error | null) => {
-        clearTimeout(timeout); waits.delete(check); stop?.(); stop = undefined;
-        if (error) reject(error); else resolve(current?.viewStore.getSnapshot().geometry?.pages.length ?? 0);
-      };
-      const check = () => {
-        if (closed) return settle(new Error('Editor was closed'));
-        if (snapshot.error) return settle(snapshot.error);
-        if (current) {
-          if (binding !== current) return settle(new Error('Document was replaced'));
-          const view = current.viewStore.getSnapshot();
-          if (flushed && view.geometry && view.presentedThroughSeq >= view.throughSeq && !view.geometry.layoutProvisional) settle(null);
-          return;
-        }
-        if (snapshot.status !== 'ready' || !binding) return;
-        const opened = binding;
-        current = opened;
-        void flushAdmittedInput(opened).then(() => {
-          if (!waits.has(check)) return;
-          flushed = true; stop = opened.viewStore.subscribe(check); check();
-        }, (error: unknown) => { if (waits.has(check)) settle(error instanceof Error ? error : new Error(String(error))); });
-      };
-      const timeout = setTimeout(() => settle(new Error('Layout timed out')), timeoutMs);
-      waits.add(check);
-      check();
-    }),
-    flushPendingInput: async () => { await flush(); },
+    whenLayoutComplete,
+    exportStructuredWithPages,
+    flushPendingInput: async () => { await flushComments(); },
     readParagraphs: (request) => read({ kind: 'readParagraphs', request }),
     getParagraphIdentities: () => read({ kind: 'paragraphIdentities' }),
     resolveParagraphAnchors: async (anchors) => {
@@ -662,15 +917,18 @@ export function createPeerlessShellController(initial: Options) {
     findParagraphs: (query, config) => read({ kind: 'findParagraphs', query, ...config }),
     listContentControls: (config) => read({ kind: 'listContentControls', options: config ?? {} }),
     findContentControls: (query, config) => read({ kind: 'findContentControls', query, options: config ?? {} }),
-    save: async () => { const current = await flush(); const result = await options.save?.();
+    save: async () => { const current = await flushComments(); const result = await options.save?.();
       if (current !== binding) throw new Error('Document was replaced'); if (result) options.onSave?.(result); return result ?? null; },
     loadDocumentBuffer: (buffer) => options.loadBuffer?.(buffer) ?? Promise.reject(new Error('Worker loading is unavailable')),
+    loadDocument: (document) => { void options.loadDocument?.(document).catch(() => {}); },
     print: () => { void options.print?.().catch(() => {}); },
     openPrintPreview: () => { void options.print?.(true).catch(() => {}); },
     getCurrentPage: () => options.currentPage?.() ?? 1,
     getTotalPages: () => snapshot.view?.geometry?.pages.length ?? 0,
     scrollToPage: (number) => options.scrollToPage?.(number),
     scrollToParagraph: (paraId) => options.scrollToParagraph?.(paraId) ?? Promise.resolve(false),
+    scrollToComment: (commentId) => Number.isSafeInteger(commentId) ? revealReviewTarget({ kind: 'comment', id: commentId }) : Promise.resolve(false),
+    scrollToChange: (revisionId) => revealReviewTarget({ kind: 'revision', revisionId: String(revisionId) }),
     focus: () => options.focus(),
     setZoom: (zoom) => { if (!Number.isFinite(zoom) || zoom <= 0) return;
       options = { ...options, zoom }; options.onZoom?.(zoom); publish(); },
@@ -679,14 +937,44 @@ export function createPeerlessShellController(initial: Options) {
     onDocumentChange: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; },
     onSelectionChange: (listener) => { selections.add(listener); return () => { selections.delete(listener); }; },
   } satisfies Partial<DocxEditorRef>;
-  const ref = new Proxy(implemented as DocxEditorRef, {
+  const syncRef = new Proxy(implemented as DocxEditorRef, {
     get(target, member) {
       if (member in target) return Reflect.get(target, member);
       return () => { throw new PeerlessSyncApiError(String(member)); };
     },
   });
+  const viewer = () => options.readOnly === true || mode() === 'viewing';
+  const viewerRef = routeViewerRefAccess(syncRef, viewer, {
+    getPositionAtPoint: () => null,
+    onContentChange: () => () => {},
+    proposeChange: request => {
+      if (!options.allowHostProposals || (!request.search && !request.replaceWith)) return false;
+      const captured = { ...request };
+      void proposalRound(async current => {
+        const identities = await query({ kind: 'paragraphIdentities' });
+        const paragraph = identities.value.paragraphs.find(({ session }) => session?.paraId === captured.paraId &&
+          (session.story === 'body' || session.story.startsWith('body:')))?.session;
+        const intent: ProposalIntent = { kind: 'propose', payload: {
+          expectVersion: identities.version,
+          proposals: [{ id: crypto.randomUUID(), paragraph: { kind: 'session', sessionId: identities.value.sessionId,
+            story: paragraph?.story ?? 'body', paraId: captured.paraId },
+          suggest: { author: captured.author, date: new Date().toISOString() },
+          ...(captured.search ? { op: 'replaceText', search: captured.search, replaceWith: captured.replaceWith }
+            : { op: 'insertText', at: 'end', text: captured.replaceWith }) }],
+        } };
+        return paragraph ? applyProposal(current, intent) : proposalFailure(current, intent, 'missing-target');
+      }).then(result => {
+        if (!result.ok) throw new Error(result.failure.message ?? result.failure.code);
+      }).catch(error => emit(options.onError, error instanceof Error ? error : new Error(String(error))));
+      return true;
+    },
+  });
+  const ref = new Proxy(viewerRef, {
+    get: (target, member) => member in target ? Reflect.get(target, member) : Reflect.get(syncRef, member),
+  });
   return {
-    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview,
+    commands, ref, read, readAt, query, applyQuery, submit, navigateCell, environment, applyEdits, reviewSnapshot, describedReview, revealReviewTarget,
+    replyToComment, setCommentDone, removeComment, beginComment, comment,
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
@@ -723,6 +1011,16 @@ export function createPeerlessShellController(initial: Options) {
       }
       commands.refresh();
     },
+    revisions(review: PeerlessWorkerQuery<'reviewSnapshot'> | null, sidebar: PeerlessWorkerQuery<'sidebar'> | null) {
+      if (!review?.value || !currentQuery(review) || (sidebar && (!currentQuery(sidebar) || sidebar.version !== review.version))) return;
+      const value = workerRevisions(review.value, sidebar?.value ?? null);
+      if (!value) return;
+      const key = JSON.stringify([[...value.ids], value.navigation, value.entries, [...value.anchors]]);
+      if (revisions?.binding === binding && revisions.key === key) return;
+      revisions = { binding: binding!, key, value };
+      publish();
+    },
+    trackedChanges: () => revisions?.binding === binding ? revisions?.value ?? null : null,
     fontChoices(families: string[]) { fontFamilies = [...families]; publish(); },
     fontEnvironment(event: ResidentFontEnvironmentEvent) {
       if (event.phase !== 'ready' || event.revision <= fontRevision || snapshot.status === 'empty' || snapshot.status === 'failed') return;
@@ -737,20 +1035,31 @@ export function createPeerlessShellController(initial: Options) {
       const accept = () => {
         if (binding !== next) return;
         const view = next.viewStore.getSnapshot();
+        if (!commentsMatch(view)) commentList = null;
         if (view.editState?.batch) {
           batchResults.set(view.editState.batch.seq, view.editState.batch.result);
           if (batchResults.size > 256) batchResults.delete(batchResults.keys().next().value!);
         }
-        const comment = view.editState?.comment;
-        if (comment && comment !== snapshot.view?.editState?.comment) {
+        for (const comment of [view.editState?.comment, view.editState?.commentChange]) {
+          if (!comment || comment === snapshot.view?.editState?.comment || comment === snapshot.view?.editState?.commentChange) continue;
+          rememberComments(next, view, comment.comments);
           commentResults.set(comment.seq, comment);
           if (commentResults.size > 256) commentResults.delete(commentResults.keys().next().value!);
         }
         const previous = snapshot.view;
+        if (previous && !sameIdentity(previous.identity, view.identity)) fontRevision = 0;
         const ready = view.presentedThroughSeq >= 0;
         snapshot = { ...snapshot, status: ready ? 'ready' : 'opening', view, error: null, mode: mode(),
           preview: ready ? null : snapshot.preview };
         syncBorderPen();
+        const batch = view.editState?.batch;
+        if (batch?.result.ok) {
+          for (const [ticket, own] of appliedBatches) {
+            if (own.binding !== next || ticket.seq !== batch.seq) continue;
+            appliedBatches.delete(ticket);
+            emit(own.applied, view);
+          }
+        }
         publish();
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {
@@ -770,7 +1079,7 @@ export function createPeerlessShellController(initial: Options) {
       replace();
       reset('empty');
     },
-    dispose() { unsubscribe?.(); binding = null; closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
+    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
   };
 }
 

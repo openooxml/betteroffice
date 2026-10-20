@@ -118,8 +118,11 @@ export interface DocxProposalSession {
   applyEdits(request: DocxEditRequest): DocxEditResult;
   listRevisions(): readonly { revisionId: string; kind: string }[];
   revisionStamps?(ids: readonly string[]): Record<string, readonly { author: string; date: string }[]>;
-  /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
-  settleRevisions(accept: readonly string[], reject: readonly string[]): void;
+  /**
+   * Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. Returns
+   * the refusal, with the document unchanged, while it holds remote updates not integrated yet.
+   */
+  settleRevisions(accept: readonly string[], reject: readonly string[]): DocxEditFailure | undefined;
   /** Runs `read` with story projections shared across its reads; omitted, reads run unshared. */
   sharedReads?<R>(read: () => R): R;
 }
@@ -565,8 +568,9 @@ export function executeProposalWithdrawal(
       }
     }
   }
-  if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
-  return { ok: true };
+  const failure =
+    accept.length > 0 || reject.length > 0 ? session.settleRevisions(accept, reject) : undefined;
+  return failure ? { ok: false, failure } : { ok: true };
 }
 
 /** The session holds update notifications until `propose` returns, so they see the round. */

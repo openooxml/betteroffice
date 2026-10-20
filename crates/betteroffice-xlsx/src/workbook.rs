@@ -7,8 +7,10 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod geometry;
 mod recovery;
+mod rich_text;
 #[cfg(test)]
 mod save_oracle_tests;
+pub mod selection;
 #[path = "snapshot/assembly.rs"]
 pub(crate) mod snapshot_assembly;
 mod staging;
@@ -19,6 +21,7 @@ mod update_tests;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
+use std::ops::{Range, RangeInclusive};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -51,7 +54,8 @@ use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
     build_display_list_with_geometry, build_print_display_list_with_charts, chart_at_point,
-    display_text, moved_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
+    display_text, display_viewport_with_geometry, moved_chart_anchor, resolve_chart_anchor,
+    visible_merged_ranges_with_geometry,
 };
 
 use crate::authority::{
@@ -365,6 +369,7 @@ pub struct Workbook {
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
+    invalidated_text_sources: Option<BTreeSet<(usize, u32, u32)>>,
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
@@ -744,6 +749,7 @@ impl Workbook {
             snapshot_package_lineage: None,
             source_container: None,
             preserved,
+            invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
@@ -1641,9 +1647,11 @@ impl Workbook {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
-        validate_display_region(sheet_ref, &geometry, viewport)?;
         Ok(visible_merged_ranges_with_geometry(
-            sheet_ref, viewport, &geometry,
+            sheet_ref,
+            viewport,
+            &geometry,
+            Some(MAX_DISPLAY_CELLS),
         ))
     }
 
@@ -2422,14 +2430,6 @@ impl Workbook {
         {
             return Err(Error::InvalidViewport);
         }
-        let cells = (u64::from(range.end.row - range.start.row) + 2)
-            * (u64::from(range.end.col - range.start.col) + 2);
-        if cells > MAX_DISPLAY_CELLS {
-            return Err(Error::DisplayTooLarge {
-                cells,
-                max: MAX_DISPLAY_CELLS,
-            });
-        }
         let sheet_ref = self.sheet(sheet)?;
         let geometry = GridGeometry::for_print(sheet_ref, &self.model.styles, metrics);
         let viewport = Viewport {
@@ -2439,6 +2439,11 @@ impl Workbook {
             height: geometry.row_y(range.end.row + 1) - geometry.row_y(range.start.row),
         };
         validate_viewport(&viewport)?;
+        let (rows, columns) = geometry.viewport_range(&viewport);
+        validate_display_cells(
+            visible_count(rows, |rows| sheet_ref.hidden_row_spans(rows)),
+            visible_count(columns, |columns| sheet_ref.hidden_col_spans(columns)),
+        )?;
         let mut frame = build_print_display_list_with_charts(
             &self.model,
             sheet,
@@ -2465,7 +2470,6 @@ impl Workbook {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
-        validate_display_region(sheet_ref, &geometry, viewport)?;
         let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
         for proposal in self.proposals.list() {
             let drifted: BTreeSet<_> = proposal
@@ -2511,6 +2515,7 @@ impl Workbook {
             viewport,
             &ghosts,
             &geometry,
+            Some(MAX_DISPLAY_CELLS),
             |chart| self.resolve_chart_space(&owner, chart),
         )
         .map_err(Error::from)
@@ -2536,7 +2541,11 @@ impl Workbook {
         y: f32,
     ) -> Result<Option<ChartRegion>> {
         let geometry = self.sheet_geometry(sheet)?;
-        let regions = chart_regions_with_geometry(self.sheet(sheet)?, &geometry, viewport)?;
+        let sheet_ref = self.sheet(sheet)?;
+        validate_viewport(viewport)?;
+        let viewport =
+            display_viewport_with_geometry(sheet_ref, viewport, &geometry, MAX_DISPLAY_CELLS);
+        let regions = chart_regions_with_geometry(sheet_ref, &geometry, &viewport)?;
         Ok(chart_at_point(&regions, x, y).cloned())
     }
 
@@ -2601,6 +2610,8 @@ impl Workbook {
         let width = viewport.width.ceil().max(1.0) as u32;
         let height = viewport.height.ceil().max(1.0) as u32;
         validate_render_size(width, height)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
         let display_list = self.display_list_for(sheet, viewport)?;
         let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
@@ -2644,6 +2655,7 @@ impl Workbook {
             &viewport,
             &[],
             &geometry,
+            None,
             |chart| self.resolve_chart_space(&owner, chart),
         )?;
         let display_list = if options.scale == 1.0 {
@@ -3207,6 +3219,7 @@ impl Workbook {
         }
         for op in ops {
             match *op {
+                Op::SetCell { sheet, at, .. } => self.invalidate_text_source(sheet, at),
                 Op::AddSheet { index, .. } => self.preserved.insert(index),
                 Op::RemoveSheet { index } => self.preserved.remove(index),
                 Op::MoveSheet { from, to } => self.preserved.move_sheet(from, to),
@@ -4767,6 +4780,7 @@ impl Workbook {
     }
 }
 
+#[cfg(feature = "raster")]
 fn validate_display_region(
     sheet: &Sheet,
     geometry: &GridGeometry,
@@ -4777,9 +4791,33 @@ fn validate_display_region(
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
-    let row_count = u64::from(rows.end - rows.start).saturating_add(u64::from(frozen_rows));
-    let column_count =
-        u64::from(columns.end - columns.start).saturating_add(u64::from(frozen_cols));
+    let row_count =
+        visible_count(rows, |rows| sheet.hidden_row_spans(rows))
+            .saturating_add(visible_count(0..frozen_rows, |rows| {
+                sheet.hidden_row_spans(rows)
+            }));
+    let column_count = visible_count(columns, |columns| sheet.hidden_col_spans(columns))
+        .saturating_add(visible_count(0..frozen_cols, |columns| {
+            sheet.hidden_col_spans(columns)
+        }));
+    validate_display_cells(row_count, column_count)
+}
+
+fn visible_count<I: Iterator<Item = (u32, u32)>>(
+    range: Range<u32>,
+    hidden: impl FnOnce(RangeInclusive<u32>) -> I,
+) -> u64 {
+    if range.is_empty() {
+        return 0;
+    }
+    let count = u64::from(range.end - range.start);
+    let hidden = hidden(range.start..=range.end - 1)
+        .map(|(first, last)| u64::from(last - first) + 1)
+        .sum::<u64>();
+    count - hidden
+}
+
+fn validate_display_cells(row_count: u64, column_count: u64) -> Result<()> {
     let cells = row_count.saturating_mul(column_count);
     if cells > MAX_DISPLAY_CELLS {
         return Err(Error::DisplayTooLarge {
@@ -5241,6 +5279,7 @@ impl Workbook {
             snapshot_package_lineage: None,
             source_container: None,
             preserved,
+            invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,

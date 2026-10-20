@@ -665,6 +665,7 @@ describe('overflow coverage', () => {
       'Delete column',
       'Delete table',
       'Borders',
+      'View gridlines',
       'Border Color',
       'Border width',
       'Cell Fill Color',

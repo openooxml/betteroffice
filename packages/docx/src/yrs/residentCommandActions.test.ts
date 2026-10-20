@@ -62,6 +62,44 @@ test('d1a_types_replaces_deletes_and_breaks_without_peer', async () => {
   expect(arm.version).toBe(5);
 }, TIMEOUT);
 
+test('line break keeps typed text in one paragraph and saves a wrapping break', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine(['']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'insertText', { text: 'a', selection: selection(id, 0) })).status).toBe('applied');
+  const broken = execute(arm, command(arm, 'lineBreak', {}));
+  expect(broken.status).toBe('applied');
+  expectCaret(broken, { story: 'body', paraId: id, offset: 2 });
+  expect(execute(arm, command(arm, 'insertText', { text: 'b' })).status).toBe('applied');
+  expect(arm.engine.paragraphs('body').map(paragraph => paragraph.paraId)).toEqual([id]);
+  const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
+  const saved = await repackDocx(projected);
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml.match(/<w:p[\s>]/g)).toHaveLength(1);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:br(?: w:type="textWrapping")?\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
+}, TIMEOUT);
+
+test('line break replaces a selection and undo restores it in one step', async () => {
+  const arm = await openCommandEngine(['abcd']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const broken = execute(arm, command(arm, 'lineBreak', { selection: selection(id, 3, 1) }));
+  expect(broken.status).toBe('applied');
+  expectCaret(broken, { story: 'body', paraId: id, offset: 2 });
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'text')
+    .map(segment => segment.text)).toEqual(['a', 'd']);
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'embed')
+    .map(segment => segment.embedKind)).toEqual(['break']);
+  expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
+  expect(texts(arm)).toEqual(['abcd']);
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'embed')).toHaveLength(0);
+  expect(execute(arm, command(arm, 'redo', {})).status).toBe('applied');
+  expect(arm.engine.paragraphs('body').map(paragraph => paragraph.paraId)).toEqual([id]);
+  expect(arm.engine.storySegments('body').filter(segment => segment.kind === 'embed')
+    .map(segment => segment.embedKind)).toEqual(['break']);
+}, TIMEOUT);
+
 test('d1a_rebases_sticky_anchors_and_predecessor_selection', async () => {
   const arm = await openCommandEngine();
   const id = arm.engine.paragraphs('body')[0]!.paraId;
@@ -111,6 +149,7 @@ test('d1a_refuses_invalid_basis_anchors_and_readonly_before_mutation', async () 
     command(arm, 'insertText', { text: '!', selection: forged }, { basis: { epoch: 1, version: 0 } }),
     command(arm, 'insertText', { text: '!', selection: selection(id, -1) }),
     command(arm, 'paragraphBreak', { selection: selection(id, 0, 1000) }),
+    command(arm, 'lineBreak', { selection: selection(id, 0, 1000) }),
     command(arm, 'deleteBackward', { selection: selection('missing', 0) }),
     command(arm, 'insertText', { text: '!', selection: selection(id, 0, 0, 'missing-story') }),
     command(arm, 'replaceSelection', { text: '!', selection: {
@@ -132,6 +171,7 @@ test('d1a_refuses_invalid_basis_anchors_and_readonly_before_mutation', async () 
   arm.state.storedMarks = { story: 'body', paraId: id, clear: false, delta: { fontSize: -1 } };
   const beforeCompound = snapshot(arm);
   expect(execute(arm, command(arm, 'insertText', { text: 'unsafe' })).status).toBe('refused');
+  expect(execute(arm, command(arm, 'lineBreak', {})).status).toBe('refused');
   expect(snapshot(arm)).toEqual(beforeCompound);
   arm.state.storedMarks = null;
 
@@ -139,6 +179,7 @@ test('d1a_refuses_invalid_basis_anchors_and_readonly_before_mutation', async () 
   for (const intent of [
     command(arm, 'insertText', { text: 'blocked' }),
     command(arm, 'paragraphBreak', { selection: selection(id, 0, 2) }),
+    command(arm, 'lineBreak', { selection: selection(id, 0, 2) }),
     command(arm, 'formatRange', { selection: selection(id, 0, 1), delta: { bold: true } }),
   ]) {
     const before = snapshot(arm);
@@ -162,6 +203,7 @@ test('d1a_refuses_anchorless_stale_commands_before_mutation', async () => {
     command(arm, 'insertText', { text: '!' }, extra),
     command(arm, 'deleteBackward', {}, extra),
     command(arm, 'paragraphBreak', {}, extra),
+    command(arm, 'lineBreak', {}, extra),
     command(arm, 'toggleMark', { mark: { type: 'bold' } }, extra),
   ]) {
     const before = snapshot(arm);
@@ -223,6 +265,134 @@ test('d1a_unicode_delete_and_paragraph_merge_return_selection', async () => {
   expect(crossedDelete.status).toBe('applied');
   expect(texts(crossed)).toEqual(['A']);
   expectCaret(crossedDelete, { story: 'body', paraId: crossedParagraphs[0]!.paraId, offset: 1 });
+}, TIMEOUT);
+
+test('suggesting forward deletes advance past each retained character', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  for (const offset of [1, 2]) {
+    const result = execute(arm, command(arm, 'deleteForward', { suggesting }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset });
+    expect(texts(arm)).toEqual(['hat']);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe('hat'.slice(0, offset));
+  }
+}, TIMEOUT);
+
+test('suggesting selection deletes keep the caret at the start', async () => {
+  for (const kind of ['deleteForward', 'deleteBackward'] as const) {
+    for (const [anchor, focus] of [[0, 3], [3, 0]] as const) {
+      const arm = await openCommandEngine(['hat']);
+      const id = arm.engine.paragraphs('body')[0]!.paraId;
+      const result = execute(arm, command(arm, kind, {
+        selection: selection(id, anchor, focus),
+        suggesting: { name: 'Writer', date: '2026-01-01T00:00:00Z' },
+      }));
+      expect(result.status).toBe('applied');
+      expectCaret(result, { story: 'body', paraId: id, offset: 0 });
+      expect(texts(arm)).toEqual(['hat']);
+      expect(arm.engine.storySegments('body').flatMap(segment =>
+        segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+      ).join('')).toBe('hat');
+    }
+  }
+}, TIMEOUT);
+
+test('suggesting forward delete skips existing deletions without counting or replacing them', async () => {
+  for (const [prefix, retained, suffix, offset, count, caret, deleted] of [
+    ['', 'ha', 'ts', 0, 1, 3, 'hat'],
+    ['', 'ha', 'ts', 1, 1, 3, 'hat'],
+    ['', 'ha', 'ts', 0, 2, 4, 'hats'],
+    ['h', 'a', 'ts', 0, 2, 3, 'hat'],
+    ['', 'ha', '😀t', 0, 1, 4, 'ha😀'],
+  ] as const) {
+    const arm = await openCommandEngine([], {
+      bodyXml: `<w:p><w:r><w:t>${prefix}</w:t></w:r><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>${retained}</w:delText></w:r></w:del><w:r><w:t>${suffix}</w:t></w:r></w:p>`,
+    });
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    const before = arm.engine.storySegments('body').find(segment => segment.kind === 'text' && segment.attributes.del != null);
+    const result = execute(arm, command(arm, 'deleteForward', {
+      selection: selection(id, offset), count,
+      suggesting: { name: 'Writer', date: '2026-01-02T00:00:00Z' },
+    }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset: caret });
+    expect(texts(arm)).toEqual([prefix + retained + suffix]);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe(deleted);
+    expect(arm.engine.storySegments('body').find(segment => segment.kind === 'text' && segment.text === retained)).toEqual(before);
+  }
+}, TIMEOUT);
+
+test('suggesting forward delete skips an imported deleted paragraph mark without replacing its revision', async () => {
+  const arm = await openCommandEngine([], {
+    bodyXml: '<w:p><w:pPr><w:rPr><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>Alpha</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p>',
+  });
+  const [first, second] = arm.engine.paragraphs('body');
+  const before = arm.engine.storySegments('body').find(segment => segment.kind === 'pilcrow' && segment.paraId === first!.paraId);
+  expect(before).toMatchObject({ kind: 'pilcrow', properties: {
+    pPrDel: { revisionId: 7, author: 'Reader', date: '2026-01-01T00:00:00Z' },
+  } });
+  expect(before!.attributes.del).toBeUndefined();
+  const result = execute(arm, command(arm, 'deleteForward', {
+    selection: selection(first!.paraId, first!.text.length),
+    suggesting: { name: 'Writer', date: '2026-01-02T00:00:00Z' },
+  }));
+  expect(result.status).toBe('applied');
+  expectCaret(result, { story: 'body', paraId: second!.paraId, offset: 1 });
+  expect(texts(arm)).toEqual(['Alpha', 'Second']);
+  const segments = arm.engine.storySegments('body');
+  expect(segments.find(segment => segment.kind === 'pilcrow' && segment.paraId === first!.paraId)).toEqual(before);
+  expect(segments.flatMap(segment =>
+    segment.kind === 'text' && segment.attributes.del != null ? [segment] : []
+  )).toMatchObject([{ text: 'S', attributes: {
+    del: { author: 'Writer', date: '2026-01-02T00:00:00Z' },
+  } }]);
+}, TIMEOUT);
+
+test('suggesting forward delete uses the receipt end when removing the authors insertion', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  expect(execute(arm, command(arm, 'insertText', { text: 'x', suggesting })).status).toBe('applied');
+  const result = execute(arm, command(arm, 'deleteForward', { selection: selection(id, 0), count: 2, suggesting }));
+  expect(result.status).toBe('applied');
+  expect(texts(arm)).toEqual(['hat']);
+  expectCaret(result, { story: 'body', paraId: id, offset: 1 });
+  expect(arm.engine.storySegments('body').flatMap(segment =>
+    segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+  ).join('')).toBe('h');
+}, TIMEOUT);
+
+test('suggesting backward deletes keep the caret before retained text', async () => {
+  const arm = await openCommandEngine(['hat']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
+  execute(arm, command(arm, 'select', { selection: selection(id, 2) }));
+  for (const offset of [1, 0]) {
+    const result = execute(arm, command(arm, 'deleteBackward', { suggesting }));
+    expect(result.status).toBe('applied');
+    expectCaret(result, { story: 'body', paraId: id, offset });
+    expect(texts(arm)).toEqual(['hat']);
+    expect(arm.engine.storySegments('body').flatMap(segment =>
+      segment.kind === 'text' && segment.attributes.del != null ? [segment.text] : []
+    ).join('')).toBe('hat'.slice(offset, 2));
+  }
+}, TIMEOUT);
+
+test('plain forward deletes remove retained tracked text at the original caret', async () => {
+  const arm = await openCommandEngine([], {
+    bodyXml: '<w:p><w:del w:id="7" w:author="Reader" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>ha</w:delText></w:r></w:del><w:r><w:t>t</w:t></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const result = execute(arm, command(arm, 'deleteForward', {}));
+  expect(result.status).toBe('applied');
+  expect(texts(arm)).toEqual(['at']);
+  expectCaret(result, { story: 'body', paraId: id, offset: 0 });
 }, TIMEOUT);
 
 test('d1a_formatting_and_stored_marks_apply_in_worker', async () => {
@@ -587,4 +757,3 @@ test('setObjectProperties preserves image wrap distances across non-inline worke
     expect(xml).toContain('distR="457200"');
   }
 }, TIMEOUT);
-

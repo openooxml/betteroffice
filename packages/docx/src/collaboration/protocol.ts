@@ -15,6 +15,8 @@ export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
 export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
 /** Largest configurable frame: one update at the per-update bound and its sync header. */
 export const MAX_FRAME_BYTES = MAX_UPDATE_BYTES + 6;
+/** Upper bound for `maxPendingBytes` and `maxSyncBytes`. */
+export const MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
@@ -283,6 +285,11 @@ export function parseSyncRequest(
   };
 }
 
+/** The clock of `clientId` in a state vector; 0 when the client is absent or the vector is malformed. */
+export function stateVectorClock(stateVector: Uint8Array, clientId: number): number {
+  return Number(stateVectorEntries(stateVector)?.entries.find((entry) => entry.client === BigInt(clientId))?.clock ?? 0n);
+}
+
 export function encodeSyncStep1(
   stateVector: Uint8Array,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
@@ -483,6 +490,7 @@ export function decodeAwarenessUpdate(
   return entries;
 }
 
+/** Every payload is a copy the caller owns; `frame` is not retained. */
 export function decodeMessages(
   frame: Uint8Array,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,

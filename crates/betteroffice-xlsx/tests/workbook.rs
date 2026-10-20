@@ -4388,17 +4388,18 @@ fn display_lists_do_not_inherit_raster_dimension_caps() {
 }
 
 #[test]
-fn display_lists_reject_excessive_cell_spans() {
+fn display_lists_degrade_excessive_cell_spans() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
-    let error = workbook
+    let frame = workbook
         .display_list(&Viewport {
             x: 0.0,
             y: 0.0,
             width: 100.0,
             height: 6_000_000.0,
         })
-        .unwrap_err();
-    assert!(matches!(error, Error::DisplayTooLarge { .. }));
+        .unwrap();
+    assert!(frame.truncated);
+    assert!(frame.grid.row_offsets.len() <= 125_001);
 }
 
 #[cfg(feature = "raster")]
@@ -10138,9 +10139,6 @@ fn bump_b2(workbook: &mut Workbook) {
         .unwrap();
 }
 
-/// The second P1: an imported chart replayed its stored cache, so an ordinary
-/// cell edit never reached it. It must now follow the cells in both backends,
-/// while the bytes a save writes back stay exactly what was imported.
 #[test]
 #[cfg(feature = "raster")]
 fn an_imported_chart_follows_a_cell_edit_without_a_save() {
@@ -10157,8 +10155,10 @@ fn an_imported_chart_follows_a_cell_edit_without_a_save() {
     assert_ne!(before, plotted(&workbook));
     assert_ne!(before_png.bytes, after_png.bytes);
 
-    // rendering live never rewrites the part: only the formulas moving does.
-    assert_eq!(chart_part(&workbook.save().unwrap()), chart_part(&source));
+    let saved = workbook.save().unwrap();
+    let chart =
+        xlsx_parse::chart_space(&chart_part(&saved), &workbook.model().styles.theme).unwrap();
+    assert_eq!(chart.plot_groups[0].series[0].values, [100.0, 7.0, 9.0]);
 }
 
 /// A reference this crate cannot resolve safely keeps the values the file was

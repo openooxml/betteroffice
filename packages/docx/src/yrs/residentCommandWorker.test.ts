@@ -15,6 +15,7 @@ import { createYrsSession } from './index';
 import { resolveReservations, type DocxReservation } from './reservations';
 import type { DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { ResidentReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
 
@@ -1590,7 +1591,7 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
     const table = await client.edit(intent(3, 2, 'insertTable', { selection: { anchor: point, focus: point }, rows: 2, columns: 2 }));
     expect(table.outcomes[0]?.status).toBe('applied');
     expect(table.editState?.tableContext).toMatchObject({ rowCount: 2, columnCount: 2 });
-    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0$/);
+    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0~\d+$/);
     expect(engine.geometryReader.storyIds().length).toBe(5);
     expect(await client.documentReadAt({ kind: 'toolbarMetadata' }, metadata.version)).toEqual({ status: 'superseded' });
     const undone = await client.edit(intent(4, 3, 'undo', {}));
@@ -1741,7 +1742,7 @@ test('worker safety resizes the issued cell rather than the table story suffix o
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, selection: { anchor: point, focus: point } }));
     const cell = inserted.frame!.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === inserted.selection!.focus.story)!;
-    expect(cell.story).toBe('body:t1:r0c0');
+    expect(cell.story).toMatch(/^body:t1:r0c0~\d+$/);
     const resized = await client.edit(intent(2, 1, 'resizeObject', { handle: cell.handle, widthTwips: 1234, expectVersion: inserted.frame!.payload.documentVersion! }));
     expect(resized.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1234]);
@@ -1809,7 +1810,7 @@ test('worker safety repairs selection after rejecting a suggested table before o
   const { client, engine } = await openWorker();
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, suggesting: { name: 'Ada', date: '2026-01-01' } }));
-    expect(inserted.selection!.focus.story).toBe('body:t0:r0c0');
+    expect(inserted.selection!.focus.story).toMatch(/^body:t0:r0c0~\d+$/);
     const revisionId = engine.geometryReader.listRevisions()[0]!.revisionId;
     const rejected = await client.edit(intent(2, 1, 'rejectRevision', { revisionId, expectVersion: engine.proposalEngine.version() }));
     expect(rejected.outcomes[0]?.status).toBe('applied');
@@ -1855,6 +1856,88 @@ test('round two page release retains a matching review preview frame', async () 
     expect(review).not.toBeNull();
     expect(review!.previewVersion).toBe(before.previewVersion);
     expect(review!.frameEpoch).toBeGreaterThan(before.frameEpoch);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a proposal decision computes its review once for all the reads of its frame', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!,
+      search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
+    const computed = spyOn(engine, 'commentProjection');
+    try {
+      for (const [seq, state] of [[2, 'rejected'], [3, 'proposed']] as const) {
+        computed.mockClear();
+        const decided = await client.edit(intent(seq, seq - 1, 'setProposalStates', {
+          expectVersion: before.version, expectPreviewVersion: before.previewVersion + seq - 2, changes: [{ id: 'one', state }],
+        }));
+        expect(decided.outcomes[0]?.status).toBe('applied');
+        const reads = await Promise.all([
+          client.documentRead({ kind: 'reviewSnapshot' }),
+          client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion + seq - 1 }),
+          client.documentRead({ kind: 'reviewSnapshot' }),
+        ]);
+        expect(reads.map(read => read.value?.proposals.proposals[0]?.state)).toEqual([state, state, state]);
+        expect(computed.mock.calls.length).toBeLessThanOrEqual(new Set(reads.map(read => read.value!.frameEpoch)).size);
+      }
+    } finally { computed.mockRestore(); }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('repeated review reads follow proposal decisions, comments, edits and undo', async () => {
+  const { client, engine } = await openWorker({ bodyXml: syntheticParagraphs(2) });
+  try {
+    const review = async () => {
+      const [first, second] = await Promise.all([
+        client.documentRead({ kind: 'reviewSnapshot' }), client.documentRead({ kind: 'reviewSnapshot' }),
+      ]);
+      expect(second.value).toEqual(first.value);
+      expect(first.value!.version).toBe(engine.proposalEngine.version());
+      expect(first.value!.comments).toEqual(engine.listComments());
+      expect(first.value!.revisions).toEqual(engine.geometryReader.listRevisions());
+      return first.value!;
+    };
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!,
+      search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const proposed = await review();
+    expect(proposed.proposals.proposals[0]?.state).toBe('proposed');
+    await client.edit(intent(2, 1, 'setProposalStates', {
+      expectVersion: proposed.version, expectPreviewVersion: proposed.previewVersion, changes: [{ id: 'one', state: 'rejected' }],
+    }));
+    const rejected = await review();
+    expect(rejected.version).toBe(proposed.version);
+    expect(rejected.previewVersion).toBe(proposed.previewVersion + 1);
+    expect(rejected.proposals.proposals[0]?.state).toBe('rejected');
+    const paraId = engine.geometryReader.paragraphSpans('body')[1]!.paraId;
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } };
+    await client.edit(intent(3, 2, 'addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Note', expectVersion: rejected.version }));
+    const commented = await review();
+    expect(commented.comments).toHaveLength(1);
+    expect(commented.uiComments).toHaveLength(1);
+    const id = commented.comments[0]!.id;
+    expect(commented.commentGeometry[id]!.length).toBeGreaterThan(0);
+    await client.edit(intent(4, 3, 'updateComment', { id, patch: { done: true }, expectVersion: commented.version }));
+    const resolved = await review();
+    expect(resolved.comments[0]).toMatchObject({ id, done: true });
+    expect(resolved.uiComments?.[0]?.done).toBe(true);
+    const at = { story: 'body', paraId, offset: 0 };
+    await client.edit(intent(5, 4, 'insertText', {
+      text: 'New ', selection: { anchor: at, focus: at }, suggesting: { name: 'Ada', date: '2026-01-01' },
+    }));
+    const edited = await review();
+    expect(edited.version).not.toBe(resolved.version);
+    expect(edited.revisions.length).toBeGreaterThan(resolved.revisions.length);
+    expect((await client.edit(intent(6, 5, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    const undone = await review();
+    expect(undone.version).not.toBe(edited.version);
+    expect(undone.revisions.length).toBeLessThan(edited.revisions.length);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -2025,6 +2108,182 @@ test('round two break sections preserve current and existing closing properties'
     expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Tail']);
     expect(engine.sectionProperties().sections).toHaveLength(2);
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break lowers on the worker as a section split', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8311 });
+  try {
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed', 'Tail']);
+    expect(remote.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed', 'Tail']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(3);
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'continuous', marginLeft: 1800 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 1800 });
+    const { parseDocx } = await import('../docx/parser');
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.sections).toHaveLength(3);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break in the final section copies its properties and keeps its start', async () => {
+  const bodyXml = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:type w:val="evenPage"/><w:pgMar w:left="2000"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr, headersFooters: true });
+  const remote = await createYrsSession({ clientId: 8312 });
+  try {
+    remote.openDocx(syntheticDocument(true, false, false, bodyXml, sectPr), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Ta', 'il']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(2);
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'evenPage', marginLeft: 2000 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 2000 });
+    const { parseDocx } = await import('../docx/parser');
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.headers?.size).toBe(1);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a resident section break undoes in one step', async () => {
+  const { client, engine } = await openWorker({ sectPr: '<w:sectPr><w:pgMar w:left="1800"/></w:sectPr>' });
+  try {
+    const paraId = engine.paragraphs('body')[0]!.paraId;
+    engine.insertSectionBreak({ story: 'body', paraId, offset: 2 }, 'nextPage');
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed']);
+    expect(engine.undo()).toBe(true);
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break keeps the closing section margins on both halves', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p><w:pPr><w:sectPr><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8314 });
+  try {
+    engine.setSectionMargins(engine.sectionProperties().sections[0]!.section, { marginLeft: 2400 });
+    remote.loadState(engine.encodeState());
+    const paraId = remote.paragraphs('body')[0]!.paraId;
+    remote.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { other: { sectPr: { marginLeft: 1800 } } });
+    remote.insertSectionBreak({ story: 'body', paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(3);
+    expect(sections[0]!.properties).toMatchObject({ marginLeft: 2400 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 2400 });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break refuses table cells and state-only final sections', async () => {
+  const bodyXml = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>Tail</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml });
+  const remote = await createYrsSession({ clientId: 8315 });
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = remote.paragraphs('body:t0:r0c0');
+    expect(cell.map(paragraph => paragraph.text)).toEqual(['Cell']);
+    expect(() => remote.insertSectionBreak({ story: 'body:t0:r0c0', paraId: cell[0]!.paraId, offset: 2 }, 'nextPage')).toThrow('body paragraphs');
+    expect(remote.paragraphs('body:t0:r0c0')).toHaveLength(1);
+    expect(remote.paragraphs('body').map(paragraph => paragraph.text)).toEqual(engine.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { remote.destroy(); client.destroy(); }
+  const origin = await createYrsSession({ clientId: 8316 });
+  const stateOnly = await createYrsSession({ clientId: 8317 });
+  try {
+    origin.openDocx(syntheticDocument(false, false, false, bodyXml), true);
+    stateOnly.loadState(origin.encodeState());
+    const tail = stateOnly.paragraphs('body').at(-1)!;
+    expect(() => stateOnly.insertSectionBreak({ story: 'body', paraId: tail.paraId, offset: 2 }, 'nextPage')).toThrow('section properties');
+    expect(stateOnly.paragraphs('body').map(paragraph => paragraph.text)).toEqual(origin.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { stateOnly.destroy(); origin.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break in a final section with an empty sectPr lowers on the worker', async () => {
+  const { client, engine } = await openWorker();
+  const remote = await createYrsSession({ clientId: 8318 });
+  try {
+    remote.openDocx(syntheticDocument(), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(2);
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage' });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break gives the closed section the headers it inherits', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr: '<w:sectPr/>', headersFooters: true });
+  const remote = await createYrsSession({ clientId: 8319 });
+  try {
+    remote.openDocx(syntheticDocument(true, false, false, bodyXml, '<w:sectPr/>'), false);
+    remote.loadState(engine.encodeState());
+    const sectPr = (text: string) => {
+      const properties = remote.paragraphs('body').find(paragraph => paragraph.text === text)!.properties;
+      return (properties.sectPr ?? properties._sectionProperties) as SectionProperties;
+    };
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
+    expect(sectPr('Se').headerReferences).toEqual(sectPr('First').headerReferences);
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.sectionProperties().sections).toHaveLength(3);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break after an earlier split keeps each section on the worker', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr });
+  const remote = await createYrsSession({ clientId: 8320 });
+  try {
+    remote.openDocx(syntheticDocument(false, false, false, bodyXml, sectPr), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'continuous');
+    const seed = remote.paragraphs('body').find(paragraph => paragraph.text === 'Seed')!;
+    remote.insertSectionBreak({ story: 'body', paraId: seed.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Fi', 'rst', 'Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections.map(section => section.properties.pageWidth)).toEqual([12240, 12240, 11906, 11906]);
+    expect(sections.at(-1)!.properties).toMatchObject({ sectionStart: 'nextPage' });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('page breaks land past leading blocks on both session kinds', async () => {
+  const bodyXml = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml });
+  const remote = await createYrsSession({ clientId: 8316 });
+  try {
+    remote.loadState(engine.encodeState());
+    const spans = engine.geometryReader.paragraphSpans('body').length;
+    const tail = remote.paragraphs('body').findIndex(paragraph => paragraph.text === 'Tail');
+    remote.insertPageBreak({ story: 'body', paraId: remote.paragraphs('body')[tail]!.paraId, offset: 0 });
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(spans);
+    expect(engine.paragraphSegments('body', [tail])[0]!.slice(0, 2).map(segment => segment.kind === 'embed' ? segment.embedKind : segment.kind)).toEqual(['table', 'pageBreak']);
+    const seed = engine.paragraphs('body').findIndex(paragraph => paragraph.text === 'Seed');
+    const target = engine.insertPageBreak({ story: 'body', paraId: engine.paragraphs('body')[seed]!.paraId, offset: 2 });
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(spans + 1);
+    expect(target).toMatchObject({ paraId: engine.paragraphs('body')[seed + 1]!.paraId, offset: 0 });
+    expect(engine.paragraphSegments('body', [seed + 1])[0]![0]).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
+    expect((await client.save({ comments: [] })).bytes.byteLength).toBeGreaterThan(0);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy page break inside a paragraph splits it before the break', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8313 });
+  try {
+    remote.loadState(engine.encodeState());
+    remote.insertPageBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 });
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(3);
+    const segments = engine.paragraphSegments('body', [1])[0]!;
+    expect(segments[0]).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
+    expect(segments.flatMap(segment => segment.kind === 'text' ? [segment.text] : []).join('')).toBe('ed');
+  } finally { remote.destroy(); client.destroy(); }
 }, TIMEOUT);
 
 test('round two break sections remain editable through section property commands', async () => {
@@ -2870,5 +3129,177 @@ test('worker refuses table structure commands in header stories', async () => {
     const refused = await client.edit(intent(2, 1, 'insertTableRow', { side: 'below' }));
     expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
     expect(refused.version).toBe(1);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const TRACKED_PARAGRAPH = '<w:p w14:paraId="00000003"><w:r><w:t>Old </w:t></w:r>' +
+  '<w:ins w:id="9" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins></w:p>';
+
+test('review target reads resolve a comment by its public id and a revision by its id', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body + TRACKED_PARAGRAPH, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [comment] = engine.listComments();
+    const [revision] = engine.geometryReader.listRevisions();
+    if (!comment || !revision) throw new Error('Source review items unavailable');
+    const publicId = engine.commentProjection()!.ids[comment.id]!;
+    const first = engine.paragraphs('body')[0]!.paraId;
+    const read = async (target: ResidentReviewTarget) => (await client.documentRead({ kind: 'reviewTarget', target })).value;
+    expect(await read({ kind: 'comment', id: publicId })).toEqual({ id: comment.id,
+      ranges: [{ story: 'body', start: { paraId: first, offset: 0 }, end: { paraId: first, offset: 4 } }] });
+    expect(await read({ kind: 'revision', revisionId: revision.revisionId })).toEqual({ id: revision.revisionId,
+      ranges: [{ story: revision.story, start: revision.range.start, end: revision.range.end }] });
+    expect(await read({ kind: 'comment', id: publicId + 40 })).toBeNull();
+    expect(await read({ kind: 'revision', revisionId: 'missing' })).toBeNull();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a reply comment links its parent in one undo step and comment commands report every comment', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const reply = (seq: number, version: number, parent: string) => client.edit(intent(seq, version, 'addComment', {
+      ranges, author: 'B', date: '2026-01-02', body: 'Reply', parentId: parent, expectVersion: engine.proposalEngine.version() }));
+    const unknown = await reply(1, 0, 'missing');
+    expect(unknown.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unknown-comment' });
+    const replied = await reply(2, unknown.version, parent.id);
+    expect(replied.outcomes[0]?.status).toBe('applied');
+    const added = engine.listComments().find(comment => comment.id !== parent.id)!;
+    expect(added.parentId).toBe(parent.id);
+    const replyId = replied.editState!.comment!.id;
+    expect(replied.editState!.comment!.comments.find(comment => comment.id === replyId)).toMatchObject({ parentId, author: 'B' });
+    const done = await client.edit(intent(3, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.editState!.commentChange).toMatchObject({ seq: 3, comments: expect.arrayContaining([expect.objectContaining({ id: parentId, done: true })]) });
+    expect(done.editState!.comment).toBeUndefined();
+    const undone = await client.edit(intent(4, done.version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    const undoneReply = await client.edit(intent(5, undone.version, 'undo', {}));
+    expect(undoneReply.outcomes[0]?.status).toBe('applied');
+    expect(engine.listComments().map(comment => comment.id)).toEqual([parent.id]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker saves a reply added through comment commands with its parent and the parent done state', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const replied = await client.edit(intent(1, 0, 'addComment', { ranges, author: 'B', date: '2026-01-02T00:00:00Z', body: 'Reply',
+      parentId: parent.id, expectVersion: engine.proposalEngine.version() }));
+    const done = await client.edit(intent(2, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.outcomes[0]?.status).toBe('applied');
+    const saved = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments ?? [];
+    expect(saved.find(comment => comment.id === parentId)).toMatchObject({ done: true });
+    expect(saved.find(comment => comment.id === replied.editState!.comment!.id)).toMatchObject({ parentId, author: 'B' });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+
+test('reopening an imported resolved comment updates the projection and saved extended metadata', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended,
+    prepare: engine => {
+      expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+      return { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 };
+    } });
+  try {
+    const result = await client.edit(intent(1, 0, 'updateComment', { id: '0', patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(result.outcomes[0]?.status).toBe('applied');
+    expect(result.editState?.commentChange?.comments.find(comment => comment.id === 0)?.done).toBe(false);
+    const bytes = (await client.save({ comments: [] })).bytes;
+    const comments = (await parseDocx(bytes)).package.document.comments!;
+    expect(comments.find(comment => comment.id === 0)?.done ?? false).toBe(false);
+    const parts = unzipContainer(new Uint8Array(bytes));
+    expect(new TextDecoder().decode(parts['word/commentsExtended.xml'])).toMatch(/w15:paraId="0C000001"[^>]*w15:done="0"/);
+    expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 0)?.done).toBe(true);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('an imported reply without range markers inherits its ancestor anchor and supports reply resolve and removal', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended });
+  try {
+    const parent = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 0 } })).value!;
+    const reply = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value;
+    expect(reply).toEqual({ id: '1', ranges: parent.ranges });
+    const added = await client.edit(intent(1, 0, 'addComment', { ranges: reply!.ranges, parentId: reply!.id, body: 'Nested reply', author: 'C', date: '2026-01-03', expectVersion: engine.proposalEngine.version() }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    expect(added.editState?.comment?.comments.find(comment => comment.id === added.editState?.comment?.id)?.parentId).toBe(1);
+    const reopened = await client.edit(intent(2, 1, 'updateComment', { id: reply!.id, patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(reopened.outcomes[0]?.status).toBe('applied');
+    expect(reopened.editState?.commentChange?.comments.find(comment => comment.id === 1)?.done).toBe(false);
+    const removed = await client.edit(intent(3, 2, 'removeComment', { id: reply!.id, expectVersion: engine.proposalEngine.version() }));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    expect(removed.editState?.commentChange?.comments.some(comment => comment.id === 1)).toBe(false);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.some(comment => comment.id === 1)).toBe(false);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect((await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value).toEqual(reply);
+    const restored = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 1);
+    expect(restored).toMatchObject({ parentId: 0 });
+    expect(restored?.done ?? false).toBe(false);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const note = (id: number, text: string) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
+  content: [{ type: 'paragraph' as const, formatting: {}, content: [{ type: 'run' as const, formatting: {}, content: [{ type: 'text' as const, text }] }] }] });
+
+test('a host comment list wins over the worker comment projection on save and keeps native anchors', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [source] = engine.listComments();
+    const id = engine.commentProjection()!.ids[source!.id]!;
+    const part = async (request: Parameters<typeof client.save>[0], name: string) =>
+      new TextDecoder().decode(unzipContainer(new Uint8Array((await client.save(request)).bytes))[name] ?? new Uint8Array());
+    const hosted = { comments: [note(id, 'Host note'), note(id + 40, 'Host only')], commentsSource: 'host' as const };
+    const comments = await part(hosted, 'word/comments.xml');
+    expect(comments).toContain('Host note');
+    expect(comments).toContain('Host only');
+    expect(comments).not.toContain('Parent');
+    const anchored = comments.match(/<w:comment [^>]*w:id="(\d+)"(?:(?!<\/w:comment>)[\s\S])*Host note/)?.[1];
+    expect(await part(hosted, 'word/document.xml')).toContain(`<w:commentRangeStart w:id="${anchored}"`);
+    expect(await part({ comments: [], commentsSource: 'host' }, 'word/comments.xml')).not.toContain('Parent');
+    expect(await part({ comments: [note(id, 'Ignored')] }, 'word/comments.xml')).toContain('Parent');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a host comment list saves on the comment ids the worker handed out after a removal', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const paraId = engine.paragraphs('body')[1]!.paraId;
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } };
+    const ids: number[] = [];
+    for (const [index, body] of ['First', 'Second'].entries()) {
+      const added = await client.edit(intent(index + 1, index, 'addComment', { ranges: [range], author: 'A', date: '2026-01-01', body,
+        expectVersion: engine.proposalEngine.version() }));
+      ids.push(added.editState!.comment!.id);
+    }
+    const first = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: ids[0]! } })).value!;
+    expect((await client.edit(intent(3, 2, 'removeComment', { id: first.id, expectVersion: engine.proposalEngine.version() }))).outcomes[0]?.status).toBe('applied');
+    const parts = unzipContainer(new Uint8Array((await client.save({ comments: [note(0, 'Host parent'), note(ids[1]!, 'Host second')], commentsSource: 'host' })).bytes));
+    const part = (name: string) => new TextDecoder().decode(parts[name] ?? new Uint8Array());
+    const saved = part('word/comments.xml').match(/<w:comment [^>]*w:id="(\d+)"(?:(?!<\/w:comment>)[\s\S])*Host second/)?.[1];
+    expect(saved).toBeDefined();
+    expect(part('word/document.xml')).toContain(`<w:commentRangeStart w:id="${saved}"`);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a comment selection range follows its issued sticky positions across later edits', async () => {
+  const { client, engine, point } = await openWorker();
+  try {
+    const locs = [{ ...point, offset: 1 }, { ...point, offset: 3 }];
+    const [anchor, focus] = (await client.documentRead({ kind: 'stickyAnchors', locs, version: engine.proposalEngine.version() })).value;
+    const atStart = { ...point, offset: 0 };
+    expect((await client.edit(intent(1, 0, 'insertText', { text: '--', selection: { anchor: atStart, focus: atStart } }))).outcomes[0]?.status).toBe('applied');
+    const read = await client.documentRead({ kind: 'commentSelectionRange', selection: {
+      anchor: { ...locs[0]!, sticky: anchor!.encoded }, focus: { ...locs[1]!, sticky: focus!.encoded } } });
+    expect(read.value).toEqual({ story: point.story, start: { paraId: point.paraId, offset: 3 }, end: { paraId: point.paraId, offset: 5 } });
+    expect(read.version).toBe(engine.proposalEngine.version());
   } finally { client.destroy(); }
 }, TIMEOUT);

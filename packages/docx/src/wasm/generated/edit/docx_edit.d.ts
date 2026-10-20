@@ -547,6 +547,7 @@ export class EditSession {
      * landed. Errors when the payload is not an object.
      */
     insert_image(story: string, para_id: string, offset: number, payload_json: string, author_name?: string | null, author_date?: string | null): string;
+    insert_line_break(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): string;
     /**
      * Inserts a page-break embed at `(story, para_id, offset)`, occupying one
      * story unit. Always a plain local edit.
@@ -982,6 +983,10 @@ export class EditSession {
     search_text(query: string, case_sensitive: boolean, limit?: number | null): string;
     section_margins_json(): string;
     /**
+     * Initializes imported metadata, creating an unanchored comment when absent.
+     */
+    seed_comment_metadata_json(comment_id: string, patch_json: string): void;
+    /**
      * [`EditSession::open_docx`] with seeding always on.
      */
     seed_from_docx(bytes: Uint8Array, generation?: string | null): string;
@@ -1212,8 +1217,9 @@ export class EditSession {
     set_windowed_incremental_builds(enabled: boolean): void;
     /**
      * Resolves tracked changes by revision id outside undo history:
-     * `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
-     * resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
+     * `{"accept":[string, …],"reject":[string, …]}` -> `{"ok":true,"revisionIds":[string, …]}`,
+     * the ids resolved, or `{"ok":false,"version","failure"}`. An id that matches nothing is
+     * skipped. See [`EditingDoc::settle_revisions`].
      */
     settle_revisions_json(request: string): string;
     /**
@@ -1786,6 +1792,7 @@ export interface InitOutput {
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+    readonly editsession_insert_line_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
     readonly editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -1860,6 +1867,7 @@ export interface InitOutput {
     readonly editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_section_margins_json: (a: number) => [number, number];
+    readonly editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;

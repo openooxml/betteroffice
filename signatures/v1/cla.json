@@ -95,6 +95,12 @@
       "id": 124210,
       "signed_at": "2026-10-15T21:26:17Z",
       "pull_request_no": 868
+    },
+    {
+      "name": "jeffma",
+      "id": 1776746,
+      "signed_at": "2026-10-18T02:27:12Z",
+      "pull_request_no": 1466
     }
   ]
 }

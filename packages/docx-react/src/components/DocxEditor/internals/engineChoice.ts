@@ -45,7 +45,7 @@ function chooseEngine(props: EngineProps): { workerOpen: boolean; warnings: stri
   if (props.mediaTokens === true) {
     warnings.push('[DocxEditor] mediaTokens requires the in-thread engine; omit mediaTokens to use the worker-owned editor.');
   }
-  if (props.collaboration?.initialUpdate !== undefined) {
+  if (missing.length === 0 && props.collaboration?.initialUpdate !== undefined) {
     warnings.push('[DocxEditor] collaboration.initialUpdate requires the in-thread engine; omit collaboration.initialUpdate to open the source in the worker-owned editor.');
   }
   if (props.document && !props.documentBuffer && !props.readOnly && props.mode !== 'viewing') {
@@ -59,16 +59,13 @@ function capabilityWarning(missing: readonly WorkerCapability[]) {
 }
 
 type RouteProps = Pick<DocxEditorProps, typeof LEGACY_SYNC_API_PROP | 'experimentalWorkerOpen' | 'collaboration' | 'onChange'>;
-type EditorRoute = { route: 'hybrid' | 'in-thread' | 'collaboration' | 'capability-fallback' | 'sync-api-error' | 'peerless'; warning?: string };
+type EditorRoute = { route: 'hybrid' | 'in-thread' | 'capability-fallback' | 'sync-api-error' | 'peerless'; warning?: string };
 
 export function chooseDocxEditorRoute(props: RouteProps): EditorRoute {
   if (props[LEGACY_SYNC_API_PROP] === true) {
     return { route: 'hybrid', warning: `[DocxEditor] ${LEGACY_SYNC_API_PROP}={true} selects the deprecated hybrid synchronous API, removed in 0.6.0.` };
   }
   if (props.experimentalWorkerOpen === false) return { route: 'in-thread' };
-  if (props.collaboration !== undefined) {
-    return { route: 'collaboration', warning: '[DocxEditor] worker-only collaboration is not available yet; collaboration uses the deprecated hybrid runtime.' };
-  }
   if (missingCapabilities().length) return { route: 'capability-fallback' };
   if (props.onChange !== undefined) return { route: 'sync-api-error' };
   return { route: 'peerless' };
@@ -77,9 +74,8 @@ export function chooseDocxEditorRoute(props: RouteProps): EditorRoute {
 export function useDocxEditorRoute(props: RouteProps): EditorRoute {
   const legacySync = props[LEGACY_SYNC_API_PROP];
   const inThread = props.experimentalWorkerOpen === false;
-  const collaboration = props.collaboration !== undefined;
   const onChange = props.onChange !== undefined;
-  const choice = useMemo(() => chooseDocxEditorRoute(props), [legacySync, inThread, collaboration, onChange]);
+  const choice = useMemo(() => chooseDocxEditorRoute(props), [legacySync, inThread, onChange]);
   useEffect(() => {
     const warning = choice.warning;
     if (!warning || warned.has(warning)) return;

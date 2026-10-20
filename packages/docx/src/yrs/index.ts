@@ -111,6 +111,7 @@ export * from './contentControls';
 export * from './readTypes';
 export * from './findParagraphs';
 export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
+export { breakRefusedWhileSuggesting } from './sectionBreak';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
@@ -121,7 +122,7 @@ export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentRangeHighlights } from './residentRangeHighlights';
 export type { ResidentPresencePeer, ResidentPresenceGeometry } from './residentCollaboration';
 export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
-export type { DocxCommentPatch, ResidentReviewSnapshot } from './residentReview';
+export type { DocxCommentPatch, ResidentReviewSnapshot, ResidentReviewTarget, ResidentReviewTargetRanges } from './residentReview';
 export type { ResidentToolbarMetadata } from './residentToolbarMetadata';
 export type {
   DocxDisplayRange,
@@ -627,6 +628,8 @@ export interface YrsRenderEnv {
   numericIds?: Record<string, number>;
   /** Include hidden text in visible layout without changing the document. */
   showHiddenText?: boolean;
+  /** Report borderless table cell edges as view-only guides on each display page. */
+  showTableGridlines?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
   /** View-only layout reservations; saves and paged exports leave them out. @internal */
@@ -1331,6 +1334,7 @@ export interface YrsSession extends CollaborationReplica {
   setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
   insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
+  insertLineBreak(at: YrsLoc, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
@@ -1383,9 +1387,13 @@ export interface YrsSession extends CollaborationReplica {
   setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
   /** Commits image geometry at a paragraph-keyed position; reaches images that share an id. */
   setImageGeometryAt(at: YrsLoc, geometry: YrsImageGeometry): void;
-  /** Inserts a native page-break embed at a paragraph-keyed location. */
-  insertPageBreak(at: YrsLoc): void;
-  /** Inserts a native section-break embed at a paragraph-keyed location. */
+  /**
+   * Inserts a native page-break embed at a paragraph-keyed location, past the
+   * paragraph's leading blocks; inside a paragraph it splits the paragraph
+   * first. Returns where the break landed.
+   */
+  insertPageBreak(at: YrsLoc): YrsLoc;
+  /** Splits the paragraph at a paragraph-keyed location into a section boundary that starts the next section with `type`. */
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;

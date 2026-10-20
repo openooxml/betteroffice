@@ -4,8 +4,9 @@ use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
     CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
     PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, SnapshotBudget,
-    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SelectionDirection, SheetId,
+    SnapshotBudget, StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,14 @@ struct CellEditInput {
 #[derive(Deserialize)]
 struct OpsArgs {
     ops: Vec<Op>,
+}
+
+#[derive(Deserialize)]
+struct SelectionDataArgs {
+    sheet: u32,
+    row: u32,
+    col: u32,
+    direction: Option<SelectionDirection>,
 }
 
 #[derive(Deserialize)]
@@ -856,6 +865,20 @@ impl Session {
         serde_json::to_string(&CellPosition { x, y }).map_err(|error| error.to_string())
     }
 
+    pub fn selection_data_json(&self, args: &str) -> Result<String, String> {
+        let args: SelectionDataArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad selection args: {error}"))?;
+        let data = self
+            .workbook
+            .selection_data(
+                SheetId(args.sheet),
+                CellRef::new(args.row, args.col),
+                args.direction,
+            )
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&data).map_err(|error| error.to_string())
+    }
+
     pub fn cell_rect_json(&self, args: &str) -> Result<String, String> {
         let args: CellArgs =
             serde_json::from_str(args).map_err(|error| format!("bad cell args: {error}"))?;
@@ -1516,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn display_list_errors_carry_cell_limit() {
+    fn display_lists_degrade_above_cell_limit() {
         let session = Session::open(&sample_xlsx(), None).unwrap();
         let viewport = r#"{"x":0,"y":0,"width":100,"height":6000000}"#;
         let mut clock = || 0.0;
@@ -1525,10 +1548,12 @@ mod tests {
             session.display_list_for_json(0, viewport),
             session.display_list_profiled_json(viewport, &mut clock),
         ] {
-            let error: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
-            assert_eq!(error["code"], "displayTooLarge");
-            assert_eq!(error["cells"], 600_002);
-            assert_eq!(error["maxCells"], betteroffice_xlsx::MAX_DISPLAY_CELLS);
+            let value: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+            let frame = value.get("displayList").unwrap_or(&value);
+            assert_eq!(frame["truncated"], true);
+            let rows = frame["grid"]["rowOffsets"].as_array().unwrap().len() - 1;
+            let cols = frame["grid"]["colOffsets"].as_array().unwrap().len() - 1;
+            assert!(rows * cols <= betteroffice_xlsx::MAX_DISPLAY_CELLS as usize);
         }
     }
 
@@ -1565,6 +1590,10 @@ mod tests {
         ] {
             let frame: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
             assert_eq!(frame["grid"]["colOffsets"].as_array().unwrap().len(), 9);
+            assert_eq!(
+                frame["grid"]["hiddenColSpans"],
+                serde_json::json!([[8, xlsx_model::MAX_COLS - 1]])
+            );
             assert!(frame.to_string().contains("r19c7"));
         }
     }
@@ -1624,6 +1653,56 @@ mod tests {
             text_command(&display_value(&session), "15");
             assert_eq!(session.save().unwrap(), source);
         }
+    }
+
+    #[test]
+    fn selection_data_json_uses_the_model_without_changing_state() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":1,"row":900000,"col":50,"input":"=1"}"#, None)
+            .unwrap();
+        let version = session.document_version();
+        let saved = session.save().unwrap();
+        let data: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":800000,"col":50,"direction":"down"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            data["edge"],
+            serde_json::json!({ "row": 900000, "col": 50 })
+        );
+        let region: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":900000,"col":50}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            region["region"],
+            serde_json::json!({
+                "top": 900000, "left": 50, "bottom": 900000, "right": 50,
+            })
+        );
+        assert!(
+            session
+                .selection_data_json(r#"{"sheet":2,"row":0,"col":0}"#)
+                .is_err()
+        );
+        assert!(
+            session
+                .selection_data_json(r#"{"sheet":0,"row":1048576,"col":0}"#)
+                .is_err()
+        );
+        assert!(
+            session
+                .selection_data_json(r#"{"sheet":0,"row":0,"col":0,"direction":"diagonal"}"#)
+                .is_err()
+        );
+        assert_eq!(session.workbook.active_sheet(), SheetId(0));
+        assert_eq!(session.document_version(), version);
+        assert_eq!(session.save().unwrap(), saved);
     }
 
     #[test]

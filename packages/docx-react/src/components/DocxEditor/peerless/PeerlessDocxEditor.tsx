@@ -25,12 +25,12 @@ import {
   type ResidentCommandConnection,
   type YrsResidentFontRegistration,
 } from '@betteroffice/docx/yrs';
-import { createResidentCommandConnection, discardCommandPresentation } from '@betteroffice/docx/peerless';
+import { createResidentCommandConnection, discardCommandPresentation, SessionFailure, type ResidentCommandCheckpoint } from '@betteroffice/docx/peerless';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
 import { registerTableActionExecutor } from './browserHarness';
 import { commandPageGeometry } from './commandPageGeometry';
-import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
+import { createDocxPluginHost, type DocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { usePluginReservations } from '../../../plugins/reservations';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
 import { DocxEditorShell } from '../DocxEditorShell';
@@ -40,8 +40,9 @@ import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from '../../D
 import { PluginOverlays } from '../../../plugins/PluginOverlays';
 import { managedSidebarItems, mergeSidebarItems } from '../../../plugins/PluginSidebarItems';
 import { UnifiedSidebar } from '../../UnifiedSidebar';
-import { createWorkerPluginGeometry } from './workerPluginGeometry';
+import { createWorkerPluginGeometry, workerDocumentVersion, workerReadRefusal } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
+import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevisions';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
@@ -55,6 +56,8 @@ import { openPrintWindow } from '@betteroffice/docx';
 import { createWorkerPrintCapture, printBitmap } from './printPages';
 import { decodeCommandFrameDeltas } from './frameDeltas';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
+import { useWorkerComments, WorkerCommentButton } from './useWorkerComments';
+import { useControllableBoolean } from '../hooks/useControllableBoolean';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createWorkerSearch } from './workerSearch';
 import { FindReplaceDialog } from '../../dialogs/FindReplaceDialog';
@@ -68,9 +71,11 @@ import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from '.
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import { useWorkerCollaboration } from './useWorkerCollaboration';
 import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
+type ResidentResume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
 
 /** @internal */
 export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function PeerlessDocxEditor(props, ref) {
@@ -88,29 +93,41 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   memoryBudget,
   measurementFontProvider,
   } = props;
-  const [replacement, setReplacement] = useState<{ input: DocxInput; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
+  type ParsedDocument = NonNullable<DocxEditorProps['document']>;
+  const [replacement, setReplacement] = useState<{ input: DocxInput | null; parsed: ParsedDocument | null; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
   const replaced = replacement && replacement.prop === props.documentBuffer && replacement.document === props.document;
   const documentBuffer = replaced ? replacement.input : props.documentBuffer;
-  const parsedDocument = documentBuffer ? null : props.document;
+  const parsedDocument = documentBuffer ? null : replaced ? replacement.parsed : props.document;
   const hasSource = !!(documentBuffer || parsedDocument);
+  const workerCollaboration = useWorkerCollaboration(props.collaboration, documentBuffer ?? parsedDocument);
   const sourceKey = useMemo(() => crypto.randomUUID(), [documentBuffer, parsedDocument]);
   const openedSource = useRef(sourceKey);
-  const loadRequest = useRef<{ input: DocxInput; resolve(): void; reject(error: Error): void } | null>(null);
-  const loadBuffer = useCallback((input: DocxInput) => {
+  const loadRequest = useRef<{ input: DocxInput | ParsedDocument; resolve(): void; reject(error: Error): void } | null>(null);
+  const load = useCallback((input: DocxInput | null, parsed: ParsedDocument | null) => {
     loadRequest.current?.reject(new Error('Document was replaced'));
     return new Promise<void>((resolve, reject) => {
-      loadRequest.current = { input, resolve, reject };
-      setReplacement({ input, prop: props.documentBuffer, document: props.document });
+      loadRequest.current = { input: (input ?? parsed)!, resolve, reject };
+      setReplacement({ input, parsed, prop: props.documentBuffer, document: props.document });
     });
   }, [props.documentBuffer, props.document]);
+  const loadBuffer = useCallback((input: DocxInput) => load(input, null), [load]);
+  const loadDocument = useCallback((document: ParsedDocument) => load(null, document), [load]);
   const host = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const isDark = useIsDark(props.colorMode ?? 'light');
   const worker = useRef<ResidentEngineWorkerClient | null>(null);
+  const releaseResident = useRef<(() => void) | null>(null);
+  const openContext = useRef<{ signal: AbortSignal; getRasterScale?: () => number } | null>(null);
   const sourceComments = useRef<NonNullable<DocxEditorProps['comments']>>([]);
   const [zoom, setZoom] = useState(initialZoom);
+  const [tableGridlines, setTableGridlines] = useState(props.showTableGridlines === true);
+  const [gridlinesProp, setGridlinesProp] = useState(props.showTableGridlines);
+  if (gridlinesProp !== props.showTableGridlines) {
+    setGridlinesProp(props.showTableGridlines);
+    setTableGridlines(props.showTableGridlines === true);
+  }
   const [hyperlinkPopup, setHyperlinkPopup] = useState<HyperlinkPopupData | null>(null);
   const linkGesture = useRef(0);
   const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__peerless-input')?.focus({ preventScroll: true }), []);
@@ -124,7 +141,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, []);
   const save = useCallback(async () => {
     if (!worker.current) throw new Error('Peer-less worker is not ready');
-    return (await worker.current.save({ comments: [...(props.comments ?? sourceComments.current)] })).bytes;
+    return (await worker.current.save(props.comments ? { comments: [...props.comments], commentsSource: 'host' } : { comments: [...sourceComments.current] })).bytes;
   }, [props.comments]);
   const printCaptures = useRef(new Set<ReturnType<typeof createWorkerPrintCapture>>());
   const print = useCallback(async (preview = false) => {
@@ -158,7 +175,20 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, reportRecoverableError]);
   const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
-  const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, print, onZoom: setZoom, isDark,
+  const [commentsOpen, setCommentsOpen] = useControllableBoolean(props.commentsSidebarOpen, props.onCommentsSidebarOpenChange);
+  const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
+  const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
+    comments: () => props.comments ?? sourceComments.current, hostComments: props.comments,
+    commentsSidebar: { open: commentsOpen, control: props.commentsSidebarOpen === undefined ? 'internal' as const : props.onCommentsSidebarOpenChange ? 'host' as const : 'fixed' as const,
+      toggle: () => { setCommentsOpen(open => !open); setExpandedSidebarItem(null); } },
+    tableGridlines, onTableGridlines: setTableGridlines,
+    layoutRequest: () => {
+      const opened = fontSource.current;
+      const current = active.current;
+      if (!opened || !current) return null;
+      const layout = JSON.parse(opened.layoutInput);
+      return JSON.stringify({ ...layout, renderEnv: { ...layout.renderEnv, ...JSON.parse(current.requestedRenderEnvironment || '{}') } });
+    },
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
@@ -178,7 +208,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (id === 'print') { await print(); return { ok: true, status: 'executed' }; }
     return fileIO.perform(id);
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
-    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph }));
+    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph,
+    scrollToReviewTarget: navigation.scrollToReviewTarget }));
   const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   useEffect(() => registerTableActionExecutor((action) =>
     controller.commands.store.execute('tableAction', action as never)), [controller]);
@@ -197,22 +228,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const legacyRef = useRef<PagedEditorRef | null>(null);
   useKeyboardShortcuts({ commands: controller.commands, pagedEditorRef: legacyRef, containerRef: container,
     disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false });
-  useEffect(() => {
-    const request = loadRequest.current;
-    if (!request) return;
-    if (request.input !== documentBuffer) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
-    else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
-    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
-  }, [shellState, documentBuffer, controller]);
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);
   const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
-    (target, focus) => navigation.revealParagraph(target.paraId, target.story, focus), () => sentReservationsRef.current()));
+    (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current()));
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
-  const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
-  const [pluginHost] = useState(() => createDocxPluginHost({
+  const [pluginHost] = useState<DocxPluginHost>(() => createDocxPluginHost({
     pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
     commands: () => controller.commands, layout: () => ({ queries: null, complete: false, failed: false }),
     subscribeLayout: controller.subscribe, geometry: pluginGeometry.geometry, subscribeGeometry: pluginGeometry.subscribe, translate: (key) => controller.environment().translate(key),
@@ -223,8 +246,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       listStories: () => controller.read({ kind: 'listStories' }),
       readStories: (request) => controller.read({ kind: 'readStories', request }),
     },
-    workerEdits: { applyEdits: (request, authorize) => controller.applyEdits(request, authorize) },
+    workerEdits: { applyEdits: (request, authorize, commit) => controller.applyEdits(request, authorize,
+      (view) => commit(() => pluginHost.workerChanged(workerDocumentVersion(view)))) },
     workerNavigation: pluginGeometry.navigation,
+    workerRefusal: (error) => workerReadRefusal(controller, error),
   }));
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
   const reservations = usePluginReservations(pluginHost, activations);
@@ -252,8 +277,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useEffect(() => {
     if (documentReady) {
       pluginHost.modeChanged(shellState.mode, effectiveReadOnly);
-      if (pluginHost.generation() === null) pluginHost.openWorker(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
-      else pluginHost.workerChanged(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
+      if (pluginHost.generation() === null) pluginHost.openWorker(workerDocumentVersion(shellState.view));
+      else pluginHost.workerChanged(workerDocumentVersion(shellState.view));
       const review = controller.reviewSnapshot();
       if (review) pluginHost.workerProposalsChanged(review.proposals);
       const layout = pluginGeometry.layout();
@@ -291,11 +316,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-    theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
+    theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
   useLayoutEffect(() => {
     settings.current = { readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-      theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded };
-  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded]);
+      theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded };
+  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, tableGridlines, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded]);
   type Ticket = ReturnType<PeerlessEditSessionBinding['session']['submit']>;
   const active = useRef<{
     binding: PeerlessEditSessionBinding;
@@ -304,35 +329,42 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     barrier?: Ticket;
     clipboard?: ReturnType<typeof createClipboardPrefetch>;
   } | null>(null);
-  const [loaded, setLoaded] = useState<{ input: DocxInput; source: Uint8Array } | null>(null);
-  const reportError = useCallback((error: Error) => { controller.fail(error); errorHandler.current?.(error); }, [controller]);
+  const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
+  const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
+  const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
     controller.previewPresented(frame);
     if (applyFrameDelta(null, decodeFrameDelta(frame.frame)).pages.some(({ page }) => !page.unbuilt)) controller.painted();
   }, [controller]);
   const source = useMemo(() => {
-    if (parsedDocument) return parsedDocument;
+    if (parsedDocument) return { ...parsedDocument };
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
-    return loaded && loaded.input === documentBuffer ? loaded.source : null;
-  }, [documentBuffer, parsedDocument, loaded]);
+    return loaded?.generation === sourceGeneration ? new Uint8Array(loaded.source) : null;
+  }, [documentBuffer, parsedDocument, sourceGeneration, loaded, workerCollaboration.reopenKey]);
 
   useEffect(() => {
     if (!documentBuffer || documentBuffer instanceof Uint8Array || documentBuffer instanceof ArrayBuffer) return;
     let current = true;
     void toArrayBuffer(documentBuffer).then((buffer) => {
-      if (current) setLoaded({ input: documentBuffer, source: new Uint8Array(buffer) });
+      if (current) setLoaded({ generation: sourceGeneration, source: new Uint8Array(buffer) });
     }, (error: unknown) => {
       if (current) reportError(error instanceof Error ? error : new Error(String(error)));
     });
     return () => { current = false; };
-  }, [documentBuffer, reportError]);
+  }, [documentBuffer, sourceGeneration, reportError]);
 
-  const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection> => {
+  const openResident = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number,
+    resume?: ResidentResume): Promise<ResidentCommandConnection> => {
     signal.throwIfAborted();
-    active.current = null;
-    const client = takePreloadedResidentEngineWorker() ?? new ResidentEngineWorkerClient();
+    const checkpoint = resume?.checkpoint as ResidentCommandCheckpoint | undefined;
+    if (checkpoint && !checkpoint.recoveryState) {
+      throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
+    }
+    releaseResident.current?.();
+    const client = (resume ? null : takePreloadedResidentEngineWorker()) ?? new ResidentEngineWorkerClient();
+    const collaboration = workerCollaboration.begin(client);
     worker.current = client;
     const stopFonts = client.onFontEnvironment(event => {
       if (worker.current === client && !signal.aborted) controller.fontEnvironment(event);
@@ -359,7 +391,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (disposed) throw new Error('DOCX command fonts are disposed');
       return fonts.push(font instanceof Uint8Array ? font.slice() : font) - 1;
     };
+    let released = false;
     const abort = () => {
+      if (released) return;
+      released = true;
+      signal.removeEventListener('abort', abort);
+      if (releaseResident.current === abort) releaseResident.current = null;
       stopFonts(); stopMemory(); disposeFonts(); client.destroy();
       if (worker.current === client) { worker.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }
     };
@@ -370,7 +407,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const measure = async (metadata: Document) => {
         const theme = settings.current.theme ?? metadata.package.theme;
         const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-        const environment = { themeColors, showHiddenText: settings.current.showHiddenText };
+        const environment = { themeColors, showHiddenText: settings.current.showHiddenText, showTableGridlines: settings.current.showTableGridlines };
         const layout = buildResidentRegionLayoutRequest(metadata, 24, { ...environment,
           defaultTabStopTwips: metadata.package.settings?.defaultTabStop ?? null, mediaTokens: settings.current.mediaTokens === true });
         const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
@@ -453,7 +490,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
       };
       let previewed = false;
-      if (settings.current.previewFirstPage === true && input instanceof Uint8Array && settings.current.mediaTokens !== true) {
+      if (!resume && settings.current.previewFirstPage === true && input instanceof Uint8Array && settings.current.mediaTokens !== true &&
+        !workerCollaboration.openOptions?.initialUpdate) {
         try {
           previewed = await withinPreviewBudget(async (live) => {
             const cut = await client.openSourceCut({ bytes: input, cut: PREVIEW_CUT, heapLimitBytes: settings.current.workerLimitBytes });
@@ -464,8 +502,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       }
       let opened: Awaited<ReturnType<typeof client.openSource>>;
       try {
-        opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
-          heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true });
+        opened = await client.openSource({ ...(input instanceof Uint8Array
+          ? { bytes: input, ...(resume?.checkpoint ? { state: resume.checkpoint.state } : {}) } : { document: input }),
+          heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true,
+          collaboration });
       } catch (error) {
         if (!painted) throw error;
         signal.throwIfAborted();
@@ -475,16 +515,21 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         return await new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
       }
       signal.throwIfAborted();
+      if (collaboration) workerCollaboration.opened(client, opened);
       const metadata = opened.document;
       sourceComments.current = metadata.package.document.comments ?? [];
       const opening = await measured(metadata);
       const { environment, layout, requirements, config } = opening;
       renderEnvironment.current = { theme: metadata.package.theme, requested: JSON.stringify(environment) };
-      if (settings.current.previewFirstPage === true && !previewed) {
+      if (!resume && settings.current.previewFirstPage === true && !previewed) {
         try { await withinPreviewBudget((live) => showPreview(opening, live)); } catch (error) { previewFailed(error); }
       }
       const initial = await client.commandInit({
-        session: crypto.randomUUID(), incarnation: 1, epoch: 1, readOnly: settings.current.readOnly,
+        session: resume?.session ?? crypto.randomUUID(), incarnation: resume?.incarnation ?? 1, epoch: resume?.epoch ?? 1,
+        ...(resume ? { version: resume.checkpoint?.version ?? 0, throughSeq: resume.checkpoint?.throughSeq ?? 0,
+          refusedSeqs: resume.refusedSeqs, replayAppliedSeqs: resume.replayAppliedSeqs,
+          recoveryState: checkpoint?.recoveryState } : {}),
+        readOnly: settings.current.readOnly,
         fonts: fonts.slice(),
         rasterScale: getRasterScale?.() ?? 1,
         fontRegistrationSlots: { fontChains: config.fontChains },
@@ -510,16 +555,22 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       retained.current = null;
       pageIndexes.current = new Map();
       prepared.current = new WeakMap();
+      releaseResident.current = abort;
       return connection;
     } catch (error) {
-      signal.removeEventListener('abort', abort);
       discardCommandPresentation(initialFrame);
       abort();
       throw error;
     } finally {
       disposeFonts();
     }
-  }, [controller]);
+  }, [controller, workerCollaboration.openOptions, workerCollaboration.begin, workerCollaboration.opened]);
+  const openConnection = useCallback((input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number) => {
+    signal.throwIfAborted();
+    active.current = null;
+    openContext.current = { signal, getRasterScale };
+    return openResident(input, signal, getRasterScale);
+  }, [openResident]);
 
   const updateReadOnly = useCallback((): void => {
     const current = active.current;
@@ -550,7 +601,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const reserved = reservationsRef.current;
     const reservations = sentReservations();
     const payload = {
-      themeColors, showHiddenText: settings.current.showHiddenText, ...(reservations ? { reservations } : {}),
+      themeColors, showHiddenText: settings.current.showHiddenText, showTableGridlines: settings.current.showTableGridlines, ...(reservations ? { reservations } : {}),
     };
     const requested = JSON.stringify(payload);
     if (current.requestedRenderEnvironment === requested) return;
@@ -648,6 +699,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   };
   const onReady = useCallback((binding: PeerlessEditSessionBinding) => {
     controller.attach(binding);
+    workerCollaboration.ready(worker.current, binding);
     if (active.current?.binding !== binding) {
       active.current?.clipboard?.dispose();
       active.current = {
@@ -661,9 +713,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     updateReadOnly();
     updateRenderEnvironment();
     updateFontEnvironment();
-  }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller]);
+  }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller, workerCollaboration.ready]);
   useLayoutEffect(updateReadOnly, [effectiveReadOnly, updateReadOnly]);
-  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, reservations, updateRenderEnvironment]);
+  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, tableGridlines, reservations, updateRenderEnvironment]);
   useLayoutEffect(updateFontEnvironment, [props.fonts, measurementFontProvider, props.onFontsLoaded, updateFontEnvironment]);
   useLayoutEffect(() => () => { active.current?.clipboard?.dispose(); active.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }, []);
 
@@ -719,10 +771,23 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     }
   }, []);
 
+  const recovery = useMemo<UsePeerlessEditSessionOptions['recovery']>(() => ({
+    checkpoint: source instanceof Uint8Array ? (resident) => resident.client.call.checkpoint() : undefined,
+    reopen: async (resume) => {
+      const context = openContext.current;
+      if (!context) throw new Error('Editor was closed');
+      return await openResident(resume.source, context.signal, context.getRasterScale, resume);
+    },
+    onRecovery: (event) => {
+      if (event.phase === 'recovered') {
+        updateReadOnly(); updateRenderEnvironment(); updateFontEnvironment();
+      }
+    },
+  }), [source, openResident, updateReadOnly, updateRenderEnvironment, updateFontEnvironment]);
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
-    source, openConnection, canvasForPage, prepareGeometry, onError: reportError,
+    source, openConnection, recovery: workerCollaboration.openOptions ? undefined : recovery, canvasForPage, prepareGeometry, onError: reportError,
     onRecoverableError: error => { controller.stalled(error); reportRecoverableError(error); },
-  } : null, [source, openConnection, canvasForPage, prepareGeometry, reportError, reportRecoverableError, controller]);
+  } : null, [source, openConnection, recovery, workerCollaboration.openOptions, canvasForPage, prepareGeometry, reportError, reportRecoverableError, controller]);
   useEffect(() => {
     if (shellState.status !== 'ready' || !previewJob) return;
     setPreviewJob(null);
@@ -776,10 +841,20 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     props.onPaste?.();
     return true;
   }, [controller, props.onPaste]);
+  const selectionAnchor = useCallback(() => {
+    const frame = controller.getSnapshot().view?.geometry;
+    const rect = frame?.selectionRects[0];
+    const page = rect && frame.pages.find(({ bounds }) => rect.y >= bounds.y && rect.y < bounds.y + bounds.height);
+    if (!rect || !page) return null;
+    const bounds = pluginGeometry.geometry()?.dom.getPageBounds(page.page.pageIndex);
+    return { y: (bounds?.y ?? page.bounds.y + 48 / zoom) + rect.y - page.bounds.y, right: bounds ? bounds.x + bounds.width : page.bounds.x + page.bounds.width };
+  }, [controller, pluginGeometry, zoom]);
+  const workerComments = useWorkerComments({ controller, documentKey: shellState.view?.identity.session, readOnly: effectiveReadOnly, setOpen: setCommentsOpen,
+    setExpanded: setExpandedSidebarItem, selectionAnchor, focus, onError: reportRecoverableError });
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
-    onPaste: props.onPaste, onError: reportRecoverableError });
+    onPaste: props.onPaste, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment });
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();
     active.current = null;
@@ -788,8 +863,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     linkGesture.current += 1;
     openedSource.current = sourceKey;
     pluginGeometry.clear();
-    if (hasSource) controller.opening(documentBuffer ?? parsedDocument); else controller.empty();
-  }, [controller, source, sourceKey, documentBuffer, parsedDocument, hasSource, pluginGeometry]);
+    if (hasSource) controller.opening(sourceGeneration); else controller.empty();
+  }, [controller, sourceGeneration, source, sourceKey, hasSource, pluginGeometry]);
+  useEffect(() => {
+    const request = loadRequest.current;
+    if (!request) return;
+    if (request.input !== (documentBuffer ?? parsedDocument)) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
+    else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
+    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
+  }, [shellState, documentBuffer, parsedDocument, controller]);
   useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
@@ -880,16 +962,37 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const review = currentReview ?? commentReview?.value;
   const toolbarMetadata = useWorkerQuery<'toolbarMetadata'>(controller, { kind: 'toolbarMetadata' });
   useLayoutEffect(() => controller.toolbarMetadata(toolbarMetadata), [controller, toolbarMetadata]);
-  const comments = review?.uiComments ?? props.comments ?? sourceComments.current;
-  const commentItems = useCommentSidebarItems({ comments: props.commentsSidebarOpen === false ? [] : comments, trackedChanges: [], callbacks: {} });
+  const revisionRead = useWorkerQuery<'sidebar'>(controller, workerRevisionRequest(commentReview));
+  useLayoutEffect(() => controller.revisions(commentReview, revisionRead), [controller, commentReview, revisionRead]);
+  const trackedChanges = controller.trackedChanges();
+  const revisionCallbacks = useMemo(() => workerRevisionCallbacks(controller), [controller]);
+  const comments = props.comments ?? review?.uiComments ?? sourceComments.current;
+  const documentKey = shellState.view?.identity.session;
+  const hasCards = comments.length > 0 || !!trackedChanges?.entries.length;
+  const autoOpened = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!hasCards || documentKey === undefined || autoOpened.current === documentKey) return;
+    autoOpened.current = documentKey;
+    setCommentsOpen(true);
+  }, [hasCards, documentKey, setCommentsOpen]);
+  const commentCallbacks = useMemo(() => ({ ...revisionCallbacks, ...workerComments.callbacks }), [revisionCallbacks, workerComments.callbacks]);
+  const commentItems = useCommentSidebarItems({ comments: commentsOpen ? comments : [], trackedChanges: commentsOpen ? trackedChanges?.entries ?? [] : [],
+    callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
   const positionedComments = commentItems.map(item => {
+    if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
-    const rect = documentReady && nativeId ? review?.commentGeometry[nativeId]?.[0] : undefined;
+    const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
+    const rect = !documentReady ? undefined : (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
+      (review && item.anchorKey?.startsWith('comment-') && firstPage !== undefined ? { pageIndex: firstPage, y: 0 } : undefined);
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
     return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
   });
-  const commentsOpen = props.commentsSidebarOpen === true || (props.commentsSidebarOpen !== false && !!comments.length);
+  const selected = shellState.view?.workerSelection;
+  const floating = documentReady && !effectiveReadOnly && !workerComments.adding && !!selected &&
+    (selected.focus.story === 'body' || selected.focus.story.startsWith('body:')) && selected.anchor.story === selected.focus.story &&
+    (selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset) &&
+    (shellState.view?.geometry?.coversThroughSeq ?? -1) >= (shellState.view?.throughSeq ?? 0) ? selectionAnchor() : null;
   const hostProposalItems = workerProposalSidebarItems(controller, currentReview, geometry,
     documentReady && props.allowHostProposals === true && props.showHostProposalsInSidebar === true && commentsOpen, reportRecoverableError);
   const sidebarItems = mergeSidebarItems([...positionedComments, ...hostProposalItems], props.pluginSidebarItems ?? [], managedItems);
@@ -911,7 +1014,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       editorContainerStyle={{ flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto', overflowY: 'auto', position: 'relative', overflowAnchor: 'none' }}
       showRuler={props.showRuler ?? false} readOnlyProp={readOnly} showOutline={navigation.showOutline} showOutlineButton={props.showOutlineButton ?? true}
       sidebarOpen={sidebarOpen} minLayoutWidth={minLayoutWidth} editorScrollLeft={navigation.pageInfo.scrollLeft} expandedSidebarItem={expandedSidebarItem}
-      trackedChanges={[]} onScrollContainerMouseDown={ignore} onEditorBgMouseDown={(event) => {
+      trackedChanges={trackedChanges?.entries ?? []} onScrollContainerMouseDown={ignore} onEditorBgMouseDown={(event) => {
         if (event.target !== event.currentTarget) return;
         event.preventDefault(); focus();
       }} onEditorContextMenu={contextMenu.open}
@@ -929,7 +1032,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
       overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}
         layerRef={setPluginLayer} heldGeometry={documentReady ? pluginGeometry.geometry() : null} /></>} dialogs={<>{propertyDialogs.element}<FindReplaceDialog isOpen={searchState.isOpen} replaceMode={searchState.replaceMode}
-        onClose={() => search.close()} currentResult={searchState.result}
+        onClose={(text, options) => { search.close(text, options); focus(); }} currentResult={searchState.result}
         onFind={(text, options) => { void search.find(text, options).catch((error) => reportRecoverableError(error)); return null; }}
         onFindNext={() => { search.host.searchNext(); return search.getSnapshot().result?.matches[search.getSnapshot().result!.currentIndex] ?? null; }}
         onFindPrevious={() => { search.host.searchPrevious(); return search.getSnapshot().result?.matches[search.getSnapshot().result!.currentIndex] ?? null; }}
@@ -947,6 +1050,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       pagedArea={<div ref={host} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: sidebarWidth }} onMouseDown={(event) => {
         if (event.target === event.currentTarget) { event.preventDefault(); focus(); }
       }}>
+      {floating && <WorkerCommentButton top={floating.y * zoom} left={floating.right * zoom + 24} onAdd={() => { void workerComments.beginAddComment(); }} />}
       {documentReady && sidebarItems.length > 0 && <UnifiedSidebar key={`${sourceKey}:${JSON.stringify(shellState.view?.identity)}`} items={sidebarItems} anchorPositions={anchorPositions} renderedDomContext={geometry?.dom ?? null}
         pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
       {documentReady && props.pluginOverlays && <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>{props.pluginOverlays}</div>}
@@ -966,6 +1070,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         onRemove={() => { void propertyDialogs.removeLinkAtCaret().then(applied => { if (applied) { setHyperlinkPopup(null); toast('Link removed'); } }); }} />
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
+          overlay={workerCollaboration.overlay(displayWindow)}
           displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}
           pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
