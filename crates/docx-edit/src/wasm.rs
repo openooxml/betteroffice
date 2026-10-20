@@ -805,7 +805,8 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
 /// "pageContentHeight": number|null, "numericIds": {yrsId: number},
-/// "showHiddenText": bool, "defaultParagraphStyleId": string,
+/// "showHiddenText": bool, "showTableGridlines": bool,
+/// "defaultParagraphStyleId": string,
 /// "revisionPreview": {revisionId: "accepted"|"rejected"} }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
@@ -830,6 +831,10 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
         .map(str::to_owned);
     env.show_hidden_text = value
         .get("showHiddenText")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    env.show_table_gridlines = value
+        .get("showTableGridlines")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     env.media_tokens = value
@@ -2708,6 +2713,11 @@ impl EditSession {
         self.engine.doc().encode_state_vector_v1()
     }
 
+    /// Whether a remote update is waiting on one that has not arrived yet.
+    pub fn has_pending_update(&self) -> bool {
+        self.engine.doc().holds_pending_update()
+    }
+
     /// The yrs v1 update carrying everything this replica has that the peer
     /// described by `remote_state_vector` does not. Errors on a malformed
     /// state vector.
@@ -2718,11 +2728,53 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// [`EditSession::encode_diff`] as ordered updates for a sync that must
+    /// travel in bounded frames: the whole diff when it fits
+    /// `max_chunk_bytes`, otherwise causally ordered struct updates followed
+    /// by the delete set alone. Each fits the limit except one that carries a
+    /// single larger struct. Errors on a malformed state vector or a zero
+    /// limit.
+    pub fn encode_diff_chunks(
+        &self,
+        remote_state_vector: &[u8],
+        max_chunk_bytes: u32,
+    ) -> Result<js_sys::Array, JsValue> {
+        let chunks = self
+            .engine
+            .doc()
+            .encode_diff_chunks_v1(remote_state_vector, max_chunk_bytes as usize)
+            .map_err(js_err)?;
+        Ok(chunks
+            .iter()
+            .map(|chunk| Uint8Array::from(chunk.as_slice()))
+            .collect())
+    }
+
     /// Applies a remote or incremental yrs v1 update. It commits without a
     /// local origin, so this replica's undo manager never claims it. Errors on
     /// a malformed update.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
+    }
+
+    /// Applies the ordered updates of one sync in a single remote transaction,
+    /// so the result matches [`EditSession::apply_update`] on the whole diff.
+    /// Errors on a non-`Uint8Array` entry or a malformed or oversized update,
+    /// before applying any.
+    pub fn apply_update_chunks(&self, updates: js_sys::Array) -> Result<(), JsValue> {
+        let chunks = updates
+            .iter()
+            .map(|update| {
+                update
+                    .dyn_into::<Uint8Array>()
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|_| js_err("sync updates must be Uint8Arrays"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.engine
+            .doc()
+            .apply_update_chunks_v1(&chunks)
+            .map_err(js_err)
     }
 
     /// [`EditSession::apply_update`] plus an inference about where the peer
@@ -2772,19 +2824,20 @@ impl EditSession {
     /// committed transaction. `update` is v1-encoded — feed it straight to
     /// [`EditSession::apply_update`] on a peer — and is copied out of wasm
     /// memory, so JS may hold it across later edits. The second argument is
-    /// `1` when the transaction had no local origin. One observer per session;
-    /// a second call replaces the first, and a throwing callback is ignored.
+    /// `1` when the transaction had no local origin; a remote update's own
+    /// formatting cleanup follows it as a `0` update to forward. One observer
+    /// per session; a second call replaces the first, and a throwing callback
+    /// is ignored.
     pub fn set_update_observer(&mut self, callback: &Function) -> Result<(), JsValue> {
         let callback = callback.clone();
         let subscription = self
             .engine
             .doc()
-            .yrs_doc()
-            .observe_update_v1(move |txn, event| {
+            .observe_update_v1(move |update, remote| {
                 // Uint8Array::from copies out of wasm memory — the JS side
                 // owns the bytes and may hold them across further edits.
-                let bytes = Uint8Array::from(event.update.as_slice());
-                let origin = if txn.origin().is_none() { 1.0 } else { 0.0 };
+                let bytes = Uint8Array::from(update);
+                let origin = if remote { 1.0 } else { 0.0 };
                 let _ = callback.call2(&JsValue::NULL, &bytes.into(), &JsValue::from_f64(origin));
             })
             .map_err(js_err)?;
@@ -2809,11 +2862,10 @@ impl EditSession {
         let subscription = self
             .engine
             .doc()
-            .yrs_doc()
-            .observe_update_v1(move |txn, event| {
-                let mut encoded = Vec::with_capacity(event.update.len() + 1);
-                encoded.push(if txn.origin().is_none() { 1 } else { 0 });
-                encoded.extend_from_slice(&event.update);
+            .observe_update_v1(move |update, remote| {
+                let mut encoded = Vec::with_capacity(update.len() + 1);
+                encoded.push(u8::from(remote));
+                encoded.extend_from_slice(update);
                 observed.borrow_mut().push_back(encoded);
             })
             .map_err(js_err)?;
@@ -3541,6 +3593,21 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
+    pub fn set_table_properties(
+        &self,
+        table_json: &str,
+        patch_json: &str,
+    ) -> Result<String, JsValue> {
+        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
+        let patch = parse_any_object(patch_json, "table properties patch")?;
+        let receipt = self
+            .engine
+            .doc()
+            .set_table_properties(&EditCtx::local("", ""), &table, &patch)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
     /// Inserts `text` at `(story, para_id, offset)`. It must contain no
     /// paragraph or line breaks, and it inherits the formatting at the
     /// insertion point. Receipt: `{"revisionId": string|null, "range"}` —
@@ -3714,6 +3781,24 @@ impl EditSession {
             .engine
             .doc()
             .replace_range(&ctx, StoryRange::new(story, start, end), text)
+            .map_err(js_err)?;
+        Ok(text_receipt_json(receipt))
+    }
+
+    pub fn insert_line_break(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
+        let at = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let ctx = edit_ctx(author_name, author_date)?;
+        let receipt = self
+            .engine
+            .doc()
+            .insert_hard_break(&ctx, Position::new(story, at))
             .map_err(js_err)?;
         Ok(text_receipt_json(receipt))
     }
@@ -4261,6 +4346,26 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// Initializes imported metadata, creating an unanchored comment when absent.
+    pub fn seed_comment_metadata_json(
+        &self,
+        comment_id: &str,
+        patch_json: &str,
+    ) -> Result<(), JsValue> {
+        let patch: Value = serde_json::from_str(patch_json).map_err(js_err)?;
+        let fields = patch
+            .as_object()
+            .ok_or_else(|| js_err("comment metadata must be an object"))?;
+        let patch = fields
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), json_to_any(value)?)))
+            .collect::<Result<_, JsValue>>()?;
+        self.engine
+            .doc()
+            .seed_comment_metadata(comment_id, patch)
+            .map_err(js_err)
+    }
+
     pub fn update_comment_metadata_json(
         &self,
         comment_id: &str,
@@ -4323,8 +4428,9 @@ impl EditSession {
     }
 
     /// Resolves tracked changes by revision id outside undo history:
-    /// `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
-    /// resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
+    /// `{"accept":[string, …],"reject":[string, …]}` -> `{"ok":true,"revisionIds":[string, …]}`,
+    /// the ids resolved, or `{"ok":false,"version","failure"}`. An id that matches nothing is
+    /// skipped. See [`EditingDoc::settle_revisions`].
     pub fn settle_revisions_json(&self, request: &str) -> Result<String, JsValue> {
         #[derive(serde::Deserialize)]
         struct Settle {
@@ -4334,12 +4440,13 @@ impl EditSession {
             reject: Vec<String>,
         }
         let request: Settle = serde_json::from_str(request).map_err(js_err)?;
-        let resolved = self
+        let outcome = self
             .engine
             .doc()
             .settle_revisions(&request.accept, &request.reject, &self.undo)
-            .map_err(js_err)?;
-        Ok(json!({ "revisionIds": resolved }).to_string())
+            .map_err(js_err)?
+            .map(|resolved| json!({ "revisionIds": resolved }));
+        outcome_json(&outcome).map_err(js_err)
     }
 
     /// Applies a batch of raw story mutations in ONE transaction. Unlike every
@@ -4964,8 +5071,7 @@ impl EditSession {
     /// Whether the document has a story with this id.
     pub fn has_story(&self, story: &str) -> bool {
         let txn = self.engine.doc().yrs_doc().transact();
-        txn.get_map(STORIES)
-            .is_some_and(|stories| stories.contains_key(&txn, story))
+        crate::story_ref(&txn, story).is_ok()
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted
@@ -4982,7 +5088,9 @@ impl EditSession {
         let Some(stories) = txn.get_map(STORIES) else {
             return Vec::new();
         };
-        let mut ids: Vec<String> = stories.iter(&txn).map(|(id, _)| id.to_string()).collect();
+        let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_string())
+            .collect();
         ids.sort();
         ids
     }
@@ -5512,6 +5620,40 @@ pub fn render_docx_markdown_with_pages_json(
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+
+    #[test]
+    fn line_break_inserts_one_inline_unit_and_is_undoable() {
+        let mut session = EditSession::new(76.0).unwrap();
+        session.undo = UndoSession::with_clock(Arc::new(|| 0));
+        session
+            .engine
+            .doc()
+            .create_story_with_paragraph_id("body", "p1", "ab", "Normal", "left")
+            .unwrap();
+        session.track_undo();
+        let receipt: Value = serde_json::from_str(
+            &session
+                .insert_line_break("body", "p1", 1, None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["range"]["start"]["offset"], 1);
+        assert_eq!(receipt["range"]["end"]["offset"], 2);
+        let segments = session.story_segments("body").unwrap();
+        let parsed: Value = serde_json::from_str(&segments).unwrap();
+        assert_eq!(parsed[0]["text"], "a");
+        assert_eq!(parsed[1]["embedKind"], "break");
+        assert_eq!(parsed[2]["text"], "b");
+        assert_eq!(session.engine.doc().paragraphs("body").unwrap().len(), 1);
+        session.add_undo_boundary();
+        assert!(session.undo());
+        assert_eq!(
+            session.engine.doc().paragraphs("body").unwrap()[0].text,
+            "ab"
+        );
+        assert!(session.redo());
+        assert_eq!(session.story_segments("body").unwrap(), segments);
+    }
 
     #[test]
     fn paragraph_segments_build_only_requested_units() {

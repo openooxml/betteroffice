@@ -63,6 +63,7 @@ impl Lineage {
             snapshot_package_lineage: _,
             source_container,
             preserved,
+            invalidated_text_sources: _,
             preserved_undo,
             preserved_redo,
             edited_since_open,
@@ -1948,6 +1949,8 @@ impl WorkbookSnapshotBuilder {
             snapshot_package_lineage,
             source_container,
             preserved,
+            invalidated_text_sources: (!edited_since_open && committed_changes == 0)
+                .then(Default::default),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open,

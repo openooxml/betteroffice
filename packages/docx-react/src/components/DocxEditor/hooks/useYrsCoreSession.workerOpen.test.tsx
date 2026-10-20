@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -4174,7 +4175,7 @@ test('a shared collaboration update keeps the existing join path', async () => {
   });
   try {
     const view = render(
-      <DocxEditor
+      <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
         ref={ref}
         documentBuffer={source.slice().buffer as ArrayBuffer}
         collaboration={{ initialUpdate }}
@@ -6615,7 +6616,7 @@ function openingPluginEditor(plugin: DocxPlugin, replay?: Promise<void>) {
         });
       }
     };
-    view = render(<DocxEditor ref={ref}
+    view = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref}
       documentBuffer={longBytes.slice().buffer as ArrayBuffer}
       mode="editing" experimentalWorkerOpen previewFirstPage plugins={[plugin]}
       measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}

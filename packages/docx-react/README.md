@@ -25,6 +25,8 @@ import '@betteroffice/docx-react/styles.css';
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
 
+`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` currently uses the hybrid runtime until worker-only collaboration is available.
+
 ## Edit a document
 
 ```tsx
@@ -56,11 +58,10 @@ export function App() {
 
 Without `onSave`, File > Save downloads the edited bytes.
 
-Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onChange`,
+Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onDocumentChange`,
 `author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`, `toolbar`,
 `showRuler`, `showZoomControl`, `showHiddenText`, `i18n`, `measurementFontProvider`. The `ref`
-exposes the full editor API (selection, formatting, find/replace, comments,
-revisions) and the editor's command store, `commands`.
+exposes async reads and edits, plus the editor's command store, `commands`.
 
 Vanished (hidden) text stays out of the layout by default; pass
 `showHiddenText` to reveal it with normal wrapping.
@@ -478,9 +479,9 @@ const review = defineDocxPlugin<State>({
   stories, or listed kinds and story ids in their order without repeats, in one
   call. An entry naming a kind is a kind, matching each story's own kind unless
   `byRoot` matches its root's: `['header']` with `byRoot` includes header table
-  cells, and `['body']` with `byRoot` selects everything under the body. Worker viewers, the
-  default for read-only editors without `collaboration`, answer each with one
-  worker read. A story that cannot be read reports its own failure, the read
+  cells, and `['body']` with `byRoot` selects everything under the body. The default worker-only
+  editor and read-only `legacySyncApi` editors without `collaboration` answer
+  each with one worker read. A story that cannot be read reports its own failure, the read
   limits stop the read with `truncated`, a story larger than the limits on its
   own reports `limit-exceeded` (page it with `readParagraphs` and `paraIds`),
   and `expectVersion` refuses a changed
@@ -504,10 +505,36 @@ const review = defineDocxPlugin<State>({
   A target in a header or footer has fragments on every built page that paints it
   and its anchor on the first; one that no laid-out page paints, built or not, is
   `missing-target` once the layout is complete.
+  `geometry.readAnchorGeometries(targets)` answers every target in order and never
+  rejects or answers `pending`. Only the worker-only editor awaits reads: targets
+  asked in one tick share one worker read, and `getAnchorGeometry` answers
+  `pending` while a target's read is in flight. The hybrid editor, removed in
+  0.6.0, answers right away, and still `layout-unavailable` while its own reads
+  are in flight. A read the worker fails answers `read-failed` on both methods and
+  renders overlays again once; only `readAnchorGeometries` reads that target
+  again, so retry it with backoff. Answers come from the layout current when the
+  reads land, so results can carry a newer `layoutId` or `stale-version`, or
+  `layout-unavailable` while the latest edit, zoom or preview is not painted yet
+  or once the document is replaced; ask again on `layout-change`. A comment
+  sidebar, say, places all of its cards from one read:
+  ```ts
+  const answers = await geometry.readAnchorGeometries(cards.map((card) => card.target));
+  const tops = answers.map((answer) => (answer.ok ? answer.anchor.y : null));
+  ```
+  An answer that reaches pages not built yet lists them in `unbuiltPages` and is
+  provisional. `geometry.getPageRect(pageIndex)` returns a page box in
+  overlay-layer pixels with `built`, and `geometry.isPageBuilt(pageIndex)` says
+  whether a page is laid out without measuring the DOM; once their layout is no
+  longer shown they answer `null` and `false`.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit
   target.
+- **Reservations.** `reservations(context)` returns `{ version, items }`: inline
+  boxes, blocks beside a paragraph and hidden ranges, in pixels at zoom 1. The
+  editor lays them out and paints nothing there; saves and paged exports leave
+  them out. `{ kind: 'reservation', id }` answers the box once
+  `layout.reservationsVersion` is the set's `version`.
 - **Sidebar cards** anchor to `{ version, story, paraId }` and show only while
   the document is at that version and the body paragraph resolves uniquely.
   `render` receives the `item` it draws, so one component can draw every card;
@@ -535,6 +562,13 @@ const review = defineDocxPlugin<State>({
   are deprecated in favour of this API.
 
 ## Page-referenced export
+
+Opt in to `legacySyncApi` for this export because the default async editor does
+not expose page-referenced export:
+
+```tsx
+<DocxEditor ref={editorRef} legacySyncApi />
+```
 
 `DocxEditorRef.exportStructuredWithPages(options)` flushes pending input and exports
 structured content with the page map of the editor's authoritative layout of that
@@ -580,12 +614,19 @@ allocated bytes and the other modules by their memory size.
 ```
 
 `memoryBudget.workerLimitBytes` caps what the resident worker's editing core may
-allocate at once; an allocation past it fails as if the memory were full. A worker
-that runs out of memory is replaced by a fresh one once. If that one runs out too,
-the editor reports `ResidentWorkerOutOfMemoryError` from `@betteroffice/docx/yrs`
-through `onError`, with the worker's memories at that point, and stops rendering
-rather than moving the work to the main thread. Any other worker failure moves the
-work to the main thread.
+allocate at once; an allocation past it fails as if the memory were full.
+
+The worker-only editor replaces a worker that crashes, stops answering or runs out
+of memory with a fresh one, once per editor. A `documentBuffer` reopens at the last
+checkpoint the worker took and replays the edits since it, so undo reaches back only
+to that checkpoint; a `document` reopens and replays every edit. If the replacement
+fails too, the editor reports a `SessionFailure` error with its `code`, such as
+`out-of-memory`, through `onError` and stops editing.
+
+The `legacySyncApi` and `collaboration` editors replace a worker that runs out of
+memory once. If that one runs out too, they report `ResidentWorkerOutOfMemoryError`
+from `@betteroffice/docx/yrs` through `onError`, with the worker's memories at that
+point, and stop rendering. Any other worker failure moves their work to the main thread.
 
 ## Framework notes
 

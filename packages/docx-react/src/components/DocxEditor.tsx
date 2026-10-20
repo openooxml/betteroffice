@@ -62,7 +62,7 @@ import {
   workerFrameVersionOf,
 } from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
-import { useEditorEngineChoice, usePeerlessEngineChoice } from './DocxEditor/internals/engineChoice';
+import { useEditorEngineChoice, useDocxEditorRoute } from './DocxEditor/internals/engineChoice';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -207,14 +207,16 @@ export interface DocxDocumentChange {
 
 export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEditor/types';
 
+export interface DocxErrorInfo {
+  recoverable: boolean;
+}
+
 /**
  * DocxEditor props
  */
-export interface DocxEditorProps extends DocxEditorPluginProps {
-  /** @internal */
+export interface DocxEditorBaseProps extends DocxEditorPluginProps {
+  /** @internal @deprecated Ignored. */
   experimentalPeerless?: boolean;
-  /** @deprecated Enables the hybrid synchronous API, removed in 0.6.0. */
-  legacySyncApi?: boolean;
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
   /**
@@ -232,10 +234,7 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
-  /**
-   * The worker-owned editor is the default; engine choice is fixed at mount.
-   * @deprecated `false` selects the deprecated in-thread engine.
-   */
+  /** @deprecated False selects the in-thread engine. */
   experimentalWorkerOpen?: boolean;
   /**
    * Opens images as `media:{n}` tokens read from the document file instead of
@@ -258,8 +257,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onDocumentChange?: (change: DocxDocumentChange) => void;
   /** Callback when selection changes */
   onSelectionChange?: (state: SelectionState | null) => void;
-  /** Callback on error */
-  onError?: (error: Error) => void;
+  /** Recoverable worker reports include `{ recoverable: true }`; fatal and legacy reports omit `info`. */
+  onError?: (error: Error, info?: DocxErrorInfo) => void;
   /**
    * Called when the fullest wasm memory, on the main thread or in the resident
    * worker, crosses a `memoryBudget` level or drops back below it. Silent while
@@ -300,6 +299,12 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   initialZoom?: number;
   /** Whether to show hidden (vanished) text in the layout (default: false) */
   showHiddenText?: boolean;
+  /**
+   * Whether to show dashed, view-only guides at table cell edges without a border (default: false).
+   * The `tableGridlines` command toggles them; they are never saved, printed or exported.
+   * Worker-only editor only.
+   */
+  showTableGridlines?: boolean;
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
@@ -452,7 +457,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    */
   pluginSidebarItems?: ReactSidebarItem[];
   /**
-   * Geometry for `pluginSidebarItems`; ignored while `plugins` are installed.
+   * Geometry for `pluginSidebarItems`; ignored while `plugins` are installed and in the
+   * worker-only editor, which supplies its own.
    * @deprecated The editor supplies its own geometry.
    */
   pluginRenderedDomContext?: RenderedDomContext | null;
@@ -476,6 +482,25 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
    */
   measurementFontProvider?: BundledFontProvider;
 }
+
+export interface DocxAsyncEditorProps extends Omit<DocxEditorBaseProps, 'onChange'> {
+  /** @deprecated Removed in 0.6.0. Omit for the async editor. */
+  [LEGACY_SYNC_API_PROP]?: false;
+  onChange?: undefined;
+}
+
+export interface DocxLegacyEditorProps extends DocxEditorBaseProps {
+  /** @deprecated Enables the sync hybrid runtime, removed in 0.6.0. */
+  [LEGACY_SYNC_API_PROP]: true;
+}
+
+export interface DocxInThreadEditorProps extends Omit<DocxEditorBaseProps, 'experimentalWorkerOpen'> {
+  [LEGACY_SYNC_API_PROP]?: false;
+  /** @deprecated Selects the in-thread engine. */
+  experimentalWorkerOpen: false;
+}
+
+export type DocxEditorProps = DocxAsyncEditorProps | DocxLegacyEditorProps | DocxInThreadEditorProps;
 
 /**
  * DocxEditor ref interface
@@ -559,7 +584,7 @@ export interface DocxEditorRef {
   exportStructuredWithPages: (
     options: DocxPageExportOptions
   ) => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
-  /** @deprecated Use {@link readPositionAtPoint}. Worker viewers return a cached answer or null while reading it. */
+  /** @deprecated Use {@link readPositionAtPoint}. Worker-only viewers return null; hybrid worker viewers may return a cached answer. */
   getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
   /** Reads the text under client coordinates after pending input commits. Worker viewers resolve it against the presented frame, retrying superseded reads. */
   readPositionAtPoint: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>;
@@ -601,9 +626,8 @@ export interface DocxEditorRef {
   scrollToParaId: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   /**
    * Scroll the paginated view to a specific display position.
-   * For Word `w14:paraId` use
-   * `scrollToParaId` instead.
-   * @example ref.current?.scrollToPosition(42)
+   * Requires `legacySyncApi`; worker navigation uses paragraph IDs.
+   * @deprecated Use {@link scrollToParagraph} with a paragraph ID.
    */
   scrollToPosition: (displayPosition: number) => void;
   /** @deprecated Use {@link scrollToComment}. Worker viewers start the async navigation and return true. */
@@ -615,8 +639,8 @@ export interface DocxEditorRef {
    * overlay highlights it, and scroll its start into view. The selection
    * persists until it next changes (there is no auto-clearing flash). No-op
    * for a malformed range or a `from` past the document end; `to` is clamped
-   * to the document size.
-   * @example ref.current?.highlightRange(10, 24)
+   * to the document size. Requires `legacySyncApi`.
+   * @deprecated Use {@link readPositionAtPoint} for worker text positions; use {@link scrollToParagraph} to select and reveal a paragraph.
    */
   highlightRange: (from: number, to: number) => void;
   /** Open print preview */
@@ -835,17 +859,26 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   props,
   ref
 ) {
-  const requested = props.experimentalPeerless === true && !props[LEGACY_SYNC_API_PROP] && props.experimentalWorkerOpen !== false;
-  const peerless = usePeerlessEngineChoice(requested, props[LEGACY_SYNC_API_PROP] === true);
-  if (requested) {
-    if (props.onChange) throw new PeerlessSyncApiError('onChange(Document)');
-    if (props.collaboration) throw new PeerlessSyncApiError('CollaborationReplica');
-  }
-  if (peerless) return <LazyPeerlessDocxEditor {...props} ref={ref} />;
-  return <LegacyDocxEditor {...props} ref={ref} />;
+  const choice = useDocxEditorRoute(props);
+  if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
+  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;
+  return <LegacyDocxEditor key={choice.route} {...props} ref={ref} />;
 });
 
-const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function LegacyDocxEditor(
+function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className' | 'style'>) {
+  const [error] = useState(() => new PeerlessSyncApiError('onChange(Document)'));
+  const latest = useRef(props.onError);
+  latest.current = props.onError;
+  const reported = useRef(false);
+  useEffect(() => {
+    if (reported.current) return;
+    reported.current = true;
+    try { latest.current?.(error); } catch {}
+  }, [error]);
+  return <div role="alert" className={props.className} style={props.style}>{error.message}</div>;
+}
+
+const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function LegacyDocxEditor(
   {
     documentBuffer,
     experimentalPrewarm = false,
@@ -2649,6 +2682,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Leg
               commandBridgeRef={commandBridgeRef}
               yrsCore={yrsCore}
               pluginHostOpen={pluginHostSession !== null}
+              reservations={pluginHost.reservations}
+              reservationSets={pluginHost.reservationSets}
               onError={reportPagedError}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}

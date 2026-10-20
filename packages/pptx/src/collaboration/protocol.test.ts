@@ -9,7 +9,10 @@ import {
   encodeSyncStep2,
   encodeUpdate,
   encodeVarUint,
+  OPEN_SYNC_CLIENT,
+  parseSyncRequest,
   ProtocolError,
+  withOpenSyncRequest,
 } from './protocol';
 import { presenceColorForClientId } from './presence';
 
@@ -186,5 +189,85 @@ describe('collaboration protocol decoding', () => {
     expect(() => decodeMessages(Uint8Array.of(3), 1024, 0)).toThrow(
       'Message limit must be a positive integer'
     );
+  });
+});
+
+function stateVector(...entries: [bigint, bigint][]): Uint8Array {
+  return stateVectorOf(entries);
+}
+
+function stateVectorOf(entries: readonly [bigint, bigint][]): Uint8Array {
+  const bytes: number[] = [];
+  const write = (value: bigint) => {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  };
+  write(BigInt(entries.length));
+  for (const [client, clock] of entries) {
+    write(client);
+    write(clock);
+  }
+  return Uint8Array.from(bytes);
+}
+
+describe('open sync requests', () => {
+  const open = BigInt(OPEN_SYNC_CLIENT);
+  const fingerprinted = (payload: Uint8Array) => concat(
+    payload,
+    new TextEncoder().encode('\0betteroffice-document-fingerprint-v1\0'),
+    new Uint8Array(32).fill(0x5a)
+  );
+
+  it('mark after the entries and keep a document fingerprint', () => {
+    expect(OPEN_SYNC_CLIENT).toBe(Number.MAX_SAFE_INTEGER - 1);
+    expect(withOpenSyncRequest(stateVector())).toEqual(stateVector([open, 0n]));
+    expect(withOpenSyncRequest(stateVector([5n, 3n], [7n, 1n]))).toEqual(stateVector([5n, 3n], [7n, 1n], [open, 0n]));
+    expect(withOpenSyncRequest(fingerprinted(stateVector([7n, 4n]))))
+      .toEqual(fingerprinted(stateVector([7n, 4n], [open, 0n])));
+  });
+
+  it('parse back what was marked and leave unmarked vectors byte-identical', () => {
+    const max = (1n << 64n) - 1n;
+    for (const vector of [
+      stateVector(),
+      stateVector([5n, 3n]),
+      stateVector([1n << 53n, 9n], [max, 2n]),
+      fingerprinted(stateVector([7n, 4n], [300n, 128n])),
+    ]) {
+      expect(parseSyncRequest(withOpenSyncRequest(vector)!)).toEqual({ stateVector: vector, open: true });
+      const plain = parseSyncRequest(vector);
+      expect(plain).toEqual({ stateVector: vector, open: false });
+      expect(plain.stateVector).toBe(vector);
+    }
+    expect(parseSyncRequest(stateVector([open, 0n], [5n, 3n])))
+      .toEqual({ stateVector: stateVector([5n, 3n]), open: true });
+  });
+
+  it('read the open client at a nonzero clock as a plain entry', () => {
+    const vector = stateVector([open, 1n], [5n, 3n]);
+    expect(parseSyncRequest(vector)).toEqual({ stateVector: vector, open: false });
+    expect(withOpenSyncRequest(vector)).toBeUndefined();
+  });
+
+  it('leave malformed payloads unmarked both ways', () => {
+    for (const payload of [
+      Uint8Array.of(),
+      Uint8Array.of(7),
+      Uint8Array.of(0, 1),
+      Uint8Array.of(1, ...new Array(10).fill(0x80), 1, 1),
+      Uint8Array.of(0xff, 0xff, 0xff, 0xff, 0x0f, 1, 1),
+    ]) {
+      expect(withOpenSyncRequest(payload)).toBe(payload);
+      expect(parseSyncRequest(payload)).toEqual({ stateVector: payload, open: false });
+    }
+  });
+
+  it('mark up to the native entry limit and no further', () => {
+    const entries = Array.from({ length: 65_535 }, (_, index): [bigint, bigint] => [BigInt(index + 1), 1n]);
+    const marked = withOpenSyncRequest(stateVectorOf(entries))!;
+    expect(marked).toEqual(stateVectorOf([...entries, [open, 0n]]));
+    expect(parseSyncRequest(marked)).toEqual({ stateVector: stateVectorOf(entries), open: true });
+    expect(withOpenSyncRequest(stateVectorOf([...entries, [70_000n, 1n]]))).toBeUndefined();
+    expect(withOpenSyncRequest(stateVector([open, 0n]))).toBeUndefined();
   });
 });

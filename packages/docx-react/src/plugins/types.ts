@@ -11,6 +11,7 @@ import type {
   DocxListStoriesResult,
   DocxReadStoriesRequest,
   DocxReadStoriesResult,
+  DocxReservation,
   DocxTextRange,
   DocxValidationResult,
 } from '@betteroffice/docx/yrs';
@@ -46,6 +47,11 @@ export type {
   PluginGrant,
   PluginLoadReason,
 } from '../../../../shared/host-contracts/plugins';
+export type {
+  DocxReservation,
+  DocxReservationAnchor,
+  DocxReservationParagraph,
+} from '@betteroffice/docx/yrs';
 
 /**
  * What the host lets one plugin do. Without a grant a plugin reads, validates and navigates only.
@@ -139,6 +145,8 @@ export interface DocxPluginLayout {
   version: string;
   /** The proposal preview its pixels show. */
   previewVersion: number;
+  /** The `version` of the reservation sets its pixels include; null or absent before any. */
+  reservationsVersion?: string | null;
   zoom: number;
   pageCount: number;
 }
@@ -171,6 +179,11 @@ export interface DocxAnchorRect extends DocxPluginRect {
   pageIndex: number;
 }
 
+/** A page box in overlay-layer pixels; `built` is false while its content is not laid out. */
+export interface DocxPluginPageRect extends DocxAnchorRect {
+  built: boolean;
+}
+
 export type DocxGeometryTarget =
   | { kind: 'proposal'; id: string }
   | { kind: 'revision'; revisionId: string }
@@ -181,7 +194,9 @@ export type DocxGeometryTarget =
       text: string;
       occurrence?: DocxOccurrence;
     }
-  | { kind: 'range'; version: string; range: DocxTextRange };
+  | { kind: 'range'; version: string; range: DocxTextRange }
+  /** This plugin's reservation: its box, or a hidden range's boundary. */
+  | { kind: 'reservation'; id: string };
 
 export type DocxAnchorGeometryResult =
   | {
@@ -192,11 +207,13 @@ export type DocxAnchorGeometryResult =
       rects: readonly DocxAnchorRect[];
       anchor: DocxAnchorRect;
       pageRect: DocxPluginRect;
+      /** Pages the target reaches that are not built yet; the answer is provisional while set. */
+      unbuiltPages?: readonly number[];
     }
   | {
       ok: false;
       failure: {
-        code: DocxPluginNavigationFailureCode | 'unknown-proposal';
+        code: DocxPluginNavigationFailureCode | 'unknown-proposal' | 'pending' | 'read-failed';
         message: string;
       };
     };
@@ -222,8 +239,29 @@ export interface DocxPluginGeometry {
    * A header or footer target has fragments on every built page that paints it and anchors on
    * the first; one that no laid-out page paints, built or not, is `missing-target` once the
    * layout is complete and `layout-unavailable` before. Refuses stale or unrendered layouts.
+   * In the worker-only editor, a target whose geometry is still being read is `pending`, and one
+   * whose read failed is `read-failed`; overlays render again once either read settles.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
+  /**
+   * {@link getAnchorGeometry} of every target, in order; it never answers `pending` and never
+   * rejects. Only the worker-only editor awaits reads, one batched read for the targets asked in
+   * one tick; the hybrid editor, removed in 0.6.0, answers right away and still answers
+   * `layout-unavailable` while its own reads are in flight. A target whose read failed answers
+   * `read-failed` and is read again only when this method asks for it, so retry with backoff.
+   * Answers come from the layout current when the reads land, so a newer layout gives its own
+   * `layoutId` or `stale-version`. `layout-unavailable` means no presented layout of this document
+   * showed the target then (an edit, zoom or proposal preview not yet painted, or the document
+   * was replaced); ask again on `layout-change`.
+   */
+  readAnchorGeometries(targets: readonly DocxGeometryTarget[]): Promise<DocxAnchorGeometryResult[]>;
+  /** Page `pageIndex` in overlay-layer pixels; null when no rendered layout places it. */
+  getPageRect(pageIndex: number): DocxPluginPageRect | null;
+  /**
+   * Whether page `pageIndex` is laid out, without measuring the DOM; false, like `getPageRect`'s
+   * null, once this layout is no longer shown.
+   */
+  isPageBuilt(pageIndex: number): boolean;
 }
 
 export type DocxPluginNavigationFailureCode =
@@ -308,6 +346,17 @@ export interface DocxPluginPanel<S> {
   render: ComponentType<{ context: DocxPluginContext<S>; width: number; height: number }>;
 }
 
+/**
+ * The layout space a plugin reserves, computed at document `version` (normally
+ * `context.snapshot.version`). Applied only while the document is still at `version`.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export interface DocxReservationSet {
+  version: string;
+  items: readonly DocxReservation[];
+}
+
 export interface DocxPluginSidebarItem<S> {
   /** Unique within the plugin. */
   id: string;
@@ -342,8 +391,8 @@ export interface DocxPluginCommand<S> {
 }
 
 /**
- * A plugin. `createState`, renderers, `getSidebarItems` and command `getState` must be pure;
- * `initialize`, `onEvent`, command `execute` and `context.run` are managed effects.
+ * A plugin. `createState`, renderers, `getSidebarItems`, `reservations` and command `getState`
+ * must be pure; `initialize`, `onEvent`, command `execute` and `context.run` are managed effects.
  *
  * @experimental The plugin API may change in minor releases.
  */
@@ -361,6 +410,12 @@ export interface DocxPluginDefinition<S> {
    */
   overlay?: ComponentType<{ context: DocxPluginContext<S>; geometry: DocxPluginGeometry }>;
   getSidebarItems?(context: DocxPluginContext<S>): readonly DocxPluginSidebarItem<S>[];
+  /**
+   * Layout space to reserve; the editor lays it out and paints nothing there. Evaluated on load,
+   * state and document changes, never on layout changes. An invalid set fails the plugin with
+   * `invalid-payload`.
+   */
+  reservations?(context: DocxPluginContext<S>): DocxReservationSet | null;
   commands?: readonly DocxPluginCommand<S>[];
   /** Local command ids, in display order. */
   toolbar?: readonly string[];
@@ -379,7 +434,7 @@ export interface DocxPlugin {
   readonly [docxPluginBrand]: true;
 }
 
-export type DocxPluginErrorPhase = PluginErrorPhase | 'sidebar';
+export type DocxPluginErrorPhase = PluginErrorPhase | 'sidebar' | 'reservations';
 
 /**
  * A plugin failure; the failing activation has already been stopped and cleaned up.

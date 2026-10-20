@@ -6,10 +6,10 @@ use std::collections::{BTreeMap, HashMap};
 use base64::Engine as _;
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
-    Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
-    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, PptxPackage,
-    RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeWrite, SlideWrite, TextTarget,
-    TextWrite,
+    BackgroundWrite, Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite,
+    CommentsWrite, DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd,
+    PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeWrite, SlideWrite,
+    TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -30,13 +30,15 @@ impl DeckSession {
                     .to_owned(),
             ));
         }
-        if let Some(attribute) = crate::source_run_properties::unrecovered_attribute(&self.doc) {
+        let current = self.snapshot()?;
+        if let Some(attribute) =
+            crate::source_run_properties::unrecovered_attribute(&self.doc, &current)
+        {
             return Err(EditError::Write(format!(
                 "run {attribute} could not be recovered from the source file for some \
                  restored text, and saving now would drop it"
             )));
         }
-        let current = self.snapshot()?;
         let baseline = baseline_snapshot(&self.package)?;
         if current == baseline {
             return pptx_parse::write_pptx(&self.package)
@@ -67,6 +69,7 @@ fn deck_write(
             Some(base) => SlideWrite::Patch {
                 part_path: source_part_path(slide)?,
                 shapes: shape_writes(&slide.shapes, &base.shapes, source_shapes(package, slide))?,
+                background: background_write(slide, base),
             },
             None if slide.source_part_path.is_some() => {
                 let mut base = baseline
@@ -86,6 +89,7 @@ fn deck_write(
                         &base.shapes,
                         source_shapes(package, slide),
                     )?,
+                    background: background_write(slide, &base),
                 }
             }
             None => SlideWrite::Add {
@@ -96,6 +100,7 @@ fn deck_write(
                     .iter()
                     .map(shape_add)
                     .collect::<EditResult<Vec<_>>>()?,
+                background: slide.background.clone().map(Box::new),
             },
         };
         slides.push(write);
@@ -120,6 +125,20 @@ fn rename_duplicate_shape(shape: &mut ShapeSnapshot, old_slide: &str, new_slide:
     }
     for child in &mut shape.children {
         rename_duplicate_shape(child, old_slide, new_slide);
+    }
+}
+
+/// The background write a slide's snapshot change needs; `None` keeps the
+/// source declaration untouched.
+fn background_write(current: &SlideSnapshot, baseline: &SlideSnapshot) -> Option<BackgroundWrite> {
+    match &current.background {
+        Some(fill) if current.background != baseline.background => {
+            Some(BackgroundWrite::Set(Box::new(fill.clone())))
+        }
+        None if current.background_edited || baseline.background.is_some() => {
+            Some(BackgroundWrite::Clear)
+        }
+        _ => None,
     }
 }
 

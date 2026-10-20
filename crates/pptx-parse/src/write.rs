@@ -53,17 +53,28 @@ pub enum SlideWrite {
     Patch {
         part_path: String,
         shapes: Vec<ShapeWrite>,
+        background: Option<BackgroundWrite>,
     },
     Clone {
         part_path: String,
         shapes: Vec<ShapeWrite>,
+        background: Option<BackgroundWrite>,
     },
     /// Mint a new slide part.
     Add {
         name: Option<String>,
         layout_part_path: Option<String>,
         shapes: Vec<ShapeAdd>,
+        background: Option<Box<ShapeFill>>,
     },
+}
+
+/// A slide background write: `Set` replaces the slide's `p:bg`, `Clear`
+/// removes it so the layout or master background shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackgroundWrite {
+    Set(Box<ShapeFill>),
+    Clear,
 }
 
 pub enum ShapeWrite {
@@ -204,7 +215,12 @@ pub fn write_pptx_with_edits(
         };
 
         for slide in &deck.slides {
-            if let SlideWrite::Patch { part_path, shapes } = slide {
+            if let SlideWrite::Patch {
+                part_path,
+                shapes,
+                background,
+            } = slide
+            {
                 let bytes = package
                     .part_bytes(part_path)
                     .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
@@ -214,6 +230,7 @@ pub fn write_pptx_with_edits(
                 patch_slide(
                     &mut root,
                     shapes,
+                    background.as_ref(),
                     Some(&theme),
                     part_path,
                     package.shape_elements,
@@ -260,6 +277,7 @@ pub fn write_pptx_with_edits(
                         SlideWrite::Clone {
                             part_path: source,
                             shapes,
+                            background,
                         } => {
                             let bytes = package
                                 .part_bytes(source)
@@ -307,6 +325,7 @@ pub fn write_pptx_with_edits(
                             patch_slide(
                                 &mut root,
                                 shapes,
+                                background.as_ref(),
                                 Some(&theme),
                                 &part_path,
                                 package.shape_elements,
@@ -319,6 +338,7 @@ pub fn write_pptx_with_edits(
                             name,
                             layout_part_path,
                             shapes,
+                            background,
                         } => {
                             let layout = layout_part_path
                                 .clone()
@@ -343,6 +363,7 @@ pub fn write_pptx_with_edits(
                             let xml = slide_xml(
                                 name.as_deref(),
                                 shapes,
+                                background.as_deref(),
                                 &part_path,
                                 &mut sink,
                                 &mut budget,
@@ -351,7 +372,6 @@ pub fn write_pptx_with_edits(
                         }
                         _ => unreachable!(),
                     }
-
                     minted.push(MintedSlide {
                         part_path,
                         relationship_id,
@@ -1465,9 +1485,11 @@ impl Prefixes {
 // --- slide patching ---------------------------------------------------------
 
 /// Resolves source ordinals with the original parser filter.
+#[allow(clippy::too_many_arguments)]
 fn patch_slide(
     root: &mut XmlElement,
     shapes: &[ShapeWrite],
+    background: Option<&BackgroundWrite>,
     theme: Option<&Theme>,
     part: &str,
     elements: ShapeElements,
@@ -1475,6 +1497,12 @@ fn patch_slide(
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
+    if let Some(background) = background {
+        let common = root
+            .child_mut("cSld")
+            .ok_or_else(|| write_error(part, "slide has no common slide data"))?;
+        patch_background(common, background, &prefixes, part)?;
+    }
     let mut next_shape_id = max_shape_id(root).checked_add(1);
     let tree = root
         .child_mut("cSld")
@@ -1491,6 +1519,39 @@ fn patch_slide(
         sink,
         budget,
     )
+}
+
+/// Inserts, replaces or removes the slide's `p:bg` declaration.
+fn patch_background(
+    common: &mut XmlElement,
+    background: &BackgroundWrite,
+    prefixes: &Prefixes,
+    part: &str,
+) -> Result<(), PptxError> {
+    common.children.retain(|child| match child {
+        XmlNode::Element(element) => element.local_name() != "bg",
+        _ => true,
+    });
+    if let BackgroundWrite::Set(fill) = background {
+        common.children.insert(
+            0,
+            XmlNode::Element(background_element(fill, prefixes, part)?),
+        );
+    }
+    Ok(())
+}
+
+/// `<p:bg><p:bgPr>…fill…<a:effectLst/></p:bgPr></p:bg>`, the first `cSld` child.
+fn background_element(
+    fill: &ShapeFill,
+    prefixes: &Prefixes,
+    part: &str,
+) -> Result<XmlElement, PptxError> {
+    Ok(XmlElement::new(prefixes.presentation("bg")).with_child(
+        XmlElement::new(prefixes.presentation("bgPr"))
+            .with_child(fill_element(fill, prefixes, part)?)
+            .with_child(XmlElement::new(prefixes.drawing("effectLst"))),
+    ))
 }
 
 fn max_shape_id(root: &XmlElement) -> u32 {
@@ -2569,11 +2630,17 @@ fn span_elements(
             let range = &ranges[range_index];
             let source = &source_runs[range.source];
             if segment.line_break {
+                let template = if source.local_name() == "br"
+                    || source
+                        .child("rPr")
+                        .is_some_and(|properties| properties.child("gradFill").is_some())
+                {
+                    source.child("rPr")
+                } else {
+                    None
+                };
                 output.push(XmlNode::Element(segment_element(
-                    segment,
-                    source.child("rPr"),
-                    theme,
-                    prefixes,
+                    segment, template, theme, prefixes,
                 )));
                 offset += 1;
                 break;
@@ -2870,7 +2937,7 @@ fn segment_properties(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> Option<XmlElement> {
-    match template.filter(|template| !segment.line_break || template.child("gradFill").is_some()) {
+    match template {
         Some(template) => {
             let mut base = template.clone();
             apply_run_properties(&mut base, segment.properties, theme, prefixes);
@@ -2933,6 +3000,32 @@ const POST_LATIN_ELEMENTS: [&str; 7] = [
     "extLst",
 ];
 
+fn is_flattened_colour_snapshot(
+    authored: Option<&ColorValue>,
+    requested: Option<&ColorValue>,
+    theme: Option<&Theme>,
+) -> bool {
+    let (Some(authored), Some(requested)) = (authored, requested) else {
+        return false;
+    };
+    if requested.theme_color.is_some()
+        || requested.theme_tint.is_some()
+        || requested.theme_shade.is_some()
+        || requested.auto.is_some()
+        || requested.luminance_modulation.is_some()
+        || requested.luminance_offset.is_some()
+        || requested.saturation_modulation.is_some()
+    {
+        return false;
+    }
+    if requested.alpha.is_some() && requested.alpha != authored.alpha {
+        return false;
+    }
+    resolve_color_value_to_hex_with_theme(Some(authored), theme)
+        .zip(requested.rgb.as_deref())
+        .is_some_and(|(hex, rgb)| rgb.eq_ignore_ascii_case(&hex[1..]))
+}
+
 /// Updates modeled styling while preserving unmodeled XML.
 fn apply_run_properties(
     base: &mut XmlElement,
@@ -2985,22 +3078,12 @@ fn apply_run_properties(
             base.attributes.remove("u");
         }
     }
-    let keeps_gradient = properties.color.as_ref().is_some_and(|color| {
-        base.child("gradFill")
-            .and_then(crate::drawing::run_gradient_color)
-            .is_some_and(|authored| {
-                &authored == color
-                    || resolve_color_value_to_hex_with_theme(Some(&authored), theme).is_some_and(
-                        |authored| {
-                            Some(authored)
-                                == resolve_color_value_to_hex_with_theme(Some(color), theme)
-                        },
-                    )
-            })
-    });
+    let authored = parse_run_properties(Some(base)).color;
+    let keeps_fill = authored == properties.color
+        || is_flattened_colour_snapshot(authored.as_ref(), properties.color.as_ref(), theme);
     // A colour write replaces the whole fill choice; clearing the colour only
     // drops an explicit solidFill so an unmodeled noFill/gradFill survives.
-    let removed_fills: &[&str] = if keeps_gradient {
+    let removed_fills: &[&str] = if keeps_fill {
         &[]
     } else if properties.color.is_some() {
         &FILL_ELEMENTS
@@ -3016,7 +3099,7 @@ fn apply_run_properties(
     if let Some(color) = properties
         .color
         .as_ref()
-        .filter(|_| !keeps_gradient)
+        .filter(|_| !keeps_fill)
         .and_then(|color| color_element(color, prefixes))
     {
         let position = base
@@ -3031,13 +3114,24 @@ fn apply_run_properties(
             XmlNode::Element(XmlElement::new(prefixes.drawing("solidFill")).with_child(color)),
         );
     }
-    base.children.retain(|child| {
-        !matches!(
-            child,
-            XmlNode::Element(element) if element.local_name() == "latin"
-        )
-    });
-    if let Some(family) = &properties.font_family {
+    let Some(family) = &properties.font_family else {
+        base.children.retain(|child| {
+            !matches!(
+                child,
+                XmlNode::Element(element) if element.local_name() == "latin"
+            )
+        });
+        return;
+    };
+    if let Some(latin) = base.child_mut("latin") {
+        if latin.attribute("typeface") != Some(family.as_str()) {
+            // panose, pitchFamily and charset describe the old face.
+            latin
+                .attributes
+                .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
+            latin.set_attribute("typeface", family.clone());
+        }
+    } else {
         let position = base
             .children
             .iter()
@@ -3467,6 +3561,7 @@ fn picture_shape_element(
 fn slide_xml(
     name: Option<&str>,
     shapes: &[ShapeAdd],
+    background: Option<&ShapeFill>,
     part: &str,
     sink: &mut PartSink<'_>,
     budget: &mut ParseBudget<'_>,
@@ -3527,6 +3622,9 @@ fn slide_xml(
     let mut common = XmlElement::new(prefixes.presentation("cSld"));
     if let Some(name) = name {
         common.set_attribute("name", name);
+    }
+    if let Some(fill) = background {
+        common = common.with_child(background_element(fill, &prefixes, part)?);
     }
     root = root.with_child(common.with_child(tree)).with_child(
         XmlElement::new(prefixes.presentation("clrMapOvr"))
@@ -3662,6 +3760,7 @@ mod tests {
                 },
             ],
             None,
+            None,
             part,
             ShapeElements::WithConnectors,
             &mut sink,
@@ -3674,6 +3773,138 @@ mod tests {
         assert!(!xml.contains(r#"name="two""#), "{xml}");
         let survivor = xml.split(r#"name="three""#).nth(1).unwrap();
         assert!(survivor.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    fn patch_background_fixture(xml: &[u8], background: Option<&BackgroundWrite>) -> String {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(xml, part, &mut budget).unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Keep { source_index: 0 }],
+            background,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+        String::from_utf8(serialize_xml(&root)).unwrap()
+    }
+
+    #[test]
+    fn a_new_background_precedes_the_shape_tree() {
+        let xml = patch_background_fixture(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            Some(&BackgroundWrite::Set(Box::new(ShapeFill {
+                color: Some(ColorValue::from_attribute("0F1720")),
+                ..ShapeFill::named("solid")
+            }))),
+        );
+        let common = xml.find("<p:cSld>").unwrap();
+        let bg = xml.find("<p:bg>").unwrap();
+        let effects = xml.find("<a:effectLst/>").unwrap();
+        let tree = xml.find("<p:spTree>").unwrap();
+        assert!(common < bg && bg < effects && effects < tree, "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="0F1720"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn clearing_a_background_removes_only_the_declaration() {
+        let xml = patch_background_fixture(
+            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="0F1720"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            Some(&BackgroundWrite::Clear),
+        );
+        assert!(!xml.contains("<p:bg>"), "{xml}");
+        assert!(xml.contains(r#"name="one""#), "{xml}");
+    }
+
+    #[test]
+    fn an_untouched_background_survives_a_shape_patch() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="0F1720"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    fill: Some(ShapeFill {
+                        color: Some(ColorValue::from_attribute("DC2626")),
+                        ..ShapeFill::named("solid")
+                    }),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+
+        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
+        assert!(xml.contains(r#"<a:srgbClr val="0F1720"/>"#), "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn an_added_slide_background_precedes_the_shape_tree() {
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let fill = ShapeFill {
+            color: Some(ColorValue::from_attribute("F8FAFC")),
+            ..ShapeFill::named("solid")
+        };
+        let xml = slide_xml(
+            None,
+            &[],
+            Some(&fill),
+            "ppt/slides/slide9.xml",
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+        let xml = String::from_utf8(xml).unwrap();
+        let common = xml.find("<p:cSld>").unwrap();
+        let bg = xml.find("<p:bg>").unwrap();
+        let tree = xml.find("<p:spTree>").unwrap();
+        assert!(common < bg && bg < tree, "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="F8FAFC"/>"#), "{xml}");
     }
 
     #[test]
@@ -3699,6 +3930,7 @@ mod tests {
         patch_slide(
             &mut root,
             &[],
+            None,
             None,
             part,
             ShapeElements::WithoutConnectors,
@@ -3742,6 +3974,20 @@ mod tests {
             !serialized.contains("solidFill"),
             "it must not be rewritten as a solid fill"
         );
+    }
+
+    #[test]
+    fn a_lowercase_flattened_colour_keeps_the_gradient() {
+        let (mut element, prefixes, mut properties) = run_properties(
+            br#"<a:rPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" lang="en"><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs></a:gsLst></a:gradFill></a:rPr>"#,
+        );
+        properties.color = Some(ColorValue {
+            rgb: Some("ff0000".to_owned()),
+            ..ColorValue::default()
+        });
+        let gradient = element.child("gradFill").unwrap().clone();
+        apply_run_properties(&mut element, &properties, None, &prefixes);
+        assert_eq!(element.child("gradFill"), Some(&gradient));
     }
 
     #[test]
@@ -3847,6 +4093,197 @@ mod tests {
             ),
             "{xml}"
         );
+    }
+
+    const FONT_PARAGRAPH: &str = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:pPr algn="ctr"/><a:r><a:rPr lang="en-US"><a:highlight><a:srgbClr val="FFFF00"/></a:highlight><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial" vendorHint="1"/><a:cs charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/></a:rPr><a:t>38.8%</a:t></a:r><a:r><a:rPr b="1" lang="en-US"><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/></a:rPr><a:t> of cases</a:t></a:r></a:p>"#;
+    const ARIAL_LATIN: &str = r#"<a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial" vendorHint="1"/>"#;
+
+    fn font_runs(family: &str) -> [(&'static str, RunProperties); 2] {
+        let arial = RunProperties {
+            font_family: Some("Arial".to_owned()),
+            ..RunProperties::default()
+        };
+        [
+            (
+                "39.8%",
+                RunProperties {
+                    font_family: Some(family.to_owned()),
+                    ..RunProperties::default()
+                },
+            ),
+            (
+                " of cases",
+                RunProperties {
+                    bold: Some(true),
+                    ..arial
+                },
+            ),
+        ]
+    }
+
+    fn edited_font_body(latin: &str) -> String {
+        let (_, body) = FONT_PARAGRAPH.split_once('>').unwrap();
+        let edited = body.replace("38.8%", "39.8%");
+        edited.replacen(ARIAL_LATIN, latin, 1)
+    }
+
+    #[test]
+    fn a_text_edit_keeps_the_latin_font_element_whole() {
+        let xml = rebuilt_paragraph(FONT_PARAGRAPH.as_bytes(), &font_runs("Arial"));
+        assert!(xml.ends_with(&edited_font_body(ARIAL_LATIN)), "{xml}");
+    }
+
+    #[test]
+    fn a_new_font_family_drops_the_old_face_metrics_in_place() {
+        let xml = rebuilt_paragraph(FONT_PARAGRAPH.as_bytes(), &font_runs("Calibri"));
+        let calibri = edited_font_body(r#"<a:latin typeface="Calibri"/>"#);
+        assert!(xml.ends_with(&calibri), "{xml}");
+    }
+
+    const FILL_PARAGRAPH: &str = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent6"><a:lumMod val="75000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr><a:t> them</a:t></a:r></a:p>"#;
+
+    /// Each run's colour flattened to hex, as the editor snapshot hands it back.
+    fn hex_runs() -> Vec<(&'static str, RunProperties)> {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let path = "ppt/slides/slide1.xml";
+        let root = parse_xml(FILL_PARAGRAPH.as_bytes(), path, &mut budget).unwrap();
+        root.child_elements()
+            .zip(["among", " then"])
+            .map(|(run, text)| {
+                let color = parse_run_properties(run.child("rPr")).color;
+                let hex = resolve_color_value_to_hex_with_theme(color.as_ref(), None);
+                let color = ColorValue {
+                    rgb: hex.map(|hex| hex[1..].to_owned()),
+                    ..ColorValue::default()
+                };
+                let properties = RunProperties {
+                    color: Some(color),
+                    ..RunProperties::default()
+                };
+                (text, properties)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_text_edit_keeps_theme_colours_and_their_transforms() {
+        let xml = rebuilt_paragraph(FILL_PARAGRAPH.as_bytes(), &hex_runs());
+        let (_, body) = FILL_PARAGRAPH.split_once('>').unwrap();
+        let edited = body.replace("amongst", "among").replace(" them", " then");
+        assert!(xml.ends_with(&edited), "{xml}");
+    }
+
+    #[test]
+    fn an_explicit_colour_edit_replaces_the_theme_fill() {
+        let mut runs = hex_runs();
+        runs[0].1.color = Some(ColorValue {
+            rgb: Some("FF0000".to_owned()),
+            ..ColorValue::default()
+        });
+        let xml = rebuilt_paragraph(FILL_PARAGRAPH.as_bytes(), &runs);
+        let red = r#"<a:rPr lang="en-US"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:rPr><a:t>among</a:t>"#;
+        assert!(xml.contains(red), "{xml}");
+        assert!(xml.contains(r#"<a:schemeClr val="tx1"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn an_alpha_change_on_an_unchanged_theme_colour_is_written() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"><a:alpha val="50000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        theme_color: Some("text1".to_owned()),
+                        alpha: Some(1.0),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(r#"<a:schemeClr val="tx1"><a:alpha val="100000"/></a:schemeClr>"#),
+            "{xml}"
+        );
+        assert!(!xml.contains(r#"val="50000""#), "{xml}");
+    }
+
+    #[test]
+    fn switching_theme_slots_with_the_same_rgb_writes_the_new_slot() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        theme_color: Some("dk1".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(xml.contains(r#"<a:schemeClr val="dk1"/>"#), "{xml}");
+        assert!(!xml.contains(r#"<a:schemeClr val="tx1"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn an_unchanged_transformed_theme_colour_survives_byte_identical() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill></a:rPr><a:t>amongst</a:t></a:r></a:p>"#,
+            &[(
+                "among",
+                RunProperties {
+                    color: Some(ColorValue {
+                        rgb: Some("8FAADC".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill>"#
+            ),
+            "{xml}"
+        );
+        assert!(!xml.contains("8FAADC"), "{xml}");
+    }
+
+    #[test]
+    fn an_edit_spanning_a_styled_line_break_keeps_the_break_properties() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"/><a:t>First line</a:t></a:r><a:br><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/><a:ea typeface="MS Gothic"/><a:cs typeface="Arial"/></a:rPr></a:br><a:r><a:rPr lang="en-US"/><a:t>Second line</a:t></a:r></a:p>"#,
+            &[(
+                "First line changed\nSecond line changed",
+                RunProperties {
+                    color: Some(ColorValue {
+                        rgb: Some("8FAADC".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    font_family: Some("Arial".to_owned()),
+                    ..RunProperties::default()
+                },
+            )],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:br><a:rPr lang="en-US"><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill><a:latin charset="0" panose="020B0604020202020204" pitchFamily="34" typeface="Arial"/><a:ea typeface="MS Gothic"/><a:cs typeface="Arial"/></a:rPr></a:br>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn an_inserted_line_break_does_not_inherit_a_neighbouring_run_properties() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:r><a:rPr lang="en-US" strike="sngStrike"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:hlinkClick r:id="rId2"/></a:rPr><a:t>HelloWorld</a:t></a:r></a:p>"#,
+            &[("Hello\nWorld", RunProperties::default())],
+        );
+        assert!(xml.contains("<a:br/>"), "{xml}");
     }
 
     #[test]
@@ -3985,6 +4422,7 @@ mod tests {
                     ..ShapePatch::default()
                 }),
             }],
+            None,
             None,
             part,
             ShapeElements::WithConnectors,

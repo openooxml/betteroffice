@@ -3,9 +3,9 @@ import type { PeerlessSelectionIntent } from './selection';
 
 /** @internal Relative mutation payloads omit main-side selection positions. */
 export type PeerlessTextIntent = {
-  [K in 'insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak']:
+  [K in 'insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak' | 'lineBreak']:
     { kind: K; payload: DocxCommandPayloads[K] };
-}['insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak'];
+}['insertText' | 'replaceSelection' | 'deleteBackward' | 'deleteForward' | 'paragraphBreak' | 'lineBreak'];
 
 /** @internal */
 export type PeerlessPartIntent = { [K in 'openPart' | 'ensurePart' | 'removePart']: { kind: K; payload: DocxCommandPayloads[K] } }['openPart' | 'ensurePart' | 'removePart'];
@@ -19,10 +19,15 @@ export type PeerlessPropertyIntent = { [K in PeerlessPropertyKind]: { kind: K; p
 type PeerlessControlKind = 'setContentControlValue' | 'addRepeatingItem' | 'removeRepeatingItem';
 export type PeerlessControlIntent = { [K in PeerlessControlKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessControlKind];
 
-export type PeerlessInputIntent = PeerlessProposalIntent | { [K in 'applyEdits' | 'addComment']: { kind: K; payload: DocxCommandPayloads[K] } }['applyEdits' | 'addComment'] | PeerlessControlIntent | PeerlessRulerIntent | PeerlessPropertyIntent | PeerlessPartIntent | PeerlessSelectionIntent | PeerlessTextIntent | { kind: 'undo' | 'redo'; payload: Record<string, never> } | { kind: 'replaceMatches'; payload: DocxCommandPayloads['replaceMatches'] } | { [K in 'setRenderEnvironment' | 'setFontEnvironment']: { kind: K; payload: DocxCommandPayloads[K] } }['setRenderEnvironment' | 'setFontEnvironment'] | { [K in 'insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak' | 'pasteFragment']: { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> } }['insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak' | 'pasteFragment'];
+type PeerlessTableKind = 'insertTableRow' | 'insertTableColumn' | 'deleteTableRow' | 'deleteTableColumn' | 'deleteTable' | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading' | 'setTableBorders' | 'setTableProperties';
+export type PeerlessTableIntent = { [K in PeerlessTableKind]: { kind: K; payload: K extends 'setTableProperties' ? DocxCommandPayloads[K] : Omit<DocxCommandPayloads[K], 'selection'> } }[PeerlessTableKind];
+
+export type PeerlessInputIntent = PeerlessProposalIntent | PeerlessRevisionIntent | { [K in 'applyEdits' | 'addComment' | 'updateComment' | 'removeComment']: { kind: K; payload: DocxCommandPayloads[K] } }['applyEdits' | 'addComment' | 'updateComment' | 'removeComment'] | PeerlessControlIntent | PeerlessRulerIntent | PeerlessPropertyIntent | PeerlessPartIntent | PeerlessSelectionIntent | PeerlessTextIntent | PeerlessTableIntent | { kind: 'undo' | 'redo'; payload: Record<string, never> } | { kind: 'replaceMatches'; payload: DocxCommandPayloads['replaceMatches'] } | { [K in 'setRenderEnvironment' | 'setFontEnvironment']: { kind: K; payload: DocxCommandPayloads[K] } }['setRenderEnvironment' | 'setFontEnvironment'] | { [K in 'insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak' | 'pasteFragment']: { kind: K; payload: Omit<DocxCommandPayloads[K], 'selection'> } }['insertImage' | 'insertTable' | 'insertPageBreak' | 'insertSectionBreak' | 'pasteFragment'];
 
 type PeerlessProposalKind = 'propose' | 'setProposalStates' | 'withdrawProposals';
 export type PeerlessProposalIntent = { [K in PeerlessProposalKind]: { kind: K; payload: DocxCommandPayloads[K] } }[PeerlessProposalKind];
+/** Without a revisionId the decision targets the change at the selection its predecessor leaves. */
+export type PeerlessRevisionIntent = { [K in 'acceptRevision' | 'rejectRevision']: { kind: K; payload: Partial<Omit<DocxCommandPayloads[K], 'expectVersion'>> } }['acceptRevision' | 'rejectRevision'];
 
 const implicitVerticalGoals = new WeakSet<PeerlessInputIntent>();
 
@@ -111,7 +116,7 @@ export function normalizeInputEvent(
         unit: meta ? 'line' : 'word', direction: backward ? 'backward' : 'forward', extend: true,
       } }, deletion] : [deletion], ctrl || alt || meta);
     }
-    if (key === 'Enter' && !ctrl && !meta && !alt) return result([{ kind: 'paragraphBreak', payload: {} }], true);
+    if (key === 'Enter' && !ctrl && !meta && !alt) return result([{ kind: extend ? 'lineBreak' : 'paragraphBreak', payload: {} }], true);
     return result([]);
   }
   const text = event.source === 'beforeinput' ? event.data : event.value;
@@ -124,7 +129,9 @@ export function normalizeInputEvent(
       return result(pasteIntents(text ?? ''), true);
     case 'insertReplacementText':
       return text ? result([{ kind: 'replaceSelection', payload: { text } }], true) : result([]);
-    case 'insertParagraph': case 'insertLineBreak':
+    case 'insertLineBreak':
+      return result([{ kind: 'lineBreak', payload: {} }], true);
+    case 'insertParagraph':
       return result([{ kind: 'paragraphBreak', payload: {} }], true);
     case 'deleteContentBackward':
       return result([{ kind: 'deleteBackward', payload: {} }]);

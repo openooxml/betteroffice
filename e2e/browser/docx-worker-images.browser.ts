@@ -1,4 +1,4 @@
-import { expect, test, type Page, type TestInfo } from 'playwright/test';
+import { expect, test, type Locator, type Page, type TestInfo } from 'playwright/test';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 
@@ -31,18 +31,35 @@ async function savedXml(page: Page, info: TestInfo, part = 'word/document.xml') 
   return zip.file(part)!.async('string');
 }
 
+async function imageToolbarTarget(inline: Locator, more: Locator): Promise<'inline' | 'more'> {
+  await expect(inline).toBeAttached();
+  await expect(inline).not.toHaveAttribute('aria-disabled', 'true');
+  let target: 'inline' | 'more' | null = null;
+  await expect.poll(async () => {
+    if ((await inline.getAttribute('aria-disabled')) === 'true') return (target = null);
+    if (await inline.isVisible()) return (target = 'inline');
+    if (await more.isVisible()) return (target = 'more');
+    return (target = null);
+  }).not.toBeNull();
+  return target!;
+}
+
 async function imageDialog(page: Page) {
   const input = await open(page);
   await input.press('Shift+ArrowRight');
   const inline = page.getByRole('button', { name: 'Image properties', exact: true });
   const more = page.getByRole('button', { name: 'More actions', exact: true });
-  await expect.poll(async () => await inline.isVisible() || await more.isVisible()).toBe(true);
-  if (await inline.isVisible()) {
-    await expect(inline).not.toHaveAttribute('aria-disabled', 'true');
+  const target = await imageToolbarTarget(inline, more);
+  if (target === 'inline') {
+    await expect(inline).toBeVisible();
+    await expect(inline).toBeEnabled();
     await inline.click();
   } else {
+    await expect(more).toBeVisible();
+    await expect(more).toBeEnabled();
     await more.click();
     const item = page.getByRole('menuitem', { name: 'Image properties', exact: true });
+    await expect(item).toBeVisible();
     await expect(item).not.toHaveAttribute('aria-disabled', 'true');
     await item.click();
   }
@@ -70,4 +87,82 @@ test('worker image position applies to the same captured image', async ({ page }
   const xml = await savedXml(page, info);
   const kinds = await page.evaluate(xml => [...new DOMParser().parseFromString(xml, 'application/xml').getElementsByTagNameNS('*', 'drawing')].map(node => node.firstElementChild?.localName), xml);
   expect(kinds).toEqual(['anchor', 'inline']);
+});
+
+async function selectImageWrap(page: Page, optionTestId: string, label: string) {
+  const input = page.locator('.paged-editor__peerless-input');
+  const inline = page.getByTestId('toolbar-image-wrap');
+  const more = page.getByRole('button', { name: 'More actions', exact: true });
+  const target = await imageToolbarTarget(inline, more);
+  if (target === 'inline') {
+    await expect(inline).toBeVisible();
+    await expect(inline).toBeEnabled();
+    await inline.click();
+    const option = page.getByTestId(`toolbar-image-wrap-${optionTestId}`);
+    await expect(option).toBeVisible();
+    await input.blur();
+    await option.click();
+  } else {
+    await expect(more).toBeVisible();
+    await expect(more).toBeEnabled();
+    await more.click();
+    const submenu = page.getByRole('menuitem', { name: 'Text wrapping', exact: true });
+    await expect(submenu).toBeVisible();
+    await expect(submenu).not.toHaveAttribute('aria-disabled', 'true');
+    await submenu.hover();
+    const option = page.getByRole('menuitemradio', { name: label, exact: true });
+    await expect(option).toBeVisible();
+    await input.blur();
+    await option.click();
+  }
+  await expect(input).toBeFocused();
+  await expect(inline).toHaveAttribute('aria-label', `Wrap: ${label}`);
+  await expect(inline).not.toHaveAttribute('aria-disabled', 'true');
+}
+
+async function selectImageTransform(page: Page, action: string, label: string) {
+  const input = page.locator('.paged-editor__peerless-input');
+  const inline = page.getByTestId('toolbar-image-transform');
+  const more = page.getByRole('button', { name: 'More actions', exact: true });
+  const target = await imageToolbarTarget(inline, more);
+  if (target === 'inline') {
+    await expect(inline).toBeVisible();
+    await expect(inline).toBeEnabled();
+    await inline.click();
+    const option = page.getByTestId(`toolbar-image-transform-${action}`);
+    await expect(option).toBeVisible();
+    await input.blur();
+    await option.click();
+  } else {
+    await expect(more).toBeVisible();
+    await expect(more).toBeEnabled();
+    await more.click();
+    const submenu = page.getByRole('menuitem', { name: 'Transform', exact: true });
+    await expect(submenu).toBeVisible();
+    await expect(submenu).not.toHaveAttribute('aria-disabled', 'true');
+    await submenu.hover();
+    const option = page.getByRole('menuitem', { name: label, exact: true });
+    await expect(option).toBeVisible();
+    await input.blur();
+    await option.click();
+  }
+  await expect(input).toBeFocused();
+  await expect(inline).toBeAttached();
+  await expect(inline).not.toHaveAttribute('aria-disabled', 'true');
+}
+
+test('worker image wrap and transform round-trip through saved OOXML', async ({ page }, info) => {
+  const input = await open(page);
+  await input.press('Shift+ArrowRight');
+  await selectImageWrap(page, 'wrapRight', 'Square Left');
+  await selectImageWrap(page, 'behind', 'Behind Text');
+  await selectImageTransform(page, 'rotateCW', 'Rotate clockwise');
+  await selectImageTransform(page, 'flipH', 'Flip horizontal');
+  const xml = await savedXml(page, info);
+  expect(xml).toContain('<wp:anchor');
+  expect(xml).toContain('behindDoc="1"');
+  expect(xml).toContain('<wp:wrapNone/>');
+  expect(xml).toContain('<a:xfrm');
+  expect(xml).toContain('rot="5400000"');
+  expect(xml).toContain('flipH="1"');
 });

@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import type { DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries } from '../layout/render/displayListQueries';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
-import type { DocxCommandFrame, ResidentCommandHooks, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandFrame, DocxFrameReservations, ResidentCommandHooks, ResidentCommandInitRequest } from './residentCommandProtocol';
+import { readCellSelection } from './residentCommandTableSelection';
+import { readResidentCellSelectionRects } from './residentObjectGeometry';
 
 function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: boolean; queryEngine?: RustDisplayListQueryEngine } = {}) {
   const source = readFileSync(`${import.meta.dir}/residentEngineWorker.ts`, 'utf8');
@@ -41,7 +43,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     commandDisplayWindow: [0, 3] as [number, number], layoutDirty: false,
     pendingOffscreenPageIds: new Set<string>(), activeOffscreenPageIds: new Set<string>(),
     selectionQueries: undefined as { frameEpoch: number; queries: ReturnType<typeof createDisplayListQueries> } | undefined,
-    pendingUpdates: [], glyphCache: {},
+    pendingUpdates: [], glyphCache: {}, laidOutReservations: undefined as DocxFrameReservations | undefined,
   };
   const advance = (expected: number, changed: number[] = []) => {
     delta = { full: expected === 0, baseFrameEpoch: expected, frameEpoch: ++revision, pageCount: pages.length,
@@ -80,6 +82,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       for (const index of indices) { pages[index]!.page.unbuilt = true; pages[index]!.page.primitives = []; }
       return advance(expected, indices);
     },
+    cellSelection: () => null,
     residentCaretSnapshot: () => ({ frameEpoch: revision, caretRect: options.cell || pages[caretPage]!.page.unbuilt ? null
       : { pageId: String(caretPage + 1), pageIndex: caretPage, x: 0, y: 0, height: 20 } }),
   };
@@ -109,6 +112,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
       state.retainedFrame.frameEpoch = revision;
       return { bytes, delta, caret: engine.residentCaretSnapshot() };
     },
+    readCellSelection, readResidentCellSelectionRects,
     projectCommandEchoContext: () => undefined,
     commandEchoGlyphs: () => ({ provider: () => undefined, unsent: () => [], sent() {} }),
     readResidentRangeHighlights: async () => ({ rects: [[]] }),
@@ -162,6 +166,13 @@ test('viewport_request_builds_entering_and_releases_distant_pages', async () => 
   expect(worker.windows.at(-1)).toEqual([0, 3]);
   expect(selection.payload.stagedPresentation?.pages.map(({ page }) => page.pageIndex)).toContain(18);
   expect(worker.released.flat()).not.toContain(0);
+});
+
+test('command_frames_name_the_reservation_set_their_layout_laid_out', async () => {
+  const worker = commandFrames();
+  expect((await worker.command(0, true)).payload).not.toHaveProperty('reservations');
+  worker.state.laidOutReservations = { version: '3', key: 'k1' };
+  expect((await worker.command(0, true)).payload.reservations).toEqual({ version: '3', key: 'k1' });
 });
 
 test('typing_across_page_boundary_off_window_builds_and_stages_model_caret', async () => {

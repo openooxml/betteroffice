@@ -617,7 +617,7 @@ impl Workbook {
         workbook.authority = authority;
         if checkpoint.collaborative {
             workbook.mode = WorkbookMode::Collaborative {
-                structure: workbook.authority.structure().map_err(authority_error)?,
+                structure: Box::new(workbook.authority.structure().map_err(authority_error)?),
             };
         } else if !pending_remote_updates.is_empty() {
             return Err(invalid("Standalone recovery has remote updates"));
@@ -632,6 +632,7 @@ impl Workbook {
             workbook.pending_remote_updates.push(update.to_vec());
         }
         workbook.preserved = preserved;
+        workbook.invalidated_text_sources = None;
         workbook.edited_since_open = header.edited_since_open;
         workbook.recalculated_since_open = header.recalculated_since_open;
         workbook.moved_references_since_open = header.moved_references_since_open;

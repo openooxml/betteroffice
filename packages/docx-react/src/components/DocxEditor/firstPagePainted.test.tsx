@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -191,7 +192,7 @@ test('each worker document reports its first page painted once, however often it
   const ref = createRef<Editor>();
   const painted: string[] = [];
   const editor = (name: string, buffer: ArrayBuffer) => (
-    <DocxEditor ref={ref} documentBuffer={buffer} onFirstPagePainted={() => painted.push(name)} />
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={buffer} onFirstPagePainted={() => painted.push(name)} />
   );
   const view = render(editor('pages', await pagedDocx(2)));
   await waitFor(() => expect(painted).toEqual(['pages']), { timeout: 20_000 });
@@ -234,7 +235,7 @@ describe('DocxEditor first page painted (worker engine)', () => {
     let painted = 0;
     try {
       const view = render(
-        <DocxEditor
+        <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
           ref={ref}
           experimentalWorkerOpen
           documentBuffer={await pagedDocx(2)}
@@ -304,7 +305,7 @@ describe('DocxEditor first page preview (worker engine)', () => {
     });
     try {
       render(
-        <DocxEditor
+        <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
           ref={ref}
           previewFirstPage
           experimentalWorkerOpen

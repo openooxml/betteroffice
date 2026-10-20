@@ -20,6 +20,10 @@ const SYNC_UPDATE = 2;
 
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
+const MAX_STATE_VECTOR_VAR_UINT_BYTES = 10;
+const DOCUMENT_FINGERPRINT_TAG = new TextEncoder().encode(
+  '\0betteroffice-document-fingerprint-v1\0'
+);
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -260,6 +264,82 @@ export function decodeAwarenessUpdate(
   }
   if (!decoder.done) throw new ProtocolError('Awareness update has trailing bytes');
   return entries;
+}
+
+export function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
+  const suffixLength = DOCUMENT_FINGERPRINT_TAG.byteLength + 32;
+  const tagOffset = payload.byteLength - suffixLength;
+  if (tagOffset < 0) return payload;
+  for (let index = 0; index < DOCUMENT_FINGERPRINT_TAG.byteLength; index += 1) {
+    if (payload[tagOffset + index] !== DOCUMENT_FINGERPRINT_TAG[index]) return payload;
+  }
+  return payload.subarray(0, tagOffset);
+}
+
+export const OPEN_SYNC_CLIENT = Number.MAX_SAFE_INTEGER - 1;
+const OPEN_SYNC_ENTRY = BigInt(OPEN_SYNC_CLIENT);
+const MAX_STATE_VECTOR_ENTRIES = 65_536;
+
+interface StateVectorEntry {
+  client: bigint;
+  clock: bigint;
+  start: number;
+  end: number;
+}
+
+function stateVectorEntries(body: Uint8Array): { header: number; entries: StateVectorEntry[] } | undefined {
+  let offset = 0;
+  const read = (): bigint | undefined => {
+    let value = 0n;
+    for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES && offset < body.byteLength; index += 1) {
+      const byte = body[offset++];
+      value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+      if (byte < 0x80) return value;
+    }
+    return undefined;
+  };
+  const count = read();
+  if (count === undefined) return undefined;
+  const header = offset;
+  const entries: StateVectorEntry[] = [];
+  for (let left = count; left > 0n; left -= 1n) {
+    const start = offset;
+    const client = read();
+    const clock = read();
+    if (client === undefined || clock === undefined) return undefined;
+    entries.push({ client, clock, start, end: offset });
+  }
+  return offset === body.byteLength ? { header, entries } : undefined;
+}
+
+/** `vector` marked as an open request, keeping any document fingerprint; unchanged when undecodable, undefined when the mark would cross the native entry limit. */
+export function withOpenSyncRequest(vector: Uint8Array): Uint8Array | undefined {
+  const body = withoutDocumentFingerprint(vector);
+  const decoded = stateVectorEntries(body);
+  if (!decoded) return vector;
+  const { header, entries } = decoded;
+  if (entries.length >= MAX_STATE_VECTOR_ENTRIES || entries.some(({ client }) => client === OPEN_SYNC_ENTRY)) {
+    return undefined;
+  }
+  return encodeFrame([
+    encodeVarUint(entries.length + 1), body.subarray(header),
+    encodeVarUint(OPEN_SYNC_CLIENT), encodeVarUint(0), vector.subarray(body.byteLength),
+  ], Number.MAX_SAFE_INTEGER);
+}
+
+/** The state vector of a sync step 1 without its open markers, and whether it carried one. */
+export function parseSyncRequest(vector: Uint8Array): { stateVector: Uint8Array; open: boolean } {
+  const body = withoutDocumentFingerprint(vector);
+  const decoded = stateVectorEntries(body);
+  if (!decoded) return { stateVector: vector, open: false };
+  const kept = decoded.entries.filter(({ client, clock }) => client !== OPEN_SYNC_ENTRY || clock !== 0n);
+  if (kept.length === decoded.entries.length) return { stateVector: vector, open: false };
+  return {
+    stateVector: encodeFrame([
+      encodeVarUint(kept.length), ...kept.map(({ start, end }) => body.subarray(start, end)), vector.subarray(body.byteLength),
+    ], Number.MAX_SAFE_INTEGER),
+    open: true,
+  };
 }
 
 export function decodeMessages(

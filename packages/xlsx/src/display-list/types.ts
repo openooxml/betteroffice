@@ -176,6 +176,8 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
   startRow: number;
   startCol: number;
+  hiddenRowSpans?: [number, number][];
+  hiddenColSpans?: [number, number][];
   rowIndices?: number[];
   colIndices?: number[];
   rowOffsets: number[];
@@ -235,4 +237,6 @@ export interface DisplayList {
   grid?: GridMeta;
   hyperlinks?: HyperlinkRegion[];
   charts?: ChartRegion[];
+  /** The cell budget omitted the bottom of this viewport. */
+  truncated?: boolean;
 }

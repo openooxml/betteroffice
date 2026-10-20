@@ -18,6 +18,8 @@ import type { TranslationKey } from '@betteroffice/docx-i18n';
 export interface TableBorderPickerProps {
   onAction: (action: TableAction) => void;
   disabled?: boolean;
+  /** A view-only gridlines toggle under the presets; omitted when the editor has none. */
+  gridlines?: { checked: boolean; onToggle: () => void };
 }
 
 const BORDER_PRESETS: { action: TableAction; icon: string; labelKey: TranslationKey }[] = [
@@ -31,7 +33,7 @@ const BORDER_PRESETS: { action: TableAction; icon: string; labelKey: Translation
   { action: 'borderNone', icon: 'border_clear', labelKey: 'table.borders.none' },
 ];
 
-export function TableBorderPicker({ onAction, disabled = false }: TableBorderPickerProps) {
+export function TableBorderPicker({ onAction, disabled = false, gridlines }: TableBorderPickerProps) {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
@@ -126,6 +128,37 @@ export function TableBorderPicker({ onAction, disabled = false }: TableBorderPic
               </button>
             ))}
           </div>
+          {gridlines && (
+            <button
+              type="button"
+              aria-pressed={gridlines.checked}
+              data-testid="toolbar-table-gridlines"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                width: '100%',
+                marginTop: 4,
+                padding: '6px 4px 2px',
+                border: 'none',
+                borderTop: '1px solid var(--doc-border)',
+                backgroundColor: 'transparent',
+                cursor: 'pointer',
+                color: 'var(--doc-text)',
+                fontSize: 13,
+                whiteSpace: 'nowrap',
+              }}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                gridlines.onToggle();
+                setIsOpen(false);
+              }}
+            >
+              <MaterialSymbol name="grid_on" size={18} />
+              <span style={{ flex: 1, textAlign: 'left' }}>{t('table.viewGridlines')}</span>
+              {gridlines.checked && <MaterialSymbol name="check" size={16} />}
+            </button>
+          )}
         </div>
       )}
     </div>

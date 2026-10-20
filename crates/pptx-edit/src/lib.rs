@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
-    ClientID, Doc, OffsetKind, Options, ReadTxn, StateVector, StickyIndex, Subscription, Transact,
-    Update, WriteTxn,
+    ClientID, Doc, IdSet, OffsetKind, Options, ReadTxn, StateVector, StickyIndex, Subscription,
+    Transact, Update, WriteTxn,
 };
 
 mod batch;
@@ -25,6 +25,7 @@ pub mod paragraph;
 mod peer;
 mod proposal_diff;
 mod proposals;
+mod remote_cleanup;
 mod replay;
 mod save;
 mod search;
@@ -36,12 +37,13 @@ mod target;
 mod undo;
 
 pub use batch::{
-    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditHistory, EditOutcome,
-    EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep, EditTarget,
-    EditValidation, FillGuard, MAX_REQUEST_BYTES, OutlineGuard, RectGuard, SlideTarget, TargetEdge,
-    TextGuard, ValidationOutcome, outcome_json, oversized_request,
+    BackgroundGuard, DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditHistory,
+    EditOutcome, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep,
+    EditTarget, EditValidation, FillGuard, MAX_REQUEST_BYTES, OutlineGuard, RectGuard, SlideTarget,
+    TargetEdge, TextGuard, ValidationOutcome, outcome_json, oversized_request,
 };
 pub use model::*;
+pub use ooxml_drawingml::{ColorValue, GradientFill, GradientStop, ShapeFill};
 #[doc(hidden)]
 pub use peer::{PeerError, PeerFont};
 pub use proposal_diff::*;
@@ -98,6 +100,7 @@ pub struct DeckSession {
     replay_state: RefCell<replay::ReplayState>,
     _epoch_observer: UpdateSubscription,
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
+    remote_deletions: remote_cleanup::RemoteDeletions,
 }
 
 fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
@@ -155,7 +158,7 @@ impl DeckSession {
         let baseline = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        let doc = doc_with_client_id(client_id);
+        let doc = session_doc(client_id);
         hydrate_doc(&doc, &baseline)?;
         deck::validate_doc(&doc)?;
         Self::assemble(
@@ -174,9 +177,10 @@ impl DeckSession {
                 "update exceeds {MAX_UPDATE_BYTES} bytes"
             )));
         }
-        let doc = doc_with_client_id(client_id);
+        let doc = session_doc(client_id);
         hydrate_doc(&doc, update)?;
         deck::migrate_doc(&doc)?;
+        collect_garbage(&doc, None);
         let (package, _snapshot) = deck::validate_doc(&doc)?;
         Self::assemble(
             doc,
@@ -209,6 +213,7 @@ impl DeckSession {
             replay_state: Default::default(),
             _epoch_observer,
             state_update: RefCell::new(None),
+            remote_deletions: Default::default(),
         })
     }
 
@@ -263,6 +268,7 @@ impl DeckSession {
         story::import_source_numbering_restarts(&self.doc, import.source)?;
         outline_gradients::import_source(&self, &mut import)?;
         import.sync_package_json(&self.doc, self.package())?;
+        collect_garbage(&self.doc, None);
         Ok(Self {
             package: Arc::new(package),
             baseline_epoch: self.epoch(),
@@ -343,33 +349,44 @@ impl DeckSession {
         let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
         let staged = doc_with_client_id(self.client_id);
         hydrate_doc(&staged, &self.encode_state_as_update_v1())?;
-        staged
-            .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        let carried = remote_cleanup::apply_staged_update(
+            &mut staged.transact_mut_with(REMOTE_ORIGIN),
+            incoming,
+        )
+        .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         let (_, snapshot) = deck::validate_doc(&staged)?;
 
         let diff = staged
             .transact()
             .encode_state_as_update_v1(&self.doc.transact().state_vector());
         let diff = decode_update_v1(&diff).map_err(EditError::InvalidUpdate)?;
-        self.doc
-            .transact_mut_with(REMOTE_ORIGIN)
+        let mut integration = self
+            .remote_deletions
+            .integrate(self.doc.transact_mut_with(REMOTE_ORIGIN));
+        integration.carry(&carried);
+        integration
             .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        drop(integration);
+        if !self.undo.borrow().ever_kept() {
+            collect_garbage(&self.doc, Some(&carried));
+        }
         Ok(snapshot)
     }
 
+    /// A remote update whose integration also deleted formatting it did not carry is followed by
+    /// a local delete-only update with those deletions, for peers.
     pub fn observe_update_v1<F>(&self, callback: F) -> EditResult<Subscription>
     where
         F: Fn(UpdateEvent) + 'static,
     {
+        let remote_deletions = self.remote_deletions.clone();
         self.doc
             .observe_update_v1(move |txn, event| {
-                let origin = if txn
+                let remote = txn
                     .origin()
-                    .is_some_and(|origin| origin.as_ref() == REMOTE_ORIGIN.as_bytes())
-                {
+                    .is_some_and(|origin| origin.as_ref() == REMOTE_ORIGIN.as_bytes());
+                let origin = if remote {
                     UpdateOrigin::Remote
                 } else {
                     UpdateOrigin::Local
@@ -379,6 +396,16 @@ impl DeckSession {
                     origin,
                 };
                 let _ = catch_unwind(AssertUnwindSafe(|| callback(update)));
+                if !remote {
+                    return;
+                }
+                if let Some(update) = remote_deletions.residual_update_v1(txn) {
+                    let update = UpdateEvent {
+                        update,
+                        origin: UpdateOrigin::Local,
+                    };
+                    let _ = catch_unwind(AssertUnwindSafe(|| callback(update)));
+                }
             })
             .map_err(|error| EditError::Observer(error.to_string()))
     }
@@ -389,6 +416,11 @@ impl DeckSession {
 
     pub fn redo(&self) -> bool {
         self.undo.borrow_mut().redo()
+    }
+
+    /// Clears local undo and redo history.
+    pub fn clear_undo_history(&self) {
+        self.undo.borrow_mut().clear();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -433,9 +465,24 @@ impl DeckSession {
 }
 
 pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
+    Doc::with_options(doc_options(client_id))
+}
+
+/// Defers Yrs GC while undo items or keep flags left by replay reference deleted parents.
+pub(crate) fn session_doc(client_id: u64) -> Doc {
+    let mut options = doc_options(client_id);
+    options.skip_gc = true;
+    Doc::with_options(options)
+}
+
+fn collect_garbage(doc: &Doc, scope: Option<&IdSet>) {
+    doc.transact_mut_with(HYDRATE_ORIGIN).gc(scope);
+}
+
+fn doc_options(client_id: u64) -> Options {
     let mut options = Options::with_client_id(ClientID::new(client_id));
     options.offset_kind = OffsetKind::Utf16;
-    Doc::with_options(options)
+    options
 }
 
 fn validate_client_id(client_id: u64) -> EditResult<()> {

@@ -247,6 +247,7 @@ function worker() {
     failPresent: null as number | null,
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
+      initializeComments() {},
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -1704,7 +1705,7 @@ test('d0_command_input_renews_scheduler_budget_and_idle_hold', async () => {
     let now = 2000;
     w.harness.now = () => now;
     const kinds = ['insertText', 'select', 'replaceSelection', 'deleteBackward', 'deleteForward',
-      'paragraphBreak', 'toggleMark', 'formatRange', 'clearFormatting', 'setParagraphAttrs', 'applyParagraphStyle'];
+      'paragraphBreak', 'lineBreak', 'toggleMark', 'formatRange', 'clearFormatting', 'setParagraphAttrs', 'applyParagraphStyle'];
     for (const [index, kind] of kinds.entries()) {
       expect(w.harness.scheduler!.budget()).toBe(24);
       await client.edit({ ...commandEnvelope(index + 1), kind });
@@ -4379,6 +4380,46 @@ describe('worker proposals during sliced completion', () => {
       return { fontRequirements: reply.proposal.fontRequirements, preview: proposalRevisionPreview(result.snapshot) };
     };
   }
+
+  test('viewer reservation carried sets preserve one owner and remove absent owners', async () => {
+    const { w, engine, snapshot } = await proposalWorker();
+    try {
+      let epoch = w.harness.delta!.frameEpoch;
+      let frame = applyFrameDeltaOwned(null, w.harness.delta!);
+      let revision = snapshot.layoutRevision;
+      const oldVersion = engine.proposalEngine.version();
+      const item = (id: string, version: string, width: number) => ({ id, kind: 'inline', width, height: 10,
+        anchor: { kind: 'range', version, range: { story: 'body', view: 'accepted',
+          start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 0 },
+        } },
+      });
+      const sync = async (sets: unknown[]) => {
+        const reply = await w.send({ type: 'sync', expectedFrameEpoch: epoch, paintCaret: false,
+          extras: '', layoutExtras: '{}', snapshot: { ...snapshot, fonts: [], layoutRevision: ++revision,
+            layoutInput: JSON.stringify({ ...JSON.parse(layoutInput), renderEnv: {
+              reservationSets: { version: engine.proposalEngine.version(), sets },
+            } }),
+          },
+        });
+        if (!reply.ok || !reply.frame) throw new Error('expected viewer frame');
+        epoch = reply.caret!.frameEpoch;
+        frame = applyFrameDeltaOwned(frame, decodeFrameDelta(reply.frame));
+        return frame.displayList.pages.flatMap((page) => page.reservations ?? []);
+      };
+      expect(await sync([
+        { owner: 'a', items: [item('a', oldVersion, 35)] },
+        { owner: 'removed', items: [item('removed', oldVersion, 20)] },
+      ])).toEqual(expect.arrayContaining([expect.objectContaining({ owner: 'a', width: 35 })]));
+      engine.applyRawOps('body', [{ op: 'insert', index: 2, text: 'X' }]);
+      const boxes = await sync([
+        { owner: 'a', version: oldVersion, items: [item('a', oldVersion, 99)] },
+        { owner: 'fresh', items: [item('fresh', engine.proposalEngine.version(), 75)] },
+      ]);
+      expect(boxes.map(({ owner, width }) => ({ owner, width }))).toEqual([
+        { owner: 'a', width: 35 }, { owner: 'fresh', width: 75 },
+      ]);
+    } finally { engine.destroy(); }
+  });
 
   test('meta and JSON replies preserve decisions, frame bytes, sizes and header epochs', async () => {
     const run = async (mode: 'json' | 'meta') => {

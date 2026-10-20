@@ -5,19 +5,28 @@ import JSZip from 'jszip';
 import { XlsxEditor, defineXlsxPlugin, type XlsxAsyncEditorApi, type XlsxPluginContext, type XlsxPluginSelection, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
 import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src/worker/useEditableSessionWorkbook';
 import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
+import {
+  CollaborationProvider,
+  createAsyncCollaborationReplica,
+  type CollaborationTransportEvent,
+  type CollaborationTransport,
+} from '@betteroffice/xlsx/collaboration';
+import { decodeMessages } from '../../../packages/xlsx/src/collaboration/protocol';
 import { workbookSessionInternals, WORKBOOK_REPLAY_MUTATORS } from '../../../packages/xlsx/src/session/replay';
 import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
 import { addPatternSheet } from './xlsx-pattern-workbook';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 const parameters = new URLSearchParams(location.search);
 const variant = parameters.get('variant') ?? 'plain';
-const peerless = parameters.has('asyncApi');
+const collaboration = parameters.has('collaboration');
+const peerless = parameters.has('asyncApi') || collaboration;
 let mainThreadEngines = 0;
 globalThis.__xlsxMainEngineProbe = { capture() { mainThreadEngines += 1; } };
 
@@ -124,6 +133,100 @@ globalThis.Worker = new Proxy(NativeWorker, {
     return worker;
   },
 });
+type PeerlessSlot = {
+  api: XlsxAsyncEditorApi | null;
+  ready: ReturnType<typeof deferred<XlsxAsyncEditorApi>>;
+  synced: ReturnType<typeof deferred<void>>;
+  session: WorkbookSession | null;
+  frame: WorkbookFrame | null;
+  generation: number;
+  context: XlsxPluginContext<null> | null;
+  provider: CollaborationProvider | null;
+};
+
+function createSlot(): PeerlessSlot {
+  return {
+    api: null,
+    ready: deferred<XlsxAsyncEditorApi>(),
+    synced: deferred<void>(),
+    session: null,
+    frame: null,
+    generation: 0,
+    context: null,
+    provider: null,
+  };
+}
+
+const slots: PeerlessSlot[] = Array.from(
+  { length: collaboration ? 2 : 1 },
+  () => createSlot(),
+);
+const eventListeners = [
+  new Set<(event: CollaborationTransportEvent) => void>(),
+  new Set<(event: CollaborationTransportEvent) => void>(),
+];
+const connected = [false, false];
+const applicationQueue: ReturnType<typeof deferred<void>>[][] = [[], []];
+const applicationReceipts: Promise<void>[] = [];
+let deliveryPaused = false;
+const deliveryQueue: { sender: number; data: Uint8Array }[] = [];
+
+function flushDeliveryQueue() {
+  if (deliveryPaused) return;
+  let index = 0;
+  while (index < deliveryQueue.length) {
+    const entry = deliveryQueue[index]!;
+    const target = 1 - entry.sender;
+    if (!connected[target]) {
+      index += 1;
+      continue;
+    }
+    deliveryQueue.splice(index, 1);
+    for (const message of decodeMessages(entry.data)) {
+      if (message.type !== 'update' && message.type !== 'sync-step-2') continue;
+      const receipt = deferred<void>();
+      applicationQueue[target]!.push(receipt);
+      applicationReceipts.push(receipt.promise);
+      void receipt.promise.catch(() => {});
+    }
+    for (const listener of eventListeners[target]!) {
+      listener({ type: 'message', data: entry.data.slice() });
+    }
+  }
+}
+
+function createLoopbackTransport(index: number): CollaborationTransport {
+  const listeners = eventListeners[index]!;
+  return {
+    connect() {
+      connected[index] = true;
+      for (const listener of listeners) listener({ type: 'open' });
+      flushDeliveryQueue();
+    },
+    disconnect() {
+      connected[index] = false;
+      for (const listener of listeners) listener({ type: 'close' });
+    },
+    send(data) {
+      deliveryQueue.push({ sender: index, data: data.slice() });
+      flushDeliveryQueue();
+      return true;
+    },
+    onEvent(callback) {
+      listeners.add(callback);
+      return () => { listeners.delete(callback); };
+    },
+  };
+}
+
+function editorRoot(index = 0): ParentNode {
+  return (
+    rootElement.querySelector<HTMLElement>(
+      `[data-peerless-editor="${index}"]`,
+    ) ?? rootElement
+  );
+}
+
 let generation = 0;
 let activeSession: WorkbookSession | null = null;
 let latestFrame: WorkbookFrame | null = null;
@@ -132,8 +235,13 @@ let heldCellInputs = 0;
 const backendOpen = editableWorkbookSessionBackend.open;
 editableWorkbookSessionBackend.open = async (...args) => {
   const token = ++generation;
+  const slotIndex =
+    args[1]?.clientId !== undefined ? args[1].clientId - 4200 : 0;
+  const slot = slots[slotIndex] ?? slots[0]!;
+  const slotGeneration = ++slot.generation;
   const session = await backendOpen(...args);
   if (token === generation) activeSession = session;
+  if (slotGeneration === slot.generation) slot.session = session;
   sessionGenerations.set(session, token);
   const internal = workbookSessionInternals.get(session)!;
   if (internal.initialVersion) initialVersions.set(token, internal.initialVersion);
@@ -146,6 +254,7 @@ editableWorkbookSessionBackend.open = async (...args) => {
   session.call.frame = async (...input) => {
     const value = await frame(...input);
     if (token === generation) latestFrame = value;
+    if (slotGeneration === slot.generation) slot.frame = value;
     return value;
   };
   const cellInputs = session.call.cellInputs;
@@ -207,26 +316,118 @@ const plugin = defineXlsxPlugin({ id: 'routes', createState: () => null, initial
 let source: Uint8Array;
 let readOnly = false;
 let readyCount = 0;
+
+function renderPeerlessEditor(bytes: Uint8Array, index: number) {
+  const slot = slots[index]!;
+  const slotPlugin = defineXlsxPlugin({
+    id: 'routes',
+    createState: () => null,
+    initialize(value) {
+      slot.context = value;
+      if (index === 0) context = value;
+    },
+  });
+  const transport = collaboration ? createLoopbackTransport(index) : null;
+  return (
+    <XlsxEditor
+      file={bytes}
+      readOnly={readOnly}
+      plugins={[slotPlugin]}
+      pluginGrants={{ routes: { document: 'write', editBatches: true } }}
+      collaboration={
+        collaboration
+          ? {
+              clientId: 4200 + index,
+              onReplica(replica) {
+                slot.provider?.destroy();
+                slot.provider = null;
+                if (!replica) return;
+                const asyncReplica = slot.session!.replica!.async;
+                const tracked = createAsyncCollaborationReplica({
+                  ...asyncReplica,
+                  async applyUpdate(update) {
+                    const receipt = applicationQueue[index]!.shift();
+                    if (!receipt) throw new Error('Remote application has no delivery receipt');
+                    try {
+                      const result = await asyncReplica.applyUpdate(update);
+                      receipt.resolve();
+                      return result;
+                    } catch (error) {
+                      receipt.reject(error);
+                      throw error;
+                    }
+                  },
+                });
+                const provider = new CollaborationProvider(tracked, transport!);
+                slot.provider = provider;
+                provider.onError((error) => errors.push(error.message));
+                const off = provider.onStatus(({ synced }) => {
+                  if (synced) { off(); slot.synced.resolve(); }
+                });
+                provider.connect();
+              },
+            }
+          : undefined
+      }
+      onError={(error) => errors.push(error.message)}
+      onSave={(nextBytes) => {
+        savedBytes = nextBytes;
+      }}
+      onReady={(value) => {
+        readyCount += 1;
+        slot.api = value;
+        slot.ready.resolve(value);
+        if (index === 0) {
+          peerlessApi = value;
+          peerlessCurrent.resolve(value);
+        }
+      }}
+    />
+  );
+}
+
 const open = (bytes: Uint8Array) => {
   source = bytes;
-  const editor = peerless ? <XlsxEditor file={bytes} readOnly={readOnly} plugins={[plugin]}
-    pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
-    onSave={(bytes) => { savedBytes = bytes; }} onReady={(value) => {
-      readyCount += 1;
-      peerlessApi = value; peerlessCurrent.resolve(value);
-    }} /> : <XlsxEditor legacySyncApi file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
-    pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
-    onReady={(value) => {
-      readyCount += 1;
-      if (!('whenHydrated' in value)) throw new Error('Expected worker editor session');
-      api = value; current.resolve(value);
-    }} />;
+  const editor = collaboration ? (
+    <div style={{ display: 'flex', width: '100%', height: '100%' }}>
+      {slots.map((_, index) => (
+        <div
+          key={index}
+          data-editor
+          data-peerless-editor={index}
+          style={{ width: '50%', height: '100%', minWidth: 0 }}
+        >
+          {renderPeerlessEditor(bytes, index)}
+        </div>
+      ))}
+    </div>
+  ) : peerless ? (
+    renderPeerlessEditor(bytes, 0)
+  ) : (
+    <XlsxEditor legacySyncApi file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
+      pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
+      onReady={(value) => {
+        readyCount += 1;
+        if (!('whenHydrated' in value)) throw new Error('Expected worker editor session');
+        api = value; current.resolve(value);
+      }} />
+  );
   root.render(parameters.has('strict') ? <StrictMode>{editor}</StrictMode> : editor);
 };
 const ready = (async () => {
   await document.fonts.ready;
   open(await workbook());
-  const editor = peerless ? await peerlessCurrent.promise : await current.promise;
+  if (peerless) {
+    const editors = await Promise.all(slots.map((slot) => slot.ready.promise));
+    if (!holdingHydration) {
+      await Promise.all(editors.map((editor) => editor.whenHydrated()));
+    }
+    if (collaboration) {
+      await Promise.all(slots.map((slot) => slot.synced.promise));
+    }
+    return;
+  }
+  const editor = await current.promise;
   if (!holdingHydration) await editor.whenHydrated();
 })();
 
@@ -234,6 +435,9 @@ async function reopenPeerless(bytes: Uint8Array) {
   peerlessApi = null;
   peerlessCurrent = deferred<XlsxAsyncEditorApi>();
   context = null;
+  slots[0]!.api = null;
+  slots[0]!.ready = deferred<XlsxAsyncEditorApi>();
+  slots[0]!.context = null;
   open(bytes);
   const editor = await peerlessCurrent.promise;
   await editor.whenHydrated();
@@ -245,23 +449,28 @@ window.__xlsxWorkerEditor = {
   mainThreadEngines: () => mainThreadEngines,
   peerless: peerless ? {
     get editor() { return peerlessApi!; },
-    async cells(sheet, range) {
-      const result = await activeSession!.call.cellInputs(sheet, range);
+    editorAt(index = 0) { return slots[index]!.api!; },
+    async cells(sheet, range, index = 0) {
+      const session = slots[index]?.session ?? activeSession!;
+      const result = await session.call.cellInputs(sheet, range);
       return result.cells.map((row) => row.map((cell) => cell.input));
     },
-    async selection() {
-      if (!context) throw new Error('Plugin is not active');
+    async selection(index = 0) {
+      const target = slots[index]?.context ?? context;
+      if (!target) throw new Error('Plugin is not active');
       let selected: XlsxPluginSelection = null;
-      await context.run((current) => { selected = structuredClone(current.snapshot.selection); });
+      await target.run((current) => { selected = structuredClone(current.snapshot.selection); });
       return selected;
     },
-    failure: () => peerlessApi?.failure?.message ?? null,
-    async cellRects(cells) {
-      if (!context) throw new Error('Plugin is not active');
+    failure: (index = 0) => (slots[index]?.api ?? peerlessApi)?.failure?.message ?? null,
+    async cellRects(cells, index = 0) {
+      const target = slots[index]?.context ?? context;
+      if (!target) throw new Error('Plugin is not active');
+      const scope = editorRoot(index);
       let placed: Awaited<ReturnType<NonNullable<WorkerEditorProbe['peerless']>['cellRects']>> = null;
-      await context.run(({ geometry }) => {
-        const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
-        const layer = rootElement.querySelector<HTMLElement>('[data-testid="plugin-overlays"]');
+      await target.run(({ geometry }) => {
+        const canvas = scope.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
+        const layer = scope.querySelector<HTMLElement>('[data-testid="plugin-overlays"]');
         if (!geometry || !canvas || !layer) return;
         const canvasBounds = canvas.getBoundingClientRect();
         const layerBounds = layer.getBoundingClientRect();
@@ -272,6 +481,13 @@ window.__xlsxWorkerEditor = {
         placed = { zoom: geometry.layout.zoom, rects: rects.map((rect) => ({ ...rect!, x: rect!.x + dx, y: rect!.y + dy })) };
       });
       return placed;
+    },
+    formulaBar(index = 0) {
+      return (
+        editorRoot(index).querySelector<HTMLInputElement>(
+          '[data-testid="xlsx-formula-input"]',
+        )?.value ?? ''
+      );
     },
     workerCount: () => workers.length,
     async saveAndReopen() {
@@ -286,7 +502,7 @@ window.__xlsxWorkerEditor = {
       return reopenPeerless(result.bytes);
     },
   } : null,
-  generation: () => generation,
+  generation: (index = 0) => (collaboration ? slots[index]!.generation : generation),
   readyCount: () => readyCount,
   setReadOnly(value) { readOnly = value; flushSync(() => open(source)); },
   readOnlyEditRefusal() {
@@ -429,7 +645,9 @@ window.__xlsxWorkerEditor = {
     await current.promise;
   },
   dispose() { root.unmount(); },
-  hydrated() { return (peerless ? peerlessApi : api)?.hydrated ?? false; },
+  hydrated(index = 0) {
+    return (peerless ? slots[index]?.api ?? peerlessApi : api)?.hydrated ?? false;
+  },
   holdPreview() {
     if (!holdingHydration || !hydrationWaiting || api?.hydrated !== false) {
       throw new Error('Hydration must be held before opening the editor');
@@ -452,11 +670,26 @@ window.__xlsxWorkerEditor = {
     holdingHydration = false;
     hydrationRelease.resolve();
   },
-  paintedTexts() {
-    const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-testid="xlsx-scroll"] canvas');
+  paintedTexts(index = 0) {
+    const canvas = editorRoot(index).querySelector<HTMLCanvasElement>('[data-testid="xlsx-scroll"] canvas');
     return canvas ? [...(paints.get(canvas) ?? [])] : [];
   },
-  async cell() { return (await api?.cellAsync(0, 0, 0))?.input ?? null; },
+  formulaBar(index = 0) {
+    return (
+      editorRoot(index).querySelector<HTMLInputElement>(
+        '[data-testid="xlsx-formula-input"]',
+      )?.value ?? ''
+    );
+  },
+  async cell(index = 0) {
+    if (peerless) {
+      const session = slots[index]?.session ?? activeSession;
+      if (!session) return null;
+      const result = await session.call.cellInputs(0, 'A1');
+      return result.cells[0]?.[0]?.input ?? null;
+    }
+    return (await api?.cellAsync(0, 0, 0))?.input ?? null;
+  },
   async saveAndReopen() {
     const bytes = await api!.save();
     if (!bytes) throw new Error('Workbook save returned no bytes');
@@ -467,8 +700,22 @@ window.__xlsxWorkerEditor = {
     await editor.whenHydrated();
     return bytes.byteLength;
   },
-  async undo() {
-    const result = await api!.commands.execute('undo', null);
+  async undo(index = 0) {
+    const target = peerless ? slots[index]?.api ?? peerlessApi! : api!;
+    const result = await target.commands.execute('undo', null);
     return result.ok;
+  },
+  pauseDelivery() {
+    deliveryPaused = true;
+  },
+  async resumeDelivery() {
+    deliveryPaused = false;
+    flushDeliveryQueue();
+    await Promise.all(applicationReceipts);
+  },
+  pendingUpdates(sender) {
+    return deliveryQueue.filter((entry) => entry.sender === sender)
+      .flatMap((entry) => decodeMessages(entry.data))
+      .filter((message) => message.type === 'update').length;
   },
 };

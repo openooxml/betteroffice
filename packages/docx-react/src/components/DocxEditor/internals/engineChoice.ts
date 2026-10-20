@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { DocxEditorProps } from '../../DocxEditor';
 import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 
@@ -45,7 +45,7 @@ function chooseEngine(props: EngineProps): { workerOpen: boolean; warnings: stri
   if (props.mediaTokens === true) {
     warnings.push('[DocxEditor] mediaTokens requires the in-thread engine; omit mediaTokens to use the worker-owned editor.');
   }
-  if (props.collaboration?.initialUpdate !== undefined) {
+  if (missing.length === 0 && props.collaboration?.initialUpdate !== undefined) {
     warnings.push('[DocxEditor] collaboration.initialUpdate requires the in-thread engine; omit collaboration.initialUpdate to open the source in the worker-owned editor.');
   }
   if (props.document && !props.documentBuffer && !props.readOnly && props.mode !== 'viewing') {
@@ -58,18 +58,31 @@ function capabilityWarning(missing: readonly WorkerCapability[]) {
   return `[DocxEditor] Using the in-thread engine because these browser features are unavailable: ${missing.join(', ')}; use a browser with these features for the worker-owned editor.`;
 }
 
-export function usePeerlessEngineChoice(requested: boolean, legacySync: boolean): boolean {
-  const [missing] = useState(missingCapabilities);
+type RouteProps = Pick<DocxEditorProps, typeof LEGACY_SYNC_API_PROP | 'experimentalWorkerOpen' | 'collaboration' | 'onChange'>;
+type EditorRoute = { route: 'hybrid' | 'in-thread' | 'capability-fallback' | 'sync-api-error' | 'peerless'; warning?: string };
+
+export function chooseDocxEditorRoute(props: RouteProps): EditorRoute {
+  if (props[LEGACY_SYNC_API_PROP] === true) {
+    return { route: 'hybrid', warning: `[DocxEditor] ${LEGACY_SYNC_API_PROP}={true} selects the deprecated hybrid synchronous API, removed in 0.6.0.` };
+  }
+  if (props.experimentalWorkerOpen === false) return { route: 'in-thread' };
+  if (missingCapabilities().length) return { route: 'capability-fallback' };
+  if (props.onChange !== undefined) return { route: 'sync-api-error' };
+  return { route: 'peerless' };
+}
+
+export function useDocxEditorRoute(props: RouteProps): EditorRoute {
+  const legacySync = props[LEGACY_SYNC_API_PROP];
+  const inThread = props.experimentalWorkerOpen === false;
+  const onChange = props.onChange !== undefined;
+  const choice = useMemo(() => chooseDocxEditorRoute(props), [legacySync, inThread, onChange]);
   useEffect(() => {
-    const warnings = legacySync ? [`[DocxEditor] ${LEGACY_SYNC_API_PROP}={true} selects the deprecated hybrid synchronous API, removed in 0.6.0.`] : [];
-    if (requested && missing.length) warnings.push(capabilityWarning(missing));
-    for (const warning of warnings) {
-      if (warned.has(warning)) continue;
-      warned.add(warning);
-      console.warn(warning);
-    }
-  }, [requested, legacySync, missing]);
-  return requested && missing.length === 0;
+    const warning = choice.warning;
+    if (!warning || warned.has(warning)) return;
+    warned.add(warning);
+    console.warn(warning);
+  }, [choice]);
+  return choice;
 }
 
 export function useEditorEngineChoice(props: EngineProps): boolean {

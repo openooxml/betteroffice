@@ -1,27 +1,31 @@
 import { commandSelectionRange } from './residentCommandAnchors';
-import type { DocxCommandIntent, DocxCommentResult, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
+import type { DocxCommandIntent, DocxCommentChangeResult, DocxCommentResult, ResidentDocxCommandEngine, ResidentDocxCommandState } from './residentCommandProtocol';
+import type { DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 
 export const reviewCommandKeys = {
-  addComment: ['ranges', 'author', 'date', 'body', 'expectVersion'],
+  addComment: ['ranges', 'author', 'date', 'body', 'expectVersion', 'parentId'],
   updateComment: ['id', 'patch', 'expectVersion'],
   setCommentRanges: ['id', 'ranges', 'expectVersion'],
   removeComment: ['id', 'expectVersion'],
   acceptRevision: ['revisionId', 'expectVersion'],
   rejectRevision: ['revisionId', 'expectVersion'],
-  propose: ['proposals', 'expectVersion'],
-  setProposalStates: ['changes', 'expectVersion', 'expectPreviewVersion'],
-  withdrawProposals: ['ids', 'expectVersion'],
+  propose: ['proposals', 'expectVersion', 'hostProposal'],
+  setProposalStates: ['changes', 'expectVersion', 'expectPreviewVersion', 'hostProposal'],
+  withdrawProposals: ['ids', 'expectVersion', 'hostProposal'],
 };
 
 export type ReviewCommand = Extract<DocxCommandIntent, { kind: keyof typeof reviewCommandKeys }>;
+
+export function grantedHostProposal(command: ReviewCommand): boolean {
+  return (command.kind === 'propose' || command.kind === 'setProposalStates' || command.kind === 'withdrawProposals') &&
+    command.payload.hostProposal === true;
+}
 
 export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, command: ReviewCommand): string | null {
   const payload = command.payload;
   if (payload.expectVersion !== engine.proposalEngine.version()) return 'stale-version';
   if (command.kind === 'withdrawProposals') {
     if (!state.proposals) return 'review-unavailable';
-    const known = new Set(state.proposals.snapshot().proposals.map(proposal => proposal.id));
-    if (command.payload.ids.some(id => !known.has(id))) return 'unknown-proposal';
   }
   switch (command.kind) {
     case 'addComment': case 'setCommentRanges': {
@@ -37,20 +41,23 @@ export function preflightReviewCommand(engine: ResidentDocxCommandEngine, state:
     }
   }
   if ('id' in payload && !engine.listComments().some(comment => comment.id === payload.id)) return 'unknown-comment';
+  if (command.kind === 'addComment' && command.payload.parentId !== undefined &&
+    !engine.listComments().some(comment => comment.id === command.payload.parentId)) return 'unknown-comment';
   if ('revisionId' in payload && state.proposals?.snapshot().proposals.some(proposal => proposal.revisionIds.includes(payload.revisionId))) return 'tracked-revision-conflict';
   if ('revisionId' in payload && !engine.geometryReader.listRevisions().some(revision => revision.revisionId === payload.revisionId)) return 'unknown-revision';
   return null;
 }
 
 export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, command: ReviewCommand):
-  { status: 'applied' | 'noop'; comment?: Omit<DocxCommentResult, 'seq'> } | { status: 'refused'; reason: string } {
+  { status: 'applied' | 'noop'; comment?: Omit<DocxCommentResult, 'seq'>; commentChange?: Omit<DocxCommentChangeResult, 'seq'> } | { status: 'refused'; reason: string } {
   const version = engine.proposalEngine.version();
   const before = state.proposals?.snapshot();
   if (command.kind === 'propose' || command.kind === 'setProposalStates' || command.kind === 'withdrawProposals') {
     if (!state.proposals) return { status: 'refused', reason: 'review-unavailable' };
-    const result = command.kind === 'propose' ? state.proposals.propose(command.payload)
-      : command.kind === 'setProposalStates' ? state.proposals.setStates(command.payload)
-      : state.proposals.withdraw(command.payload);
+    const { hostProposal: _grant, ...request } = command.payload;
+    const result = command.kind === 'propose' ? state.proposals.propose(request as DocxProposalRequest)
+      : command.kind === 'setProposalStates' ? state.proposals.setStates(request as DocxProposalStateRequest)
+      : state.proposals.withdraw(request as DocxProposalWithdrawRequest);
     if (!result.ok) return { status: 'refused', reason: result.failure.code };
     return { status: JSON.stringify(before) === JSON.stringify(result.snapshot) ? 'noop' : 'applied' };
   }
@@ -58,7 +65,10 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   engine.addUndoBoundary();
   let added: string | undefined;
   switch (command.kind) {
-    case 'addComment': added = engine.addComment(command.payload.ranges, command.payload.author, command.payload.date, command.payload.body).commentId; break;
+    case 'addComment':
+      added = engine.addComment(command.payload.ranges, command.payload.author, command.payload.date, command.payload.body).commentId;
+      if (command.payload.parentId !== undefined) engine.updateComment(added, { parentId: command.payload.parentId });
+      break;
     case 'updateComment': engine.updateComment(command.payload.id, command.payload.patch); break;
     case 'setCommentRanges': engine.setCommentRanges(command.payload.id, command.payload.ranges); break;
     case 'removeComment': engine.applyRawOps('body', [{ op: 'removeComment', id: command.payload.id }]); break;
@@ -68,7 +78,10 @@ export function applyReviewCommand(engine: ResidentDocxCommandEngine, state: Res
   engine.addUndoBoundary();
   engine.markProjectionStories(engine.geometryReader.storyIds());
   const status = engine.proposalEngine.version() === version ? 'noop' : 'applied';
-  const projection = added === undefined ? null : engine.commentProjection();
-  const id = added === undefined ? undefined : projection?.ids[added];
-  return projection && id !== undefined ? { status, comment: { id, comments: projection.comments } } : { status };
+  const changed = command.kind === 'updateComment' || command.kind === 'setCommentRanges' || command.kind === 'removeComment';
+  const projection = added !== undefined || changed ? engine.commentProjection() : null;
+  if (!projection) return { status };
+  if (added === undefined) return { status, commentChange: { comments: projection.comments } };
+  const id = projection.ids[added];
+  return id === undefined ? { status } : { status, comment: { id, comments: projection.comments } };
 }

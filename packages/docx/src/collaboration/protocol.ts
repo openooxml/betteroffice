@@ -1,4 +1,5 @@
 import { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
+export { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
 import {
   MAX_AWARENESS_CURSOR_BYTES,
   MAX_AWARENESS_ENTRIES_PER_UPDATE,
@@ -10,6 +11,12 @@ import {
 
 export const DEFAULT_MAX_FRAME_BYTES = MAX_COLLABORATION_FRAME_BYTES;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
+/** Largest update a replica accepts (docx-edit `MAX_UPDATE_BYTES`), the per-update bound. */
+export const MAX_UPDATE_BYTES = 64 * 1024 * 1024;
+/** Largest configurable frame: one update at the per-update bound and its sync header. */
+export const MAX_FRAME_BYTES = MAX_UPDATE_BYTES + 6;
+/** Upper bound for `maxPendingBytes` and `maxSyncBytes`. */
+export const MAX_BUFFERED_BYTES = 256 * 1024 * 1024;
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
@@ -22,6 +29,7 @@ const SYNC_UPDATE = 2;
 
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
+const MAX_STATE_VECTOR_VAR_UINT_BYTES = 10;
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -175,6 +183,111 @@ function encodeSyncMessage(
     ],
     maxFrameBytes
   );
+}
+
+/** Largest sync payload that fits a frame of `maxFrameBytes`. */
+export function maxSyncPayloadBytes(maxFrameBytes: number): number {
+  return maxFrameBytes - 2 - encodeVarUint(maxFrameBytes).byteLength;
+}
+
+/** Bytes of a frame holding one sync message with a payload of `payloadBytes`. */
+export function syncFrameBytes(payloadBytes: number): number {
+  return 2 + encodeVarUint(payloadBytes).byteLength + payloadBytes;
+}
+
+/**
+ * Reserved state-vector entries at clock 0 that ask something of the peer answering a SyncStep1. Peers that do not
+ * know them read an empty client, which changes no diff. CHUNKED asks for a chunked answer; OPEN marks the opening
+ * request, which the peer answers with one SyncStep1 of its own.
+ */
+export const CHUNKED_SYNC_CLIENT = Number.MAX_SAFE_INTEGER;
+export const OPEN_SYNC_CLIENT = Number.MAX_SAFE_INTEGER - 1;
+
+/** `clientId`, refused when it is one of the reserved request entries. */
+export function requireUnreservedClientId(clientId: number): number {
+  if (clientId >= OPEN_SYNC_CLIENT) {
+    throw new RangeError('clientId must be below Number.MAX_SAFE_INTEGER - 1');
+  }
+  return clientId;
+}
+
+interface StateVectorEntry {
+  client: bigint;
+  clock: bigint;
+  start: number;
+  end: number;
+}
+
+function stateVectorEntries(body: Uint8Array): { header: number; entries: StateVectorEntry[] } | undefined {
+  let offset = 0;
+  const read = (): bigint | undefined => {
+    let value = 0n;
+    for (let index = 0; index < MAX_STATE_VECTOR_VAR_UINT_BYTES && offset < body.byteLength; index += 1) {
+      const byte = body[offset++];
+      value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+      if (byte < 0x80) return value;
+    }
+    return undefined;
+  };
+  const count = read();
+  if (count === undefined) return undefined;
+  const header = offset;
+  const entries: StateVectorEntry[] = [];
+  for (let left = count; left > 0n; left -= 1n) {
+    const start = offset;
+    const client = read();
+    const clock = read();
+    if (client === undefined || clock === undefined) return undefined;
+    entries.push({ client, clock, start, end: offset });
+  }
+  return offset === body.byteLength ? { header, entries } : undefined;
+}
+
+/** `stateVector` with the requested entries, each added once; unchanged when it is malformed. */
+export function withSyncRequest(
+  stateVector: Uint8Array,
+  { open = false, chunked = false }: { open?: boolean; chunked?: boolean }
+): Uint8Array {
+  const decoded = stateVectorEntries(stateVector);
+  if (!decoded) return stateVector;
+  const clients = [...(open ? [OPEN_SYNC_CLIENT] : []), ...(chunked ? [CHUNKED_SYNC_CLIENT] : [])]
+    .filter((client) => !decoded.entries.some((entry) => entry.client === BigInt(client)));
+  if (!clients.length) return stateVector;
+  return encodeFrame([
+    encodeVarUint(decoded.entries.length + clients.length),
+    stateVector.subarray(decoded.header),
+    ...clients.flatMap((client) => [encodeVarUint(client), encodeVarUint(0)]),
+  ], Number.MAX_SAFE_INTEGER);
+}
+
+/** Whether the history behind `stateVector` already holds the open request client, which then cannot carry the mark. */
+export function holdsOpenSyncClient(stateVector: Uint8Array): boolean {
+  return stateVectorEntries(stateVector)?.entries
+    .some((entry) => entry.client === BigInt(OPEN_SYNC_CLIENT) && entry.clock !== 0n) ?? false;
+}
+
+/** The state vector of a SyncStep1 without its request entries, and which requests it carried. */
+export function parseSyncRequest(
+  stateVector: Uint8Array
+): { stateVector: Uint8Array; open: boolean; chunked: boolean } {
+  const decoded = stateVectorEntries(stateVector);
+  const asks = (entry: StateVectorEntry, client: number) => entry.client === BigInt(client) && entry.clock === 0n;
+  const open = decoded?.entries.some((entry) => asks(entry, OPEN_SYNC_CLIENT)) ?? false;
+  const chunked = decoded?.entries.some((entry) => asks(entry, CHUNKED_SYNC_CLIENT)) ?? false;
+  if (!decoded || (!open && !chunked)) return { stateVector, open, chunked };
+  const kept = decoded.entries.filter((entry) => !asks(entry, OPEN_SYNC_CLIENT) && !asks(entry, CHUNKED_SYNC_CLIENT));
+  return {
+    stateVector: encodeFrame([
+      encodeVarUint(kept.length), ...kept.map(({ start, end }) => stateVector.subarray(start, end)),
+    ], Number.MAX_SAFE_INTEGER),
+    open,
+    chunked,
+  };
+}
+
+/** The clock of `clientId` in a state vector; 0 when the client is absent or the vector is malformed. */
+export function stateVectorClock(stateVector: Uint8Array, clientId: number): number {
+  return Number(stateVectorEntries(stateVector)?.entries.find((entry) => entry.client === BigInt(clientId))?.clock ?? 0n);
 }
 
 export function encodeSyncStep1(
@@ -377,6 +490,7 @@ export function decodeAwarenessUpdate(
   return entries;
 }
 
+/** Every payload is a copy the caller owns; `frame` is not retained. */
 export function decodeMessages(
   frame: Uint8Array,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
