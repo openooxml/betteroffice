@@ -1,4 +1,4 @@
-import type { YrsSession } from './index';
+import type { YrsLoc, YrsSession } from './index';
 import type { TrackedChangeEntry } from '../utils/comments';
 import {
   createYrsSidebarProjection,
@@ -67,6 +67,30 @@ export function readSidebar(
     })),
     trackedChanges: { entries: tracked.entries, commentToRevision: [...tracked.commentToRevision] },
   };
+}
+
+/** Hybrid review navigation: the first change after the selection, or the last before it, wrapping at the ends. */
+export function readAdjacentRevision(
+  reader: DocxSidebarReader,
+  selection: { anchor: YrsLoc; focus: YrsLoc } | null,
+  direction: 'next' | 'previous',
+  excluded: ReadonlySet<string>
+): { revisionId: string } | null {
+  const projection = createYrsSidebarProjection(reader);
+  const positions = new Map<string, number>();
+  for (const revision of reader.listRevisions()) {
+    if (excluded.has(revision.revisionId) || positions.has(revision.revisionId)) continue;
+    const point = projection.locToDisplayPoint({ story: revision.story, ...revision.range.start });
+    if (point && !point.hfRid) positions.set(revision.revisionId, point.position);
+  }
+  const navigation = [...positions].sort((first, second) => first[1] - second[1]);
+  if (!navigation.length) return null;
+  const points = selection ? [selection.anchor, selection.focus].map((at) => projection.locToDisplayPoint(at)) : [];
+  const bounds = points.length && points.every((point) => point && !point.hfRid) ? points.map((point) => point!.position) : null;
+  const target = direction === 'next'
+    ? navigation.find(([, position]) => position > (bounds ? Math.max(...bounds) : -1)) ?? navigation[0]!
+    : [...navigation].reverse().find(([, position]) => position < (bounds ? Math.min(...bounds) : -1)) ?? navigation.at(-1)!;
+  return { revisionId: target[0] };
 }
 
 export function readOutlineHeadings(

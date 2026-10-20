@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from './pinned-evaluate';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
@@ -35,9 +36,23 @@ async function open(page: Page) {
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       buffer: await longDocument(),
     });
-  // More pages than the canvas keeps bitmaps for at once.
+  // More pages than the canvas keeps bitmaps for at once, counted from the scroll extent
+  // because an editor may mount only the pages near the viewport.
   await expect
-    .poll(() => page.locator('.canvas-page canvas').count(), { timeout: 60_000 })
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const pages = document.querySelectorAll('.canvas-page');
+          let scroller = pages[0]?.parentElement ?? null;
+          while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) {
+            scroller = scroller.parentElement;
+          }
+          if (!scroller || pages.length < 2) return 0;
+          const stride = pages[1]!.getBoundingClientRect().top - pages[0]!.getBoundingClientRect().top;
+          return stride > 0 ? Math.floor(scroller.scrollHeight / stride) : 0;
+        }),
+      { timeout: 60_000 }
+    )
     .toBeGreaterThan(12);
 }
 
@@ -47,7 +62,7 @@ async function open(page: Page) {
  */
 async function inkAtViewportCentre(page: Page): Promise<number> {
   const box = await page.evaluate(() => {
-    let scroller = document.querySelector('.canvas-pages')?.parentElement ?? null;
+    let scroller = document.querySelector('.canvas-page')?.parentElement ?? null;
     while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) {
       scroller = scroller.parentElement;
     }
@@ -55,7 +70,7 @@ async function inkAtViewportCentre(page: Page): Promise<number> {
     return { x: rect.left + rect.width / 2 - 150, y: rect.top + rect.height / 2 - 200 };
   });
   const png = await page.screenshot({ clip: { ...box, width: 300, height: 400 } });
-  return page.evaluate(async (base64) => {
+  return pinnedEvaluate(page, async (base64) => {
     const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
     const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
     const canvas = new OffscreenCanvas(image.width, image.height);
@@ -79,7 +94,7 @@ for (const zoom of [0.8, 1.25]) {
     await page.addStyleTag({ content: `.editor-stage { zoom: ${zoom}; }` });
     for (const fraction of [0.3, 0.7]) {
       await page.evaluate((fraction) => {
-        let scroller = document.querySelector('.canvas-pages')?.parentElement ?? null;
+        let scroller = document.querySelector('.canvas-page')?.parentElement ?? null;
         while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) {
           scroller = scroller.parentElement;
         }

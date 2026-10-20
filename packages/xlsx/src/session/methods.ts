@@ -1,4 +1,5 @@
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
 import type { CollaborationUpdateOrigin } from '../collaboration/types';
 import type { XlsxExportOptions, XlsxExportResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxStructuredContent } from '../exports';
@@ -168,6 +169,7 @@ export type WorkbookSessionMethods = {
   sheetView(sheet: number): WorkbookSheetView;
   cellGeometry(sheet: number, row: number, col: number): WorkbookCellGeometry;
   cellInputs(sheet: number, range: string): WorkbookCellInputs;
+  selectionData(sheet: number, row: number, col: number, direction?: Direction): SelectionData;
   captureFormat(sheet: number, range: string): CapturedFormat;
   sheets(): WorkbookSheetSummary[];
   calculationStatus(): CalculationStatus;
@@ -198,6 +200,7 @@ export const WORKBOOK_SESSION_METHODS = {
   sheetView: true,
   cellGeometry: true,
   cellInputs: true,
+  selectionData: true,
   captureFormat: true,
   sheets: true,
   calculationStatus: true,
@@ -228,6 +231,7 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   sheetView: { lane: 'interactive' },
   cellGeometry: { lane: 'interactive' },
   cellInputs: { lane: 'interactive' },
+  selectionData: { lane: 'interactive', reorderable: false },
   captureFormat: { lane: 'interactive', reorderable: false },
   sheets: { lane: 'interactive' },
   calculationStatus: { lane: 'interactive' },

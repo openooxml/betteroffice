@@ -244,7 +244,7 @@ impl EditingDoc {
         if remove {
             parent.remove_range(&mut txn, raw, 1);
             for id in graph.keys() {
-                root.remove(&mut txn, id);
+                crate::mark_story_removed(&mut txn, id);
             }
             return Ok(true);
         }

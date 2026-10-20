@@ -4147,9 +4147,10 @@ mod ceiling_tests {
             sheets: vec![Sheet::new("Data")],
             ..WorkbookModel::default()
         };
-        let mut authority = WorkbookAuthority::from_source_with_projection(&model, None, &[], None)
-            .unwrap()
-            .0;
+        let mut authority =
+            WorkbookAuthority::from_source_with_projection(&model, None, &[], None, &[])
+                .unwrap()
+                .0;
         Arc::make_mut(&mut authority.base)
             .shared_strings
             .push("a".repeat(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1));

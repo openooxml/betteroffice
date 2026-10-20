@@ -7,8 +7,8 @@ type Format = 'docx' | 'xlsx' | 'pptx';
 const root = resolve(import.meta.dirname, '../..');
 const marker = 'BrowserE2Eprobe';
 
-async function open(page: Page, format: Format, file?: string) {
-  await page.goto('/?format=' + format);
+async function open(page: Page, format: Format, file?: string, query = '') {
+  await page.goto('/?format=' + format + query);
   await page
     .locator('input[type=file]')
     .last()
@@ -26,6 +26,9 @@ async function open(page: Page, format: Format, file?: string) {
   await expect(page.locator('.notice')).toHaveCount(0);
   await expect(page.locator('[data-testid$="-error"]')).toHaveCount(0);
 }
+
+const docxInput = (page: Page) =>
+  page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
 
 async function save(page: Page, format: Format, info: TestInfo, label: string) {
   const downloading = page.waitForEvent('download');
@@ -59,9 +62,17 @@ async function save(page: Page, format: Format, info: TestInfo, label: string) {
   return { file, text };
 }
 
-for (const format of ['docx', 'xlsx', 'pptx'] as const) {
+for (const [label, format, query] of [
+  ['docx', 'docx', ''],
+  ['docx legacySyncApi', 'docx', '&peerless=0'],
+  ['xlsx', 'xlsx', ''],
+  ['pptx', 'pptx', ''],
+] as const) {
   test(
-    format + ': edit, undo, redo, save, reopen, and reject a broken file',
+    label +
+      (query
+        ? ': edit, undo, redo, save, and reopen'
+        : ': edit, undo, redo, save, reopen, and reject a broken file'),
     async ({ page }, info) => {
       const errors: string[] = [];
       page.on('pageerror', (error) => errors.push(error.message));
@@ -82,7 +93,7 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
           await route.abort();
         } else await route.continue();
       });
-      await open(page, format);
+      await open(page, format, undefined, query);
       const original = await save(page, format, info, 'original');
       expect(original.text).not.toContain(marker);
 
@@ -91,10 +102,10 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
           .locator('.canvas-page canvas')
           .first()
           .click({ position: { x: 150, y: 150 } });
-        const input = page.getByTestId('yrs-input');
+        const input = docxInput(page);
         await expect(input).toBeEditable();
         await input.press('ControlOrMeta+Home');
-        await input.pressSequentially(marker);
+        await page.keyboard.insertText(marker);
         await expect(page.locator('.canvas-page-mirror').first()).toContainText(
           marker
         );
@@ -133,16 +144,16 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
       const edited = await save(page, format, info, 'edited');
       expect(edited.text).toContain(marker);
       if (format === 'docx')
-        await page.getByTestId('yrs-input').press('ControlOrMeta+z');
+        await docxInput(page).press('ControlOrMeta+z');
       else await page.getByTestId(format + '-undo').click();
       expect((await save(page, format, info, 'undone')).text).toBe(original.text);
       if (format === 'docx')
-        await page.getByTestId('yrs-input').press('ControlOrMeta+Shift+z');
+        await docxInput(page).press('ControlOrMeta+Shift+z');
       else await page.getByTestId(format + '-redo').click();
       const redone = await save(page, format, info, 'redone');
       expect(redone.text).toBe(edited.text);
 
-      await open(page, format, redone.file);
+      await open(page, format, redone.file, query);
       if (format === 'docx')
         await expect(page.locator('.canvas-page-mirror').first()).toContainText(
           marker
@@ -155,19 +166,23 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
         redone.text
       );
 
-      await page
-        .locator('input[type=file]')
-        .last()
-        .setInputFiles({
-          name: 'broken.' + format,
-          mimeType: 'application/octet-stream',
-          buffer: Buffer.from('not an OOXML archive'),
-        });
-      await expect(page.locator('.notice')).toBeVisible();
-      await expect(page.locator('.editor-stage canvas').first()).toBeVisible();
-      expect((await save(page, format, info, 'after-failed-open')).text).toBe(
-        redone.text
-      );
+      if (!query) {
+        await page
+          .locator('input[type=file]')
+          .last()
+          .setInputFiles({
+            name: 'broken.' + format,
+            mimeType: 'application/octet-stream',
+            buffer: Buffer.from('not an OOXML archive'),
+          });
+        await expect(page.locator('.notice')).toBeVisible();
+        await expect(
+          page.locator('.editor-stage canvas').first()
+        ).toBeVisible();
+        expect((await save(page, format, info, 'after-failed-open')).text).toBe(
+          redone.text
+        );
+      }
       await info.attach('editor-after-reopen', {
         body: await page.screenshot(),
         contentType: 'image/png',

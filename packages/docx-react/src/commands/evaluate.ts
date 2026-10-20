@@ -44,7 +44,11 @@ export interface DocxCommandEnvironment {
   sidebarControl: DocxCommandControl;
   zoom: number;
   zoomWhileOpening?: boolean;
+  /** View-only table gridlines are shown; absent when the editor cannot show them. */
+  tableGridlines?: boolean;
   supportedCommands?: ReadonlySet<DocxCommandId>;
+  /** Table actions the host shell wires to worker commands; absent means every known action passes. */
+  tableActions?: ReadonlySet<string>;
   canOpen: boolean;
   canReportIssue: boolean;
   /** The body, not a header, footer or note, has the input. */
@@ -390,6 +394,7 @@ function evaluateTableAction(env: DocxCommandEnvironment, action: DocxTableActio
   const table = env.table;
   if (!table?.isInTable) return 'table-required';
   if (key === null) return null;
+  if (env.tableActions && !env.tableActions.has(key)) return 'unsupported-command';
   if (typeof action === 'object' && !SUPPORTED_TABLE_OBJECT_ACTIONS.has(key)) {
     return 'unsupported-command';
   }
@@ -623,6 +628,11 @@ function evaluate<K extends DocxCommandId>(
       return {
         gate: documentGate(env) ?? (env.sidebarControl === 'fixed' ? 'controlled-sidebar' : null),
         active: env.sidebarOpen,
+      };
+    case 'tableGridlines':
+      return {
+        gate: documentGate(env) ?? (env.tableGridlines === undefined ? 'unsupported-command' : null),
+        active: env.tableGridlines === true,
       };
     case 'open':
       return {

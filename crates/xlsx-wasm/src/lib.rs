@@ -417,6 +417,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = selectionDataJson)]
+    pub fn selection_data_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .selection_data_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = cellRectJson)]
     pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
         self.session
@@ -459,6 +466,13 @@ impl XlsxDocument {
     pub fn edit_cells_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.session
             .edit_cells_json(args, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = moveRangeJson)]
+    pub fn move_range_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .move_range_json(args, now_serial())
             .map_err(|e| JsValue::from_str(&e))
     }
 

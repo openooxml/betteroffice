@@ -88,6 +88,51 @@ async function matchingSheetView(
 }
 
 describe('workbook sessions', () => {
+  test('selection queries cross the worker protocol without changing the workbook', async () => {
+    const worker = await session();
+    try {
+      const before = await worker.save();
+      const reference = openWorkbook(before);
+      try {
+        const version = await worker.call.version();
+        for (const direction of ['up', 'down', 'left', 'right', undefined] as const) {
+          expect(await worker.call.selectionData(0, 2, 2, direction))
+            .toEqual(reference.selectionData(0, 2, 2, direction));
+        }
+        expect(await worker.call.version()).toBe(version);
+        expect(await worker.save()).toEqual(before);
+        await expect(worker.call.selectionData(99, 0, 0)).rejects.toThrow();
+        await expect(worker.call.selectionData(0, 1_048_576, 0)).rejects.toThrow();
+      } finally { reference.dispose(); }
+    } finally { await worker.dispose(); }
+  });
+
+  test('worker applyOps restores a custom column width after hiding and unhiding', async () => {
+    const worker = await session();
+    let seq = 0;
+    const applyOps = async (ops: unknown[]) => {
+      const ack = await worker.submit({ ...worker.commandIdentity,
+        basis: worker.confirmedBasis, seq: ++seq,
+        kind: 'applyOps', payload: { args: [ops] } });
+      expect(ack.status).toBe('applied');
+    };
+    try {
+      await applyOps([{ type: 'setColWidth', sheet: 0, col: 1, width: 20 }]);
+      const original = (await worker.call.cellGeometry(0, 2, 1)).rect.w;
+      expect(original).toBeGreaterThan(0);
+      await applyOps([{ type: 'setColVisibility', sheet: 0, col: 1, hidden: true }]);
+      expect((await worker.call.cellGeometry(0, 2, 1)).rect.w).toBe(0);
+      const zip = await JSZip.loadAsync(await worker.save());
+      const xml = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+      expect(xml).toMatch(/<col[^>]*width="20"[^>]*hidden="1"/);
+      await applyOps([{ type: 'setColVisibility', sheet: 0, col: 1, hidden: false }]);
+      expect((await worker.call.cellGeometry(0, 2, 1)).rect.w).toBe(original);
+      const reopened = openWorkbook(await worker.save());
+      try { expect(reopened.cellRect(0, 2, 1).w).toBe(original); }
+      finally { reopened.dispose(); }
+    } finally { await worker.dispose(); }
+  });
+
   test('command reply contains the final requested frame', async () => {
     const zip = new JSZip();
     zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
@@ -504,15 +549,14 @@ describe('workbook sessions', () => {
     } finally { main.dispose(); }
   });
 
-  test('rejects invalid viewports and sheet indices without changing the session', async () => {
+  test('rejects invalid viewports and sheet indices and degrades oversized frames without changing the session', async () => {
     const worker = await session();
     try {
       const state = worker.state;
       const version = await worker.call.version();
       const saved = await worker.save();
       for (const invalid of [
-        { ...viewport, x: NaN }, { ...viewport, height: Infinity },
-        { ...viewport, width: 0 }, { ...viewport, width: 1e9, height: 1e9 },
+        { ...viewport, x: NaN }, { ...viewport, height: Infinity }, { ...viewport, width: 0 },
       ]) await expect(worker.call.frame(invalid)).rejects.toThrow();
       for (const sheet of [-1, 0.5, state.sheets.length, 2 ** 32, NaN]) {
         await expect(worker.call.frame(viewport, { sheet })).rejects.toMatchObject({
@@ -531,6 +575,11 @@ describe('workbook sessions', () => {
       const frame = await worker.call.frame(viewport);
       expect(frame.epoch).toBe(1);
       expect(frame.version).toBe(version);
+      expect(frame.displayList.truncated).toBeUndefined();
+      const oversized = await worker.call.frame({ ...viewport, width: 1e9, height: 1e9 });
+      expect(oversized.displayList.truncated).toBe(true);
+      expect(oversized.version).toBe(version);
+      expect(worker.state).toEqual(state);
       expect(await worker.save()).toEqual(saved);
     } finally { await worker.dispose(); }
   });

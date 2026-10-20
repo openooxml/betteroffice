@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { createDocxWorkerEditSession, discardCommandPresentation } from '@betteroffice/docx/peerless';
+import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
+import { createDocxWorkerEditSession, discardCommandPresentation, SessionFailure } from '@betteroffice/docx/peerless';
 import type {
   DocxCommandFrame,
   DocxCommandPageIdentity,
@@ -66,12 +67,29 @@ export function usePeerlessEditSession(
     let unsubscribe: (() => void) | undefined;
     let incarnation = 0;
     let sessionCreated = false;
+    let respawned = false;
+    let recovering = false;
+    let crash: Error | undefined;
     let receiveRequestedFrame: ((frame: DocxCommandFrame) => void) | undefined;
-    const connect = (resident: ResidentCommandConnection): ResidentCommandConnection => ({
+    const connect = (resident: ResidentCommandConnection, replayAppliedSeqs: readonly number[] = []): ResidentCommandConnection => ({
       ...resident,
       client: {
         ...resident.client,
         get failure() { return resident.client.failure; },
+        call: {
+          ...resident.client.call,
+          async edit(command) {
+            const ack = await resident.client.call.edit(command);
+            const refused = command.replay && ack.outcomes.find(outcome =>
+              outcome.status === 'refused' || outcome.status === 'cancelled' ||
+              (replayAppliedSeqs.includes(outcome.seq) && outcome.status === 'noop'));
+            if (refused) {
+              discardCommandPresentation(ack.frame);
+              throw new SessionFailure('message', `Cannot restore DOCX command ${command.seq} (${command.kind}): ${refused.reason ?? refused.status}`);
+            }
+            return ack;
+          },
+        },
         onFrame(listener) {
           receiveRequestedFrame = listener;
           const stop = resident.client.onFrame?.(listener);
@@ -131,7 +149,7 @@ export function usePeerlessEditSession(
             else discardCommandPresentation(ack.frame);
           }).catch((error: unknown) => {
             settled();
-            if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+            if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
           });
         };
         const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame });
@@ -142,45 +160,6 @@ export function usePeerlessEditSession(
           onError: (error) => { if (!controller.signal.aborted) callbacks.current.onRecoverableError?.(error); },
         });
         cleanups.push(() => presentation.dispose());
-        const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
-          source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
-          transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
-          maxRecoveryAttempts: callbacks.current.recovery ? undefined : 0,
-          recovery: {
-            checkpoint: callbacks.current.recovery?.checkpoint
-              ? (resident) => callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint() : undefined,
-            onRecovery(event) {
-              if (controller.signal.aborted) return;
-              if (event.phase === 'failed') fail(event.failure ?? new Error('Peerless session failed'));
-              callbacks.current.recovery?.onRecovery?.(event);
-            },
-            async reopen(input) {
-              const recovery = callbacks.current.recovery;
-              if (!recovery) throw new Error('Peerless recovery is unavailable');
-              const reopened = await recovery.reopen(input);
-              if (controller.signal.aborted) {
-                discardCommandPresentation(reopened.initial.frame);
-                void reopened.client.dispose().catch(() => {});
-                throw new Error('Peerless session was closed');
-              }
-              connection = reopened;
-              incarnation = reopened.initial.incarnation;
-              viewStore.acceptWorkerState({ session: reopened.initial.session, incarnation, epoch: reopened.initial.epoch }, {
-                epoch: reopened.initial.epoch, version: reopened.initial.version, throughSeq: reopened.initial.throughSeq,
-                presentedThroughSeq: -1, selection: reopened.initial.selection, editState: reopened.initial.editState,
-              });
-              return connect(reopened);
-            },
-          },
-        });
-        sessionCreated = true;
-        cleanups.push(() => { void session.dispose().catch(() => {}); });
-        if (controller.signal.aborted) {
-          close();
-          return;
-        }
-        const admission = createInputAdmission({ session, viewStore, echoPainter });
-        cleanups.push(() => admission.dispose());
         let displayWindow = { start: 0, end: 3 };
         let viewport: Omit<ResidentCommandViewportRequest, 'frameEpoch'> | undefined;
         let viewportPending = false;
@@ -194,9 +173,61 @@ export function usePeerlessEditSession(
               await connection.requestViewport?.({ ...request, frameEpoch: viewStore.getSnapshot().geometry?.frameEpoch ?? 0 });
             }
           } catch (error) {
-            if (!controller.signal.aborted) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+            if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
           } finally { viewportPending = false; }
         };
+        const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
+          source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
+          transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
+          maxRecoveryAttempts: callbacks.current.recovery ? 1 : 0,
+          recovery: {
+            checkpoint: callbacks.current.recovery?.checkpoint
+              ? (resident) => callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint() : undefined,
+            onRecovery(event) {
+              if (controller.signal.aborted) return;
+              if (event.phase !== 'diverged') recovering = event.phase === 'recovering';
+              if (event.phase === 'recovering') crash = event.failure;
+              if (event.phase === 'recovered') {
+                viewport = { ...displayWindow, ...viewport };
+                void requestViewport();
+              }
+              if (event.phase === 'failed') fail(event.failure ?? new Error('Peerless session failed'));
+              callbacks.current.recovery?.onRecovery?.(event);
+            },
+            async reopen(input) {
+              const recovery = callbacks.current.recovery;
+              if (!recovery) throw new Error('Peerless recovery is unavailable');
+              if (respawned) throw crash ?? new Error('Peerless session failed');
+              respawned = true;
+              const reopened = await recovery.reopen(input).catch((error: unknown) => {
+                if (error instanceof ResidentWorkerOutOfMemoryError) {
+                  throw new SessionFailure('out-of-memory', error.message, JSON.stringify(error.memory));
+                }
+                throw error;
+              });
+              if (controller.signal.aborted) {
+                discardCommandPresentation(reopened.initial.frame);
+                void reopened.client.dispose().catch(() => {});
+                throw new Error('Peerless session was closed');
+              }
+              connection = reopened;
+              incarnation = reopened.initial.incarnation;
+              viewStore.acceptWorkerState({ session: reopened.initial.session, incarnation, epoch: reopened.initial.epoch }, {
+                epoch: reopened.initial.epoch, version: reopened.initial.version, throughSeq: reopened.initial.throughSeq,
+                presentedThroughSeq: -1, selection: reopened.initial.selection, editState: reopened.initial.editState,
+              });
+              return connect(reopened, input.replayAppliedSeqs);
+            },
+          },
+        });
+        sessionCreated = true;
+        cleanups.push(() => { void session.dispose().catch(() => {}); });
+        if (controller.signal.aborted) {
+          close();
+          return;
+        }
+        const admission = createInputAdmission({ session, viewStore, echoPainter });
+        cleanups.push(() => admission.dispose());
         binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission), echoPainter, presentation,
           setDisplayWindow(start, end) {
             displayWindow = { start, end };

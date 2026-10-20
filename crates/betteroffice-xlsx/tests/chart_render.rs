@@ -8,6 +8,44 @@ const UNSUPPORTED: &[u8] =
     include_bytes!("../../../packages/xlsx/test-fixtures/unsupported-charts.xlsx");
 
 #[test]
+fn capped_frames_clip_charts_and_their_hits() {
+    let workbook = Workbook::open_for_read(FIXTURE).unwrap();
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 1_000_000.0,
+        height: 800.0,
+    };
+    let frame = workbook.display_list(&viewport).unwrap();
+    assert!(frame.truncated);
+    assert!(!frame.charts.is_empty());
+    let bottom = *frame.grid.row_offsets.last().unwrap();
+    assert!(
+        frame
+            .charts
+            .iter()
+            .all(|chart| chart.clip.y + chart.clip.h <= bottom)
+    );
+    for chart in &frame.charts {
+        let hit = workbook
+            .chart_at_point(
+                &viewport,
+                chart.clip.x + chart.clip.w / 2.0,
+                chart.clip.y + chart.clip.h / 2.0,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(frame.charts.iter().any(|chart| chart.id == hit.id));
+    }
+    assert!(
+        workbook
+            .chart_at_point(&viewport, 10.0, bottom + 1.0)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn fixture_covers_anchor_families_display_list_and_raster() {
     let workbook = Workbook::open_for_read(FIXTURE).unwrap();
     let sheet = workbook.model().sheet(SheetId(0)).unwrap();
@@ -61,11 +99,36 @@ fn fixture_covers_anchor_families_display_list_and_raster() {
     assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
 }
 
-/// A 3-D plot and a stacked plot are both refused by the renderer. Neither may
-/// take the worksheet down with it, in either backend.
 #[test]
-fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
-    let workbook = Workbook::open_for_read(UNSUPPORTED).unwrap();
+fn stacked_chart_renders_beside_a_refused_3d_chart() {
+    let mut parts = ooxml_opc::unzip_parts(UNSUPPORTED).unwrap();
+    let (_, chart) = parts
+        .iter_mut()
+        .find(|(name, bytes)| {
+            name.starts_with("xl/charts/")
+                && name.ends_with(".xml")
+                && std::str::from_utf8(bytes).is_ok_and(|xml| xml.contains("stacked"))
+        })
+        .expect("stacked chart part");
+    let mut xml = String::from_utf8(chart.clone()).unwrap();
+    let prefix = if xml.contains("<c:ser>") { "c:" } else { "" };
+    let start = xml.find(&format!("<{prefix}ser>")).unwrap();
+    let end = xml[start..].find(&format!("</{prefix}ser>")).unwrap()
+        + start
+        + format!("</{prefix}ser>").len();
+    let second = xml[start..end]
+        .replace(
+            &format!("<{prefix}idx val=\"0\""),
+            &format!("<{prefix}idx val=\"1\""),
+        )
+        .replace(
+            &format!("<{prefix}order val=\"0\""),
+            &format!("<{prefix}order val=\"1\""),
+        );
+    xml.insert_str(end, &second);
+    *chart = xml.into_bytes();
+    let fixture = ooxml_opc::rezip_parts(&parts).unwrap();
+    let workbook = Workbook::open_for_read(&fixture).unwrap();
     assert_eq!(workbook.model().sheet(SheetId(0)).unwrap().charts.len(), 2);
 
     let display_list = workbook
@@ -89,10 +152,11 @@ fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
         labels,
         [
             "Chart, not shown",
-            "Revenue stacked, bar chart, 1 series, 4 categories, not shown"
+            "Revenue stacked, bar chart, 2 series, 4 categories"
         ]
     );
-    assert!(display_list.charts.iter().all(|chart| chart.placeholder));
+    assert!(display_list.charts[0].placeholder);
+    assert!(!display_list.charts[1].placeholder);
 
     assert!(display_list.commands.iter().any(|command| matches!(
         command,
@@ -108,24 +172,37 @@ fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
                 DrawCmd::FillRect { color, clip: Some(_), .. } if &**color == "#f2f2f2"
             ))
             .count(),
-        2
+        1
     );
-    // two placeholders and nothing else on the chart layer: neither refused
-    // plot leaked any of the ops it managed to emit before being rejected.
-    assert_eq!(
-        display_list
-            .commands
-            .iter()
-            .filter(|command| match command {
-                DrawCmd::FillRect { clip, .. }
-                | DrawCmd::PatternFill { clip, .. }
-                | DrawCmd::Line { clip, .. }
-                | DrawCmd::Path { clip, .. } => clip.is_some(),
-                DrawCmd::Text { chart, .. } => *chart,
-            })
-            .count(),
-        10
-    );
+    let bars: Vec<_> = display_list
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::FillRect {
+                x,
+                y,
+                w,
+                h,
+                color,
+                clip: Some(_),
+                ..
+            } if matches!(&**color, "#4472C4" | "#ED7D31" | "#A5A5A5" | "#FFC000") => {
+                Some((*x, *y, *w, *h))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bars.len(), 8);
+    for (&[(x, y, w, h), (x2, y2, w2, h2)], ratio) in
+        bars.as_chunks::<2>().0.iter().zip([1.0, 1.5, 1.25, 2.0])
+    {
+        assert!((x - bars[0].0).abs() < 0.01);
+        assert!((w / bars[0].2 - ratio).abs() < 0.01);
+        assert!(h > 0.0);
+        assert!((x + w - x2).abs() < 0.01);
+        assert!((y - y2).abs() < 0.01 && (h - h2).abs() < 0.01);
+        assert!((w - w2).abs() < 0.01);
+    }
 
     let png = workbook
         .render_sheet(
@@ -141,6 +218,7 @@ fn refused_charts_degrade_to_placeholders_and_keep_the_sheet() {
 
     let pixels = decode_rgba(&png.bytes);
     assert!(pixels.contains(&[0xf2, 0xf2, 0xf2]));
+    assert!(pixels.contains(&[0x44, 0x72, 0xc4]));
     assert!(
         pixels
             .iter()

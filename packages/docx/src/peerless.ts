@@ -1,3 +1,4 @@
+export { SessionFailure } from '../../../shared/office-session/types';
 export { createResidentCommandConnection } from './yrs/residentCommandConnection';
 export { createDocxWorkerEditSession } from './yrs/createDocxWorkerEditSession';
 export { discardCommandPresentation, closeCommandBitmap } from './yrs/residentCommandPresentation';

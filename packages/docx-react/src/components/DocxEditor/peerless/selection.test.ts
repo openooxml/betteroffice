@@ -85,6 +85,7 @@ function orderedSelection() {
   let tail: CommandTicket | undefined;
   const commands: PeerlessCommandBinding = {
     submit(intent, options) {
+      if (intent.kind === 'acceptRevision' || intent.kind === 'rejectRevision') throw new Error('Unexpected review intent');
       const echo: PeerlessEchoIntent | undefined = intent.kind === 'insertText'
         ? { intent, originalIntentCount: 1, contextFrameEpoch: 7 } : undefined;
       tail = session.submit(intent.kind, intent.payload, { ...options, after: tail, echo });

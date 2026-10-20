@@ -70,7 +70,7 @@ function frame(revision: number, coverage: number, text = ''): DocxCommandFrame 
 
 async function mount(selection = false, accessible = false, table = false,
   prepare?: UsePeerlessEditSessionOptions['prepareGeometry'], caretX: (revision: number) => number = () => 10,
-  props: Partial<PeerlessPagedEditorProps> = {}) {
+  props: Partial<PeerlessPagedEditorProps> = {}, multiCell = false) {
   const events: string[] = [];
   restorers.push(installGlyphPaths());
   const canvas = document.createElement('canvas');
@@ -88,7 +88,7 @@ async function mount(selection = false, accessible = false, table = false,
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: false, canRedo: false, hyperlink: null, tableContext: table ? {
         story: 'body', tableIndex: 0, rowIndex: 0, columnIndex: 0, rowCount: 1, columnCount: 2,
-        hasMultiCellSelection: false, canSplitCell: false,
+        hasMultiCellSelection: multiCell, canSplitCell: false,
       } : null },
     frame: frame(1, 0),
   };
@@ -418,4 +418,14 @@ test('a press outside the pages ends their click sequence', async () => {
   press(document.body);
   press(host);
   expect(counts).toEqual([1, 2, 1, 2, 1]);
+});
+
+test('single_cell selection keeps the worker caret next to its highlight', async () => {
+  const editor = await mount(true, false, true);
+  await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2));
+});
+
+test('multi_cell selection hides the worker caret but keeps its highlight', async () => {
+  const editor = await mount(true, false, true, undefined, () => 10, {}, true);
+  await waitFor(() => expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1));
 });

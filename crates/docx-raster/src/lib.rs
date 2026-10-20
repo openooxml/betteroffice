@@ -691,6 +691,16 @@ fn paint_shape(
     opacity: f32,
     budget: &mut PageBudget,
 ) -> Result<(), String> {
+    if shape
+        .attrs
+        .fill_paint
+        .as_ref()
+        .and_then(|paint| paint.get("kind"))
+        .and_then(Value::as_str)
+        == Some("picture")
+    {
+        return Ok(());
+    }
     if !shape.attrs.effects.is_empty() {
         return Err("unsupported shape field: effects".to_string());
     }

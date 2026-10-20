@@ -20,13 +20,14 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   readonly fontFaces: Set<FontFace>;
   /** Holds the worker's replies until `release`. */
   hold(): void;
-  release(): void;
+  /** Delivers the held replies `only` accepts and keeps holding, or delivers all and stops holding. */
+  release(only?: (reply: ResidentEngineWorkerResponse) => boolean): void;
 }
 
 const STUBS: Record<string, string> = {
   '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
   './residentEngineSession':
-    'export const createResidentEngineSession = (heapLimitBytes) => testHarness.createSession(heapLimitBytes);',
+    'export const createResidentEngineSession = (heapLimitBytes, clientId) => testHarness.createSession(heapLimitBytes, clientId);',
   './wasm/index': `
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
@@ -66,7 +67,7 @@ class Canvas {
  * `terminate` stops the worker like a real one: no more messages either way, its timers and
  * channels close and its sessions are freed.
  */
-export async function residentWorkerFactory(): Promise<(clientId?: number) => InProcessResidentWorker> {
+export async function residentWorkerFactory(options: { transferBuffers?: boolean } = {}): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
     target: 'bun',
@@ -157,10 +158,10 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       sessions: [],
       imageBlobs: [],
       fontFaces,
-      postMessage(message) {
+      postMessage(message, transfer = []) {
         worker.requests.push(message.type);
         if (terminated) return;
-        const data = structuredClone(message);
+        const data = structuredClone(message, { transfer: options.transferBuffers ? transfer.filter(value => value instanceof ArrayBuffer) : [] });
         if (data.type === 'attachCanvases') {
           for (const page of data.pages) Object.setPrototypeOf(page.canvas, Canvas.prototype);
         }
@@ -185,10 +186,10 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       hold() {
         held ??= [];
       },
-      release() {
+      release(only) {
         const replies = held ?? [];
-        held = null;
-        for (const reply of replies) deliver(reply);
+        held = only ? replies.filter((reply) => !only(reply)) : null;
+        for (const reply of replies) if (!only || only(reply)) deliver(reply);
       },
     };
     start(
@@ -215,8 +216,8 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       },
       {
         encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
-        createSession: async (heapLimitBytes?: number) => {
-          const session = await createResidentEngineSession(heapLimitBytes, clientId);
+        createSession: async (heapLimitBytes?: number, requested?: number) => {
+          const session = await createResidentEngineSession(heapLimitBytes, clientId ?? requested);
           worker.sessions.push(session);
           if (terminated) session.destroy();
           return session;

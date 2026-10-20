@@ -25,6 +25,7 @@ import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
 import { isMacPlatform, matchesChord } from './commands/descriptors';
 import * as presenceRendering from './presence-rendering';
+import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
 
 const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
@@ -1464,6 +1465,26 @@ describe('PptxEditor host controls', () => {
       } finally { serialize.mockRestore(); }
     });
   }
+
+  it('returns the saved bytes from the sync save() under legacySyncApi alone', async () => {
+    const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, writable: true, value: class {} });
+    const workerOpen = spyOn(workerEditorSessionOpener, 'open').mockImplementation(() => {
+      throw new Error('opened the worker editor');
+    });
+    try {
+      let api: PptxEditorApi | undefined;
+      render(<PptxEditor legacySyncApi file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      expect(workerOpen).not.toHaveBeenCalled();
+      expect(api!.save().byteLength).toBeGreaterThan(0);
+    } finally {
+      workerOpen.mockRestore();
+      if (worker) Object.defineProperty(globalThis, 'Worker', worker);
+      else Reflect.deleteProperty(globalThis, 'Worker');
+    }
+  });
 
   it('discards an awaiting save after replacement and rejects stale flush handles', async () => {
     const opened: PptxEditorApi[] = [];

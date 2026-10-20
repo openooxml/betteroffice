@@ -87,10 +87,8 @@ const LEGEND_ROW_EM: f64 = 1.4;
 const LEGEND_ENTRY_GAP_EM: f64 = 0.65;
 /// The smallest plot an automatic layout leaves room for.
 const MIN_PLOT: f64 = 24.0;
-/// Room past a legend label's measured width, so a sink that clips to the box
-/// and can only estimate the width keeps glyphs wider than its estimate; a
-/// right legend's label box then ends at the chart's edge.
-const LEGEND_TEXT_SLACK: f64 = LEGEND_EDGE;
+/// Room for wider fallback fonts in unmeasured label boxes.
+const LABEL_TEXT_SLACK: f64 = LEGEND_EDGE;
 /// The space a title or a top or bottom legend keeps from the plot's labels.
 const BAND_GAP: f64 = 12.0;
 /// A title's line height and the depth of its baseline below the line's top,
@@ -266,6 +264,16 @@ pub trait PlotSink {
     }
 
     fn push_op(&mut self, op: PlotOp) -> bool;
+
+    /// Whether the sink anchors text at its exact right edge, consulted before layout.
+    fn anchors_text_end(&self) -> bool {
+        false
+    }
+
+    /// Draws Start text with exact right edge `x + width` and an estimated left edge.
+    fn push_end_aligned_text(&mut self, op: PlotOp) -> bool {
+        self.push_op(op)
+    }
 
     /// Whether the host draws a text op at its `rotation_deg`. One that keeps
     /// every label flat gets a turned title laid out flat instead.
@@ -953,6 +961,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     let ops = &mut Emitter {
         sink,
         remaining: MAX_PLOT_OPS,
+        estimated_text: false,
     };
     let scan = &mut ScanBudget::new();
     let chart_text = chart.text.chart;
@@ -996,7 +1005,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             y + CHART_PAD + TITLE_ASCENT_EM * size,
             (width - 2.0 * CHART_PAD).max(0.0),
             &style,
-            PlotTextAlign::Center,
+            TextAnchor::Center,
         );
         CHART_PAD + TITLE_LINE_EM * size + BAND_GAP
     } else {
@@ -1083,7 +1092,16 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         _ => 0.0,
     };
     let secondary_w = if secondary_value_axis(chart, false).is_some() {
-        38.0
+        if ops.sink.anchors_text_end() {
+            families
+                .iter()
+                .copied()
+                .filter(|family| family.secondary && !family.transposed())
+                .map(|family| secondary_axis_band(ops, family))
+                .fold(38.0, f64::max)
+        } else {
+            38.0
+        }
     } else {
         0.0
     };
@@ -1100,7 +1118,13 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     let top = title_h;
     let region_x = x + reserve_left.min(width);
     let region_w = (width - reserve_left - reserve_right).max(0.0);
-    let gutter = bands.left;
+    let gutter = if ops.sink.anchors_text_end() && ops.estimated_text {
+        bands
+            .left
+            .min((region_w - right_margin - secondary_w - MIN_PLOT).max(0.0))
+    } else {
+        bands.left
+    };
     let plot_x = x + reserve_left + gutter;
     let region_y = y + top + band_top;
     // A row legend keeps its gap from the region on either edge, and the far
@@ -1285,7 +1309,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
         let format = family.axis.and_then(|axis| axis.number_format);
         axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit))
             .into_iter()
-            .map(|value| text_width(&scale.format(value, format), &value_style, ops))
+            .map(|value| axis_text_width(&scale.format(value, format), &value_style, ops))
             .collect()
     };
     let category_style = family.category_text();
@@ -1301,7 +1325,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
         categories
             .iter()
             .flat_map(|label| label.split('\n'))
-            .map(|line| text_width(line.trim(), &category_style, ops))
+            .map(|line| axis_text_width(line.trim(), &category_style, ops))
             .fold(0.0, f64::max)
     };
     let lines = categories
@@ -1365,7 +1389,7 @@ fn axis_bands<S: PlotSink + ?Sized>(
             axis_ticks(scale, family.x_axis.and_then(|axis| axis.major_unit))
                 .last()
                 .map_or(0.0, |value| {
-                    text_width(&scale.format(*value, format), family.label(), ops) / 2.0
+                    axis_text_width(&scale.format(*value, format), family.label(), ops) / 2.0
                 })
         } else {
             0.0
@@ -1392,6 +1416,29 @@ fn axis_bands<S: PlotSink + ?Sized>(
             overhang: x_overhang,
         }
     }
+}
+
+fn secondary_axis_band<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+) -> f64 {
+    if family.axis.is_some_and(|axis| axis.hidden) {
+        return 38.0;
+    }
+    let style = family.scoped(family.axis.map(|axis| axis.text).unwrap_or_default());
+    let scale = value_scale(family);
+    let format = family.axis.and_then(|axis| axis.number_format);
+    axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit))
+        .into_iter()
+        .map(|value| {
+            let text = scale.format(value, format);
+            if measured_text_width(&text, &style, ops).is_some() {
+                38.0
+            } else {
+                fallback_font_width(&text, &style.font) + LABEL_TEXT_SLACK + label_gap(&style)
+            }
+        })
+        .fold(38.0, f64::max)
 }
 
 /// Draw ops for `chart` inside `rect`, collected into one vector.
@@ -1456,14 +1503,24 @@ pub fn chart_aria_label(chart: &PlotChart<'_>) -> String {
 struct Emitter<'s, S: PlotSink + ?Sized> {
     sink: &'s mut S,
     remaining: usize,
+    estimated_text: bool,
 }
 
 impl<S: PlotSink + ?Sized> Emitter<'_, S> {
     fn push(&mut self, op: PlotOp) {
+        self.push_anchored(op, TextAnchor::Start);
+    }
+
+    fn push_anchored(&mut self, op: PlotOp, anchor: TextAnchor) {
         if self.exhausted() {
             return;
         }
-        if self.sink.push_op(op) {
+        let accepted = if matches!(anchor, TextAnchor::End) && self.sink.anchors_text_end() {
+            self.sink.push_end_aligned_text(op)
+        } else {
+            self.sink.push_op(op)
+        };
+        if accepted {
             self.remaining -= 1;
         } else {
             self.remaining = 0;
@@ -1952,6 +2009,13 @@ fn push_rect<S: PlotSink + ?Sized>(
     });
 }
 
+#[derive(Clone, Copy)]
+enum TextAnchor {
+    Start,
+    Center,
+    End,
+}
+
 fn push_text<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     text: &str,
@@ -1960,7 +2024,7 @@ fn push_text<S: PlotSink + ?Sized>(
     width: f64,
     style: &ResolvedText,
 ) {
-    push_text_aligned(ops, text, x, baseline_y, width, style, PlotTextAlign::Start);
+    push_text_aligned(ops, text, x, baseline_y, width, style, TextAnchor::Start);
 }
 
 fn push_text_aligned<S: PlotSink + ?Sized>(
@@ -1970,7 +2034,7 @@ fn push_text_aligned<S: PlotSink + ?Sized>(
     baseline_y: f64,
     width: f64,
     style: &ResolvedText,
-    align: PlotTextAlign,
+    align: TextAnchor,
 ) {
     push_text_turned(ops, text, x, baseline_y, width, style, align, 0.0);
 }
@@ -1983,22 +2047,28 @@ fn push_text_turned<S: PlotSink + ?Sized>(
     baseline_y: f64,
     width: f64,
     style: &ResolvedText,
-    align: PlotTextAlign,
+    align: TextAnchor,
     rotation_deg: f64,
 ) {
     if text.is_empty() || width <= 0.0 || ops.exhausted() {
         return;
     }
-    ops.push(PlotOp::Text {
-        text: text.chars().take(MAX_LABEL_CHARS).collect(),
-        x,
-        baseline_y,
-        width,
-        font: style.font.clone(),
-        color: style.color.clone(),
+    ops.push_anchored(
+        PlotOp::Text {
+            text: text.chars().take(MAX_LABEL_CHARS).collect(),
+            x,
+            baseline_y,
+            width,
+            font: style.font.clone(),
+            color: style.color.clone(),
+            align: match align {
+                TextAnchor::Start | TextAnchor::End => PlotTextAlign::Start,
+                TextAnchor::Center => PlotTextAlign::Center,
+            },
+            rotation_deg,
+        },
         align,
-        rotation_deg,
-    });
+    );
 }
 
 fn push_line<S: PlotSink + ?Sized>(
@@ -2142,7 +2212,7 @@ fn side_legend_band<S: PlotSink + ?Sized>(
         let width = lead
             + lines
                 .iter()
-                .map(|line| legend_text_width(line, style, ops, 0.0))
+                .map(|line| text_width_with_slack(line, style, ops, 0.0))
                 .fold(0.0, f64::max);
         let height = size * LEGEND_PITCH_EM + size * 1.22 * lines.len().saturating_sub(1) as f64;
         rows.push(LegendRow {
@@ -2216,7 +2286,7 @@ fn legend_rows<S: PlotSink + ?Sized>(
         let entry_width = lead
             + lines
                 .iter()
-                .map(|line| legend_text_width(line, style, ops, LEGEND_TEXT_SLACK))
+                .map(|line| text_width_with_slack(line, style, ops, LABEL_TEXT_SLACK))
                 .fold(0.0, f64::max);
         let row = rows.last().unwrap();
         if !row.entries.is_empty() && row.width + gap + entry_width > width {
@@ -2239,18 +2309,40 @@ fn legend_rows<S: PlotSink + ?Sized>(
     rows
 }
 
-/// A legend line's advance: measured, or estimated at Calibri's widths plus
-/// `slack`, since a legend clips its label to the box it packs.
-fn legend_text_width<S: PlotSink + ?Sized>(
+/// Measured advance, or fallback font advances plus slack.
+fn text_width_with_slack<S: PlotSink + ?Sized>(
     label: &str,
     style: &ResolvedText,
     ops: &mut Emitter<'_, S>,
     slack: f64,
 ) -> f64 {
-    ops.sink
+    measured_text_width(label, style, ops)
+        .unwrap_or_else(|| fallback_font_width(label, &style.font) + slack)
+}
+
+fn axis_text_width<S: PlotSink + ?Sized>(
+    label: &str,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> f64 {
+    if ops.sink.anchors_text_end() {
+        text_width_with_slack(label, style, ops, LABEL_TEXT_SLACK)
+    } else {
+        text_width(label, style, ops)
+    }
+}
+
+fn measured_text_width<S: PlotSink + ?Sized>(
+    label: &str,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> Option<f64> {
+    let width = ops
+        .sink
         .measure_text(label, &style.font)
-        .filter(|width| width.is_finite() && *width >= 0.0)
-        .unwrap_or_else(|| legend_fallback_width(label, &style.font) + slack)
+        .filter(|width| width.is_finite() && *width >= 0.0);
+    ops.estimated_text |= width.is_none();
+    width
 }
 
 /// A label's advance in `style`, measured by the sink where it can.
@@ -2259,9 +2351,7 @@ fn text_width<S: PlotSink + ?Sized>(
     style: &ResolvedText,
     ops: &mut Emitter<'_, S>,
 ) -> f64 {
-    ops.sink
-        .measure_text(label, &style.font)
-        .filter(|width| width.is_finite() && *width >= 0.0)
+    measured_text_width(label, style, ops)
         .unwrap_or_else(|| fallback_label_width(label, &style.font))
 }
 
@@ -2271,10 +2361,9 @@ pub fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
     estimated_width(label, font, |_| 0.5)
 }
 
-/// A legend label's estimate: Calibri's advances and a full em for East Asian
-/// wide characters, never under [`fallback_label_width`]'s.
-fn legend_fallback_width(label: &str, font: &PlotFont) -> f64 {
-    estimated_width(label, font, legend_advance)
+/// Calibri advances and a full em for East Asian wide characters.
+fn fallback_font_width(label: &str, font: &PlotFont) -> f64 {
+    estimated_width(label, font, fallback_advance)
 }
 
 fn estimated_width(label: &str, font: &PlotFont, advance: fn(char) -> f64) -> f64 {
@@ -2293,7 +2382,7 @@ const FALLBACK_ADVANCES: [u16; 95] = [
     230, 799, 526, 528, 526, 526, 348, 391, 335, 526, 452, 715, 433, 452, 395, 314, 460, 314, 498,
 ];
 
-fn legend_advance(character: char) -> f64 {
+fn fallback_advance(character: char) -> f64 {
     match character as u32 {
         code @ 0x20..=0x7E => {
             (f64::from(FALLBACK_ADVANCES[(code - 0x20) as usize]) / 1000.0).max(0.5)
@@ -3001,7 +3090,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
             continue;
         }
         let text = scale.format(value, number_format);
-        let width = text_width(&text, tick_style, ops);
+        let width = axis_text_width(&text, tick_style, ops);
         widest = widest.max(width);
         if transposed {
             let baseline = if family.secondary {
@@ -3016,7 +3105,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
                 baseline,
                 width * 2.0,
                 tick_style,
-                PlotTextAlign::Center,
+                TextAnchor::Center,
             );
         } else {
             let label_x = if family.secondary {
@@ -3024,13 +3113,18 @@ fn emit_axes<S: PlotSink + ?Sized>(
             } else {
                 plot.x - label_gap(tick_style) - width
             };
-            push_text(
+            push_text_aligned(
                 ops,
                 &text,
                 label_x,
                 baseline_centred(at, tick_style),
                 width,
                 tick_style,
+                if family.secondary {
+                    TextAnchor::Start
+                } else {
+                    TextAnchor::End
+                },
             );
         }
         if let Some((outer, inner)) = tick_extents(axis.and_then(|axis| axis.major_tick_mark)) {
@@ -3119,7 +3213,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
                 plot.y + plot.h / 2.0 + tick_style.font.size_px * 0.34,
                 plot.h,
                 tick_style,
-                PlotTextAlign::Center,
+                TextAnchor::Center,
                 -90.0,
             );
         }
@@ -3333,7 +3427,7 @@ fn push_point_label<S: PlotSink + ?Sized>(
     baseline_y: f64,
     width: f64,
     percent_total: f64,
-    align: PlotTextAlign,
+    align: TextAnchor,
 ) {
     let Some(text) = point_label(family, series, index, percent_total) else {
         return;
@@ -3386,15 +3480,11 @@ fn push_marker_label<S: PlotSink + ?Sized>(
     let middle = y + font_px * 0.35;
     let centred = x - MARKER_LABEL_WIDTH / 2.0;
     let (left, baseline, align) = match spec.and_then(|labels| labels.position) {
-        Some("t") => (centred, y - reach - font_px * 0.25, PlotTextAlign::Center),
-        Some("b") => (centred, y + reach + font_px * 0.75, PlotTextAlign::Center),
-        Some("ctr") => (centred, middle, PlotTextAlign::Center),
-        Some("l") => (
-            x - reach - MARKER_LABEL_WIDTH,
-            middle,
-            PlotTextAlign::Center,
-        ),
-        _ => (x + reach, middle, PlotTextAlign::Start),
+        Some("t") => (centred, y - reach - font_px * 0.25, TextAnchor::Center),
+        Some("b") => (centred, y + reach + font_px * 0.75, TextAnchor::Center),
+        Some("ctr") => (centred, middle, TextAnchor::Center),
+        Some("l") => (x - reach - MARKER_LABEL_WIDTH, middle, TextAnchor::Center),
+        _ => (x + reach, middle, TextAnchor::Start),
     };
     push_point_label(
         ops,
@@ -3553,8 +3643,8 @@ fn emit_bar<S: PlotSink + ?Sized>(
         for (line, text) in label.split('\n').enumerate() {
             if horizontal {
                 let text = text.trim();
-                let width = text_width(text, category_style, ops);
-                push_text(
+                let width = axis_text_width(text, category_style, ops);
+                push_text_aligned(
                     ops,
                     text,
                     plot.x - label_gap(category_style) - width,
@@ -3562,6 +3652,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                         + step * line as f64,
                     width,
                     category_style,
+                    TextAnchor::End,
                 );
             } else {
                 push_text_aligned(
@@ -3571,7 +3662,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     baseline_below(plot.y + plot.h, category_style) + step * line as f64,
                     bands.slot - 4.0,
                     category_style,
-                    PlotTextAlign::Center,
+                    TextAnchor::Center,
                 );
             }
         }
@@ -3606,7 +3697,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     y + bands.bar,
                     48.0,
                     total,
-                    PlotTextAlign::Start,
+                    TextAnchor::Start,
                 );
             } else {
                 let (y0, y1) = (scale.y(plot, start), scale.y(plot, end));
@@ -3635,7 +3726,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     y0 + (y1 - y0) * fraction - offset,
                     label_w,
                     total,
-                    PlotTextAlign::Center,
+                    TextAnchor::Center,
                 );
             }
         }
@@ -3680,7 +3771,7 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
                 baseline_below(plot.y + plot.h, style) + step * line as f64,
                 slot,
                 style,
-                PlotTextAlign::Center,
+                TextAnchor::Center,
             );
         }
     }
@@ -3817,7 +3908,7 @@ fn emit_area<S: PlotSink + ?Sized>(
                 *y - 3.0,
                 48.0,
                 category_total(family, i),
-                PlotTextAlign::Start,
+                TextAnchor::Start,
             );
         }
     }
@@ -3942,7 +4033,7 @@ fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
             return;
         }
         let text = scale.format(value, format);
-        let width = text_width(&text, family.label(), ops);
+        let width = axis_text_width(&text, family.label(), ops);
         push_text_aligned(
             ops,
             &text,
@@ -3950,7 +4041,7 @@ fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
             baseline_below(plot.y + plot.h, family.label()),
             width * 2.0,
             family.label(),
-            PlotTextAlign::Center,
+            TextAnchor::Center,
         );
     }
 }
@@ -4090,7 +4181,7 @@ fn emit_bubble<S: PlotSink + ?Sized>(
                 y,
                 48.0,
                 category_total(family, i),
-                PlotTextAlign::Start,
+                TextAnchor::Start,
             );
         }
     }
@@ -4206,7 +4297,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
                 *y - 4.0,
                 48.0,
                 category_total(family, index),
-                PlotTextAlign::Start,
+                TextAnchor::Start,
             );
         }
     }
@@ -4665,7 +4756,7 @@ fn emit_pie<S: PlotSink + ?Sized>(
             oy + reach * middle.sin(),
             48.0,
             total,
-            PlotTextAlign::Start,
+            TextAnchor::Start,
         );
         angle += sweep;
     }
@@ -4749,7 +4840,7 @@ fn emit_legend<S: PlotSink + ?Sized>(
                 line,
                 band.x + lead,
                 middle + size * (LEGEND_BASELINE_EM + 1.22 * index as f64),
-                (band.w - lead + LEGEND_TEXT_SLACK).max(1.0),
+                (band.w - lead + LABEL_TEXT_SLACK).max(1.0),
                 style,
             );
         }
@@ -4845,7 +4936,7 @@ fn emit_legend_rows<S: PlotSink + ?Sized>(
                     text,
                     x + lead,
                     first + size * LEGEND_BASELINE_EM + line * index as f64,
-                    (entry.width - lead + LEGEND_TEXT_SLACK).max(1.0),
+                    (entry.width - lead + LABEL_TEXT_SLACK).max(1.0),
                     style,
                 );
             }
@@ -5217,6 +5308,332 @@ mod tests {
             w: 300.0,
             h: 200.0,
         }
+    }
+
+    struct AxisLabelSink {
+        ops: Vec<PlotOp>,
+        end_aligned: Vec<PlotOp>,
+        measured: bool,
+    }
+
+    #[test]
+    fn axis_label_regression_default_sink_preserves_base_geometry() {
+        let data = source(&[200_000.0, 600_000.0]);
+        let mut primary = group("column", vec![series("Units", &data)]);
+        primary.axis_ids = vec!["1"];
+        let mut secondary = group("line", vec![series("Revenue", &data)]);
+        secondary.axis_ids = vec!["2"];
+        let mut axis = value_axis("1", 0.0, 600_000.0);
+        axis.number_format = Some("\"$\"#,##0");
+        let mut secondary_axis = axis;
+        secondary_axis.id = Some("2");
+        let mut chart = combo_with_axes(primary, secondary, vec![axis, secondary_axis]);
+        chart.legend = Some(PlotLegend {
+            visible: Some(false),
+            ..Default::default()
+        });
+        for frame in [rect(), PlotRect { w: 110.0, ..rect() }] {
+            let ops = plot_chart(&chart, frame);
+            let (plot_x, plot_right) = ops
+                .iter()
+                .find_map(|op| match op {
+                    PlotOp::Line {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        width,
+                        ..
+                    } if y1 == y2 && x2 > x1 && *width == 1.0 => Some((*x1, *x2)),
+                    _ => None,
+                })
+                .expect("the bottom plot axis is drawn");
+            let font = chart_label_font();
+            let width = fallback_label_width("$600,000", &font);
+            let gap = TICK_LEN + LABEL_GAP_EM * font.size_px;
+            assert_eq!(plot_x, frame.x + CHART_PAD + width + gap);
+            let gutter = CHART_PAD + width + gap;
+            let expected_right = frame.x
+                + gutter
+                + (frame.w - gutter - (CHART_PAD + PLOT_INSET) - 38.0).max(MIN_PLOT);
+            assert_eq!(plot_right, expected_right);
+            let (x, emitted_width, align) = ops
+                .iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        x,
+                        width,
+                        align,
+                        ..
+                    } if text == "$600,000" => Some((*x, *width, *align)),
+                    _ => None,
+                })
+                .expect("the left currency tick is drawn");
+            assert_eq!(align, PlotTextAlign::Start);
+            assert_eq!(emitted_width, width);
+            assert_eq!(x, plot_x - gap - width);
+        }
+    }
+
+    impl PlotSink for AxisLabelSink {
+        fn anchors_text_end(&self) -> bool {
+            true
+        }
+
+        fn push_end_aligned_text(&mut self, op: PlotOp) -> bool {
+            self.end_aligned.push(op.clone());
+            self.push_op(op)
+        }
+
+        fn push_op(&mut self, op: PlotOp) -> bool {
+            self.ops.push(op);
+            true
+        }
+
+        fn measure_text(&mut self, text: &str, font: &PlotFont) -> Option<f64> {
+            self.measured
+                .then(|| text.chars().count() as f64 * 0.8 * font.size_px)
+        }
+    }
+
+    #[test]
+    fn axis_label_regression_left_ticks_keep_their_right_edge() {
+        check_left_axis_labels(false);
+    }
+
+    #[test]
+    fn axis_label_regression_measured_left_ticks_keep_their_positions() {
+        check_left_axis_labels(true);
+    }
+
+    #[test]
+    fn axis_label_regression_narrow_unmeasured_chart_keeps_plot_and_tick_edges() {
+        let data = source(&[200_000.0, 600_000.0]);
+        let mut group = group("column", vec![series("Revenue", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 0.0, 600_000.0);
+        axis.number_format = Some("\"$\"#,##0");
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            legend: Some(PlotLegend {
+                visible: Some(false),
+                ..Default::default()
+            }),
+            ..PlotChart::default()
+        };
+        let frame = PlotRect { w: 110.0, ..rect() };
+        let mut sink = AxisLabelSink {
+            ops: Vec::new(),
+            end_aligned: Vec::new(),
+            measured: false,
+        };
+        plot_chart_into(&chart, frame, &mut sink);
+        let (plot_x, plot_right) = sink
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    ..
+                } if y1 == y2 && x2 > x1 && *width == 1.0 => Some((*x1, *x2)),
+                _ => None,
+            })
+            .expect("the bottom plot axis is drawn");
+        assert!(plot_right - plot_x >= MIN_PLOT - 1e-9);
+        assert!(plot_right <= frame.x + frame.w - CHART_PAD - PLOT_INSET + 1e-9);
+        let labels: Vec<_> = sink
+            .end_aligned
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Text {
+                    text,
+                    x,
+                    width,
+                    font,
+                    align,
+                    ..
+                } if text.starts_with('$') => Some((*x, *width, font, *align)),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.len() > 1);
+        assert!(labels.iter().any(|(_, width, font, _)| {
+            frame.x + CHART_PAD + width + TICK_LEN + LABEL_GAP_EM * font.size_px > plot_x
+        }));
+        for (x, width, font, align) in labels {
+            let edge = plot_x - (TICK_LEN + LABEL_GAP_EM * font.size_px);
+            assert_eq!(align, PlotTextAlign::Start);
+            assert!((x + width - edge).abs() < 1e-9);
+        }
+    }
+
+    fn check_left_axis_labels(measured: bool) {
+        let data = source(&[200_000.0, 600_000.0]);
+        for chart_type in ["column", "line", "bar"] {
+            let mut group = group(chart_type, vec![series("Revenue", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 600_000.0);
+            axis.number_format = Some("\"$\"#,##0");
+            let chart = PlotChart {
+                chart_type,
+                plot_groups: vec![group],
+                axes: vec![axis],
+                legend: Some(PlotLegend {
+                    visible: Some(false),
+                    ..Default::default()
+                }),
+                ..PlotChart::default()
+            };
+            let mut sink = AxisLabelSink {
+                ops: Vec::new(),
+                end_aligned: Vec::new(),
+                measured,
+            };
+            plot_chart_into(&chart, rect(), &mut sink);
+            let axis_x = sink
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if x1 == x2 && *width == 1.0 => Some(*x1),
+                    _ => None,
+                })
+                .fold(f64::INFINITY, f64::min);
+            let label = if chart_type == "bar" {
+                "Q1"
+            } else {
+                "$600,000"
+            };
+            let (x, width, font, align) = sink
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        x,
+                        width,
+                        font,
+                        align,
+                        ..
+                    } if text == label => Some((*x, *width, font, *align)),
+                    _ => None,
+                })
+                .expect("the left axis label is drawn");
+            let edge = axis_x - (TICK_LEN + LABEL_GAP_EM * font.size_px);
+            assert!((x + width - edge).abs() < 1e-9);
+            assert_eq!(align, PlotTextAlign::Start);
+            assert!(
+                sink.end_aligned
+                    .iter()
+                    .any(|op| { matches!(op, PlotOp::Text { text, .. } if text == label) })
+            );
+            if measured {
+                let advance = label.chars().count() as f64 * 0.8 * font.size_px;
+                assert_eq!(width, advance);
+                assert!((x - (edge - advance)).abs() < 1e-9);
+                assert!((x - CHART_PAD).abs() < 1e-9);
+            } else {
+                assert!(width >= label.chars().count() as f64 * 0.64 * font.size_px);
+                assert!(x >= rect().x);
+            }
+        }
+    }
+
+    #[test]
+    fn axis_label_regression_hidden_secondary_axis_keeps_base_reserve() {
+        let data = source(&[200_000.0, 600_000.0]);
+        let mut primary = group("column", vec![series("Units", &data)]);
+        primary.axis_ids = vec!["1"];
+        let mut secondary = group("line", vec![series("Revenue", &data)]);
+        secondary.axis_ids = vec!["2"];
+        let mut axis = value_axis("2", 0.0, 600_000.0);
+        axis.number_format = Some("\"$\"#,##0");
+        axis.hidden = true;
+        let mut chart = combo_with_axes(
+            primary,
+            secondary,
+            vec![value_axis("1", 0.0, 600_000.0), axis],
+        );
+        chart.legend = Some(PlotLegend {
+            visible: Some(false),
+            ..Default::default()
+        });
+        let frame = rect();
+        let mut sink = AxisLabelSink {
+            ops: Vec::new(),
+            end_aligned: Vec::new(),
+            measured: false,
+        };
+        plot_chart_into(&chart, frame, &mut sink);
+        let (plot_x, plot_right) = sink
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    ..
+                } if y1 == y2 && x2 > x1 && *width == 1.0 => Some((*x1, *x2)),
+                _ => None,
+            })
+            .expect("the bottom plot axis is drawn");
+        let gutter = plot_x - frame.x;
+        let expected_right =
+            frame.x + gutter + (frame.w - gutter - (CHART_PAD + PLOT_INSET) - 38.0).max(MIN_PLOT);
+        assert_eq!(plot_right, expected_right);
+    }
+
+    #[test]
+    fn axis_label_regression_secondary_ticks_keep_room_for_fallback_fonts() {
+        let data = source(&[200_000.0, 600_000.0]);
+        let mut primary = group("column", vec![series("Units", &data)]);
+        primary.axis_ids = vec!["1"];
+        let mut secondary = group("line", vec![series("Revenue", &data)]);
+        secondary.axis_ids = vec!["2"];
+        let mut axis = value_axis("2", 0.0, 600_000.0);
+        axis.number_format = Some("\"$\"#,##0");
+        let mut chart = combo_with_axes(
+            primary,
+            secondary,
+            vec![value_axis("1", 0.0, 600_000.0), axis],
+        );
+        chart.legend = Some(PlotLegend {
+            visible: Some(false),
+            ..Default::default()
+        });
+        let mut sink = AxisLabelSink {
+            ops: Vec::new(),
+            end_aligned: Vec::new(),
+            measured: false,
+        };
+        plot_chart_into(&chart, rect(), &mut sink);
+        let (x, width, align, size) = sink
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Text {
+                    text,
+                    x,
+                    width,
+                    align,
+                    font,
+                    ..
+                } if text == "$600,000" => Some((*x, *width, *align, font.size_px)),
+                _ => None,
+            })
+            .expect("the secondary currency tick is drawn");
+        assert_eq!(align, PlotTextAlign::Start);
+        assert!(width >= "$600,000".chars().count() as f64 * 0.64 * size);
+        assert!(x + width <= rect().x + rect().w);
     }
 
     fn family<'a>(
@@ -8664,7 +9081,7 @@ mod tests {
     }
 
     #[test]
-    fn axis_labels_keep_half_an_em_and_legend_labels_calibri_widths() {
+    fn fallback_font_advances_cover_half_em_estimates() {
         let font = chart_label_font();
         assert_eq!(
             fallback_label_width("July", &font),
@@ -8674,11 +9091,11 @@ mod tests {
             fallback_label_width("日本", &font),
             2.0 * 0.5 * font.size_px
         );
-        assert_eq!(legend_fallback_width("日本", &font), 2.0 * font.size_px);
+        assert_eq!(fallback_font_width("日本", &font), 2.0 * font.size_px);
         for label in ["July", "illicit", "WW", "日本"] {
-            assert!(legend_fallback_width(label, &font) >= fallback_label_width(label, &font));
+            assert!(fallback_font_width(label, &font) >= fallback_label_width(label, &font));
         }
-        assert!(legend_fallback_width("WW", &font) > 2.0 * 0.85 * font.size_px);
+        assert!(fallback_font_width("WW", &font) > 2.0 * 0.85 * font.size_px);
     }
 
     #[test]
@@ -8799,8 +9216,7 @@ mod tests {
             let ops = plot_chart(&legend_chart(Some(position), &names, &data), rect());
             let label = text_at(&ops, "WW");
             assert!(
-                label.3
-                    >= legend_fallback_width("WW", &chart_label_font()) + LEGEND_TEXT_SLACK - 1e-9,
+                label.3 >= fallback_font_width("WW", &chart_label_font()) + LABEL_TEXT_SLACK - 1e-9,
                 "{position}: {label:?}"
             );
         }
@@ -9700,6 +10116,7 @@ mod tests {
         let mut emitter = Emitter {
             sink: &mut ops,
             remaining: MAX_PLOT_OPS,
+            estimated_text: false,
         };
         let style = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
         // A negative band leaves the remainder empty and still wider than the

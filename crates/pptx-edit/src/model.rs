@@ -132,6 +132,8 @@ pub struct ShapeSnapshot {
     /// Hides this shape and its descendants.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub geometry: String,
     pub adjust_values: BTreeMap<String, f64>,
     pub placeholder: Option<Placeholder>,
@@ -193,6 +195,12 @@ pub struct SlideSnapshot {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<ShapeFill>,
+    /// An edit changed the background from what the source part declares, so
+    /// `background` stands for the slide whatever `p:bg` that part holds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub background_edited: bool,
     pub shapes: Vec<ShapeSnapshot>,
 }
 
@@ -342,6 +350,14 @@ pub struct ShapeFillReceipt {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SlideBackgroundReceipt {
+    pub slide_id: String,
+    pub before: Option<ShapeFill>,
+    pub after: Option<ShapeFill>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShapeStrokeReceipt {
     pub slide_id: String,
     pub shape_id: String,
@@ -398,6 +414,8 @@ pub enum EditError {
     ParagraphBoundary { start: u32, end: u32 },
     #[error("invalid shape geometry: {0}")]
     InvalidGeometry(String),
+    #[error("invalid fill: {0}")]
+    InvalidFill(String),
     #[error("invalid shape adjustment: {0}")]
     InvalidAdjustment(String),
     #[error("invalid text: {0}")]

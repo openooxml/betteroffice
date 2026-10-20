@@ -14,10 +14,10 @@ export function resolvedFinalSectionProperties(
  * Applies an edit to the last section on both views: the resolved entry the
  * engine lays out and the authored sectPr the serializer saves.
  */
-export function updateFinalSectionProperties(
-  body: DocumentBody,
+export function updateFinalSectionProperties<T extends Pick<DocumentBody, 'sections' | 'finalSectionProperties'>>(
+  body: T,
   update: (properties: SectionProperties) => SectionProperties
-): DocumentBody {
+): T {
   const sections = body.sections?.map((section, index, all) =>
     index === all.length - 1 ? { ...section, properties: update(section.properties) } : section
   );

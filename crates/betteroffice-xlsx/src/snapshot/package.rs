@@ -274,6 +274,10 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
             .unwrap()
             .unwrap_err();
         assert_eq!(refused.failure.code, EditFailureCode::LockedTarget);
+        assert_eq!(
+            refused.failure.message,
+            r#"A1 is locked on protected sheet "Other""#
+        );
         let error = workbook
             .apply_ops(
                 vec![Op::RenameSheet {

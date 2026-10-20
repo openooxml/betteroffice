@@ -88,6 +88,7 @@ export class XlsxDocument {
      * slide a chart by a pixel delta as one undo step.
      */
     moveChartJson(args: string): string;
+    moveRangeJson(args: string): string;
     nextPeerSnapshotChunk(): Uint8Array | undefined;
     /**
      * open a workbook from raw `.xlsx` bytes.
@@ -134,6 +135,7 @@ export class XlsxDocument {
      */
     saveBytes(): Uint8Array;
     searchTextJson(args: string): string;
+    selectionDataJson(args: string): string;
     selectionFormattingJson(args: string): string;
     /**
      * switch the active sheet by index.
@@ -237,6 +239,7 @@ export interface InitOutput {
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_nextPeerSnapshotChunk: (a: number) => [number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
@@ -256,6 +259,7 @@ export interface InitOutput {
     readonly xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
     readonly xlsxdocument_setCalculationContextJson: (a: number, b: number, c: number) => [number, number];

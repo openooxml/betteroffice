@@ -1,4 +1,5 @@
 import { expect, test, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 
 interface CommentInsertion {
   paraId: string;
@@ -74,7 +75,7 @@ async function openSidebar(page: Page, firstCanvasAt: number) {
   const autoOpen = await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.sidebarOpen);
   const started = autoOpen ? firstCanvasAt : Date.now();
   if (!autoOpen) {
-    expect(await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.commands.execute('commentsSidebar', null))).toMatchObject({ ok: true });
+    expect(await pinnedEvaluate(page, () => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.commands.execute('commentsSidebar', null))).toMatchObject({ ok: true });
   }
   await expect(page.locator('.docx-comment-card')).toBeVisible();
   console.log(JSON.stringify({ sidebarFirstCardMs: Date.now() - started }));
@@ -149,7 +150,7 @@ test('expanding a viewer comment highlights it without session reads', async ({ 
 test('deleting a viewer comment removes its worker anchor without a document replica', async ({ page }) => {
   const { before, firstCanvasAt } = await open(page);
   await openSidebar(page, firstCanvasAt);
-  await expect.poll(() => page.evaluate(() =>
+  await expect.poll(() => pinnedEvaluate(page, () =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
       .then((anchors) => anchors?.length ?? 0)
   )).toBeGreaterThan(0);
@@ -159,7 +160,7 @@ test('deleting a viewer comment removes its worker anchor without a document rep
   await comment.getByRole('button', { name: 'More options' }).click();
   await comment.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await expect(comment).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() =>
+  await expect.poll(() => pinnedEvaluate(page, () =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
   )).toEqual([]);
   await expect(page.locator('.docx-canvas-brighten-comment')).toHaveCount(0);
@@ -170,7 +171,7 @@ test('deleting a viewer comment removes its worker anchor without a document rep
   await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.setZoom(1.1));
   await expect.poll(() => canvas.evaluate((element) => element.getBoundingClientRect().width)).not.toBe(width);
   await expect(comment).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() =>
+  await expect.poll(() => pinnedEvaluate(page, () =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.commentAnchors('7')
   )).toEqual([]);
   await expectNoDocumentReads(page, before);
@@ -178,7 +179,7 @@ test('deleting a viewer comment removes its worker anchor without a document rep
 
 test('viewer ref mutations refuse without loading a main-thread document', async ({ page }) => {
   const { before } = await open(page);
-  const refused = await page.evaluate(async () => {
+  const refused = await pinnedEvaluate(page, async () => {
     const editor = (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!;
     return {
       editorRef: editor.getEditorRef(),

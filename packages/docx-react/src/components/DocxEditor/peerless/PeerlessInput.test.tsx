@@ -147,6 +147,34 @@ test('d2b_overlapping_browser_events_commit_once', () => {
   expect(textarea.value).toBe('');
 });
 
+test('Shift+Enter inserts one line break across overlapping browser events', () => {
+  for (const inputType of ['insertLineBreak', 'insertParagraph']) {
+    const input = mount();
+    beforeinput(input.textarea, 'insertText', 'a');
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', shiftKey: true, bubbles: true, cancelable: true,
+    });
+    act(() => { input.textarea.dispatchEvent(enter); });
+    expect(enter.defaultPrevented).toBe(true);
+    beforeinput(input.textarea, inputType);
+    fireEvent.input(input.textarea, { inputType, target: { value: '\n' } });
+    fireEvent.keyUp(input.textarea, { key: 'Enter', shiftKey: true });
+    beforeinput(input.textarea, 'insertText', 'b');
+    fireEvent.keyDown(input.textarea, { key: 'Enter' });
+    beforeinput(input.textarea, 'insertParagraph');
+    fireEvent.input(input.textarea, { inputType: 'insertParagraph', target: { value: '\n' } });
+    fireEvent.keyUp(input.textarea, { key: 'Enter' });
+    expect(input.submitted).toEqual(['insertText', 'lineBreak', 'insertText', 'paragraphBreak']);
+    expect(input.entries[1]!.payload).toEqual({});
+    expect(input.entries[1]!.options.fence).toBe(true);
+    for (let i = 1; i < input.entries.length; i += 1) {
+      expect(input.entries[i]!.options.after).toBe(input.entries[i - 1]!.ticket);
+    }
+    input.unmount();
+    input.admission.dispose();
+  }
+});
+
 test('d2b_identical_input_after_trailing_composition_is_admitted', () => {
   for (const trailingBeforeinput of [true, false]) {
     const input = mount();
@@ -624,6 +652,17 @@ test('copy and cut use the worker clipboard adapter instead of the empty input v
   expect(copy.defaultPrevented).toBe(true);
   expect(cut.defaultPrevented).toBe(true);
   expect(input.submitted).toEqual([]);
+});
+
+test('copy and cut hand the event clipboardData to the adapter while the event is dispatching', () => {
+  const seen: Array<DataTransfer | null | undefined> = [];
+  const input = mount(false, { onClipboard: async (_cut, data) => { seen.push(data); } });
+  const clipboardData = { setData() {}, getData: () => '' } as unknown as DataTransfer;
+  for (const type of ['copy', 'cut']) {
+    const event = Object.assign(new Event(type, { bubbles: true, cancelable: true }), { clipboardData });
+    act(() => { input.textarea.dispatchEvent(event); });
+  }
+  expect(seen).toEqual([clipboardData, clipboardData]);
 });
 
 test('worker input enables spelling and follows acknowledged caret geometry', () => {

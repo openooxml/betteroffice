@@ -15,8 +15,15 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  CHUNKED_SYNC_CLIENT,
   encodeVarUint,
+  holdsOpenSyncClient,
+  OPEN_SYNC_CLIENT,
+  parseSyncRequest,
   ProtocolError,
+  requireUnreservedClientId,
+  stateVectorClock,
+  withSyncRequest,
 } from './protocol';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -276,5 +283,101 @@ describe('collaboration protocol decoding', () => {
     expect(() => decodeMessages(Uint8Array.of(3), 1024, 0)).toThrow(
       'Message limit must be a positive integer'
     );
+  });
+});
+
+describe('stateVectorClock', () => {
+  it('reads one client clock and 0 for an absent client or a malformed vector', () => {
+    const vector = Uint8Array.of(2, 5, 9, ...encodeVarUint(300), 7);
+    expect(stateVectorClock(vector, 5)).toBe(9);
+    expect(stateVectorClock(vector, 300)).toBe(7);
+    expect(stateVectorClock(vector, 6)).toBe(0);
+    for (const malformed of [Uint8Array.of(4), Uint8Array.of(1, 5), new Uint8Array()]) expect(stateVectorClock(malformed, 5)).toBe(0);
+  });
+});
+
+function stateVector(...entries: [bigint, bigint][]): Uint8Array {
+  const bytes: number[] = [];
+  const write = (value: bigint) => {
+    for (; value >= 0x80n; value >>= 7n) bytes.push(Number(value & 0x7fn) | 0x80);
+    bytes.push(Number(value));
+  };
+  write(BigInt(entries.length));
+  for (const [client, clock] of entries) {
+    write(client);
+    write(clock);
+  }
+  return Uint8Array.from(bytes);
+}
+
+const OPEN = [BigInt(OPEN_SYNC_CLIENT), 0n] as [bigint, bigint];
+const CHUNKED = [BigInt(CHUNKED_SYNC_CLIENT), 0n] as [bigint, bigint];
+
+describe('sync request entries', () => {
+  it('appends each requested entry once at clock 0', () => {
+    const vector = stateVector([5n, 9n]);
+    expect(withSyncRequest(vector, { open: true })).toEqual(stateVector([5n, 9n], OPEN));
+    expect(withSyncRequest(vector, { chunked: true })).toEqual(stateVector([5n, 9n], CHUNKED));
+    const both = withSyncRequest(vector, { open: true, chunked: true });
+    expect(both).toEqual(stateVector([5n, 9n], OPEN, CHUNKED));
+    expect(withSyncRequest(both, { open: true, chunked: true })).toBe(both);
+    expect(withSyncRequest(stateVector([5n, 9n], CHUNKED), { open: true, chunked: true }))
+      .toEqual(stateVector([5n, 9n], CHUNKED, OPEN));
+    expect(withSyncRequest(vector, {})).toBe(vector);
+  });
+
+  it('parses both requests and strips them wherever they sit', () => {
+    expect(parseSyncRequest(stateVector(OPEN, [5n, 9n], CHUNKED, [7n, 1n]))).toEqual({
+      stateVector: stateVector([5n, 9n], [7n, 1n]),
+      open: true,
+      chunked: true,
+    });
+    expect(parseSyncRequest(stateVector([5n, 9n], CHUNKED))).toEqual({
+      stateVector: stateVector([5n, 9n]),
+      open: false,
+      chunked: true,
+    });
+    const plain = stateVector([5n, 9n]);
+    expect(parseSyncRequest(plain)).toEqual({ stateVector: plain, open: false, chunked: false });
+    const ahead = stateVector([BigInt(OPEN_SYNC_CLIENT), 3n]);
+    expect(parseSyncRequest(ahead)).toEqual({ stateVector: ahead, open: false, chunked: false });
+  });
+
+  it('tells a history that holds the open request client from a marked or plain vector', () => {
+    expect(holdsOpenSyncClient(stateVector([5n, 9n], [BigInt(OPEN_SYNC_CLIENT), 3n]))).toBe(true);
+    for (const vector of [stateVector([5n, 9n]), stateVector([5n, 9n], OPEN), Uint8Array.of(7)]) {
+      expect(holdsOpenSyncClient(vector)).toBe(false);
+    }
+  });
+
+  it('marks a local clock at the native limit without changing it', () => {
+    const marked = withSyncRequest(stateVector([7n, 0xffff_ffffn]), { open: true });
+    expect(parseSyncRequest(marked)).toEqual({
+      stateVector: stateVector([7n, 0xffff_ffffn]),
+      open: true,
+      chunked: false,
+    });
+  });
+
+  it('marks vectors of any size', () => {
+    const entries = Array.from({ length: 70_000 }, (_, index) => [BigInt(index), 1n] as [bigint, bigint]);
+    const request = parseSyncRequest(withSyncRequest(stateVector(...entries), { open: true, chunked: true }));
+    expect(request.open && request.chunked).toBe(true);
+    expect(request.stateVector).toEqual(stateVector(...entries));
+  });
+
+  it('leaves vectors that do not decode unchanged and unmarked', () => {
+    const overlong = Uint8Array.of(1, ...new Array(11).fill(0x80));
+    for (const vector of [Uint8Array.of(), Uint8Array.of(7), Uint8Array.of(0, 1), overlong]) {
+      expect(withSyncRequest(vector, { open: true, chunked: true })).toBe(vector);
+      expect(parseSyncRequest(vector)).toEqual({ stateVector: vector, open: false, chunked: false });
+    }
+  });
+
+  it('refuses the reserved client ids', () => {
+    expect(requireUnreservedClientId(OPEN_SYNC_CLIENT - 1)).toBe(OPEN_SYNC_CLIENT - 1);
+    for (const client of [OPEN_SYNC_CLIENT, CHUNKED_SYNC_CLIENT]) {
+      expect(() => requireUnreservedClientId(client)).toThrow(RangeError);
+    }
   });
 });

@@ -31,6 +31,7 @@ export const editsession_apply_paragraph_style: (a: number, b: number, c: number
 export const editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
+export const editsession_apply_update_chunks: (a: number, b: any) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
 export const editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
@@ -72,6 +73,7 @@ export const editsession_drain_update_event: (a: number) => [number, number];
 export const editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
 export const editsession_encode_state: (a: number) => [number, number];
 export const editsession_encode_state_vector: (a: number) => [number, number];
@@ -89,12 +91,14 @@ export const editsession_finish_compared_docx_json: (a: number, b: number, c: nu
 export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_geometry_position_outline_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_has_pending_update: (a: number) => number;
 export const editsession_has_story: (a: number, b: number, c: number) => number;
 export const editsession_header_footer_aliases_json: (a: number) => [number, number];
 export const editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_history_stories: (a: number) => [number, number];
 export const editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+export const editsession_insert_line_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
 export const editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -169,6 +173,7 @@ export const editsession_revision_stamps_json: (a: number, b: number, c: number)
 export const editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_section_margins_json: (a: number) => [number, number];
+export const editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
 export const editsession_select_story: (a: number, b: number, c: number) => void;
@@ -200,6 +205,7 @@ export const editsession_set_part_metadata: (a: number, b: number, c: number, d:
 export const editsession_set_partial_document: (a: number, b: number) => void;
 export const editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+export const editsession_set_table_properties: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_undo_input_time: (a: number, b: number, c: number) => void;
