@@ -1,11 +1,11 @@
-import { createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from '../selectionData';
+import { copiedSelection, createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   cellAtPoint, cellRect, chartRegionAtPoint, extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable,
   moveFocus, normalizeRange, paintDisplayList, parseHyperlinkLocation, safeExternalHyperlink, selectionAt,
   selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
 import type {
-  CellAddr, CellInputEdit, Proposal, Selection, WorkbookSheetView, WorkbookCommandSelection,
+  CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookCommandSelection,
   WorkbookSheetSummary,
 } from '@betteroffice/xlsx';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -100,8 +100,7 @@ function commandSelection(target: WorkbookCommandSelection, previous?: Selection
   } };
 }
 
-function selectedRange(selection: Selection): string {
-  const range = normalizeRange(selection);
+function rangeA1(range: CellRange): string {
   return `${address({ row: range.top, col: range.left })}:${address({ row: range.bottom, col: range.right })}`;
 }
 
@@ -987,7 +986,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (refused) { reject!(refused.error); report(refused.error); return; }
     const copied = coordinator.runAfterPendingInput(async () => {
       checkOwner();
-      const result = await owner.session.call.cellInputs(sheet, selectedRange(selected));
+      const result = await owner.session.call.cellInputs(sheet, rangeA1(await copiedSelection(owner.session, sheet, selected)));
       checkOwner();
       return toTsv(result.cells);
     }, kind === 'cut' ? true : 'posted');

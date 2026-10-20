@@ -1710,6 +1710,39 @@ describe('XlsxEditor commands', () => {
     }
   });
 
+  for (const key of ['c', 'Delete'] as const) it(`${key === 'c' ? 'copies' : 'clears'} a Ctrl+A sheet selection through its used cells`, async () => {
+    const clipboard = holdClipboardWrite();
+    try {
+      const editor = await mountCommands();
+      const api = editor.api();
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      api.handle.editCells(0, [
+        { row: 0, col: 0, input: 'First' },
+        { row: 3, col: 1, input: 'Second' },
+      ]);
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 40, col: 20 }));
+      });
+      await act(async () => {
+        fireEvent.keyDown(surface, { key: 'a', ctrlKey: true });
+      });
+      await act(async () => {
+        fireEvent.keyDown(surface, key === 'c' ? { key, ctrlKey: true } : { key });
+      });
+      if (key === 'Delete') {
+        await waitFor(() => expect(api.handle.cell(0, 3, 1).input).toBe(''));
+        expect(api.handle.cell(0, 0, 0).input).toBe('');
+        return;
+      }
+      const rows = clipboard.writes[0]!.text.split(/\r?\n/).map((row) => row.split('\t'));
+      expect(rows[0]![0]).toBe('First');
+      expect(rows[3]![1]).toBe('Second');
+      expect(rows.length).toBeLessThan(1_000);
+    } finally {
+      clipboard.restore();
+    }
+  });
+
   const keepsRejectedOnItsSheet = async (back: 'tab' | 'selectCells') => {
     const source = openWorkbook(plain.bytes.slice());
     source.applyOps([{ type: 'addSheet', index: 1, name: 'Second' }]);

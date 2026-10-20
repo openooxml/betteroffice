@@ -168,8 +168,29 @@ describe('workbook commands', () => {
     } finally { clearing.mockRestore(); await session.dispose(); }
   });
 
+  test('toolbar clear to the sheet edge clears only its used cells', async () => {
+    const { session, handle } = await trackedSession();
+    const target = { ...selected, range: { kind: 'a1' as const, a1: 'A2:XFD1048576' } };
+    try {
+      await session.submit(command(session, 1, 'editCells', { args: [0, [
+        { row: 1, col: 0, input: 'text' }, { row: 3, col: 2, input: '=A2' },
+      ]] }));
+      const clearing = spyOn(handle, 'editCells');
+      try {
+        expect(await session.submit(command(session, 2, 'applyOps', {
+          toolbar: { id: 'clear', args: null, target }, selection: target,
+        }))).toMatchObject({ status: 'applied', committed: true });
+        expect(clearing).toHaveBeenCalledTimes(1);
+        expect(clearing.mock.calls[0]![1].length).toBeLessThan(100_000);
+        expect(handle.cell(0, 1, 0).input).toBe('');
+        expect(handle.cell(0, 3, 2).input).toBe('');
+      } finally { clearing.mockRestore(); }
+    } finally { await session.dispose(); }
+  });
+
   test('toolbar clear refuses oversized ranges before expanding cells', async () => {
     const { session, handle } = await trackedSession();
+    await session.submit(command(session, 1, 'editCells', { args: [0, [{ row: 1_048_575, col: 16_383, input: 'far' }]] }));
     const resolving = spyOn(toolbarCommands, 'resolveWorkbookToolbar').mockImplementation(() => {
       throw new Error('Oversized clear reached cell expansion');
     });
@@ -179,7 +200,7 @@ describe('workbook commands', () => {
       const version = handle.version();
       const history = handle.historyState();
       const selection = structuredClone(session.selection);
-      let seq = 0;
+      let seq = 1;
       for (const a1 of ['A2:A100002', 'A1:XFD1048576']) {
         const target = { ...selected, range: { kind: 'a1' as const, a1 } };
         expect(await session.submit(command(session, ++seq, 'applyOps', {

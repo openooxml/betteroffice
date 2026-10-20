@@ -1,4 +1,4 @@
-import { createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
+import { clearedCells, copiedRange, createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
   extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
@@ -7,7 +7,7 @@ import {
   workbookEditPeerOperations, workbookSessionInternals,
 } from '@betteroffice/xlsx';
 import type {
-  CapturedFormat, CellAddr, CellEdit, CellInputEdit, Direction, EditResult, Proposal, Rect, Selection,
+  CapturedFormat, CellAddr, CellEdit, CellInputEdit, CellRange, Direction, EditResult, Proposal, Rect, Selection,
   WorkbookFrame, WorkbookHandle, WorkbookReplayOp, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
 import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -69,9 +69,12 @@ function address(cell: CellAddr): string {
   return `${column}${cell.row + 1}`;
 }
 
-function selectedRange(selection: Selection): string {
-  const range = normalizeRange(selection);
+function rangeA1(range: CellRange): string {
   return `${address({ row: range.top, col: range.left })}:${address({ row: range.bottom, col: range.right })}`;
+}
+
+function selectedRange(selection: Selection): string {
+  return rangeA1(normalizeRange(selection));
 }
 
 function fromPlugin(event: SyntheticEvent): boolean {
@@ -1022,6 +1025,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!owner?.current || owner.failure || !selected || kind !== 'copy' && !acceptInput()) return;
     const sheet = activeRef.current;
     const range = normalizeRange(selected);
+    const usedRange = () => owner.peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange;
     let clipboardWrite: { resolve(payload: Blob): void; reject(error: unknown): void; done: Promise<boolean> } | undefined;
     if (kind !== 'paste') {
       if (typeof ClipboardItem !== 'function' || typeof navigator.clipboard.write !== 'function') {
@@ -1051,14 +1055,10 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     });
     const prepareMutation = async (text: string) => {
       if (kind !== 'copy' && !mutation) {
-        const edits: CellInputEdit[] = [];
+        const edits: CellInputEdit[] = kind === 'paste' ? [] : clearedCells(range, usedRange);
         if (kind === 'paste') {
           fromTsv(text).forEach((row, dr) => row.forEach((input, dc) =>
             edits.push({ row: range.top + dr, col: range.left + dc, input })));
-        } else {
-          for (let row = range.top; row <= range.bottom; row++) {
-            for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
-          }
         }
         mutation = { method: 'editCells', args: [sheet, edits] };
       }
@@ -1068,7 +1068,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
       if (kind !== 'copy' && !mutation) await prepareMutation(text);
       if (kind !== 'paste') {
-        const copied = toTsv(owner.peer!.rangeCells(sheet, selectedRange(selected)));
+        const copied = toTsv(owner.peer!.rangeCells(sheet, rangeA1(copiedRange(range, usedRange))));
         let written: boolean;
         if (clipboardWrite) {
           clipboardWrite.resolve(new Blob([copied], { type: 'text/plain' }));
@@ -1106,10 +1106,8 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!acceptInput() || !selectionRef.current) return;
     const sheet = activeRef.current;
     const range = normalizeRange(selectionRef.current);
-    const edits: CellInputEdit[] = [];
-    for (let row = range.top; row <= range.bottom; row++) {
-      for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
-    }
+    const peer = run!.peer;
+    const edits = clearedCells(range, () => peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange);
     const op: WorkbookReplayOp = { method: 'editCells', args: [sheet, edits] };
     let discardPreview: (() => Promise<void>) | undefined;
     void coordinator.runAfterPendingInput(async (_, markApplied) => {

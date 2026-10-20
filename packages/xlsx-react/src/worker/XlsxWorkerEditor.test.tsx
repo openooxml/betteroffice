@@ -106,6 +106,14 @@ function harness(realFacade = false, normalizeInput = false) {
     cellRect: (_sheet: number, row: number, col: number) => ({ x: col * 96, y: row * 24, w: 96, h: 24 }),
     displayList: mock(() => { log.push('display:peer'); return display('peer'); }),
     mergedRanges: () => [], listProposals: () => [],
+    selectionData: (sheet: number) => {
+      const used = [...cells.entries()].filter(([key, input]) => input && key.startsWith(`${sheet}:`))
+        .map(([key]) => key.split(':').map(Number));
+      return { usedRange: used.length === 0 ? null : {
+        top: Math.min(...used.map(([, row]) => row!)), left: Math.min(...used.map(([, , col]) => col!)),
+        bottom: Math.max(...used.map(([, row]) => row!)), right: Math.max(...used.map(([, , col]) => col!)),
+      } };
+    },
     historyState: () => ({ canUndo: true, canRedo: true }),
     selectionFormatting: () => null,
     onUpdate: (listener: () => void) => { updates.add(listener); return () => { updates.delete(listener); }; },
@@ -4196,6 +4204,17 @@ describe('workbook worker editor', () => {
     await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen onReady={onReady} />); });
     expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toBeNull();
     await expect(apis[0].flushPendingInput()).rejects.toThrow('replaced');
+  });
+
+  it('clears a Ctrl+A sheet selection through its used cells', async () => {
+    const host = harness(true);
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'Delete' }); });
+    await advance();
+    expect(host.peerMethods.editCells).toHaveBeenCalledWith(0, [{ row: 0, col: 0, input: '' }]);
   });
 
   it('shows visible ready commit text while the replacement frame is held without blocking input', async () => {

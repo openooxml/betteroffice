@@ -7,7 +7,7 @@
  * layer is framework glue — keyboard/mouse wiring, focus flow, and DOM chrome.
  */
 
-import { selectionDataRequest, selectionHidden } from './selectionData';
+import { clearedCells, copiedRange, selectionDataRequest, selectionHidden } from './selectionData';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import {
@@ -1808,11 +1808,8 @@ function XlsxEditorContent({
   const writeClear = useCallback(
     ({ handle, sheet, range }: CellTarget) => {
       if (handleRef.current !== handle || readOnlyRef.current) return;
-      const edits: CellInputEdit[] = [];
-      for (let row = range.top; row <= range.bottom; row++) {
-        for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
-      }
       try {
+        const edits = clearedCells(range, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
         applyResult(handle.editCells(sheet, edits));
         return true;
       } catch (e) {
@@ -1828,8 +1825,9 @@ function XlsxEditorContent({
     if (target && !readOnly) void coordinator.input(() => writeClear(target));
   }, [captureTarget, writeClear, readOnly, coordinator]);
 
-  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget) => {
+  const copyTarget = useCallback(async ({ handle, sheet, range: selected }: CellTarget) => {
     try {
+      const range = copiedRange(selected, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
       const from = handle.cell(sheet, range.top, range.left).a1;
       const to = handle.cell(sheet, range.bottom, range.right).a1;
       const cells = handle.rangeCells(sheet, `${from}:${to}`);

@@ -1,5 +1,45 @@
 import { normalizeRange, selectionKeyReducer } from '@betteroffice/xlsx';
-import type { CellAddr, Direction, GridMeta, KeyInput, Selection, SelectionData, SelectionHidden, SelectionLimits } from '@betteroffice/xlsx';
+import type {
+  CellAddr, CellInputEdit, CellRange, Direction, GridMeta, KeyInput, Selection, SelectionData, SelectionHidden, SelectionLimits,
+  WorkbookSession,
+} from '@betteroffice/xlsx';
+
+const SHEET_ROWS = 1_048_576;
+const SHEET_COLS = 16_384;
+
+type UsedRange = () => CellRange | null | undefined;
+
+const reachesSheetEdge = (range: CellRange) => range.bottom >= SHEET_ROWS - 1 || range.right >= SHEET_COLS - 1;
+
+export function copiedRange(range: CellRange, used: UsedRange): CellRange {
+  if (!reachesSheetEdge(range)) return range;
+  const bounds = used();
+  const end = (start: number, last: number, usedLast: number | undefined, size: number) =>
+    last >= size - 1 ? Math.max(start, Math.min(last, usedLast ?? start)) : last;
+  return { ...range, bottom: end(range.top, range.bottom, bounds?.bottom, SHEET_ROWS),
+    right: end(range.left, range.right, bounds?.right, SHEET_COLS) };
+}
+
+export async function copiedSelection(
+  session: Pick<WorkbookSession, 'call'>, sheet: number, selection: Selection
+): Promise<CellRange> {
+  const range = normalizeRange(selection);
+  if (!reachesSheetEdge(range)) return range;
+  const { usedRange } = await session.call.selectionData(sheet, 0, 0, 'usedRange');
+  return copiedRange(range, () => usedRange);
+}
+
+export function clearedCells(range: CellRange, used: UsedRange): CellInputEdit[] {
+  const bounds = reachesSheetEdge(range) ? used() : range;
+  const edits: CellInputEdit[] = [];
+  if (!bounds) return edits;
+  for (let row = Math.max(range.top, bounds.top); row <= Math.min(range.bottom, bounds.bottom); row++) {
+    for (let col = Math.max(range.left, bounds.left); col <= Math.min(range.right, bounds.right); col++) {
+      edits.push({ row, col, input: '' });
+    }
+  }
+  return edits;
+}
 
 export function selectionHidden(grid: GridMeta | undefined): SelectionHidden {
   const contains = (spans: [number, number][] | undefined, index: number) => {

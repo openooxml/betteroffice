@@ -1,10 +1,10 @@
-import { createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
+import { copiedSelection, createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, chartRegionAtPoint, extendTo, hyperlinkAtCell,
   normalizeRange, paintDisplayList, parseHyperlinkLocation, rangeRect,
   safeExternalHyperlink, selectionAt, selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
-import type { CellAddr, CellEdit, Selection } from '@betteroffice/xlsx';
+import type { CellAddr, CellEdit, CellRange, Selection } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react';
 import type { XlsxWorkerViewerProps } from '../XlsxEditor';
@@ -40,8 +40,7 @@ function address(cell: CellAddr): string {
   return `${column}${cell.row + 1}`;
 }
 
-function selectedRange(selection: Selection): string {
-  const range = normalizeRange(selection);
+function rangeA1(range: CellRange): string {
   return `${address({ row: range.top, col: range.left })}:${address({ row: range.bottom, col: range.right })}`;
 }
 
@@ -374,7 +373,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
   const copy = async () => {
     if (!run?.current || !selection) return;
     try {
-      const inputs = await run.session.call.cellInputs(active, selectedRange(selection));
+      const inputs = await run.session.call.cellInputs(active, rangeA1(await copiedSelection(run.session, active, selection)));
       if (run.current) await navigator.clipboard.writeText(toTsv(inputs.cells));
     } catch {}
   };
