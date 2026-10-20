@@ -79,12 +79,20 @@ pub struct TextRunSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSnapshot {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_paragraphs: Vec<ParagraphSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserved_xml: Option<String>,
     pub alignment: Option<String>,
     pub level: u32,
     pub bullet_json: Option<String>,
     pub runs: Vec<TextRunSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParagraphSource {
+    pub id: String,
+    pub xml: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

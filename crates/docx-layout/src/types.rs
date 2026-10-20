@@ -596,6 +596,8 @@ pub struct ListNumPr {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_source_content: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub horizontal_rules: Vec<HorizontalRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1143,6 +1145,8 @@ pub struct SectionBreakBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageBreakBlock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_mark_ineligible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sdt_groups: Option<Vec<SdtGroup>>,
     pub id: BlockId,
@@ -1751,12 +1755,15 @@ impl PartialEq for ChartBlock {
 impl PartialEq for PageBreakBlock {
     fn eq(&self, other: &Self) -> bool {
         let Self {
+            section_mark_ineligible: _,
             sdt_groups: _,
             id: _,
             pm_start: _,
             pm_end: _,
         } = other;
-        self.sdt_groups == other.sdt_groups && self.id == other.id
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.section_mark_ineligible == other.section_mark_ineligible
     }
 }
 

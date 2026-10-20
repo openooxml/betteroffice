@@ -56,25 +56,47 @@ interface NavigationOptions {
   apply(selection: Selection): boolean | Promise<boolean>;
 }
 
+interface DeferredAction {
+  run(): void;
+  cancel?(): void;
+}
+
 interface NavigationBatch {
   context: NavigationContext;
-  keys: KeyInput[];
+  keys: (KeyInput | DeferredAction)[];
   target?: Selection;
 }
+
+const isAction = (key: KeyInput | DeferredAction): key is DeferredAction => 'run' in key;
 
 function samePosition(first: NavigationContext, second: NavigationContext | null): boolean {
   return second !== null && first.owner === second.owner && first.sheet === second.sheet &&
     first.selection === second.selection && first.navigation === second.navigation;
 }
 
+function joins(batch: NavigationBatch, context: NavigationContext): boolean {
+  return samePosition(batch.context, context) || Boolean(batch.target) &&
+    batch.context.owner === context.owner && batch.context.sheet === context.sheet &&
+    batch.context.navigation === context.navigation && sameSelection(batch.target!, context.selection);
+}
+
 export function createSelectionDataNavigation() {
   let pending: NavigationBatch | null = null;
   const drain = async (batch: NavigationBatch, options: NavigationOptions) => {
+    let replay = false;
     try {
       while (pending === batch && batch.keys.length > 0) {
         const key = batch.keys[0]!;
         const selected = options.context();
         if (!samePosition(batch.context, selected) || !selected) return;
+        if (isAction(key)) {
+          batch.keys.shift();
+          key.run();
+          const after = options.context();
+          if (!after) { replay = true; return; }
+          batch.context = after;
+          continue;
+        }
         const request = selectionDataRequest(key);
         let data: SelectionData | undefined;
         try {
@@ -100,6 +122,19 @@ export function createSelectionDataNavigation() {
       }
     } finally {
       if (pending === batch) pending = null;
+      const rest = batch.keys.splice(0);
+      while (rest.length > 0) {
+        const key = rest.shift()!;
+        if (isAction(key)) {
+          if (replay) key.run(); else key.cancel?.();
+          continue;
+        }
+        const context = replay && !pending ? options.context() : null;
+        if (!context) continue;
+        pending = { context, keys: [key, ...rest] };
+        void drain(pending, options);
+        break;
+      }
     }
   };
   return {
@@ -107,15 +142,19 @@ export function createSelectionDataNavigation() {
       const context = options.context();
       if (!context) return;
       const input = { key: key.key, ctrlKey: key.ctrlKey, metaKey: key.metaKey, shiftKey: key.shiftKey };
-      if (pending && (samePosition(pending.context, context) || pending.target &&
-        pending.context.owner === context.owner && pending.context.sheet === context.sheet &&
-        pending.context.navigation === context.navigation && sameSelection(pending.target, context.selection))) {
+      if (pending && joins(pending, context)) {
         pending.keys.push(input);
         return;
       }
       const batch = { context, keys: [input] };
       pending = batch;
       void drain(batch, options);
+    },
+    defer(context: NavigationContext | null, run: () => void, behindActions = false, cancel?: () => void): boolean {
+      if (!pending || !context || !joins(pending, context)) return false;
+      if (behindActions && !pending.keys.some(isAction)) return false;
+      pending.keys.push({ run, cancel });
+      return true;
     },
   };
 }

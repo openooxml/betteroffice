@@ -410,6 +410,7 @@ type PresentationMetadata = {
 };
 const metadataReaders = new WeakMap<PresentationHandle, () => PresentationMetadata>();
 const storyFormattingReaders = new WeakMap<PresentationHandle, (target: PptxStoryFormattingTarget) => StorySnapshot>();
+const paragraphJoiners = new WeakMap<PresentationHandle, (storyId: string, start: number, end: number) => TextReceipt>();
 type PptxStoryFormattingTarget = { slideId: string; shapeId: string; storyId: string };
 type StoryFormattingDocument = PptxDocument & { storyFormattingJson(args: string): string };
 
@@ -417,6 +418,14 @@ export function presentationStoryFormatting(handle: PresentationHandle, target: 
   const read = storyFormattingReaders.get(handle);
   if (!read) throw new Error('Presentation story formatting is unavailable');
   return read(target);
+}
+
+export function presentationDeleteTextJoiningParagraphs(
+  handle: PresentationHandle, storyId: string, start: number, end: number
+): TextReceipt {
+  const join = paragraphJoiners.get(handle);
+  if (!join) throw new Error('Presentation paragraph joining is unavailable');
+  return join(storyId, start, end);
 }
 
 export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
@@ -1113,6 +1122,9 @@ function openPresentationInternal(
     jsonWasmCall(() => (doc as StoryFormattingDocument).storyFormattingJson(JSON.stringify({
       slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
     })))
+  );
+  if (!peer) paragraphJoiners.set(handle, (storyId, start, end) =>
+    jsonWasmCall(() => doc.deleteTextJson(JSON.stringify({ storyId, start, end, allowParagraphJoin: true })), true)
   );
   Object.defineProperty(handle, Symbol.for('@betteroffice/pptx/slide-layout-cache'), {
     value: {

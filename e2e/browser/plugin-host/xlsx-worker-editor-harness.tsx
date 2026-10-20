@@ -311,6 +311,7 @@ let api: XlsxWorkerEditorApi | null = null;
 let peerlessCurrent = deferred<XlsxAsyncEditorApi>();
 let peerlessApi: XlsxAsyncEditorApi | null = null;
 let savedBytes: Uint8Array | null = null;
+const peerSavedBytes: (Uint8Array | null)[] = [null, null];
 let context: XlsxPluginContext<null> | null = null;
 const plugin = defineXlsxPlugin({ id: 'routes', createState: () => null, initialize(value) { context = value; } });
 let source: Uint8Array;
@@ -372,6 +373,7 @@ function renderPeerlessEditor(bytes: Uint8Array, index: number) {
       onError={(error) => errors.push(error.message)}
       onSave={(nextBytes) => {
         savedBytes = nextBytes;
+        peerSavedBytes[index] = nextBytes;
       }}
       onReady={(value) => {
         readyCount += 1;
@@ -717,5 +719,8 @@ window.__xlsxWorkerEditor = {
     return deliveryQueue.filter((entry) => entry.sender === sender)
       .flatMap((entry) => decodeMessages(entry.data))
       .filter((message) => message.type === 'update').length;
+  },
+  savedBytes(index = 0) {
+    return peerSavedBytes[index] ? Array.from(peerSavedBytes[index]!) : null;
   },
 };

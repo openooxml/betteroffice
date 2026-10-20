@@ -27,8 +27,13 @@ fn parses_theme_matrix_slots_references_and_explicit_fill_barriers() {
     assert_eq!(reference.index, 3);
     let color = reference.color.as_ref().unwrap();
     assert_eq!(color.rgb.as_deref(), Some("808080"));
-    assert_eq!(color.luminance_modulation, Some(0.5));
-    assert_eq!(color.luminance_offset, Some(0.1));
+    assert_eq!(
+        color.transforms,
+        vec![
+            ooxml_drawingml::ColorTransform::LumMod(0.5),
+            ooxml_drawingml::ColorTransform::LumOff(0.1),
+        ]
+    );
     assert_eq!(
         shape(6)
             .fill

@@ -91,16 +91,16 @@ export class XlsxDocument {
     moveRangeJson(args: string): string;
     nextPeerSnapshotChunk(): Uint8Array | undefined;
     /**
-     * open a workbook from raw `.xlsx` bytes.
-     */
-    static open(bytes: Uint8Array): XlsxDocument;
-    /**
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
     static openRecoveryCheckpoint(bytes: Uint8Array, through_seq: number): XlsxDocument;
     static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
     static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument;
+    /**
+     * open a workbook from raw `.xlsx` bytes.
+     */
+    static open(bytes: Uint8Array): XlsxDocument;
     patchRangeStyleJson(args: string): string;
     peerHydrationJson(): string;
     printDisplayListJson(args: string): string;

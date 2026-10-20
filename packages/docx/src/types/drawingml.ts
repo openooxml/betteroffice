@@ -18,12 +18,30 @@ export type ThemeColorSlot =
   | 'background2'
   | 'text2';
 
+/** Hue and hue offsets use turns; other values use fractions. */
+export type ColorTransform =
+  | {
+      kind:
+        | 'tint' | 'shade'
+        | 'hue' | 'hueMod' | 'hueOff'
+        | 'sat' | 'satMod' | 'satOff'
+        | 'lum' | 'lumMod' | 'lumOff'
+        | 'red' | 'redMod' | 'redOff'
+        | 'green' | 'greenMod' | 'greenOff'
+        | 'blue' | 'blueMod' | 'blueOff'
+        | 'alpha' | 'alphaMod' | 'alphaOff';
+      value: number;
+    }
+  | { kind: 'comp' | 'inv' | 'gray' | 'gamma' | 'invGamma' };
+
 export interface ColorValue {
   rgb?: string;
   themeColor?: ThemeColorSlot;
   themeTint?: string;
   themeShade?: string;
   auto?: boolean;
+  /** Overrides legacy colour modifiers; legacy alpha applies without an alpha step. */
+  transforms?: ColorTransform[];
 }
 
 export interface ThemeColorScheme {

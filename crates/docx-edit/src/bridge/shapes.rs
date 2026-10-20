@@ -834,6 +834,10 @@ fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
     let value = value?.as_object()?;
     let base = shape_base_color(value)?;
     let mut color = ColorValue {
+        transforms: value
+            .get("transforms")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
         theme_tint: string_in(value, "themeTint"),
         theme_shade: string_in(value, "themeShade"),
         luminance_modulation: number_in(value, "luminanceModulation"),
@@ -1311,6 +1315,30 @@ mod textbox_charts_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_colors_resolve_ordered_drawingml_transforms() {
+        for (color, expected) in [
+            (
+                json!({"rgb":"204060","transforms":[{"kind":"shade","value":0.5}]}),
+                "#142C44",
+            ),
+            (
+                json!({"themeColor":"accent4","transforms":[{"kind":"tint","value":0.4}]}),
+                "#FFE8CB",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"tint","value":0.5},{"kind":"lumMod","value":0.5}]}),
+                "#3F5493",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"lumMod","value":0.5},{"kind":"tint","value":0.5}]}),
+                "#BDBFC6",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+    }
 
     #[test]
     fn shape_color_modifiers_follow_shared_hsl_and_tint_rules() {

@@ -1758,11 +1758,11 @@ fn shape_text_cached_theme_color_survives_import_without_a_second_shade() {
     for (fill, expected) in [
         (
             r#"<a:srgbClr val="204060"><a:shade val="50000"/></a:srgbClr>"#,
-            "#102030",
+            "#142C44",
         ),
         (
             r#"<a:schemeClr val="accent4"><a:tint val="40000"/></a:schemeClr>"#,
-            "#FFE699",
+            "#FFE8CB",
         ),
     ] {
         let shape = SHAPE
