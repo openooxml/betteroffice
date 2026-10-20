@@ -67,7 +67,6 @@ export class PptxDocument {
     moveShapeJson(args: string): string;
     moveShapeProfiledJson(args: string): string;
     moveSlideJson(args: string): string;
-    static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
     /**
      * `source` is the file the update was seeded from; when it matches the
      * recorded fingerprint the session keeps its part bytes and can save, and
@@ -76,6 +75,7 @@ export class PptxDocument {
      * fails — joining a room must not depend on carrying the right file.
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
+    static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
     static openPeerDeckJson(source: Uint8Array, identity_json: string, initial_update?: Uint8Array | null): PptxDocument;
     static openReplayBaseline(source: Uint8Array, client_id?: number | null, initial_update?: Uint8Array | null): PptxDocument;
     peerHydrationJson(fonts_json: string): string;

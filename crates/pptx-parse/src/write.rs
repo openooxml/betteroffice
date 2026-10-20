@@ -138,6 +138,7 @@ pub enum TextTarget {
 pub struct ParagraphWrite {
     /// Index of the paragraph in the source text body, when it survives.
     pub source_index: Option<usize>,
+    pub source_paragraphs: Vec<Option<String>>,
     pub preserved_xml: Option<String>,
     /// `false` keeps the source paragraph verbatim.
     pub rebuild: bool,
@@ -2446,13 +2447,38 @@ fn rebuild_paragraphs(
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
     for paragraph in paragraphs {
-        let source = if let Some(xml) = &paragraph.preserved_xml {
+        let source = if let Some(first) = paragraph.source_paragraphs.first() {
+            first
+                .as_ref()
+                .map(|xml| parse_xml(xml.as_bytes(), "paragraph", &mut budget))
+                .transpose()?
+        } else if let Some(xml) = &paragraph.preserved_xml {
             Some(parse_xml(xml.as_bytes(), "paragraph", &mut budget)?)
         } else {
             paragraph
                 .source_index
                 .and_then(|index| originals.get(index).cloned())
         };
+        let mut source = source;
+        for xml in paragraph.source_paragraphs.iter().skip(1) {
+            let source = source.get_or_insert_with(|| XmlElement::new(prefixes.drawing("p")));
+            if let Some(xml) = xml {
+                let next = parse_xml(xml.as_bytes(), "paragraph", &mut budget)?;
+                if next.child("endParaRPr").is_some() {
+                    source.children.retain(|child| {
+                        !matches!(child, XmlNode::Element(element) if element.local_name() == "endParaRPr")
+                    });
+                }
+                source.children.extend(
+                    next.child_elements()
+                        .filter(|child| {
+                            is_run_element(child.local_name()) || child.local_name() == "endParaRPr"
+                        })
+                        .cloned()
+                        .map(XmlNode::Element),
+                );
+            }
+        }
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
             source => build_paragraph(paragraph, source, theme, prefixes),
@@ -3907,6 +3933,51 @@ mod tests {
     }
 
     #[test]
+    fn a_patched_use_bg_fill_shape_keeps_the_attribute() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    fill: Some(ShapeFill {
+                        color: Some(ColorValue::from_attribute("DC2626")),
+                        ..ShapeFill::named("solid")
+                    }),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+
+        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
+        assert!(xml.contains(r#"useBgFill="1""#), "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    #[test]
     fn an_added_slide_background_precedes_the_shape_tree() {
         let package = PptxPackage::default();
         let mut replacements = HashMap::new();
@@ -4073,6 +4144,7 @@ mod tests {
         let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
         let prefixes = Prefixes::from_root(&mut root);
         let write = ParagraphWrite {
+            source_paragraphs: Vec::new(),
             source_index: Some(0),
             preserved_xml: None,
             rebuild: true,

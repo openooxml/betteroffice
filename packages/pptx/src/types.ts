@@ -499,6 +499,7 @@ export interface PositionedTextRun {
 }
 
 export interface PositionedTextLine {
+  columnOffset?: number;
   x: number;
   y: number;
   width: number;

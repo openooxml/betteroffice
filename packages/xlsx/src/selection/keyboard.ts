@@ -109,7 +109,7 @@ export function selectionKeyReducer(
     if (mod(key)) {
       const edge = visibleEdge(state, data?.edge ?? edgeInDirection(state.focus, direction, limits), direction, limits, hidden);
       if (hidden && edge.row === state.focus.row && edge.col === state.focus.col) return moveAction(state);
-      return moveAction(key.shiftKey ? extendTo(state, edge, limits) : selectionAt(edge));
+      return moveAction(key.shiftKey ? extendTo(state, edge) : selectionAt(edge));
     }
     return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits, hidden }));
   }

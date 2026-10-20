@@ -1,6 +1,6 @@
 import type { HitTestResult, PositionedTextLine, SlideDisplayList, SlidePrimitive, TextBoxPrimitive } from '../types';
 import type { PresentationCommandFrame, PresentationCommandMotion, PresentationCommandSelected, PresentationCommandSelection } from './commandProtocol';
-import { graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
+import { caretColumnOffset, graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
 
 export interface CommandRect { x: number; y: number; width: number; height: number }
 
@@ -16,7 +16,7 @@ export interface CommandGeometryIndex {
 }
 
 type GeometryBounds = Pick<SlidePrimitive, 'x' | 'y' | 'w' | 'h' | 'transform'>;
-type CaretLine = Pick<PositionedTextLine, 'x' | 'y' | 'height' | 'start' | 'end' | 'caretStops'>;
+type CaretLine = Pick<PositionedTextLine, 'columnOffset' | 'x' | 'y' | 'height' | 'start' | 'end' | 'caretStops'>;
 type HitPrimitive = GeometryBounds & { kind: SlidePrimitive['kind']; shapeId?: string; storyId?: string; lines?: CaretLine[] };
 interface NavigationLine { line: CaretLine }
 interface NavigationIndex { lines: Map<string, NavigationLine[]> }
@@ -70,7 +70,7 @@ export function indexHitGeometry(list: SlideDisplayList): CommandHitGeometryInde
       if (source.shapeId) index.hits.push({ primitive, transforms, clips });
       if (source.kind === 'textBox' && source.shapeId && source.storyId) {
         primitive.storyId = source.storyId;
-        primitive.lines = source.lines.map((line) => ({ x: line.x, y: line.y, height: line.height,
+        primitive.lines = source.lines.map((line) => ({ columnOffset: line.columnOffset, x: line.x, y: line.y, height: line.height,
           start: line.start, end: line.end, caretStops: line.caretStops.map((stop) => ({ position: stop.position, x: stop.x })) }));
         const key = targetKey(source.shapeId, source.storyId);
         const lines = index.lines.get(key) ?? [];
@@ -177,10 +177,29 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
     }
     if (primitive.kind === 'textBox' && primitive.storyId) {
       const nearest = target || entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table');
-      const line = nearest ? primitive.lines?.reduce<CaretLine | undefined>((best, candidate) => {
-        const distance = (value: CaretLine) => Math.max(value.y - local.y, local.y - value.y - value.height, 0);
-        return !best || distance(candidate) < distance(best) ? candidate : best;
-      }, undefined) : primitive.lines?.find((candidate) => local.y >= candidate.y && local.y <= candidate.y + candidate.height);
+      const columns = primitive.lines?.some((line, index, lines) => index > 0 &&
+        (line.columnOffset ?? 0) !== (lines[index - 1].columnOffset ?? 0));
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      const line = primitive.lines?.reduce<CaretLine | undefined>((best, candidate) => {
+        if (!nearest && (local.y < candidate.y || local.y > candidate.y + candidate.height)) return best;
+        const distance = (value: CaretLine) => {
+          let left = value.x;
+          let right = value.x;
+          for (const stop of value.caretStops) {
+            left = Math.min(left, stop.x);
+            right = Math.max(right, stop.x);
+          }
+          const dx = Math.max(left - local.x, local.x - right, 0);
+          const dy = Math.max(value.y - local.y, local.y - value.y - value.height, 0);
+          return columns ? dx * dx + dy * dy : dy;
+        };
+        const candidateDistance = distance(candidate);
+        if (!best || candidateDistance < nearestDistance) {
+          nearestDistance = candidateDistance;
+          return candidate;
+        }
+        return best;
+      }, undefined);
       const first = line?.caretStops[0];
       if (line && first) {
         const stop = line.caretStops.reduce((best, candidate) =>
@@ -232,8 +251,9 @@ export function navigateGeometry(
     const candidates = stops.filter((stop) => motion === 'left' ? stop < position : stop > position);
     if (candidates.length) position = motion === 'left' ? Math.max(...candidates) : Math.min(...candidates);
   } else if (motion === 'up' || motion === 'down') {
-    goalX = selection.goalX ?? stopX(entry.line, position);
-    const moved = verticalCaretMove(lines.map(({ line }) => line),
+    const caretLines = lines.map(({ line }) => line);
+    goalX = selection.goalX ?? stopX(entry.line, position) - caretColumnOffset(caretLines, lines.indexOf(entry));
+    const moved = verticalCaretMove(caretLines,
       { position, lineIndex: lines.indexOf(entry) }, motion, goalX);
     destination = lines[moved.lineIndex]!;
     position = moved.position;

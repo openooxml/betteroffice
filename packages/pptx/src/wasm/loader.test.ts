@@ -73,6 +73,23 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 
 afterAll(() => handle.dispose());
 
+test('ordinary text deletion refuses paragraph joins without changing state or history', () => {
+  const source = openPresentation(fixture, { clientId: 9210 });
+  try {
+    const story = source.snapshot().slides.flatMap((slide) => slide.shapes)
+      .flatMap((shape) => shape.textStories).find((story) => story.paragraphs.length > 1)!;
+    const boundary = story.paragraphs[0]!.runs.reduce((length, run) => length + run.text.length, 0);
+    const before = source.snapshot();
+    const version = source.version();
+    for (const remove of [source.deleteText, source.deleteTextProfiled]) {
+      expect(() => remove(story.id, boundary, boundary + 1)).toThrow('paragraph boundary');
+      expect(source.snapshot()).toEqual(before);
+      expect(source.version()).toBe(version);
+      expect(source.canUndo()).toBe(false);
+    }
+  } finally { source.dispose(); }
+});
+
 test('text search returns stable slide and story locations without mutating the deck', () => {
   const source = openPresentation(fixture, { clientId: 9200 });
   try {

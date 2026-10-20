@@ -440,6 +440,7 @@ impl DeckSession {
                     .insert(&mut txn, id.as_str(), value)
                     .cast::<TextRef>()
                     .map_err(|_| EditError::StoryNotFound(id.clone()))?;
+                crate::story::materialize_paragraph_joins(&text, &mut txn, &source_id)?;
                 let prefix = format!("para:{source_id}:");
                 for diff in text.diff(&txn, YChange::identity) {
                     if let Out::YMap(marker) = diff.insert {
@@ -1241,40 +1242,62 @@ pub(crate) fn import_source_render_data(
     let sources = source
         .slides
         .iter()
-        .map(|part| (&part.part_path, &part.shapes))
+        .map(|part| (&part.part_path, (&part.shapes, &part.background_picture)))
         .chain(
             source
                 .layouts
                 .iter()
-                .map(|part| (&part.part_path, &part.shapes)),
+                .map(|part| (&part.part_path, (&part.shapes, &part.background_picture))),
         )
         .chain(
             source
                 .masters
                 .iter()
-                .map(|part| (&part.part_path, &part.shapes)),
+                .map(|part| (&part.part_path, (&part.shapes, &part.background_picture))),
         )
         .collect::<HashMap<_, _>>();
     let mut changed = false;
-    for (path, shapes) in package
+    for (path, (shapes, picture)) in package
         .slides
         .iter_mut()
-        .map(|part| (&part.part_path, &mut part.shapes))
-        .chain(
-            package
-                .layouts
-                .iter_mut()
-                .map(|part| (&part.part_path, &mut part.shapes)),
-        )
-        .chain(
-            package
-                .masters
-                .iter_mut()
-                .map(|part| (&part.part_path, &mut part.shapes)),
-        )
+        .map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        })
+        .chain(package.layouts.iter_mut().map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        }))
+        .chain(package.masters.iter_mut().map(|part| {
+            (
+                &part.part_path,
+                (&mut part.shapes, &mut part.background_picture),
+            )
+        }))
     {
-        if let Some(source) = sources.get(path) {
-            changed |= merge_source_render_shapes(shapes, source);
+        if let Some((source_shapes, source_picture)) = sources.get(path) {
+            changed |= merge_source_render_shapes(shapes, source_shapes);
+            if picture != *source_picture {
+                picture.clone_from(source_picture);
+                changed = true;
+            }
+        }
+    }
+    for theme in &mut package.themes {
+        if let Some(source) = source
+            .themes
+            .iter()
+            .find(|source| source.part_path == theme.part_path)
+            && theme.background_pictures != source.background_pictures
+        {
+            theme
+                .background_pictures
+                .clone_from(&source.background_pictures);
+            changed = true;
         }
     }
     for master in &mut package.masters {
@@ -1359,6 +1382,10 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
             (ShapeNode::Picture(target), ShapeNode::Picture(source)) => {
                 if target.effects.is_empty() && !source.effects.is_empty() {
                     target.effects.clone_from(&source.effects);
+                    changed = true;
+                }
+                if target.paths.is_empty() && !source.paths.is_empty() {
+                    target.paths.clone_from(&source.paths);
                     changed = true;
                 }
             }
@@ -1512,11 +1539,17 @@ fn merge_source_text_body(
     let mut changed = target.list_style != source.list_style
         || target.default_list_style != source.default_list_style
         || target.compat_line_spacing != source.compat_line_spacing
+        || target.num_col != source.num_col
+        || target.spc_col != source.spc_col
+        || target.rtl_col != source.rtl_col
         || target.vertical_overflow != source.vertical_overflow
         || target.horizontal_overflow != source.horizontal_overflow;
     target.vertical_overflow = source.vertical_overflow;
     target.horizontal_overflow = source.horizontal_overflow;
     target.compat_line_spacing = source.compat_line_spacing;
+    target.num_col = source.num_col;
+    target.spc_col = source.spc_col;
+    target.rtl_col = source.rtl_col;
     target.list_style.clone_from(&source.list_style);
     target
         .default_list_style
@@ -4007,6 +4040,68 @@ mod tests {
         assert!(merge_source_chart_properties(&mut target, &source));
         assert_eq!(target, source);
         assert!(!merge_source_chart_properties(&mut target, &source));
+    }
+
+    #[test]
+    fn text_columns_are_restored_when_a_source_is_reattached() {
+        let mut json = serde_json::to_value(pptx_parse::TextBody::default()).unwrap();
+        json["numCol"] = 2.into();
+        json["spcCol"] = 457_200.into();
+        json["rtlCol"] = true.into();
+        let source = serde_json::from_value(json).unwrap();
+        let mut target = pptx_parse::TextBody::default();
+        assert!(merge_source_text_body(&mut target, &source));
+        assert_eq!(target, source);
+        assert!(!merge_source_text_body(&mut target, &source));
+    }
+
+    #[test]
+    fn a_reattached_source_restores_picture_paths_a_stored_package_lacks() {
+        let source = vec![ShapeNode::Picture(pptx_parse::Picture {
+            base: ShapeBase {
+                id: 42,
+                name: "Custom picture".to_owned(),
+                description: None,
+                hidden: false,
+                placeholder: None,
+                transform: pptx_parse::ShapeTransform::default(),
+            },
+            aspect_ratio_locked: false,
+            relationship_id: None,
+            media_part_path: None,
+            crop: pptx_parse::PictureCrop::default(),
+            effects: Vec::new(),
+            geometry: "custom".to_owned(),
+            paths: vec![pptx_parse::CustomGeometryPath {
+                commands: vec![
+                    ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                    ooxml_drawingml::GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                ],
+                no_fill: true,
+                no_stroke: false,
+            }],
+            adjust_values: BTreeMap::new(),
+            fill: None,
+            outline: None,
+            shape_effects: None,
+            style: None,
+        })];
+        let mut target = source.clone();
+        let ShapeNode::Picture(picture) = &mut target[0] else {
+            panic!("expected picture");
+        };
+        picture.paths.clear();
+
+        assert!(merge_source_render_shapes(&mut target, &source));
+        assert_eq!(target, source);
+        assert!(!merge_source_render_shapes(&mut target, &source));
+        let ShapeNode::Picture(picture) = &mut target[0] else {
+            panic!("expected picture");
+        };
+        picture.paths[0].no_stroke = true;
+        let before = target.clone();
+        assert!(!merge_source_render_shapes(&mut target, &source));
+        assert_eq!(target, before);
     }
 
     #[test]

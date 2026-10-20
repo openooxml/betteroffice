@@ -91,6 +91,37 @@ fn inline_runs_preserve_entities_cdata_and_whitespace() {
 }
 
 #[test]
+fn inline_runs_follow_implicit_cell_addresses() {
+    let parsed = parse_workbook_with_package(&package(
+        concat!(
+            r#"<sheetData><row><c t="inlineStr"><is><r><rPr><b/></rPr><t>x</t></r></is></c>"#,
+            r#"<c t="inlineStr"><is><r><rPr><i/></rPr><t>y</t></r></is></c></row>"#,
+            r#"<row r="3"><c/><c t="inlineStr"><is><r><rPr><u/></rPr><t>z</t></r></is></c></row></sheetData>"#,
+        ),
+        &[],
+        false,
+    ))
+    .unwrap();
+    let runs = |row, col| {
+        parsed
+            .package
+            .inline_string_text_runs(0, CellRef::new(row, col))
+            .unwrap()[0]
+            .style
+            .clone()
+    };
+    assert_eq!(runs(0, 0).bold, Some(true));
+    assert_eq!(runs(0, 1).italic, Some(true));
+    assert_eq!(runs(2, 1).underline, Some(RunUnderline::Single));
+    assert!(
+        parsed
+            .package
+            .inline_string_text_runs(0, CellRef::new(2, 0))
+            .is_none()
+    );
+}
+
+#[test]
 fn phonetics_and_inter_run_whitespace_keep_legacy_plain_text() {
     let parsed = rich_package(
         "<si><r><t>漢</t></r><rPh sb=\"0\" eb=\"1\"><t>kan</t></rPh></si><si>\n<r><t>x</t></r>\n</si>",

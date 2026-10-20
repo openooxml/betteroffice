@@ -214,13 +214,13 @@ export function textLocationAtPoint(
   );
   if (!textBox || textBox.lines.length === 0) return null;
   const local = localPoint(textBox, point);
+  const columns = hasTextColumns(textBox);
   let lineIndex = 0;
   for (let index = 1; index < textBox.lines.length; index += 1) {
     const candidate = textBox.lines[index];
     const nearest = textBox.lines[lineIndex];
     if (
-      lineDistance(candidate.y, candidate.height, local.y) <
-      lineDistance(nearest.y, nearest.height, local.y)
+      textLineDistance(candidate, local, columns) < textLineDistance(nearest, local, columns)
     ) {
       lineIndex = index;
     }
@@ -249,7 +249,7 @@ export function hoverTargetAtPoint(
     if (!primitive.shapeId) continue;
     const local = containedPoint(primitive, at);
     if (!local) continue;
-    return primitive.kind === 'textBox' && primitive.storyId && hasCaretNear(primitive, local.y)
+    return primitive.kind === 'textBox' && primitive.storyId && hasCaretNear(primitive, local)
       ? 'text'
       : 'shape';
   }
@@ -295,10 +295,22 @@ function containedPoint(primitive: SlidePrimitive, point: SlidePoint): SlidePoin
     : null;
 }
 
-function hasCaretNear(textBox: TextBoxPrimitive, y: number): boolean {
+function hasTextColumns(textBox: TextBoxPrimitive): boolean {
+  return textBox.lines.some((line, index) => index > 0 &&
+    (line.columnOffset ?? 0) !== (textBox.lines[index - 1].columnOffset ?? 0));
+}
+
+function textLineDistance(line: TextBoxPrimitive['lines'][number], point: SlidePoint, columns: boolean): number {
+  const dx = Math.max(line.x - point.x, point.x - line.x - line.width, 0);
+  const dy = lineDistance(line.y, line.height, point.y);
+  return columns ? dx * dx + dy * dy : dy;
+}
+
+function hasCaretNear(textBox: TextBoxPrimitive, point: SlidePoint): boolean {
   if (textBox.lines.length === 0) return false;
+  const columns = hasTextColumns(textBox);
   const nearest = textBox.lines.reduce((best, candidate) =>
-    lineDistance(candidate.y, candidate.height, y) < lineDistance(best.y, best.height, y)
+    textLineDistance(candidate, point, columns) < textLineDistance(best, point, columns)
       ? candidate
       : best
   );

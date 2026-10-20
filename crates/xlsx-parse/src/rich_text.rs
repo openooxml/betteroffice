@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use xlsx_model::addr::MAX_ROWS;
 use xlsx_model::{CellRef, CellValue, Color, RichRun, RunBaseline, RunStyle, RunUnderline};
 
+use crate::read::parse_index;
 use crate::xml::{attr, local_name, next_event, reader, resolve_entity, xml_err};
 use crate::{ParseError, PreservedPackage};
 
@@ -165,14 +167,27 @@ impl RichTextIndex {
         let mut buffer = Vec::new();
         let mut depth = 0;
         let mut cell = None;
+        let mut row: Option<u32> = None;
+        let mut col = 0;
         loop {
             if budget.exhausted {
                 break;
             }
             match next_event(&mut xml, &mut buffer, &mut depth)? {
+                Event::Start(start) if local_name(&start) == b"row" => {
+                    row = Some(match attr(&start, b"r")? {
+                        Some(value) => parse_index(&value, MAX_ROWS)?,
+                        None => row.map_or(0, |row| row + 1),
+                    });
+                    col = 0;
+                }
                 Event::Start(start) if local_name(&start) == b"c" => {
-                    cell = attr(&start, b"r")?.and_then(|value| CellRef::parse_a1(&value).ok());
+                    cell = match attr(&start, b"r")? {
+                        Some(value) => CellRef::parse_a1(&value).ok(),
+                        None => Some(CellRef::new(row.unwrap_or(0), col)),
+                    };
                     if let Some(at) = cell {
+                        col = at.col;
                         self.inline.remove(&(sheet, at.row, at.col));
                     }
                     if attr(&start, b"t")?.as_deref() != Some("inlineStr") {
@@ -196,7 +211,11 @@ impl RichTextIndex {
                         self.inline.remove(&(sheet, at.row, at.col));
                     }
                 }
-                Event::End(end) if end.local_name().as_ref() == b"c" => cell = None,
+                Event::End(end) if end.local_name().as_ref() == b"c" => {
+                    cell = None;
+                    col += 1;
+                }
+                Event::End(end) if end.local_name().as_ref() == b"row" => row = None,
                 Event::Eof => break,
                 _ => {}
             }
