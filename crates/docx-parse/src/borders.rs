@@ -76,9 +76,9 @@ pub fn parse_border_spec(element: Option<&XmlElement>) -> Option<BorderSpec> {
         .then(|| parse_color_value(color_value, theme_color, theme_tint, theme_shade)),
         size: element.parse_numeric_attribute(Some("w"), "sz", 1.0),
         space: element.parse_numeric_attribute(Some("w"), "space", 1.0),
-        shadow: matches!(element.attribute(Some("w"), "shadow"), Some("1" | "true"))
+        shadow: (element.parse_boolean_attribute(Some("w"), "shadow") == Some(true))
             .then_some(true),
-        frame: matches!(element.attribute(Some("w"), "frame"), Some("1" | "true")).then_some(true),
+        frame: (element.parse_boolean_attribute(Some("w"), "frame") == Some(true)).then_some(true),
     })
 }
 

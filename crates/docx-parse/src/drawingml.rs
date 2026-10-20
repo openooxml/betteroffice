@@ -212,8 +212,8 @@ pub fn parse_transform(element: Option<&XmlElement>) -> TransformResult {
         y: numeric_attr(Some(offset), "y").unwrap_or(0.0),
     });
     let rotation = rot_to_degrees(element.attribute(None, "rot"));
-    let flip_h = (element.attribute(None, "flipH") == Some("1")).then_some(true);
-    let flip_v = (element.attribute(None, "flipV") == Some("1")).then_some(true);
+    let flip_h = (element.parse_boolean_attribute(None, "flipH") == Some(true)).then_some(true);
+    let flip_v = (element.parse_boolean_attribute(None, "flipV") == Some(true)).then_some(true);
     let transform =
         (rotation.is_some() || flip_h.is_some() || flip_v.is_some()).then_some(Transform2D {
             rotation,
