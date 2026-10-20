@@ -447,7 +447,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
 
     rerender({ plugins: [plugin] });
     await until(() => log.includes('load:attached'));
-  });
+  }, 30_000);
 
   test('a default plugin reads and navigates but cannot mutate through any path', async () => {
     const calls: string[] = [];

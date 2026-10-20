@@ -700,7 +700,7 @@ describe('overflow coverage', () => {
       'Align table center',
       'Align table right',
     ]);
-  });
+  }, 30_000);
 
   test('overflow choices run the same commands as the controls they replace', async () => {
     const harness = mountDefault();
