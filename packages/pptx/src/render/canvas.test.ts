@@ -833,6 +833,7 @@ describe('PPTX picture cropping', () => {
     const ctx = new Proxy(
       {
         drawImage: (...args: unknown[]) => calls.push(`draw:${args.slice(1).join(',')}`),
+        translate: (...args: unknown[]) => calls.push(`translate:${args.join(',')}`),
         clip: () => calls.push('clip'),
         save: () => calls.push('save'),
         restore: () => calls.push('restore'),
@@ -970,6 +971,22 @@ describe('PPTX picture cropping', () => {
     expect(calls).toContain('clip');
     expect(calls).toContain('restore');
     expect(calls).toContain('draw:0,30,400,210,10,20,200,100');
+  });
+
+  test('an outset picture keeps its mask, outline and transform in the original frame', async () => {
+    const { calls, ctx } = harness();
+    await paintSlide(ctx, list({
+      destination: { x: 10, y: 60, w: 200, h: 60 },
+      crop: { bottom: 0.4 },
+      path: ellipse,
+      stroke: { color: '#ff00ff', width: 2 },
+      transform: { rotationDeg: 90, flipV: true },
+    }), 1, 1, { resolveImage: async () => source });
+    expect(calls).toContain('draw:0,0,400,180,10,60,200,60');
+    expect(calls.filter((call) => call.startsWith('move:') || call.startsWith('cubic:')))
+      .toEqual([...ellipseOutline, ...ellipseOutline].filter((call) => call.startsWith('move:') || call.startsWith('cubic:')));
+    expect(calls).toContain('translate:110,70');
+    expect(calls).toContain('translate:-110,-70');
   });
 
   test('an uncropped picture draws the whole source and needs no mask', async () => {

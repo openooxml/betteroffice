@@ -415,6 +415,7 @@ function drawCropped(
   }
   const width = sourceWidth(source);
   const height = sourceHeight(source);
+  const destination = image.destination ?? image;
   if (width > 0 && height > 0) {
     ctx.drawImage(
       source,
@@ -422,13 +423,13 @@ function drawCropped(
       top * height,
       keptX * width,
       keptY * height,
-      image.x,
-      image.y,
-      image.w,
-      image.h
+      destination.x,
+      destination.y,
+      destination.w,
+      destination.h
     );
   } else {
-    ctx.drawImage(source, image.x, image.y, image.w, image.h);
+    ctx.drawImage(source, destination.x, destination.y, destination.w, destination.h);
   }
   if (masked) ctx.restore();
 }
@@ -459,12 +460,13 @@ function drawTiled(
   buildImageOutline(ctx, image);
   ctx.clip();
   const tileDecodeScale = imageDecodeScale(tileSource);
+  const destination = image.destination ?? image;
   pattern.setTransform(
-    new DOMMatrix().translateSelf(image.x, image.y)
+    new DOMMatrix().translateSelf(destination.x, destination.y)
       .scaleSelf(tile.scaleX * tileDecodeScale.x, tile.scaleY * tileDecodeScale.y)
   );
   ctx.fillStyle = pattern;
-  ctx.fillRect(image.x, image.y, image.w, image.h);
+  ctx.fillRect(destination.x, destination.y, destination.w, destination.h);
   ctx.restore();
 }
 
@@ -498,7 +500,6 @@ function buildImageOutline(ctx: CanvasRenderingContext2D, image: ImagePrimitive)
   }
 }
 
-/** `a:srcRect` also encodes outsets as negatives, which canvas cannot express. */
 function clampCrop(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return 0;
   return Math.min(Math.max(value, 0), 1);

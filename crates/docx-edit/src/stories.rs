@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use yrs::{Map, ReadTxn, Transact};
+use yrs::{ReadTxn, Transact};
 
 use crate::EditingDoc;
 use crate::batch::DocumentVersion;
@@ -84,7 +84,11 @@ pub(crate) fn story_infos<T: ReadTxn>(views: &mut Views<'_, T>) -> Vec<StoryInfo
     let txn = views.txn();
     let mut ids: Vec<String> = txn
         .get_map(crate::STORIES)
-        .map(|stories| stories.keys(txn).map(str::to_owned).collect())
+        .map(|stories| {
+            crate::live_stories(&stories, txn)
+                .map(|(id, _)| id.to_owned())
+                .collect()
+        })
         .unwrap_or_default();
     ids.sort();
     let index = header_footer_index(views);

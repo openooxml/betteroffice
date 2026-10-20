@@ -557,6 +557,41 @@ fn located_fields(source: &TextParagraph, live: &str, start: u32) -> (Vec<TextFi
     (fields, editable)
 }
 
+pub(crate) fn field_paragraphs(
+    package: &PptxPackage,
+    snapshot: &DeckSnapshot,
+    story_id: &str,
+) -> Vec<String> {
+    snapshot
+        .slides
+        .iter()
+        .find_map(|slide| {
+            shapes_in_order(&slide.shapes)
+                .into_iter()
+                .find_map(|shape| {
+                    shape
+                        .text_stories
+                        .iter()
+                        .find(|story| story.id == story_id)?;
+                    let body = source_body(package, slide, shape, story_id)?;
+                    Some(
+                        body.paragraphs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, paragraph)| {
+                                paragraph
+                                    .runs
+                                    .iter()
+                                    .any(|run| run.field_id.is_some() || run.field_type.is_some())
+                            })
+                            .map(|(index, _)| format!("para:{story_id}:{index}"))
+                            .collect(),
+                    )
+                })
+        })
+        .unwrap_or_default()
+}
+
 /// Whether saving `paragraph_id` of `story_id` as `snapshot` holds it, changed, keeps every
 /// field result of its source paragraph: each non-empty, in the unchanged leading or trailing
 /// text, inside one run.
@@ -633,6 +668,13 @@ impl<'a> Deck<'a> {
                     requested,
                 )
             })
+    }
+
+    /// Whether the slide's source part declares `p:bg`, fills the model cannot
+    /// hold included.
+    pub fn declares_source_background(&self, slide: &SlideSnapshot) -> bool {
+        crate::deck::source_slide(self.package, slide.source_part_path.as_deref())
+            .is_some_and(|source| source.declares_background)
     }
 
     /// Resolves a shape through its slide; the flag marks a shape at the top of the slide.
