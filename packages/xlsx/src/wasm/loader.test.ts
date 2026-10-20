@@ -485,6 +485,71 @@ describe('wasm loader', () => {
       handle.dispose();
     }
   });
+
+  it('syncs a freeze pane through the public collaborative workbook handle', () => {
+    const bytes = sampleBytes();
+    const author = openWorkbook(bytes, { collaborative: true, clientId: 5040 });
+    const peer = openWorkbook(bytes, { collaborative: true, clientId: 5041 });
+    try {
+      expect(author.sheetInfo().frozenRows).toBe(0);
+      expect(author.applyOps([{ type: 'setFreezePane', sheet: 0,
+        pane: { rows: 1, cols: 0, top_left: { row: 1, col: 0 } } }]).applied).toBe(true);
+      expect(author.sheetInfo().frozenRows).toBe(1);
+      peer.applyUpdate(author.encodeStateAsUpdate());
+      expect(peer.sheetInfo().frozenRows).toBe(1);
+      const reopened = openWorkbook(peer.save());
+      try { expect(reopened.sheetInfo().frozenRows).toBe(1); }
+      finally { reopened.dispose(); }
+
+      expect(() => author.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }])).toThrow();
+      expect(author.sheetInfo().frozenRows).toBe(1);
+      author.undo();
+      expect(author.sheetInfo().frozenRows).toBe(0);
+      peer.applyUpdate(author.encodeStateAsUpdate());
+      expect(peer.sheetInfo().frozenRows).toBe(0);
+      author.redo();
+      peer.applyUpdate(author.encodeStateAsUpdate());
+      expect(peer.sheetInfo().frozenRows).toBe(1);
+    } finally {
+      author.dispose();
+      peer.dispose();
+    }
+  });
+
+  it('moves a formula range with one collaborative undo and an XLSX round trip', () => {
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5032 });
+    const peer = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5033 });
+    try {
+      handle.editCells(0, [
+        { row: 40, col: 0, input: '19' },
+        { row: 40, col: 1, input: '=A41*2' },
+        { row: 40, col: 2, input: '=SUM(A41:B41)' },
+      ]);
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      const before = handle.historyState().undoDepth;
+      expect(handle.moveRange(0, 'A41:B41', 'D43').applied).toBe(true);
+      expect(handle.historyState().undoDepth).toBe(before + 1);
+      expect(handle.cell(0, 40, 0).input).toBe('');
+      expect(handle.cell(0, 42, 3).input).toBe('19');
+      expect(handle.cell(0, 42, 4).input).toBe('=D43*2');
+      expect(handle.cell(0, 40, 2).input).toBe('=SUM(D43:E43)');
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      expect(peer.cell(0, 42, 4).input).toBe('=D43*2');
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 42, 4).input).toBe('=D43*2');
+        expect(reopened.cell(0, 40, 2).input).toBe('=SUM(D43:E43)');
+      } finally {
+        reopened.dispose();
+      }
+      handle.undo();
+      expect(handle.cell(0, 40, 0).input).toBe('19');
+      expect(handle.cell(0, 40, 2).input).toBe('=SUM(A41:B41)');
+    } finally {
+      handle.dispose();
+      peer.dispose();
+    }
+  });
 });
 
 // the two paths are gated on `isProposalsAvailable()` so this file passes

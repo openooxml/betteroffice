@@ -185,14 +185,19 @@ impl SheetPatch<'_> {
 
         let moved = source.index != row;
         let height = self.sheet.row_heights.get(&row).copied();
-        let height_changed = height != self.original.row_heights.get(&source.index).copied();
+        let hidden_height = self.sheet.hidden_row_heights.get(&row).copied();
+        let height_changed = (height, hidden_height)
+            != (
+                self.original.row_heights.get(&source.index).copied(),
+                self.original.hidden_row_heights.get(&source.index).copied(),
+            );
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
         let mut rewrite = moved || height_changed;
         if moved {
             set_attribute(&mut attributes, "r", "r", (u64::from(row) + 1).to_string());
         }
         if height_changed {
-            set_row_height(&mut attributes, height);
+            set_row_height(&mut attributes, height, hidden_height);
         }
         if let Some((min, max)) = columns
             && spans_exclude(&attributes, min, max)

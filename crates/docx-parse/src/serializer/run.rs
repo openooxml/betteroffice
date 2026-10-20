@@ -69,7 +69,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 "w:eastAsiaTheme",
                 fonts.east_asia_theme.as_deref(),
             );
-            optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:cstheme", fonts.cs_theme.as_deref());
             optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
@@ -138,6 +138,20 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     on_off(&mut body, "w:rtl", formatting.rtl);
     on_off(&mut body, "w:cs", formatting.cs);
     on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
+    if let Some(language) = formatting.language.as_ref() {
+        let slots = [
+            ("w:val", language.latin.as_deref()),
+            ("w:eastAsia", language.east_asia.as_deref()),
+            ("w:bidi", language.bidi.as_deref()),
+        ];
+        if slots.iter().any(|(_, value)| nonempty(*value).is_some()) {
+            body.start_element("w:lang");
+            for (name, value) in slots {
+                optional_nonempty_attr(&mut body, name, value);
+            }
+            body.end_element();
+        }
+    }
 
     let body = body.finish();
     if body.is_empty() {
@@ -1214,9 +1228,10 @@ fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::formatting::{FontFamily, TextFormatting};
+    use crate::formatting::{FontFamily, RunLanguage, TextFormatting, parse_run_properties};
     use crate::inline::{Run, RunType};
     use crate::serializer::s10::SerializerDeterminism;
+    use crate::xml::{ParseBudget, ParseLimits, parse_xml};
 
     use super::*;
 
@@ -1367,6 +1382,47 @@ mod tests {
             serialize_run(&run, &mut context()).unwrap(),
             "<w:r><w:rPr><w:rStyle w:val=\"bad&quot;/&gt;&lt;evil&amp;\"/><w:rFonts w:ascii=\"A&amp;B\"/><w:b w:val=\"0\"/><w:i/><w:sz w:val=\"24\"/></w:rPr><w:t xml:space=\"preserve\"> &lt;hello&gt; &amp; </w:t></w:r>"
         );
+    }
+
+    #[test]
+    fn run_language_follows_emphasis_in_schema_order() {
+        let formatting = TextFormatting {
+            font_size: Some(20.0),
+            emphasis_mark: Some("dot".to_owned()),
+            language: Some(RunLanguage {
+                latin: Some("en-US".to_owned()),
+                east_asia: Some("ja-JP".to_owned()),
+                bidi: Some("ar-SA".to_owned()),
+            }),
+            ..TextFormatting::default()
+        };
+        assert_eq!(
+            serialize_text_formatting(Some(&formatting)),
+            r#"<w:rPr><w:sz w:val="20"/><w:em w:val="dot"/><w:lang w:val="en-US" w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:rPr>"#
+        );
+    }
+
+    #[test]
+    fn run_language_survives_parse_and_serialize() {
+        for xml in [
+            r#"<w:rPr><w:b/><w:sz w:val="20"/><w:lang w:val="de-DE" w:eastAsia="zh-CN" w:bidi="he-IL"/></w:rPr>"#,
+            r#"<w:rPr><w:lang w:eastAsia="ko-KR"/></w:rPr>"#,
+        ] {
+            let limits = ParseLimits::default();
+            let parsed =
+                parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let formatting = parse_run_properties(parsed.root(), None);
+            assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
+        }
+    }
+
+    #[test]
+    fn theme_fonts_survive_parse_and_serialize() {
+        let xml = r#"<w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/></w:rPr>"#;
+        let limits = ParseLimits::default();
+        let parsed = parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+        let formatting = parse_run_properties(parsed.root(), None);
+        assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
     }
 
     #[test]

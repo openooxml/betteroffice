@@ -37,6 +37,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNav
   private var server: DesktopServer!
   private var documents: [String: OpenDocument] = [:]
   private var active: String?
+  private var retained: String?
   private var ready = false
   private var pending: [URL] = []
   private var closing = false
@@ -162,7 +163,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNav
 
   private func register(bytes: Data, name: String, url: URL?) -> [String: Any] {
     let id = UUID().uuidString
-    documents = documents.filter { $0.key == active }
+    documents = documents.filter { $0.key == active || $0.key == retained }
     documents[id] = OpenDocument(url: url, name: name)
     server.retainDocuments(Set(documents.keys))
     return ["id": id, "name": name, "url": server.put(bytes, id: id).absoluteString]
@@ -259,15 +260,17 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNav
           throw self.message("File is no longer available.")
         }
         active = id
+        retained = body["retainId"] as? String
         window.title = document.name + " — " + appName
         window.representedURL = document.url
         window.isDocumentEdited = false
         if let url = document.url { remember(url) }
-        documents = [id: document]
-        server.retainDocuments([id])
+        documents = documents.filter { $0.key == id || $0.key == retained }
+        server.retainDocuments(Set(documents.keys))
         replyHandler(nil, nil)
       case "deactivate":
         active = nil
+        retained = nil
         documents = [:]
         server.retainDocuments([])
         window.title = appName
@@ -304,7 +307,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNav
   }
 
   private func save(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) throws {
-    guard let id = body["id"] as? String, id == active, let document = documents[id],
+    guard let id = body["id"] as? String, id == active || id == retained, let document = documents[id],
       let encoded = body["bytes"] as? String,
       let bytes = Data(base64Encoded: encoded)
     else { throw message("The file is no longer open.") }
@@ -316,8 +319,10 @@ final class DesktopApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNav
       do {
         try bytes.write(to: url, options: .atomic)
         self.documents[id] = OpenDocument(url: url, name: url.lastPathComponent)
-        self.window.title = url.lastPathComponent + " — " + self.appName
-        self.window.representedURL = url
+        if id == self.active {
+          self.window.title = url.lastPathComponent + " — " + self.appName
+          self.window.representedURL = url
+        }
         self.remember(url)
         reply(["name": url.lastPathComponent], nil)
       } catch { reply(nil, error.localizedDescription) }

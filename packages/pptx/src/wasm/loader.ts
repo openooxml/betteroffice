@@ -11,6 +11,7 @@ import initWasmModule, {
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
 import type {
@@ -534,6 +535,10 @@ function openPresentationInternal(
   bytes: Uint8Array, options: OpenPresentationOptions, peer?: PeerMode
 ): PresentationHandle {
   requireInitialized();
+  if (options.clientId !== undefined && options.clientId >= OPEN_SYNC_CLIENT) {
+    const message = 'client id must be a positive safe integer below Number.MAX_SAFE_INTEGER - 1';
+    throw peer ? new PresentationPeerError('clientId', message) : new Error(message);
+  }
   const faces = peer ? [
     ...(options.fonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: false })),
     ...(options.fallbackFonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: true })),
@@ -1279,7 +1284,7 @@ function clientId(): number {
   do {
     random.getRandomValues(values);
     value = (values[0] & 0x1fffff) * 0x1_0000_0000 + values[1];
-  } while (value === 0);
+  } while (value === 0 || value >= OPEN_SYNC_CLIENT);
   return value;
 }
 

@@ -1674,7 +1674,25 @@ test('p5_blank_click_then_text_click_keeps_held_typing', async () => {
       beforeInput(value.input, 'insertText', 'Y');
     });
     await held;
-    await value.finish('aXbcY', ['insertText', 'selectAtPoint', 'insertText']);
+    await value.finish('aXbcY', ['insertText', 'setSelection', 'selectAtPoint', 'insertText']);
+    expect(value.sent[value.start + 1]).toMatchObject({ payload: { selection: null } });
+  } finally { await value.dispose(); }
+});
+
+test.each(['X', 'XY'])('p5_blank_click_keeps_held_typing_without_a_followup (%s)', async (text) => {
+  const value = await mountedRealSession('abc', 1);
+  try {
+    const held = value.hold();
+    await act(async () => {
+      for (const character of text) beforeInput(value.input, 'insertText', character);
+      value.click({ x: value.confirmed.displayList.width - 1, y: value.confirmed.displayList.height - 1 });
+    });
+    await held;
+    expect(value.sent.slice(value.start).map((intent) => intent.kind)).toEqual(['insertText']);
+    await value.finish(`a${text}bc`, [...Array.from(text, () => 'insertText'), 'setSelection']);
+    expect(value.sent[value.start + text.length]).toMatchObject({ payload: { selection: null } });
+    expect(value.client.state.selection).toBeNull();
+    expect(paintedViews[paintedViews.length - 1]?.selection).toBeNull();
   } finally { await value.dispose(); }
 });
 

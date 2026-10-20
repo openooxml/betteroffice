@@ -41,6 +41,6 @@ test('worker_insertions_replace_selection_and_create_worker_owned_cells', async 
   expect(execute(arm, command(arm, 'undo', {}))).toMatchObject({ status: 'applied' });
   expect(texts(arm)).toEqual(['Alpha']);
   expect(execute(arm, command(arm, 'insertTable', { rows: 2, columns: 2, selection: selection(paraId, 5) }))).toMatchObject({ status: 'applied' });
-  expect(arm.state.selection?.focus.story).toMatch(/:t\d+:r0c0$/);
+  expect(arm.state.selection?.focus.story).toMatch(/:t\d+:r0c0~\d+$/);
   expect(arm.engine.paragraphs(arm.state.selection!.focus.story)).toHaveLength(1);
 }, TIMEOUT);

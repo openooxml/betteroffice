@@ -1,3 +1,4 @@
+import { createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
   extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
@@ -34,6 +35,7 @@ import { LocaleProvider, useTranslation } from '../i18n';
 import type { XlsxPluginEditorAccess, XlsxRevealAlignment } from '../plugins/createPluginClients';
 
 import { PluginOverlays } from '../plugins/PluginOverlays';
+import { frozenGridExtent } from '../plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
@@ -192,6 +194,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
   const mutationRef = useRef(0);
   const navigationRef = useRef(0);
+  const [selectionNavigation] = useState(createSelectionDataNavigation);
   const sourceRef = useRef<WorkerPaintSource | null>(null);
   const dragging = useRef(false);
   const clickStart = useRef<CellAddr | null>(null);
@@ -860,6 +863,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return () => { cancelled = true; };
   }, [run, run?.peer, selection, active, selectedChart, painted]);
 
+  const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
   const limits = () => deriveLimits(sourceRef.current?.painted?.displayList ?? null, viewRef.current!,
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const draftFor = (source: InputDraft['source'], cell: CellAddr, value: string): WorkerCellDraft => ({
@@ -1005,7 +1009,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (source === 'cell') { suppressBlur.current = true; setEditing(null); }
     else setFormulaDraft(null);
     const base = selectionAt({ row: draft.row, col: draft.col });
-    setSelection(move ? moveFocus(base, move, { limits: limits() }) : base);
+    setSelection(move ? moveFocus(base, move, { limits: limits(), hidden: hidden() }) : base);
     focus();
   };
   const cancelDraft = () => {
@@ -1280,7 +1284,43 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         clipboard(key === 'c' ? 'copy' : key === 'x' ? 'cut' : 'paste'); event.preventDefault(); return;
       }
     }
-    const action = selectionKeyReducer(selectionRef.current, event, limits());
+    const request = selectionDataRequest(event);
+    if (request) {
+      event.preventDefault();
+      const owner = runRef.current;
+      const sheet = activeRef.current;
+      if (!owner?.current) return;
+      selectionNavigation.enqueue(event, {
+        context: () => {
+          if (!owner.current || owner.retiring || owner.failure || runRef.current !== owner ||
+            activeRef.current !== sheet || editingRef.current || chartRef.current || !selectionRef.current) return null;
+          const basis = owner.session.confirmedBasis;
+          return { owner, sheet, selection: selectionRef.current, navigation: navigationRef.current,
+            version: `${basis.epoch}:${basis.version}:${owner.peer?.version() ?? basis.version}:${owner.session.state.version}` };
+        },
+        limits,
+        hidden,
+        query: (context, direction) => (owner.peer ?? owner.session.call).selectionData(sheet,
+          context.selection.focus.row, context.selection.focus.col, direction),
+        apply: (next) => {
+          setSelection(next);
+          if (owner.peer) reveal(owner.peer, sheet, next.focus.row, next.focus.col,
+            'nearest', () => owner.current && runRef.current === owner);
+          else void owner.session.call.cellGeometry(sheet, next.focus.row, next.focus.col)
+            .then((geometry) => {
+              const scroll = scrollRef.current;
+              if (!owner.current || runRef.current !== owner || activeRef.current !== sheet ||
+                selectionRef.current !== next || !scroll) return;
+              scroll.scrollLeft = geometry.scrollPosition.x * zoomRef.current;
+              scroll.scrollTop = geometry.scrollPosition.y * zoomRef.current;
+              sourceRef.current?.schedule();
+            }).catch(reportInputError);
+          return true;
+        },
+      });
+      return;
+    }
+    const action = selectionKeyReducer(selectionRef.current, event, limits(), undefined, hidden());
     if (action.type === 'move') setSelection(action.selection);
     else if (action.type === 'startEdit') openEditor(action.initialInput);
     else if (action.type === 'clear') clearCells();
@@ -1296,11 +1336,12 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const at = peer.cellPosition(sheet, row, col);
     const next = peer.cellPosition(sheet, Math.min(row + 1, 1_048_575), Math.min(col + 1, 16_383));
     const zoom = zoomRef.current;
-    const frozen = sourceRef.current?.painted?.displayList.grid;
+    const frozen = frozenGridExtent(sourceRef.current?.painted?.displayList.grid,
+      info.frozenRows, info.frozenCols);
     const x = revealAxis(at.x, next.x - at.x, col < info.frozenCols, scroll.scrollLeft / zoom,
-      scroll.clientWidth / zoom - (frozen?.colOffsets[info.frozenCols] ?? 0), align);
+      scroll.clientWidth / zoom - frozen.width, align);
     const y = revealAxis(at.y, next.y - at.y, row < info.frozenRows, scroll.scrollTop / zoom,
-      scroll.clientHeight / zoom - (frozen?.rowOffsets[info.frozenRows] ?? 0), align);
+      scroll.clientHeight / zoom - frozen.height, align);
     if (x !== null) scroll.scrollLeft = x * zoom;
     if (y !== null) scroll.scrollTop = y * zoom;
     if (!owner.recovering) sourceRef.current?.schedule();

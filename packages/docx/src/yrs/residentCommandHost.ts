@@ -25,7 +25,7 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
   let failure: unknown;
   let selection: DocxCommandSelection | null | undefined;
   let editState: DocxEditState | undefined;
-  const selections = new Map<number, DocxCommandSelection | null>();
+  const selections = new Map<number, DocxCommandSelection | null>(structuredClone(init.recoveryState?.selections ?? []));
   const selectionLimit = Math.max(256, options.retainedOutcomes ?? 256);
   const shared = createCommandHost<
     DocxCommandPayload, DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload
@@ -132,7 +132,15 @@ export function createResidentCommandHost(options: ResidentCommandHostOptions): 
         ? { lane: 'input', mutates: true, reframes: true, reorderable: false }
         : shared.policy(command);
     },
-    checkpoint: (context) => serialize(() => shared.checkpoint(context)),
+    checkpoint: (context) => serialize(async () => {
+      const result = await shared.checkpoint(context);
+      if (!hooks.recoveryState) return result;
+      const checkpoint = isTransferResult(result) ? result.value : result;
+      const value = { ...checkpoint, recoveryState: structuredClone({
+        ...hooks.recoveryState(), selections: [...selections],
+      }) };
+      return isTransferResult(result) ? transferable(value, result.transfer) : value;
+    }),
     checkpointPolicy: shared.checkpointPolicy,
     frame: () => failure === undefined ? shared.frame() : Promise.reject(failure),
     withFrameWork(run) {

@@ -1,5 +1,5 @@
 import type { LayoutMetaV1 } from './layoutMeta';
-import { isCommandAck, type Checkpoint } from '../../../../shared/office-session/commands/types';
+import { isCommandAck } from '../../../../shared/office-session/commands/types';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
@@ -7,6 +7,7 @@ import type {
   DocxCommandEnvelope,
   DocxCommandFrame,
   ResidentCommandClient,
+  ResidentCommandCheckpoint,
   ResidentCommandInitReply,
   ResidentCommandInitRequest,
   ResidentCommandViewportRequest,
@@ -18,6 +19,7 @@ import type {
   YrsSelection,
 } from './index';
 import type { CollaborationCursor } from '../collaboration/types';
+import type { CollaborationTextInsertion } from '../collaboration/types';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentDocumentRead,
@@ -205,6 +207,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
+  private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
   constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
@@ -233,6 +236,14 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
         }
       }
       if (response.memory) this.lastMemory = response.memory;
+      const collaboration = response.collabUpdates;
+      const identity = response.ok ? response.commandInitial ?? this.commandIdentity : this.commandIdentity;
+      if (collaboration && !this.terminalError && !this.commandReplacementPending &&
+        (collaboration.session === undefined || (identity && collaboration.session === identity.session &&
+          collaboration.incarnation === identity.incarnation && collaboration.epoch === identity.epoch))) {
+        const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences, clock: collaboration.clock };
+        for (const listener of [...this.collabListeners]) { try { listener(event); } catch {} }
+      }
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
       }
@@ -283,6 +294,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
               : Object.assign(new Error(response.commandError.message), response.commandError)
             : response.code === 'save-unavailable'
             ? new ResidentWorkerSaveUnavailableError(response.error)
+            : response.code === 'cut-kept'
+            ? new ResidentWorkerCutKeptError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
         );
       }
@@ -335,16 +348,30 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }
 
   async edit(command: DocxCommandEnvelope): Promise<DocxCommandAck> {
-    const response = await this.request({ type: 'edit', command });
+    const transfer: ArrayBuffer[] = [];
+    const owned = (update: ArrayBuffer) => {
+      const copy = update.slice(0);
+      transfer.push(copy);
+      return copy;
+    };
+    if (command.kind === 'applyRemoteUpdate' && command.payload && typeof command.payload === 'object' &&
+      'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
+      command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
+    } else if (command.kind === 'applyRemoteUpdateChunks' && command.payload && typeof command.payload === 'object' &&
+      'updates' in command.payload && Array.isArray(command.payload.updates) &&
+      command.payload.updates.every(update => update instanceof ArrayBuffer)) {
+      command = { ...command, payload: { ...command.payload, updates: command.payload.updates.map(owned) } };
+    }
+    const response = await this.request({ type: 'edit', command }, transfer);
     return this.commandAck(response);
   }
 
-  async checkpoint(): Promise<Checkpoint> {
+  async checkpoint(): Promise<ResidentCommandCheckpoint> {
     const response = await this.request({ type: 'checkpoint' });
     if (!response.checkpoint || !(response.checkpoint.state instanceof Uint8Array)) {
       throw new SessionFailure('message', 'Resident command checkpoint omitted its state');
     }
-    return response.checkpoint;
+    return response.checkpoint as ResidentCommandCheckpoint;
   }
 
   async requestFullFrame(): Promise<DocxCommandAck> {
@@ -358,6 +385,11 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   onFrame(listener: (frame: DocxCommandFrame) => void): () => void {
     this.frameListeners.add(listener);
     return () => { this.frameListeners.delete(listener); };
+  }
+
+  onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void): () => void {
+    this.collabListeners.add(listener);
+    return () => { this.collabListeners.delete(listener); };
   }
 
   async applyRemoteUpdate(update: Uint8Array): Promise<void> {
@@ -692,6 +724,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
    */
   async save(request: {
     comments: Comment[];
+    /** @internal */
+    commentsSource?: 'host';
     host?: Document;
     stateVector?: Uint8Array;
     /** @internal */
@@ -700,6 +734,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     const response = await this.request({
       type: 'save',
       comments: request.comments,
+      ...(request.commentsSource === undefined ? {} : { commentsSource: request.commentsSource }),
       ...(request.host === undefined ? {} : { host: request.host }),
       ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
       ...(request.stories === undefined ? {} : { stories: [...request.stories] }),
@@ -1074,7 +1109,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     const id = this.nextId++;
     const message: ResidentEngineWorkerRequest = { id, type: 'destroy' };
     this.worker.postMessage(message);
-    this.fail(new ResidentWorkerFailureError('Resident engine worker was destroyed'), false);
+    this.fail(Object.assign(new ResidentWorkerFailureError('Resident engine worker was destroyed'), { code: 'disposed' }), false);
   }
 
   protected request(
@@ -1172,6 +1207,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.frameListeners.clear();
+    this.collabListeners.clear();
     for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     if (notify && first) this.failureListener?.(error);
   }
@@ -1184,6 +1220,9 @@ export class ResidentWorkerFailureError extends Error {}
 
 /** The worker has no whole opened package to save. @internal */
 export class ResidentWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
+
+/** A whole source failed to open and the worker still holds the source cut it was to replace. @internal */
+export class ResidentWorkerCutKeptError extends Error {}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {

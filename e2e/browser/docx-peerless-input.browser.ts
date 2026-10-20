@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from 'playwright/test';
+import { pinnedEvaluate } from './pinned-evaluate';
 import JSZip from 'jszip';
 import { readFileSync } from 'node:fs';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
@@ -283,7 +284,7 @@ test('font picker prepares the selected family and retains shaped glyph widths',
 });
 
 async function harnessText(page: Page) {
-  const bytes = await page.evaluate(() => window.__docxPeerlessHarness!.exportBytes());
+  const bytes = await pinnedEvaluate(page, () => window.__docxPeerlessHarness!.exportBytes());
   const zip = await JSZip.loadAsync(Buffer.from(bytes));
   const xml = await zip.file('word/document.xml')!.async('string');
   return page.evaluate((xml) => Array.from(
@@ -293,7 +294,7 @@ async function harnessText(page: Page) {
 
 async function open(page: Page, peerless = true, contextBytes: number | null = null, pageCount = 1, buffer?: Buffer) {
   await installProbe(page);
-  await page.goto(peerless ? '/?format=docx&peerless=1' : '/?format=docx');
+  await page.goto(peerless ? '/?format=docx&peerless=1' : '/?format=docx&peerless=0');
   await page.evaluate((bytes) => { window.__docxPeerlessInput.contextBytes = bytes; }, contextBytes);
   await page.locator('input[type=file]').last().setInputFiles({
     name: 'peerless-input.docx',
@@ -347,7 +348,7 @@ async function settled(page: Page) {
 }
 
 async function paintTurns(page: Page) {
-  await page.evaluate(() => new Promise<void>((resolve) => {
+  await pinnedEvaluate(page, () => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
 }
@@ -411,6 +412,33 @@ const steadyCaret = '[data-peerless-docx] div[aria-hidden="true"][style*="curren
 async function pixels(page: Page, peerless = true) {
   return documentCanvas(page, peerless).screenshot({ animations: 'disabled', style: steadyCaret });
 }
+
+test('peerless Shift+Enter saves a soft break within one paragraph', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+    .replace('<w:r><w:t>abcd</w:t></w:r>', ''));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  const start = await commandCount(page);
+  await input.pressSequentially('a');
+  await input.press('Shift+Enter');
+  await input.pressSequentially('b');
+  await settled(page);
+  const commands = await commandsSince(page, start);
+  expect(commands.map(command => command.kind)).toEqual(['insertText', 'lineBreak', 'insertText']);
+  expectChain(commands);
+  const xml = await savedXml(page);
+  const paragraphs = await page.evaluate(xml => {
+    const document = new DOMParser().parseFromString(xml, 'application/xml');
+    return Array.from(document.getElementsByTagNameNS('*', 'p')).map(paragraph =>
+      Array.from(paragraph.getElementsByTagNameNS('*', '*')).map(node =>
+        node.localName === 't' ? node.textContent ?? '' : node.localName === 'br' ? '\n' : ''
+      ).join('')
+    );
+  }, xml);
+  expect(paragraphs).toEqual(['a\nb']);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:br(?: w:type="textWrapping")?\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
+});
 
 test('d2d_pending_insert_click_arrow_backspace_order', async ({ page }) => {
   await open(page);
@@ -1212,7 +1240,7 @@ test(`viewport-first ${feature} open paints later pages after certified geometry
   await releaseCertifiedGeometry(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
-  await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
+  await pinnedEvaluate(page, async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
   const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
   await expect(later).toBeAttached();
   await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::io::Cursor;
 
-use betteroffice_pptx::{Presentation, RenderOptions};
+use betteroffice_pptx::{ColorValue, EditCtx, Paint, Presentation, RenderOptions, ShapeFill};
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -23,6 +23,34 @@ fn deck() -> Presentation {
             .unwrap();
     }
     presentation
+}
+
+#[test]
+fn a_written_background_reaches_the_display_list() {
+    let presentation = deck();
+    let slide_id = presentation.snapshot().unwrap().slides[0].id.clone();
+    let fill = ShapeFill {
+        fill_type: "solid".to_owned(),
+        color: Some(ColorValue {
+            rgb: Some("0F1720".to_owned()),
+            ..ColorValue::default()
+        }),
+        gradient: None,
+    };
+    presentation
+        .set_slide_background(&EditCtx::local("render-test"), &slide_id, Some(&fill))
+        .unwrap();
+    let saved = presentation.save().unwrap();
+
+    let mut reopened = Presentation::open(&saved).unwrap();
+    for bold in [false, true] {
+        reopened.register_font("Arial", bold, false, FONT).unwrap();
+    }
+    let rendered = reopened.render_slide(0).unwrap();
+    let Some(Paint::Solid { color }) = rendered.display_list.background else {
+        panic!("expected a solid background paint");
+    };
+    assert_eq!(color.trim_start_matches('#').to_ascii_uppercase(), "0F1720");
 }
 
 #[test]

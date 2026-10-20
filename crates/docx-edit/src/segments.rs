@@ -852,6 +852,11 @@ pub(crate) mod tests {
                 let ctx = EditCtx::local("", "");
                 let advanced = if insert {
                     let text = random_text(&mut random);
+                    let at = {
+                        let txn = doc.yrs_doc().transact();
+                        let story = crate::story_ref(&txn, "body").unwrap();
+                        crate::ops::past_leading_blocks(&story, &txn, start)
+                    };
                     if doc
                         .insert_text(
                             &ctx,
@@ -874,7 +879,7 @@ pub(crate) mod tests {
                             text,
                         );
                     }
-                    exact && maintained.shift_for_text_insert(start, text)
+                    exact && maintained.shift_for_text_insert(at, text)
                 } else {
                     let end = (start + 1 + next_random(&mut random) % 3).min(len);
                     let end = end + u32::from(!maintained.is_char_boundary(end));
@@ -1245,7 +1250,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn segment_index_advances_when_paragraph_shift_is_rejected() {
+    fn indexes_advance_past_leading_blocks_for_text_inserted_inside_them() {
         let doc = seeded_doc();
         doc.paragraph_index("body").unwrap();
         let before = doc.committed_epoch();
@@ -1258,13 +1263,12 @@ pub(crate) mod tests {
         .unwrap();
         let after = doc.committed_epoch();
         doc.advance_indexes_after_text_insert("body", before, after, 5, "xy");
-        assert!(
-            doc.paragraph_indexes
-                .lock()
-                .unwrap()
-                .get("body", after)
-                .is_none()
-        );
+        let paragraphs = doc
+            .paragraph_indexes
+            .lock()
+            .unwrap()
+            .get("body", after)
+            .unwrap();
         let segments = doc
             .segment_indexes
             .lock()
@@ -1273,8 +1277,10 @@ pub(crate) mod tests {
             .unwrap();
         let txn = doc.yrs_doc().transact();
         let story = crate::story_ref(&txn, "body").unwrap();
-        assert_eq!(units(&segments), units(&build_indexes(&story, &txn).0));
+        let (cold_segments, cold_paragraphs) = build_indexes(&story, &txn);
+        assert_eq!(units(&segments), units(&cold_segments));
         assert_segment_invariants(&segments);
+        assert_paragraph_indexes_eq(&paragraphs, &cold_paragraphs);
     }
 
     #[test]

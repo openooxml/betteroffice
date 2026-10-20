@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type {} from './xlsx-worker-editor-probe';
 
 const pageErrors = new WeakMap<Page, string[]>();
@@ -6,16 +7,16 @@ const pageErrors = new WeakMap<Page, string[]>();
 async function open(page: Page, query = 'asyncApi=1') {
   await page.goto(`/xlsx-worker-editor.html?${query}`);
   await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-  await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
 }
 
 async function cells(page: Page, range = 'A1', sheet = 0) {
-  return page.evaluate(({ range, sheet }) => window.__xlsxWorkerEditor.peerless!.cells(sheet, range), { range, sheet });
+  return pinnedEvaluate(page, ({ range, sheet }) => window.__xlsxWorkerEditor.peerless!.cells(sheet, range), { range, sheet });
 }
 
 async function selection(page: Page, row: number, col: number, sheetIndex = 0) {
-  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.selection())).toMatchObject({
+  await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.selection())).toMatchObject({
     sheetIndex, cells: { anchor: { row, col }, focus: { row, col } },
   });
 }
@@ -61,7 +62,7 @@ test('asyncApi mounts a peer-less editor without a main-thread engine', async ({
 test('hybrid control still creates a main-thread engine', async ({ page }) => {
   await open(page, '');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.mainThreadEngines())).toBeGreaterThan(0);
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('initial');
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.cell())).toBe('initial');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 
@@ -79,6 +80,70 @@ test('peer-less typing commits the cell and formula bar before navigation', asyn
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('24');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
+
+for (const route of ['select', 'execCommand', 'none'] as const) {
+  test(`peer-less ${
+    route === 'none' ? 'typing without selection appends to' : `native select-all via ${route} replaces`
+  } a delayed prefill`, async ({ page }) => {
+    await open(page);
+    await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('initial');
+    await page.evaluate(() => window.__xlsxWorkerEditor.holdCellInputs());
+    await page.getByTestId('xlsx-scroll').focus();
+    await page.getByTestId('xlsx-scroll').press('F2');
+    const input = page.getByTestId('xlsx-cell-editor');
+    await expect(input).toBeFocused();
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.heldCellInputs())).toBeGreaterThan(0);
+    await input.evaluate((element, route) => {
+      if (route === 'select') (element as HTMLInputElement).select();
+      else if (route === 'execCommand') document.execCommand('selectAll');
+    }, route);
+    await input.pressSequentially('replacement');
+    await page.evaluate(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      window.__xlsxWorkerEditor.releaseCellInputs();
+    });
+    await expect(input).not.toHaveValue('');
+    await expect(input).not.toHaveValue('initial');
+    const expected = route === 'none' ? 'initialreplacement' : 'replacement';
+    expect(await input.inputValue()).toBe(expected);
+    await input.press('Enter');
+    await expect.poll(() => cells(page)).toEqual([[expected]]);
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+  });
+}
+
+for (const route of ['keyboard', 'native', 'paste', 'unicode'] as const) {
+  test(`peer-less uncached pending prefill keeps native input for ${route}`, async ({ page, context }) => {
+    await open(page);
+    await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('initial');
+    await page.evaluate(() => window.__xlsxWorkerEditor.holdCellInputs());
+    const scroll = page.getByTestId('xlsx-scroll');
+    await scroll.focus();
+    await scroll.press('ArrowRight');
+    await selection(page, 0, 1);
+    await scroll.press('F2');
+    const input = page.getByTestId('xlsx-cell-editor');
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue('');
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.heldCellInputs())).toBeGreaterThan(0);
+    if (route === 'keyboard') await input.press('ControlOrMeta+A');
+    if (route === 'native') await input.evaluate((element) => (element as HTMLInputElement).select());
+    if (route === 'paste') {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await pinnedEvaluate(page, () => navigator.clipboard.writeText('replacement'));
+      await input.press('ControlOrMeta+v');
+    } else if (route === 'unicode') await page.keyboard.insertText('😀');
+    else await input.pressSequentially('replacement');
+    await page.evaluate(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      window.__xlsxWorkerEditor.releaseCellInputs();
+    });
+    const expected = route === 'keyboard' ? 'replacement' : route === 'unicode' ? '1😀' : '1replacement';
+    await expect(input).toHaveValue(expected);
+    await input.press('Enter');
+    await expect.poll(() => cells(page, 'B1')).toEqual([[expected]]);
+  });
+}
 
 for (const release of ['F2', 'select all', 'Delete', 'typing'] as const) {
   test(`peer-less F2 keeps the edit keys when its held seed arrives after ${release}`, async ({ page }) => {
@@ -152,21 +217,21 @@ test('peer-less clipboard pastes, copies and cuts a rectangular range', async ({
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await open(page);
   const text = 'paste one\tpaste two\r\npaste three\tpaste four';
-  await page.evaluate((value) => navigator.clipboard.writeText(value), text);
+  await pinnedEvaluate(page, (value) => navigator.clipboard.writeText(value), text);
   const scroll = page.getByTestId('xlsx-scroll');
   await scroll.focus();
   await scroll.press('ControlOrMeta+v');
   await expect.poll(() => cells(page, 'A1:B2')).toEqual([['paste one', 'paste two'], ['paste three', 'paste four']]);
-  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.selection())).toMatchObject({
+  await expect.poll(() => pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.selection())).toMatchObject({
     cells: { anchor: { row: 0, col: 0 }, focus: { row: 1, col: 1 } },
   });
-  await page.evaluate(() => navigator.clipboard.writeText('copy sentinel'));
+  await pinnedEvaluate(page, () => navigator.clipboard.writeText('copy sentinel'));
   await scroll.press('ControlOrMeta+c');
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(text);
+  await expect.poll(() => pinnedEvaluate(page, () => navigator.clipboard.readText())).toBe(text);
   expect(await cells(page, 'A1:B2')).toEqual([['paste one', 'paste two'], ['paste three', 'paste four']]);
-  await page.evaluate(() => navigator.clipboard.writeText('cut sentinel'));
+  await pinnedEvaluate(page, () => navigator.clipboard.writeText('cut sentinel'));
   await scroll.press('ControlOrMeta+x');
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(text);
+  await expect.poll(() => pinnedEvaluate(page, () => navigator.clipboard.readText())).toBe(text);
   await expect.poll(() => cells(page, 'A1:B2')).toEqual([['', ''], ['', '']]);
   await scroll.press('ControlOrMeta+z');
   await expect.poll(() => cells(page, 'A1:B2')).toEqual([['paste one', 'paste two'], ['paste three', 'paste four']]);
@@ -176,11 +241,11 @@ test('peer-less clipboard pastes, copies and cuts a rectangular range', async ({
 test('peer-less plugin reads, edits and navigation survive save and reopen', async ({ page }) => {
   await open(page);
   await edit(page, 'saved edit');
-  await page.evaluate(() => window.__xlsxWorkerEditor.pluginRoutes());
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.pluginRoutes());
   await expect.poll(() => cells(page, 'A4')).toEqual([['plugin']]);
   await selection(page, 0, 0);
   const generation = await page.evaluate(() => window.__xlsxWorkerEditor.generation());
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.saveAndReopen())).toBeGreaterThan(0);
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.saveAndReopen())).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBeGreaterThan(generation);
   expect(await cells(page)).toEqual([['saved edit']]);
   expect(await cells(page, 'A4')).toEqual([['plugin']]);
@@ -194,14 +259,14 @@ test('peer-less recovery replays edits in a new worker after termination', async
   await open(page);
   await edit(page, 'recovered edit');
   await expect.poll(() => cells(page)).toEqual([['recovered edit']]);
-  await page.evaluate(() => window.__xlsxWorkerEditor.pluginRoutes());
+  await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.pluginRoutes());
   await expect.poll(() => cells(page, 'A4')).toEqual([['plugin']]);
   const workers = await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.workerCount());
   await page.evaluate(() => window.__xlsxWorkerEditor.fail());
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.peerless!.failure())).toContain('Browser worker failure');
   await expect(page.getByTestId('xlsx-error')).toBeVisible();
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toHaveLength(1);
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.recoverAndReopen())).toBeGreaterThan(0);
+  expect(await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.peerless!.recoverAndReopen())).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerless!.workerCount())).toBeGreaterThan(workers);
   await expect(page.getByTestId('xlsx-error')).toHaveCount(0);
   expect(await cells(page)).toEqual([['recovered edit']]);

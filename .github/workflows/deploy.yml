@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [web, demo, docs, relay, fidelity]
+        app: [web, demo, docs, relay, fidelity, evals]
     steps:
       - uses: actions/checkout@v7
 

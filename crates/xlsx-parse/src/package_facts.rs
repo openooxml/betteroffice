@@ -20,6 +20,7 @@ pub(crate) struct SheetFacts {
     pub(crate) visibility: SheetVisibility,
     pub(crate) worksheet: bool,
     pub(crate) protected: bool,
+    pub(crate) format_cells: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +70,7 @@ pub(crate) fn sheet_facts(package: &PreservedPackage, index: usize) -> SheetFact
             .unwrap_or(SheetVisibility::Visible),
         worksheet: package.source_sheet_is_worksheet(index),
         protected: package.source_sheet_is_protected(index),
+        format_cells: package.source_sheet_allows_format_cells(index),
     }
 }
 
@@ -191,6 +193,16 @@ impl<'a> PackageFactsView<'a> {
         }
     }
 
+    pub fn source_sheet_allows_format_cells(&self, index: usize) -> bool {
+        match self.0 {
+            FactsSource::Package(package) => package.source_sheet_allows_format_cells(index),
+            FactsSource::Facts(facts) => facts
+                .sheets
+                .get(index)
+                .is_some_and(|sheet| sheet.format_cells),
+        }
+    }
+
     pub fn unpatchable_reference_part(&self) -> Option<&'a str> {
         match self.0 {
             FactsSource::Package(package) => package.unpatchable_reference_part(),
@@ -300,7 +312,7 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/charts
             ""
         };
         let protection = if protected {
-            "<sheetProtection sheet=\"1\"/>"
+            "<sheetProtection sheet=\"1\" formatCells=\"0\"/>"
         } else {
             ""
         };
@@ -430,8 +442,13 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
                     present.source_sheet_is_protected(index),
                     deferred.source_sheet_is_protected(index)
                 );
+                assert_eq!(
+                    present.source_sheet_allows_format_cells(index),
+                    deferred.source_sheet_allows_format_cells(index)
+                );
             }
             assert_eq!(present.source_sheet_is_protected(0), flags.0);
+            assert_eq!(present.source_sheet_allows_format_cells(0), flags.0);
             assert_eq!(
                 present.unpatchable_reference_part(),
                 deferred.unpatchable_reference_part()

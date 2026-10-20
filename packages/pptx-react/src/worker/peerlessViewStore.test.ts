@@ -23,6 +23,7 @@ import type {
 import {
   createPeerlessViewStore,
   installCoveringFrame,
+  hitConfirmedGeometry,
   PEERLESS_ACTIVE_CONTEXT_BYTES,
   PEERLESS_PENDING_INTENTS,
   peerlessInputReference,
@@ -1073,4 +1074,22 @@ test('p2_echo_caps_wait_instead_of_dropping', async () => {
   large.client.ack(2, { selection: selection(8), frame: frame(`aBIGNEXT${'a'.repeat(8191)}`, 2, 2) });
   await waiting;
   large.store.dispose();
+});
+
+test('confirmed geometry preserves the screen-sized border band inside table cells', () => {
+  const client = new FakeCommandClient();
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame.displayList)) as SlideDisplayList;
+  const box = list.primitives[0]!;
+  list.primitives = [{ kind: 'table', objectId: 1, shapeId: 'box', name: 'Table',
+    x: 20, y: 40, w: 300, h: 40, label: 'Table', primitives: [box] }];
+  client.state.frame.displayList = new TextEncoder().encode(JSON.stringify(list)).buffer;
+  const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
+  try {
+    expect(hitConfirmedGeometry(store, { x: 31, y: 50 }, 0.5)?.kind).toBe('shape');
+    expect(hitConfirmedGeometry(store, { x: 33, y: 53 }, 0.5)).toMatchObject({
+      kind: 'text', shapeId: 'box', storyId: 'story', position: 1,
+    });
+    expect(hitConfirmedGeometry(store, { x: 21.4, y: 50 }, 4)?.kind).toBe('shape');
+    expect(hitConfirmedGeometry(store, { x: 21.6, y: 50 }, 4)?.kind).toBe('text');
+  } finally { store.dispose(); }
 });

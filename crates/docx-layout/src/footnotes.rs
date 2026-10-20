@@ -272,6 +272,7 @@ fn fragment_pm_range(fragment: &Fragment) -> (Option<f64>, Option<f64>) {
         Fragment::Shape(value) => (value.pm_start, value.pm_end),
         Fragment::Chart(value) => (value.pm_start, value.pm_end),
         Fragment::TextBox(value) => (value.pm_start, value.pm_end),
+        Fragment::Reserved(_) => (None, None),
     }
 }
 
@@ -755,6 +756,7 @@ fn fragment_bottom(fragment: &Fragment) -> f64 {
         Fragment::Shape(value) => value.y + value.height,
         Fragment::Chart(value) => value.y + value.height,
         Fragment::TextBox(value) => value.y + value.height,
+        Fragment::Reserved(value) => value.y + value.height,
     }
 }
 

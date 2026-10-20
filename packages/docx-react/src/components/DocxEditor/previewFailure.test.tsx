@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -226,7 +227,7 @@ const load = (
   ref = createRef<Editor>(),
   experimentalWorkerOpen = false
 ) => (
-  <DocxEditor
+  <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
     ref={ref}
     previewFirstPage
     experimentalWorkerOpen={experimentalWorkerOpen}
@@ -349,7 +350,7 @@ test.each([false, true])('a terminal worker open reports one typed error and an 
   const errors: Error[] = [];
   const buffer = documentBuffer();
   const element = () => (
-    <DocxEditor
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
       experimentalWorkerOpen
       previewFirstPage={false}
       readOnly={viewer}
@@ -997,7 +998,7 @@ test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only whil
   } as unknown as typeof Worker;
   const ref = createRef<Editor>();
   const errors: Error[] = [];
-  const view = render(<DocxEditor ref={ref} experimentalWorkerOpen
+  const view = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} experimentalWorkerOpen
     readOnly={mode === 'readOnly'} mode={mode === 'viewing' ? 'viewing' : 'editing'}
     documentBuffer={documentBuffer()} onError={(error) => errors.push(error)} />);
   try {

@@ -110,7 +110,7 @@ struct DirtyFormulas {
 
 struct WidthPiece {
     range: Range<u32>,
-    changed: Option<Option<f64>>,
+    changed: Option<(Option<f64>, Option<f64>)>,
     style: Option<Option<u32>>,
 }
 
@@ -274,8 +274,8 @@ impl SheetPatch<'_> {
                         (piece.range.start + 1).to_string(),
                     );
                     set_attribute(&mut attributes, "max", "max", piece.range.end.to_string());
-                    if let Some(width) = piece.changed {
-                        set_col_width(&mut attributes, width);
+                    if let Some((width, hidden_width)) = piece.changed {
+                        set_col_width(&mut attributes, width, hidden_width);
                     }
                     match piece.style {
                         Some(Some(style)) => {
@@ -333,8 +333,12 @@ impl SheetPatch<'_> {
         for col in range {
             let source = self.axes.cols.source(col);
             let model = self.sheet.col_widths.get(&col).copied();
+            let model_hidden = self.sheet.hidden_col_widths.get(&col).copied();
             let original = source.and_then(|source| self.original.col_widths.get(&source).copied());
-            let changed = (model != original).then_some(model);
+            let original_hidden =
+                source.and_then(|source| self.original.hidden_col_widths.get(&source).copied());
+            let changed = ((model, model_hidden) != (original, original_hidden))
+                .then_some((model, model_hidden));
             let model_style = run_style(model_runs, col);
             let source_style = source.and_then(|source| run_style(source_runs, source));
             let same = self.styles.equivalent(source_style, model_style);
@@ -469,7 +473,12 @@ impl SheetPatch<'_> {
 
         let moved = source.index != row;
         let height = self.sheet.row_heights.get(&row).copied();
-        let height_changed = height != self.original.row_heights.get(&source.index).copied();
+        let hidden_height = self.sheet.hidden_row_heights.get(&row).copied();
+        let height_changed = (height, hidden_height)
+            != (
+                self.original.row_heights.get(&source.index).copied(),
+                self.original.hidden_row_heights.get(&source.index).copied(),
+            );
         let style = self.sheet.row_styles.get(&row).copied();
         let style_changed = style != self.original.row_styles.get(&source.index).copied();
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
@@ -478,7 +487,7 @@ impl SheetPatch<'_> {
             set_attribute(&mut attributes, "r", "r", (u64::from(row) + 1).to_string());
         }
         if height_changed {
-            set_row_height(&mut attributes, height);
+            set_row_height(&mut attributes, height, hidden_height);
         }
         if style_changed {
             remove_attribute(&mut attributes, "s");
@@ -1013,13 +1022,21 @@ fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usiz
     }))
 }
 
-fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {
+fn set_row_height(
+    attributes: &mut Vec<XmlAttribute>,
+    height: Option<f64>,
+    hidden_height: Option<f64>,
+) {
     remove_attribute(attributes, "ht");
     remove_attribute(attributes, "customHeight");
     remove_attribute(attributes, "hidden");
     if let Some(height) = height {
-        let value = fmt_num(height);
-        let hidden = value == "0";
+        let hidden = height == 0.0;
+        let value = fmt_num(if hidden {
+            hidden_height.unwrap_or(height)
+        } else {
+            height
+        });
         set_attribute(attributes, "ht", "ht", value);
         set_attribute(attributes, "customHeight", "customHeight", "1".to_owned());
         if hidden {
@@ -1036,14 +1053,22 @@ fn run_style(runs: &[ColStyle], col: ColId) -> Option<u32> {
         .map(|run| run.xf)
 }
 
-fn set_col_width(attributes: &mut Vec<XmlAttribute>, width: Option<f64>) {
+fn set_col_width(
+    attributes: &mut Vec<XmlAttribute>,
+    width: Option<f64>,
+    hidden_width: Option<f64>,
+) {
     remove_attribute(attributes, "width");
     remove_attribute(attributes, "customWidth");
     remove_attribute(attributes, "hidden");
     remove_attribute(attributes, "bestFit");
     if let Some(width) = width {
-        let value = fmt_num(width);
-        let hidden = value == "0";
+        let hidden = width == 0.0;
+        let value = fmt_num(if hidden {
+            hidden_width.unwrap_or(width)
+        } else {
+            width
+        });
         set_attribute(attributes, "width", "width", value);
         set_attribute(attributes, "customWidth", "customWidth", "1".to_owned());
         if hidden {

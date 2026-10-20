@@ -65,20 +65,20 @@ impl ModelValidation {
                 self.phase = 1;
                 self.index = 0;
             }
-            if self.phase == 10 {
+            if self.phase == 11 {
                 if let Some(name) = self.names.first() {
                     let bytes = admit(name.len().saturating_add(24), budget)?;
                     self.names.pop_first();
                     return Ok((false, 1, bytes));
                 }
-                self.phase = 11;
+                self.phase = 12;
                 return Ok((true, 0, 0));
             }
-            if self.phase == 11 {
+            if self.phase == 12 {
                 return Ok((true, 0, 0));
             }
             let Some(sheet) = model.sheets.get(self.sheet) else {
-                self.phase = 10;
+                self.phase = 11;
                 continue;
             };
             match self.phase {
@@ -270,9 +270,50 @@ impl ModelValidation {
                         self.charts.pop_first();
                         return Ok((false, 1, bytes));
                     }
-                    self.sheet += 1;
-                    self.phase = 1;
-                    self.index = 0;
+                    self.phase = 9;
+                    self.dimension = None;
+                }
+                9 | 10 => {
+                    let (values, visible, limit, maximum) = if self.phase == 9 {
+                        (
+                            &sheet.hidden_col_widths,
+                            &sheet.col_widths,
+                            MAX_COLS,
+                            MAX_COL_WIDTH,
+                        )
+                    } else {
+                        (
+                            &sheet.hidden_row_heights,
+                            &sheet.row_heights,
+                            MAX_ROWS,
+                            MAX_ROW_HEIGHT,
+                        )
+                    };
+                    let next = match self.dimension {
+                        Some(after) => values.range((Excluded(after), Unbounded)).next(),
+                        None => values.first_key_value(),
+                    };
+                    if let Some((&index, &value)) = next {
+                        let bytes = admit(16, budget)?;
+                        if index >= limit
+                            || !value.is_finite()
+                            || value <= 0.0
+                            || value > maximum
+                            || visible.get(&index) != Some(&0.0)
+                        {
+                            return Err(SnapshotError::new("snapshot hidden dimension is invalid"));
+                        }
+                        self.dimension = Some(index);
+                        return Ok((false, 1, bytes));
+                    }
+                    self.dimension = None;
+                    if self.phase == 9 {
+                        self.phase = 10;
+                    } else {
+                        self.sheet += 1;
+                        self.phase = 1;
+                        self.index = 0;
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -321,6 +362,49 @@ mod tests {
             assert_eq!(work.bytes, *bytes);
         }
         result
+    }
+
+    #[test]
+    fn hidden_dimensions_validate_every_sheet_with_bounded_work() {
+        let budget = SnapshotBudget::new(1, 16_384).unwrap();
+        for invalid in [false, true] {
+            let mut model = Workbook {
+                sheets: (0..3)
+                    .map(|index| Sheet::new(format!("S{index}")))
+                    .collect(),
+                ..Workbook::default()
+            };
+            for sheet in &mut model.sheets {
+                sheet.col_widths.insert(1, 0.0);
+                sheet.hidden_col_widths.insert(1, 20.0);
+                sheet.row_heights.insert(2, 0.0);
+                sheet.hidden_row_heights.insert(2, 30.0);
+            }
+            if invalid {
+                model.sheets[2]
+                    .hidden_row_heights
+                    .insert(2, MAX_ROW_HEIGHT + 1.0);
+            }
+            let mut validation = ModelValidation::default();
+            let mut refused = false;
+            let mut ready = false;
+            for _ in 0..100 {
+                match step(&mut validation, &model, budget) {
+                    Ok((done, _, _)) if done => {
+                        ready = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        refused = true;
+                        break;
+                    }
+                }
+            }
+            assert_eq!(refused, invalid);
+            assert_eq!(ready, !invalid);
+            assert!(validation.names.is_empty() || invalid);
+        }
     }
 
     #[test]

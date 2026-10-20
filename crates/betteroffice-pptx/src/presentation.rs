@@ -6,10 +6,11 @@ use pptx_edit::structured::{
 use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
     DocumentVersion, EditCtx, EditError, EditOutcome, EditRequest, FindOutcome, FindRequest,
-    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
-    ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideScope,
-    StorySnapshot, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
-    UpdateEvent, UpdateSubscription, ValidationOutcome,
+    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
+    ShapeFillReceipt, ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt,
+    SlideBackgroundReceipt, SlideReceipt, SlideScope, StorySnapshot, TextReceipt, TextSearchMatch,
+    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
+    ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -239,6 +240,19 @@ impl Presentation {
     /// Sets a slide's speaker notes; empty text clears them.
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> Result<()> {
         Ok(self.session.set_slide_notes(context, slide_id, text)?)
+    }
+
+    /// Replaces the slide's background; `None` clears the declaration so the
+    /// layout or master background shows.
+    pub fn set_slide_background(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        background: Option<&ShapeFill>,
+    ) -> Result<SlideBackgroundReceipt> {
+        Ok(self
+            .session
+            .set_slide_background(context, slide_id, background)?)
     }
 
     pub fn add_text_box(

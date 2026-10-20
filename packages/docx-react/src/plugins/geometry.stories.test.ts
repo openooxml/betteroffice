@@ -146,6 +146,7 @@ function geometryOf({ main, engine, queries }: LaidOut, worker: boolean, complet
       id: 'layout',
       version: worker ? mirror.version : main.version(),
       previewVersion: snapshot.previewVersion,
+      reservationsVersion: null,
       zoom: 1,
       pageCount: queries.pageCount(),
     },

@@ -219,6 +219,26 @@ fn a_sequence_with_a_nested_field_keeps_its_cached_results() {
 }
 
 #[test]
+fn a_sequence_nested_past_the_field_limit_keeps_its_cached_results() {
+    let open = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "</w:instrText></w:r>"#;
+    let close = r#"<w:r><w:instrText xml:space="preserve">" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    for level in [2, 33] {
+        let nested = format!(
+            "{}{}{}",
+            open.repeat(level - 1),
+            field("SEQ Figure"),
+            close.repeat(level - 1)
+        );
+        let body = [paragraph(&nested), paragraph(&field("SEQ Figure"))].concat();
+        assert_eq!(
+            sequence_results(&body),
+            ["7"],
+            "SEQ Figure at level {level}"
+        );
+    }
+}
+
+#[test]
 fn legacy_state_without_sequence_metadata_keeps_all_cached_results() {
     let nested = format!(
         r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "</w:instrText></w:r>{}<w:r><w:instrText xml:space="preserve">" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,

@@ -9,20 +9,22 @@ pub use pptx_edit::structured::{
     snapshot_outcome_json,
 };
 pub use pptx_edit::{
-    CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError,
-    EditOrigin, InheritedGeometry, ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt,
-    ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot,
-    TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin,
-    UpdateSubscription,
+    BackgroundGuard, DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditHistory,
+    EditOutcome, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep,
+    EditTarget, EditValidation, FillGuard, FindMatch, FindOutcome, FindRequest, FindResponse,
+    FindScope, MAX_REQUEST_BYTES, OutlineGuard, ParagraphText, ReadOutcome, ReadRequest,
+    ReadResponse, RectGuard, ShapeTarget, SlideTarget, StoryTarget, StoryText, TargetEdge,
+    TextField, TextGuard, TextRange, TextTarget, ValidationOutcome, outcome_json,
+    oversized_request,
 };
 pub use pptx_edit::{
-    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditHistory, EditOutcome,
-    EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep, EditTarget,
-    EditValidation, FillGuard, FindMatch, FindOutcome, FindRequest, FindResponse, FindScope,
-    MAX_REQUEST_BYTES, OutlineGuard, ParagraphText, ReadOutcome, ReadRequest, ReadResponse,
-    RectGuard, ShapeTarget, SlideTarget, StoryTarget, StoryText, TargetEdge, TextField, TextGuard,
-    TextRange, TextTarget, ValidationOutcome, outcome_json, oversized_request,
+    CaretAnchor, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx,
+    EditError, EditOrigin, GradientFill, GradientStop as ModelGradientStop, InheritedGeometry,
+    ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
+    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    ShapeStrokeReceipt, SlideBackgroundReceipt, SlideReceipt, SlideSnapshot, StorySnapshot,
+    TextReceipt, TextRunSnapshot, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
+    UpdateEvent, UpdateOrigin, UpdateSubscription,
 };
 pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,

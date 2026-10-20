@@ -1481,6 +1481,111 @@ fn saving_rejects_invalid_palette_colors_from_model_json() {
 }
 
 #[test]
+fn dxf_plain_open_save_and_current_state_skip_legacy_style_reading() {
+    let source = dxf_count_source(1);
+    let before = xlsx_parse::legacy_style_reads();
+    let plain = Workbook::open(&source).unwrap();
+    let saved = plain.save().unwrap();
+    Workbook::open_for_read(&saved).unwrap();
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+    let peer = Workbook::open_collaborative(&source, 903).unwrap();
+    replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(xlsx_parse::legacy_style_reads(), before);
+}
+
+fn dxf_count_source(count: usize) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.styles.cell_xfs.push(xlsx_model::Xf::default());
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let dxfs = r#"<dxf><numFmt numFmtId="14" formatCode="0%"/></dxf>"#.repeat(count);
+    let styles = format!("<styleSheet><dxfs>{dxfs}</dxfs></styleSheet>");
+    set_test_part(&mut parts, "xl/styles.xml", styles.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn dxf_entries_over_legacy_style_cap_still_open() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    Workbook::open(&source).unwrap();
+    Workbook::open_collaborative(&source, 902).unwrap();
+}
+
+#[test]
+fn dxf_legacy_style_cap_preserves_fingerprint_mismatch() {
+    let source = dxf_count_source(xlsx_parse::MAX_STYLE_ENTRIES + 1);
+    let mut replica = Workbook::open_collaborative(&source, 902).unwrap();
+    let mut other = WorkbookModel::default();
+    other.sheets.push(Sheet::new("Different"));
+    let peer = Workbook::from_model_collaborative(other, 903).unwrap();
+    let before = replica.model().clone();
+    let reads = xlsx_parse::legacy_style_reads();
+    let error = replica
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("base fingerprint"), "{error}");
+    assert_eq!(xlsx_parse::legacy_style_reads(), reads + 1);
+    assert_eq!(replica.model(), &before);
+}
+
+#[test]
+fn persisted_dxf_base_fingerprints_keep_pre_filter_pool_readings() {
+    for flags in [
+        "",
+        r#"applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1""#,
+    ] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.styles.cell_xfs.push(xlsx_model::Xf::default());
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let prefix = r#"<numFmts><numFmt numFmtId="164" formatCode="0.000"/></numFmts>"#;
+        let fonts = "<font/><font><b/></font>";
+        let fills = r#"<fill/><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>"#;
+        let borders = r#"<border/><border><left style="thin"/></border>"#;
+        let xf = format!(r#"<xf numFmtId="164" fontId="0" fillId="0" borderId="0" {flags}/>"#);
+        let extension_xf = format!(r#"<xf numFmtId="164" fontId="0" {flags}/>"#);
+        let legacy_projection = format!(
+            r#"<styleSheet><numFmts><numFmt numFmtId="164" formatCode="0.000"/><numFmt numFmtId="14" formatCode="0%"/><numFmt numFmtId="165" formatCode="@"/></numFmts><fonts>{fonts}</fonts><fills>{fills}</fills><borders>{borders}</borders><cellXfs>{xf}{extension_xf}</cellXfs></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", legacy_projection.into_bytes());
+        let pre_fix = xlsx_parse::parse_workbook(&parts).unwrap();
+        let legacy = Workbook::from_model_collaborative(pre_fix, 901).unwrap();
+        let state = legacy.encode_state_as_update_v1();
+        let source_xml = format!(
+            r#"<styleSheet>{prefix}<fonts><font/></fonts><dxfs><dxf><font><b/></font></dxf></dxfs><fills><fill/></fills><extLst><ext><fills><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills></ext></extLst><borders><border/></borders><dxfs><dxf><border><left style="thin"/></border></dxf></dxfs><cellXfs>{xf}</cellXfs><dxfs><dxf><numFmt numFmtId="14" formatCode="0%"/></dxf></dxfs><extLst><ext><numFmt numFmtId="165" formatCode="@"/><cellXfs>{extension_xf}</cellXfs></ext></extLst></styleSheet>"#
+        );
+        set_test_part(&mut parts, "xl/styles.xml", source_xml.into_bytes());
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut restored = Workbook::open_collaborative(&source, 902).unwrap();
+        restored
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap();
+        assert_eq!(restored.model().styles.num_fmts, [(164, "0.000".into())]);
+        assert_eq!(restored.model().styles.fonts.len(), 1);
+        assert_eq!(restored.model().styles.fills.len(), 1);
+        assert_eq!(restored.model().styles.borders.len(), 1);
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", br#"<worksheet><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#.to_vec());
+        let different = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut different = Workbook::open_collaborative(&different, 903).unwrap();
+        let before = different.model().clone();
+        let error = different
+            .apply_update_v1(&state, CalculationOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("base fingerprint"), "{error}");
+        assert_eq!(different.model(), &before);
+    }
+}
+
+#[test]
 fn restored_legacy_snapshots_publish_the_current_palette_identity() {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Data"));
@@ -3445,6 +3550,479 @@ fn semantic_noop_preserves_redo_history() {
 }
 
 #[test]
+fn range_move_rewrites_formulas_and_converges_as_one_undoable_edit() {
+    let mut data = Sheet::new("Data");
+    data.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("B1"),
+        Cell {
+            formula: Some("A1*2".into()),
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("C1"),
+        Cell {
+            formula: Some("SUM(A1:B1)".into()),
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("D3"),
+        Cell {
+            value: CellValue::Number { value: 99.0 },
+            ..Cell::default()
+        },
+    );
+    let mut other = Sheet::new("Other");
+    other.set_cell(
+        cell("A1"),
+        Cell {
+            formula: Some("Data!$A$1".into()),
+            ..Cell::default()
+        },
+    );
+    let original = Workbook::from_model(WorkbookModel {
+        sheets: vec![data, other],
+        ..Default::default()
+    })
+    .unwrap()
+    .save()
+    .unwrap();
+    let mut left = Workbook::open_collaborative(&original, 801).unwrap();
+    let mut right = Workbook::open_collaborative(&original, 802).unwrap();
+    assert!(
+        left.move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            cell("D3"),
+            CalculationOptions::default(),
+        )
+        .unwrap()
+        .applied
+    );
+    assert_eq!(left.history_state().undo_depth, 1);
+    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(left.cell(SheetId(0), cell("B1")).unwrap().input, "");
+    assert_eq!(left.cell(SheetId(0), cell("D3")).unwrap().input, "10");
+    assert_eq!(left.cell(SheetId(0), cell("E3")).unwrap().input, "=D3*2");
+    assert_eq!(
+        left.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=SUM(D3:E3)"
+    );
+    assert_eq!(
+        left.cell(SheetId(1), cell("A1")).unwrap().input,
+        "=Data!$D$3"
+    );
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+    let reopened = Workbook::open(&right.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("E3")).unwrap().input,
+        "=D3*2"
+    );
+    assert_eq!(
+        reopened.cell(SheetId(1), cell("A1")).unwrap().input,
+        "=Data!$D$3"
+    );
+    assert!(left.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "10");
+    assert_eq!(left.cell(SheetId(0), cell("D3")).unwrap().input, "99");
+    assert_eq!(
+        left.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=SUM(A1:B1)"
+    );
+    let undo = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&undo, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+}
+
+#[test]
+fn range_move_rejects_partial_formula_span_without_mutation() {
+    let mut data = Sheet::new("Data");
+    data.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("C1"),
+        Cell {
+            formula: Some("SUM(A1:B1)".into()),
+            ..Cell::default()
+        },
+    );
+    let bytes = Workbook::from_model(WorkbookModel {
+        sheets: vec![data],
+        ..Default::default()
+    })
+    .unwrap()
+    .save()
+    .unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 803).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let result = workbook.move_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("D3"),
+        CalculationOptions::default(),
+    );
+    assert!(matches!(result, Err(Error::InvalidOperation(_))));
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert!(!workbook.can_undo());
+}
+
+#[test]
+fn range_move_refuses_preserved_validation_even_outside_source() {
+    let mut parts = sample_parts();
+    let worksheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    let xml = String::from_utf8(worksheet.1.clone()).unwrap();
+    worksheet.1 = xml
+        .replace(
+            "</worksheet>",
+            r#"<dataValidations count="1"><dataValidation type="whole" sqref="D9"><formula1>1</formula1></dataValidation></dataValidations></worksheet>"#,
+        )
+        .into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 804).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let result = workbook.move_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("D3"),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidOperation(reason)) if reason.contains("worksheet features"))
+    );
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+}
+
+fn assert_move_range_refused(bytes: &[u8], source: CellRange, destination: CellRef) {
+    let mut workbook = Workbook::open_collaborative(bytes, 805).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let saved = workbook.save().unwrap();
+    assert_eq!(saved, bytes);
+    let model = workbook.model().clone();
+    let result = workbook.move_range(
+        SheetId(0),
+        source,
+        destination,
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidOperation(ref reason)) if reason.contains("cannot safely preserve")),
+        "{result:?}"
+    );
+    assert!(!workbook.can_undo());
+    assert_eq!(workbook.history_state().undo_depth, 0);
+    assert_eq!(workbook.model(), &model);
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert_eq!(workbook.save().unwrap(), saved);
+}
+
+#[test]
+fn move_range_refuses_inline_rich_text_without_mutation() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><r><rPr><b/></rPr><t>rich</t></r><r><t> text</t></r></is></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    assert_move_range_refused(
+        &ooxml_opc::rezip_parts(&parts).unwrap(),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("B1"),
+    );
+}
+
+#[test]
+fn move_range_refuses_related_table_formulas_without_mutation() {
+    for tag in ["calculatedColumnFormula", "totalsRowFormula"] {
+        for (owner, formula) in [
+            (1, "A1"),
+            (1, "$B$1"),
+            (1, "Data!A1"),
+            (1, "SUM(A1:B1)"),
+            (2, "Data!A1"),
+            (2, "Data!$B$1"),
+        ] {
+            let mut parts = sample_parts();
+            set_test_part(
+                &mut parts,
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+            );
+            if owner == 2 {
+                set_test_part(
+                    &mut parts,
+                    "xl/worksheets/sheet1.xml",
+                    br#"<worksheet><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+                );
+                set_test_part(
+                    &mut parts,
+                    "xl/worksheets/sheet2.xml",
+                    br#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+                );
+            }
+            parts.push((
+                format!("xl/worksheets/_rels/sheet{owner}.xml.rels"),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>"#.to_vec(),
+            ));
+            parts.push((
+                "xl/tables/table1.xml".into(),
+                format!(r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Sales" displayName="Sales" ref="D10:D12"><tableColumns count="1"><tableColumn id="1" name="Amount"><{tag}>{formula}</{tag}></tableColumn></tableColumns></table>"#).into_bytes(),
+            ));
+            assert_move_range_refused(
+                &ooxml_opc::rezip_parts(&parts).unwrap(),
+                CellRange::new(cell("A1"), cell("A1")),
+                cell("B1"),
+            );
+        }
+    }
+}
+
+#[test]
+fn move_range_refuses_dynamic_ranges_without_mutation() {
+    for formula in [
+        "SUM(A1:INDEX(A10:A20,1))",
+        "SUM(A1:CHOOSE(1,A10,A20))",
+        "SUM(A1:CUSTOM(A10))",
+        "SUM(A1:OFFSET(A10,0,0))",
+        "SUM(A1:INDIRECT(\"A10\"))",
+        "SUM(INDEX(A1:A20,1):INDEX(A1:A20,10))",
+        "SUM(OFFSET(A10,-5,0))",
+        "SUM(INDIRECT(\"A5\"))",
+    ] {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            cell("A5"),
+            Cell {
+                value: CellValue::Number { value: 10.0 },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            cell("D1"),
+            Cell {
+                formula: Some(formula.into()),
+                ..Cell::default()
+            },
+        );
+        let bytes = Workbook::from_model(WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        })
+        .unwrap()
+        .save()
+        .unwrap();
+        assert_move_range_refused(&bytes, CellRange::new(cell("A5"), cell("A5")), cell("C5"));
+    }
+}
+
+#[test]
+fn move_range_materializes_missing_cell_styles_in_one_transaction() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    for row_style in [false, true] {
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs.push(Default::default());
+        let style = model
+            .styles
+            .intern_cell_format(&CellFormat {
+                fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+        let mut sheet = Sheet::new("Data");
+        if row_style {
+            sheet.row_styles.insert(0, style);
+        } else {
+            sheet.col_styles.push(ColStyle {
+                first: 0,
+                last: 0,
+                xf: style,
+            });
+        }
+        sheet.col_styles.push(ColStyle {
+            first: 4,
+            last: 4,
+            xf: style,
+        });
+        sheet.set_cell(
+            cell("B1"),
+            Cell {
+                value: CellValue::Number { value: 42.0 },
+                ..Cell::default()
+            },
+        );
+        model.sheets.push(sheet);
+        let bytes = Workbook::from_model(model).unwrap().save().unwrap();
+        let mut left = Workbook::open_collaborative(&bytes, 806).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, 807).unwrap();
+        assert!(left.model().sheets[0].cell(cell("A1")).is_none());
+        assert_eq!(cascade_fill(&left, "A1").as_deref(), Some("#00ff00"));
+        left.move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            cell("D2"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(left.history_state().undo_depth, 1);
+        let update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        right
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap();
+        assert_eq!(right.model(), left.model());
+        let reopened = Workbook::open(&left.save().unwrap()).unwrap();
+        for workbook in [&left, &right, &reopened] {
+            assert_eq!(cascade_fill(workbook, "D2").as_deref(), Some("#00ff00"));
+            for address in ["A1", "B1", "E2"] {
+                assert_ne!(cascade_fill(workbook, address).as_deref(), Some("#00ff00"));
+            }
+            assert_eq!(workbook.cell(SheetId(0), cell("E2")).unwrap().input, "42");
+        }
+        left.undo(CalculationOptions::default()).unwrap();
+        assert!(!left.can_undo());
+        assert!(left.model().sheets[0].cell(cell("A1")).is_none());
+        assert_eq!(cascade_fill(&left, "A1").as_deref(), Some("#00ff00"));
+        assert_eq!(left.cell(SheetId(0), cell("B1")).unwrap().input, "42");
+        assert!(left.model().sheets[0].cell(cell("D2")).is_none());
+        assert!(left.model().sheets[0].cell(cell("E2")).is_none());
+        left.redo(CalculationOptions::default()).unwrap();
+        assert_eq!(cascade_fill(&left, "D2").as_deref(), Some("#00ff00"));
+        assert_ne!(cascade_fill(&left, "A1").as_deref(), Some("#00ff00"));
+    }
+}
+
+#[test]
+fn move_range_refuses_related_comment_anchors_without_mutation() {
+    for anchor in ["A1", "B1"] {
+        for relationship_type in ["comments", "threadedComment"] {
+            let mut parts = sample_parts();
+            set_test_part(
+                &mut parts,
+                "xl/worksheets/sheet1.xml",
+                br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+            );
+            parts.push((
+                "xl/worksheets/_rels/sheet1.xml.rels".into(),
+                format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{relationship_type}" Target="../comments/comment1.xml"/></Relationships>"#).into_bytes(),
+            ));
+            let xml = if relationship_type == "comments" {
+                format!(
+                    r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="{anchor}" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#
+                )
+            } else {
+                format!(
+                    r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment ref="{anchor}" personId="person" id="comment"><text>Note</text></threadedComment></ThreadedComments>"#
+                )
+            };
+            parts.push(("xl/comments/comment1.xml".into(), xml.into_bytes()));
+            assert_move_range_refused(
+                &ooxml_opc::rezip_parts(&parts).unwrap(),
+                CellRange::new(cell("A1"), cell("A1")),
+                cell("B1"),
+            );
+        }
+    }
+}
+
+#[test]
+fn move_range_allows_disjoint_rich_text_table_formulas_and_comments() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1"><v>10</v></c><c r="C1" t="inlineStr"><is><r><rPr><b/></rPr><t>rich</t></r></is></c></row></sheetData><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/tables/table1.xml".into(),
+        br#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" displayName="Sales" ref="D10:D12"><tableColumns count="1"><tableColumn id="1" name="Amount"><calculatedColumnFormula>SUM(A20:B20)</calculatedColumnFormula><totalsRowFormula>Empty!A1</totalsRowFormula></tableColumn></tableColumns></table>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/comments1.xml".into(),
+        br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="F20" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#.to_vec(),
+    ));
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 808).unwrap();
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            cell("B1"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.history_state().undo_depth, 1);
+    let saved = package_map(&workbook.save().unwrap());
+    let original = package_map(&bytes);
+    for path in ["xl/tables/table1.xml", "xl/comments1.xml"] {
+        assert_eq!(saved[path], original[path]);
+    }
+    let sheet = String::from_utf8(saved["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(sheet.contains("<rPr><b/></rPr>"));
+    assert_eq!(workbook.cell(SheetId(0), cell("B1")).unwrap().input, "10");
+}
+
+#[test]
+fn range_move_handles_overlapping_source_and_destination() {
+    let mut data = Sheet::new("Data");
+    for (address, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0)] {
+        data.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![data],
+        ..Default::default()
+    })
+    .unwrap();
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A2")),
+            cell("A2"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(workbook.cell(SheetId(0), cell("A2")).unwrap().input, "1");
+    assert_eq!(workbook.cell(SheetId(0), cell("A3")).unwrap().input, "2");
+}
+
+#[test]
 fn rejects_insertions_that_discard_boundary_content() {
     let mut sheet = Sheet::new("Data");
     let last_row = CellRef::new(betteroffice_xlsx::MAX_ROWS - 1, 0);
@@ -3810,17 +4388,18 @@ fn display_lists_do_not_inherit_raster_dimension_caps() {
 }
 
 #[test]
-fn display_lists_reject_excessive_cell_spans() {
+fn display_lists_degrade_excessive_cell_spans() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
-    let error = workbook
+    let frame = workbook
         .display_list(&Viewport {
             x: 0.0,
             y: 0.0,
             width: 100.0,
             height: 6_000_000.0,
         })
-        .unwrap_err();
-    assert!(matches!(error, Error::DisplayTooLarge { .. }));
+        .unwrap();
+    assert!(frame.truncated);
+    assert!(frame.grid.row_offsets.len() <= 125_001);
 }
 
 #[cfg(feature = "raster")]
@@ -4523,13 +5102,16 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
     let _remote_subscription = target
         .observe_update_v1(move |event| observed.lock().unwrap().push(event))
         .unwrap();
+    let state_vector = target.encode_state_vector_v1();
     assert!(
         target
             .apply_update_v1(&updates[1], CalculationOptions::default())
             .unwrap()
             .applied
     );
-    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "9");
+    assert_eq!(target.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(target.cell(SheetId(0), cell("A2")).unwrap().input, "");
+    assert_eq!(target.encode_state_vector_v1(), state_vector);
     assert_eq!(remote_events.lock().unwrap().len(), 1);
     assert!(
         target
@@ -4538,7 +5120,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .applied
     );
     assert_eq!(target.model(), source.model());
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
     assert_eq!(
         remote_events.lock().unwrap()[0].origin,
         UpdateOrigin::Remote
@@ -4555,7 +5137,7 @@ fn duplicate_and_reversed_update_delivery_are_safe() {
             .unwrap()
             .applied
     );
-    assert_eq!(remote_events.lock().unwrap().len(), 2);
+    assert_eq!(remote_events.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -5196,7 +5778,6 @@ fn panicking_native_observers_do_not_split_authority_and_projection() {
 fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
     let bytes = sample_xlsx();
     let mut workbook = Workbook::open_collaborative(&bytes, 1001).unwrap();
-    let range = CellRange::new(cell("A1"), cell("A2"));
     let structural_ops = vec![
         Op::InsertRows {
             sheet: SheetId(0),
@@ -5217,14 +5798,6 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             sheet: SheetId(0),
             at: 0,
             count: 1,
-        },
-        Op::MergeCells {
-            sheet: SheetId(0),
-            range,
-        },
-        Op::UnmergeCells {
-            sheet: SheetId(0),
-            range,
         },
         Op::AddSheet {
             index: 1,
@@ -5272,6 +5845,928 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             )
             .unwrap()
             .applied
+    );
+}
+
+#[test]
+fn collaborative_freeze_panes_converge_undo_and_reopen_without_unfreezing_axes() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1002).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1003).unwrap();
+    let pane = Some(FreezePane::new(1, 0, cell("A2")));
+    assert!(
+        left.apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane
+            }],
+            options
+        )
+        .unwrap()
+        .applied
+    );
+    assert_eq!(left.model().sheets[0].freeze_pane, pane);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, pane);
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .freeze_pane,
+        pane
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    assert_eq!(left.model().sheets[0].freeze_pane, None);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, None);
+    assert!(left.redo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, pane);
+
+    let state = right.encode_state_as_update_v1();
+    let mut shifted = Workbook::open(&bytes).unwrap();
+    shifted
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
+    assert!(matches!(
+        right.apply_update_v1(
+            &shifted
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options
+        ),
+        Err(Error::CollaborativeStructureChanged)
+    ));
+    assert_eq!(right.encode_state_as_update_v1(), state);
+}
+
+#[test]
+fn collaborative_merges_converge_undo_and_reopen() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1101).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1102).unwrap();
+    let range = CellRange::parse_a1("A1:B2").unwrap();
+    assert!(
+        left.apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range
+            }],
+            options
+        )
+        .unwrap()
+        .applied
+    );
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(left.model().sheets[0].merges, vec![range]);
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![range]
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert!(left.model().sheets[0].merges.is_empty());
+    assert_eq!(left.model(), right.model());
+    assert!(left.redo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].merges, vec![range]);
+}
+
+fn internal_link(range: &str, target: &str) -> Hyperlink {
+    Hyperlink {
+        range: CellRange::parse_a1(range).unwrap(),
+        external_target: None,
+        location: Some(target.into()),
+        tooltip: Some("Open destination".into()),
+        display: Some("Go".into()),
+    }
+}
+
+#[test]
+fn collaborative_hyperlinks_converge_undo_and_reopen() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1201).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1202).unwrap();
+    let first = internal_link("A1", "Empty!A1");
+    let second = internal_link("D4", "Data!B1");
+    let baseline = left.encode_state_vector_v1();
+    assert!(
+        left.set_hyperlink(SheetId(0), first.clone(), options)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        right
+            .set_hyperlink(SheetId(0), second.clone(), options)
+            .unwrap()
+            .applied
+    );
+    let left_update = left.encode_diff_v1(&baseline).unwrap();
+    let right_update = right.encode_diff_v1(&baseline).unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        left.model().sheets[0].hyperlinks,
+        vec![first.clone(), second.clone()]
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(left.model().sheets[0].hyperlinks, vec![second.clone()]);
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .hyperlinks,
+        vec![second.clone()]
+    );
+
+    assert!(
+        right
+            .remove_hyperlink(SheetId(0), second.range, options)
+            .unwrap()
+            .applied
+    );
+    left.apply_update_v1(
+        &right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap(),
+        options,
+    )
+    .unwrap();
+    assert!(left.model().sheets[0].hyperlinks.is_empty());
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn anchored_hyperlink_ops_match_in_both_modes() {
+    for collaborative in [false, true] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let mut editor = if collaborative {
+            Workbook::from_model_collaborative(model, 1250)
+        } else {
+            Workbook::from_model(model)
+        }
+        .unwrap();
+        let options = CalculationOptions::default();
+        editor
+            .set_hyperlink(SheetId(0), internal_link("$A$1:$B$2", "Data!D1"), options)
+            .unwrap();
+        assert_eq!(
+            editor.model().sheets[0].hyperlinks[0].range.to_a1(),
+            "A1:B2"
+        );
+        editor
+            .remove_hyperlink(SheetId(0), CellRange::parse_a1("$A1:B$2").unwrap(), options)
+            .unwrap();
+        assert!(editor.model().sheets[0].hyperlinks.is_empty());
+    }
+}
+
+#[test]
+fn anchored_imported_hyperlink_ranges_are_normalized_before_collaboration() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.hyperlinks.push(internal_link("$A$1", "Data!D1"));
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut left = Workbook::open_collaborative(&bytes, 1254).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1255).unwrap();
+    assert_eq!(left.model().sheets[0].hyperlinks[0].range.to_a1(), "A1");
+    let before = right.encode_state_vector_v1();
+    let replacement = internal_link("A1", "Data!D2");
+    left.set_hyperlink(
+        SheetId(0),
+        replacement.clone(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .apply_update_v1(
+            &left.encode_diff_v1(&before).unwrap(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].hyperlinks, vec![replacement]);
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn imported_empty_hyperlink_fields_allow_edits_undo_and_redo_in_both_modes() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><hyperlinks><hyperlink ref="A1" location="Data!D1" tooltip="" display=""/></hyperlinks></worksheet>"#.to_vec(),
+    );
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    for collaborative in [false, true] {
+        let mut editor = if collaborative {
+            Workbook::open_collaborative(&bytes, 1256)
+        } else {
+            Workbook::open(&bytes)
+        }
+        .unwrap();
+        let original = editor.model().sheets[0].hyperlinks.clone();
+        assert_eq!(original[0].tooltip.as_deref(), Some(""));
+        assert_eq!(original[0].display.as_deref(), Some(""));
+        let options = CalculationOptions::default();
+        let added = internal_link("B2", "Data!D2");
+        editor
+            .set_hyperlink(SheetId(0), added.clone(), options)
+            .unwrap();
+        let expected = vec![original[0].clone(), added];
+        assert_eq!(editor.model().sheets[0].hyperlinks, expected);
+        editor.undo(options).unwrap();
+        assert_eq!(editor.model().sheets[0].hyperlinks, original);
+        editor.redo(options).unwrap();
+        assert_eq!(editor.model().sheets[0].hyperlinks, expected);
+    }
+}
+
+#[test]
+fn bulk_anchored_hyperlink_baselines_refuse_single_link_edits_atomically_in_both_modes() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut source = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let original = internal_link("$A$1", "Data!D1");
+    source
+        .apply_ops(
+            vec![Op::SetHyperlinks {
+                sheet: SheetId(0),
+                hyperlinks: vec![original.clone()],
+            }],
+            options,
+        )
+        .unwrap();
+    assert_eq!(source.model().sheets[0].hyperlinks, vec![original]);
+    for collaborative in [false, true] {
+        let model = source.model().clone();
+        let mut editor = if collaborative {
+            Workbook::from_model_collaborative(model, 1257)
+        } else {
+            Workbook::from_model(model)
+        }
+        .unwrap();
+        for address in ["A1", "B2"] {
+            for remove in [false, true] {
+                let before = editor.model().clone();
+                let state = editor.encode_state_as_update_v1();
+                let vector = editor.encode_state_vector_v1();
+                let result = if remove {
+                    editor.remove_hyperlink(
+                        SheetId(0),
+                        CellRange::parse_a1(address).unwrap(),
+                        options,
+                    )
+                } else {
+                    editor.set_hyperlink(SheetId(0), internal_link(address, "Data!D2"), options)
+                };
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("anchored imported hyperlinks")
+                );
+                assert_eq!(editor.model(), &before);
+                assert_eq!(editor.encode_state_as_update_v1(), state);
+                assert_eq!(editor.encode_state_vector_v1(), vector);
+            }
+        }
+    }
+    source.undo(options).unwrap();
+    assert!(source.model().sheets[0].hyperlinks.is_empty());
+    source.redo(options).unwrap();
+    assert_eq!(source.model().sheets[0].hyperlinks[0].range.to_a1(), "$A$1");
+}
+
+#[test]
+fn empty_optional_hyperlink_fields_are_refused_locally() {
+    for collaborative in [false, true] {
+        for field in 0..4 {
+            let mut model = WorkbookModel::default();
+            model.sheets.push(Sheet::new("Data"));
+            let mut editor = if collaborative {
+                Workbook::from_model_collaborative(model, 1251)
+            } else {
+                Workbook::from_model(model)
+            }
+            .unwrap();
+            let mut link = internal_link("A1", "Data!D1");
+            link.external_target = Some("https://example.com".into());
+            match field {
+                0 => link.external_target = Some(String::new()),
+                1 => link.location = Some(String::new()),
+                2 => link.tooltip = Some(String::new()),
+                _ => link.display = Some(String::new()),
+            }
+            let before = editor.encode_state_as_update_v1();
+            assert!(
+                editor
+                    .set_hyperlink(SheetId(0), link, CalculationOptions::default())
+                    .is_err()
+            );
+            assert!(editor.model().sheets[0].hyperlinks.is_empty());
+            assert_eq!(editor.encode_state_as_update_v1(), before);
+        }
+    }
+}
+
+#[test]
+fn hyperlink_replace_and_undo_preserve_imported_order_and_sheet_bytes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.hyperlinks = vec![
+        internal_link("D4:E5", "Data!D1"),
+        internal_link("A1:B2", "Data!D2"),
+    ];
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    for collaborative in [false, true] {
+        for remove in [false, true] {
+            let mut editor = if collaborative {
+                Workbook::open_collaborative(&bytes, 1252)
+            } else {
+                Workbook::open(&bytes)
+            }
+            .unwrap();
+            let before = editor.model().sheets[0].hyperlinks.clone();
+            let options = CalculationOptions::default();
+            if remove {
+                editor
+                    .remove_hyperlink(SheetId(0), before[0].range, options)
+                    .unwrap();
+            } else {
+                let replacement = internal_link("D4:E5", "Data!D3");
+                editor
+                    .set_hyperlink(SheetId(0), replacement.clone(), options)
+                    .unwrap();
+                assert_eq!(
+                    editor.model().sheets[0].hyperlinks,
+                    vec![replacement, before[1].clone()]
+                );
+            }
+            editor.undo(options).unwrap();
+            assert_eq!(editor.model().sheets[0].hyperlinks, before);
+            let saved = editor.save().unwrap();
+            let original_parts = ooxml_opc::unzip_parts(&bytes)
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            let saved_parts = ooxml_opc::unzip_parts(&saved)
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                saved_parts.get("xl/worksheets/sheet1.xml"),
+                original_parts.get("xl/worksheets/sheet1.xml")
+            );
+        }
+    }
+}
+
+#[test]
+fn duplicate_imported_hyperlinks_refuse_set_and_remove_atomically() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.hyperlinks = vec![
+        internal_link("A1", "Data!D1"),
+        internal_link("A1", "Data!D2"),
+    ];
+    model.sheets.push(sheet);
+    let mut editor = Workbook::from_model_collaborative(model, 1253).unwrap();
+    for remove in [false, true] {
+        let before = editor.model().clone();
+        let state = editor.encode_state_as_update_v1();
+        let options = CalculationOptions::default();
+        let result = if remove {
+            editor.remove_hyperlink(SheetId(0), CellRange::parse_a1("A1").unwrap(), options)
+        } else {
+            editor.set_hyperlink(SheetId(0), internal_link("A1", "Data!D2"), options)
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("overlapping imported hyperlinks")
+        );
+        assert_eq!(editor.model(), &before);
+        assert_eq!(editor.encode_state_as_update_v1(), state);
+    }
+}
+
+#[test]
+fn overlapping_concurrent_hyperlinks_project_identically() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1203).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1204).unwrap();
+    let first = internal_link("A1:B2", "Empty!A1");
+    let second = internal_link("B2:C3", "Data!B1");
+    let baseline = left.encode_state_vector_v1();
+    left.set_hyperlink(SheetId(0), first.clone(), options)
+        .unwrap();
+    right.set_hyperlink(SheetId(0), second, options).unwrap();
+    let left_update = left.encode_diff_v1(&baseline).unwrap();
+    let right_update = right.encode_diff_v1(&baseline).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].hyperlinks, vec![first]);
+}
+
+#[test]
+fn imported_external_hyperlink_can_be_replaced_removed_and_restored() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    let original = Hyperlink {
+        range: CellRange::parse_a1("A1").unwrap(),
+        external_target: Some("https://example.com/original".into()),
+        location: None,
+        tooltip: None,
+        display: Some("Original".into()),
+    };
+    sheet.hyperlinks.push(original.clone());
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let options = CalculationOptions::default();
+    let mut editor = Workbook::open_collaborative(&bytes, 1205).unwrap();
+    let replacement = Hyperlink {
+        external_target: Some("https://example.com/revised".into()),
+        display: Some("Revised".into()),
+        ..original.clone()
+    };
+    assert!(
+        editor
+            .set_hyperlink(SheetId(0), replacement.clone(), options)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        Workbook::open(&editor.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .hyperlinks,
+        vec![replacement.clone()]
+    );
+    assert!(
+        editor
+            .remove_hyperlink(SheetId(0), original.range, options)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        Workbook::open(&editor.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .hyperlinks
+            .is_empty()
+    );
+    assert!(editor.undo(options).unwrap().applied);
+    assert_eq!(editor.model().sheets[0].hyperlinks, vec![replacement]);
+}
+
+#[test]
+fn overlapping_imported_hyperlinks_block_authoring_without_loss() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.hyperlinks.push(internal_link("A1:B2", "Data!D1"));
+    sheet.hyperlinks.push(internal_link("B2:C3", "Data!D2"));
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut editor = Workbook::open_collaborative(&bytes, 1206).unwrap();
+    let before = editor.model().clone();
+
+    let error = editor
+        .set_hyperlink(
+            SheetId(0),
+            internal_link("E1", "Data!D3"),
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("overlapping imported hyperlinks")
+    );
+    assert_eq!(editor.model(), &before);
+    assert_eq!(
+        Workbook::open(&editor.save().unwrap()).unwrap().model(),
+        &before
+    );
+}
+
+#[test]
+fn concurrent_disjoint_merges_on_one_sheet_converge_without_loss() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1103).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1104).unwrap();
+    let first = CellRange::parse_a1("A1:B2").unwrap();
+    let second = CellRange::parse_a1("D4:E5").unwrap();
+    left.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: first,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range: second,
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first, second]);
+}
+
+#[test]
+fn concurrent_overlapping_merges_choose_the_same_range_and_survive_reopen() {
+    let snapshot = |workbook: &Workbook| {
+        let update = YrsUpdate::decode_v1(&workbook.encode_state_as_update_v1()).unwrap();
+        yrs::Snapshot::new(update.state_vector(), update.delete_set().clone())
+    };
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1105).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1106).unwrap();
+    let first = CellRange::parse_a1("A1:B2").unwrap();
+    let second = CellRange::parse_a1("B2:C3").unwrap();
+    left.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: first,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range: second,
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first]);
+    assert_eq!(
+        Workbook::open(&left.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![first]
+    );
+
+    let vector = right.encode_state_vector_v1();
+    right.undo(options).unwrap();
+    assert_eq!(right.encode_state_vector_v1(), vector);
+    let undo_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    assert!(left.apply_update_v1(&undo_update, options).unwrap().applied);
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first]);
+    assert_eq!(snapshot(&left), snapshot(&right));
+    assert!(!left.apply_update_v1(&undo_update, options).unwrap().applied);
+
+    assert!(left.undo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    left.apply_update_v1(
+        &right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap(),
+        options,
+    )
+    .unwrap();
+    assert_eq!(
+        left.model().sheets[0].merges,
+        right.model().sheets[0].merges
+    );
+    assert_eq!(snapshot(&left), snapshot(&right));
+    assert!(left.model().sheets[0].merges.is_empty());
+}
+
+#[test]
+fn concurrent_merge_and_baseline_unmerge_converge() {
+    let baseline = CellRange::parse_a1("A1:B2").unwrap();
+    let replacement = CellRange::parse_a1("A1:C3").unwrap();
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Merges");
+    sheet.merges.push(baseline);
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1111).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1112).unwrap();
+    left.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: replacement,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::UnmergeCells {
+                sheet: SheetId(0),
+                range: baseline,
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![replacement]);
+    assert_eq!(
+        Workbook::open(&left.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![replacement]
+    );
+}
+
+#[test]
+fn collaborative_baseline_unmerge_undo_redo_and_snapshot_preserve_imported_order() {
+    let first = CellRange::parse_a1("D4:E5").unwrap();
+    let second = CellRange::parse_a1("A1:B2").unwrap();
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Merges");
+    sheet.merges = vec![first, second];
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1113).unwrap();
+    left.apply_ops(
+        vec![Op::UnmergeCells {
+            sheet: SheetId(0),
+            range: first,
+        }],
+        options,
+    )
+    .unwrap();
+    assert_eq!(left.model().sheets[0].merges, vec![second]);
+    assert!(left.undo(options).unwrap().applied);
+    assert_eq!(left.model().sheets[0].merges, vec![first, second]);
+    assert!(!left.undo(options).unwrap().applied);
+    assert!(left.redo(options).unwrap().applied);
+    assert_eq!(left.model().sheets[0].merges, vec![second]);
+    let mut recovered = Workbook::open_collaborative(&bytes, 1114).unwrap();
+    recovered
+        .apply_update_v1(&left.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(left.model(), recovered.model());
+    assert_eq!(
+        Workbook::open(&recovered.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![second]
+    );
+}
+
+#[test]
+fn concurrent_collaborative_freeze_panes_converge() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1004).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1005).unwrap();
+    left.apply_ops(
+        vec![Op::SetFreezePane {
+            sheet: SheetId(0),
+            pane: Some(FreezePane::new(1, 0, cell("A2"))),
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane: Some(FreezePane::new(2, 0, cell("A3"))),
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        left.encode_state_as_update_v1(),
+        right.encode_state_as_update_v1()
+    );
+    assert_eq!(
+        Workbook::open(&left.save().unwrap()).unwrap().model(),
+        left.model()
+    );
+}
+
+#[test]
+fn concurrent_freeze_and_cell_edit_do_not_overwrite_each_other() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut pane_author = Workbook::open_collaborative(&bytes, 1006).unwrap();
+    let mut cell_author = Workbook::open_collaborative(&bytes, 1007).unwrap();
+    let pane = Some(FreezePane::new(1, 1, cell("B2")));
+    pane_author
+        .apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane,
+            }],
+            options,
+        )
+        .unwrap();
+    cell_author
+        .edit_cell(SheetId(0), cell("A1"), "41", options)
+        .unwrap();
+    let pane_update = pane_author
+        .encode_diff_v1(&cell_author.encode_state_vector_v1())
+        .unwrap();
+    let cell_update = cell_author
+        .encode_diff_v1(&pane_author.encode_state_vector_v1())
+        .unwrap();
+    pane_author.apply_update_v1(&cell_update, options).unwrap();
+    cell_author.apply_update_v1(&pane_update, options).unwrap();
+    for workbook in [&pane_author, &cell_author] {
+        assert_eq!(workbook.model().sheets[0].freeze_pane, pane);
+        assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "41");
+    }
+    assert_eq!(pane_author.model(), cell_author.model());
+}
+
+#[test]
+fn freeze_pane_updates_recover_from_reversed_delivery_and_full_snapshot() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut source = Workbook::open_collaborative(&bytes, 1008).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 1009).unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&updates);
+    let _subscription = source
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    for rows in [1, 2] {
+        source
+            .apply_ops(
+                vec![Op::SetFreezePane {
+                    sheet: SheetId(0),
+                    pane: Some(FreezePane::new(rows, 0, CellRef::new(rows, 0))),
+                }],
+                options,
+            )
+            .unwrap();
+    }
+    let updates = updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), 2);
+    assert!(
+        !target
+            .apply_update_v1(&updates[1], options)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        target
+            .apply_update_v1(&updates[0], options)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        target.model().sheets[0].freeze_pane,
+        source.model().sheets[0].freeze_pane
+    );
+
+    let mut recovered = Workbook::open_collaborative(&bytes, 1010).unwrap();
+    recovered
+        .apply_update_v1(&source.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(recovered.model(), source.model());
+    assert_eq!(
+        Workbook::open(&recovered.save().unwrap()).unwrap().model(),
+        source.model()
     );
 }
 
@@ -5366,7 +6861,7 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
     let workbook_xml = String::from_utf8(after["xl/workbook.xml"].clone()).unwrap();
     assert!(workbook_xml.contains(r#"<definedName name="NamedCell">Data!$A$1</definedName>"#));
     assert!(!after.contains_key("xl/calcChain.xml"));
-    assert!(workbook_xml.contains(r#"fullCalcOnLoad="1""#));
+    assert!(workbook_xml.contains(r#"<calcPr calcId="191029"/>"#));
     assert_eq!(
         after["xl/sharedStrings.xml"],
         before["xl/sharedStrings.xml"]
@@ -6287,7 +7782,7 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     assert!(workbook_xml.contains(&format!(r#"<sheets xmlns:r="{strict_rel}" {strict_main}"#)));
     assert!(workbook_xml.contains(r#"<sheet name="Data" sheetId="1" rel:id="rId1"/>"#));
     assert!(workbook_xml.contains(r#"r:id="rId2""#));
-    assert!(workbook_xml.contains("<calcPr"));
+    assert!(!workbook_xml.contains("calcPr"));
     assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
     let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
     assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
@@ -8644,9 +10139,6 @@ fn bump_b2(workbook: &mut Workbook) {
         .unwrap();
 }
 
-/// The second P1: an imported chart replayed its stored cache, so an ordinary
-/// cell edit never reached it. It must now follow the cells in both backends,
-/// while the bytes a save writes back stay exactly what was imported.
 #[test]
 #[cfg(feature = "raster")]
 fn an_imported_chart_follows_a_cell_edit_without_a_save() {
@@ -8663,8 +10155,10 @@ fn an_imported_chart_follows_a_cell_edit_without_a_save() {
     assert_ne!(before, plotted(&workbook));
     assert_ne!(before_png.bytes, after_png.bytes);
 
-    // rendering live never rewrites the part: only the formulas moving does.
-    assert_eq!(chart_part(&workbook.save().unwrap()), chart_part(&source));
+    let saved = workbook.save().unwrap();
+    let chart =
+        xlsx_parse::chart_space(&chart_part(&saved), &workbook.model().styles.theme).unwrap();
+    assert_eq!(chart.plot_groups[0].series[0].values, [100.0, 7.0, 9.0]);
 }
 
 /// A reference this crate cannot resolve safely keeps the values the file was
@@ -9020,4 +10514,326 @@ fn oversized_column_width_opens_at_excel_limit_and_survives_save() {
         "{sheet}"
     );
     assert!(sheet.contains("<v>3</v>"), "{sheet}");
+}
+
+#[test]
+fn zero_size_ops_preserve_authored_dimensions_in_saved_xml() {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 20.0);
+    sheet.row_heights.insert(0, 30.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    workbook
+        .apply_ops(
+            vec![
+                Op::SetColWidth {
+                    sheet: SheetId(0),
+                    col: 0,
+                    width: Some(0.0),
+                },
+                Op::SetRowHeight {
+                    sheet: SheetId(0),
+                    row: 0,
+                    height: Some(0.0),
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = package_map(&saved);
+    let xml = std::str::from_utf8(&parts["xl/worksheets/sheet1.xml"]).unwrap();
+    assert!(xml.contains(r#"width="20""#), "{xml}");
+    assert!(xml.contains(r#"ht="30""#), "{xml}");
+    assert_eq!(xml.matches(r#"hidden="1""#).count(), 2, "{xml}");
+    let mut reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(reopened.model().sheets[0].col_widths.get(&0), Some(&0.0));
+    assert_eq!(reopened.model().sheets[0].row_heights.get(&0), Some(&0.0));
+
+    assert_eq!(
+        reopened.model().sheets[0].hidden_col_widths.get(&0),
+        Some(&20.0)
+    );
+    assert_eq!(
+        reopened.model().sheets[0].hidden_row_heights.get(&0),
+        Some(&30.0)
+    );
+    reopened
+        .apply_ops(
+            vec![
+                Op::SetColVisibility {
+                    sheet: SheetId(0),
+                    col: 0,
+                    hidden: false,
+                },
+                Op::SetRowVisibility {
+                    sheet: SheetId(0),
+                    row: 0,
+                    hidden: false,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(reopened.model().sheets[0].col_widths.get(&0), Some(&20.0));
+    assert_eq!(reopened.model().sheets[0].row_heights.get(&0), Some(&30.0));
+    reopened.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].hidden_col_widths.get(&0),
+        Some(&20.0)
+    );
+    assert_eq!(
+        reopened.model().sheets[0].hidden_row_heights.get(&0),
+        Some(&30.0)
+    );
+    reopened.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(reopened.model().sheets[0].col_widths.get(&0), Some(&20.0));
+    assert_eq!(reopened.model().sheets[0].row_heights.get(&0), Some(&30.0));
+}
+
+#[test]
+fn hidden_custom_sizes_survive_bounded_workbook_snapshots() {
+    use betteroffice_xlsx::{SnapshotBudget, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder};
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 20.0);
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_row_heights.insert(0, 30.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let workbook = Workbook::open(&source).unwrap();
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (mut restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(restored.model(), workbook.model());
+    restored
+        .apply_ops(
+            vec![
+                Op::SetColVisibility {
+                    sheet: SheetId(0),
+                    col: 0,
+                    hidden: false,
+                },
+                Op::SetRowVisibility {
+                    sheet: SheetId(0),
+                    row: 0,
+                    hidden: false,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(restored.model().sheets[0].col_widths.get(&0), Some(&20.0));
+    assert_eq!(restored.model().sheets[0].row_heights.get(&0), Some(&30.0));
+}
+
+fn hidden_custom_sizes_source() -> Vec<u8> {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 24.0);
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_row_heights.insert(0, 30.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
+}
+
+fn shared_json(workbook: &Workbook) -> yrs::Any {
+    use yrs::Transact;
+    use yrs::types::ToJson;
+    let doc = yrs::Doc::new();
+    doc.transact_mut()
+        .apply_update(YrsUpdate::decode_v1(&workbook.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    doc.get_or_insert_map("xlsx");
+    doc.get_or_insert_map("xlsx:sheets");
+    doc.get_or_insert_map("xlsx:cell-formats");
+    doc.get_or_insert_array("xlsx:sheet-order");
+    let txn = doc.transact();
+    doc.to_json(&txn)
+}
+
+fn assert_no_shared_hidden_sizes(workbook: &Workbook) {
+    let json = shared_json(workbook).to_string();
+    assert!(!json.contains("hiddenColWidths"), "{json}");
+    assert!(!json.contains("hiddenRowHeights"), "{json}");
+    assert!(workbook.model().sheets[0].hidden_col_widths.is_empty());
+    assert!(workbook.model().sheets[0].hidden_row_heights.is_empty());
+}
+
+#[test]
+fn collaborative_hidden_sizes_keep_main_schema_six_identity() {
+    let source = hidden_custom_sizes_source();
+    let mut stripped = Workbook::open(&source).unwrap().model().clone();
+    for sheet in &mut stripped.sheets {
+        sheet.hidden_col_widths.clear();
+        sheet.hidden_row_heights.clear();
+    }
+    let expected = Workbook::from_model_collaborative(stripped, 886).unwrap();
+    let actual = Workbook::open_collaborative(&source, 886).unwrap();
+    assert_eq!(
+        actual.encode_state_vector_v1(),
+        expected.encode_state_vector_v1()
+    );
+    assert_eq!(
+        actual.encode_state_as_update_v1(),
+        expected.encode_state_as_update_v1()
+    );
+    assert_no_shared_hidden_sizes(&actual);
+}
+
+#[test]
+fn collaborative_hidden_sizes_never_write_shared_keys() {
+    let source = hidden_custom_sizes_source();
+    let mut stripped = Workbook::open(&source).unwrap().model().clone();
+    stripped.sheets[0].hidden_col_widths.clear();
+    stripped.sheets[0].hidden_row_heights.clear();
+    let mut expected = Workbook::from_model_collaborative(stripped, 887).unwrap();
+    let mut workbook = Workbook::open_collaborative(&source, 887).unwrap();
+    assert_no_shared_hidden_sizes(&workbook);
+    for ops in [
+        vec![
+            Op::SetColWidth {
+                sheet: SheetId(0),
+                col: 0,
+                width: Some(25.0),
+            },
+            Op::SetRowHeight {
+                sheet: SheetId(0),
+                row: 0,
+                height: Some(35.0),
+            },
+        ],
+        vec![
+            Op::SetColVisibility {
+                sheet: SheetId(0),
+                col: 0,
+                hidden: true,
+            },
+            Op::SetRowVisibility {
+                sheet: SheetId(0),
+                row: 0,
+                hidden: true,
+            },
+        ],
+        vec![
+            Op::SetColVisibility {
+                sheet: SheetId(0),
+                col: 0,
+                hidden: false,
+            },
+            Op::SetRowVisibility {
+                sheet: SheetId(0),
+                row: 0,
+                hidden: false,
+            },
+        ],
+    ] {
+        expected
+            .apply_ops(ops.clone(), CalculationOptions::default())
+            .unwrap();
+        workbook
+            .apply_ops(ops, CalculationOptions::default())
+            .unwrap();
+        assert_no_shared_hidden_sizes(&workbook);
+        assert_eq!(
+            workbook.encode_state_vector_v1(),
+            expected.encode_state_vector_v1()
+        );
+        assert_eq!(
+            workbook.encode_state_as_update_v1(),
+            expected.encode_state_as_update_v1()
+        );
+    }
+    expected.undo(CalculationOptions::default()).unwrap();
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_no_shared_hidden_sizes(&workbook);
+    assert_eq!(
+        workbook.encode_state_vector_v1(),
+        expected.encode_state_vector_v1()
+    );
+    // yrs redoes restored items in HashSet order, so post-undo clocks are not byte-stable
+    assert_eq!(shared_json(&workbook), shared_json(&expected));
+}
+
+#[test]
+fn collaborative_hidden_sizes_concurrent_first_hides_use_main_maps() {
+    let mut sheet = Sheet::new("Sized");
+    for index in 0..2 {
+        sheet.col_widths.insert(index, 24.0 + f64::from(index));
+        sheet.row_heights.insert(index, 30.0 + f64::from(index));
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut left = Workbook::open_collaborative(&source, 888).unwrap();
+    let mut right = Workbook::open_collaborative(&source, 889).unwrap();
+    for (workbook, index) in [(&mut left, 0), (&mut right, 1)] {
+        workbook
+            .apply_ops(
+                vec![
+                    Op::SetColVisibility {
+                        sheet: SheetId(0),
+                        col: index,
+                        hidden: true,
+                    },
+                    Op::SetRowVisibility {
+                        sheet: SheetId(0),
+                        row: index,
+                        hidden: true,
+                    },
+                ],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&to_left, CalculationOptions::default())
+        .unwrap();
+    right
+        .apply_update_v1(&to_right, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(left.model(), right.model());
+    for workbook in [&left, &right] {
+        assert_no_shared_hidden_sizes(workbook);
+        for index in 0..2 {
+            assert_eq!(
+                workbook.model().sheets[0].col_widths.get(&index),
+                Some(&0.0)
+            );
+            assert_eq!(
+                workbook.model().sheets[0].row_heights.get(&index),
+                Some(&0.0)
+            );
+        }
+    }
 }

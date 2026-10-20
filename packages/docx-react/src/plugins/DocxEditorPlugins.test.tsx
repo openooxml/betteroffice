@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../components/DocxEditor/peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -14,11 +15,13 @@ import {
   createYrsSession,
   takePreloadedResidentEngineWorker,
   type DocxEditRequest,
+  type YrsSession,
 } from '@betteroffice/docx/yrs';
 import {
   residentWorkerFactory,
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import * as yrs from '@betteroffice/docx/yrs';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import * as publicApi from '../index';
 import {
@@ -30,7 +33,8 @@ import {
   useDocxCommand,
   useDocxCommands,
   type DocxCommandResult,
-  type DocxEditorProps,
+  type DocxEditorBaseProps,
+  type DocxEditorPluginProps,
   type DocxEditorRef,
   type DocxPlugin,
   type DocxPluginCommandResult,
@@ -44,6 +48,8 @@ import {
   type DocxGeometryTarget,
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
+import * as pluginHosts from './createDocxPluginHost';
+import { scopePluginGeometry } from './geometry';
 import * as canvasReplay from '../components/DocxEditor/canvasReplay';
 import {
   resetEngineChoiceForTests,
@@ -52,7 +58,7 @@ import {
 import { setupWorkerEngine } from '../components/DocxEditor/__fixtures__/workerEngine';
 import { testScope } from '../components/DocxEditor/__fixtures__/testScope';
 
-const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, false, documentBytes(), false);
+const mount = (props: Partial<DocxEditorBaseProps> = {}) => mountEditor(props, false, documentBytes(), false);
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
@@ -186,23 +192,29 @@ function recorder(id = 'acme.review', extra: Partial<DocxPluginDefinition<State>
 }
 
 async function mountEditor(
-  props: Partial<DocxEditorProps>,
+  props: Partial<DocxEditorBaseProps>,
   strict: boolean,
   buffer: ArrayBuffer,
   experimentalWorkerOpen: false | undefined
 ) {
   const ref = createRef<DocxEditorRef>();
+  const errors: Error[] = [];
   const opens = workers.reduce(
     (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
   );
-  const element = (next: Partial<DocxEditorProps>) => {
+  let currentProps = props;
+  const onError = (error: Error) => { errors.push(error); currentProps.onError?.(error); };
+  const element = (next: Partial<DocxEditorBaseProps>) => {
+    currentProps = next;
     const editor = experimentalWorkerOpen === false
-      ? <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} {...next} />
-      : <DocxEditor ref={ref} documentBuffer={buffer} {...next} />;
+      ? <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} {...next} onError={onError} />
+      : <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={buffer} {...next} onError={onError} />;
     return strict ? <StrictMode>{editor}</StrictMode> : editor;
   };
   const view = render(element(props));
-  await until(() => ref.current?.commands.getState('save').enabled === true);
+  await until(() => ref.current?.commands.getState('save').enabled === true || errors.length > 0);
+  expect(errors).toEqual([]);
+  expect(ref.current?.commands.getState('save').enabled).toBe(true);
   if (experimentalWorkerOpen === undefined) {
     expect(workers.length).toBeGreaterThan(0);
     expect(workers.some(
@@ -215,7 +227,7 @@ async function mountEditor(
       await ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
     });
   }
-  return { ref, view, rerender: (next: Partial<DocxEditorProps>) => view.rerender(element(next)) };
+  return { ref, view, rerender: (next: Partial<DocxEditorBaseProps>) => view.rerender(element(next)) };
 }
 
 async function firstParagraph(ref: React.RefObject<DocxEditorRef | null>) {
@@ -249,24 +261,59 @@ async function selectInThreadFirstWord(ref: React.RefObject<DocxEditorRef | null
 
 const WRITE = { 'acme.review': { document: 'write', editBatches: true } } as const;
 
+function installWorkerEngine() {
+  compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  setMissingWorkerCapabilitiesForTests([]);
+  globalThis.Worker = class {
+    constructor() {
+      const worker = startWorker();
+      workers.push(worker);
+      return worker;
+    }
+  } as unknown as typeof Worker;
+}
+
+type Mount = (props: DocxEditorPluginProps) => Promise<{ ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render> }>;
+
+async function loadHookAppliesOnce(mount: Mount) {
+  const loads: string[] = [];
+  const plugin = defineDocxPlugin<State>({
+    id: 'acme.review',
+    createState: () => ({ count: 0 }),
+    async onEvent(context, event) {
+      if (event.type !== 'load') return;
+      loads.push(event.version);
+      const read = await context.read.readParagraphs({ view: 'accepted' });
+      const paragraph = read.ok ? read.paragraphs.find((c) => c.text.length >= 3) : undefined;
+      if (!read.ok || !paragraph || !context.edits) return;
+      const applied = await context.edits.applyEdits(
+        appendRequest(read.version, paragraph.paraId)
+      );
+      if (applied.ok) context.setState({ count: loads.length }, applied.version);
+    },
+    panel: {
+      title: 'Loaded',
+      placement: 'left',
+      render: ({ context }) => <output data-testid="loaded">{context.state.count}</output>,
+    },
+  });
+  const { ref, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
+  const body = within(view.container);
+  await until(() => body.queryByTestId('loaded')?.textContent === '1');
+  await settle(150);
+  expect(loads).toHaveLength(1);
+  expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!]!$/);
+}
+
 describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experimentalWorkerOpen) => {
   beforeEach(() => {
-    if (experimentalWorkerOpen === false) return;
-    compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
-      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
-    ));
-    setMissingWorkerCapabilitiesForTests([]);
-    globalThis.Worker = class {
-      constructor() {
-        const worker = startWorker();
-        workers.push(worker);
-        return worker;
-      }
-    } as unknown as typeof Worker;
+    if (experimentalWorkerOpen !== false) installWorkerEngine();
   });
 
   const mount = (
-    props: Partial<DocxEditorProps> = {},
+    props: Partial<DocxEditorBaseProps> = {},
     strict = false,
     buffer: ArrayBuffer = documentBytes()
   ) => mountEditor(props, strict, buffer, experimentalWorkerOpen);
@@ -286,14 +333,28 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   test('initialize, load, one change per batch, and cleanup on removal and readdition', async () => {
     const { plugin, log, contexts } = recorder();
     let live: CollaborationReplica | null = null;
-    const { ref, rerender } = await mount({
+    let host!: pluginHosts.DocxPluginHost;
+    const createHost = pluginHosts.createDocxPluginHost;
+    const capture = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((access) => {
+      host = createHost(access);
+      return host;
+    });
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try { mounted = await mount({
       plugins: [plugin],
       ...(experimentalWorkerOpen === undefined ? {
         collaboration: { onReplica: (replica: CollaborationReplica | null) => { live = replica; } },
       } : {}),
-    });
+    }); } finally { capture.mockRestore(); }
+    const { ref, rerender } = mounted;
+    const drainNotifications = async () => {
+      await ref.current!.flushPendingInput();
+      await ref.current!.readParagraphs({ view: 'accepted', paraIds: [] });
+      await host.notificationsIdle();
+    };
     await until(() => log.includes('load:loaded'));
     expect(log.slice(0, 2)).toEqual(['initialize', 'load:loaded']);
+    const changeCount = () => log.filter((entry) => entry.startsWith('document-change')).length;
     const loadVersion = contexts[1].snapshot.version;
 
     const { version, paragraph } = await firstParagraph(ref);
@@ -303,7 +364,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       applied = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
     });
     expect(applied).toMatchObject({ ok: true, applied: true });
-    await settle(150);
+    await until(() => changeCount() === 1);
     const changes = log.filter((entry) => entry.startsWith('document-change'));
     expect(changes).toEqual([`document-change:${applied.ok ? applied.version : ''}`]);
 
@@ -311,7 +372,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       const stale = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
       expect(stale).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
     });
-    await settle(150);
+    await act(drainNotifications);
     expect(log.filter((entry) => entry.startsWith('document-change'))).toHaveLength(1);
 
     const session = experimentalWorkerOpen === false
@@ -326,7 +387,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
           });
         }
       });
-      await settle(150);
+      await until(() => changeCount() === (step === 'undo' ? 2 : 3));
       expect(log.filter((entry) => entry.startsWith('document-change')).at(-1)).toBe(
         `document-change:${session ? session.version() : (await firstParagraph(ref)).version}`
       );
@@ -345,7 +406,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       });
       expect(noop).toMatchObject({ ok: true, applied: false });
     });
-    await settle(150);
+    await act(drainNotifications);
     expect(log.filter((entry) => entry.startsWith('document-change'))).toHaveLength(3);
     const replica = await createYrsSession({ clientId: 5151 });
     try {
@@ -363,7 +424,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       await act(async () => {
         transport.applyUpdate(replica.encodeStateAsUpdate(transport.encodeStateVector()));
       });
-      await settle(150);
+      await until(() => changeCount() === 4);
     } finally {
       replica.destroy();
     }
@@ -613,35 +674,8 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     });
   });
 
-  test('a load hook that applies a batch every run loads once and keeps its state', async () => {
-    const loads: string[] = [];
-    const plugin = defineDocxPlugin<State>({
-      id: 'acme.review',
-      createState: () => ({ count: 0 }),
-      async onEvent(context, event) {
-        if (event.type !== 'load') return;
-        loads.push(event.version);
-        const read = await context.read.readParagraphs({ view: 'accepted' });
-        const paragraph = read.ok ? read.paragraphs.find((c) => c.text.length >= 3) : undefined;
-        if (!read.ok || !paragraph || !context.edits) return;
-        const applied = await context.edits.applyEdits(
-          appendRequest(read.version, paragraph.paraId)
-        );
-        if (applied.ok) context.setState({ count: loads.length }, applied.version);
-      },
-      panel: {
-        title: 'Loaded',
-        placement: 'left',
-        render: ({ context }) => <output data-testid="loaded">{context.state.count}</output>,
-      },
-    });
-    const { ref, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
-    const body = within(view.container);
-    await until(() => body.queryByTestId('loaded')?.textContent === '1');
-    await settle(150);
-    expect(loads).toHaveLength(1);
-    expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!]!$/);
-  });
+  test('a load hook that applies a batch every run loads once and keeps its state', () =>
+    loadHookAppliesOnce(mount));
 
   test('contributed commands run with their plugin, from the toolbar, ref and shortcuts', async () => {
     const calls: string[] = [];
@@ -1269,6 +1303,280 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     expect(image.anchor.x).toBeCloseTo(image.rects[0]!.x + image.rects[0]!.width);
   });
 
+  test('a viewer opened read-only lays out inline and block reservations without loading its replica', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const buffer = await inlineImageDocument(
+      '<w:p w14:paraId="00000001"><w:r><w:t>First paragraph text</w:t></w:r></w:p>' +
+      '<w:p w14:paraId="00000002"><w:r><w:t>Second</w:t></w:r></w:p>'
+    );
+    const loadSpies: Array<ReturnType<typeof spyOn<YrsSession, 'loadState'>>> = [];
+    const createSession = yrs.createYrsSession;
+    const opening = spyOn(yrs, 'createYrsSession').mockImplementation(async (options) => {
+      const session = await createSession(options);
+      loadSpies.push(spyOn(session, 'loadState'));
+      return session;
+    });
+    try {
+      const { ref, rerender } = await mount({ readOnly: true }, false, buffer);
+      const { version, paragraph } = await firstParagraph(ref);
+      const replicaLoads = () => workers.reduce(
+        (count, worker) => count + worker.requests.filter((type) => type === 'encodeState').length, 0
+      );
+      const loadsBefore = replicaLoads();
+      expect(loadSpies.length).toBeGreaterThan(0);
+      for (const loaded of loadSpies) loaded.mockClear();
+      const plugin = defineDocxPlugin({
+        id: 'host.viewer-reserve',
+        createState: () => null,
+        reservations: () => ({
+          version,
+          items: [
+            {
+              id: 'chip', kind: 'inline', width: 40, height: 20,
+              anchor: { kind: 'range', version, range: {
+                story: paragraph.story, view: 'accepted',
+                start: { paraId: paragraph.paraId, offset: 6 },
+                end: { paraId: paragraph.paraId, offset: 6 },
+              } },
+            },
+            {
+              id: 'gap', kind: 'block', side: 'after', height: 60,
+              anchor: { kind: 'range', version, range: {
+                story: paragraph.story, view: 'accepted',
+                start: { paraId: paragraph.paraId, offset: 0 },
+                end: { paraId: paragraph.paraId, offset: 0 },
+              } },
+            },
+          ],
+        }),
+        overlay: (props) => { geometry = props.geometry; return null; },
+      });
+      rerender({ readOnly: true, plugins: [plugin] });
+      await until(() => (geometry as DocxPluginGeometry | null)?.layout.reservationsVersion === version);
+      const current = geometry! as DocxPluginGeometry;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]')) {
+        const width = Number.parseFloat(canvas.style.width);
+        const height = Number.parseFloat(canvas.style.height);
+        expect(width).toBeGreaterThan(0);
+        expect(height).toBeGreaterThan(0);
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, width, height);
+      }
+      const chip = current.getAnchorGeometry({ kind: 'reservation', id: 'chip' });
+      const gap = current.getAnchorGeometry({ kind: 'reservation', id: 'gap' });
+      expect(chip.ok).toBe(true);
+      expect(gap.ok).toBe(true);
+      if (!chip.ok || !gap.ok) throw new Error('reservation geometry failed');
+      expect(chip.rects).toEqual([chip.anchor]);
+      expect(chip.anchor.height / chip.anchor.width).toBeCloseTo(0.5);
+      expect(gap.anchor.height).toBeCloseTo(chip.anchor.height * 3);
+      expect(gap.anchor.y).toBeGreaterThan(chip.anchor.y);
+      expect(replicaLoads()).toBe(loadsBefore);
+      for (const loaded of loadSpies) expect(loaded).not.toHaveBeenCalled();
+    } finally {
+      opening.mockRestore();
+      for (const loaded of loadSpies) loaded.mockRestore();
+    }
+  });
+
+  test('reservations take layout space geometry reports, read-only, and never reach saved bytes', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const buffer = await inlineImageDocument(
+      '<w:p w14:paraId="00000001"><w:r><w:t>First paragraph text</w:t></w:r></w:p>' +
+      '<w:p w14:paraId="00000002"><w:r><w:t>Second</w:t></w:r></w:p>'
+    );
+    const { ref, rerender } = await mount({}, false, buffer);
+    const { version, paragraph } = await firstParagraph(ref);
+    const identity = (await ref.current!.getParagraphIdentities()).paragraphs.find(
+      (candidate) => candidate.session?.paraId === paragraph.paraId
+    )!.session!;
+    const saved = new Uint8Array((await ref.current!.save())!);
+    let evaluations = 0;
+    const plugin = defineDocxPlugin({
+      id: 'acme.reserve',
+      createState: () => null,
+      reservations: (context) => {
+        evaluations += 1;
+        return {
+          version: context.snapshot.version,
+          items: [
+            {
+              id: 'chip', kind: 'inline', width: 40, height: 20,
+              anchor: { kind: 'search', paragraph: identity, text: 'paragraph' },
+            },
+            { id: 'gap', kind: 'block', side: 'after', height: 60, anchor: { kind: 'paragraph', paragraph: identity } },
+          ],
+        };
+      },
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const anchored = async () => {
+      await until(() => {
+        const current = geometry as DocxPluginGeometry | null;
+        return current?.layout.version === version && current.layout.reservationsVersion === version;
+      });
+      const current = geometry! as DocxPluginGeometry;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]')) {
+        const width = Number.parseFloat(canvas.style.width);
+        const height = Number.parseFloat(canvas.style.height);
+        expect(width).toBeGreaterThan(0);
+        expect(height).toBeGreaterThan(0);
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, width, height);
+      }
+      const chip = current.getAnchorGeometry({ kind: 'reservation', id: 'chip' });
+      const gap = current.getAnchorGeometry({ kind: 'reservation', id: 'gap' });
+      if (!chip.ok || !gap.ok) throw new Error('reservation geometry failed');
+      expect(chip.rects).toEqual([chip.anchor]);
+      expect(chip.anchor.height / chip.anchor.width).toBeCloseTo(0.5);
+      expect(gap.anchor.height).toBeCloseTo(chip.anchor.height * 3);
+      expect(gap.anchor.y).toBeGreaterThan(chip.anchor.y);
+      expect(current.getAnchorGeometry({ kind: 'reservation', id: 'missing' })).toMatchObject({
+        ok: false, failure: { code: 'missing-target' },
+      });
+    };
+    rerender({ plugins: [plugin] });
+    await anchored();
+    expect(new Uint8Array((await ref.current!.save())!)).toEqual(saved);
+    const evaluated = evaluations;
+    await act(async () => ref.current!.setZoom(1.25));
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.zoom === 1.25);
+    expect(evaluations).toBe(evaluated);
+    geometry = null;
+    rerender({ plugins: [plugin], readOnly: true });
+    await anchored();
+    rerender({ plugins: [plugin] });
+    const removed = await ref.current!.applyEdits({
+      expectVersion: version,
+      steps: [{ op: 'deleteParagraphs', story: 'body', firstParaId: paragraph.paraId, lastParaId: paragraph.paraId }],
+    });
+    if (!removed.ok) throw new Error(removed.failure.message);
+    await until(() => {
+      const current = geometry as DocxPluginGeometry | null;
+      return current?.layout.version === removed.version && current.layout.reservationsVersion === removed.version;
+    });
+    expect(geometry!.getAnchorGeometry({ kind: 'reservation', id: 'chip' })).toMatchObject({
+      ok: false, failure: { code: 'missing-target' },
+    });
+  });
+
+  test.each(['removed', 'fresh'] as const)('reservation owners update independently when another owner is stale (%s)', async (other) => {
+    let access!: pluginHosts.DocxPluginHostAccess;
+    const createHost = pluginHosts.createDocxPluginHost;
+    const capture = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((next) => {
+      access = next;
+      return createHost(next);
+    });
+    const buffer = await inlineImageDocument('<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p>');
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try { mounted = await mount({}, false, buffer); } finally { capture.mockRestore(); }
+    const { ref, rerender } = mounted;
+    const { version, paragraph } = await firstParagraph(ref);
+    const range = (atVersion: string, start: number, end = start) => ({
+      kind: 'range' as const, version: atVersion, range: {
+        story: 'body', view: 'accepted' as const,
+        start: { paraId: paragraph.paraId, offset: start }, end: { paraId: paragraph.paraId, offset: end },
+      },
+    });
+    const a = defineDocxPlugin({
+      id: 'test.reserve-a', createState: () => null,
+      reservations: () => ({ version, items: [{ id: 'a', kind: 'inline', width: 35, height: 20, anchor: range(version, 0) }] }),
+    });
+    const b = defineDocxPlugin({
+      id: 'test.reserve-b', createState: () => null,
+      reservations: (context) => ({ version: context.snapshot.version, items: [{
+        id: 'b', kind: 'inline', width: context.snapshot.version === version ? 20 : 75,
+        height: 20, hideAnchor: true, anchor: range(context.snapshot.version, 6, 10),
+      }] }),
+    });
+    const geometry = () => {
+      const current = access.geometry();
+      if (!current) return null;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]')) {
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, Number.parseFloat(canvas.style.width), Number.parseFloat(canvas.style.height));
+      }
+      return current;
+    };
+    const answer = (owner: string, id: string) => {
+      const current = geometry();
+      return current && scopePluginGeometry(current, owner).getAnchorGeometry({ kind: 'reservation', id });
+    };
+    rerender({ plugins: [a, b] });
+    await until(() => answer(a.id, 'a')?.ok === true && answer(b.id, 'b')?.ok === true);
+    expect(geometry()!.dom.getRectsForRange(7, 11).filter((rect) => rect.width > 0)).toEqual([]);
+    let changed!: Awaited<ReturnType<DocxEditorRef['applyEdits']>>;
+    await act(async () => { changed = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId)); });
+    if (!changed.ok) throw new Error(changed.failure.message);
+    rerender({ plugins: other === 'removed' ? [a] : [a, b] });
+    await until(() => geometry()?.layout.version === changed.version && answer(a.id, 'a')?.ok === true);
+    await act(async () => { await ref.current!.flushPendingInput(); await ref.current!.readParagraphs({ view: 'accepted' }); });
+    const retained = answer(a.id, 'a');
+    expect(retained?.ok).toBe(true);
+    if (!retained?.ok) throw new Error('missing retained owner');
+    expect(retained.anchor.width).toBeCloseTo(35);
+    const updated = answer(b.id, 'b');
+    if (other === 'removed') {
+      expect(updated).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+      expect(geometry()!.dom.getRectsForRange(7, 11).some((rect) => rect.width > 0)).toBe(true);
+    } else {
+      expect(updated?.ok).toBe(true);
+      if (!updated?.ok) throw new Error('missing fresh owner');
+      expect(updated.anchor.width).toBeCloseTo(75);
+    }
+  });
+
+  test('reservation definition replacement at the same id and revision applies its new width', async () => {
+    const buffer = await inlineImageDocument('<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta</w:t></w:r></w:p>');
+    const { ref, rerender } = await mount({}, false, buffer);
+    const { version, paragraph } = await firstParagraph(ref);
+    let geometry: DocxPluginGeometry | null = null;
+    const definition = (width: number) => defineDocxPlugin({
+      id: 'test.replace-reserve', revision: 1, createState: () => null,
+      reservations: () => ({ version, items: [{ id: 'box', kind: 'inline', width, height: 20,
+        anchor: { kind: 'range', version, range: { story: 'body', view: 'accepted',
+          start: { paraId: paragraph.paraId, offset: 0 }, end: { paraId: paragraph.paraId, offset: 0 },
+        } },
+      }] }),
+      overlay: (props) => { geometry = props.geometry; return null; },
+    });
+    const width = () => {
+      const current = geometry as DocxPluginGeometry | null;
+      if (!current) return null;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]')) {
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, Number.parseFloat(canvas.style.width), Number.parseFloat(canvas.style.height));
+      }
+      const result = current.getAnchorGeometry({ kind: 'reservation', id: 'box' });
+      return result.ok ? result.anchor.width : null;
+    };
+    rerender({ plugins: [definition(25)] });
+    await until(() => width() !== null);
+    expect(width()).toBeCloseTo(25);
+    rerender({ plugins: [definition(70)] });
+    await until(() => width() === 70);
+    expect((await firstParagraph(ref)).version).toBe(version);
+  });
+
+  test('an invalid reservation set fails its plugin with invalid-payload', async () => {
+    const errors: DocxPluginError[] = [];
+    const plugin = defineDocxPlugin({
+      id: 'acme.bad-reserve',
+      createState: () => null,
+      reservations: (context) => ({
+        version: context.snapshot.version,
+        items: [{ id: 'gap', kind: 'hide', anchor: { kind: 'search', paragraph: null as never, text: '' } }],
+      }),
+    });
+    await mount({ plugins: [plugin], onPluginError: (error) => errors.push(error) });
+    await until(() => errors.length > 0);
+    expect(errors[0]).toMatchObject({ pluginId: 'acme.bad-reserve', phase: 'reservations' });
+    expect(String((errors[0]!.error as Error).message)).toBe('invalid-payload');
+  });
+
   test('an anchor stays inside its range across a line break and after an image', async () => {
     let geometry: DocxPluginGeometry | null = null;
     const plugin = defineDocxPlugin({
@@ -1507,7 +1815,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   test('installing plugins materializes no compatibility document', async () => {
     const yrs = await import('@betteroffice/docx/yrs');
     const materialized = spyOn(yrs, 'yrsToDocument');
-    const edit = async (props: Partial<DocxEditorProps>) => {
+    const edit = async (props: Partial<DocxEditorBaseProps>) => {
       const { ref } = await mount(props);
       await settle(300);
       materialized.mockClear();
@@ -1585,6 +1893,146 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   });
 });
 
+describe('DocxEditor plugins (peer-less engine)', () => {
+  let canvasContext: ReturnType<typeof spyOn<HTMLCanvasElement, 'getContext'>>;
+  beforeEach(() => {
+    installWorkerEngine();
+    canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ save() {}, restore() {}, setTransform() {},
+      clearRect() {}, drawImage() {}, beginPath() {}, rect() {}, clip() {} } as unknown as CanvasRenderingContext2D);
+  });
+  afterEach(() => canvasContext.mockRestore());
+
+  const mount: Mount = async (props) => {
+    const ref = createRef<DocxEditorRef>();
+    const view = render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    await act(async () => {
+      await ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    });
+    return { ref, view };
+  };
+
+  test('a load hook that applies a batch every run loads once and keeps its state', () =>
+    loadHookAppliesOnce(mount));
+
+  test('a change hook keeps its own batch and sets state at the applied version', async () => {
+    const outcomes: unknown[] = [];
+    const plugin = defineDocxPlugin<State>({
+      id: 'acme.review',
+      createState: () => ({ count: 0 }),
+      async onEvent(context, event) {
+        if (event.type !== 'document-change' || outcomes.length) return;
+        const read = await context.read.readParagraphs({ view: 'accepted' });
+        const paragraph = read.ok ? read.paragraphs.find((c) => c.text.length >= 3) : undefined;
+        if (!read.ok || !paragraph || !context.edits) return;
+        const applied = await context.edits.applyEdits(appendRequest(read.version, paragraph.paraId, '?'));
+        outcomes.push(applied.ok ? true : applied.failure.code, applied.ok && context.setState({ count: 1 }, applied.version));
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin], pluginGrants: WRITE });
+    const { version, paragraph } = await firstParagraph(ref);
+    await act(async () => {
+      await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
+    });
+    await until(() => outcomes.length === 2);
+    await settle(150);
+    expect(outcomes).toEqual([true, true]);
+    expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!?]!\?$/);
+  });
+
+  test('a point read superseded by an edit returns null and the plugin keeps running', async () => {
+    const errors: DocxPluginError[] = [];
+    const changes: string[] = [];
+    let context: DocxPluginContext<State> | undefined;
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin<State>({
+      id: 'point-reader',
+      createState: () => ({ count: 0 }),
+      initialize: value => { context = value; },
+      overlay: props => { geometry = props.geometry; return null; },
+      onEvent(_context, event) {
+        if (event.type === 'document-change') changes.push(event.version);
+      },
+    });
+    const { ref, view } = await mount({ plugins: [plugin], pluginGrants: { 'point-reader': { document: 'read' } }, onPluginError: error => errors.push(error) });
+    const { version, paragraph } = await firstParagraph(ref);
+    await until(() => geometry?.layout.version === version);
+    const host = view.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+    host.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    const worker = workers.find(candidate => candidate.requests.includes('documentRead'))!;
+    const reads = () => worker.requests.filter(type => type === 'documentRead').length;
+    const before = reads();
+    let result: unknown = 'unanswered';
+    let edited = false;
+    worker.hold();
+    const action = context!.run(async next => {
+      result = await next.geometry!.readPositionAtPoint(100, 100);
+    });
+    await until(() => reads() > before);
+    void ref.current!.applyEdits(appendRequest(version, paragraph.paraId)).then(() => { edited = true; });
+    await until(() => {
+      worker.release(reply => !('read' in reply));
+      return edited;
+    });
+    worker.release();
+    await act(() => action);
+    expect(result).toBeNull();
+    expect(errors).toEqual([]);
+    const seen = changes.length;
+    const latest = await firstParagraph(ref);
+    await act(async () => { await ref.current!.applyEdits(appendRequest(latest.version, latest.paragraph.paraId)); });
+    await until(() => changes.length > seen);
+    expect(errors).toEqual([]);
+  });
+
+  test('a read superseded by an edit refuses and the plugin keeps running', async () => {
+    const errors: DocxPluginError[] = [];
+    const changes: string[] = [];
+    let context: DocxPluginContext<State> | undefined;
+    const plugin = defineDocxPlugin<State>({
+      id: 'acme.review',
+      createState: () => ({ count: 0 }),
+      initialize: (value) => {
+        context = value;
+      },
+      onEvent(_context, event) {
+        if (event.type === 'document-change') changes.push(event.version);
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin], pluginGrants: WRITE, onPluginError: (error) => errors.push(error) });
+    await until(() => context !== undefined);
+    const { version, paragraph } = await firstParagraph(ref);
+    const worker = workers.find((candidate) => candidate.requests.includes('documentRead'))!;
+    const reads = () => worker.requests.filter((type) => type === 'documentRead').length;
+    const before = reads();
+    let result: unknown;
+    let edited = false;
+    worker.hold();
+    const action = context!.run(async (next) => {
+      result = await next.read.readParagraphs({ view: 'accepted' });
+    });
+    await until(() => reads() > before);
+    void ref.current!.applyEdits(appendRequest(version, paragraph.paraId)).then(() => {
+      edited = true;
+    });
+    await until(() => {
+      worker.release((reply) => !('read' in reply));
+      return edited;
+    });
+    worker.release();
+    await act(() => action);
+    expect(result).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+    expect(errors).toEqual([]);
+    const seen = changes.length;
+    const latest = await firstParagraph(ref);
+    await act(async () => {
+      await ref.current!.applyEdits(appendRequest(latest.version, latest.paragraph.paraId));
+    });
+    await until(() => changes.length > seen);
+    expect(errors).toEqual([]);
+  });
+});
+
 describe('DocxEditor plugins (in-thread engine)', () => {
   test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
     const results: DocxAnchorGeometryResult[] = [];
@@ -1656,7 +2104,7 @@ describe('DocxEditor plugins (worker engine)', () => {
     };
   });
 
-  async function mountWorker(props: Partial<DocxEditorProps> = {}) {
+  async function mountWorker(props: Partial<DocxEditorBaseProps> = {}) {
     const opens = workers.reduce(
       (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
     );

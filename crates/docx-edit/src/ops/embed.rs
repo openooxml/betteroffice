@@ -5,7 +5,10 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, position_chunks};
+use crate::ops::{
+    adjacent_paragraph_change_revision_id, adjacent_revision_id, past_leading_blocks,
+    position_chunks,
+};
 use crate::{
     EditCtx, EditingDoc, INS, KIND_KEY, PILCROW_KIND, Position, check_position, insertion_attrs,
     is_pilcrow, out_len, revision_value, story_ref,
@@ -60,7 +63,9 @@ fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)
     let stories = txn
         .get_map(crate::STORIES)
         .ok_or_else(|| OpError::UnknownEmbed(embed_id.to_owned()))?;
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
+    let mut story_ids: Vec<String> = crate::live_stories(&stories, txn)
+        .map(|(id, _)| id.to_owned())
+        .collect();
     story_ids.sort();
     for story_id in story_ids {
         let Some(Out::YText(story)) = stories.get(txn, &story_id) else {
@@ -215,6 +220,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        if !crate::segments::is_block_embed(kind) {
+            at.index = past_leading_blocks(&story, &txn, at.index);
+        }
         crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {

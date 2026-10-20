@@ -209,6 +209,27 @@ test('a held failure after a read-only held entry releases each count once', asy
   } finally { submit.mockRestore(); admission.dispose(); }
 });
 
+test('read-only admission forwards the host proposal grant and refuses proposals and edits without it', () => {
+  const { admission, submitted } = lane();
+  admission.setReadOnly(true);
+  const propose: PeerlessInputIntent = { kind: 'propose', payload: { expectVersion: 'v1', proposals: [], hostProposal: true } };
+  const decide: PeerlessInputIntent = { kind: 'setProposalStates', payload: { expectVersion: 'v1', expectPreviewVersion: 0, changes: [] } };
+  const withdraw: PeerlessInputIntent = { kind: 'withdrawProposals', payload: { expectVersion: 'v1', ids: [] } };
+  for (const intent of [propose, decide, withdraw]) expect(admitIntent(admission, intent)).toEqual({ status: 'ignored', reason: 'read-only' });
+  expect(admitIntent(admission, { kind: 'insertText', payload: { text: 'x' } }, { hostProposal: true })).toEqual({ status: 'ignored', reason: 'read-only' });
+  expect(submitted.map(entry => entry.kind)).toEqual(['setReadOnly']);
+  for (const intent of [propose, decide, withdraw]) expect(admitIntent(admission, intent, { fence: true, hostProposal: true }).status).toBe('submitted');
+  expect(submitted.slice(1).map(({ kind, payload }) => ({ kind, payload }))).toEqual([
+    { kind: 'propose', payload: { expectVersion: 'v1', proposals: [], hostProposal: true } },
+    { kind: 'setProposalStates', payload: { expectVersion: 'v1', expectPreviewVersion: 0, changes: [], hostProposal: true } },
+    { kind: 'withdrawProposals', payload: { expectVersion: 'v1', ids: [], hostProposal: true } },
+  ]);
+  admission.setReadOnly(false);
+  expect(admitIntent(admission, propose).status).toBe('submitted');
+  expect(submitted.at(-1)!.payload).toEqual({ expectVersion: 'v1', proposals: [] });
+  admission.dispose();
+});
+
 function lane() {
   let selectionThroughSeq = 0;
   let selection: DocxCommandSelection = {
@@ -608,6 +629,25 @@ test('history_intents_share_the_composition_and_typing_admission_tail', () => {
   admission.dispose();
 });
 
+test('line breaks and paragraph breaks normalize into distinct fenced commands', () => {
+  const state = { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null };
+  for (const [inputType, kind] of [['insertLineBreak', 'lineBreak'], ['insertParagraph', 'paragraphBreak']] as const) {
+    for (const source of ['beforeinput', 'input'] as const) {
+      const event = { eventId: 1, inputTime: 0, inputType, isComposing: false };
+      expect(normalizeInputEvent(source === 'beforeinput'
+        ? { ...event, source, data: null } : { ...event, source, value: '' }, state)).toMatchObject({
+        intents: [{ kind, payload: {} }], fence: true, preventDefault: true,
+      });
+    }
+  }
+  for (const [shift, kind] of [[true, 'lineBreak'], [false, 'paragraphBreak']] as const) {
+    expect(normalizeInputEvent({ source: 'keydown', eventId: 1, inputTime: 0,
+      key: 'Enter', code: 'Enter', shift, alt: false, ctrl: false, meta: false }, state)).toMatchObject({
+      intents: [{ kind, payload: {} }], fence: true, preventDefault: true,
+    });
+  }
+});
+
 test('history_shortcuts_and_beforeinput_normalize_into_fenced_commands', () => {
   const state = { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null };
   for (const [inputType, kind] of [['historyUndo', 'undo'], ['historyRedo', 'redo']] as const) {
@@ -650,11 +690,11 @@ test('suggesting mode leaves comment and object commands without text suggestion
   const { admission, submitted } = lane();
   admission.setSuggesting!('Writer');
   const range = { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 4 } };
-  const intents: PeerlessInputIntent[] = [
+  const intents = [
     { kind: 'addComment', payload: { ranges: [range], author: 'Writer', date: '2026-01-01', body: 'Note', expectVersion: 'native' } },
     { kind: 'resizeObject', payload: { handle: 'image', widthEmu: 9525, heightEmu: 9525, expectVersion: 'native' } },
     { kind: 'moveObject', payload: { handle: 'image', hOffsetEmu: 0, vOffsetEmu: 0, expectVersion: 'native' } },
-  ];
+  ] satisfies PeerlessInputIntent[];
   for (const intent of intents) expect(admitIntent(admission, intent).status).toBe('submitted');
   expect(submitted.map(entry => entry.payload)).toEqual(intents.map(intent => intent.payload));
   admitIntent(admission, { kind: 'insertText', payload: { text: 'tracked' } });

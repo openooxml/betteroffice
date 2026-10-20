@@ -1312,10 +1312,12 @@ fn shiftable(block: &LayoutBlock) -> bool {
                 .attrs
                 .as_ref()
                 .is_none_or(|attrs| attrs.horizontal_rules.is_empty())
-                && paragraph
-                    .runs
-                    .iter()
-                    .all(|run| matches!(run, Run::Text(_) | Run::Tab(_) | Run::LineBreak(_)))
+                && paragraph.runs.iter().all(|run| {
+                    matches!(
+                        run,
+                        Run::Text(_) | Run::Tab(_) | Run::LineBreak(_) | Run::Reserved(_)
+                    )
+                })
         }
         LayoutBlock::Table(table) => table
             .rows
@@ -1323,7 +1325,7 @@ fn shiftable(block: &LayoutBlock) -> bool {
             .flat_map(|row| &row.cells)
             .flat_map(|cell| &cell.blocks)
             .all(shiftable),
-        LayoutBlock::SectionBreak(_) => true,
+        LayoutBlock::SectionBreak(_) | LayoutBlock::Reserved(_) => true,
         LayoutBlock::Image(_)
         | LayoutBlock::Shape(_)
         | LayoutBlock::Chart(_)
@@ -1375,7 +1377,7 @@ pub(crate) fn shift_block(block: &mut LayoutBlock, delta: i64) {
             shift_pair(&mut column_break.pm_start, &mut column_break.pm_end, delta);
             shift_groups(&mut column_break.sdt_groups, delta);
         }
-        LayoutBlock::Unsupported => {}
+        LayoutBlock::Reserved(_) | LayoutBlock::Unsupported => {}
     }
 }
 
@@ -1417,8 +1419,15 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, delta: i64) {
                 if let Some(shape) = &mut run.inline_shape {
                     shift_shape(shape, delta);
                 }
+                if let Some(chart) = &mut run.inline_chart {
+                    shift_pair(&mut chart.pm_start, &mut chart.pm_end, delta);
+                    shift_pair(&mut chart.doc_start, &mut chart.doc_end, delta);
+                    shift_drawing_id(&mut chart.id, delta);
+                    shift_groups(&mut chart.sdt_groups, delta);
+                }
             }
             Run::Field(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
+            Run::Reserved(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
             Run::Unsupported => {}
         }
     }

@@ -12,7 +12,8 @@ export interface CommentCallbacks {
   onCommentResolve?: (commentId: number) => void;
   onCommentUnresolve?: (commentId: number) => void;
   onCommentDelete?: (commentId: number) => void;
-  onAddComment?: (text: string) => void;
+  /** Resolving to false keeps the composer and its text. */
+  onAddComment?: (text: string) => void | Promise<boolean>;
   onCancelAddComment?: () => void;
   onAcceptChange?: (from: number, to: number) => void;
   onRejectChange?: (from: number, to: number) => void;

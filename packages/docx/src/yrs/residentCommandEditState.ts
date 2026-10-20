@@ -1,4 +1,4 @@
-import type { YrsHyperlinkAttrs, YrsSelectionContext } from './index';
+import type { YrsHyperlinkAttrs, YrsLoc, YrsSelectionContext } from './index';
 import { readCommandSelection } from './residentCommandAnchors';
 import { readCellSelection, resolveLiveCell } from './residentCommandTableSelection';
 import { tableAnchors, type TablePayload } from './storyPlainText';
@@ -56,6 +56,23 @@ function hyperlinkAt(engine: ResidentDocxCommandEngine, story: string, paraId: s
   return boundary;
 }
 
+function revisionAt(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, head: YrsLoc): string | undefined {
+  const reader = engine.geometryReader;
+  const at = (paraId: string, offset: number) => reader.locateParagraph(head.story, paraId).start + offset;
+  const position = at(head.paraId, head.offset);
+  const holding = reader.listRevisions().filter(({ range }) => {
+    if (range.story !== head.story) return false;
+    try {
+      return at(range.start.paraId, range.start.offset) <= position && position <= at(range.end.paraId, range.end.offset);
+    } catch {
+      return false;
+    }
+  });
+  if (!holding.length) return undefined;
+  const proposed = new Set(state.proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds));
+  return holding.find(({ revisionId }) => !proposed.has(revisionId))?.revisionId;
+}
+
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
     (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -87,7 +104,7 @@ function tableContext(engine: ResidentDocxCommandEngine, story: string): DocxCom
   const focusedCell = anchors.find((entry) => entry.row <= focused.row && focused.row < entry.row + entry.rowspan &&
     entry.column <= focused.column && focused.column < entry.column + entry.colspan);
   if (!focusedCell) return null;
-  const properties = payload.rows.flatMap((row) => row.cells ?? []).find((entry) => entry.story === cell.story)?.tcPr;
+  const properties = payload.rows.flatMap((row) => row.cells ?? []).find((entry) => entry.story === focusedCell.story)?.tcPr;
   const borders = properties?.borders;
   let cellBorderColor: DocxCommandTableContext['cellBorderColor'];
   if (borders && typeof borders === 'object') {
@@ -146,5 +163,7 @@ export function projectDocxEditState(
   };
   result.hyperlink = hyperlinkAt(engine, selection.focus.story, selection.focus.paraId, selection.focus.offset);
   result.tableContext = tableContext(engine, selection.focus.story);
+  const revision = revisionAt(engine, state, selection.focus);
+  if (revision !== undefined) result.currentRevisionId = revision;
   return result;
 }

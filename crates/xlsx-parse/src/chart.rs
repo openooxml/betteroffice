@@ -5,6 +5,7 @@
 
 #[cfg(feature = "test-counters")]
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
@@ -12,7 +13,8 @@ use ooxml_drawingml::{
     Theme as DrawingTheme, parse_color_value, resolve_color_value_to_hex_with_theme,
 };
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::styles::Theme;
+use xlsx_model::numfmt::{builtin_format_code, format_value};
+use xlsx_model::styles::{FormatCode, Theme};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, CellRef, CellValue, ChartAnchor, ChartRef,
     ChartRefKind, ErrorValue, SheetChart,
@@ -47,6 +49,8 @@ const TYPE_CHART: &str = "chart";
 thread_local! {
     static CHART_PLAN_BUILDS: Cell<u64> = const { Cell::new(0) };
     static CHART_SPACE_DECODES: Cell<u64> = const { Cell::new(0) };
+    static CHART_SAVE_INPUTS: Cell<usize> = const { Cell::new(0) };
+    static CHART_SAVE_REBUILDS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(feature = "test-counters")]
@@ -60,6 +64,14 @@ pub fn chart_counters() -> (u64, u64) {
 pub fn reset_chart_counters() {
     CHART_PLAN_BUILDS.set(0);
     CHART_SPACE_DECODES.set(0);
+    CHART_SAVE_INPUTS.set(0);
+    CHART_SAVE_REBUILDS.set(0);
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn chart_save_counters() -> (usize, usize) {
+    (CHART_SAVE_INPUTS.get(), CHART_SAVE_REBUILDS.get())
 }
 
 /// Parse a chart part into the shared model, resolving `a:schemeClr` through
@@ -171,6 +183,29 @@ impl ChartRefreshPlan {
         ChartRefresh(edits)
     }
 
+    pub(crate) fn save_refresh<'a>(
+        &'a self,
+        workbook: &'a xlsx_model::Workbook,
+        original: &'a xlsx_model::Workbook,
+    ) -> ChartSaveRefresh<'a> {
+        ChartSaveRefresh {
+            plan: self,
+            workbook,
+            original,
+            current_inputs: ChartInputs::new(),
+            original_inputs: ChartInputs::new(),
+            rebuilt: HashMap::new(),
+            changes: HashMap::new(),
+            remaining: crate::MAX_PROJECTED_CACHE_POINTS,
+        }
+    }
+
+    pub(crate) fn owner_dependent(&self) -> bool {
+        self.sites.iter().any(|site| {
+            split_qualifier(site.formula.trim()).is_some_and(|(sheet, _)| sheet.is_none())
+        })
+    }
+
     pub fn chart_space(
         &self,
         refresh: &ChartRefresh,
@@ -191,6 +226,168 @@ impl ChartRefreshPlan {
         }
         chart_space(part, theme)
     }
+}
+
+type CacheInputs<'a> = Vec<(CellValue, &'a str)>;
+type InputKey = (String, String);
+type ChangeKey = (usize, String, String, String);
+
+struct ChartInputs<'a> {
+    remaining: usize,
+    resolved: HashMap<InputKey, Option<CacheInputs<'a>>>,
+}
+
+impl<'a> ChartInputs<'a> {
+    fn new() -> Self {
+        Self {
+            remaining: crate::MAX_PROJECTED_CACHE_POINTS,
+            resolved: HashMap::new(),
+        }
+    }
+
+    fn get(
+        &mut self,
+        formula: &str,
+        workbook: &'a xlsx_model::Workbook,
+        owner: &str,
+    ) -> Option<&CacheInputs<'a>> {
+        let key = (formula.to_owned(), reference_owner(formula, owner));
+        self.resolved
+            .entry(key)
+            .or_insert_with(|| {
+                let inputs = reference_inputs(formula, workbook, owner, self.remaining).ok()?;
+                self.remaining -= inputs.len();
+                #[cfg(feature = "test-counters")]
+                CHART_SAVE_INPUTS.set(CHART_SAVE_INPUTS.get() + inputs.len());
+                Some(inputs)
+            })
+            .as_ref()
+    }
+}
+
+pub(crate) struct ChartSaveRefresh<'a> {
+    plan: &'a ChartRefreshPlan,
+    workbook: &'a xlsx_model::Workbook,
+    original: &'a xlsx_model::Workbook,
+    current_inputs: ChartInputs<'a>,
+    original_inputs: ChartInputs<'a>,
+    rebuilt: HashMap<(usize, String, Option<String>), Option<String>>,
+    changes: HashMap<ChangeKey, (bool, Option<String>)>,
+    remaining: usize,
+}
+
+impl ChartSaveRefresh<'_> {
+    pub(crate) fn refresh_changed(
+        &mut self,
+        owner: &str,
+        original_owner: &str,
+        original_refs: &[ChartRef],
+    ) -> Option<Vec<u8>> {
+        if self.plan.sites.len() != original_refs.len() {
+            return None;
+        }
+        let changed = self
+            .plan
+            .sites
+            .iter()
+            .zip(original_refs)
+            .enumerate()
+            .map(|(index, (site, reference))| {
+                let key = (
+                    index,
+                    reference_owner(&site.formula, owner),
+                    reference.formula.clone(),
+                    reference_owner(&reference.formula, original_owner),
+                );
+                self.changes
+                    .entry(key)
+                    .or_insert_with(|| {
+                        let current = self.current_inputs.get(&site.formula, self.workbook, owner);
+                        let original = self.original_inputs.get(
+                            &reference.formula,
+                            self.original,
+                            original_owner,
+                        );
+                        let format = current.zip(original).and_then(|(current, original)| {
+                            current
+                                .iter()
+                                .zip(original)
+                                .find_map(|((value, code), (_, before))| {
+                                    (code != before && matches!(value, CellValue::Number { .. }))
+                                        .then(|| (*code).to_owned())
+                                })
+                        });
+                        (
+                            site.formula != reference.formula || current != original,
+                            format,
+                        )
+                    })
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let changed_series = self
+            .plan
+            .sites
+            .iter()
+            .zip(&changed)
+            .filter(|(_, (changed, _))| *changed)
+            .filter_map(|(site, _)| site.series)
+            .collect::<std::collections::HashSet<_>>();
+        let mut declined = std::collections::HashSet::new();
+        let mut edits = Vec::new();
+        for (index, (site, (changed, format))) in self.plan.sites.iter().zip(changed).enumerate() {
+            if !changed
+                && !site
+                    .series
+                    .is_some_and(|series| changed_series.contains(&series))
+            {
+                continue;
+            }
+            let Some(cache) = &site.cache else { continue };
+            let key = (index, reference_owner(&site.formula, owner), format.clone());
+            let markup = self.rebuilt.entry(key).or_insert_with(|| {
+                let cells = self
+                    .current_inputs
+                    .get(&site.formula, self.workbook, owner)?;
+                if cells.len() > self.remaining {
+                    return None;
+                }
+                self.remaining -= cells.len();
+                #[cfg(feature = "test-counters")]
+                CHART_SAVE_REBUILDS.set(CHART_SAVE_REBUILDS.get() + 1);
+                regenerated_cache_inputs(
+                    cache,
+                    cells,
+                    self.workbook,
+                    CacheFidelity::Persisted,
+                    format.as_deref(),
+                    true,
+                )
+                .ok()
+            });
+            match cache.span.clone().zip(markup.as_ref()) {
+                Some((span, markup)) => edits.push((site.series, (span, markup.clone()))),
+                None => declined.extend(site.series),
+            }
+        }
+        let mut edits = edits
+            .into_iter()
+            .filter(|(series, _)| series.is_none_or(|series| !declined.contains(&series)))
+            .map(|(_, (span, markup))| (span, Replacement::Markup(markup)))
+            .collect::<Vec<_>>();
+        edits.sort_by_key(|(span, _)| span.start);
+        match &self.plan.source {
+            Some(source) if !edits.is_empty() => source.splice(&edits).ok(),
+            _ => None,
+        }
+    }
+}
+
+fn reference_owner(formula: &str, owner: &str) -> String {
+    split_qualifier(formula.trim())
+        .and_then(|(sheet, _)| sheet)
+        .unwrap_or_else(|| owner.to_owned())
+        .to_ascii_lowercase()
 }
 
 /// Whether the raw bytes name a reference vocabulary this crate does not read,
@@ -839,17 +1036,52 @@ fn regenerated_cache(
             "a chart cache carrying content this crate does not model cannot be regenerated".into(),
         ));
     }
-    let numeric = cache.local == "numCache";
-    let cells = resolve_reference(formula, workbook, owner, rebuild.limit.min(rebuild.budget))?;
+    let limit = rebuild.limit.min(rebuild.budget);
+    let cells = if rebuild.fidelity == CacheFidelity::Persisted {
+        reference_inputs(formula, workbook, owner, limit)?
+    } else {
+        resolve_reference_with(formula, workbook, owner, limit, |sheet, at| {
+            (
+                sheet
+                    .cell(at)
+                    .map(|cell| cell.value.clone())
+                    .unwrap_or_default(),
+                "General",
+            )
+        })?
+    };
     rebuild.budget -= cells.len();
+    regenerated_cache_inputs(
+        cache,
+        &cells,
+        workbook,
+        rebuild.fidelity,
+        None,
+        rebuild.fidelity == CacheFidelity::Displayed,
+    )
+}
+
+fn regenerated_cache_inputs(
+    cache: &CacheSite,
+    cells: &[(CellValue, &str)],
+    workbook: &xlsx_model::Workbook,
+    fidelity: CacheFidelity,
+    format_override: Option<&str>,
+    preserve_authored: bool,
+) -> Result<String, ParseError> {
+    if cache.local == "multiLvlStrCache" || cache.unmodelled_content {
+        return Err(ParseError::UnsupportedEdit(
+            "chart cache content cannot be regenerated".into(),
+        ));
+    }
+    let numeric = cache.local == "numCache";
     // A populated cache over cells the grid reads as empty — including a
     // reference that names none at all, such as `#REF!` — is the file speaking
     // for data the workbook does not hold; emptying the chart would be a worse
-    // answer than a stale one. A save is regenerating because the reference
-    // moved, so there the new emptiness is the truth.
-    if rebuild.fidelity == CacheFidelity::Displayed
+    // answer than a stale one.
+    if preserve_authored
         && cache.authored_points > 0
-        && cells.iter().all(|cell| *cell == CellValue::Empty)
+        && cells.iter().all(|(value, _)| *value == CellValue::Empty)
     {
         return Err(ParseError::UnsupportedEdit(
             "a chart cache over cells the grid reads as empty keeps its authored values".into(),
@@ -857,14 +1089,14 @@ fn regenerated_cache(
     }
     let points = cells
         .iter()
-        .map(|value| cache_point(value, numeric, rebuild.fidelity))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|(value, code)| cache_point(value, numeric, fidelity, code, workbook.date_system))
+        .collect::<Vec<_>>();
     // A cache omits the points a consumer cannot read, and the shared parser
     // collects what remains positionally rather than by `@idx`. A hole before
     // the last surviving point would therefore slide every later value into an
     // earlier slot, under another point's category. A trailing hole shifts
     // nothing, so only an interior one declines.
-    if rebuild.fidelity == CacheFidelity::Displayed
+    if preserve_authored
         && let Some(last) = points.iter().rposition(Option::is_some)
         && points[..last].iter().any(Option::is_none)
     {
@@ -874,7 +1106,10 @@ fn regenerated_cache(
     }
     let prefix = &cache.prefix;
     let mut out = String::new();
-    if let Some(format_code) = &cache.format_code {
+    if let Some(format_code) = format_override
+        .filter(|_| numeric)
+        .or(cache.format_code.as_deref())
+    {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
             escape_text(format_code)?
@@ -893,31 +1128,28 @@ fn regenerated_cache(
     Ok(out)
 }
 
-/// One cached point, or `None` for a cell a cache omits. A save cannot put a
-/// value that is not text into a string cache without applying the cell's
-/// number format, so it refuses instead of guessing; a render only has to show
-/// a readable value.
+/// One cached point, or `None` for a cell a cache omits.
 fn cache_point(
     value: &CellValue,
     numeric: bool,
     fidelity: CacheFidelity,
-) -> Result<Option<String>, ParseError> {
-    Ok(match (value, numeric) {
+    code: &str,
+    date_system: xlsx_model::DateSystem,
+) -> Option<String> {
+    match (value, numeric) {
         (CellValue::Empty, _) => None,
         (CellValue::Number { value }, true) => Some(format_number(*value)),
         (_, true) => None,
         (CellValue::Text { value }, false) => Some(value.clone()),
         (_, false) if fidelity == CacheFidelity::Persisted => {
-            return Err(ParseError::UnsupportedEdit(
-                "a string cache over non-text cells cannot be regenerated".into(),
-            ));
+            Some(format_value(value, code, date_system).text)
         }
         (CellValue::Number { value }, false) => Some(format_number(*value)),
         (CellValue::Bool { value }, false) => {
             Some(if *value { "TRUE" } else { "FALSE" }.to_owned())
         }
         (CellValue::Error { value }, false) => Some(value.as_str().to_owned()),
-    })
+    }
 }
 
 fn format_number(value: f64) -> String {
@@ -928,18 +1160,38 @@ fn format_number(value: f64) -> String {
     }
 }
 
-/// The cells one chart reference names, in the order a cache lists them, up to
-/// `limit` of them. Only a single contiguous one-dimensional area on a sheet
-/// this workbook holds can be resolved; `#REF!` resolves to nothing, which is
-/// the correct empty cache. Every other form — a union, an external book, a
-/// defined name, a two-dimensional area — is refused here, so a caller needs no
-/// predicate of its own.
-fn resolve_reference(
+fn reference_inputs<'a>(
     formula: &str,
-    workbook: &xlsx_model::Workbook,
+    workbook: &'a xlsx_model::Workbook,
     owner: &str,
     limit: usize,
-) -> Result<Vec<CellValue>, ParseError> {
+) -> Result<CacheInputs<'a>, ParseError> {
+    resolve_reference_with(formula, workbook, owner, limit, |sheet, at| {
+        let code = match workbook
+            .styles
+            .resolved_format(sheet.effective_style(at))
+            .number_format
+        {
+            FormatCode::Custom(code) => code,
+            FormatCode::Builtin(id) => builtin_format_code(id).unwrap_or("General"),
+        };
+        (
+            sheet
+                .cell(at)
+                .map(|cell| cell.value.clone())
+                .unwrap_or_default(),
+            code,
+        )
+    })
+}
+
+fn resolve_reference_with<'a, T>(
+    formula: &str,
+    workbook: &'a xlsx_model::Workbook,
+    owner: &str,
+    limit: usize,
+    mut read: impl FnMut(&'a xlsx_model::Sheet, CellRef) -> T,
+) -> Result<Vec<T>, ParseError> {
     let trimmed = formula.trim();
     if trimmed.is_empty() || trimmed == ErrorValue::Ref.as_str() {
         return Ok(Vec::new());
@@ -968,12 +1220,7 @@ fn resolve_reference(
     let mut values = Vec::with_capacity(count as usize);
     for row in start.row..=end.row {
         for col in start.col..=end.col {
-            values.push(
-                sheet
-                    .cell(CellRef::new(row, col))
-                    .map(|cell| cell.value.clone())
-                    .unwrap_or_default(),
-            );
+            values.push(read(sheet, CellRef::new(row, col)));
         }
     }
     Ok(values)

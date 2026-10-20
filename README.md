@@ -25,7 +25,7 @@
 
 - **Agent editing with human review.** Review attributed agent edits through
   tracked changes, inline diffs, and before-and-after previews. Accept or
-  reject changes directly in the editor.
+  reject DOCX proposals in the optional proposal sidebar.
 
 - **Real-time collaboration.** People and agents edit the same file together,
   with live cursors and selections. Concurrent changes merge automatically,
@@ -98,6 +98,8 @@ What to install for which language, with a first example each:
 | PPTX | 8/10 | **10/10** |
 
 Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
+
+[Per-task results and methodology](https://evals.betteroffice.dev).
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
