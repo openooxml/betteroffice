@@ -276,8 +276,15 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         ? intent.payload.direction : undefined;
       const send = (predecessor: CommandTicket | undefined, goalX?: number, recoverTab = false) => {
         const selection = workerSelection();
-        if (recoverTab && tabDirection === 'backward') return;
-        if (tabDirection && !recoverTab) {
+        if (tabDirection && latestEditState()?.tableContext) {
+          const suggesting = 'suggesting' in intent.payload ? intent.payload.suggesting : undefined;
+          const createLastRow = tabDirection === 'forward' && !readOnly();
+          intent = { kind: 'navigateCell', payload: {
+            direction: tabDirection, extend: false, createLastRow,
+            ...(createLastRow && suggesting ? { suggesting } : {}),
+          } };
+        } else if (recoverTab && tabDirection === 'backward') return;
+        else if (tabDirection && !recoverTab) {
           const toolbar = latestEditState()?.toolbar;
           const numPr = toolbar?.paragraphProperties.numPr as { numId?: number; ilvl?: number } | null | undefined;
           if (selection && (!isCollapsed(selection) || selection.focus.offset === 0) &&
