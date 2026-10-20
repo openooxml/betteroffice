@@ -991,12 +991,12 @@ mod tests {
     }
 
     #[test]
-    fn group_text_boxes_nested_past_eight_levels_open_without_their_text() {
+    fn group_text_boxes_nested_past_four_levels_open_without_their_text() {
         let limits = ParseLimits::default();
-        let (blocks, warnings) = parse_with(&nested_text_box_chain(8, "deepest"), &limits);
+        let (blocks, warnings) = parse_with(&nested_text_box_chain(4, "deepest"), &limits);
         assert!(contains(&blocks, "deepest"));
         assert!(warnings.is_empty());
-        for levels in [9, 20] {
+        for levels in [5, 20] {
             let (blocks, warnings) = parse_with(&nested_text_box_chain(levels, "deepest"), &limits);
             assert_eq!(blocks.len(), 1);
             assert!(!contains(&blocks, "deepest"));
@@ -1051,12 +1051,6 @@ mod tests {
         assert_eq!(warnings, [crate::shape::GROUP_TEXT_BOX_BUDGET_WARNING]);
         let both = serde_json::to_string(&both).unwrap().matches(&leaf).count();
         assert!(single > 0 && both < 2 * single);
-        let (blocks, warnings) = parse_with(
-            &nested_text_box_chain(8, &"z".repeat(160 * 1024)),
-            &ParseLimits::default(),
-        );
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(warnings, [crate::shape::GROUP_TEXT_BOX_BUDGET_WARNING]);
     }
 
     #[test]

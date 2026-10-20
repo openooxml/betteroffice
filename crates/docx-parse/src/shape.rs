@@ -1733,7 +1733,7 @@ fn render_scene_shape(
 type TextBodyKey = (usize, Option<String>);
 
 pub(crate) const GROUP_SCENE_LIMIT_WARNING: &str = "BetterOffice did not show every shape of a drawing group nested deeper than 32 levels or holding more than 4096 shapes.";
-pub(crate) const GROUP_TEXT_BOX_NESTING_WARNING: &str = "BetterOffice did not show the text of group text boxes nested more than 8 levels inside other group text boxes.";
+pub(crate) const GROUP_TEXT_BOX_NESTING_WARNING: &str = "BetterOffice did not show the text of group text boxes nested more than 4 levels inside other group text boxes.";
 pub(crate) const GROUP_TEXT_BOX_BUDGET_WARNING: &str = "BetterOffice did not show the text of some group text boxes nested inside other group text boxes: their copies passed the size limit for nested group text box text.";
 
 pub(crate) fn enrich_group_text_boxes(

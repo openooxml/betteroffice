@@ -9,7 +9,7 @@ use thiserror::Error;
 pub const MAX_NESTING_DEPTH: usize = 64;
 
 const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
-const MAX_GROUP_TEXT_BOX_NESTING: usize = 8;
+const MAX_GROUP_TEXT_BOX_NESTING: usize = 4;
 
 /// OOXML namespace URIs.
 pub mod namespaces {
