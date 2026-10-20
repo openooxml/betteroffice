@@ -161,6 +161,12 @@ const jobs = readdirSync(directory)
     });
   });
 
+function timeouts(job: any): unknown[] {
+  const timeout = job['timeout-minutes'];
+  const key = typeof timeout === 'string' ? timeout.match(/^\$\{\{\s*matrix\.(\w+)\s*\}\}$/)?.[1] : undefined;
+  return key ? combinations(job.strategy?.matrix).map((row) => row[key]) : [timeout];
+}
+
 const githubHosted = (labels: string[]) => labels.length === 1 && GITHUB_HOSTED.test(labels[0]);
 const resolved = (runners: Record<string, Record<string, string[]>>) =>
   Object.values(runners).flatMap((byVariables) => Object.values(byVariables));
@@ -216,7 +222,7 @@ describe('CI runner routing', () => {
       for (const step of job.steps) {
         expect(String(step.uses ?? ''), name).not.toMatch(/^docker:\/\/|^docker\/|^EmbarkStudios\/cargo-deny-action@/);
       }
-      expect(job['timeout-minutes'], name).toBeLessThan(120);
+      for (const timeout of timeouts(job)) expect(timeout, name).toBeLessThan(120);
     }
   });
 

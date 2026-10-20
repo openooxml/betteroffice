@@ -7,6 +7,7 @@
 export type {
   // Color & Styling Primitives
   ThemeColorSlot,
+  ColorTransform,
   ColorValue,
   BorderSpec,
   ShadingProperties,

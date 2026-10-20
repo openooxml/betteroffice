@@ -229,14 +229,11 @@ fn clamp_compatibility_mode(raw: Option<&str>) -> u8 {
 }
 
 fn boolean_element(element: &XmlElement) -> bool {
-    !matches!(
-        element.attribute(Some("w"), "val"),
-        Some("0" | "false" | "off")
-    )
+    element.parse_boolean("w")
 }
 
 fn boolean_attribute(value: Option<&str>) -> Option<bool> {
-    value.map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off"))
+    value.map(|value| crate::xml::parse_on_off(value).unwrap_or(true))
 }
 
 fn nonempty_attribute(element: Option<&XmlElement>, name: &str) -> Option<String> {
@@ -290,7 +287,7 @@ mod tests {
             parsed.theme_font_lang.unwrap().east_asia.as_deref(),
             Some("ja-JP")
         );
-        assert_eq!(parsed.update_fields, Some(true));
+        assert_eq!(parsed.update_fields, Some(false));
         assert_eq!(parsed.track_revisions, Some(false));
         assert_eq!(parsed.revision_view.unwrap().markup, Some(false));
         assert_eq!(parsed.compatibility_flags.compatibility_mode, 15);
@@ -307,6 +304,8 @@ mod tests {
             (r#" w:val="on""#, true),
             (r#" w:val="0""#, false),
             (r#" w:val="false""#, false),
+            (r#" w:val="FALSE""#, false),
+            (r#" w:val=" off ""#, false),
             (r#" w:val="off""#, false),
         ] {
             let flags = parse(Some(&format!(

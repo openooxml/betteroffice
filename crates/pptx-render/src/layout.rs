@@ -9,6 +9,7 @@ use ooxml_drawingml::{
     TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
     preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
+    style_reference_color,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -500,6 +501,10 @@ impl SlideRenderer {
             media_parts: None,
             chart_parts: None,
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
+            slide_width: width,
+            slide_height: height,
+            background_paint: background.clone(),
+            background_picture: background_picture.cloned(),
         };
         let root_space = Space::root();
         if let Some(picture) = background_picture
@@ -521,7 +526,13 @@ impl SlideRenderer {
                 w: width,
                 h: height,
                 asset_id: Some(asset_id),
-                effects: Vec::new(),
+                effects: image_effects_with_placeholder(
+                    &picture.effects,
+                    theme,
+                    background_source
+                        .as_ref()
+                        .and_then(|source| source.reference),
+                ),
                 crop,
                 destination,
                 tile,
@@ -724,7 +735,7 @@ impl RenderedSlide {
                 if !inside_shape && !(text.overflow && region.hit_rect.contains(text_x, text_y)) {
                     continue;
                 }
-                if let Some(line) = nearest_line(&text.lines, text_y)
+                if let Some(line) = nearest_line(&text.lines, text_x, text_y)
                     && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
                         (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
                     })
@@ -771,6 +782,10 @@ struct LayoutBuilder<'a> {
     chart_parts: Option<HashMap<(&'a str, Option<&'a str>), &'a ChartPart>>,
     /// The number a `slidenum` field resolves to on this slide.
     slide_number: i64,
+    slide_width: f32,
+    slide_height: f32,
+    background_paint: Option<Paint>,
+    background_picture: Option<PictureFill>,
 }
 
 impl<'a> LayoutBuilder<'a> {
@@ -851,7 +866,7 @@ impl<'a> LayoutBuilder<'a> {
                 .or_else(|| layout_node.and_then(node_group_transform))
                 .or_else(|| master_node.and_then(node_group_transform));
             let child_space = group_transform
-                .map(|transform| Space::for_group(rect, transform))
+                .map(|transform| space.for_group(rect, transform))
                 .unwrap_or(space);
             for child in &shape.children {
                 self.render_snapshot_shape(child, child_space)?;
@@ -866,7 +881,20 @@ impl<'a> LayoutBuilder<'a> {
         let picture = effective_fill
             .filter(|fill| fill.fill_type == PICTURE_FILL)
             .and_then(|_| picture_fill(&inherited));
-        let fill = effective_fill.and_then(|fill| paint(fill, self.theme));
+        let use_bg_fill = shape.kind == ShapeKind::Shape && node_use_bg_fill(original);
+        let background_picture = use_bg_fill
+            .then(|| self.background_picture.clone())
+            .flatten();
+        let picture = if use_bg_fill {
+            background_picture.as_ref()
+        } else {
+            picture
+        };
+        let fill = if use_bg_fill {
+            self.background_paint.clone()
+        } else {
+            effective_fill.and_then(|fill| paint(fill, self.theme))
+        };
         let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
             inherited_outline
         } else {
@@ -920,33 +948,34 @@ impl<'a> LayoutBuilder<'a> {
                 if shape.geometry == "custom" && !paths.is_empty() {
                     geometry_fallback = false;
                 }
-                self.push_shape(
-                    Primitive::Shape {
-                        clip: None,
-                        even_odd: false,
-                        object_id: shape.source_id,
-                        shape_id: Some(stable_id.clone()),
-                        name: shape.name.clone(),
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                        geometry: shape.geometry.clone(),
-                        path,
-                        geometry_fallback,
-                        adjust_values: shape
-                            .adjust_values
-                            .iter()
-                            .map(|(name, value)| (name.clone(), *value as f32))
-                            .collect(),
-                        fill,
-                        stroke: outline,
-                        shadow,
-                        transform,
-                    },
-                    paths,
-                    picture,
-                )?;
+                let primitive = Primitive::Shape {
+                    clip: None,
+                    even_odd: false,
+                    object_id: shape.source_id,
+                    shape_id: Some(stable_id.clone()),
+                    name: shape.name.clone(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    geometry: shape.geometry.clone(),
+                    path,
+                    geometry_fallback,
+                    adjust_values: shape
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
+                    fill,
+                    stroke: outline,
+                    shadow,
+                    transform,
+                };
+                if use_bg_fill {
+                    self.push_background_shape(primitive, paths, picture)?;
+                } else {
+                    self.push_shape(primitive, paths, picture)?;
+                }
             }
             ShapeKind::Picture => {
                 let source = picture_source(original);
@@ -1035,7 +1064,7 @@ impl<'a> LayoutBuilder<'a> {
         }
         if let ShapeNode::Group(group) = shape {
             let rect = space.map_transform(&group.base.transform);
-            let child_space = Space::for_group(rect, &group.base.transform);
+            let child_space = space.for_group(rect, &group.base.transform);
             for (index, child) in group.children.iter().enumerate() {
                 self.render_parsed_shape(
                     child,
@@ -1056,16 +1085,28 @@ impl<'a> LayoutBuilder<'a> {
         match shape {
             ShapeNode::Shape(value) => {
                 let resolved_fill = self.resolved_fill(&[Some(shape)]);
-                let fill = resolved_fill
-                    .as_ref()
-                    .and_then(|fill| paint(fill, self.theme));
+                let use_bg_fill = value.use_bg_fill;
+                let background_picture = use_bg_fill
+                    .then(|| self.background_picture.clone())
+                    .flatten();
+                let fill = if use_bg_fill {
+                    self.background_paint.clone()
+                } else {
+                    resolved_fill
+                        .as_ref()
+                        .and_then(|fill| paint(fill, self.theme))
+                };
                 let outline = self
                     .resolved_outline(&[Some(shape)])
                     .and_then(|outline| stroke(&outline, self.theme));
-                let picture = resolved_fill
-                    .as_ref()
-                    .filter(|fill| fill.fill_type == PICTURE_FILL)
-                    .and(value.picture_fill.as_deref());
+                let picture = if use_bg_fill {
+                    background_picture.as_ref()
+                } else {
+                    resolved_fill
+                        .as_ref()
+                        .filter(|fill| fill.fill_type == PICTURE_FILL)
+                        .and(value.picture_fill.as_deref())
+                };
                 let shadow = value
                     .effects
                     .as_ref()
@@ -1089,33 +1130,34 @@ impl<'a> LayoutBuilder<'a> {
                 if value.geometry == "custom" && !value.paths.is_empty() {
                     geometry_fallback = false;
                 }
-                self.push_shape(
-                    Primitive::Shape {
-                        clip: None,
-                        even_odd: false,
-                        object_id: base.id,
-                        shape_id: Some(stable_id.to_owned()),
-                        name: base.name.clone(),
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                        geometry: value.geometry.clone(),
-                        path,
-                        geometry_fallback,
-                        adjust_values: value
-                            .adjust_values
-                            .iter()
-                            .map(|(name, value)| (name.clone(), *value as f32))
-                            .collect(),
-                        fill,
-                        stroke: outline,
-                        shadow,
-                        transform,
-                    },
-                    &value.paths,
-                    picture,
-                )?;
+                let primitive = Primitive::Shape {
+                    clip: None,
+                    even_odd: false,
+                    object_id: base.id,
+                    shape_id: Some(stable_id.to_owned()),
+                    name: base.name.clone(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    geometry: value.geometry.clone(),
+                    path,
+                    geometry_fallback,
+                    adjust_values: value
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
+                    fill,
+                    stroke: outline,
+                    shadow,
+                    transform,
+                };
+                if use_bg_fill {
+                    self.push_background_shape(primitive, &value.paths, picture)?;
+                } else {
+                    self.push_shape(primitive, &value.paths, picture)?;
+                }
             }
             ShapeNode::Picture(value) => {
                 let outline = self
@@ -1411,7 +1453,7 @@ impl<'a> LayoutBuilder<'a> {
                     .and_then(|path| self.media_part(path))
                     .and_then(|part| image_dpi(&part.bytes));
                 self.primitives
-                    .push(picture_filled(primitive, picture, dpi));
+                    .push(picture_filled(primitive, picture, dpi, self.theme));
             }
             return Ok(());
         }
@@ -1445,9 +1487,134 @@ impl<'a> LayoutBuilder<'a> {
                 .and_then(|path| self.media_part(path))
                 .and_then(|part| image_dpi(&part.bytes));
             self.primitives
-                .push(picture_filled(primitive, picture, dpi));
+                .push(picture_filled(primitive, picture, dpi, self.theme));
         }
         Ok(())
+    }
+
+    fn push_background_shape(
+        &mut self,
+        primitive: Primitive,
+        paths: &[CustomGeometryPath],
+        picture: Option<&PictureFill>,
+    ) -> Result<(), RenderError> {
+        let start = self.primitives.len();
+        self.push_shape(primitive, paths, None)?;
+        let parts = self.primitives.split_off(start);
+        let picture = picture.filter(|fill| fill.media_part_path.is_some());
+        let dpi = picture
+            .and_then(|fill| fill.media_part_path.as_deref())
+            .and_then(|path| self.media_part(path))
+            .and_then(|part| image_dpi(&part.bytes));
+        for mut part in parts {
+            if self.slide_width > 0.0
+                && self.slide_height > 0.0
+                && matches!(&part, Primitive::Shape { fill, shadow, .. } if fill.is_some() || shadow.is_some())
+            {
+                self.charge_shape()?;
+                let slide = self.slide_background_primitive(part.clone(), picture, dpi);
+                self.primitives.push(slide);
+            }
+            if let Primitive::Shape { fill, shadow, .. } = &mut part {
+                *fill = None;
+                *shadow = None;
+            }
+            self.primitives.push(part);
+        }
+        Ok(())
+    }
+
+    fn slide_background_primitive(
+        &self,
+        primitive: Primitive,
+        picture: Option<&PictureFill>,
+        dpi: Option<f32>,
+    ) -> Primitive {
+        let Primitive::Shape {
+            object_id,
+            name,
+            geometry,
+            path,
+            geometry_fallback,
+            adjust_values,
+            fill,
+            stroke,
+            shadow,
+            even_odd,
+            x,
+            y,
+            w,
+            h,
+            transform,
+            ..
+        } = primitive
+        else {
+            return primitive;
+        };
+        let placement = BackgroundTransform::for_shape(PxRect { x, y, w, h }, transform);
+        let shadow = shadow.map(|mut shadow| {
+            if shadow.paths.is_empty() {
+                shadow.paths.push(crate::ShadowPath {
+                    path: path.clone(),
+                    fill: fill.is_some(),
+                    stroke,
+                });
+            }
+            for part in &mut shadow.paths {
+                part.path = slide_background_path(
+                    &part.path,
+                    placement,
+                    self.slide_width,
+                    self.slide_height,
+                );
+            }
+            shadow
+        });
+        let path = slide_background_path(&path, placement, self.slide_width, self.slide_height);
+        if let Some(picture) = picture.filter(|_| fill.is_some()) {
+            let tile = picture_fill_tile(picture, dpi);
+            let (crop, destination) =
+                picture_fill_crop(picture).placement(0.0, 0.0, self.slide_width, self.slide_height);
+            let destination = if tile.is_some() { None } else { destination };
+            return Primitive::Image {
+                object_id,
+                shape_id: None,
+                name,
+                x: 0.0,
+                y: 0.0,
+                w: self.slide_width,
+                h: self.slide_height,
+                asset_id: picture.media_part_path.clone(),
+                effects: Vec::new(),
+                crop,
+                destination,
+                tile,
+                path: Some(path),
+                geometry_fallback,
+                stroke: None,
+                shadow,
+                transform: Transform::default(),
+            };
+        }
+        Primitive::Shape {
+            clip: None,
+            even_odd,
+            object_id,
+            shape_id: None,
+            name,
+            x: 0.0,
+            y: 0.0,
+            w: self.slide_width,
+            h: self.slide_height,
+            geometry,
+            path,
+            geometry_fallback,
+            adjust_values,
+            fill,
+            stroke: None,
+            shadow,
+            transform: Transform::default(),
+        }
     }
 
     /// Plots a chart or table frame, or keeps the placeholder for graphics
@@ -1679,6 +1846,7 @@ impl<'a> LayoutBuilder<'a> {
                     &content,
                     cell_cascade(&cell.text, &inherited),
                     columns[column + span] - columns[column],
+                    heights[row_index..row_index + row_span].iter().sum(),
                 )?;
                 if row_span == 1 {
                     heights[row_index] = heights[row_index].max(height);
@@ -1781,6 +1949,7 @@ impl<'a> LayoutBuilder<'a> {
         content: &TextContent,
         cascade: BodyCascade<'_>,
         width: f32,
+        height: f32,
     ) -> Result<f32, RenderError> {
         if TextFlow::from_body_vert(cascade.vertical()) != TextFlow::Horizontal {
             return Ok(0.0);
@@ -1802,9 +1971,18 @@ impl<'a> LayoutBuilder<'a> {
             x: 0.0,
             y: 0.0,
             w: (width - emu_to_px(left + right)).max(1.0),
-            h: 0.0,
+            h: (height - emu_to_px(top + bottom)).max(1.0),
         };
-        let text = self.layout_text(&resolved, rect, 1.0, false, true)?;
+        let text = if cascade.num_col() > 1 {
+            self.layout_text_columns(
+                &resolved,
+                rect,
+                cascade,
+                autofit_font_scale(cascade.autofit()),
+            )?
+        } else {
+            self.layout_text(&resolved, rect, 1.0, false, true)?
+        };
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
@@ -1869,9 +2047,7 @@ impl<'a> LayoutBuilder<'a> {
             h: (text_rect.h - emu_to_px(top + bottom) - preset_y * 2.0).max(1.0),
         };
         let mut scale = autofit_font_scale(cascade.autofit());
-        let stacked = flow == TextFlow::Stacked;
-        let mut laid_out =
-            self.layout_text(&resolved, content_rect, scale, stacked, cascade.wraps())?;
+        let mut laid_out = self.layout_text_columns(&resolved, content_rect, cascade, scale)?;
         if cascade.fit_to_box {
             let largest_font = resolved
                 .paragraphs
@@ -1891,8 +2067,7 @@ impl<'a> LayoutBuilder<'a> {
                     break;
                 }
                 scale = next_scale;
-                laid_out =
-                    self.layout_text(&resolved, content_rect, scale, stacked, cascade.wraps())?;
+                laid_out = self.layout_text_columns(&resolved, content_rect, cascade, scale)?;
             }
         }
         self.line_count += laid_out.lines.len();
@@ -1988,6 +2163,35 @@ impl<'a> LayoutBuilder<'a> {
             transform: text_transform,
             lines,
         })
+    }
+
+    fn layout_text_columns(
+        &self,
+        resolved: &ResolvedContent,
+        rect: PxRect,
+        cascade: BodyCascade<'_>,
+        scale: f32,
+    ) -> Result<LayoutText, RenderError> {
+        let flow = TextFlow::from_body_vert(cascade.vertical());
+        let stacked = flow == TextFlow::Stacked;
+        let columns = if flow == TextFlow::Horizontal {
+            cascade.num_col()
+        } else {
+            1
+        };
+        let gap = emu_to_px(cascade.spc_col()).min(
+            (rect.w - f32::from(columns)).max(0.0) / f32::from(columns.saturating_sub(1).max(1)),
+        );
+        let column_rect = PxRect {
+            w: ((rect.w - f32::from(columns - 1) * gap) / f32::from(columns)).max(1.0),
+            ..rect
+        };
+        let mut laid_out =
+            self.layout_text(resolved, column_rect, scale, stacked, cascade.wraps())?;
+        if columns > 1 {
+            flow_text_columns(&mut laid_out, column_rect, columns, gap, cascade.rtl_col());
+        }
+        Ok(laid_out)
     }
 
     /// `layout_content` behind the renderer cache.
@@ -2300,6 +2504,22 @@ impl BodyCascade<'_> {
             .and_then(|body| body.vertical.as_deref())
             .or_else(|| self.layout.and_then(|body| body.vertical.as_deref()))
             .or_else(|| self.master.and_then(|body| body.vertical.as_deref()))
+    }
+
+    fn num_col(&self) -> u8 {
+        cascade_value(self.primary, self.layout, self.master, |body| body.num_col)
+            .unwrap_or(1)
+            .clamp(1, 16)
+    }
+
+    fn spc_col(&self) -> i64 {
+        cascade_value(self.primary, self.layout, self.master, |body| body.spc_col)
+            .unwrap_or(0)
+            .max(0)
+    }
+
+    fn rtl_col(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| body.rtl_col).unwrap_or(false)
     }
 
     fn space_first_last_para(&self) -> bool {
@@ -3131,6 +3351,7 @@ fn chart_text_primitive(
             }],
         }],
         lines: vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y: baseline - line_box.ascent,
             width,
@@ -3458,6 +3679,33 @@ fn layout_content(
     })
 }
 
+fn flow_text_columns(text: &mut LayoutText, rect: PxRect, columns: u8, gap: f32, rtl: bool) {
+    let trailing_space = text.lines.last().map_or(0.0, |line| {
+        text.total_height - (line.y + line.height - rect.y)
+    });
+    let mut column = 0;
+    let mut column_start = rect.y;
+    let mut has_lines = false;
+    let mut total_height = 0.0_f32;
+    for line in &mut text.lines {
+        let mut y = line.y - column_start;
+        if has_lines && y + line.height > rect.h && column + 1 < columns {
+            column += 1;
+            column_start = line.y;
+            y = 0.0;
+        }
+        let visual_column = if rtl { columns - 1 - column } else { column };
+        line.column_offset = f32::from(visual_column) * (rect.w + gap);
+        shift_line(line, line.column_offset, rect.y + y - line.y);
+        total_height = total_height.max(y + line.height);
+        has_lines = true;
+    }
+    if let Some(last) = text.lines.last() {
+        total_height = total_height.max(last.y + last.height - rect.y + trailing_space);
+    }
+    text.total_height = total_height;
+}
+
 /// Height of a `spcBef` or `spcAft`, whose percentages measure a single line.
 fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale: f32) -> f32 {
     let height = match spacing {
@@ -3581,6 +3829,7 @@ fn layout_paragraph(
             points_to_px(autofit_size_pt(style.font_size_pt, scale)),
         );
         return Ok(vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y,
             width: 0.0,
@@ -3685,6 +3934,7 @@ fn layout_paragraph(
             mirror_line(&mut runs, &mut caret_stops, line_x, line_width);
         }
         output.push(PositionedTextLine {
+            column_offset: 0.0,
             x: line_x,
             y: line_y,
             width: line_width,
@@ -4520,6 +4770,43 @@ impl PxRect {
 }
 
 #[derive(Clone, Copy)]
+struct BackgroundTransform {
+    xx: f64,
+    xy: f64,
+    yx: f64,
+    yy: f64,
+    tx: f64,
+    ty: f64,
+}
+
+impl BackgroundTransform {
+    fn for_shape(rect: PxRect, transform: Transform) -> Self {
+        let (sin, cos) = f64::from(transform.rotation_deg).to_radians().sin_cos();
+        let width = f64::from(rect.w);
+        let height = f64::from(rect.h);
+        let flipped_width = if transform.flip_h { -width } else { width };
+        let flipped_height = if transform.flip_v { -height } else { height };
+        let (xx, xy) = (cos * flipped_width, -sin * flipped_height);
+        let (yx, yy) = (sin * flipped_width, cos * flipped_height);
+        Self {
+            xx,
+            xy,
+            yx,
+            yy,
+            tx: f64::from(rect.x) + width / 2.0 - (xx + xy) / 2.0,
+            ty: f64::from(rect.y) + height / 2.0 - (yx + yy) / 2.0,
+        }
+    }
+
+    fn point(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.xx * x + self.xy * y + self.tx,
+            self.yx * x + self.yy * y + self.ty,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Space {
     origin_x: f32,
     origin_y: f32,
@@ -4546,7 +4833,7 @@ impl Space {
         }
     }
 
-    fn for_group(rect: PxRect, transform: &ShapeTransform) -> Self {
+    fn for_group(self, rect: PxRect, transform: &ShapeTransform) -> Self {
         let child_width = transform.child_width.unwrap_or(transform.width);
         let child_height = transform.child_height.unwrap_or(transform.height);
         if child_width == 0 || child_height == 0 {
@@ -4556,9 +4843,11 @@ impl Space {
         let scale_y = safe_geometry(rect.h / child_height as f32);
         let child_x = transform.child_x.unwrap_or_default() as f32;
         let child_y = transform.child_y.unwrap_or_default() as f32;
+        let origin_x = safe_geometry(rect.x - child_x * scale_x);
+        let origin_y = safe_geometry(rect.y - child_y * scale_y);
         Self {
-            origin_x: safe_geometry(rect.x - child_x * scale_x),
-            origin_y: safe_geometry(rect.y - child_y * scale_y),
+            origin_x,
+            origin_y,
             scale_x,
             scale_y,
         }
@@ -4616,14 +4905,18 @@ fn local_point(rect: PxRect, transform: Transform, x: f32, y: f32) -> (f32, f32)
     (center_x + local_x, center_y + local_y)
 }
 
-fn nearest_line(lines: &[PositionedTextLine], y: f32) -> Option<&PositionedTextLine> {
-    lines.iter().min_by(|left, right| {
-        distance_to_interval(y, left.y, left.y + left.height).total_cmp(&distance_to_interval(
-            y,
-            right.y,
-            right.y + right.height,
-        ))
-    })
+fn nearest_line(lines: &[PositionedTextLine], x: f32, y: f32) -> Option<&PositionedTextLine> {
+    let columns = lines
+        .windows(2)
+        .any(|pair| pair[1].column_offset != pair[0].column_offset);
+    let distance = |line: &PositionedTextLine| {
+        let dx = distance_to_interval(x, line.x, line.x + line.width);
+        let dy = distance_to_interval(y, line.y, line.y + line.height);
+        if columns { dx * dx + dy * dy } else { dy }
+    };
+    lines
+        .iter()
+        .min_by(|left, right| distance(left).total_cmp(&distance(right)))
 }
 
 fn distance_to_interval(value: f32, start: f32, end: f32) -> f32 {
@@ -4935,7 +5228,20 @@ fn resolved_transform_value(
 
 /// Resolves bitmap effect colours against the theme.
 fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
-    let rgba = |color: Option<&ColorValue>| resolve_color_value_to_rgba_hex(color, Some(theme));
+    image_effects_with_placeholder(effects, theme, None)
+}
+
+fn image_effects_with_placeholder(
+    effects: &[BlipEffect],
+    theme: &Theme,
+    reference: Option<&StyleReference>,
+) -> Vec<ImageEffect> {
+    let rgba = |color: Option<&ColorValue>| {
+        let color = color?;
+        let substituted =
+            reference.and_then(|reference| style_reference_color(color, reference, theme));
+        resolve_color_value_to_rgba_hex(Some(substituted.as_ref().unwrap_or(color)), Some(theme))
+    };
     effects
         .iter()
         .filter_map(|effect| match effect {
@@ -5232,6 +5538,63 @@ fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     }
 }
 
+fn node_use_bg_fill(node: Option<&ShapeNode>) -> bool {
+    matches!(node, Some(ShapeNode::Shape(shape)) if shape.use_bg_fill)
+}
+
+fn slide_background_path(
+    path: &[GeometryPathCommand],
+    placement: BackgroundTransform,
+    slide_width: f32,
+    slide_height: f32,
+) -> Vec<GeometryPathCommand> {
+    if slide_width <= 0.0 || slide_height <= 0.0 {
+        return path.to_vec();
+    }
+    let map = |x: f64, y: f64| {
+        let (x, y) = placement.point(x, y);
+        (x / f64::from(slide_width), y / f64::from(slide_height))
+    };
+    path.iter()
+        .map(|command| match *command {
+            GeometryPathCommand::Move { x, y } => {
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Move { x, y }
+            }
+            GeometryPathCommand::Line { x, y } => {
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Line { x, y }
+            }
+            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+                let (cpx, cpy) = map(cpx, cpy);
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Quad { cpx, cpy, x, y }
+            }
+            GeometryPathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                let (cp1x, cp1y) = map(cp1x, cp1y);
+                let (cp2x, cp2y) = map(cp2x, cp2y);
+                let (x, y) = map(x, y);
+                GeometryPathCommand::Cubic {
+                    cp1x,
+                    cp1y,
+                    cp2x,
+                    cp2y,
+                    x,
+                    y,
+                }
+            }
+            GeometryPathCommand::Close => GeometryPathCommand::Close,
+        })
+        .collect()
+}
+
 fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
     match shape {
         Some(ShapeNode::Shape(shape)) => &shape.paths,
@@ -5256,6 +5619,7 @@ fn picture_filled(
     primitive: Primitive,
     picture: Option<&PictureFill>,
     dpi: Option<f32>,
+    theme: &Theme,
 ) -> Primitive {
     let Some(picture) = picture else {
         return primitive;
@@ -5289,7 +5653,7 @@ fn picture_filled(
                 w,
                 h,
                 asset_id: picture.media_part_path.clone(),
-                effects: Vec::new(),
+                effects: image_effects(&picture.effects, theme),
                 crop,
                 destination,
                 tile,
@@ -6107,6 +6471,7 @@ mod tests {
             h: 20.0,
         };
         let line = |y: f32, height: f32| PositionedTextLine {
+            column_offset: 0.0,
             x: 10.0,
             y,
             width: 200.0,
@@ -6789,7 +7154,7 @@ mod tests {
                 BlipEffect::Duotone {
                     shadow: Some(ColorValue {
                         theme_color: Some("background2".to_owned()),
-                        theme_shade: Some("73".to_owned()),
+                        transforms: vec![ooxml_drawingml::ColorTransform::Shade(0.45)],
                         ..ColorValue::default()
                     }),
                     highlight: Some(ColorValue {
@@ -6806,7 +7171,7 @@ mod tests {
             effects,
             vec![
                 ImageEffect::Duotone {
-                    shadow: "#737373FF".to_owned(),
+                    shadow: "#B3B3B3FF".to_owned(),
                     highlight: "#FFFFFFFF".to_owned(),
                 },
                 ImageEffect::BiLevel { threshold: 0.25 },
@@ -7788,6 +8153,7 @@ mod tests {
         let picture = PictureFill {
             relationship_id: None,
             media_part_path: Some("ppt/media/image1.png".to_owned()),
+            effects: Vec::new(),
             tile: None,
             crop: PictureCrop::default(),
             fill_rect: PictureCrop {
@@ -7836,6 +8202,152 @@ mod tests {
             referenced.display_list.primitives[0],
             rendered.display_list.primitives[0]
         );
+    }
+
+    #[test]
+    fn a_theme_background_picture_resolves_effects_with_the_master_reference_color() {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        for (path, bytes) in &mut parts {
+            if path == "ppt/slides/slide1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, "");
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/slideMasters/slideMaster1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, r#"<p:bg><p:bgRef idx="1001"><a:schemeClr val="accent1"><a:shade val="50000"/><a:alpha val="50000"/></a:schemeClr></p:bgRef></p:bg>"#);
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/theme/theme1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<a:bgFillStyleLst>").unwrap();
+                let end = xml.find("</a:bgFillStyleLst>").unwrap() + "</a:bgFillStyleLst>".len();
+                xml.replace_range(start..end, r#"<a:bgFillStyleLst><a:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="background"><a:duotone><a:schemeClr val="phClr"><a:shade val="50000"/></a:schemeClr><a:schemeClr val="phClr"><a:tint val="50000"/><a:alpha val="25000"/></a:schemeClr></a:duotone><a:clrChange><a:clrFrom><a:schemeClr val="phClr"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"/></a:clrTo></a:clrChange></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill></a:bgFillStyleLst>"#);
+                *bytes = xml.into_bytes();
+            }
+        }
+        parts.push((
+            "ppt/theme/_rels/theme1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="background" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"#.to_vec(),
+        ));
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut package = pptx_parse::parse_pptx(&source).unwrap();
+        package.themes[0].theme.color_scheme.accent1 = "808080".to_owned();
+        let session = DeckSession::open(&source, 8_321).unwrap();
+        let rendered = renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the theme background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Duotone {
+                    shadow: "#42424280".to_owned(),
+                    highlight: "#C4C4C440".to_owned(),
+                },
+                ImageEffect::ColorChange {
+                    from: "#5C5C5C80".to_owned(),
+                    to: "#FFFFFFFF".to_owned(),
+                    use_alpha: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_318).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "effects": [
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.1, "contrast": -0.2 }
+            ]
+        }))
+        .unwrap();
+        package.slides[0].background_picture = Some(Box::new(picture));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Alpha { amount: 0.2 },
+                ImageEffect::Luminance {
+                    brightness: 0.1,
+                    contrast: -0.2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shape_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_319).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "tile": { "scaleX": 0.5, "scaleY": 0.5 },
+            "effects": [{ "type": "alpha", "amount": 0.2 }]
+        }))
+        .unwrap();
+        package.masters[0]
+            .shapes
+            .push(ShapeNode::Shape(pptx_parse::Shape {
+                has_preset_geometry: true,
+                effects: None,
+                base: pptx_parse::ShapeBase {
+                    id: 9_002,
+                    name: "Filled".to_owned(),
+                    description: None,
+                    hidden: false,
+                    placeholder: None,
+                    transform: ShapeTransform {
+                        x: 0,
+                        y: 0,
+                        width: 1_000_000,
+                        height: 1_000_000,
+                        ..ShapeTransform::default()
+                    },
+                },
+                geometry: "rect".to_owned(),
+                adjust_values: BTreeMap::new(),
+                paths: Vec::new(),
+                use_bg_fill: false,
+                style: None,
+                fill: Some(ShapeFill::named("picture")),
+                picture_fill: Some(Box::new(picture)),
+                outline: None,
+                text: None,
+            }));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 9_002,
+                        ..
+                    }
+                )
+            })
+            .expect("the picture-filled master shape paints as an image");
+        let Primitive::Image { effects, tile, .. } = image else {
+            unreachable!()
+        };
+        assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
+        assert!(tile.is_some());
     }
 
     #[test]
@@ -8250,6 +8762,7 @@ mod tests {
                         TextFlow::Horizontal,
                     ),
                     lines: vec![PositionedTextLine {
+                        column_offset: 0.0,
                         x: 110.0,
                         y: 110.0,
                         width: 100.0,
@@ -8314,6 +8827,7 @@ mod tests {
                     rect: TextFlow::Vert270.layout_rect(rect),
                     transform: text_transform(shape, TextFlow::Vert270),
                     lines: vec![PositionedTextLine {
+                        column_offset: 0.0,
                         x: 60.0,
                         y: 150.0,
                         width: 100.0,
@@ -8446,6 +8960,7 @@ mod tests {
                 },
                 geometry: "rect".to_owned(),
                 adjust_values: BTreeMap::new(),
+                use_bg_fill: false,
                 paths: Vec::new(),
                 style: None,
                 fill: None,
@@ -8454,6 +8969,9 @@ mod tests {
                 text: Some(TextBody {
                     vertical_overflow: None,
                     horizontal_overflow: None,
+                    num_col: None,
+                    spc_col: None,
+                    rtl_col: None,
                     wrap: None,
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
@@ -8499,6 +9017,287 @@ mod tests {
                 )
             })
             .expect("the master text box was laid out")
+    }
+
+    fn text_columns_body() -> TextBody {
+        let body = TextBody {
+            anchor: Some("t".to_owned()),
+            inset_left: Some(95_250),
+            inset_right: Some(95_250),
+            inset_top: Some(47_625),
+            inset_bottom: Some(47_625),
+            paragraphs: vec![pptx_parse::TextParagraph {
+                properties: ParagraphProperties {
+                    line_spacing: Some(LineSpacing::Points { value: 12.0 }),
+                    ..ParagraphProperties::default()
+                },
+                runs: vec![pptx_parse::TextRun {
+                    text: "first\nsecond\nthird\nfourth\nfifth".to_owned(),
+                    properties: RunProperties {
+                        font_size_pt: Some(12.0),
+                        font_family: Some("Arial".to_owned()),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                }],
+                ..pptx_parse::TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        let mut json = serde_json::to_value(body).unwrap();
+        json["numCol"] = 2.into();
+        json["spcCol"] = 95_250.into();
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn text_columns_slide(body: TextBody) -> RenderedSlide {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_012).unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        snapshot.slides[0].shapes.clear();
+        let mut shape = package.slides[0]
+            .shapes
+            .iter()
+            .find_map(|node| match node {
+                ShapeNode::Shape(shape) if shape.text.is_some() => Some(shape.clone()),
+                _ => None,
+            })
+            .unwrap();
+        shape.base.id = 9_002;
+        shape.base.placeholder = None;
+        shape.base.transform = ShapeTransform {
+            x: 0,
+            y: 0,
+            width: 2_000_250,
+            height: 428_625,
+            ..ShapeTransform::default()
+        };
+        shape.geometry = "rect".to_owned();
+        shape.text = Some(body);
+        package.masters[0].shapes = vec![ShapeNode::Shape(shape)];
+        package.layouts[0].shapes.clear();
+        renderer().layout_slide(&package, &snapshot, 0).unwrap()
+    }
+
+    fn text_columns_lines(rendered: &RenderedSlide) -> &[PositionedTextLine] {
+        rendered
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    object_id: 9_002,
+                    lines,
+                    ..
+                } => Some(lines.as_slice()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn text_columns_fill_then_continue_at_the_next_column() {
+        let rendered = text_columns_slide(text_columns_body());
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 5);
+        assert!((lines[0].x - 10.0).abs() < 0.01);
+        assert!((lines[1].x - 10.0).abs() < 0.01);
+        assert!((lines[2].x - 110.0).abs() < 0.01, "{:?}", lines[2]);
+        assert!((lines[2].y - lines[0].y).abs() < 0.01);
+        assert!((lines[3].y - lines[1].y).abs() < 0.01);
+        assert!(lines[4].y + lines[4].height > 40.0);
+        let stop = &lines[2].caret_stops[0];
+        assert!((stop.x - lines[2].x).abs() < 0.01);
+        assert!((lines[2].runs[0].x - lines[2].x).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_column_hit_testing_keeps_the_row_right_of_a_short_line() {
+        let mut body = text_columns_body();
+        body.num_col = None;
+        body.paragraphs[0].runs[0].text = "i\na considerably longer line".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].end, 2);
+        let x = lines[0].x + 150.0;
+        let y = lines[0].y + lines[0].height / 2.0;
+        assert!(matches!(
+            rendered.hit_test(x, y),
+            Some(HitTestResult::Text { position: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn single_column_hit_testing_keeps_the_row_in_reversed_vertical_flow() {
+        let mut body = text_columns_body();
+        body.num_col = None;
+        body.vertical = Some("mongolianVert".to_owned());
+        body.paragraphs[0].properties.alignment = Some("ctr".to_owned());
+        body.paragraphs[0].runs[0].text = "i\nwide".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].y > lines[1].y);
+        assert!(lines[0].x > lines[1].x);
+        let x = lines[1].x;
+        let y = lines[0].y + lines[0].height / 2.0;
+        assert_eq!(nearest_line(lines, x, y).unwrap().start, lines[0].start);
+    }
+
+    #[test]
+    fn text_columns_keep_their_origin_for_centered_short_lines() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].properties.alignment = Some("ctr".to_owned());
+        body.paragraphs[0].runs[0].text = "i\ni\ni".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].x > 10.0);
+        assert!(lines[2].x > 110.0);
+        let json = serde_json::to_value(lines).unwrap();
+        assert!(json[0].get("columnOffset").is_none());
+        assert_eq!(json[2]["columnOffset"], 100.0);
+        assert!((lines[2].x - lines[0].x - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_hit_test_finds_a_caret_in_column_two() {
+        let rendered = text_columns_slide(text_columns_body());
+        let lines = text_columns_lines(&rendered);
+        assert!(matches!(
+            rendered.hit_test(110.0, lines[0].y + lines[0].height / 2.0),
+            Some(HitTestResult::Text { position, .. }) if position == lines[2].start
+        ));
+    }
+
+    #[test]
+    fn text_columns_wrap_to_the_column_width() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].runs[0].text =
+            "several words that must wrap within each narrow column".to_owned();
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert!(lines.len() > 2);
+        assert!(lines.iter().all(|line| line.width <= 90.01));
+        assert!((lines[2].x - 110.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_anchor_the_whole_block() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].runs[0].text = "first\nsecond\nthird\nfourth".to_owned();
+        let top = text_columns_slide(body.clone());
+        let top_lines = text_columns_lines(&top);
+        for (anchor, shift) in [("ctr", 1.5), ("b", 3.0)] {
+            body.anchor = Some(anchor.to_owned());
+            let rendered = text_columns_slide(body.clone());
+            for (line, original) in text_columns_lines(&rendered).iter().zip(top_lines) {
+                assert!((line.y - original.y - shift).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn text_columns_use_the_stored_normal_autofit_scale() {
+        let mut body = text_columns_body();
+        body.paragraphs[0].properties.line_spacing = None;
+        body.autofit = Some(TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: None,
+        });
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert!((lines[3].x - 110.0).abs() < 0.01);
+        assert!((lines[3].y - lines[0].y).abs() < 0.01);
+        assert!((lines[0].runs[0].font_size_px - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_follow_right_to_left_column_order() {
+        let mut json = serde_json::to_value(text_columns_body()).unwrap();
+        json["rtlCol"] = true.into();
+        let rendered = text_columns_slide(serde_json::from_value(json).unwrap());
+        let lines = text_columns_lines(&rendered);
+        assert!((lines[0].x - 110.0).abs() < 0.01);
+        assert!((lines[2].x - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_columns_leave_vertical_and_single_column_layout_unchanged() {
+        for vertical in [None, Some("vert"), Some("vert270"), Some("wordArtVert")] {
+            let mut json = serde_json::to_value(text_columns_body()).unwrap();
+            json["vertical"] = serde_json::to_value(vertical).unwrap();
+            json["numCol"] = 1.into();
+            let single = text_columns_slide(serde_json::from_value(json.clone()).unwrap());
+            if vertical.is_some() {
+                json["numCol"] = 2.into();
+            } else {
+                json.as_object_mut().unwrap().remove("numCol");
+            }
+            let other = text_columns_slide(serde_json::from_value(json).unwrap());
+            assert_eq!(
+                serde_json::to_value(&single.display_list).unwrap(),
+                serde_json::to_value(&other.display_list).unwrap()
+            );
+        }
+        let mut body = text_columns_body();
+        let natural = text_columns_slide(body.clone());
+        body.autofit = Some(TextAutofit::Shape);
+        let shape_fit = text_columns_slide(body);
+        assert_eq!(
+            serde_json::to_value(&natural.display_list).unwrap(),
+            serde_json::to_value(&shape_fit.display_list).unwrap()
+        );
+    }
+
+    #[test]
+    fn text_columns_inherit_properties_and_keep_explicit_overrides() {
+        let master = text_columns_body();
+        let layout = TextBody {
+            spc_col: Some(190_500),
+            rtl_col: Some(true),
+            ..TextBody::default()
+        };
+        let primary = TextBody::default();
+        let mut cascade = cell_cascade(&primary, &master);
+        cascade.layout = Some(&layout);
+        assert_eq!(cascade.num_col(), 2);
+        assert_eq!(cascade.spc_col(), 190_500);
+        assert!(cascade.rtl_col());
+        let primary = TextBody {
+            num_col: Some(1),
+            spc_col: Some(0),
+            rtl_col: Some(false),
+            ..TextBody::default()
+        };
+        cascade.primary = Some(&primary);
+        assert_eq!(cascade.num_col(), 1);
+        assert_eq!(cascade.spc_col(), 0);
+        assert!(!cascade.rtl_col());
+    }
+
+    #[test]
+    fn text_columns_keep_paragraph_spacing_inside_a_column() {
+        let mut body = text_columns_body();
+        let mut first = body.paragraphs[0].clone();
+        first.runs[0].text = "first".to_owned();
+        first.properties.space_after = Some(LineSpacing::Points { value: 3.0 });
+        let mut second = body.paragraphs[0].clone();
+        second.runs[0].text = "second\nthird".to_owned();
+        second.properties.space_before = Some(LineSpacing::Points { value: 6.0 });
+        let mut third = body.paragraphs[0].clone();
+        third.runs[0].text = "fourth".to_owned();
+        third.properties.space_before = Some(LineSpacing::Points { value: 3.0 });
+        body.paragraphs = vec![first, second, third];
+        let rendered = text_columns_slide(body);
+        let lines = text_columns_lines(&rendered);
+        assert_eq!(lines.len(), 4);
+        assert!((lines[1].x - 110.0).abs() < 0.01);
+        assert!((lines[1].y - 5.0).abs() < 0.01);
+        assert!((lines[3].y - 41.0).abs() < 0.01);
     }
 
     #[test]
@@ -10045,6 +10844,7 @@ mod tests {
             },
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
+            use_bg_fill: false,
             fill: None,
             picture_fill: None,
             outline: None,

@@ -699,6 +699,89 @@ for (const change of ['selection', 'sheet', 'replacement']) {
   });
 }
 
+it('clears the cell a pending peerless data jump lands on, then applies later arrows in order', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  const before = host.sent.length;
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'Delete' });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+  await act(async () => {});
+  expect(host.sent).toHaveLength(before);
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  const sent = host.sent.slice(before);
+  expect(sent.map((command) => command.kind)).toEqual(['select', 'applyOps', 'select']);
+  expect(sent[1]).toMatchObject({ payload: { toolbar: { id: 'clear', target: { range: {
+    start: { row: 3, col: 0 }, end: { row: 3, col: 0 },
+  } } } } });
+  expect(sent[2]).toMatchObject({ payload: { selection: { activeCell: { row: 3, col: 1 } } } });
+});
+
+it('types keys queued behind a pending peerless data jump into the cell they open', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  for (const key of ['Delete', 'a', 'b', 'c', 'Enter']) fireEvent.keyDown(scroll, { key });
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  expect(host.sent.filter((command) => command.kind === 'editCell')[0]).toMatchObject({ payload: { args: [0, 3, 0, 'abc'] } });
+});
+
+it('resumes a data jump queued after a typed cell commits behind a pending peerless jump', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise).mockResolvedValueOnce({ edge: { row: 4, col: 5 } });
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'Delete' });
+  fireEvent.keyDown(scroll, { key: 'a' });
+  fireEvent.keyDown(scroll, { key: 'Enter' });
+  fireEvent.keyDown(scroll, { key: 'ArrowRight', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'Delete' });
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  await act(async () => {});
+  expect(host.sent.filter((command) => command.kind === 'editCell')[0]).toMatchObject({ payload: { args: [0, 3, 0, 'a'] } });
+  expect(host.sent.filter((command) => command.kind === 'applyOps').slice(-1)[0]).toMatchObject({ payload: { toolbar: {
+    id: 'clear', target: { range: { start: { row: 4, col: 5 }, end: { row: 4, col: 5 } } },
+  } } });
+});
+
+it('cancels a typed cell with Escape queued behind a pending peerless data jump', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  for (const key of ['Delete', 'a', 'Escape', 'Enter']) fireEvent.keyDown(scroll, { key });
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+  expect(host.sent.some((command) => command.kind === 'editCell')).toBe(false);
+});
+
+it('starts clipboard access in the key press behind a pending peerless data jump', async () => {
+  const host = peerlessHarness();
+  const answer = deferred<xlsx.SelectionData>();
+  host.selectionData.mockReturnValueOnce(answer.promise);
+  const clipboard = promisedClipboard();
+  const readText = mock(async () => 'pasted');
+  replaceClipboard('readText', readText);
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  fireEvent.keyDown(scroll, { key: 'ArrowDown', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'c', ctrlKey: true });
+  fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
+  expect(clipboard.write).toHaveBeenCalledTimes(1);
+  expect(readText).toHaveBeenCalledTimes(1);
+  expect(host.sent.some((command) => command.kind === 'select')).toBe(false);
+  await act(async () => answer.resolve({ edge: { row: 3, col: 0 } }));
+});
+
 it('chains rapid peerless data jumps from the latest accepted target', async () => {
   const host = peerlessHarness();
   const first = deferred<xlsx.SelectionData>();

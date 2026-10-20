@@ -53,6 +53,7 @@ test('default editor reaches the peerless surface only through a dynamic import'
   visit(resolve(root, 'packages/pptx-react/src/index.ts'));
   expect([...seen].map((path) => relative(root, path))).not.toContain('packages/pptx-react/src/worker/PeerlessPptxSurface.tsx');
   expect([...seen].filter((path) => /\/worker\/(?:Peerless|peerless|createPeerless|usePeerless)/.test(path))).toEqual([]);
+  expect(seen.has(resolve(root, 'shared/textSelection.ts'))).toBe(false);
   expect(deferred.has(resolve(root, 'packages/pptx-react/src/worker/PeerlessPptxSurface.tsx'))).toBe(true);
 });
 

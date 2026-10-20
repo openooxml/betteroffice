@@ -7,13 +7,15 @@
 //! clock and the wasm host injects `Date.now`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
 use yrs::sync::time::Clock;
-use yrs::types::DeepObservable;
+use yrs::types::text::YChange;
+use yrs::types::{DeepObservable, Delta, EntryChange, Event};
 use yrs::{
-    Doc, IdSet, IndexedSequence, Map, Origin, Out, ReadTxn, Snapshot, Subscription, Text, Transact,
+    Any, Doc, IdSet, IndexedSequence, Map, MapRef, Origin, Out, ReadTxn, Snapshot, Subscription,
+    Text, Transact,
 };
 
 use crate::identity::{IdentityRepair, IdentityWatch};
@@ -26,15 +28,21 @@ pub const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 pub const UNDO_DEPTH: usize = 100;
 
 type AnchorBoundaries = [IdSet; 2];
+type StoryVisibility = Vec<(String, bool)>;
 
 #[derive(Default)]
-struct AnchorHistory(Arc<Mutex<AnchorBoundaries>>);
+struct AnchorHistory(
+    Arc<Mutex<AnchorBoundaries>>,
+    Arc<Mutex<StoryVisibility>>,
+    Arc<Mutex<Option<HashSet<String>>>>,
+);
 
 #[derive(Default)]
 struct AnchorState {
     current: AnchorBoundaries,
     pending: AnchorBoundaries,
     latest: Weak<Mutex<AnchorBoundaries>>,
+    removed_before: HashSet<String>,
 }
 
 /// Policy for grouping tracked local transactions.
@@ -113,6 +121,7 @@ pub struct DocUndoManager {
     identities: IdentityRepair,
     anchor_state: Arc<Mutex<AnchorState>>,
     _anchors: Subscription,
+    _removals: Subscription,
     _history: [Subscription; 2],
     clock: Arc<CaptureClock>,
 }
@@ -168,6 +177,7 @@ impl DocUndoManager {
             .get_map(crate::REMOVED_STORIES)
             .expect("removed stories root is declared");
         inner.expand_scope(doc.yrs_doc(), &removed);
+        let removal_root = removed.clone();
         let comments = doc
             .yrs_doc()
             .transact()
@@ -231,6 +241,28 @@ impl DocUndoManager {
                 merge_boundaries(&mut state.pending, &next);
             })
         };
+        let removals = {
+            let state = Arc::clone(&anchor_state);
+            let removed = removal_root.clone();
+            removal_root.observe_deep(move |txn, events| {
+                let mut before: HashSet<_> = removed.keys(txn).map(str::to_owned).collect();
+                for event in events.iter() {
+                    if let Event::Map(event) = event {
+                        for (story, change) in event.keys(txn) {
+                            match change {
+                                EntryChange::Inserted(_) => {
+                                    before.remove(story.as_ref());
+                                }
+                                EntryChange::Removed(_) | EntryChange::Updated(_, _) => {
+                                    before.insert(story.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                state.lock().unwrap().removed_before = before;
+            })
+        };
         let added = {
             let state = Arc::clone(&anchor_state);
             inner.observe_item_added(move |txn, event| {
@@ -248,6 +280,7 @@ impl DocUndoManager {
             identities: doc.identity_repair(),
             anchor_state,
             _anchors: anchors,
+            _removals: removals,
             _history: [added, updated],
             clock,
             inner,
@@ -274,20 +307,159 @@ impl DocUndoManager {
     }
 
     pub fn undo(&mut self) -> bool {
-        lock(&self.changed_stories).clear();
-        let identities = IdentityWatch::new(&self.doc);
-        let applied = self.inner.undo_blocking();
-        if applied {
-            self.restore_history(identities);
-        }
-        applied
+        self.pop(true)
     }
 
     pub fn redo(&mut self) -> bool {
+        self.pop(false)
+    }
+
+    fn pop(&mut self, undoing: bool) -> bool {
         lock(&self.changed_stories).clear();
+        let tables = Arc::new(Mutex::new(Vec::new()));
+        let restored_stories = Arc::new(Mutex::new(HashSet::new()));
+        let restored = {
+            let tables = Arc::clone(&tables);
+            let restored_stories = Arc::clone(&restored_stories);
+            stories_root(&self.doc.transact()).observe_deep(move |txn, events| {
+                let mut tables = tables.lock().unwrap();
+                let mut restored_stories = restored_stories.lock().unwrap();
+                let mut keys = None;
+                for event in events.iter() {
+                    match event {
+                        Event::Map(event) if event.keys(txn).contains_key("rows") => {
+                            let mut previous = HashSet::new();
+                            match &event.keys(txn)["rows"] {
+                                EntryChange::Updated(Out::Any(rows), _)
+                                | EntryChange::Removed(Out::Any(rows)) => {
+                                    collect_row_stories(rows, &mut previous);
+                                }
+                                _ => {}
+                            }
+                            let mut current = HashSet::new();
+                            if let Some(Out::Any(rows)) = event.target().get(txn, "rows") {
+                                collect_row_stories(&rows, &mut current);
+                            }
+                            for story in current.difference(&previous) {
+                                collect_story_tree(
+                                    txn,
+                                    keys.get_or_insert_with(|| story_keys(txn)),
+                                    story,
+                                    &mut restored_stories,
+                                );
+                            }
+                            if !tables.contains(event.target()) {
+                                tables.push(event.target().clone());
+                            }
+                        }
+                        Event::Text(event) => {
+                            for delta in event.delta(txn) {
+                                if let Delta::Inserted(Out::YMap(map), _) = delta {
+                                    collect_table_stories(
+                                        txn,
+                                        keys.get_or_insert_with(|| story_keys(txn)),
+                                        map,
+                                        &mut restored_stories,
+                                    );
+                                    if !tables.contains(map) {
+                                        tables.push(map.clone());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        };
+        let visibility = Arc::new(Mutex::new(Vec::new()));
+        let protected_stories = Arc::new(Mutex::new(None));
+        let popped = {
+            let visibility = Arc::clone(&visibility);
+            let protected_stories = Arc::clone(&protected_stories);
+            self.inner.observe_item_popped(move |_, event| {
+                *visibility.lock().unwrap() = event.meta().1.lock().unwrap().clone();
+                *protected_stories.lock().unwrap() = event.meta().2.lock().unwrap().clone();
+            })
+        };
         let identities = IdentityWatch::new(&self.doc);
-        let applied = self.inner.redo_blocking();
+        let applied = if undoing {
+            self.inner.undo_blocking()
+        } else {
+            self.inner.redo_blocking()
+        };
+        drop((restored, popped));
         if applied {
+            let mut txn = self.doc.transact_mut_with("system");
+            let removed = txn
+                .get_map(crate::REMOVED_STORIES)
+                .expect("removed stories root is declared");
+            let tables = tables.lock().unwrap();
+            let live_tables: Vec<_> = if tables.is_empty() {
+                Vec::new()
+            } else {
+                crate::live_stories(&stories_root(&txn), &txn)
+                    .filter_map(|(_, value)| match value {
+                        Out::YText(text) => Some(text),
+                        _ => None,
+                    })
+                    .flat_map(|text| text.diff(&txn, YChange::identity))
+                    .filter_map(|diff| match diff.insert {
+                        Out::YMap(map) => Some(map),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let mut cells = HashSet::new();
+            let keys = if tables.is_empty() {
+                Vec::new()
+            } else {
+                story_keys(&txn)
+            };
+            for table in tables.iter() {
+                if live_tables.contains(table) {
+                    collect_table_stories(&txn, &keys, table, &mut cells);
+                }
+            }
+            let mut inverse = BTreeMap::new();
+            let protected_stories = protected_stories
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default();
+            for (story, hidden) in visibility.lock().unwrap().iter() {
+                if *hidden {
+                    removed.insert(&mut txn, story.as_str(), true);
+                    lock(&self.changed_stories).push(story.clone());
+                } else if cells.contains(story) && !protected_stories.contains(story) {
+                    removed.remove(&mut txn, story);
+                    lock(&self.changed_stories).push(story.clone());
+                } else {
+                    continue;
+                }
+                inverse.insert(story.clone(), !*hidden);
+            }
+            for story in cells.intersection(&restored_stories.lock().unwrap()) {
+                if !protected_stories.contains(story) && removed.remove(&mut txn, story).is_some() {
+                    inverse.insert(story.clone(), true);
+                    lock(&self.changed_stories).push(story.clone());
+                }
+            }
+            drop(txn);
+            let stack = if undoing {
+                self.inner.redo_stack()
+            } else {
+                self.inner.undo_stack()
+            };
+            if let Some(item) = stack.last() {
+                *item.meta().1.lock().unwrap() = inverse.into_iter().collect();
+                *item.meta().2.lock().unwrap() = Some(protected_stories);
+            }
+            {
+                let mut changed = lock(&self.changed_stories);
+                changed.sort();
+                changed.dedup();
+            }
             self.restore_history(identities);
         }
         applied
@@ -413,6 +585,85 @@ impl DocUndoManager {
     }
 }
 
+fn story_keys(txn: &impl ReadTxn) -> Vec<String> {
+    let mut keys: Vec<String> = stories_root(txn).keys(txn).map(str::to_owned).collect();
+    keys.sort_unstable();
+    keys
+}
+
+fn collect_table_stories(
+    txn: &impl ReadTxn,
+    keys: &[String],
+    table: &MapRef,
+    stories: &mut HashSet<String>,
+) {
+    if crate::map_string(table, txn, crate::KIND_KEY).as_deref() != Some("table") {
+        return;
+    }
+    let Some(Out::Any(rows)) = table.get(txn, "rows") else {
+        return;
+    };
+    let mut cells = HashSet::new();
+    collect_row_stories(&rows, &mut cells);
+    for cell in cells {
+        collect_story_tree(txn, keys, &cell, stories);
+    }
+}
+
+fn collect_row_stories(rows: &Any, stories: &mut HashSet<String>) {
+    let Any::Array(rows) = rows else {
+        return;
+    };
+    for row in rows.iter() {
+        let Any::Map(row) = row else {
+            continue;
+        };
+        let Some(Any::Array(cells)) = row.get("cells") else {
+            continue;
+        };
+        for cell in cells.iter() {
+            let Any::Map(cell) = cell else {
+                continue;
+            };
+            let Some(Any::String(story)) = cell.get("story") else {
+                continue;
+            };
+            stories.insert(story.to_string());
+        }
+    }
+}
+
+fn collect_story_tree(
+    txn: &impl ReadTxn,
+    keys: &[String],
+    story: &str,
+    stories: &mut HashSet<String>,
+) {
+    if !stories.insert(story.to_owned()) {
+        return;
+    }
+    let root = stories_root(txn);
+    let prefix = format!("{story}:");
+    let start = keys.partition_point(|key| key.as_str() < prefix.as_str());
+    for child in keys[start..]
+        .iter()
+        .take_while(|key| key.starts_with(&prefix))
+    {
+        collect_story_tree(txn, keys, child, stories);
+    }
+    let Some(Out::YText(text)) = root.get(txn, story) else {
+        return;
+    };
+    for diff in text.diff(txn, YChange::identity) {
+        if let Out::YMap(embed) = diff.insert {
+            if let Some(child) = crate::map_string(&embed, txn, "story") {
+                collect_story_tree(txn, keys, &child, stories);
+            }
+            collect_table_stories(txn, keys, &embed, stories);
+        }
+    }
+}
+
 fn merge_boundaries(target: &mut AnchorBoundaries, source: &AnchorBoundaries) {
     for (target, source) in target.iter_mut().zip(source) {
         target.merge_with(source.clone());
@@ -425,6 +676,17 @@ fn remember_history_boundaries(
     state: &Mutex<AnchorState>,
 ) {
     let mut state = state.lock().unwrap();
+    let mut removed_before = event.meta().2.lock().unwrap();
+    if removed_before.is_none() {
+        let removed = txn
+            .get_map(crate::REMOVED_STORIES)
+            .expect("removed stories root is declared");
+        *removed_before = Some(if event.has_changed(&removed) {
+            state.removed_before.clone()
+        } else {
+            removed.keys(txn).map(str::to_owned).collect()
+        });
+    }
     let mut boundaries = event.meta().0.lock().unwrap();
     merge_boundaries(&mut boundaries, &state.current);
     merge_boundaries(&mut boundaries, &state.pending);

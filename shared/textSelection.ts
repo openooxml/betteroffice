@@ -1,3 +1,7 @@
+import { caretColumnOffset } from './caretColumnOffset';
+
+export { caretColumnOffset };
+
 export interface TextRange {
   start: number;
   end: number;
@@ -71,6 +75,9 @@ function clampedIndex(text: string, index: number): number {
 /** The laid-out lines a caret can move through, as the display list reports
  *  them. Only the fields caret movement reads are required. */
 export interface CaretLine {
+  columnOffset?: number;
+  x?: number;
+  y?: number;
   start: number;
   end: number;
   caretStops: ReadonlyArray<{ position: number; x: number }>;
@@ -99,7 +106,8 @@ export function caretGoalX(
   caret: CaretLocation
 ): number | undefined {
   const line = lines[caretLineIndex(lines, caret)];
-  return line?.caretStops.find((stop) => stop.position === caret.position)?.x;
+  const x = line?.caretStops.find((stop) => stop.position === caret.position)?.x;
+  return x === undefined ? undefined : x - caretColumnOffset(lines, caretLineIndex(lines, caret));
 }
 
 /** Moves vertically while retaining `goalX`. */
@@ -114,7 +122,8 @@ export function verticalCaretMove(
   const targetIndex = index + (direction === 'up' ? -1 : 1);
   const target = lines[targetIndex];
   if (!target) return { position: caret.position, lineIndex: index };
-  const x = goalX ?? caretGoalX(lines, caret);
+  const goal = goalX ?? caretGoalX(lines, caret);
+  const x = goal === undefined ? undefined : goal + caretColumnOffset(lines, targetIndex);
   if (x === undefined) return { position: target.start, lineIndex: targetIndex };
   const nearest = target.caretStops.reduce<{ position: number; x: number } | null>(
     (best, stop) => (best === null || Math.abs(stop.x - x) < Math.abs(best.x - x) ? stop : best),

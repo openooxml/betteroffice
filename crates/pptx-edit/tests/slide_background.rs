@@ -332,6 +332,59 @@ fn invalid_backgrounds_are_refused_before_saving() {
 }
 
 #[test]
+fn invalid_background_transforms_are_refused_without_mutating_state() {
+    use ooxml_drawingml::ColorTransform::{self, *};
+
+    let session = DeckSession::open(FIXTURE, 18).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let before = background_of(&session, 0);
+    let version = session.version();
+    let constructors: [fn(f64) -> ColorTransform; 23] = [
+        Tint, Shade, Hue, HueMod, HueOff, Sat, SatMod, SatOff, Lum, LumMod, LumOff, Red, RedMod,
+        RedOff, Green, GreenMod, GreenOff, Blue, BlueMod, BlueOff, Alpha, AlphaMod, AlphaOff,
+    ];
+    let mut invalid = Vec::new();
+    for constructor in constructors {
+        invalid.extend([f64::NAN, f64::INFINITY, f64::NEG_INFINITY].map(constructor));
+    }
+    let ranged: [fn(f64) -> ColorTransform; 6] = [Tint, Shade, LumMod, LumOff, SatMod, Alpha];
+    for constructor in ranged {
+        invalid.extend([-0.01, 1.01].map(constructor));
+    }
+    for transform in invalid {
+        let color = ColorValue {
+            rgb: Some("112233".to_owned()),
+            transforms: vec![transform],
+            ..Default::default()
+        };
+        for fill in [
+            ShapeFill {
+                fill_type: "solid".to_owned(),
+                color: Some(color.clone()),
+                gradient: None,
+            },
+            gradient_with(vec![
+                stop(0.0, "FFFFFF"),
+                GradientStop {
+                    position: 100_000.0,
+                    color: color.clone(),
+                },
+            ]),
+        ] {
+            assert!(
+                matches!(
+                    session.set_slide_background(&context(), &slide_id, Some(&fill)),
+                    Err(EditError::InvalidFill(_))
+                ),
+                "{transform:?}"
+            );
+            assert_eq!(background_of(&session, 0), before);
+            assert_eq!(session.version(), version);
+        }
+    }
+}
+
+#[test]
 fn the_batch_guard_checks_the_effective_background() {
     let session = DeckSession::open(FIXTURE, 19).unwrap();
     let slide_id = session.snapshot().unwrap().slides[0].id.clone();

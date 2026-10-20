@@ -126,3 +126,69 @@ test('docx toolbar saves equal formatting and table properties in both arms', as
   }
   expect(results[1]).toEqual(results[0]);
 });
+
+async function openSpaced(page: Page, arm: string, source: Buffer | string) {
+  await page.goto('/?format=docx' + arm);
+  await page.locator('input[type=file]').last().setInputFiles(typeof source === 'string' ? source : {
+    name: 'spaced.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: source,
+  });
+  await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByTestId('formatting-bar')).toBeVisible();
+  await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({ position: { x: 150, y: 150 } });
+  const input = page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  await expect(input).toBeEditable();
+  await input.press('ControlOrMeta+Home');
+  return input;
+}
+
+test('docx toolbar line spacing and indent save over direct paragraph properties in both arms', async ({ page }, info) => {
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  zip.file('word/styles.xml', `<w:styles xmlns:w="${w}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>`);
+  zip.file('word/document.xml', `<w:document xmlns:w="${w}"><w:body>` +
+    '<w:p><w:pPr><w:pStyle w:val="Normal"/><w:spacing w:before="120" w:after="240" w:line="240" w:lineRule="auto"/><w:ind w:left="360" w:hanging="360"/></w:pPr><w:r><w:t>Alpha</w:t></w:r></w:p>' +
+    '<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Bravo</w:t></w:r></w:p>' +
+    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>');
+  const source = await zip.generateAsync({ type: 'nodebuffer' });
+  await page.setViewportSize({ width: 2560, height: 1200 });
+  for (const arm of ['&peerless=0', '']) {
+    const label = arm ? 'hybrid' : 'default';
+    await test.step(label, async () => {
+      const input = await openSpaced(page, arm, source);
+      const rail = page.getByTestId('formatting-bar');
+      const spacing = rail.getByRole('combobox', { name: 'Line spacing', exact: true });
+      await expect(spacing).toHaveAttribute('title', 'Line spacing: Single');
+      for (const step of ['first', 'second']) {
+        if (step === 'second') {
+          await input.press('ArrowDown');
+          await expect(spacing).toHaveAttribute('title', 'Line spacing: Single');
+        }
+        await spacing.click();
+        await page.getByRole('option', { name: '1.15', exact: true }).click();
+        await expect(spacing).toHaveAttribute('title', 'Line spacing: 1.15');
+        await rail.getByRole('button', { name: 'Increase Indent', exact: true }).click();
+      }
+      const downloading = page.waitForEvent('download');
+      await page.getByRole('button', { name: 'Save', exact: true }).first().click();
+      const file = info.outputPath(`${label}-spacing.docx`);
+      await (await downloading).saveAs(file);
+      const xml = await (await JSZip.loadAsync(await readFile(file))).file('word/document.xml')!.async('string');
+      const saved = await page.evaluate(({ xml, w }) => Array.from(new DOMParser().parseFromString(xml, 'application/xml')
+        .getElementsByTagNameNS(w, 'p')).map((paragraph) => {
+        const element = (name: string) => paragraph.getElementsByTagNameNS(w, name)[0];
+        const attrs = (name: string) => Object.fromEntries(Array.from(element(name)?.attributes ?? [])
+          .map((attribute) => [attribute.localName, attribute.value]));
+        return { spacing: attrs('spacing'), ind: attrs('ind') };
+      }), { xml, w });
+      expect(saved).toEqual([
+        { spacing: { before: '120', after: '240', line: '276', lineRule: 'auto' }, ind: { left: '1080', hanging: '360' } },
+        { spacing: { line: '276', lineRule: 'auto' }, ind: { left: '720' } },
+      ]);
+      await openSpaced(page, arm, file);
+      await expect(spacing).toHaveAttribute('title', 'Line spacing: 1.15');
+    });
+  }
+});

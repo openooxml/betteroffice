@@ -400,6 +400,8 @@ pub struct Shape {
     pub style: Option<Box<ShapeStyle>>,
     #[serde(default)]
     pub adjust_values: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_bg_fill: bool,
     pub fill: Option<ShapeFill>,
     /// The image behind an `a:blipFill`, when the fill is a stretched picture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -426,6 +428,9 @@ pub struct PictureFill {
     /// `a:tile`: the picture repeats at its own size instead of stretching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tile: Option<PictureTile>,
+    /// Bitmap effects in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<BlipEffect>,
 }
 
 /// `a:blipFill/a:tile`. The offset, alignment and flip it can also carry are
@@ -775,6 +780,12 @@ where
 pub struct TextBody {
     pub anchor: Option<String>,
     pub vertical: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_col: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spc_col: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtl_col: Option<bool>,
     /// Use a 1.2 em percentage pitch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat_line_spacing: Option<bool>,

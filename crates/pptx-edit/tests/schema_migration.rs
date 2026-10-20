@@ -744,6 +744,60 @@ fn assert_source_recovers(
 }
 
 #[test]
+fn a_stored_slide_recovers_its_background_picture_effects() {
+    assert_background_picture_recovers("ppt/slides/slide1.xml", 45300);
+}
+
+#[test]
+fn a_stored_layout_recovers_its_background_picture_effects() {
+    assert_background_picture_recovers("ppt/slideLayouts/slideLayout1.xml", 45400);
+}
+
+#[test]
+fn a_stored_master_recovers_its_background_picture_effects() {
+    assert_background_picture_recovers("ppt/slideMasters/slideMaster1.xml", 45500);
+}
+
+#[test]
+fn a_stored_theme_recovers_its_background_picture_effects() {
+    assert_background_picture_recovers("ppt/theme/theme1.xml", 45600);
+}
+
+fn assert_background_picture_recovers(path: &str, client_id: u64) {
+    let picture = r#"<a:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="background"><a:alphaModFix amt="20000"/><a:duotone><a:schemeClr val="phClr"/><a:srgbClr val="FFFFFF"/></a:duotone></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>"#;
+    let mut xml = defaults_part(path);
+    if path == "ppt/theme/theme1.xml" {
+        let start = xml.find("<a:bgFillStyleLst>").unwrap();
+        let end = xml.find("</a:bgFillStyleLst>").unwrap() + "</a:bgFillStyleLst>".len();
+        xml.replace_range(
+            start..end,
+            &format!("<a:bgFillStyleLst>{picture}</a:bgFillStyleLst>"),
+        );
+    } else {
+        if let Some(start) = xml.find("<p:bg>") {
+            let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+            xml.replace_range(start..end, "");
+        }
+        xml = xml.replacen(
+            "<p:spTree>",
+            &format!("<p:bg><p:bgPr>{picture}</p:bgPr></p:bg><p:spTree>"),
+            1,
+        );
+    }
+    let source = defaults_variant(&[(path, &defaults_part(path), &xml)]);
+    let parsed = serde_json::to_value(pptx_parse::parse_pptx(&source).unwrap()).unwrap();
+    assert!(parsed.to_string().contains("\"alpha\""));
+    for (offset, keys) in [
+        (0, &["backgroundPicture", "backgroundPictures"][..]),
+        (10, &["effects"][..]),
+    ] {
+        assert_source_recovers(&source, client_id + offset, &[], |value| {
+            without_keys(value, keys)
+        });
+    }
+}
+
+#[test]
 fn a_2_0_snapshot_recovers_run_baselines() {
     assert_source_recovers(
         include_bytes!("../../pptx-render/tests/fixtures/text-baseline-script.pptx"),

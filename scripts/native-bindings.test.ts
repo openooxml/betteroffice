@@ -245,7 +245,7 @@ describe('native package release wiring', () => {
     const steps = publish.jobs.publish.steps;
     const download = steps.find(
       (step: any) =>
-        step.uses === 'actions/download-artifact@v4' &&
+        step.uses === 'actions/download-artifact@v8' &&
         step.with.pattern === '${{ inputs.binding }}-native.*'
     );
     expect(download.with).toEqual({
@@ -255,7 +255,7 @@ describe('native package release wiring', () => {
     });
     const loader = steps.find(
       (step: any) =>
-        step.uses === 'actions/download-artifact@v4' &&
+        step.uses === 'actions/download-artifact@v8' &&
         step.with.name === '${{ inputs.binding }}-native-loader'
     );
     expect(loader.with).toEqual({
@@ -433,7 +433,7 @@ describe('native package release wiring', () => {
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const download = job.steps.find(
       (step: any) =>
-        step.uses === 'actions/download-artifact@v4' &&
+        step.uses === 'actions/download-artifact@v8' &&
         step.with.pattern === '${{ matrix.binding }}-native.*'
     );
     expect(download.with).toEqual({
@@ -443,7 +443,7 @@ describe('native package release wiring', () => {
     });
     const loader = job.steps.find(
       (step: any) =>
-        step.uses === 'actions/download-artifact@v4' &&
+        step.uses === 'actions/download-artifact@v8' &&
         step.with.name === '${{ matrix.binding }}-native-loader'
     );
     expect(loader.with).toEqual({

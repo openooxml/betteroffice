@@ -526,7 +526,11 @@ impl PptxDocument {
         if request.len() > MAX_REQUEST_BYTES {
             return self.oversized();
         }
-        let request: EditRequest = parse_args(request)?;
+        let request: EditRequest = serde_json::from_str(request).map_err(|error| {
+            let exception = js_sys::Error::new(&error.to_string());
+            exception.set_name("PptxEditDecodeError");
+            JsValue::from(exception)
+        })?;
         outcome_json(&self.session.validate_edits(&request).map_err(js_error)?).map_err(js_error)
     }
 

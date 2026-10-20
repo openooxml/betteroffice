@@ -242,6 +242,66 @@ fn inline_picture_in_text_box_paints_with_body_image_properties() {
 }
 
 #[test]
+fn chartex_choice_paints_its_picture_fallback_once() {
+    let alternate = format!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><mc:Choice Requires="cx"><w:drawing><wp:inline><wp:extent cx="1828800" cy="914400"/><wp:docPr id="8" name="Chart"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart r:id="rIdChartEx"/></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback>{PICTURE}</mc:Fallback></mc:AlternateContent>"#
+    );
+    for boxed in [false, true] {
+        let mut parts = ooxml_opc::unzip_parts(&document(&alternate, boxed)).unwrap();
+        let relationships = &mut parts
+            .iter_mut()
+            .find(|(path, _)| path == "word/_rels/document.xml.rels")
+            .unwrap()
+            .1;
+        *relationships = String::from_utf8(relationships.clone())
+            .unwrap()
+            .replace(
+                "</Relationships>",
+                r#"<Relationship Id="rIdChartEx" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="charts/chartEx1.xml"/></Relationships>"#,
+            )
+            .into_bytes();
+        parts.push((
+            "word/charts/chartEx1.xml".to_owned(),
+            br#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart/></cx:chartSpace>"#.to_vec(),
+        ));
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        for media_tokens in [true, false] {
+            let display = display(&bytes, media_tokens);
+            let painted: Vec<_> = display["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|page| page["primitives"].as_array().unwrap())
+                .cloned()
+                .collect();
+            let pictures = images(&painted);
+            assert_eq!(
+                pictures.len(),
+                1,
+                "boxed={boxed}, media_tokens={media_tokens}"
+            );
+            if media_tokens {
+                assert_eq!(pictures[0]["relId"], "media:0");
+            } else {
+                assert!(
+                    pictures[0]["relId"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("data:image/png;base64,")
+                );
+            }
+            let fallback = primitives(PICTURE, boxed, media_tokens);
+            let expected = images(&fallback);
+            assert_eq!(expected.len(), 1);
+            for key in ["relId", "w", "h", "crop", "altText"] {
+                assert_eq!(pictures[0][key], expected[0][key], "{key}");
+            }
+            assert!(painted.iter().all(|primitive| primitive["chart"].is_null()));
+        }
+    }
+}
+
+#[test]
 fn text_around_a_text_box_picture_still_paints() {
     let display = primitives(
         &format!("<w:t>Before</w:t>{PICTURE}<w:t>After</w:t>"),
