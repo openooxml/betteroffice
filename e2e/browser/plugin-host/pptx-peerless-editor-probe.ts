@@ -3,6 +3,8 @@ import type { PptxReadResult, PresentationCommandSelected } from '../../../packa
 export interface PeerlessEditorProbe {
   ready: Promise<void>;
   errors: string[];
+  saves: number[][];
+  setReadOnly(value: boolean, toolbar?: boolean): void;
   mainThreadEngines(): number;
   generation(editor?: number): number;
   hydrated(editor?: number): boolean;

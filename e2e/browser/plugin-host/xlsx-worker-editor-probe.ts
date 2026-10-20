@@ -40,7 +40,8 @@ export interface WorkerEditorProbe {
   replayEntries: { generation: number; sequence: number; method: string; args: unknown[] }[];
   generation(index?: number): number;
   readyCount(): number;
-  setReadOnly(value: boolean): void;
+  saves: number[][];
+  setReadOnly(value: boolean, toolbar?: boolean): void;
   readOnlyEditRefusal(): string;
   savedInputs(): Promise<string[]>;
   releaseHydration(): void;
