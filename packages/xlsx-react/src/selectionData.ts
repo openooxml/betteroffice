@@ -6,10 +6,11 @@ import type {
 
 const SHEET_ROWS = 1_048_576;
 const SHEET_COLS = 16_384;
+export const MAX_CLEAR_CELLS = 100_000;
 
 type UsedRange = () => CellRange | null | undefined;
 
-const reachesSheetEdge = (range: CellRange) => range.bottom >= SHEET_ROWS - 1 || range.right >= SHEET_COLS - 1;
+export const reachesSheetEdge = (range: CellRange) => range.bottom >= SHEET_ROWS - 1 || range.right >= SHEET_COLS - 1;
 
 export function copiedRange(range: CellRange, used: UsedRange): CellRange {
   if (!reachesSheetEdge(range)) return range;
@@ -29,12 +30,19 @@ export async function copiedSelection(
   return copiedRange(range, () => usedRange);
 }
 
-export function clearedCells(range: CellRange, used: UsedRange): CellInputEdit[] {
-  const bounds = reachesSheetEdge(range) ? used() : range;
+export function clearedCells(range: CellRange, used: UsedRange): CellInputEdit[] | null {
+  const edge = reachesSheetEdge(range);
+  const bounds = edge ? used() : range;
   const edits: CellInputEdit[] = [];
   if (!bounds) return edits;
-  for (let row = Math.max(range.top, bounds.top); row <= Math.min(range.bottom, bounds.bottom); row++) {
-    for (let col = Math.max(range.left, bounds.left); col <= Math.min(range.right, bounds.right); col++) {
+  const top = Math.max(range.top, bounds.top);
+  const bottom = Math.min(range.bottom, bounds.bottom);
+  const left = Math.max(range.left, bounds.left);
+  const right = Math.min(range.right, bounds.right);
+  if (top > bottom || left > right) return edits;
+  if (edge && (bottom - top + 1) * (right - left + 1) > MAX_CLEAR_CELLS) return null;
+  for (let row = top; row <= bottom; row++) {
+    for (let col = left; col <= right; col++) {
       edits.push({ row, col, input: '' });
     }
   }

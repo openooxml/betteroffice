@@ -4217,6 +4217,47 @@ describe('workbook worker editor', () => {
     expect(host.peerMethods.editCells).toHaveBeenCalledWith(0, [{ row: 0, col: 0, input: '' }]);
   });
 
+  for (const hydrated of [false, true]) for (const key of ['Delete', 'x'] as const) {
+    it(`${key === 'Delete' ? 'clears' : 'cuts'} cells added by a pending paste after Ctrl+A (${hydrated ? 'hydrated' : 'before hydration'})`, async () => {
+      const host = harness();
+      const hydration = deferred<WorkbookHandle>();
+      if (!hydrated) host.hydrate.mockReturnValue(hydration.promise);
+      const paste = deferred<string>();
+      replaceClipboard('readText', mock(() => paste.promise));
+      if (key === 'x') promisedClipboard();
+      const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+      await opened();
+      const scroll = view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
+      await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+      fireEvent.keyDown(scroll, { key, ctrlKey: key === 'x' });
+      await advance(3);
+      expect(host.editMethods.editCells).not.toHaveBeenCalled();
+      expect(host.cells.has('0:0:1')).toBe(false);
+      await act(async () => { paste.resolve('first\toutside'); hydration.resolve(host.peer); });
+      await advance(16);
+      expect(host.editMethods.editCells.mock.calls).toEqual([
+        [0, [{ row: 0, col: 0, input: 'first' }, { row: 0, col: 1, input: 'outside' }]],
+        [0, [{ row: 0, col: 0, input: '' }, { row: 0, col: 1, input: '' }]],
+      ]);
+      expect(host.cells.get('0:0:0')).toBe('');
+      expect(host.cells.get('0:0:1')).toBe('');
+    });
+  }
+
+  it('does not dispatch an empty clear for a Ctrl+A sheet selection', async () => {
+    const host = harness();
+    host.cells.clear();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    fireEvent.keyDown(scroll, { key: 'Delete' });
+    await advance();
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.replay).not.toHaveBeenCalled();
+  });
+
   it('shows visible ready commit text while the replacement frame is held without blocking input', async () => {
     const host = harness(true);
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);

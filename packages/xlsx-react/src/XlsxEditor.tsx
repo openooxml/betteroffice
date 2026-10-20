@@ -1810,6 +1810,7 @@ function XlsxEditorContent({
       if (handleRef.current !== handle || readOnlyRef.current) return;
       try {
         const edits = clearedCells(range, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
+        if (!edits) { setError('Clear exceeds the cell limit'); return; }
         applyResult(handle.editCells(sheet, edits));
         return true;
       } catch (e) {

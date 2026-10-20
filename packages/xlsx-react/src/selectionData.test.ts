@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from 'bun:test';
 import { normalizeRange, selectionAt } from '@betteroffice/xlsx';
 import type { KeyInput, Selection, SelectionData } from '@betteroffice/xlsx';
 import { deriveLimits } from './viewer/sessionGeometry';
-import { createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from './selectionData';
+import { clearedCells, createSelectionDataNavigation, sameSelection, selectionDataRequest, selectionHidden } from './selectionData';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -38,6 +38,29 @@ function navigation(anchorActive = false) {
       queue.defer(current, task, behindActions, cancel),
   };
 }
+
+describe('Ctrl+A sheet selection clears', () => {
+  const sheet = { top: 0, left: 0, bottom: 1_048_575, right: 16_383 };
+
+  it('refuses a sparse used range spanning A1:XFD1048576 before expanding it', () => {
+    expect(clearedCells(sheet, () => sheet)).toBeNull();
+  });
+
+  it('applies the host cell limit to the intersection with the used range', () => {
+    const column = { ...sheet, right: 0 };
+    expect(clearedCells(column, () => ({ ...sheet, bottom: MAX_CLEAR_CELLS - 1 })))
+      .toHaveLength(MAX_CLEAR_CELLS);
+    expect(clearedCells(column, () => ({ ...sheet, bottom: MAX_CLEAR_CELLS }))).toBeNull();
+    expect(clearedCells({ ...column, top: 1 }, () => ({ ...sheet, bottom: 0 }))).toEqual([]);
+  });
+
+  it('preserves clears larger than the limit when the selection does not reach a sheet edge', () => {
+    const used = mock(() => sheet);
+    expect(clearedCells({ top: 0, left: 0, bottom: MAX_CLEAR_CELLS, right: 0 }, used))
+      .toHaveLength(MAX_CLEAR_CELLS + 1);
+    expect(used).not.toHaveBeenCalled();
+  });
+});
 
 describe('selection data navigation', () => {
   it('requests the used range for Ctrl/Meta End and leaves plain End synchronous', () => {

@@ -1,4 +1,4 @@
-import { clearedCells, copiedRange, createSelectionDataNavigation, selectionDataRequest, selectionHidden } from '../selectionData';
+import { clearedCells, copiedRange, createSelectionDataNavigation, reachesSheetEdge, selectionDataRequest, selectionHidden } from '../selectionData';
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
   extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
@@ -955,7 +955,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer);
         let result: EditResult;
         try {
-          result = op ? (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult :
+          result = op ? (run!.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult :
             owner.editPeer.editCell(draft.sheet, draft.row, draft.col, draft.value);
         } catch (error) {
           if (inputRefusal(error)) draftDiscards.get(draft)?.();
@@ -1025,7 +1025,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!owner?.current || owner.failure || !selected || kind !== 'copy' && !acceptInput()) return;
     const sheet = activeRef.current;
     const range = normalizeRange(selected);
-    const usedRange = () => owner.peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange;
+    const usedRange = () => run!.peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange;
     let clipboardWrite: { resolve(payload: Blob): void; reject(error: unknown): void; done: Promise<boolean> } | undefined;
     if (kind !== 'paste') {
       if (typeof ClipboardItem !== 'function' || typeof navigator.clipboard.write !== 'function') {
@@ -1053,9 +1053,12 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (kind === 'cut' && discardPreview) void discardPreview().catch(reportInputError);
       reportInputError(error);
     });
-    const prepareMutation = async (text: string) => {
+    const prepareMutation = async (text: string, queued = false) => {
+      if (kind === 'cut' && reachesSheetEdge(range) && !queued) return;
       if (kind !== 'copy' && !mutation) {
-        const edits: CellInputEdit[] = kind === 'paste' ? [] : clearedCells(range, usedRange);
+        const edits = kind === 'paste' ? [] : clearedCells(range, usedRange);
+        if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
+        if (kind === 'cut' && edits.length === 0) return;
         if (kind === 'paste') {
           fromTsv(text).forEach((row, dr) => row.forEach((input, dc) =>
             edits.push({ row: range.top + dr, col: range.left + dc, input })));
@@ -1066,7 +1069,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (clipboardRefusal) { await discardPreview?.(); throw clipboardRefusal; }
     };
     void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
-      if (kind !== 'copy' && !mutation) await prepareMutation(text);
+      if (kind !== 'copy' && !mutation) await prepareMutation(text, true);
       if (kind !== 'paste') {
         const copied = toTsv(owner.peer!.rangeCells(sheet, rangeA1(copiedRange(range, usedRange))));
         let written: boolean;
@@ -1082,12 +1085,13 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         if (!written) throw new WorkerInputRefusal('Clipboard write was refused', kind === 'cut');
         if (kind === 'copy') return;
       }
-      const op = mutation!;
+      if (!mutation) return;
+      const op = mutation;
       const edits = op.args[1];
       if (edits.length === 0) return;
       markApplied.check();
-      const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer!);
-      const result = (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
+      const operations = workbookEditPeerOperations(run!.recovering ? operationPeer.current! : run!.editPeer!);
+      const result = (run!.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied();
       apply(result, op);
       if (kind === 'paste' && selectionRef.current === selected && activeRef.current === sheet) {
@@ -1106,17 +1110,24 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!acceptInput() || !selectionRef.current) return;
     const sheet = activeRef.current;
     const range = normalizeRange(selectionRef.current);
-    const peer = run!.peer;
-    const edits = clearedCells(range, () => peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange);
-    const op: WorkbookReplayOp = { method: 'editCells', args: [sheet, edits] };
+    let op: WorkbookReplayOp | undefined;
     let discardPreview: (() => Promise<void>) | undefined;
+    const prepareClear = async () => {
+      const edits = clearedCells(range, () => run!.peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange);
+      if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
+      if (edits.length === 0) return;
+      op = { method: 'editCells', args: [sheet, edits] };
+      discardPreview = await previewEdits(sheet, edits, op);
+    };
     void coordinator.runAfterPendingInput(async (_, markApplied) => {
+      if (!op) await prepareClear();
+      if (!op) return;
       markApplied.check();
       const operations = workbookEditPeerOperations(run!.recovering ? operationPeer.current! : run!.editPeer!);
       const result = (run!.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied(); apply(result, op);
     }, { kind: 'input', target: { sheet, target: JSON.stringify(range) },
-      prepare: async () => { discardPreview = await previewEdits(sheet, edits, op); } }).catch(async (error) => {
+      prepare: async () => { if (!reachesSheetEdge(range)) await prepareClear(); } }).catch(async (error) => {
       if (inputRefusal(error)) await discardPreview?.();
       reportInputError(error);
     });
