@@ -25,6 +25,8 @@ export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
   [K in keyof AsyncOperations]: (...args: Parameters<AsyncOperations[K]>) => Promise<ReturnType<AsyncOperations[K]>>;
 } & { handleAsync(): Promise<PptxPeerlessEditorAccess>; recoverySave(): ReturnType<PeerlessPresentation['recover']> };
 
+const caller = { reportRefusal: false } as const;
+
 function unsupported(operation: string): never {
   throw new PptxPeerlessUnsupportedError(operation);
 }
@@ -63,7 +65,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
   const register = async (face: PptxFontFace, fallback: boolean): Promise<number> => {
     admit();
     const operation = run.store.dispatch({ kind: 'registerFont', payload: { font: { ...face, bytes: face.bytes.slice().buffer },
-      fallback, inputTime: performance.now(), undoGroup: 'font' } });
+      fallback, inputTime: performance.now(), undoGroup: 'font' } }, caller);
     await run.installFont(face);
     const ack = await operation;
     run.require();
@@ -76,7 +78,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     admit();
     if (!Number.isSafeInteger(slide) || slide < 1 || slide > run.client.state.slides.length) return false;
     const slideId = run.client.state.slides[slide - 1]!.id;
-    const ack = await run.store.dispatch({ kind: 'activateSlide', payload: { slideId } });
+    const ack = await run.store.dispatch({ kind: 'activateSlide', payload: { slideId } }, caller);
     await installed();
     return !ack.outcomes.some((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled') &&
       run.store.getSnapshot().confirmed?.frame.slideId === slideId;
@@ -101,7 +103,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
         return { ok: false, version: ack.version,
           failure: { code: 'read-only', message: 'The editor is read-only' } } satisfies PptxEditRefusal;
       }
-      const ack = await run.store.dispatch({ kind: 'applyEdits', payload: { request, inputTime: performance.now(), undoGroup: 'batch' } });
+      const ack = await run.store.dispatch({ kind: 'applyEdits', payload: { request, inputTime: performance.now(), undoGroup: 'batch' } }, caller);
       run.require();
       await installed();
       return ack.editResult ?? { ok: false, version: ack.version, failure: {
@@ -114,7 +116,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
       const slideId = run.client.state.slides[target.slide - 1]!.id;
       const ack = await run.store.dispatch({ kind: 'setSelection', payload: { selection: { slideId,
         shapeId: target.shapeId, storyId: target.storyId, anchor: target.start, focus: target.end, affinity: 'downstream' },
-        inputTime: performance.now(), undoGroup: 'selection' } });
+        inputTime: performance.now(), undoGroup: 'selection' } }, caller);
       await installed();
       return !ack.outcomes.some((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
     },
@@ -134,7 +136,7 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
   };
   const mutations = Object.fromEntries(PRESENTATION_COMMAND_MUTATIONS.map((method) => [method, async (...args: unknown[]) => {
     admit();
-    const ack = await invokePeerless(run, { method, args } as PresentationCommandMutation);
+    const ack = await invokePeerless(run, { method, args } as PresentationCommandMutation, caller);
     run.require();
     const refused = ack.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
     if (refused) {

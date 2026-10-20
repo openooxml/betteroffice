@@ -419,7 +419,7 @@ export function usePeerlessPresentation(
           },
           subscribePresentation: (listener) => subscribe(subscribePresentation, listener),
           subscribeEditState: (listener) => subscribe(subscribeEditState, listener),
-          dispatch: (intent) => {
+          dispatch: (intent, options) => {
             try {
               require();
               const admission = PRESENTATION_COMMAND_ADMISSION[intent.kind];
@@ -429,7 +429,7 @@ export function usePeerlessPresentation(
               if (admission !== 'mode' && !selectionEnabled() && !['undo', 'redo', 'applyEdits', 'registerFont', 'invoke', 'setChangeObserver'].includes(intent.kind)) {
                 throw new Error('Slide input is unavailable');
               }
-              return dispatch(intent);
+              return dispatch(intent, options);
             } catch (error) { return Promise.reject(error); }
           },
           fence: async () => { require(); await fence(); require(); },

@@ -78,7 +78,7 @@ export interface PeerlessViewStore {
   subscribePresentation(listener: () => void): () => void;
   subscribeStructure(listener: () => void): () => void;
   subscribeEditState(listener: () => void): () => void;
-  dispatch(intent: PresentationCommandIntent): Promise<PresentationCommandAck>;
+  dispatch(intent: PresentationCommandIntent, options?: { reportRefusal?: boolean }): Promise<PresentationCommandAck>;
   fence(): Promise<void>;
   setSelection(selection: PresentationCommandSelection | null): void;
   setFocused(focused: boolean): void;
@@ -98,6 +98,7 @@ interface WaitingInput {
   intent: PresentationCommandIntent;
   chunks: string[];
   echoed: boolean;
+  quiet: boolean;
   operation: Promise<PresentationCommandAck>;
   resolve(ack: PresentationCommandAck): void;
   reject(error: unknown): void;
@@ -154,6 +155,7 @@ export function createPeerlessViewStore(
   const navigationTargets = new Map<number, string>();
   let navigationReply: { seq: number; slideId: string } | undefined;
   const captured = new Map<Promise<PresentationCommandAck>, (error: unknown) => void>();
+  const quietSeqs = new Set<number>();
   const sharedInput = presentationSharedInputs.get(client);
   const resultReferences = new WeakMap<PresentationCommandSelectionReference, WaitingInput>();
   let compatibilityNextSeq = initial.throughSeq + 1;
@@ -323,9 +325,10 @@ export function createPeerlessViewStore(
     const remoteHistory = view.pending.some((record) => record.seq === ack.historyThroughSeq && record.intent.kind === 'applyRemoteUpdate');
     const refusals = view.pending.flatMap((record) => {
       const outcome = ack.outcomes.find((entry) => entry.seq === record.seq);
-      return outcome?.reason && (outcome.status === 'refused' || outcome.status === 'cancelled')
+      return outcome?.reason && !quietSeqs.has(record.seq) && (outcome.status === 'refused' || outcome.status === 'cancelled')
         ? [new PeerlessCommandRefusedError(record.intent.kind, outcome)] : [];
     });
+    for (const outcome of ack.outcomes) quietSeqs.delete(outcome.seq);
     if (ack.historyThroughSeq === ack.throughSeq) {
       localOnlySelection = false;
       localSelectionSeq = ack.throughSeq;
@@ -373,7 +376,7 @@ export function createPeerlessViewStore(
       waiting.splice(index, 1);
       const outcome: PresentationCommandOutcome = { seq: sharedInput ? lastSentSeq + index + 1 : input.seq,
         status: 'cancelled', reason: 'dependency-refused', committed: false };
-      refusals.push(new PeerlessCommandRefusedError(input.intent.kind, outcome));
+      if (!input.quiet) refusals.push(new PeerlessCommandRefusedError(input.intent.kind, outcome));
       input.resolve({ ...ack, outcomes: [outcome] });
     }
     if (!sharedInput) {
@@ -515,6 +518,7 @@ export function createPeerlessViewStore(
     if (intent.kind === 'setSelection' && intent.payload.selection && intent.payload.selection.slideId !== view.confirmed?.frame.slideId) {
       navigationTargets.set(input.seq, intent.payload.selection.slideId);
     }
+    if (input.quiet) quietSeqs.add(input.seq);
     if (needsWorkerResolution(intent)) {
       unresolvedThroughSeq = Math.max(unresolvedThroughSeq, input.seq);
       localOnlySelection = false;
@@ -592,7 +596,7 @@ export function createPeerlessViewStore(
     subscribePresentation: (listener) => subscribe(presentation, listener),
     subscribeStructure: (listener) => subscribe(structure, listener),
     subscribeEditState: (listener) => subscribe(editState, listener),
-    dispatch(intent) {
+    dispatch(intent, { reportRefusal = true } = {}) {
       if (disposed) return Promise.reject(new Error('Peerless view is disposed'));
       if (failure) return Promise.reject(failure);
       if (view.inputFailure) view = { ...view, inputFailure: undefined };
@@ -638,7 +642,7 @@ export function createPeerlessViewStore(
       void operation.then(() => { captured.delete(operation); }, () => { captured.delete(operation); });
       const input: WaitingInput = { seq, intent, after, basisThroughSeq: view.presentedThroughSeq,
         basis: { epoch: identity.epoch, version: view.confirmed?.frame.version ?? client.state.version },
-        echoed, chunks: [], operation, resolve, reject };
+        echoed, quiet: !reportRefusal, chunks: [], operation, resolve, reject };
       if (!preservesSelection(intent)) chainTailInput = input;
       if (waiting.length || blocked()) {
         waiting.push(input);

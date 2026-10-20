@@ -197,6 +197,23 @@ test('refused local input surfaces through onError exactly once', async () => {
   } finally { store.dispose(); }
 });
 
+test('refusals returned to the dispatching caller stay off onError', async () => {
+  const client = new FakeCommandClient();
+  const onError = mock((_error: Error) => {});
+  const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} }, { onError });
+  try {
+    const input = store.dispatch({ kind: 'invoke', payload: { method: 'propose', args: ['Writer', null, []],
+      inputTime: 100, undoGroup: 'object' } }, { reportRefusal: false });
+    client.ack(1, { selection: selection(), dirtySlideIds: [], outcomes: [
+      { seq: 1, status: 'refused', reason: 'invalid-payload', committed: false },
+    ] });
+    expect((await input).outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(onError).not.toHaveBeenCalled();
+    expect(store.getSnapshot().inputFailure).toBeUndefined();
+    expect(store.getSnapshot().editState.readOnly).toBe(false);
+  } finally { store.dispose(); }
+});
+
 function insert(text: string, afterSeq?: number, position = 1): PresentationCommandIntent {
   return { kind: 'insertText', payload: { text, inputTime: 100, undoGroup: 'typing',
     at: afterSeq === undefined ? { source: 'confirmed', selection: selection(position) }

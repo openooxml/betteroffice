@@ -176,6 +176,7 @@ class FakeCommandClient implements PresentationCommandClient {
   state = initial();
   text = 'abc';
   hold = false;
+  refuse?: (intent: PresentationCommandEnvelope) => PresentationCommandAck['outcomes'][number]['reason'];
   readonly versions = new Map<string, number>([['v0', 0]]);
   readonly mutations: { seq: number; from: number; to: number; length: number }[] = [];
   readonly outcomes = new Map<number, PresentationCommandAck['outcomes'][number]>();
@@ -218,6 +219,13 @@ class FakeCommandClient implements PresentationCommandClient {
           this.outcomes.set(sequence, outcome);
           continue;
         }
+      }
+      const refusal = this.refuse?.(intent);
+      if (refusal) {
+        const outcome: PresentationCommandAck['outcomes'][number] = { seq: sequence, status: 'refused', reason: refusal, committed: false };
+        outcomes.push(outcome);
+        this.outcomes.set(sequence, outcome);
+        continue;
       }
       let committed = false;
       if (intent.kind === 'setReadOnly') readOnly = intent.payload.readOnly;
@@ -499,6 +507,29 @@ test('p2_peerless_mount_never_initializes_main_wasm', async () => {
   expect(instantiateStreaming).not.toHaveBeenCalled();
   expect(compile).not.toHaveBeenCalled();
   expect(compileStreaming).not.toHaveBeenCalled();
+});
+
+test('p2_refused_api_proposal_rejects_to_caller_without_onError', async () => {
+  const value = session();
+  value.client.refuse = (intent) => intent.kind === 'invoke' && intent.payload.method === 'propose' ? 'invalid-payload' : undefined;
+  const errors = mock((_error: Error) => {});
+  const ready = mock((_api: PptxAsyncEditorApi) => {});
+  const view = render(<PptxEditor fonts={[]} file={file} {...{ [PEERLESS_FLAG]: true as const }} onError={errors} onReady={ready} />);
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  const access = await ready.mock.calls[0][0].handleAsync();
+  const edit = { type: 'insertSlide', index: 1 } as unknown as editor.ProposalEdit;
+  await act(async () => {
+    await expect(access.propose('Writer', null, [edit])).rejects.toMatchObject({ code: 'invalid-arguments' });
+  });
+  expect(errors).not.toHaveBeenCalled();
+  expect(view.getByRole('application').getAttribute('aria-readonly')).toBe('false');
+  expect(view.queryByRole('alert')).toBe(null);
+  await act(async () => { await access.setSlideNotes('slide', 'notes'); });
+  expect(value.client.outcomes.get(value.client.sent.length)).toMatchObject({ status: 'applied' });
+  let failure!: PresentationCommandFailure;
+  await act(async () => { failure = value.crash(); });
+  expect(errors).toHaveBeenCalledTimes(1);
+  expect(errors.mock.calls[0][0]).toMatchObject({ code: 'editor-failed', cause: failure });
 });
 
 test('p2_worker_failure_goes_read_only_with_typed_onError', async () => {

@@ -2,9 +2,10 @@ import type { PresentationCommandAck, PresentationCommandMutation } from '@bette
 import type { PptxCommandArgs } from '../commands/types';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
-export function invokePeerless(run: PeerlessPresentation, mutation: PresentationCommandMutation): Promise<PresentationCommandAck> {
+export function invokePeerless(run: PeerlessPresentation, mutation: PresentationCommandMutation,
+  options?: { reportRefusal?: boolean }): Promise<PresentationCommandAck> {
   run.require();
-  return run.store.dispatch({ kind: 'invoke', payload: { ...mutation, inputTime: performance.now(), undoGroup: 'object' } });
+  return run.store.dispatch({ kind: 'invoke', payload: { ...mutation, inputTime: performance.now(), undoGroup: 'object' } }, options);
 }
 
 export async function peerlessObjectCommand(run: PeerlessPresentation, action:
