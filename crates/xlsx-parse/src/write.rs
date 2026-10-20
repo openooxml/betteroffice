@@ -14,17 +14,17 @@ use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
-    Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart, SheetId,
-    Workbook,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart,
+    SheetId, Workbook,
 };
 
 use crate::ParseError;
 use crate::axis::SheetAxes;
 use crate::package::{
-    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
-    XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
-    parse_relationships, relationship_part_path, relationships_by_id, remove_attribute,
-    set_attribute,
+    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship,
+    SourceSheetKind, XmlAttribute, XmlTemplate, attributes_from_fragment, effective_content_type,
+    normalized_part_name, parse_relationships, relationship_part_path, relationships_by_id,
+    remove_attribute, set_attribute,
 };
 use crate::patch::{
     SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
@@ -404,7 +404,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
-    patch_chart_parts(wb, package, origins, &mut parts)?;
+    let chart_refreshes = patch_chart_parts(wb, package, origins, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
@@ -606,6 +606,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         (None, None) => {}
     }
 
+    for (path, bytes) in chart_refreshes {
+        let _ = parts.set(path, bytes);
+    }
     Ok(parts.finish())
 }
 
@@ -613,6 +616,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
 struct ChartClaim<'a> {
     refs: &'a [ChartRef],
     sheet: &'a str,
+    original_refs: &'a [ChartRef],
+    original_sheet: &'a str,
 }
 
 /// What one sheet wants written into a drawing anchor it holds.
@@ -631,13 +636,12 @@ fn patch_chart_parts(
     package: &PreservedPackage,
     origins: &[Option<usize>],
     parts: &mut PartStore<'_>,
-) -> Result<(), ParseError> {
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     let mut chart_refs: BTreeMap<&str, Vec<ChartClaim<'_>>> = BTreeMap::new();
-    let mut moved_refs: HashSet<&str> = HashSet::new();
     let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim<'_>>> = BTreeMap::new();
     for (sheet, origin) in wb.sheets.iter().zip(origins) {
-        let source = origin
-            .and_then(|origin| package.original_workbook.sheets.get(origin))
+        let original_sheet = origin.and_then(|origin| package.original_workbook.sheets.get(origin));
+        let source = original_sheet
             .map(|sheet| sheet.charts.as_slice())
             .unwrap_or_default();
         for chart in &sheet.charts {
@@ -660,10 +664,9 @@ fn patch_chart_parts(
                 .push(ChartClaim {
                     refs: chart.refs.as_slice(),
                     sheet: sheet.name.as_str(),
+                    original_refs: original.refs.as_slice(),
+                    original_sheet: original_sheet.map_or(&sheet.name, |sheet| &sheet.name),
                 });
-            if original.refs != chart.refs {
-                moved_refs.insert(chart.part.as_str());
-            }
             claim_anchor(
                 anchors.entry(chart.drawing.as_str()).or_default(),
                 chart,
@@ -672,13 +675,28 @@ fn patch_chart_parts(
             )?;
         }
     }
+    let mut refreshes = Vec::new();
     for (path, claims) in chart_refs {
-        if !moved_refs.contains(path) {
+        let moved = claims.iter().any(|claim| claim.refs != claim.original_refs);
+        let Some(source) = package.part_bytes(path) else {
+            if moved {
+                return Err(missing_part(path));
+            }
             continue;
+        };
+        let rewritten = if moved {
+            agreed_chart_bytes(source, path, &claims, wb)?.unwrap_or_else(|| source.to_vec())
+        } else {
+            source.to_vec()
+        };
+        if let Some(bytes) =
+            refreshed_chart_bytes(&rewritten, &claims, wb, &package.original_workbook)
+            && bytes != rewritten
+        {
+            refreshes.push((path.to_owned(), bytes));
         }
-        let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
-        if let Some(bytes) = agreed_chart_bytes(source, path, &claims, wb)? {
-            parts.set(path.to_owned(), bytes)?;
+        if rewritten != source {
+            parts.set(path.to_owned(), rewritten)?;
         }
     }
     for (path, claims) in anchors {
@@ -696,7 +714,7 @@ fn patch_chart_parts(
             crate::chart::patch_drawing_anchors(source, &moved)?,
         )?;
     }
-    Ok(())
+    Ok(refreshes)
 }
 
 /// Records what one sheet wants at a drawing anchor, refusing when a sheet
@@ -751,6 +769,48 @@ fn agreed_chart_bytes(
         }
     }
     Ok(agreed.map(|(bytes, _)| bytes))
+}
+
+fn refreshed_chart_bytes(
+    source: &[u8],
+    claims: &[ChartClaim<'_>],
+    wb: &Workbook,
+    original: &Workbook,
+) -> Option<Vec<u8>> {
+    let plan = crate::chart::ChartRefreshPlan::new(source);
+    let mut refresh = plan.save_refresh(wb, original);
+    let mut refreshed = None;
+    let mut seen: BTreeMap<_, Vec<&[ChartRef]>> = BTreeMap::new();
+    for claim in claims {
+        let owner = if plan.owner_dependent() {
+            claim.sheet
+        } else {
+            ""
+        };
+        let original_owner = if claim
+            .original_refs
+            .iter()
+            .any(|reference| !reference.formula.contains('!'))
+        {
+            claim.original_sheet
+        } else {
+            ""
+        };
+        let references = seen.entry((owner, original_owner)).or_default();
+        if references.contains(&claim.original_refs) {
+            continue;
+        }
+        references.push(claim.original_refs);
+        let bytes = refresh
+            .refresh_changed(claim.sheet, claim.original_sheet, claim.original_refs)
+            .unwrap_or_else(|| source.to_vec());
+        match &refreshed {
+            Some(first) if *first != bytes => return None,
+            Some(_) => {}
+            None => refreshed = Some(bytes),
+        }
+    }
+    refreshed
 }
 
 /// Two sheets anchor one part and no longer agree on what it holds. The part
@@ -2091,7 +2151,7 @@ fn workbook_xml_with_template(
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
-    let calc_pr = if edited {
+    let calc_pr = if edited && holds_formulas(wb, package, sheets) {
         let mut attributes = package.calc_pr_attributes.clone().unwrap_or_default();
         set_attribute(
             &mut attributes,
@@ -2132,6 +2192,23 @@ fn workbook_xml_with_template(
         }
     }
     template.render(replacements, workbook_child_rank)
+}
+
+/// Whether the saved workbook holds a formula. Only worksheet cells are
+/// modeled, and an `mc:AlternateContent` branch can hide one from the model,
+/// so a macrosheet, an unknown sheet kind or such a source sheet counts too.
+fn holds_formulas(wb: &Workbook, package: &PreservedPackage, sheets: &[PlannedSheet]) -> bool {
+    sheets.iter().filter_map(|plan| plan.origin).any(|origin| {
+        matches!(
+            package.source_sheet_kind(origin),
+            Some(SourceSheetKind::Macrosheet | SourceSheetKind::Other)
+        ) || package
+            .source_cell_facts(origin)
+            .is_some_and(|facts| facts.alternate_formulas)
+    }) || wb
+        .sheets
+        .iter()
+        .any(|sheet| sheet.iter_cells().any(|(_, cell)| cell.formula.is_some()))
 }
 
 /// Patches retained `definedName` elements from the model, which the sheet ops
@@ -2665,6 +2742,27 @@ fn worksheet_xml_with_template(
         ("mergeCells", merges),
     ];
 
+    let extent = cell_extent(sheet);
+    let authored = source_extent(template, sheet_axes);
+    if template.child("dimension").is_some()
+        && template.require_unwrapped_child("dimension").is_ok()
+        && (original.is_none_or(|original| cell_extent(original) != extent)
+            || authored != source_extent(template, None))
+    {
+        let reference =
+            union_extent(extent, authored).map_or_else(|| "A1".to_owned(), |range| range.to_a1());
+        replacements.push((
+            "dimension",
+            Some(fragment(|writer| {
+                writer
+                    .create_element("dimension")
+                    .with_attribute(("ref", reference.as_str()))
+                    .write_empty()
+                    .map(|_| ())
+            })?),
+        ));
+    }
+
     if original.is_none_or(|original| original.freeze_pane != sheet.freeze_pane) {
         replacements.push(("sheetViews", patched_sheet_views(template, sheet)?));
     }
@@ -2692,6 +2790,57 @@ fn worksheet_xml_with_template(
         bytes: template.render(replacements, worksheet_child_rank)?,
         relationships,
     })
+}
+
+fn cell_extent(sheet: &Sheet) -> Option<CellRange> {
+    let mut cells = sheet.iter_cells().map(|(at, _)| at);
+    let first = cells.next()?;
+    let (mut last_row, mut min_col, mut max_col) = (first.row, first.col, first.col);
+    for at in cells {
+        last_row = at.row;
+        min_col = min_col.min(at.col);
+        max_col = max_col.max(at.col);
+    }
+    Some(CellRange::new(
+        CellRef::new(first.row, min_col),
+        CellRef::new(last_row, max_col),
+    ))
+}
+
+/// The source `<dimension>` moved through the sheet's row and column edits;
+/// it still covers source cells the model does not hold.
+fn source_extent(template: &XmlTemplate, axes: Option<&SheetAxes>) -> Option<CellRange> {
+    let attributes = attributes_from_fragment(&template.child("dimension")?.bytes).ok()?;
+    let reference = attributes
+        .iter()
+        .find(|attribute| attribute.local_name() == "ref")?;
+    let range = CellRange::parse_a1(&reference.value).ok()?;
+    let Some(axes) = axes else {
+        return Some(range);
+    };
+    let span = |ranges: Vec<Range<u32>>| Some(ranges.first()?.start..ranges.last()?.end);
+    let rows = span(
+        axes.rows
+            .current_ranges(range.start.row..range.end.row.saturating_add(1)),
+    )?;
+    let cols = span(
+        axes.cols
+            .current_ranges(range.start.col..range.end.col.saturating_add(1)),
+    )?;
+    Some(CellRange::new(
+        CellRef::new(rows.start, cols.start),
+        CellRef::new(rows.end - 1, cols.end - 1),
+    ))
+}
+
+fn union_extent(a: Option<CellRange>, b: Option<CellRange>) -> Option<CellRange> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(CellRange::new(
+            CellRef::new(a.start.row.min(b.start.row), a.start.col.min(b.start.col)),
+            CellRef::new(a.end.row.max(b.end.row), a.end.col.max(b.end.col)),
+        )),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Rewrites each `<sheetView>`'s pane while its zoom, selection and view flags
@@ -2961,6 +3110,7 @@ pub(crate) struct ColRun {
     pub(crate) first: ColId,
     last: ColId,
     width: Option<f64>,
+    hidden_width: Option<f64>,
     style: Option<u32>,
 }
 
@@ -3019,6 +3169,7 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
                 first,
                 last,
                 width,
+                hidden_width: sheet.hidden_col_widths.get(&first).copied(),
                 style,
             }),
         }
@@ -3029,7 +3180,14 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
 pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io::Result<()> {
     let first = (u64::from(run.first) + 1).to_string();
     let last = (u64::from(run.last) + 1).to_string();
-    let width = run.width.map(fmt_num);
+    let hidden = run.width == Some(0.0);
+    let width = run.width.map(|width| {
+        fmt_num(if hidden {
+            run.hidden_width.unwrap_or(width)
+        } else {
+            width
+        })
+    });
     let style = run.style.map(|style| style.to_string());
     let mut element = BytesStart::new("col");
     element.push_attribute(("min", first.as_str()));
@@ -3041,7 +3199,7 @@ pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io
     if let Some(style) = &style {
         element.push_attribute(("style", style.as_str()));
     }
-    if width.as_deref() == Some("0") {
+    if hidden {
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Empty(element))?;
@@ -3071,11 +3229,18 @@ where
         start.push_attribute(("s", style.as_str()));
         start.push_attribute(("customFormat", "1"));
     }
-    let ht = sheet.row_heights.get(&row).map(|h| fmt_num(*h));
+    let hidden = sheet.row_heights.get(&row) == Some(&0.0);
+    let ht = sheet.row_heights.get(&row).map(|h| {
+        fmt_num(if hidden {
+            sheet.hidden_row_heights.get(&row).copied().unwrap_or(*h)
+        } else {
+            *h
+        })
+    });
     if let Some(h) = &ht {
         start.push_attribute(("ht", h.as_str()));
         start.push_attribute(("customHeight", "1"));
-        if h == "0" {
+        if hidden {
             start.push_attribute(("hidden", "1"));
         }
     }
@@ -3274,13 +3439,20 @@ fn patched_pool<T>(
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
     overrides: Option<&HashMap<usize, Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
+    template.require_unwrapped_child(pool_name)?;
+    let pool = template
+        .child(pool_name)
+        .map(|child| XmlTemplate::capture(&child.bytes))
+        .transpose()?;
+    if let Some(pool) = &pool {
+        pool.require_unwrapped_child(item_name)?;
+    }
     if values.is_empty() {
         return Ok(None);
     }
-    let Some(child) = template.child(pool_name) else {
+    let Some(pool) = pool else {
         return write_pool().map(Some);
     };
-    let pool = XmlTemplate::capture(&child.bytes)?;
     let sources = pool.children_named(item_name).collect::<Vec<_>>();
     let mut items = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {

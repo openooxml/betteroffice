@@ -136,11 +136,21 @@ describe('XlsxEditor engine dispatch', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('mounts the hybrid only with legacySyncApi and warns once across remounts', () => {
-    const view = render(<XlsxEditor legacySyncApi file={file} />);
+  it('mounts the hybrid only with legacySyncApi and experimentalWorkerOpen and warns once across remounts', () => {
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
     expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy');
     view.unmount();
-    render(<XlsxEditor legacySyncApi file={file} />);
+    render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
+  });
+
+  it('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', () => {
+    const view = render(<XlsxEditor legacySyncApi file={file} />);
+    expectInThread(view);
+    view.rerender(<XlsxEditor legacySyncApi file={file} readOnly />);
+    expectInThread(view);
+    expect(mounts).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
   });

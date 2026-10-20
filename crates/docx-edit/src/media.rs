@@ -12,6 +12,7 @@ use std::hash::Hasher;
 use std::sync::{Arc, Mutex};
 
 use docx_parse::media::{MediaTable, media_token, media_token_index};
+use serde_json::Value;
 use yrs::Any;
 
 use crate::raw::RawOp;
@@ -26,20 +27,21 @@ pub struct MediaSources(Arc<Sources>);
 struct Sources {
     key: (u64, u64),
     parts: HashMap<u64, u32>,
-    seen: Mutex<Seen>,
+    seen: Mutex<Seen<u32>>,
+    json: Mutex<Seen<Arc<str>>>,
 }
 
 /// Sources found to match, by address. Holding each keeps its address from
 /// naming another string; an entry only the cache still holds is dropped once
 /// the cache has doubled since it was last pruned.
 #[derive(Debug, Default)]
-struct Seen {
-    sources: HashMap<usize, (Arc<str>, u32)>,
+struct Seen<T> {
+    sources: HashMap<usize, (Arc<str>, T)>,
     prune_at: usize,
 }
 
-impl Seen {
-    fn new(sources: HashMap<usize, (Arc<str>, u32)>) -> Self {
+impl<T> Seen<T> {
+    fn new(sources: HashMap<usize, (Arc<str>, T)>) -> Self {
         let prune_at = Self::next_prune(sources.len());
         Self { sources, prune_at }
     }
@@ -48,13 +50,13 @@ impl Seen {
         (len * 2).max(64)
     }
 
-    fn insert(&mut self, address: usize, source: Arc<str>, index: u32) {
+    fn insert(&mut self, address: usize, source: Arc<str>, value: T) {
         if self.sources.len() >= self.prune_at {
             self.sources
                 .retain(|_, (source, _)| Arc::strong_count(source) > 1);
             self.prune_at = Self::next_prune(self.sources.len());
         }
-        self.sources.insert(address, (source, index));
+        self.sources.insert(address, (source, value));
     }
 }
 
@@ -99,6 +101,45 @@ impl MediaSources {
             .map(|index| media_token(*index as usize))
     }
 
+    pub(crate) fn tokenized_json(&self, source: &Arc<str>) -> Arc<str> {
+        if self.is_empty() {
+            return Arc::clone(source);
+        }
+        let address = Arc::as_ptr(source) as *const u8 as usize;
+        let mut seen = self.0.json.lock().unwrap();
+        if let Some((_, json)) = seen.sources.get(&address) {
+            return Arc::clone(json);
+        }
+        let Ok(mut value) = serde_json::from_str::<Value>(source) else {
+            return Arc::clone(source);
+        };
+        self.tokenize_json(&mut value);
+        let json: Arc<str> = value.to_string().into();
+        seen.insert(address, Arc::clone(source), Arc::clone(&json));
+        json
+    }
+
+    fn tokenize_json(&self, value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::String(src)) = map.get_mut("src")
+                    && let Some(token) = self.token_of(src)
+                {
+                    *src = token;
+                }
+                for value in map.values_mut() {
+                    self.tokenize_json(value);
+                }
+            }
+            Value::Array(items) => {
+                for value in items {
+                    self.tokenize_json(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn digest(&self, src: &str) -> u64 {
         digest(self.0.key, src)
     }
@@ -134,6 +175,7 @@ impl MediaSources {
                 .map(|(digest, index)| Ok((hex(digest)?, *index)))
                 .collect::<Result<_, String>>()?,
             seen: Mutex::default(),
+            json: Mutex::default(),
         })))
     }
 }
@@ -161,6 +203,7 @@ pub(crate) fn write_data_urls<'a>(
     layout_tokens: bool,
 ) -> Result<MediaSources, String> {
     let mut writer = DataUrls::new(table);
+    writer.keep_json_sources = layout_tokens;
     for op in ops {
         match op {
             RawOp::InsertEmbed { payload, .. } => {
@@ -196,6 +239,7 @@ pub(crate) fn write_data_urls<'a>(
         key,
         parts,
         seen: Mutex::new(Seen::new(seen)),
+        json: Mutex::new(Seen::new(writer.json_sources)),
     })))
 }
 
@@ -229,6 +273,8 @@ struct DataUrls<'a> {
     table: &'a MediaTable,
     urls: HashMap<usize, Option<Arc<str>>>,
     error: Option<String>,
+    keep_json_sources: bool,
+    json_sources: HashMap<usize, (Arc<str>, Arc<str>)>,
 }
 
 impl<'a> DataUrls<'a> {
@@ -237,6 +283,8 @@ impl<'a> DataUrls<'a> {
             table,
             urls: HashMap::new(),
             error: None,
+            keep_json_sources: false,
+            json_sources: HashMap::new(),
         }
     }
 
@@ -270,7 +318,14 @@ impl<'a> DataUrls<'a> {
             Any::String(text)
                 if JSON_PAYLOADS.contains(&key) && text.contains("\"src\":\"media:") =>
             {
-                Some(Any::String(self.json(text).into()))
+                let source: Arc<str> = self.json(text).into();
+                if self.keep_json_sources && key == "shapeJson" {
+                    self.json_sources.insert(
+                        Arc::as_ptr(&source) as *const u8 as usize,
+                        (Arc::clone(&source), Arc::clone(text)),
+                    );
+                }
+                Some(Any::String(source))
             }
             Any::Array(items) => {
                 let written: Vec<Option<Any>> =
@@ -342,6 +397,7 @@ mod tests {
                 .map(|(src, index)| (digest(key, src), *index))
                 .collect(),
             seen: Mutex::default(),
+            json: Mutex::default(),
         }))
     }
 
@@ -388,6 +444,116 @@ mod tests {
         assert_eq!(loaded.token_of("data:b").as_deref(), Some("media:4"));
         assert_eq!(MediaSources::default(), MediaSources::default());
         assert!(MediaSources::from_json(r#"{"key":["zz","0"],"parts":[]}"#).is_err());
+    }
+
+    #[test]
+    fn text_box_pictures_reuse_seeded_media_across_layouts() {
+        use docx_layout::types::{LayoutBlock, Run};
+
+        use crate::bridge::{RenderEnv, yrs_doc_to_layout_blocks};
+        use crate::{Attrs, EditCtx, EditingDoc};
+
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/media/picture.png".to_owned(), vec![1; 10_000])])
+                .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let shape: Arc<str> = serde_json::json!({
+            "shapeType": "textBox",
+            "textBody": {"content": [{"type": "paragraph", "content": [{
+                "type": "run", "content": [{"type": "drawing", "image": {
+                    "src": "media:0",
+                    "size": {"width": 914400, "height": 457200},
+                    "wrap": {"type": "inline"}
+                }}]
+            }]}]}
+        })
+        .to_string()
+        .into();
+        let mut ops = vec![
+            RawOp::InsertEmbed {
+                index: 0,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::String(Arc::clone(&shape)))],
+                attrs: Attrs::new(),
+            },
+            RawOp::InsertEmbed {
+                index: 1,
+                kind: "image".to_owned(),
+                payload: vec![("src".to_owned(), Any::from("media:0"))],
+                attrs: Attrs::new(),
+            },
+        ];
+        let sources = write_data_urls(&mut ops, &table, true).unwrap();
+        let RawOp::InsertEmbed { payload, .. } = &ops[0] else {
+            panic!("expected shape");
+        };
+        let Any::String(source) = &payload[0].1 else {
+            panic!("expected shape JSON");
+        };
+        let source = Arc::clone(source);
+        assert!(source.contains("data:image/png;base64,"));
+        assert!(Arc::ptr_eq(&sources.tokenized_json(&source), &shape));
+
+        let doc = EditingDoc::new(7);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops("body", ops, &EditCtx::local("", ""))
+            .unwrap();
+        doc.set_media_sources(sources.clone());
+        let env = RenderEnv {
+            media_tokens: true,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+            let text_box = blocks
+                .iter()
+                .find_map(|block| match block {
+                    LayoutBlock::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .unwrap();
+            let Run::Image(image) = &text_box.inner_text.as_ref().unwrap()[0].runs[0] else {
+                panic!("expected text box picture");
+            };
+            assert_eq!(image.src, "media:0");
+            let body_picture = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    LayoutBlock::Paragraph(paragraph) => Some(paragraph),
+                    _ => None,
+                })
+                .flat_map(|paragraph| &paragraph.runs)
+                .find_map(|run| match run {
+                    Run::Image(image) => Some(image),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(body_picture.src, image.src);
+            assert!(Arc::ptr_eq(&sources.tokenized_json(&source), &shape));
+            assert_eq!(sources.0.seen.lock().unwrap().sources.len(), 1);
+            assert_eq!(sources.0.json.lock().unwrap().sources.len(), 1);
+        }
+    }
+
+    #[test]
+    fn replica_json_projection_is_reused_and_edits_get_a_new_projection() {
+        let sources = sources(&[("data:image/png;base64,AQID", 2)]);
+        let source: Arc<str> =
+            Arc::from(r#"{"nested":[{"src":"data:image/png;base64,AQID"},{"src":"https://x"}]}"#);
+        let replica = MediaSources::from_json(&sources.to_json()).unwrap();
+        let projected = replica.tokenized_json(&source);
+        assert_eq!(
+            projected.as_ref(),
+            r#"{"nested":[{"src":"media:2"},{"src":"https://x"}]}"#
+        );
+        assert!(Arc::ptr_eq(&replica.tokenized_json(&source), &projected));
+        let edited: Arc<str> = Arc::from(r#"{"src":"data:image/png;base64,BAUG"}"#);
+        assert_eq!(replica.tokenized_json(&edited).as_ref(), edited.as_ref());
+        assert!(Arc::ptr_eq(
+            &MediaSources::default().tokenized_json(&source),
+            &source
+        ));
     }
 
     #[test]

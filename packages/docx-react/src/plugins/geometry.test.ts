@@ -8,6 +8,7 @@ import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/lay
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import {
   proposalRevisionPreview,
+  type DocxResolvedReservations,
   type DocxSessionParagraphAnchor,
   type DocxTextRange,
   type YrsSession,
@@ -17,13 +18,22 @@ import {
   createRenderedDomContext,
 } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
+  keyResolvedReservations,
   revisionPreviewKey,
+  stampReservationsKey,
   stampRevisionPreviewKey,
   stampSourceVersion,
   UNKNOWN_REVISION_PREVIEW_KEY,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { bindDisplayWindow } from '../components/DocxEditor/internals/displayWindow';
-import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, toOverlayRect } from './geometry';
+import {
+  createPluginGeometry,
+  pluginLayout,
+  readPluginPositionAtPoint,
+  scopePluginGeometry,
+  toOverlayRect,
+  unbuiltPagesOf,
+} from './geometry';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
 import * as proposalPreview from './proposalPreview';
@@ -78,6 +88,121 @@ function queries(): DisplayListQueries {
   } as unknown as DisplayListQueries;
 }
 
+describe('reservation geometry', () => {
+  test('a header reservation reports every built repeated page and waits for pending matches', () => {
+    const pages = document.createElement('div');
+    const layer = document.createElement('div');
+    place(pages, rectAt(0, 0, 100, 800));
+    place(layer, rectAt(0, 0, 100, 800));
+    const box = { owner: 'test.header', id: 'running', x: 10, y: 5, width: 30, height: 12 };
+    for (let index = 0; index < 4; index += 1) {
+      const canvas = document.createElement('canvas');
+      canvas.dataset.pageIndex = String(index);
+      place(canvas, rectAt(0, index * 200, 100, 200));
+      pages.appendChild(canvas);
+    }
+    const source = {
+      ...queries(), pageCount: () => 4,
+      displayList: { pages: Array.from({ length: 4 }, (_, pageIndex) => ({
+        pageIndex, ...PAGE, primitives: [], header: { rId: 'running' },
+        reservations: [box], unbuilt: pageIndex === 1,
+      })) },
+    } as unknown as DisplayListQueries;
+    const resolved: DocxResolvedReservations = { [JSON.stringify(['test.header', 'running'])]: {
+      owner: 'test.header', id: 'running', story: 'hf:running', paraId: 'p', start: 0, end: 0,
+      kind: 'inline', width: 30, height: 12,
+    } };
+    const key = keyResolvedReservations(resolved, 'v', 1);
+    stampSourceVersion(source, 'v');
+    stampReservationsKey(source, key);
+    const dom = createRenderedDomContext(pages, 1, {
+      displayListQueries: source, projector: createCanvasHostProjector(pages, source, 1),
+    });
+    let pending = false;
+    bindDisplayWindow(source, { read: () => pending ? [0, 4] : [2, 4], subscribe: () => () => {} });
+    const layout = pluginLayout(source, 'v', 1, { key: '', previewVersion: 0 })!;
+    const geometry = scopePluginGeometry(createPluginGeometry(layout, dom, layer, () => true,
+      () => null, source, () => ({
+        session: { version: () => 'v' } as unknown as YrsSession,
+        editor: { hasPendingInput: () => false, yrsLocToDisplayPosition: () => null },
+        presented: true, reservations: () => ({ key, resolved }),
+      }), () => false, undefined, () => true), 'test.header');
+    const result = geometry.getAnchorGeometry({ kind: 'reservation', id: 'running' });
+    if (!result.ok) throw new Error(result.failure.message);
+    expect(result.rects.map((rect) => rect.pageIndex)).toEqual([0, 2, 3]);
+    expect(result.anchor).toEqual(result.rects[0]);
+    pending = true;
+    expect(geometry.getAnchorGeometry({ kind: 'reservation', id: 'running' })).toMatchObject({
+      ok: false, failure: { code: 'layout-unavailable' },
+    });
+  });
+
+  test('answers a plugin its own box once the painted layout holds its latest set', async () => {
+    const pages = document.createElement('div');
+    const canvas = document.createElement('canvas');
+    canvas.dataset.pageIndex = '0';
+    pages.appendChild(canvas);
+    const layer = document.createElement('div');
+    place(pages, rectAt(0, 0, 800, 1200));
+    place(canvas, rectAt(0, 0, PAGE.width, PAGE.height));
+    place(layer, rectAt(0, 0, 800, 1200));
+    const box = { owner: 'acme.a', id: 'box', x: 10, y: 20, width: 30, height: 40 };
+    const source = {
+      ...queries(),
+      displayList: { pages: [{ pageIndex: 0, ...PAGE, primitives: [], reservations: [box] }] },
+    } as unknown as DisplayListQueries;
+    stampSourceVersion(source, 'v');
+    stampReservationsKey(source, '');
+    const dom = createRenderedDomContext(pages, 1, {
+      displayListQueries: source,
+      projector: createCanvasHostProjector(pages, source, 1),
+    });
+    const resolved: DocxResolvedReservations = {
+      [JSON.stringify(['acme.a', 'box'])]: {
+        owner: 'acme.a', id: 'box', story: 'body', paraId: 'p', start: 0, end: 0,
+        kind: 'inline', width: 30, height: 40,
+      },
+    };
+    let current: { key: string; resolved: DocxResolvedReservations | null } = { key: '', resolved: null };
+    const session = { version: () => 'v' } as unknown as YrsSession;
+    const layout = pluginLayout(source, 'v', 1, { key: '', previewVersion: 0 })!;
+    expect(layout.reservationsVersion).toBeNull();
+    const geometry = createPluginGeometry(layout, dom, layer, () => true, () => null, source,
+      () => ({
+        session,
+        editor: { hasPendingInput: () => false, yrsLocToDisplayPosition: () => null },
+        presented: true,
+        reservations: () => current,
+      }),
+      () => false, undefined, () => true);
+    const mine = scopePluginGeometry(geometry, 'acme.a');
+    const target = { kind: 'reservation', id: 'box' } as const;
+    expect(scopePluginGeometry(geometry, 'acme.a')).toBe(mine);
+    expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+
+    current = { key: keyResolvedReservations(resolved, 'v', 1), resolved };
+    expect(mine.getAnchorGeometry(target)).toMatchObject({
+      ok: false, failure: { code: 'layout-unavailable' },
+    });
+    stampReservationsKey(source, current.key);
+    expect(pluginLayout(source, 'v', 1, { key: '', previewVersion: 0 })!.reservationsVersion).toBe('v');
+    const result = mine.getAnchorGeometry(target);
+    if (!result.ok) throw new Error(result.failure.message);
+    expect(result).toMatchObject({ version: 'v', layoutId: layout.id });
+    expect(result.anchor).toEqual({ x: 10, y: 20, width: 30, height: 40, pageIndex: 0 });
+    expect(result.rects).toEqual([result.anchor]);
+    expect(await mine.readAnchorGeometries([target, { kind: 'reservation', id: 'other' }])).toEqual([
+      result, mine.getAnchorGeometry({ kind: 'reservation', id: 'other' }),
+    ]);
+    expect(scopePluginGeometry(geometry, 'acme.b').getAnchorGeometry(target)).toMatchObject({
+      ok: false, failure: { code: 'missing-target' },
+    });
+    expect(mine.getAnchorGeometry({ kind: 'reservation', id: 'other' })).toMatchObject({
+      ok: false, failure: { code: 'missing-target' },
+    });
+  });
+});
+
 describe('plugin overlay geometry', () => {
   test('moves a context rectangle into the layer once, at every zoom', () => {
     for (const zoom of [0.5, 1, 2]) {
@@ -108,7 +233,7 @@ describe('plugin overlay geometry', () => {
       expect(overlay.width).toBeCloseTo(RANGE.width * zoom);
       expect(overlay.height).toBeCloseTo(RANGE.height * zoom);
 
-      const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom, pageCount: 1 };
+      const layout = { id: 'layout', version: 'v', previewVersion: 0, reservationsVersion: null, zoom, pageCount: 1 };
       let current = true;
       const geometry = createPluginGeometry(
         layout,
@@ -132,7 +257,7 @@ describe('plugin overlay geometry', () => {
     const custom: Omit<RenderedDomContext, 'getPositionAtPoint'> = new Proxy(dom, {
       get: (target, key) => (key === 'getPositionAtPoint' ? undefined : Reflect.get(target, key)),
     });
-    const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 1 };
+    const layout = { id: 'layout', version: 'v', previewVersion: 0, reservationsVersion: null, zoom: 1, pageCount: 1 };
     const geometry = createPluginGeometry(
       layout,
       custom,
@@ -335,7 +460,7 @@ function semanticGeometry(zoom = 1, ancestor = 1, { stableSession = false } = {}
   let current = true;
   let available = true;
   let presented = true;
-  const layout = { id: 'layout', version: 'v1', previewVersion: 0, zoom, pageCount: 2 };
+  const layout = { id: 'layout', version: 'v1', previewVersion: 0, reservationsVersion: null, zoom, pageCount: 2 };
   const geometry = createPluginGeometry(
     layout,
     dom,
@@ -494,6 +619,19 @@ describe('semantic anchor geometry', () => {
     }
   });
 
+  test('readAnchorGeometries answers every target right away, in order', async () => {
+    const { geometry } = semanticGeometry();
+    const targets: DocxGeometryTarget[] = [
+      PARAGRAPH_TARGET,
+      { kind: 'revision', revisionId: 'r1' },
+      { kind: 'range', version: 'v0', range: TEXT_RANGE },
+    ];
+    const read = geometry.readAnchorGeometries(targets);
+    const answered = targets.map((target) => geometry.getAnchorGeometry(target));
+    expect(answered.map((result) => result.ok || result.failure.code)).toEqual([true, true, 'stale-version']);
+    expect(await read).toEqual(answered);
+  });
+
   test('keeps both pages and places the anchor and page rectangle on the last page', () => {
     const { geometry, source } = semanticGeometry();
     source.rangeRects = () => [RANGE, { ...RANGE, pageIndex: 1, x: 4, width: 9 }];
@@ -646,6 +784,17 @@ describe('semantic anchor geometry', () => {
     ).toMatchObject({ x: 153 });
   });
 
+  test('anchors a hidden target before neighbouring text that does not draw, in either direction', () => {
+    for (const rtl of [false, true]) {
+      const { geometry, source } = semanticGeometry();
+      textLine(source, [1, 2, 3], rtl);
+      expect(anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId: 'r2' }))).toMatchObject({
+        rects: [],
+        anchor: { pageIndex: 0, x: rtl ? 156 : 154, width: 0 },
+      });
+    }
+  });
+
   test('finds the last drawn unit behind a long hidden suffix', () => {
     for (const rtl of [false, true]) {
       const { geometry, session, source } = semanticGeometry();
@@ -730,7 +879,7 @@ describe('semantic anchor geometry', () => {
       displayListQueries: source,
       projector: createCanvasHostProjector(pages, source, 1),
     });
-    const layout = { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1.5, pageCount: 1 };
+    const layout = { id: 'layout', version: 'v1', previewVersion: 0, reservationsVersion: null, zoom: 1.5, pageCount: 1 };
     const geometry = createPluginGeometry(
       layout,
       dom,
@@ -1139,7 +1288,7 @@ for (const viewer of [false, true]) {
       displayListQueries: source,
       projector: createCanvasHostProjector(pages, source, 1),
     });
-    const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 1 };
+    const layout = { id: 'layout', version: 'v', previewVersion: 0, reservationsVersion: null, zoom: 1, pageCount: 1 };
     const geometry = createPluginGeometry(layout, dom, document.createElement('div'), () => true,
       () => hit, source, () => null, () => false,
       (x, y) => readPluginPositionAtPoint({ current: editor }, x, y));
@@ -1157,7 +1306,7 @@ for (const change of ['id', 'version', 'zoom'] as const) {
       displayListQueries: source,
       projector: createCanvasHostProjector(pages, source, 1),
     });
-    const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 1 };
+    const layout = { id: 'layout', version: 'v', previewVersion: 0, reservationsVersion: null, zoom: 1, pageCount: 1 };
     let current = { ...layout };
     let resolve!: (hit: DocxPointPosition | null) => void;
     const pending = new Promise<DocxPointPosition | null>((done) => { resolve = done; });
@@ -1172,3 +1321,54 @@ for (const change of ['id', 'version', 'zoom'] as const) {
     expect(await result).toBeNull();
   });
 }
+
+test('getPageRect answers a page box in overlay pixels with whether it is built', async () => {
+  const pages = document.createElement('div');
+  const canvases = [0, 1].map((pageIndex) => {
+    const canvas = document.createElement('canvas');
+    canvas.dataset.pageIndex = String(pageIndex);
+    pages.appendChild(canvas);
+    return canvas;
+  });
+  const layer = document.createElement('div');
+  place(pages, rectAt(130, 60, 800, 2000));
+  canvases.forEach((canvas, index) => place(canvas, rectAt(180, 84 + index * 500, PAGE.width * 2, PAGE.height * 2)));
+  place(layer, rectAt(20, 10, 900, 2100));
+  const source = {
+    ...queries(),
+    pageCount: () => 2,
+    pageBounds: (pageIndex: number) => (pageIndex < 2 ? { pageIndex, x: 0, y: 0, ...PAGE } : null),
+    displayList: { pages: [{}, { unbuilt: true }] },
+  } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 2, { displayListQueries: source, projector: createCanvasHostProjector(pages, source, 2) });
+  let current = true;
+  const geometry = createPluginGeometry({ id: 'layout', version: 'v', previewVersion: 0, reservationsVersion: null, zoom: 2, pageCount: 2 }, dom, layer,
+    () => current, () => null, source, () => null);
+  expect(geometry.getPageRect(0)).toEqual({ pageIndex: 0, x: 160, y: 74, width: PAGE.width * 2, height: PAGE.height * 2, built: true });
+  expect(geometry.getPageRect(1)).toEqual({ pageIndex: 1, x: 160, y: 574, width: PAGE.width * 2, height: PAGE.height * 2, built: false });
+  expect(geometry.getPageRect(2)).toBeNull();
+  expect(await geometry.readAnchorGeometries([])).toEqual([]);
+  current = false;
+  expect(geometry.getPageRect(0)).toBeNull();
+});
+
+test('isPageBuilt answers from the display list without measuring the pages, and false once not shown', () => {
+  const pages = document.createElement('div');
+  let measured = 0;
+  pages.getBoundingClientRect = () => { measured += 1; return rectAt(0, 0, 100, 100); };
+  const source = { ...queries(), pageCount: () => 2, displayList: { pages: [{}, { unbuilt: true }] } } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 1, { displayListQueries: source, projector: createCanvasHostProjector(pages, source, 1) });
+  let current = true;
+  const geometry = createPluginGeometry({ id: 'layout', version: 'v', previewVersion: 0, reservationsVersion: null, zoom: 1, pageCount: 2 }, dom,
+    document.createElement('div'), () => current, () => null, source, () => null);
+  expect([0, 1, 2, -1].map((pageIndex) => geometry.isPageBuilt(pageIndex))).toEqual([true, false, false, false]);
+  expect(measured).toBe(0);
+  current = false;
+  expect(geometry.isPageBuilt(0)).toBe(false);
+});
+
+test('unbuiltPages takes range ends as exclusive and an empty range where it sits', () => {
+  const source = { displayList: { pages: [{}, { unbuilt: true, positionSpan: [100, 199] }] } } as unknown as DisplayListQueries;
+  const pagesOf = (from: number, to: number) => unbuiltPagesOf(source, [{ from, to }]);
+  expect([pagesOf(90, 100), pagesOf(90, 101), pagesOf(100, 100), pagesOf(199, 205), pagesOf(200, 205)]).toEqual([[], [1], [1], [1], []]);
+});

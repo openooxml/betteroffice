@@ -3,7 +3,7 @@ import { LEGACY_SYNC_API } from './runtimeOptions';
 export type PptxEngineWarning = 'deprecated' | 'collaboration' | 'no-worker' | 'no-offscreen-canvas' | 'legacy-sync-api';
 
 const messages: Record<PptxEngineWarning, string> = {
-  deprecated: '[PptxEditor] `experimentalWorkerOpen={false}` selects the deprecated in-thread engine. Omit `experimentalWorkerOpen` to use the worker-owned editor.',
+  deprecated: `[PptxEditor] \`experimentalWorkerOpen={false}\` selects the deprecated in-thread engine. Omit it and \`${LEGACY_SYNC_API}\` to use the worker-owned async editor.`,
   collaboration: '[PptxEditor] the legacy hybrid runtime does not support `collaboration`; using the deprecated in-thread engine.',
   'no-worker': '[PptxEditor] `Worker` is not available in this environment; using the deprecated in-thread engine.',
   'no-offscreen-canvas': '[PptxEditor] `OffscreenCanvas` is not available in this environment; using the deprecated in-thread engine.',

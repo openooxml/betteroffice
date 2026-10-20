@@ -70,6 +70,33 @@ fn document_is_send_and_sync() {
 }
 
 #[test]
+fn foreign_package_returns_not_a_word_document() {
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "xl/workbook.xml".to_owned(),
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#.to_vec(),
+        ),
+    ];
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let Err(error) = Document::open(&bytes) else {
+        panic!("a foreign package opened as a Word document");
+    };
+    assert!(matches!(
+        &error,
+        betteroffice_docx::Error::NotAWordDocument(message) if message.starts_with("not a Word document")
+    ));
+    assert!(error.to_string().starts_with("not a Word document"));
+}
+
+#[test]
 fn open_with_limits_rejects_a_document_over_budget() {
     let bytes = sample_docx();
     let limits = ParseLimits {

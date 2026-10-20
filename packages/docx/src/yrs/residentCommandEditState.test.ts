@@ -133,6 +133,26 @@ test('d1b_toolbar_storedmarks_hyperlink_and_table_context_are_worker_reads', asy
   }
 }, TIMEOUT);
 
+test('worker_table_properties_state_matches_toolbar_shape', async () => {
+  const bodyXml =
+    '<w:p w14:paraId="00000001"><w:r><w:t>Before</w:t></w:r></w:p>' +
+    '<w:tbl><w:tblPr><w:jc w:val="right"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>' +
+    '<w:tr><w:tc><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="4" w:color="112233"/></w:tcBorders><w:shd w:fill="AABBCC"/></w:tcPr>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>Cell A</w:t></w:r></w:p></w:tc>' +
+    '<w:tc><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="4" w:color="445566"/></w:tcBorders></w:tcPr>' +
+    '<w:p w14:paraId="00000003"><w:r><w:t>Cell B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+  const arm = await openCommandEngine([], { editState: true, bodyXml });
+  const storyA = arm.engine.geometryReader.storyIds().find((story) => arm.engine.paragraphs(story)[0]?.text === 'Cell A')!;
+  const idA = arm.engine.paragraphs(storyA)[0]!.paraId;
+  expect(execute(arm, command(arm, 'select', { selection: selection(idA, 0, 0, storyA) })).status).toBe('noop');
+  arm.engine.setCellSelection({ anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 }, head: { story: 'body', tableIndex: 0, row: 0, column: 1 } });
+  const state = projectDocxEditState(arm.engine, arm.state);
+  expect(state.tableContext).toMatchObject({
+    rowIndex: 0, columnIndex: 1, justification: 'right',
+    cellBorderColor: { rgb: '112233' }, cellBackgroundColor: 'AABBCC',
+  });
+}, TIMEOUT);
+
 test('d1b_undo_redo_availability_excludes_noops_refusals_and_remote_updates', async () => {
   const arm = await openCommandEngine(['abc'], { editState: true, clientId: 8201 });
   const id = arm.engine.paragraphs('body')[0]!.paraId;

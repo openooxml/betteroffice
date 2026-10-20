@@ -514,3 +514,25 @@ fn rejects_an_empty_family_and_malformed_font_bytes() {
             .is_err()
     );
 }
+
+#[test]
+fn grouped_picture_skips_only_unsupported_picture_primitive_in_native_png() {
+    let sibling = json!({
+        "kind": "shape", "x": 32, "y": 0, "w": 32, "h": 32,
+        "geometryPath": [{"type": "move", "x": 32, "y": 0},
+            {"type": "line", "x": 64, "y": 0}, {"type": "line", "x": 64, "y": 32},
+            {"type": "line", "x": 32, "y": 32}, {"type": "close"}], "fill": "#ff0000"
+    });
+    for src in [Some(RED_PNG_DATA_URL), None] {
+        let picture = json!({
+            "kind": "shape", "x": 0, "y": 0, "w": 32, "h": 32,
+            "geometryPath": [], "fillPaint": {"kind": "picture", "pictureSrc": src, "pictureRelId": "rId7"}
+        });
+        let rendered = document()
+            .render_png(&page(vec![picture, sibling.clone()]), 0)
+            .unwrap();
+        let (width, _, pixels) = decode(&rendered.bytes);
+        assert_eq!(pixel(width, &pixels, 48, 16), [255, 0, 0, 255]);
+        assert_eq!(pixel(width, &pixels, 16, 16), [255, 255, 255, 255]);
+    }
+}

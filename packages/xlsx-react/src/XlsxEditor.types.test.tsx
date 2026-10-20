@@ -33,6 +33,10 @@ test('default and in-thread props preserve the async contextual API', () => {
 test('only legacy sync props expose sync contextual APIs', () => {
   const check = (readOnly: boolean) => [
     <XlsxEditor legacySyncApi onReady={(api) => {
+      assertType<Equal<typeof api, XlsxEditorApi>>();
+      assertType<Equal<ReturnType<typeof api.save>, Uint8Array>>();
+    }} />,
+    <XlsxEditor legacySyncApi experimentalWorkerOpen onReady={(api) => {
       assertType<Equal<typeof api, XlsxWorkerEditorApi>>();
     }} />,
     <XlsxEditor legacySyncApi experimentalWorkerOpen={false} onReady={(api) => {
@@ -41,9 +45,15 @@ test('only legacy sync props expose sync contextual APIs', () => {
       api.save();
     }} />,
     <XlsxEditor legacySyncApi readOnly onReady={(api) => {
+      assertType<Equal<typeof api, XlsxEditorApi>>();
+    }} />,
+    <XlsxEditor legacySyncApi experimentalWorkerOpen readOnly onReady={(api) => {
       assertType<Equal<typeof api, XlsxWorkerViewerApi>>();
     }} />,
     <XlsxEditor legacySyncApi readOnly={readOnly} onReady={(api) => {
+      assertType<Equal<typeof api, XlsxEditorApi>>();
+    }} />,
+    <XlsxEditor legacySyncApi experimentalWorkerOpen readOnly={readOnly} onReady={(api) => {
       assertType<Equal<typeof api, XlsxWorkerEditorApi | XlsxWorkerViewerApi>>();
     }} />,
     <XlsxEditor legacySyncApi experimentalWorkerOpen={false} collaboration={{}} onReady={(api) => {

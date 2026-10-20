@@ -287,6 +287,8 @@ test('staged_hydration_refusals_dispose_without_adoption', async () => {
   refusal(() => openPresentationPeerDeck(source, JSON.stringify({ ...decoded, schemaVersion: 99 })), 'schema');
   refusal(() => openPresentationPeerDeck(new Uint8Array([1, 2, 3]), identity), 'sourceMismatch');
   refusal(() => openPresentationReplayBaseline(source, { clientId: 0 }), 'clientId');
+  refusal(() => openPresentationReplayBaseline(source, { clientId: Number.MAX_SAFE_INTEGER - 1 }), 'clientId');
+  expect(() => openPresentation(source, { clientId: Number.MAX_SAFE_INTEGER - 1 })).toThrow('below Number.MAX_SAFE_INTEGER - 1');
   refusal(() => openPresentationPeerDeck(source, identity, { initialUpdate: new Uint8Array([255]) }), 'initialUpdate');
 
   const skipped = keep(openPresentationPeerDeck(source, identity, fonts()));

@@ -175,7 +175,7 @@ fn assert_original_grid(wb: &Workbook, vp: &Viewport, print: Option<(&PrintMetri
         || GridGeometry::new(&wb.sheets[0], &wb.styles),
         |(metrics, _)| GridGeometry::for_print(&wb.sheets[0], &wb.styles, metrics),
     );
-    let (rows, cols, _, _) = viewport_axes(&wb.sheets[0], vp, &geom, print.is_some());
+    let (rows, cols, _, _) = viewport_axes(&wb.sheets[0], vp, &geom, print.is_some(), None);
     let mut expected = if print.is_some_and(|(_, gridlines)| !gridlines) {
         Vec::new()
     } else {
@@ -266,7 +266,7 @@ fn assert_merge_subtraction(
     print: Option<(&PrintMetrics, bool)>,
     interior: [(f32, f32); 2],
 ) {
-    let (rows, cols, _, _) = viewport_axes(&wb.sheets[0], vp, geom, print.is_some());
+    let (rows, cols, _, _) = viewport_axes(&wb.sheets[0], vp, geom, print.is_some(), None);
     let reference = original_grid_commands(&rows, &cols, print);
     let col_boundaries: Vec<_> = std::iter::once(cols.tracks[0].index)
         .chain(cols.tracks.iter().map(|track| track.index + 1))

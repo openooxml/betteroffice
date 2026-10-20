@@ -1,6 +1,43 @@
 import { cellRect, rangeRect } from '@betteroffice/xlsx';
-import type { CellRange, DisplayList, Viewport } from '@betteroffice/xlsx';
+import type { CellRange, DisplayList, GridMeta, Viewport } from '@betteroffice/xlsx';
 import type { XlsxPluginGeometry, XlsxPluginLayout, XlsxPluginRect } from './types';
+
+export function frozenGridExtent(
+  grid: GridMeta | undefined,
+  frozenRows: number,
+  frozenCols: number,
+  fallback: Pick<Viewport, 'width' | 'height'> = { width: 0, height: 0 }
+) {
+  const edge = (
+    offsets: number[] | undefined,
+    indices: number[] | undefined,
+    start: number,
+    frozen: number,
+    whole: number
+  ) => {
+    if (frozen === 0) return 0;
+    const count = indices
+      ? indices.filter((index) => index < frozen).length
+      : Math.max(0, frozen - start);
+    return offsets?.[count] ?? whole;
+  };
+  return {
+    width: edge(grid?.colOffsets, grid?.colIndices, grid?.startCol ?? 0, frozenCols, fallback.width),
+    height: edge(grid?.rowOffsets, grid?.rowIndices, grid?.startRow ?? 0, frozenRows, fallback.height),
+  };
+}
+
+export function visibleGridRange(grid: GridMeta): CellRange | null {
+  const rows = grid.rowOffsets.length - 1;
+  const cols = grid.colOffsets.length - 1;
+  if (rows <= 0 || cols <= 0) return null;
+  return {
+    top: grid.rowIndices?.[0] ?? grid.startRow,
+    left: grid.colIndices?.[0] ?? grid.startCol,
+    bottom: grid.rowIndices?.[rows - 1] ?? grid.startRow + rows - 1,
+    right: grid.colIndices?.[cols - 1] ?? grid.startCol + cols - 1,
+  };
+}
 
 /** A grid frame the canvas painted, with what it shows. */
 export interface PaintedGrid {

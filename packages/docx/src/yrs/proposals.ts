@@ -94,7 +94,7 @@ export type DocxProposalResult =
   | { ok: true; snapshot: DocxProposalSnapshot }
   | { ok: false; version: string; failure: DocxProposalFailure };
 
-/** Ids that name no proposal are ignored, so a retried withdrawal changes nothing. */
+/** Missing or remotely settled ids withdraw as a no-op, preserving accepted text. */
 export interface DocxProposalWithdrawRequest {
   expectVersion: string;
   ids: readonly string[];
@@ -118,8 +118,11 @@ export interface DocxProposalSession {
   applyEdits(request: DocxEditRequest): DocxEditResult;
   listRevisions(): readonly { revisionId: string; kind: string }[];
   revisionStamps?(ids: readonly string[]): Record<string, readonly { author: string; date: string }[]>;
-  /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
-  settleRevisions(accept: readonly string[], reject: readonly string[]): void;
+  /**
+   * Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. Returns
+   * the refusal, with the document unchanged, while it holds remote updates not integrated yet.
+   */
+  settleRevisions(accept: readonly string[], reject: readonly string[]): DocxEditFailure | undefined;
   /** Runs `read` with story projections shared across its reads; omitted, reads run unshared. */
   sharedReads?<R>(read: () => R): R;
 }
@@ -130,6 +133,8 @@ export interface DocxProposalRegistry {
   setStates(request: DocxProposalStateRequest): DocxProposalResult;
   withdraw(request: DocxProposalWithdrawRequest): DocxProposalResult;
   snapshot(): DocxProposalSnapshot;
+  /** @internal */
+  reconcile(): void;
   /** @internal */
   exportState(): DocxProposalRegistryState;
   /** @internal */
@@ -563,8 +568,9 @@ export function executeProposalWithdrawal(
       }
     }
   }
-  if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
-  return { ok: true };
+  const failure =
+    accept.length > 0 || reject.length > 0 ? session.settleRevisions(accept, reject) : undefined;
+  return failure ? { ok: false, failure } : { ok: true };
 }
 
 /** The session holds update notifications until `propose` returns, so they see the round. */
@@ -826,6 +832,22 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     setStates,
     withdraw,
     snapshot,
+    reconcile() {
+      if (mirrored || records.size === 0) return;
+      const pending = new Set(session.listRevisions().map(({ revisionId }) => revisionId));
+      let changed = false;
+      let decided = false;
+      for (const [id, entry] of records) {
+        const revisionIds = entry.record.revisionIds.filter(revisionId => pending.has(revisionId));
+        if (revisionIds.length === entry.record.revisionIds.length) continue;
+        changed = true;
+        decided ||= entry.record.state !== 'proposed';
+        if (revisionIds.length === 0) records.delete(id);
+        else entry.record = { ...entry.record, revisionIds };
+      }
+      if (decided) previewVersion += 1;
+      if (changed) notify();
+    },
     exportState() {
       return structuredClone(
         mirrored?.proposals ?? { previewVersion, entries: [...records.values()] }

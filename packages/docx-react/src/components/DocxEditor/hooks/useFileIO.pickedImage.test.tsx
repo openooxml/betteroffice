@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -245,7 +246,7 @@ test('an image inserted through the picker keeps its media after two saves and r
     const ref = createRef<DocxEditorRef>();
     const errors: Error[] = [];
     const view = render(
-      <DocxEditor ref={ref} documentBuffer={fixture()} onError={(error) => errors.push(error)} />
+      <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={fixture()} onError={(error) => errors.push(error)} />
     );
     await until(() => ref.current?.commands.getState('save').enabled === true);
     await act(async () => {

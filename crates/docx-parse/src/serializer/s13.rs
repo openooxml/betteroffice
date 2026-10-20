@@ -938,21 +938,29 @@ impl StoryParts<'_> {
         let Some(part) = self.spliced.get(path) else {
             return serialize(context);
         };
-        context.begin_splice(part.paragraphs.iter().copied());
-        let serialized = serialize(context);
-        let written = context.end_splice();
-        let serialized = serialized?;
         let source = package
             .original_bytes(path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let token_prefix = source
+            .filter(|source| super::permissions::has_markers(source))
+            .map(super::permissions::token_prefix);
+        context.begin_splice(part.paragraphs.iter().copied(), token_prefix);
+        let serialized = serialize(context);
+        let written = context.end_splice();
+        let mut serialized = serialized?;
+        let (Some(source), Some(mut written)) = (source, written) else {
+            return Ok(serialized);
+        };
+        super::permissions::keep(source, part, &mut written, &mut serialized);
+        if written.conflict {
+            return Ok(serialized);
+        }
         let empty = BTreeMap::new();
         let assignments = self.assignments.get(path).unwrap_or(&empty);
-        Ok(source
-            .zip(written)
-            .and_then(|(source, written)| {
-                super::splice::splice_story_part(source, &serialized, &written, part, assignments)
-            })
-            .unwrap_or(serialized))
+        Ok(
+            super::splice::splice_story_part(source, &serialized, &written, part, assignments)
+                .unwrap_or(serialized),
+        )
     }
 }
 

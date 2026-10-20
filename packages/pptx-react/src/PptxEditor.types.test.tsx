@@ -46,6 +46,8 @@ test('plugin props preserve async and legacy contextual APIs', () => {
     { fonts: [], plugins, pluginGrants: {}, onPluginError: () => {} } satisfies PptxAsyncEditorProps,
     { fonts: [], plugins } satisfies PptxEditorProps,
     <PptxEditor legacySyncApi fonts={[]} plugins={plugins}
+      onReady={(api) => { assertType<Equal<typeof api, PptxEditorApi>>(); }} />,
+    <PptxEditor legacySyncApi experimentalWorkerOpen fonts={[]} plugins={plugins}
       onReady={(api) => { assertType<Equal<typeof api, PptxWorkerEditorApi>>(); }} />,
     <PptxEditor legacySyncApi experimentalWorkerOpen={false} fonts={[]} plugins={plugins}
       onReady={(api) => { assertType<Equal<typeof api, PptxEditorApi>>(); }} />,
@@ -56,6 +58,10 @@ test('plugin props preserve async and legacy contextual APIs', () => {
 test('only legacy sync props expose sync contextual APIs', () => {
   const check = () => [
     <PptxEditor legacySyncApi fonts={[]} onReady={(api) => {
+      assertType<Equal<typeof api, PptxEditorApi>>();
+      assertType<Equal<ReturnType<typeof api.save>, Uint8Array>>();
+    }} />,
+    <PptxEditor legacySyncApi experimentalWorkerOpen fonts={[]} onReady={(api) => {
       assertType<Equal<typeof api, PptxWorkerEditorApi>>();
       assertType<Equal<ReturnType<typeof api.goToSlide>, boolean>>();
     }} />,
@@ -65,6 +71,9 @@ test('only legacy sync props expose sync contextual APIs', () => {
       api.save();
     }} />,
     <PptxEditor legacySyncApi fonts={[]} readOnly onReady={(api) => {
+      assertType<Equal<typeof api, PptxEditorApi>>();
+    }} />,
+    <PptxEditor legacySyncApi experimentalWorkerOpen fonts={[]} readOnly onReady={(api) => {
       assertType<Equal<typeof api, PptxWorkerViewerApi>>();
     }} />,
     <PptxEditor legacySyncApi fonts={[]} collaboration={{ clientId: 1, onReplica: (replica) => {

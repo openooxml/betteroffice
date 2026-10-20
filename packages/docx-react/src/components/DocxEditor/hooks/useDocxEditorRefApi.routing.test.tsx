@@ -1015,7 +1015,7 @@ for (const [member, twin, args] of NAVIGATION) {
 }
 
 const PASS_THROUGH = [
-  'getPositionAtPoint', 'proposeChange', 'highlightRange',
+  'getPositionAtPoint', 'proposeChange', 'highlightRange', 'scrollToPosition',
   'getComments', 'readParagraphs', 'onDocumentChange',
 ] as const;
 for (const member of PASS_THROUGH) {
@@ -1031,8 +1031,11 @@ for (const member of PASS_THROUGH) {
     expect(Reflect.apply(api[member] as Function, api, ['argument'])).toBe(value);
     expect(Reflect.apply(api[member] as Function, api, ['argument'])).toBe(value);
     expect(call).toHaveBeenCalledTimes(3);
-    const deprecated = !['highlightRange', 'getComments', 'resolveComment', 'readParagraphs', 'onDocumentChange'].includes(member);
+    const deprecated = !['getComments', 'resolveComment', 'readParagraphs', 'onDocumentChange'].includes(member);
     expect(warning).toHaveBeenCalledTimes(deprecated ? 1 : 0);
+    if (['getPositionAtPoint', 'highlightRange', 'scrollToPosition'].includes(member)) {
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('keeps its synchronous behaviour in viewer sessions'));
+    }
   });
 }
 

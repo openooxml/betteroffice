@@ -58,7 +58,8 @@ match workbook.apply_edits(&request)? {
 ```
 
 Batches do not insert or delete rows, columns or sheets, and refuse writes to
-merged-cell followers, array-formula cells and protected sheets.
+merged-cell followers, array-formula cells and locked cells of protected sheets.
+Formats on a protected sheet need its protection to allow formatting cells.
 
 `Workbook::export_structured` and `export_markdown` read the committed workbook
 with its version as sparse cells, sheet metadata and diagnostics, or as bounded

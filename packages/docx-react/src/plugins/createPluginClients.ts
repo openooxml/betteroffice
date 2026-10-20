@@ -52,8 +52,11 @@ export interface DocxPluginEditorAccess {
   viewer?(): boolean;
   workerOpen?(): boolean;
   workerRead?: Pick<DocxPluginReadClient, 'version' | 'readParagraphs' | 'listStories' | 'readStories' | 'findText'> & Partial<Pick<DocxPluginReadClient, 'validateEdits'>>;
-  workerEdits?: { applyEdits(request: Parameters<DocxPluginEditClient['applyEdits']>[0], authorize: () => DocxPluginRefusal | null): ReturnType<DocxPluginEditClient['applyEdits']> };
+  /** `commit` runs the write that makes the applied batch the host's current version. */
+  workerEdits?: { applyEdits(request: Parameters<DocxPluginEditClient['applyEdits']>[0], authorize: () => DocxPluginRefusal | null, commit: (write: () => void) => void): ReturnType<DocxPluginEditClient['applyEdits']> };
   workerNavigation?: DocxPluginNavigation;
+  /** The refusal a worker read or navigation answers instead of rejecting with `error`, or null to rethrow it. */
+  workerRefusal?(error: unknown): DocxPluginRefusal | null;
 }
 
 const LAYOUT_WAIT_MS = 30_000;
@@ -142,7 +145,7 @@ export function createPluginClients(
         const result = await operation();
         return refusalOf(invocation) ?? result;
       } catch (error) {
-        const refused = refusalOf(invocation);
+        const refused = refusalOf(invocation) ?? access.workerRefusal?.(error);
         if (refused) return refused;
         throw error;
       }
@@ -168,7 +171,7 @@ export function createPluginClients(
           const denied = authorize();
           if (denied) return denied;
           try {
-            const result = await (access.workerEdits?.applyEdits(request, authorize) ?? Promise.resolve(pluginRefusal('unsupported-policy')));
+            const result = await (access.workerEdits?.applyEdits(request, authorize, (write) => invocation.commit(write)) ?? Promise.resolve(pluginRefusal('unsupported-policy')));
             return authorize() ?? result;
           } catch (error) {
             return refusalOf(invocation) ?? pluginRefusal('input-failed', error instanceof Error ? error.message : String(error));

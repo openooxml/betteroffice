@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
+import * as viewerSelection from './viewerSelection';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { createYrsSession, type YrsSession } from './index';
 import { resolveYrsPointPosition } from './pointPosition';
@@ -227,6 +228,21 @@ describe('viewer selection reads', () => {
   test('bookmarks resolve to their paragraph', () => {
     const version = resident.geometryReader.version();
     expect(resolveBookmarkPosition(index, 'body', 'target', version)).toBe(at('00000002', 0) - 1);
+  });
+
+  test('bookmark targets resolve the caret after the paragraph boundary in body and cell stories', async () => {
+    const version = resident.geometryReader.version();
+    expect(viewerSelection.resolveBookmarkTarget(index, 'body', 'target', version)).toEqual({
+      position: at('00000002', 0), loc: { story: 'body', paraId: '00000002', offset: 0 },
+    });
+    expect(viewerSelection.resolveBookmarkTarget(index, 'body', 'target', `${version}-stale`)).toBeNull();
+    expect(viewerSelection.resolveBookmarkTarget(index, 'body', 'missing', version)).toBeNull();
+    await withDocument(`<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr>${cell(p('00000003', `<w:bookmarkStart w:id="1" w:name="cell"/>${r('Cell')}<w:bookmarkEnd w:id="1"/>`))}</w:tr></w:tbl>`, (reader, positions) => {
+      const result = viewerSelection.resolveBookmarkTarget(positions, 'body', 'cell', reader.geometryReader.version());
+      expect(result?.loc.paraId).toBe('00000003');
+      expect(result?.loc.story).toStartWith('body:');
+      expect(result?.loc.offset).toBe(0);
+    });
   });
 
   test('selection info matches the main session for single, multiple and collapsed paragraphs', () => {

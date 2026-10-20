@@ -1,5 +1,5 @@
 use betteroffice_xlsx::{
-    Cell, CellRange, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, MAX_COLS,
+    Cell, CellRange, CellRef, CellValue, DrawCmd, FreezePane, GridGeometry, MAX_COLS,
     MAX_DISPLAY_CELLS, MAX_ROWS, RenderOptions, RowId, Sheet, SheetId, Viewport, Workbook,
     WorkbookModel,
 };
@@ -205,10 +205,10 @@ fn display_lists_count_cells_when_a_start_rounds_to_the_grid_end() {
         height: 6_000_000.0,
     };
     assert_eq!(geometry.viewport_range(&viewport).1, MAX_COLS - 1..MAX_COLS);
-    assert!(matches!(
-        workbook.display_list(&viewport),
-        Err(Error::DisplayTooLarge { cells, max }) if cells > max && max == MAX_DISPLAY_CELLS
-    ));
+    let frame = workbook.display_list(&viewport).unwrap();
+    assert!(frame.truncated);
+    assert_eq!(frame.grid.col_offsets.len(), 2);
+    assert_eq!(frame.grid.row_offsets.len() as u64, MAX_DISPLAY_CELLS + 1);
 }
 
 #[test]
@@ -242,20 +242,21 @@ fn display_lists_past_one_grid_end_build_no_tracks_on_the_other_axis() {
 }
 
 #[test]
-fn display_lists_reject_excessive_in_sheet_spans() {
+fn display_lists_degrade_excessive_in_sheet_spans() {
     let workbook = workbook();
-    let error = workbook
+    let frame = workbook
         .display_list(&Viewport {
             x: 0.0,
             y: 0.0,
             width: 100.0,
             height: 6_000_000.0,
         })
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::DisplayTooLarge { cells, max } if cells > max && max == MAX_DISPLAY_CELLS
-    ));
+        .unwrap();
+    assert!(frame.truncated);
+    assert!(
+        (frame.grid.row_offsets.len() - 1) as u64 * (frame.grid.col_offsets.len() - 1) as u64
+            <= MAX_DISPLAY_CELLS
+    );
 }
 
 const SCREEN: Viewport = Viewport {
@@ -364,7 +365,7 @@ fn display_lists_end_at_the_last_track_with_extent() {
 }
 
 #[test]
-fn display_lists_keep_interior_hidden_tracks() {
+fn display_lists_compact_interior_hidden_tracks() {
     let mut sheet = hidden_tail(8, 20, true, Some(MAX_ROWS - 1));
     for col in 2..5 {
         sheet.col_widths.insert(col, 0.0);
@@ -381,12 +382,26 @@ fn display_lists_keep_interior_hidden_tracks() {
     assert_eq!(geometry.viewport_range(&SCREEN), (0..20, 0..8));
     let frame = workbook.display_list_for(SheetId(0), &SCREEN).unwrap();
     let cols = &frame.grid.col_offsets;
-    assert_eq!(cols.len(), 9);
-    assert_eq!((cols[2], cols[3], cols[4]), (cols[5], cols[5], cols[5]));
-    assert!(cols[1] < cols[2] && cols[5] < cols[6]);
+    assert_eq!(
+        frame.grid.col_indices.as_deref(),
+        Some(&[0, 1, 5, 6, 7][..])
+    );
+    assert_eq!(
+        *cols,
+        [0, 1, 5, 6, 7, 8].map(|col| geometry.col_x(col)).to_vec()
+    );
     let rows = &frame.grid.row_offsets;
-    assert_eq!(rows.len(), 21);
-    assert_eq!(rows[4], rows[5]);
+    let indices: Vec<_> = (0..20).filter(|&row| row != 4).collect();
+    assert_eq!(frame.grid.row_indices.as_ref(), Some(&indices));
+    assert_eq!(
+        *rows,
+        indices
+            .iter()
+            .copied()
+            .chain([20])
+            .map(|row| geometry.row_y(row))
+            .collect::<Vec<_>>()
+    );
     assert!(has_text(&frame, "r0c5") && has_text(&frame, "r19c7"));
     assert_eq!(
         workbook.visible_merged_ranges(SheetId(0), &SCREEN).unwrap(),
@@ -395,9 +410,9 @@ fn display_lists_keep_interior_hidden_tracks() {
 }
 
 #[test]
-fn display_lists_still_refuse_large_regions_beside_hidden_tracks() {
+fn display_lists_degrade_large_regions_beside_hidden_tracks() {
     let workbook = open(hidden_tail(8, 20, true, None));
-    let error = workbook
+    let frame = workbook
         .display_list_for(
             SheetId(0),
             &Viewport {
@@ -405,9 +420,11 @@ fn display_lists_still_refuse_large_regions_beside_hidden_tracks() {
                 ..SCREEN
             },
         )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::DisplayTooLarge { cells, max } if cells > max && max == MAX_DISPLAY_CELLS
-    ));
+        .unwrap();
+    assert!(frame.truncated);
+    assert!(has_text(&frame, "r0c0"));
+    assert!(
+        (frame.grid.row_offsets.len() - 1) as u64 * (frame.grid.col_offsets.len() - 1) as u64
+            <= MAX_DISPLAY_CELLS
+    );
 }

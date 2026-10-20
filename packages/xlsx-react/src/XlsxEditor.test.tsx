@@ -9,7 +9,7 @@
  */
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -43,6 +43,7 @@ import {
   type XlsxEditorApi,
   type XlsxInThreadEditorProps,
 } from './XlsxEditor';
+import { editableWorkbookSessionBackend } from './worker/useEditableSessionWorkbook';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -2741,6 +2742,25 @@ describe('XlsxEditor edit batches', () => {
 });
 
 describe('XlsxEditor host controls', () => {
+  it('returns the saved bytes from the sync save() under legacySyncApi alone', async () => {
+    const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, writable: true, value: class {} });
+    const workerOpen = spyOn(editableWorkbookSessionBackend, 'open').mockImplementation(() => {
+      throw new Error('opened the worker editor');
+    });
+    try {
+      let api: XlsxEditorApi | undefined;
+      render(<XlsxEditor legacySyncApi file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      expect(workerOpen).not.toHaveBeenCalled();
+      expect(api!.save().byteLength).toBeGreaterThan(0);
+    } finally {
+      workerOpen.mockRestore();
+      if (worker) Object.defineProperty(globalThis, 'Worker', worker);
+      else Reflect.deleteProperty(globalThis, 'Worker');
+    }
+  });
+
   it('lets a host flush and serialize inside the save callback without re-entering it', async () => {
     let api!: XlsxEditorApi;
     let requests = 0;

@@ -13,7 +13,7 @@ use docx_parse::paragraph_identity::{
 };
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use serde_json::json;
-use yrs::Any;
+use yrs::{Any, ReadTxn, Transact};
 
 const DATE: &str = "2026-09-24T00:00:00Z";
 const BODY: &str = "/word/document.xml";
@@ -987,10 +987,20 @@ fn editor_only_paragraphs_are_not_persisted_until_authored() {
     assert!(retyped.ooxml_para_id.is_some());
 
     let touched = seeded(&bytes);
-    let tail_mark = touched.paragraph_mark_position(&tail).unwrap();
-    let before_tables = Position::new("body", tail_mark.index - 1);
+    let peer = EditingDoc::new(42);
+    peer.apply_update_v1(&touched.encode_state_as_update_v1())
+        .unwrap();
+    let tail_mark = peer.paragraph_mark_position(&tail).unwrap();
+    {
+        let stories = peer.yrs_doc().transact().get_map("stories").unwrap();
+        let mut txn = peer.yrs_doc().transact_mut();
+        let Some(yrs::Out::YText(body)) = yrs::Map::get(&stories, &txn, "body") else {
+            panic!("body");
+        };
+        yrs::Text::insert(&body, &mut txn, tail_mark.index, "early");
+    }
     touched
-        .insert_text(&ctx(), before_tables, "early", FormatPolicy::Plain)
+        .apply_update_v1(&peer.encode_state_as_update_v1())
         .unwrap();
     assert_eq!(identity(&touched, &tail).origin, ParagraphOrigin::Synthetic);
     let report = touched.persist_paragraph_ids().unwrap();
