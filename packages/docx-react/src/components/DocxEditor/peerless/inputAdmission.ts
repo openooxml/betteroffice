@@ -273,6 +273,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         ? intent.payload.direction : undefined;
       const send = (predecessor: CommandTicket | undefined, goalX?: number, recoverTab = false) => {
         const selection = workerSelection();
+        if (recoverTab && tabDirection === 'backward') return;
         if (tabDirection && !recoverTab) {
           const toolbar = latestEditState()?.toolbar;
           const numPr = toolbar?.paragraphProperties.numPr as { numId?: number; ilvl?: number } | null | undefined;

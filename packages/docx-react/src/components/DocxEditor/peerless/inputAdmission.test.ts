@@ -561,6 +561,21 @@ test('Tab recovers from a cancelled deferred predecessor and restarts the select
   } finally { admission.dispose(); }
 });
 
+test('Shift+Tab recovering from a cancelled predecessor inserts nothing', async () => {
+  const { admission, submitted } = lane();
+  try {
+    admitIntent(admission, { kind: 'insertText', payload: { text: 'a' } });
+    const cancelled = submitFormattingIntent(admission, { kind: 'formatRange', payload: { delta: { bold: true } } });
+    const tab = admitIntent(admission, { kind: 'insertText', payload: { text: '\t' } }, { tabDirection: 'backward' });
+    if (cancelled.status !== 'submitted' || tab.status !== 'submitted') throw new Error('input was not submitted');
+    submitted[0]!.settle({ status: 'refused', seq: 1, reason: 'invalid-selection' });
+    expect(await tab.ticket.ack).toEqual({ status: 'noop' });
+    expect(submitted.map(({ kind, payload }) => ({ kind, payload }))).toEqual([
+      { kind: 'insertText', payload: { text: 'a' } },
+    ]);
+  } finally { admission.dispose(); }
+});
+
 test('mode_barriers_restart_dependencies_after_refused_input', async () => {
   const { admission, submitted } = lane();
   admitIntent(admission, { kind: 'insertText', payload: { text: 'refused' } });
