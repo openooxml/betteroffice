@@ -581,10 +581,7 @@ impl StoryParser<'_, '_> {
         container: &XmlElement,
         depth: usize,
     ) -> Result<Vec<serde_json::Value>, ParseError> {
-        let blocks = self.parse_blocks(container, depth.saturating_add(1), false)?;
-        self.budget
-            .charge_group_text_box_materialization(&blocks, self.part)?;
-        blocks
+        self.parse_blocks(container, depth.saturating_add(1), false)?
             .into_iter()
             .map(serde_json::to_value)
             .collect::<Result<_, _>>()
@@ -945,8 +942,11 @@ mod tests {
     }
 
     fn try_parse(xml: &str) -> Result<Vec<BlockContent>, ParseError> {
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
+        try_parse_with(xml, &ParseLimits::default())
+    }
+
+    fn try_parse_with(xml: &str, limits: &ParseLimits) -> Result<Vec<BlockContent>, ParseError> {
+        let mut budget = ParseBudget::new(limits);
         let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
         let media = IndexMap::new();
         let charts = IndexMap::new();
@@ -968,16 +968,24 @@ mod tests {
         .parse_blocks(document.root().unwrap(), 0, false)
     }
 
-    fn nested_text_box_chain(levels: usize, leaf: &str) -> String {
+    fn text_box_chain_story(levels: usize, leaf: &str) -> String {
         let mut story = format!("<w:p><w:r><w:t>{leaf}</w:t></w:r></w:p>");
         for _ in 0..levels {
             story = format!(
                 r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="50"/><a:graphic><a:graphicData><wpg:wgp><wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent>{story}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
             );
         }
+        story
+    }
+
+    fn text_box_body(story: &str) -> String {
         format!(
             r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg">{story}</w:body>"#
         )
+    }
+
+    fn nested_text_box_chain(levels: usize, leaf: &str) -> String {
+        text_box_body(&text_box_chain_story(levels, leaf))
     }
 
     #[test]
@@ -1166,42 +1174,32 @@ mod tests {
     }
 
     #[test]
-    fn nested_group_text_box_stories_share_materialization_budget() {
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
-        let media = MediaMap::new();
-        let charts = ChartPartsMap::new();
-        let mut smart_art = SmartArtContext::default();
-        let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
-        for depth in [1, 6, 1] {
-            let xml = nested_text_box_chain(depth, &"x".repeat(72 * 1024));
-            let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
-            let result = StoryParser {
-                relationships: None,
-                theme: None,
-                styles: None,
-                doc_defaults: None,
-                numbering: None,
-                media: &media,
-                charts: &charts,
-                smart_art: &mut smart_art,
-                budget: &mut budget,
-                ids: &mut ids,
-                part: "word/document.xml",
-            }
-            .parse_blocks(document.root().unwrap(), 0, false);
-            if depth == 6 {
-                assert_eq!(
-                    result.err(),
-                    Some(ParseError::ResourceLimit {
-                        kind: "groupTextBoxBytes",
-                        part: "word/document.xml".to_owned(),
-                    })
-                );
-            } else {
-                assert_eq!(result.unwrap().len(), 1);
-            }
-        }
+    fn nested_group_text_box_stories_share_one_materialization_budget() {
+        let limits = ParseLimits {
+            max_xml_bytes: 1024 * 1024,
+            ..ParseLimits::default()
+        };
+        let large = "x".repeat(700 * 1024);
+        assert_eq!(
+            try_parse_with(&nested_text_box_chain(1, &large), &limits)
+                .unwrap()
+                .len(),
+            1
+        );
+        let chain = text_box_chain_story(3, &"x".repeat(200 * 1024));
+        assert_eq!(
+            try_parse_with(&text_box_body(&chain), &limits)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            try_parse_with(&text_box_body(&chain.repeat(2)), &limits).err(),
+            Some(ParseError::ResourceLimit {
+                kind: "groupTextBoxBytes",
+                part: "word/document.xml".to_owned(),
+            })
+        );
     }
 
     #[test]

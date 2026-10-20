@@ -8,7 +8,7 @@ use thiserror::Error;
 /// Maximum block and inline nesting depth.
 pub const MAX_NESTING_DEPTH: usize = 64;
 
-const MAX_GROUP_TEXT_BOX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
 
 /// OOXML namespace URIs.
 pub mod namespaces {
@@ -94,7 +94,8 @@ pub struct ParseBudget<'a> {
     source_ordinals: bool,
     media: Option<&'a crate::media::MediaTable>,
     media_error: Option<String>,
-    group_text_box_bytes: Option<usize>,
+    group_text_box_bytes: usize,
+    group_text_box_depth: usize,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -116,7 +117,8 @@ impl<'a> ParseBudget<'a> {
             source_ordinals: false,
             media: None,
             media_error: None,
-            group_text_box_bytes: None,
+            group_text_box_bytes: 0,
+            group_text_box_depth: 0,
         }
     }
 
@@ -164,18 +166,12 @@ impl<'a> ParseBudget<'a> {
     }
 
     pub(crate) fn begin_group_text_box_materialization(&mut self) -> bool {
-        if self.group_text_box_bytes.is_some() {
-            false
-        } else {
-            self.group_text_box_bytes = Some(0);
-            true
-        }
+        self.group_text_box_depth += 1;
+        self.group_text_box_depth > 1
     }
 
-    pub(crate) fn end_group_text_box_materialization(&mut self, outermost: bool) {
-        if outermost {
-            self.group_text_box_bytes = None;
-        }
+    pub(crate) fn end_group_text_box_materialization(&mut self) {
+        self.group_text_box_depth = self.group_text_box_depth.saturating_sub(1);
     }
 
     pub(crate) fn charge_group_text_box_materialization<T: serde::Serialize + ?Sized>(
@@ -183,11 +179,8 @@ impl<'a> ParseBudget<'a> {
         value: &T,
         part: &str,
     ) -> Result<(), ParseError> {
-        let Some(used) = self.group_text_box_bytes.as_mut() else {
-            return Ok(());
-        };
         let mut meter = GroupTextBoxMeter {
-            used,
+            used: &mut self.group_text_box_bytes,
             limit: self.limits.max_xml_bytes.min(MAX_GROUP_TEXT_BOX_BYTES),
             part,
             error: None,

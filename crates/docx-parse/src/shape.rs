@@ -1771,19 +1771,21 @@ pub(crate) fn enrich_group_text_boxes(
             "group text body source mismatch".to_owned(),
         ));
     }
-    let outermost = budget.begin_group_text_box_materialization();
+    let nested = budget.begin_group_text_box_materialization();
     let result = (|| {
         for (key, container) in sources {
             if let Some(container) = container {
                 let content = parse_story(container, budget)?;
-                budget.charge_group_text_box_materialization(&content, part)?;
+                if nested {
+                    budget.charge_group_text_box_materialization(&content, part)?;
+                }
                 scene_bodies.get_mut(&key).unwrap().content = content.clone();
                 child_bodies.get_mut(&key).unwrap().content = content;
             }
         }
         Ok(())
     })();
-    budget.end_group_text_box_materialization(outermost);
+    budget.end_group_text_box_materialization();
     result
 }
 
