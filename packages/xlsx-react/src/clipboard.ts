@@ -7,24 +7,31 @@ const MAX_CLIPBOARD_BYTES = 16 * 1024 * 1024;
 
 type ClipboardCells = { input: string; isFormula: boolean; isArrayFormula?: boolean }[][];
 type Capture = { owner: object; sheet: number; range: CellRange; cells: ClipboardCells; cut: boolean };
-type Token = { revision: number; cancellation: number; marker: string };
+type Token = { revision: number; cancellation: number; escapes: number; marker: string };
 export type CellPaste = Capture & { edits: CellInputEdit[]; bottom: number; right: number };
 
 export class CellClipboard {
   pending: Promise<unknown> = Promise.resolve();
   private revision = 0;
   private cancellation = 0;
+  private escapes = 0;
   private watching: Token | null = null;
   private captured: (Capture & { text: string; marker: string }) | null = null;
 
-  begin(): Token {
+  get escaped(): number {
+    return this.escapes;
+  }
+
+  begin(escapes = this.escapes): Token {
     this.captured = null;
     this.watching = null;
-    return { revision: ++this.revision, cancellation: this.cancellation, marker: `betteroffice-${crypto.randomUUID()}` };
+    return { revision: ++this.revision, cancellation: this.cancellation, escapes,
+      marker: `betteroffice-${crypto.randomUUID()}` };
   }
 
   capture(token: Token, capture: Capture, marked = false): void {
-    if (!marked || token.revision !== this.revision || capture.cut && token.cancellation !== this.cancellation) return;
+    if (!marked || token.revision !== this.revision ||
+      capture.cut && (token.cancellation !== this.cancellation || token.escapes !== this.escapes)) return;
     const { owner, ...data } = capture;
     this.captured = { ...structuredClone(data), owner, text: toTsv(capture.cells), marker: token.marker };
   }
@@ -35,6 +42,11 @@ export class CellClipboard {
 
   changed(): void {
     if (this.captured?.cut || this.watching) this.cancelCut();
+  }
+
+  escape(): void {
+    this.escapes++;
+    this.cancelCut();
   }
 
   cancelCut(): void {

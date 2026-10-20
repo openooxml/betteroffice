@@ -1815,8 +1815,8 @@ function XlsxEditorContent({
     if (target && !readOnly) void coordinator.input(() => writeClear(target));
   }, [captureTarget, writeClear, readOnly, coordinator]);
 
-  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget, cut = false) => {
-    const token = cellClipboard.begin();
+  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget, cut = false, escapes?: number) => {
+    const token = cellClipboard.begin(escapes);
     try {
       const from = handle.cell(sheet, range.top, range.left).a1;
       const to = handle.cell(sheet, range.bottom, range.right).a1;
@@ -1843,8 +1843,10 @@ function XlsxEditorContent({
 
   const cutSelection = useCallback(() => {
     const target = captureTarget();
-    if (target && !readOnly) void coordinator.input(() => copyTarget(target, true));
-  }, [captureTarget, copyTarget, readOnly, coordinator]);
+    if (!target || readOnly) return;
+    const escapes = cellClipboard.escaped;
+    void coordinator.input(() => copyTarget(target, true, escapes));
+  }, [captureTarget, cellClipboard, copyTarget, readOnly, coordinator]);
 
   const pasteSelection = useCallback(() => {
     const handle = handleRef.current;
@@ -2528,7 +2530,7 @@ function XlsxEditorContent({
       className={className}
       role="application"
       aria-label={t('editor.appLabel')}
-      onKeyDownCapture={(event) => { if (!fromPlugin(event) && event.key === 'Escape') cellClipboard.cancelCut(); }}
+      onKeyDownCapture={(event) => { if (!fromPlugin(event) && event.key === 'Escape') cellClipboard.escape(); }}
       style={{
         position: 'relative',
         display: 'flex',

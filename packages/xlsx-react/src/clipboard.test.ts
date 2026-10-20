@@ -74,6 +74,19 @@ describe('cell clipboard', () => {
     expect(clipboard.paste(owner, text, range, token.marker)).toBeNull();
   });
 
+  test('escape after a cut is accepted keeps it from arming when its write starts later', () => {
+    const clipboard = new CellClipboard();
+    const accepted = clipboard.escaped;
+    clipboard.changed();
+    clipboard.escape();
+    const token = clipboard.begin(accepted);
+    clipboard.capture(token, { owner, sheet: 0, range, cells, cut: true }, true);
+    expect(clipboard.paste(owner, text, range, token.marker)).toBeNull();
+    const next = clipboard.begin(clipboard.escaped);
+    clipboard.capture(next, { owner, sheet: 0, range, cells, cut: true }, true);
+    expect(clipboard.paste(owner, text, range, next.marker)?.cut).toBe(true);
+  });
+
   test('earlier edits settling before the source read do not cancel a new cut', () => {
     const clipboard = new CellClipboard();
     const token = clipboard.begin();

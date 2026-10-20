@@ -932,6 +932,67 @@ describe('XlsxEditor host integration', () => {
       }
     }
   });
+  for (const escape of [true, false]) it(`${escape ? 'escape cancels' : 'without escape, keeps'} a cut queued behind a pending paste`, async () => {
+    const file = plain.bytes.slice();
+    let api: XlsxEditorApi | undefined;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    type Item = { types: string[]; getType(type: string): Promise<Blob> };
+    let items: Item[] = [];
+    let first = true;
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    Object.defineProperty(globalThis, 'ClipboardItem', {
+      configurable: true,
+      value: class {
+        constructor(private readonly data: Record<string, Blob>) {}
+        get types() { return Object.keys(this.data); }
+        async getType(type: string) { return this.data[type]!; }
+      },
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: async () => {
+          if (first) { first = false; await gate; return ''; }
+          return items[0] ? (await items[0].getType('text/plain')).text() : '';
+        },
+        read: async () => items,
+        write: async (next: Item[]) => { items = next; },
+      },
+    });
+
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const surface = view.getByTestId('xlsx-scroll');
+      const source = { row: 40, col: 10 };
+      const destination = { row: 40, col: 12 };
+      const value = 'Moved value';
+      await act(async () => { api!.handle.editCells(0, [{ ...source, input: value }]); });
+      expect(api!.handle.cell(0, source.row, source.col).input).toBe(value);
+      expect(api!.handle.cell(0, destination.row, destination.col).input).toBe('');
+
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => { api!.selectCells(0, selectionAt(source)); });
+      fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
+      if (escape) fireEvent.keyDown(surface, { key: 'Escape' });
+      await act(async () => release());
+      await waitFor(() => expect(items.length).toBe(1));
+
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await waitFor(() => expect(api!.handle.cell(0, destination.row, destination.col).input).toBe(value));
+      expect(api!.handle.cell(0, source.row, source.col).input).toBe(escape ? value : '');
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+      if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+      else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+    }
+  });
 });
 
 describe('XlsxEditor proposal review', () => {
