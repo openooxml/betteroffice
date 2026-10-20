@@ -175,7 +175,7 @@ test('copy formulas shifts relative references and keeps absolute and mixed refe
   await input(page, 2, 3, '');
   await page.getByTestId('xlsx-redo').click();
   await input(page, 2, 3, '=A3+$B$1+A$2+$B4');
-  expect((await roundTrip(page, info))[sheet].cells.D1.formula).toBe('A1+$B$1+A$2+$B2');
+  expect(await roundTrip(page, info)).toEqual(after);
 });
 
 test('copying a formula shifts only its relative references at the destination', async ({ page }, info) => {
