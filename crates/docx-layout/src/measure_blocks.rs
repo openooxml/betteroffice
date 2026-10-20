@@ -1206,7 +1206,17 @@ impl FlowState {
                 active_zones.clone_from(zones);
             }
         }
-        let width = widths.get(index).copied().unwrap_or(default_width);
+        let mut width = widths.get(index).copied().unwrap_or(default_width);
+        let column_bands = match column_bands {
+            Some(bands)
+                if active_zones.len() + bands.iter().filter(|band| band.width < width).count()
+                    > MAX_ACTIVE_ZONES =>
+            {
+                width = bands.iter().map(|band| band.width).fold(width, f64::min);
+                None
+            }
+            bands => bands,
+        };
         // A bare paragraph mark carrying section properties is the section
         // break itself and prints no line, unless it is everything its section
         // holds: Word lays such a section out one line tall.
@@ -3704,6 +3714,45 @@ mod tests {
             defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn column_bands_past_the_zone_limit_measure_at_the_narrowest_slot() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind":"paragraph","id":"long","runs":[{"kind":"text","text":"word ".repeat(2000)}]}
+        ]))
+        .unwrap();
+        let mut bands: Vec<_> = (0..450)
+            .map(|slot| ColumnWidthBand {
+                top: slot as f64 * 14.0,
+                bottom: (slot + 1) as f64 * 14.0,
+                width: if slot % 2 == 0 { 300.0 } else { 200.0 },
+            })
+            .collect();
+        bands.last_mut().unwrap().bottom = f64::INFINITY;
+        let measures = measure_blocks_with_column_frames(
+            &mut blocks,
+            &[300.0],
+            &[] as &[bool],
+            &config,
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, bands)]),
+        )
+        .unwrap();
+        let BlockExtent::Paragraph(paragraph) = &measures[0] else {
+            panic!()
+        };
+        assert!(paragraph.lines.len() > 200);
+        assert!(
+            paragraph
+                .lines
+                .iter()
+                .all(|line| line.synthetic_fallback != Some(true) && line.width <= 210.0)
+        );
     }
 
     #[test]
