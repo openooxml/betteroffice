@@ -1731,6 +1731,16 @@ mod tests {
         assert_eq!(used["usedRange"]["right"], 50);
         assert!(used["region"].is_null());
         assert!(used["edge"].is_null());
+        let row_end: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":1,"row":900000,"col":3,"direction":"rowEnd"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            row_end["edge"],
+            serde_json::json!({ "row": 900000, "col": 50 })
+        );
         assert!(
             session
                 .selection_data_json(r#"{"sheet":2,"row":0,"col":0}"#)

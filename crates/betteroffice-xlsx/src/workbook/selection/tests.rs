@@ -644,3 +644,53 @@ fn zero_height_defaults_skip_large_hidden_spans() {
         })
     );
 }
+
+#[test]
+fn row_end_finds_the_last_visible_data_cell_or_the_used_range_edge() {
+    let mut sheet = Sheet::new("Data");
+    for (row, col) in [(0, 0), (0, 2), (0, 6), (1, 1), (3, 9)] {
+        sheet.set_cell(
+            CellRef::new(row, col),
+            Cell {
+                value: CellValue::Bool { value: true },
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.col_widths.insert(6, 0.0);
+    sheet.col_widths.insert(9, 0.0);
+    sheet.row_heights.insert(4, 0.0);
+    sheet
+        .merges
+        .push(CellRange::new(CellRef::new(2, 3), CellRef::new(3, 5)));
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    for (at, expected) in [
+        ((0, 0), Some((0, 2))),
+        ((0, 2), Some((0, 2))),
+        ((0, 3), Some((0, 8))),
+        ((1, 0), Some((1, 1))),
+        ((1, 4), Some((1, 8))),
+        ((2, 0), Some((2, 5))),
+        ((3, 4), Some((3, 5))),
+        ((5, 8), None),
+        ((5, 12), None),
+        ((4, 0), None),
+        ((0, 6), None),
+    ] {
+        assert_eq!(
+            edge(&workbook, at.0, at.1, SelectionDirection::RowEnd),
+            expected.map(|(row, col)| CellRef::new(row, col)),
+            "{at:?}"
+        );
+    }
+    let empty = Workbook::from_model(WorkbookModel {
+        sheets: vec![Sheet::new("Empty")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    assert_eq!(edge(&empty, 0, 0, SelectionDirection::RowEnd), None);
+}

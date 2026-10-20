@@ -758,6 +758,22 @@ for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
   });
 }
 
+it('moves plain End to the last data cell of the row and Shift+End extends to it', async () => {
+  const host = peerlessHarness();
+  host.selectionData.mockResolvedValue({ edge: { row: 0, col: 7 } });
+  const view = await host.mount();
+  const scroll = view.getByTestId('xlsx-scroll');
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'End', shiftKey: true }); });
+  expect(host.selectionData).toHaveBeenCalledWith(0, 0, 0, 'rowEnd');
+  expect(host.sent[0]).toMatchObject({ kind: 'select', payload: { selection: {
+    range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 7 } },
+    activeCell: { row: 0, col: 0 },
+  } } });
+  host.selectionData.mockResolvedValue({ edge: null });
+  await act(async () => { fireEvent.keyDown(scroll, { key: 'End' }); });
+  expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A1');
+});
+
 for (const change of ['selection', 'sheet', 'replacement']) {
   it(`drops an obsolete data edge after ${change}`, async () => {
     const host = peerlessHarness();

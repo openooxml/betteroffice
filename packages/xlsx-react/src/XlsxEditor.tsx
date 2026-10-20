@@ -2050,7 +2050,7 @@ function XlsxEditorContent({
         data = request ? handle.selectionData(activeSheetRef.current, selection.focus.row,
           selection.focus.col, request === 'region' ? undefined : request) : undefined;
       } catch (error) {
-        if (request !== 'usedRange') throw error;
+        if (request !== 'usedRange' && request !== 'rowEnd') throw error;
         e.preventDefault();
         return;
       }

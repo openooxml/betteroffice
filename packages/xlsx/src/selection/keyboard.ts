@@ -78,11 +78,9 @@ function visibleEdge(state: Selection, edge: CellAddr, direction: Direction, lim
   return vertical ? { row: index, col: edge.col } : { row: edge.row, col: index };
 }
 
-function corner(state: Selection, end: boolean, sheet: boolean, limits: SelectionLimits,
-  hidden?: SelectionHidden): Selection {
-  const step = end ? -1 : 1;
-  const col = visibleIndex(end ? limits.cols - 1 : 0, step, limits.cols, hidden?.isColHidden);
-  const row = sheet ? visibleIndex(end ? limits.rows - 1 : 0, step, limits.rows, hidden?.isRowHidden) : state.focus.row;
+function home(state: Selection, sheet: boolean, limits: SelectionLimits, hidden?: SelectionHidden): Selection {
+  const col = visibleIndex(0, 1, limits.cols, hidden?.isColHidden);
+  const row = sheet ? visibleIndex(0, 1, limits.rows, hidden?.isRowHidden) : state.focus.row;
   if (row === null || col === null || (hidden && row === state.focus.row && col === state.focus.col)) return state;
   return selectionAt({ row, col });
 }
@@ -124,14 +122,16 @@ export function selectionKeyReducer(
       return moveAction(moveFocus(state, key.shiftKey ? 'up' : 'down', { extend: false, limits, hidden }));
 
     case 'Home':
-      return moveAction(corner(state, false, mod(key), limits, hidden));
+      return moveAction(home(state, mod(key), limits, hidden));
 
     case 'End': {
-      if (!mod(key)) return moveAction(corner(state, true, false, limits, hidden));
-      if (data?.usedRange === undefined) return { type: 'none' };
+      const used = data?.usedRange;
+      const found = mod(key) ? used && { row: used.bottom, col: used.right } : data?.edge;
+      if (found === undefined) return { type: 'none' };
+      if (found === null && !mod(key)) return moveAction(state);
       const target = {
-        row: Math.max(0, Math.min(data?.usedRange?.bottom ?? 0, limits.rows - 1)),
-        col: Math.max(0, Math.min(data?.usedRange?.right ?? 0, limits.cols - 1)),
+        row: Math.max(0, Math.min(found?.row ?? 0, limits.rows - 1)),
+        col: Math.max(0, Math.min(found?.col ?? 0, limits.cols - 1)),
       };
       return moveAction(key.shiftKey ? extendTo(state, target, limits) : selectionAt(target));
     }

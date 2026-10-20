@@ -10,6 +10,8 @@ pub enum SelectionDirection {
     Right,
     #[serde(rename = "usedRange")]
     UsedRange,
+    #[serde(rename = "rowEnd")]
+    RowEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -150,6 +152,34 @@ fn data_edge(sheet: &Sheet, at: CellRef, direction: SelectionDirection) -> Optio
     })
 }
 
+fn row_end(sheet: &Sheet, at: CellRef) -> Option<CellRef> {
+    if sheet.row_hidden(at.row) || sheet.col_hidden(at.col) {
+        return None;
+    }
+    let cols = VisibleAxis::new(sheet.hidden_col_spans(0..=MAX_COLS - 1));
+    let line = CellRange::new(at, CellRef::new(at.row, MAX_COLS - 1));
+    let merged = sheet
+        .merges
+        .iter()
+        .filter(|merge| {
+            merge.start.row <= at.row && merge.end.row >= at.row && merge.end.col >= at.col
+        })
+        .filter_map(|merge| cols.bounds(merge.start.col, merge.end.col))
+        .map(|(_, end)| cols.restore(end));
+    let last = sheet
+        .cells_in_range(line)
+        .filter(|(cell, value)| filled(value) && !sheet.col_hidden(cell.col))
+        .map(|(cell, _)| cell.col)
+        .chain(merged)
+        .max()
+        .or_else(|| {
+            let visible = cols.project(sheet.used_range()?.end.col + 1);
+            let col = cols.restore(visible.checked_sub(1)?);
+            (col > at.col).then_some(col)
+        })?;
+    Some(CellRef::new(at.row, last))
+}
+
 fn current_region(sheet: &Sheet, at: CellRef) -> Option<SelectionRegion> {
     if sheet.row_hidden(at.row) || sheet.col_hidden(at.col) {
         return None;
@@ -255,6 +285,11 @@ impl Workbook {
                     bottom: range.end.row,
                     right: range.end.col,
                 }),
+            },
+            Some(SelectionDirection::RowEnd) => SelectionData {
+                edge: row_end(sheet, at),
+                region: None,
+                used_range: None,
             },
             Some(direction) => SelectionData {
                 edge: data_edge(sheet, at, direction),

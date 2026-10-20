@@ -63,12 +63,29 @@ describe('Ctrl+A sheet selection clears', () => {
 });
 
 describe('selection data navigation', () => {
-  it('requests the used range for Ctrl/Meta End and leaves plain End synchronous', () => {
-    expect(selectionDataRequest({ key: 'End' })).toBeNull();
+  it('requests the used range for Ctrl/Meta End and the row end for plain End', () => {
+    expect(selectionDataRequest({ key: 'End' })).toBe('rowEnd');
+    expect(selectionDataRequest({ key: 'End', shiftKey: true })).toBe('rowEnd');
+    expect(selectionDataRequest({ key: 'Home' })).toBeNull();
     for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
       expect(selectionDataRequest({ key: 'End', ...modifier })).toBe('usedRange');
       expect(selectionDataRequest({ key: 'End', shiftKey: true, ...modifier })).toBe('usedRange');
     }
+  });
+
+  it('moves plain End to the queried row end and extends it with Shift', async () => {
+    const nav = navigation(true);
+    nav.update({ selection: { anchor: { row: 1, col: 1 }, focus: { row: 4, col: 3 } } });
+    nav.query.mockResolvedValueOnce({ edge: { row: 4, col: 12 } }).mockResolvedValueOnce({ edge: { row: 1, col: 9 } });
+    nav.press({ key: 'End', shiftKey: true });
+    nav.press({ key: 'End' });
+    await tick();
+    expect(nav.query.mock.calls.map(([context, direction]) => [context.selection.focus, direction])).toEqual([
+      [{ row: 4, col: 3 }, 'rowEnd'],
+      [{ row: 1, col: 1 }, 'rowEnd'],
+    ]);
+    expect(nav.apply.mock.calls[0]![0]).toEqual({ anchor: { row: 1, col: 1 }, focus: { row: 4, col: 12 } });
+    expect(nav.current.selection).toEqual(selectionAt({ row: 1, col: 9 }));
   });
 
   it('chains a used-range jump and a data-edge jump through one asynchronous batch', async () => {
