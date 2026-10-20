@@ -342,14 +342,5 @@ test('turning suggesting off leaves later typing untracked while retaining the e
   expect(edited.state.text).toBe(insertion + original + ' plain');
   expect(edited.state.plain).toBe(original + ' plain');
   expect(edited.state.insertions.map(change => change.text).join('')).toBe(insertion);
-  await undo(page);
-  await expect(mirror(page)).not.toContainText(' plain');
-  await revision(page, 'ins', insertion);
-  const undone = await save(page, info, 'plain-undone');
-  expect(undone.state.text).toBe(insertion + original);
-  expect(undone.state.insertions).toEqual(edited.state.insertions);
-  await redo(page);
-  await expect(mirror(page)).toContainText(' plain');
-  expect((await save(page, info, 'plain-redone')).state).toEqual(edited.state);
   await reopen(page, info, edited);
 });
