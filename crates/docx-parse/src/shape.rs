@@ -1771,7 +1771,7 @@ pub(crate) fn enrich_group_text_boxes(
             "group text body source mismatch".to_owned(),
         ));
     }
-    let nested = budget.begin_group_text_box_materialization();
+    let nested = budget.begin_group_text_box_materialization(part)?;
     let result = (|| {
         for (key, container) in sources {
             if let Some(container) = container {

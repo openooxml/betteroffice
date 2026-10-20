@@ -9,6 +9,7 @@ use thiserror::Error;
 pub const MAX_NESTING_DEPTH: usize = 64;
 
 const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GROUP_TEXT_BOX_NESTING: usize = 8;
 
 /// OOXML namespace URIs.
 pub mod namespaces {
@@ -165,9 +166,18 @@ impl<'a> ParseBudget<'a> {
         self.limits
     }
 
-    pub(crate) fn begin_group_text_box_materialization(&mut self) -> bool {
+    pub(crate) fn begin_group_text_box_materialization(
+        &mut self,
+        part: &str,
+    ) -> Result<bool, ParseError> {
+        if self.group_text_box_depth >= MAX_GROUP_TEXT_BOX_NESTING {
+            return Err(ParseError::ResourceLimit {
+                kind: "groupTextBoxDepth",
+                part: part.to_owned(),
+            });
+        }
         self.group_text_box_depth += 1;
-        self.group_text_box_depth > 1
+        Ok(self.group_text_box_depth > 1)
     }
 
     pub(crate) fn end_group_text_box_materialization(&mut self) {

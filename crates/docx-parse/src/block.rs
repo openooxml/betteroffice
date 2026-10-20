@@ -989,15 +989,22 @@ mod tests {
     }
 
     #[test]
-    fn twenty_level_text_box_chain_stops_at_the_materialization_budget() {
+    fn twenty_level_text_box_chain_fails_before_it_amplifies() {
         assert_eq!(
             try_parse(&nested_text_box_chain(20, "x")).err(),
+            Some(ParseError::ResourceLimit {
+                kind: "groupTextBoxDepth",
+                part: "word/document.xml".to_owned(),
+            })
+        );
+        assert_eq!(
+            try_parse(&nested_text_box_chain(8, &"x".repeat(160 * 1024))).err(),
             Some(ParseError::ResourceLimit {
                 kind: "groupTextBoxBytes",
                 part: "word/document.xml".to_owned(),
             })
         );
-        assert_eq!(try_parse(&nested_text_box_chain(3, "x")).unwrap().len(), 1);
+        assert_eq!(try_parse(&nested_text_box_chain(8, "x")).unwrap().len(), 1);
     }
 
     #[test]
