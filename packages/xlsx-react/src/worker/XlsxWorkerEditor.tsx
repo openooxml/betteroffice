@@ -1067,7 +1067,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         }
         mutation = { method: 'editCells', args: [sheet, edits] };
       }
-      if (mutation) discardPreview = await previewEdits(sheet, mutation.args[1], mutation);
+      if (mutation && !queued) discardPreview = await previewEdits(sheet, mutation.args[1], mutation);
       if (clipboardRefusal) { await discardPreview?.(); throw clipboardRefusal; }
     };
     void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
@@ -1121,7 +1121,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
       if (edits.length === 0) return;
       op = { method: 'editCells', args: [sheet, edits] };
-      discardPreview = await previewEdits(sheet, edits, op);
+      if (!reachesSheetEdge(range)) discardPreview = await previewEdits(sheet, edits, op);
     };
     void coordinator.runAfterPendingInput(async (_, markApplied) => {
       if (!op) await prepareClear();

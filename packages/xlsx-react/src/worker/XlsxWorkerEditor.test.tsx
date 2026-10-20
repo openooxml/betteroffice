@@ -4258,6 +4258,41 @@ describe('workbook worker editor', () => {
     });
   }
 
+  it('preserves replacement input after a deferred Ctrl+A cut and an unchanged commit', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const writing = deferred<void>();
+    const clipboard = promisedClipboard(writing.promise);
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
+    fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true });
+    reviewEdit(view, 'replacement');
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('replacement');
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(clipboard.copied).toEqual(['initial']);
+    fireEvent.keyDown(scroll, { key: 'ArrowUp' });
+    fireEvent.keyDown(scroll, { key: 'F2' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    await act(async () => writing.resolve());
+    await advance(16);
+    expect(host.editMethods.editCells.mock.calls).toEqual([
+      [0, [{ row: 0, col: 0, input: '' }]],
+    ]);
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'replacement']]);
+    expect(host.cells.get('0:0:0')).toBe('replacement');
+  });
+
   it('does not dispatch an empty clear for a Ctrl+A sheet selection', async () => {
     const host = harness();
     host.cells.clear();
