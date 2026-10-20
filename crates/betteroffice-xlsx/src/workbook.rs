@@ -4723,12 +4723,16 @@ fn value_to_input(
                 .styles
                 .resolved_format(Some(style.unwrap_or(0)))
                 .number_format;
-            let stays_text = [None, Some(LEAP_YEAR_SERIAL)].into_iter().all(|now| {
-                matches!(
-                    xlsx_ops::parse_input_with_context(value, format.clone(), workbook.date_system, now).0,
-                    xlsx_ops::ParsedInput::Text(text) if text == *value
-                )
-            });
+            let stays_text = [format, xlsx_model::FormatCode::Builtin(0)]
+                .into_iter()
+                .all(|format| {
+                    [None, Some(LEAP_YEAR_SERIAL)].into_iter().all(|now| {
+                        matches!(
+                            xlsx_ops::parse_input_with_context(value, format.clone(), workbook.date_system, now).0,
+                            xlsx_ops::ParsedInput::Text(text) if text == *value
+                        )
+                    })
+                });
             if stays_text {
                 value.clone()
             } else {

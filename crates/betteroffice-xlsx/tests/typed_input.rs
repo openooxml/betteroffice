@@ -305,3 +305,38 @@ fn text_read_back_from_a_cell_stays_text_when_written_unchanged() {
         );
     }
 }
+
+#[test]
+fn text_format_cells_copy_as_text_into_general_cells() {
+    let mut model = Workbook::open(&fixture(0, DateSystem::V1900))
+        .unwrap()
+        .model()
+        .clone();
+    model.styles.cell_xfs.push(Xf {
+        num_fmt_id: Some(49),
+        ..Default::default()
+    });
+    model.sheets[0].set_cell(
+        at(),
+        Cell {
+            value: CellValue::Text {
+                value: "00123".into(),
+            },
+            style: Some(1),
+            ..Default::default()
+        },
+    );
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let input = workbook.cell(SheetId(0), at()).unwrap().input;
+    for cell in [at(), CellRef::new(0, 1)] {
+        workbook
+            .edit_cell(SheetId(0), cell, &input, CalculationOptions::default())
+            .unwrap();
+        assert_eq!(
+            workbook.model().sheets[0].cell(cell).unwrap().value,
+            CellValue::Text {
+                value: "00123".into()
+            }
+        );
+    }
+}
