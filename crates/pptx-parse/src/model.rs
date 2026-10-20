@@ -453,6 +453,8 @@ pub struct CustomGeometryPath {
 pub struct Picture {
     #[serde(flatten)]
     pub base: ShapeBase,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,
@@ -580,6 +582,8 @@ pub enum GraphicFrameData {
 #[serde(rename_all = "camelCase")]
 pub struct DiagramDrawing {
     pub part_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_extent: Option<[i64; 2]>,
     pub shapes: Vec<ShapeNode>,
 }
 

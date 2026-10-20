@@ -133,6 +133,10 @@ pub struct GridMeta {
     pub row_indices: Option<Vec<u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub col_indices: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_row_spans: Vec<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_col_spans: Vec<(u32, u32)>,
     pub row_offsets: Vec<f32>,
     pub col_offsets: Vec<f32>,
 }
@@ -328,6 +332,8 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
         grid: GridMeta {
             start_row: dl.grid.start_row,
             start_col: dl.grid.start_col,
+            hidden_row_spans: dl.grid.hidden_row_spans,
+            hidden_col_spans: dl.grid.hidden_col_spans,
             row_indices: dl.grid.row_indices,
             col_indices: dl.grid.col_indices,
             row_offsets: dl
@@ -496,6 +502,8 @@ mod tests {
             grid: GridMeta {
                 start_row: 1,
                 start_col: 2,
+                hidden_row_spans: vec![(10, 20)],
+                hidden_col_spans: vec![(4, 5)],
                 row_indices: None,
                 col_indices: None,
                 row_offsets: vec![0.0, 20.0],
@@ -580,6 +588,8 @@ mod tests {
             _ => panic!("expected text"),
         }
         assert_eq!(dl.grid.start_row, 1);
+        assert_eq!(dl.grid.hidden_row_spans, vec![(10, 20)]);
+        assert_eq!(dl.grid.hidden_col_spans, vec![(4, 5)]);
         assert_eq!(dl.grid.col_offsets, vec![0.0, 128.0]);
         assert_eq!(dl.charts[0].label, "Revenue chart");
         assert_eq!(dl.charts[0].id, "xl/charts/chart1.xml");

@@ -170,7 +170,7 @@ export function registerPresentationCommandHandlers(
     }
   }
 
-  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt): string[] {
+  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt, selectAppeared = false): string[] {
     const opened = presentation();
     const dirty = new Set(receipt.changedSlideIds);
     if (receipt.deckSizeChanged || receipt.slideOrderChanged) {
@@ -192,6 +192,8 @@ export function registerPresentationCommandHandlers(
       if (activeSlideId === null || !ids.has(activeSlideId)) {
         activeSlideId = metadata.slides[Math.max(0, Math.min(index, metadata.slides.length - 1))]?.id ?? null;
       }
+      const appeared = selectAppeared ? metadata.slides.find((slide) => !previous.has(slide.id)) : undefined;
+      if (appeared) activeSlideId = appeared.id;
     }
     const content = opened.readCommandContent({ slideIds: [...dirty].filter((id) => revisions.has(id)) });
     if (!content.ok) throw new Error(`Presentation history read refused: ${content.failure.message}`);
@@ -257,7 +259,8 @@ export function registerPresentationCommandHandlers(
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
       canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
-      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape),
+      aspectRatioLocked: shape.aspectRatioLocked ?? false, units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -1352,7 +1355,7 @@ export function registerPresentationCommandHandlers(
         const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
         const committed = apply(command, admitted);
         const historyDirtySlideIds = committed && admitted.kind === 'history'
-          ? refreshHistory(command.seq, admitted.receipt!) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
+          ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
         if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
         if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
           const cached = stories.get(storyKey(admitted.selection))!;

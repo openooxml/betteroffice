@@ -28,6 +28,15 @@ function medianTrack(offsets: number[] | undefined, fallback: number): number {
   return mid > 0 ? mid : fallback;
 }
 
+function trackCount(count: number, spans: [number, number][] | undefined, limit: number): number {
+  let last = count - 1;
+  for (const [start, end] of spans ?? []) {
+    if (start > last) break;
+    last += end - start + 1;
+  }
+  return Math.min(last + 1, limit);
+}
+
 export function deriveLimits(
   dl: DisplayList | null,
   info: Pick<SheetInfo, 'contentWidth' | 'contentHeight'>,
@@ -35,8 +44,8 @@ export function deriveLimits(
 ): SelectionLimits {
   const rowH = medianTrack(dl?.grid?.rowOffsets, ROW_H);
   const colW = medianTrack(dl?.grid?.colOffsets, COL_W);
-  const rows = Math.max(1, Math.round(info.contentHeight / rowH)) + 1;
-  const cols = Math.max(1, Math.round(info.contentWidth / colW)) + 1;
+  const rows = trackCount(Math.max(1, Math.round(info.contentHeight / rowH)) + 1, dl?.grid?.hiddenRowSpans, 1_048_576);
+  const cols = trackCount(Math.max(1, Math.round(info.contentWidth / colW)) + 1, dl?.grid?.hiddenColSpans, 16_384);
   const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
   return { rows, cols, rowsPerPage };
 }

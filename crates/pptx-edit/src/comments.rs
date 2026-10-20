@@ -2,10 +2,10 @@ use pptx_parse::{CommentFlavor, PptxPackage};
 use sha2::{Digest, Sha256};
 use yrs::{Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
 
-use crate::deck::{SourceImport, map_bool, map_number, map_string, required_map};
+use crate::deck::{SourceImport, map_bool, map_number, map_string, required_map, slide_ref};
 use crate::{
     BOOTSTRAP_CLIENT_ID, COMMENTS, CommentReceipt, CommentSnapshot, DeckSession, EditCtx,
-    EditError, EditResult, META, MIGRATE_ORIGIN, SLIDES, doc_with_client_id, hydrate_doc,
+    EditError, EditResult, META, MIGRATE_ORIGIN, doc_with_client_id, hydrate_doc,
 };
 
 pub(crate) fn seeded_comment_id(index: usize, source_id: &str) -> String {
@@ -137,7 +137,6 @@ pub(crate) struct CommentKey {
 /// The live comments, ordered by creation time and id, without reading their text.
 pub(crate) fn comment_keys<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentKey>> {
     let comments = required_map(txn, COMMENTS)?;
-    let slides = required_map(txn, SLIDES)?;
     let mut keys = Vec::new();
     for (id, value) in comments.iter(txn) {
         let Ok(entry) = value.cast::<MapRef>() else {
@@ -146,7 +145,7 @@ pub(crate) fn comment_keys<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentKey>> {
             )));
         };
         let slide_id = map_string(&entry, txn, "slideId").unwrap_or_default();
-        if !slides.contains_key(txn, &slide_id) {
+        if slide_ref(txn, &slide_id).is_err() {
             continue;
         }
         keys.push((map_string(&entry, txn, "created"), id.to_owned(), slide_id));

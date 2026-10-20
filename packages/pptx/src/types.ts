@@ -143,6 +143,7 @@ export interface ShapeSnapshot {
   inherited?: InheritedGeometry | null;
   /** Hides this shape and its descendants; omitted when false. */
   hidden?: boolean;
+  aspectRatioLocked?: boolean;
   geometry: string;
   adjustValues: Record<string, number>;
   placeholder: unknown | null;
@@ -453,6 +454,8 @@ export interface ImagePrimitive extends PrimitiveBase {
   effects?: ImageEffect[];
   /** Fraction of the source discarded per edge, from `a:srcRect`. */
   crop?: ImageCrop;
+  /** Bitmap destination within the picture frame. */
+  destination?: { x: number; y: number; w: number; h: number };
   /** `a:tile`: repeat the picture at its own size, scaled by these fractions. */
   tile?: { scaleX: number; scaleY: number };
   /** Outline the picture is masked to, when its `spPr` gives it one. */
