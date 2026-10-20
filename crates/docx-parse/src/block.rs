@@ -941,6 +941,10 @@ mod tests {
     use indexmap::IndexMap;
 
     fn parse(xml: &str) -> Vec<BlockContent> {
+        try_parse(xml).unwrap()
+    }
+
+    fn try_parse(xml: &str) -> Result<Vec<BlockContent>, ParseError> {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
@@ -962,7 +966,58 @@ mod tests {
             part: "word/document.xml",
         }
         .parse_blocks(document.root().unwrap(), 0, false)
-        .unwrap()
+    }
+
+    fn nested_text_box_chain(levels: usize, leaf: &str) -> String {
+        let mut story = format!("<w:p><w:r><w:t>{leaf}</w:t></w:r></w:p>");
+        for _ in 0..levels {
+            story = format!(
+                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="50"/><a:graphic><a:graphicData><wpg:wgp><wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent>{story}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+            );
+        }
+        format!(
+            r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg">{story}</w:body>"#
+        )
+    }
+
+    #[test]
+    fn twenty_level_text_box_chain_stops_at_the_materialization_budget() {
+        assert_eq!(
+            try_parse(&nested_text_box_chain(20, "x")).err(),
+            Some(ParseError::ResourceLimit {
+                kind: "groupTextBoxBytes",
+                part: "word/document.xml".to_owned(),
+            })
+        );
+        assert_eq!(try_parse(&nested_text_box_chain(3, "x")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn group_text_boxes_nested_past_the_scene_depth_fail_to_parse() {
+        let group = |levels: usize| {
+            format!(
+                r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg"><w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="50"/><a:graphic><a:graphicData><wpg:wgp>{}<wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent><w:p><w:r><w:t>deep</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>{}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body>"#,
+                "<wpg:grpSp>".repeat(levels),
+                "</wpg:grpSp>".repeat(levels)
+            )
+        };
+        assert!(
+            serde_json::to_string(&try_parse(&group(crate::shape::MAX_SCENE_DEPTH - 1)).unwrap())
+                .unwrap()
+                .contains("deep")
+        );
+        for levels in [
+            crate::shape::MAX_SCENE_DEPTH,
+            crate::shape::MAX_SCENE_DEPTH + 40,
+        ] {
+            assert_eq!(
+                try_parse(&group(levels)).err(),
+                Some(ParseError::ResourceLimit {
+                    kind: "groupTextBoxDepth",
+                    part: "word/document.xml".to_owned(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -1119,15 +1174,7 @@ mod tests {
         let mut smart_art = SmartArtContext::default();
         let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
         for depth in [1, 6, 1] {
-            let mut story = format!("<w:p><w:r><w:t>{}</w:t></w:r></w:p>", "x".repeat(72 * 1024));
-            for _ in 0..depth {
-                story = format!(
-                    r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="50"/><a:graphic><a:graphicData><wpg:wgp><wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent>{story}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
-                );
-            }
-            let xml = format!(
-                r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg">{story}</w:body>"#
-            );
+            let xml = nested_text_box_chain(depth, &"x".repeat(72 * 1024));
             let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
             let result = StoryParser {
                 relationships: None,

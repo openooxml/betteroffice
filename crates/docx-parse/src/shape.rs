@@ -18,7 +18,7 @@ use crate::relationships::{RelationshipMap, TargetMode};
 use crate::scalars::ColorValue;
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_javascript_integer_prefix};
 
-const MAX_SCENE_DEPTH: usize = 32;
+pub(crate) const MAX_SCENE_DEPTH: usize = 32;
 const MAX_SCENE_NODES: usize = 4_096;
 const MAX_SAFE_DRAWING_NUMBER: f64 = 1_000_000_000_000.0;
 
@@ -1758,7 +1758,7 @@ pub(crate) fn enrich_group_text_boxes(
         return Ok(());
     };
     let mut sources = BTreeMap::new();
-    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources);
+    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, part)?;
     let mut scene_bodies = BTreeMap::new();
     collect_scene_text_bodies(root, &mut 0, &mut scene_bodies, 0);
     let mut child_bodies = BTreeMap::new();
@@ -1793,9 +1793,10 @@ fn collect_text_box_sources<'a>(
     ordinal: &mut usize,
     depth: usize,
     sources: &mut BTreeMap<TextBodyKey, Option<&'a XmlElement>>,
-) {
+    part: &str,
+) -> Result<(), ParseError> {
     if depth > MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
-        return;
+        return Ok(());
     }
     *count += 1;
     if is_scene_shape(element.local_name()) {
@@ -1807,16 +1808,33 @@ fn collect_text_box_sources<'a>(
             );
         }
         *ordinal += 1;
-    } else if depth < MAX_SCENE_DEPTH
-        && (is_scene_group(element.local_name()) || element.local_name() == "wpc")
-    {
+    } else if is_scene_group(element.local_name()) || element.local_name() == "wpc" {
+        if depth >= MAX_SCENE_DEPTH {
+            if element
+                .child_elements()
+                .any(|child| is_scene_node(child.local_name()))
+            {
+                return Err(ParseError::ResourceLimit {
+                    kind: "groupTextBoxDepth",
+                    part: part.to_owned(),
+                });
+            }
+            return Ok(());
+        }
         for child in element.child_elements() {
             if *count >= MAX_SCENE_NODES {
                 break;
             }
-            collect_text_box_sources(child, count, ordinal, depth + 1, sources);
+            collect_text_box_sources(child, count, ordinal, depth + 1, sources, part)?;
         }
     }
+    Ok(())
+}
+
+fn is_scene_node(name: &str) -> bool {
+    is_scene_shape(name)
+        || is_scene_group(name)
+        || matches!(name, "wpc" | "pic" | "graphicFrame" | "contentPart")
 }
 
 fn collect_scene_text_bodies<'a>(
@@ -1994,7 +2012,7 @@ mod tests {
         for (children, expected_stories, expected_depth) in [
             (
                 format!("{leaf}<pic:pic/><a:graphicFrame/><a:cxnSp/>{leaf}"),
-                2,
+                Some(2),
                 1,
             ),
             (
@@ -2002,7 +2020,7 @@ mod tests {
                     + leaf
                     + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH - 1)
                     + leaf,
-                2,
+                Some(2),
                 MAX_SCENE_DEPTH,
             ),
             (
@@ -2010,7 +2028,7 @@ mod tests {
                     + leaf
                     + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH)
                     + leaf,
-                1,
+                None,
                 MAX_SCENE_DEPTH,
             ),
             (
@@ -2018,10 +2036,14 @@ mod tests {
                     + leaf
                     + &"</wpg:grpSp>".repeat(MAX_SCENE_DEPTH + 2)
                     + leaf,
-                1,
+                None,
                 MAX_SCENE_DEPTH,
             ),
-            (leaf.repeat(MAX_SCENE_NODES + 2), MAX_SCENE_NODES - 2, 1),
+            (
+                leaf.repeat(MAX_SCENE_NODES + 2),
+                Some(MAX_SCENE_NODES - 2),
+                1,
+            ),
         ] {
             let drawing = root(&format!(
                 r#"<w:drawing><wp:inline><wp:extent cx="1000" cy="500"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm rot="5400000" flipH="1" flipV="1"><a:off x="10" y="20"/><a:ext cx="1000" cy="500"/><a:chOff x="5" y="10"/><a:chExt cx="500" cy="250"/></a:xfrm></wpg:grpSpPr>{children}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#
@@ -2064,7 +2086,7 @@ mod tests {
             let mut stories = 0;
             let limits = ParseLimits::default();
             let mut budget = ParseBudget::new(&limits);
-            enrich_group_text_boxes(
+            let result = enrich_group_text_boxes(
                 &mut shape,
                 &drawing,
                 &mut budget,
@@ -2073,8 +2095,20 @@ mod tests {
                     stories += 1;
                     Ok(vec![serde_json::json!({"story": stories})])
                 },
-            )
-            .unwrap();
+            );
+            let Some(expected_stories) = expected_stories else {
+                assert_eq!(
+                    result,
+                    Err(ParseError::ResourceLimit {
+                        kind: "groupTextBoxDepth",
+                        part: "word/document.xml".to_owned(),
+                    })
+                );
+                assert_eq!(stories, 0);
+                assert_eq!(shape, baseline);
+                continue;
+            };
+            result.unwrap();
             assert_eq!(stories, expected_stories);
             let mut scene_bodies = BTreeMap::new();
             collect_scene_text_bodies(
