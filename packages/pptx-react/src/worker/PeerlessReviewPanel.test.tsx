@@ -70,15 +70,14 @@ test('review warns about stale targets and disables ordinary acceptance', async 
   expect(view.queryByTestId('pptx-proposal-force')).toBeNull();
 });
 
-test('review force acceptance uses the force command for the previewed stale proposal', async () => {
+test('review withholds force acceptance until the fresh preview is ready', async () => {
   const { view, execute, props } = mount([proposal({ staleTargets: ['shape'] })]);
   fireEvent.click(await view.findByRole('button', { name: 'Preview changes' }));
   await waitFor(() => expect(execute).toHaveBeenCalledWith('proposalDiff', { enabled: true }));
   expect(execute).toHaveBeenCalledWith('proposalSelect', { proposalId: 'proposal' });
   view.rerender(<PeerlessReview {...props} state={{ ...props.state, selectedId: 'proposal', diff: true }} />);
-  await waitFor(() => expect(view.getByTestId('pptx-proposal-force').textContent).toBe('Apply updated proposal'));
-  await act(async () => { fireEvent.click(view.getByTestId('pptx-proposal-force')); });
-  expect(execute).toHaveBeenCalledWith('proposalAccept', { proposalId: 'proposal', force: true });
+  expect(view.queryByTestId('pptx-proposal-force') === null).toBe(true);
+  expect(execute).not.toHaveBeenCalledWith('proposalAccept', { proposalId: 'proposal', force: true });
   expect(props.onError).not.toHaveBeenCalled();
 });
 
