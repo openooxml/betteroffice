@@ -32,10 +32,209 @@ async function deck(texts = ['alpha', 'beta', 'gamma']): Promise<Uint8Array> {
 
 const identity = { session: 'insert-session', incarnation: 'insert-worker' };
 const input = { inputTime: 1, undoGroup: 'insert-session' };
+const rect = { x: 200000, y: 200000, width: 1500000, height: 900000 };
 
 test('command_host_does_not_import_react_source', async () => {
   const source = await readFile(new URL('./commandHost.ts', import.meta.url), 'utf8');
   expect(source).not.toMatch(/from ['"][^'"]*pptx-react/);
+});
+
+test('unsupported proposal edits are refused without closing the command connection', async () => {
+  const session = await open();
+  try {
+    let state: PresentationCommandAck = session.state;
+    let seq = 0;
+    for (const edit of [{ type: 'insertSlide', index: 1 }, { type: 'deleteSlide', slideId: session.story.slideId }]) {
+      state = await session.command(state, ++seq, { kind: 'invoke', payload: {
+        ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+      expect(state.outcomes).toEqual([{ seq, status: 'refused', reason: 'invalid-payload', committed: false }]);
+      expect(state.version).toBe(session.state.version);
+      expect(state.editState.canUndo).toBe(false);
+      expect(session.handle().listProposals()).toEqual([]);
+      expect(session.rpc.failure).toBeUndefined();
+    }
+    state = await session.command(state, ++seq, { kind: 'invoke', payload: {
+      ...input, method: 'setSlideNotes', args: [session.story.slideId, 'Still connected'] } });
+    expect(state.outcomes).toEqual([{ seq, status: 'applied', committed: true }]);
+    expect(session.handle().snapshot().slides[0]!.notes).toBe('Still connected');
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { await session.dispose(); }
+});
+
+const selfReferencingNotes: unknown[] & { loop?: unknown } = [];
+selfReferencingNotes.loop = selfReferencingNotes;
+
+test.each([
+  ['self-referencing slide notes', 'setSlideNotes', { text: selfReferencingNotes }],
+  ['lone surrogate in slide notes', 'setSlideNotes', { text: '\ud800' }],
+  ['lone surrogate in replacement text', 'replaceText', { text: '\udc00' }],
+  ['lone surrogate in slide id', 'setSlideNotes', { slideId: '\ud800', text: 'Notes' }],
+  ['lone surrogate in shape id', 'setShapeRect', { shapeId: '\ud800', rect }],
+  ['lone surrogate in story id', 'replaceText', { storyId: '\ud800' }],
+  ['lone surrogate in adjustment key', 'setShapeAdjust', { adjustments: { ['\ud800']: 1 } }],
+  ['NaN rectangle x', 'setShapeRect', { rect: { ...rect, x: Number.NaN } }],
+  ['infinite rectangle height', 'setShapeRect', { rect: { ...rect, height: Number.NEGATIVE_INFINITY } }],
+  ['infinite stroke width', 'setShapeStroke', { stroke: { widthPt: Number.POSITIVE_INFINITY } }],
+  ['NaN adjustment value', 'setShapeAdjust', { adjustments: { adj: Number.NaN } }],
+  ['non-finite range start', 'replaceText', { start: Number.POSITIVE_INFINITY }],
+  ['non-finite range end', 'replaceText', { end: Number.NaN }],
+])('%s is refused without closing the command connection', async (_, type, fields) => {
+  const session = await open();
+  const validation = spyOn(session.handle(), 'validateEdits');
+  try {
+    const edit = type === 'replaceText'
+      ? { type, storyId: session.story.storyId, start: 0, end: 0, text: 'x', ...fields }
+      : { type, slideId: session.story.slideId, ...(type === 'setSlideNotes' ? {} : { shapeId: session.story.shapeId }), ...fields };
+    const state = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+    expect(state.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(validation).not.toHaveBeenCalled();
+    expect(state.version).toBe(session.state.version);
+    expect(state.editState.canUndo).toBe(false);
+    expect(session.handle().listProposals()).toEqual([]);
+    expect(session.rpc.failure).toBeUndefined();
+    const next = await session.command(state, 2, { kind: 'invoke', payload: {
+      ...input, method: 'setSlideNotes', args: [session.story.slideId, 'Still connected'] } });
+    expect(next.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
+    expect(session.handle().snapshot().slides[0]!.notes).toBe('Still connected');
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { validation.mockRestore(); await session.dispose(); }
+});
+
+test.each([
+  ['invalid replacement style', { style: 'bad' }],
+  ['invalid replacement style field', { style: { bold: 'bad' } }],
+  ['unknown replacement key', { extra: true }],
+])('%s is refused before a legitimate proposal', async (_, fields) => {
+  const session = await open();
+  try {
+    const edit = { type: 'replaceText', storyId: session.story.storyId, start: 0, end: 0, text: 'x' };
+    const state = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [{ ...edit, ...fields }]] } });
+    expect(state.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(state.version).toBe(session.state.version);
+    expect(session.handle().listProposals()).toEqual([]);
+    const next = await session.command(state, 2, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [{ ...edit, style: { bold: true } }]] } });
+    expect(next.outcomes).toEqual([{ seq: 2, status: 'applied', committed: false }]);
+    expect(session.handle().listProposals()).toHaveLength(1);
+    expect(session.handle().listProposals()[0]!.edits[0]).toMatchObject({ style: { bold: true } });
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { await session.dispose(); }
+});
+
+test.each([
+  ['whitespace agent', '   ', null],
+  ['invalid agent text', 'Writer\u0000', null],
+  ['invalid note text', 'Writer', '\u0000'],
+  ['oversized note', 'Writer', 'x'.repeat(1e6 + 1)],
+])('%s is refused before a legitimate proposal', async (_, agent, note) => {
+  const session = await open();
+  try {
+    const edits = [{ type: 'setSlideNotes', slideId: session.story.slideId, text: 'Proposed notes' }];
+    const state = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: [agent, note, edits] } });
+    expect(state.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(session.handle().listProposals()).toEqual([]);
+    const next = await session.command(state, 2, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, edits] } });
+    expect(next.outcomes).toEqual([{ seq: 2, status: 'applied', committed: false }]);
+    expect(session.handle().listProposals()).toHaveLength(1);
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { await session.dispose(); }
+});
+
+test('pending proposal limit refuses before a legitimate proposal', async () => {
+  const session = await open();
+  try {
+    const edit = { type: 'setSlideNotes' as const, slideId: session.story.slideId, text: 'Proposed notes' };
+    const proposals = Array.from({ length: 64 }, () => session.handle().propose('Writer', null, [edit]));
+    const state = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+    expect(state.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(session.handle().listProposals()).toHaveLength(64);
+    for (const proposal of proposals) session.handle().rejectProposal(proposal.id);
+    const next = await session.command(state, 2, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [edit]] } });
+    expect(next.outcomes).toEqual([{ seq: 2, status: 'applied', committed: false }]);
+    expect(session.handle().listProposals()).toHaveLength(1);
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { await session.dispose(); }
+});
+
+test('internal proposal reads during preparation surface as fatal failures', async () => {
+  const session = await open();
+  const listing = spyOn(session.handle(), 'listProposals').mockImplementationOnce(() => {
+    throw new WebAssembly.RuntimeError('Internal proposal read failed');
+  });
+  try {
+    await expect(session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'rejectProposal', args: ['missing'] } })).rejects.toThrow('Internal proposal read failed');
+    expect(listing).toHaveBeenCalledTimes(1);
+    expect(session.rpc.failure).toMatchObject({ code: 'trap' });
+  } finally { listing.mockRestore(); await session.dispose(); }
+});
+
+test('proposal validation deserialization exceptions are refused without closing the command connection', async () => {
+  const session = await open();
+  try {
+    const validation = spyOn(session.handle(), 'validateEdits').mockImplementationOnce(() => {
+      throw Object.assign(new Error('Request could not be decoded'), { name: 'PptxEditDecodeError' });
+    });
+    let state: PresentationCommandAck;
+    try {
+      state = await session.command(session.state, 1, { kind: 'invoke', payload: {
+        ...input, method: 'propose', args: ['Writer', null, [
+          { type: 'setSlideNotes', slideId: session.story.slideId, text: 'Proposed notes' }]] } });
+      expect(validation).toHaveBeenCalledTimes(1);
+    } finally { validation.mockRestore(); }
+    expect(state.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(state.version).toBe(session.state.version);
+    expect(session.handle().listProposals()).toEqual([]);
+    expect(session.rpc.failure).toBeUndefined();
+    const next = await session.command(state, 2, { kind: 'invoke', payload: {
+      ...input, method: 'setSlideNotes', args: [session.story.slideId, 'Still connected'] } });
+    expect(next.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
+    expect(session.handle().snapshot().slides[0]!.notes).toBe('Still connected');
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { await session.dispose(); }
+});
+
+test.each([
+  ['trap', new WebAssembly.RuntimeError('invalid type: string "a", expected f64 at line 1 column 142')],
+  ['Rust error string', 'Internal proposal validation failed'],
+  ['Rust error string matching a decode message', 'invalid type: string "a", expected f64 at line 1 column 142'],
+  ['JavaScript error', new Error('invalid type: string "a", expected f64 at line 1 column 142')],
+])('internal proposal validation %s is not refused', async (_, error) => {
+  const session = await open();
+  const validation = spyOn(session.handle(), 'validateEdits').mockImplementationOnce(() => { throw error; });
+  try {
+    await expect(session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [
+        { type: 'setSlideNotes', slideId: session.story.slideId, text: 'Proposed notes' }]] } })).rejects.toThrow(
+      typeof error === 'string' ? error : error.message);
+    expect(validation).toHaveBeenCalledTimes(1);
+    if (error instanceof WebAssembly.RuntimeError) expect(session.rpc.failure).toMatchObject({ code: 'trap' });
+    else expect(session.rpc.failure).toBeUndefined();
+  } finally { validation.mockRestore(); await session.dispose(); }
+});
+
+test('proposal with a wrong field type is refused without closing the command connection', async () => {
+  const session = await open();
+  try {
+    const state = await session.command(session.state, 1, { kind: 'invoke', payload: {
+      ...input, method: 'propose', args: ['Writer', null, [{ type: 'setShapeRect',
+        slideId: session.story.slideId, shapeId: session.story.shapeId, rect: { ...rect, x: 'a' } }]] } });
+    expect(state.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'invalid-payload', committed: false }]);
+    expect(state.version).toBe(session.state.version);
+    expect(session.handle().listProposals()).toEqual([]);
+    expect(session.rpc.failure).toBeUndefined();
+    const next = await session.command(state, 2, { kind: 'invoke', payload: {
+      ...input, method: 'setSlideNotes', args: [session.story.slideId, 'Still connected'] } });
+    expect(next.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
+    expect(session.handle().snapshot().slides[0]!.notes).toBe('Still connected');
+    expect(session.rpc.failure).toBeUndefined();
+  } finally { await session.dispose(); }
 });
 
 test('comment payload validation refuses without poisoning the session', async () => {
@@ -109,7 +308,6 @@ function bounded<T>(promise: Promise<T>): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-const rect = { x: 200000, y: 200000, width: 1500000, height: 900000 };
 const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7N8AAAAASUVORK5CYII=', 'base64'));
 
 test('image_roundtrip_and_creation_receipt', async () => {

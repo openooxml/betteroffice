@@ -1325,5 +1325,5 @@ function toError(error: unknown): Error {
       }
     } catch {}
   }
-  return new Error(typeof error === 'string' ? error : String(error));
+  return Object.assign(new Error(typeof error === 'string' ? error : String(error)), { cause: error });
 }
