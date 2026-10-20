@@ -152,11 +152,7 @@ fn index_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, sl
 
 #[cfg(any(feature = "wasm", test))]
 fn refresh_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, slide_id: &str) {
-    let Some(shape) = txn
-        .get_map(SHAPES)
-        .and_then(|shapes| shapes.get(txn, shape_id))
-        .and_then(|value| value.cast::<MapRef>().ok())
-    else {
+    let Ok(shape) = crate::deck::shape_ref(txn, shape_id) else {
         return;
     };
     let Ok(stories) = crate::deck::map_string_array(&shape, txn, "textStories") else {
@@ -175,15 +171,11 @@ fn refresh_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, 
 
 #[cfg(any(feature = "wasm", test))]
 fn index_slide<T: ReadTxn>(txn: &T, state: &mut HistoryState, slide_id: &str) {
-    let Some(slide) = txn
-        .get_map(SLIDES)
-        .and_then(|slides| slides.get(txn, slide_id))
-        .and_then(|value| value.cast::<MapRef>().ok())
-    else {
+    let Ok(slide) = crate::deck::slide_ref(txn, slide_id) else {
         return;
     };
     if let Ok(order) = crate::deck::slide_shape_order(&slide, txn) {
-        for id in crate::deck::string_array_ref(&order, txn) {
+        for id in crate::deck::live_shape_order(&order, txn).unwrap_or_default() {
             index_shape(txn, state, &id, slide_id);
         }
     }
@@ -198,13 +190,13 @@ impl DeckSession {
         }
         let txn = self.doc.transact();
         let mut initial = HistoryState::default();
-        let slides = crate::deck::required_map(&txn, SLIDES)?;
-        for (id, _) in slides.iter(&txn) {
-            index_slide(&txn, &mut initial, id);
+        for id in crate::deck::live_slide_ids(&txn)? {
+            index_slide(&txn, &mut initial, &id);
         }
         for (id, value) in crate::deck::required_map(&txn, COMMENTS)?.iter(&txn) {
             if let Ok(map) = value.cast::<MapRef>()
                 && let Some(slide_id) = crate::deck::map_string(&map, &txn, "slideId")
+                && crate::deck::slide_ref(&txn, &slide_id).is_ok()
             {
                 initial.owners.insert(id.to_owned(), slide_id);
             }
@@ -240,17 +232,21 @@ impl DeckSession {
                         if root == META {
                             if key == "widthEmu" || key == "heightEmu" {
                                 receipt.deck_size_changed = true;
-                            } else if let Some(slides) = txn.get_map(SLIDES) {
+                            } else {
                                 receipt
                                     .changed_slide_ids
-                                    .extend(slides.keys(txn).map(str::to_owned));
+                                    .extend(crate::deck::live_slide_ids(txn).unwrap_or_default());
                             }
                         }
-                        if let Some(id) = &owner {
+                        if let Some(id) = &owner
+                            && crate::deck::slide_ref(txn, id).is_ok()
+                        {
                             receipt.changed_slide_ids.insert(id.clone());
                         }
                         if root == COMMENTS {
-                            receipt.changed_slide_ids.extend(previous_owner);
+                            receipt.changed_slide_ids.extend(
+                                previous_owner.filter(|id| crate::deck::slide_ref(txn, id).is_ok()),
+                            );
                         }
                     }
                     if root == SLIDES {
@@ -289,6 +285,10 @@ impl DeckSession {
         let applied = if redo { undo.redo() } else { undo.undo() };
         let mut receipt = state.lock().unwrap().receipt.take().unwrap();
         receipt.applied = applied;
+        let txn = self.doc.transact();
+        receipt
+            .changed_slide_ids
+            .retain(|id| crate::deck::slide_ref(&txn, id).is_ok());
         Ok(receipt)
     }
 }
@@ -353,8 +353,7 @@ impl DeckUndoManager {
         Ok(())
     }
 
-    /// Whether this manager ever pushed a stack item, the only way its doc gains keep flags. Keep
-    /// flags outlive the stack items that set them, so a doc that ever had one must not collect.
+    /// Whether retained Yrs items may still reference deleted parents.
     pub(crate) fn ever_kept(&self) -> bool {
         self.kept.load(Ordering::Relaxed)
     }
@@ -421,6 +420,11 @@ impl DeckUndoManager {
         self.inner.redo_blocking()
     }
 
+    pub fn clear(&mut self) {
+        self.inner.clear_all();
+        self.inner.reset();
+    }
+
     pub fn can_undo(&self) -> bool {
         self.inner.can_undo()
     }
@@ -463,6 +467,66 @@ mod tests {
         package.presentation.height_emu = 6858000;
         DeckSession::from_package_with_fingerprint(package, "history-receipts".to_owned(), 7)
             .unwrap()
+    }
+
+    #[test]
+    fn history_receipts_exclude_deleted_slides_for_text_and_meta_changes() {
+        let session = session();
+        let context = EditCtx::local("test");
+        let deleted = session.insert_slide(&context, 0, None).unwrap().slide_id;
+        let live = session.insert_slide(&context, 1, None).unwrap().slide_id;
+        let shape = session
+            .add_text_box(
+                &context,
+                &deleted,
+                &ShapeDraft {
+                    name: "Text".to_owned(),
+                    rect: ShapeRect {
+                        x: 0,
+                        y: 0,
+                        width: 1000,
+                        height: 1000,
+                    },
+                    text: "alpha".to_owned(),
+                    style: TextStyle::default(),
+                },
+            )
+            .unwrap();
+        session.clear_undo_history();
+        let story = format!("story:{}:0", shape.shape_id);
+        session
+            .insert_text(&context, &story, 0, "X", &TextStyle::default())
+            .unwrap();
+        session.add_undo_barrier();
+        session
+            .delete_slide(
+                &EditCtx {
+                    origin: crate::EditOrigin::Remote,
+                    author: "peer".to_owned(),
+                },
+                &deleted,
+            )
+            .unwrap();
+        session.enable_history_receipts().unwrap();
+        assert!(
+            session
+                .history_step(false)
+                .unwrap()
+                .changed_slide_ids
+                .is_empty()
+        );
+        {
+            let mut txn = session.transact_for(&context);
+            let meta = txn.get_map(META).unwrap();
+            meta.insert(&mut txn, "title", "changed");
+        }
+        session.add_undo_barrier();
+        for redo in [false, true] {
+            assert_eq!(
+                session.history_step(redo).unwrap().changed_slide_ids,
+                BTreeSet::from([live.clone()])
+            );
+        }
     }
 
     #[test]
@@ -543,7 +607,11 @@ mod tests {
             assert!(!receipt.deck_size_changed);
             assert_eq!(
                 receipt.changed_slide_ids,
-                BTreeSet::from([slide.slide_id.clone()])
+                if redo {
+                    BTreeSet::from([slide.slide_id.clone()])
+                } else {
+                    BTreeSet::new()
+                }
             );
         }
         session.add_undo_barrier();

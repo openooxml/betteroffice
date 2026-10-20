@@ -508,6 +508,9 @@ impl SlideRenderer {
             let background_dpi = builder
                 .media_part(&asset_id)
                 .and_then(|part| image_dpi(&part.bytes));
+            let tile = picture_fill_tile(picture, background_dpi);
+            let (crop, destination) = picture_fill_crop(picture).placement(0.0, 0.0, width, height);
+            let destination = if tile.is_some() { None } else { destination };
             builder.primitives.push(Primitive::Image {
                 geometry_fallback: false,
                 object_id: 0,
@@ -518,9 +521,17 @@ impl SlideRenderer {
                 w: width,
                 h: height,
                 asset_id: Some(asset_id),
-                effects: Vec::new(),
-                crop: picture_fill_crop(picture),
-                tile: picture_fill_tile(picture, background_dpi),
+                effects: image_effects_with_placeholder(
+                    &picture.effects,
+                    theme,
+                    background_source
+                        .as_ref()
+                        .and_then(|source| source.reference)
+                        .and_then(|reference| reference.color.as_ref()),
+                ),
+                crop,
+                destination,
+                tile,
                 path: None,
                 stroke: None,
                 shadow: None,
@@ -1201,11 +1212,13 @@ impl<'a> LayoutBuilder<'a> {
         media_part_path: Option<&str>,
         effects: &[BlipEffect],
         crop: Option<&PictureCrop>,
-        mask: PictureMask,
-        outline: Option<Stroke>,
+        mut mask: PictureMask,
+        mut outline: Option<Stroke>,
         shadow: Option<Shadow>,
     ) {
-        if effects.is_empty()
+        let separate_outline = mask.outline_path.is_some();
+        let metafile = !mask.empty
+            && effects.is_empty()
             && self.push_metafile(
                 object_id,
                 name,
@@ -1214,52 +1227,66 @@ impl<'a> LayoutBuilder<'a> {
                 media_part_path,
                 crop,
                 &mask,
-            )
-        {
-            if let Some(outline) = outline {
-                self.primitives.push(Primitive::Shape {
-                    clip: None,
-                    even_odd: false,
-                    object_id,
-                    shape_id: Some(shape_id.to_owned()),
-                    name: name.to_owned(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    geometry: "rect".to_owned(),
-                    path: mask
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0)),
-                    geometry_fallback: mask.geometry_fallback,
-                    adjust_values: BTreeMap::new(),
-                    fill: None,
-                    stroke: Some(outline),
-                    shadow: None,
-                    transform,
-                });
-            }
-            return;
+            );
+        if !mask.empty && !metafile {
+            let (crop, destination) = crop
+                .map(image_crop)
+                .unwrap_or_default()
+                .placement(rect.x, rect.y, rect.w, rect.h);
+            self.primitives.push(Primitive::Image {
+                object_id,
+                shape_id: Some(shape_id.to_owned()),
+                name: name.to_owned(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                asset_id: media_part_path.map(str::to_owned),
+                effects: image_effects(effects, self.theme),
+                crop,
+                destination,
+                tile: None,
+                path: mask.path.take(),
+                geometry_fallback: mask.geometry_fallback,
+                stroke: if separate_outline {
+                    None
+                } else {
+                    outline.take()
+                },
+                shadow,
+                transform,
+            });
         }
-        self.primitives.push(Primitive::Image {
-            object_id,
-            shape_id: Some(shape_id.to_owned()),
-            name: name.to_owned(),
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
-            asset_id: media_part_path.map(str::to_owned),
-            effects: image_effects(effects, self.theme),
-            crop: crop.map(image_crop).unwrap_or_default(),
-            tile: None,
-            path: mask.path,
-            geometry_fallback: mask.geometry_fallback,
-            stroke: outline,
-            shadow,
-            transform,
-        });
+        if (metafile || separate_outline)
+            && let Some(outline) = outline
+        {
+            let path = mask
+                .outline_path
+                .or(mask.path)
+                .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
+            if path.is_empty() {
+                return;
+            }
+            self.primitives.push(Primitive::Shape {
+                clip: None,
+                even_odd: false,
+                object_id,
+                shape_id: Some(shape_id.to_owned()),
+                name: name.to_owned(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                geometry: if separate_outline { "custom" } else { "rect" }.to_owned(),
+                path,
+                geometry_fallback: mask.geometry_fallback,
+                adjust_values: BTreeMap::new(),
+                fill: None,
+                stroke: Some(outline),
+                shadow: None,
+                transform,
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1391,7 +1418,7 @@ impl<'a> LayoutBuilder<'a> {
                     .and_then(|path| self.media_part(path))
                     .and_then(|part| image_dpi(&part.bytes));
                 self.primitives
-                    .push(picture_filled(primitive, picture, dpi));
+                    .push(picture_filled(primitive, picture, dpi, self.theme));
             }
             return Ok(());
         }
@@ -1425,7 +1452,7 @@ impl<'a> LayoutBuilder<'a> {
                 .and_then(|path| self.media_part(path))
                 .and_then(|part| image_dpi(&part.bytes));
             self.primitives
-                .push(picture_filled(primitive, picture, dpi));
+                .push(picture_filled(primitive, picture, dpi, self.theme));
         }
         Ok(())
     }
@@ -4915,7 +4942,43 @@ fn resolved_transform_value(
 
 /// Resolves bitmap effect colours against the theme.
 fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
-    let rgba = |color: Option<&ColorValue>| resolve_color_value_to_rgba_hex(color, Some(theme));
+    image_effects_with_placeholder(effects, theme, None)
+}
+
+fn image_effects_with_placeholder(
+    effects: &[BlipEffect],
+    theme: &Theme,
+    placeholder: Option<&ColorValue>,
+) -> Vec<ImageEffect> {
+    let placeholder = placeholder.and_then(|color| {
+        Some(ColorValue {
+            rgb: Some(resolve_color_value_to_hex_with_theme(
+                Some(color),
+                Some(theme),
+            )?),
+            alpha: color.alpha,
+            ..ColorValue::default()
+        })
+    });
+    let rgba = |color: Option<&ColorValue>| {
+        let color = color?;
+        let substituted;
+        let color = if color.theme_color.as_deref() == Some("phClr")
+            && let Some(placeholder) = &placeholder
+        {
+            substituted = ColorValue {
+                rgb: placeholder.rgb.clone(),
+                theme_color: None,
+                auto: None,
+                alpha: color.alpha.or(placeholder.alpha),
+                ..color.clone()
+            };
+            &substituted
+        } else {
+            color
+        };
+        resolve_color_value_to_rgba_hex(Some(color), Some(theme))
+    };
     effects
         .iter()
         .filter_map(|effect| match effect {
@@ -5145,9 +5208,9 @@ fn picture_asset_id(shape: &ShapeSnapshot) -> Option<String> {
     })
 }
 
-/// Clamps outsets and discards empty crops.
+/// Discards empty source rectangles.
 fn image_crop(crop: &PictureCrop) -> ImageCrop {
-    let fraction = |value: i32| (value as f32 / 100_000.0).clamp(0.0, 1.0);
+    let fraction = |value: i32| (value as f32 / 100_000.0).min(1.0);
     let cropped = ImageCrop {
         left: fraction(crop.left),
         top: fraction(crop.top),
@@ -5165,12 +5228,40 @@ fn image_crop(crop: &PictureCrop) -> ImageCrop {
 #[derive(Default)]
 struct PictureMask {
     path: Option<Vec<GeometryPathCommand>>,
+    outline_path: Option<Vec<GeometryPathCommand>>,
+    empty: bool,
     geometry_fallback: bool,
 }
 
 fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     if picture.geometry.is_empty() || picture.geometry == "rect" || rect.h <= 0.0 {
         return PictureMask::default();
+    }
+    if picture.geometry == "custom" && !picture.paths.is_empty() {
+        let path: Vec<_> = picture
+            .paths
+            .iter()
+            .filter(|path| !path.no_fill)
+            .flat_map(|path| path.commands.iter().cloned())
+            .collect();
+        let outline_path = picture
+            .paths
+            .iter()
+            .any(|path| path.no_fill || path.no_stroke)
+            .then(|| {
+                picture
+                    .paths
+                    .iter()
+                    .filter(|path| !path.no_stroke)
+                    .flat_map(|path| path.commands.iter().cloned())
+                    .collect()
+            });
+        return PictureMask {
+            empty: path.is_empty(),
+            path: (!path.is_empty()).then_some(path),
+            outline_path,
+            geometry_fallback: false,
+        };
     }
     let (path, geometry_fallback) = geometry_path_with_fallback(
         &picture.geometry,
@@ -5180,6 +5271,7 @@ fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     PictureMask {
         path: (!path.is_empty()).then_some(path),
         geometry_fallback,
+        ..PictureMask::default()
     }
 }
 
@@ -5207,6 +5299,7 @@ fn picture_filled(
     primitive: Primitive,
     picture: Option<&PictureFill>,
     dpi: Option<f32>,
+    theme: &Theme,
 ) -> Primitive {
     let Some(picture) = picture else {
         return primitive;
@@ -5227,24 +5320,30 @@ fn picture_filled(
             shadow,
             transform,
             ..
-        } => Primitive::Image {
-            object_id,
-            shape_id,
-            name,
-            x,
-            y,
-            w,
-            h,
-            asset_id: picture.media_part_path.clone(),
-            effects: Vec::new(),
-            crop: picture_fill_crop(picture),
-            tile: picture_fill_tile(picture, dpi),
-            path: (geometry != "rect").then_some(path),
-            geometry_fallback,
-            stroke,
-            shadow,
-            transform,
-        },
+        } => {
+            let tile = picture_fill_tile(picture, dpi);
+            let (crop, destination) = picture_fill_crop(picture).placement(x, y, w, h);
+            let destination = if tile.is_some() { None } else { destination };
+            Primitive::Image {
+                object_id,
+                shape_id,
+                name,
+                x,
+                y,
+                w,
+                h,
+                asset_id: picture.media_part_path.clone(),
+                effects: image_effects(&picture.effects, theme),
+                crop,
+                destination,
+                tile,
+                path: (geometry != "rect").then_some(path),
+                geometry_fallback,
+                stroke,
+                shadow,
+                transform,
+            }
+        }
         other => other,
     }
 }
@@ -5615,6 +5714,7 @@ mod tests {
                 ..PictureCrop::default()
             }),
             ImageCrop {
+                left: -0.05,
                 right: 0.2,
                 ..ImageCrop::default()
             }
@@ -5646,6 +5746,7 @@ mod tests {
             effects: Vec::new(),
             crop: PictureCrop::default(),
             geometry: "rect".to_owned(),
+            paths: Vec::new(),
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
@@ -5676,6 +5777,310 @@ mod tests {
     }
 
     #[test]
+    fn custom_geometry_picture_is_clipped_through_layout_and_save() {
+        let mut source = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let part = "ppt/slides/slide1.xml";
+        let picture = r#"<p:pic><p:nvPicPr><p:cNvPr id="4242" name="Triangle"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:custGeom><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:pic>"#;
+        let xml = std::str::from_utf8(source.part_bytes(part).unwrap())
+            .unwrap()
+            .replace("</p:spTree>", &format!("{picture}</p:spTree>"));
+        assert!(source.replace_part(part, xml.clone().into_bytes()));
+        let bytes = pptx_parse::write_pptx(&source).unwrap();
+        let session = DeckSession::open(&bytes, 289).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let Primitive::Image {
+            path,
+            geometry_fallback,
+            stroke,
+            ..
+        } = image
+        else {
+            unreachable!()
+        };
+        assert!(!geometry_fallback);
+        assert_eq!(
+            path.as_ref().unwrap(),
+            &vec![
+                GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert_eq!(stroke.as_ref().unwrap().color, "#0000FF");
+        let saved = session.save().unwrap();
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        assert_eq!(reopened.part_bytes(part).unwrap(), xml.as_bytes());
+    }
+
+    fn layout_custom_geometry_picture(path_a_fill: &str, path_b_stroke: &str) -> RenderedSlide {
+        let mut source = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let part = "ppt/slides/slide1.xml";
+        let picture = format!(
+            r#"<p:pic><p:nvPicPr><p:cNvPr id="4242" name="Custom picture"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr><a:xfrm rot="5400000" flipH="1"><a:off x="914400" y="457200"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:custGeom><a:pathLst><a:path w="100" h="100" fill="{path_a_fill}" stroke="0"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path><a:path w="100" h="100" fill="none" stroke="{path_b_stroke}"><a:moveTo><a:pt x="25" y="25"/></a:moveTo><a:lnTo><a:pt x="75" y="25"/></a:lnTo></a:path></a:pathLst></a:custGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></p:spPr></p:pic>"#
+        );
+        let xml = std::str::from_utf8(source.part_bytes(part).unwrap())
+            .unwrap()
+            .replace("</p:spTree>", &format!("{picture}</p:spTree>"));
+        assert!(source.replace_part(part, xml.into_bytes()));
+        let bytes = pptx_parse::write_pptx(&source).unwrap();
+        let session = DeckSession::open(&bytes, 290).unwrap();
+        renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn custom_geometry_picture_path_flags_control_mask_and_outline() {
+        let rendered = layout_custom_geometry_picture("norm", "1");
+        let primitives = &rendered.display_list.primitives;
+        let index = primitives
+            .iter()
+            .position(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let Primitive::Image {
+            path,
+            stroke,
+            shape_id,
+            transform,
+            x,
+            y,
+            w,
+            h,
+            ..
+        } = &primitives[index]
+        else {
+            panic!("expected image");
+        };
+        assert_eq!(
+            path.as_ref().unwrap(),
+            &vec![
+                GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                GeometryPathCommand::Close,
+            ]
+        );
+        assert!(stroke.is_none());
+        let Primitive::Shape {
+            object_id: 4242,
+            path,
+            fill: None,
+            stroke: Some(stroke),
+            shape_id: outline_id,
+            transform: outline_transform,
+            x: outline_x,
+            y: outline_y,
+            w: outline_w,
+            h: outline_h,
+            ..
+        } = &primitives[index + 1]
+        else {
+            panic!("expected stroke-only outline immediately after image");
+        };
+        assert_eq!(shape_id, outline_id);
+        assert_eq!(transform, outline_transform);
+        assert_eq!((x, y, w, h), (outline_x, outline_y, outline_w, outline_h));
+        assert_eq!(
+            path,
+            &vec![
+                GeometryPathCommand::Move { x: 0.25, y: 0.25 },
+                GeometryPathCommand::Line { x: 0.75, y: 0.25 },
+            ]
+        );
+        assert_eq!(stroke.color, "#0000FF");
+        assert_eq!(
+            primitives
+                .iter()
+                .filter(|p| matches!(
+                    p,
+                    Primitive::Image {
+                        object_id: 4242,
+                        ..
+                    } | Primitive::Shape {
+                        object_id: 4242,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn custom_geometry_picture_without_filled_paths_emits_only_its_outline() {
+        for stroked in [true, false] {
+            let rendered = layout_custom_geometry_picture("none", if stroked { "1" } else { "0" });
+            let primitives: Vec<_> = rendered
+                .display_list
+                .primitives
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p,
+                        Primitive::Image {
+                            object_id: 4242,
+                            ..
+                        } | Primitive::Shape {
+                            object_id: 4242,
+                            ..
+                        }
+                    )
+                })
+                .collect();
+            assert!(
+                primitives
+                    .iter()
+                    .all(|p| !matches!(p, Primitive::Image { .. }))
+            );
+            assert_eq!(primitives.len(), usize::from(stroked));
+            if stroked {
+                let Primitive::Shape {
+                    path,
+                    fill: None,
+                    stroke: Some(stroke),
+                    ..
+                } = primitives[0]
+                else {
+                    panic!("expected stroke-only outline");
+                };
+                assert_eq!(
+                    path,
+                    &vec![
+                        GeometryPathCommand::Move { x: 0.25, y: 0.25 },
+                        GeometryPathCommand::Line { x: 0.75, y: 0.25 },
+                    ]
+                );
+                assert_eq!(stroke.color, "#0000FF");
+            }
+        }
+    }
+
+    #[test]
+    fn a_negative_picture_crop_offsets_the_image_inside_its_frame() {
+        assert_picture_outset(
+            PictureCrop {
+                top: -36_890,
+                bottom: 36_890,
+                ..PictureCrop::default()
+            },
+            (100.0, 86.89, 200.0, 63.11),
+            ImageCrop {
+                bottom: 0.3689,
+                ..ImageCrop::default()
+            },
+        );
+    }
+
+    #[test]
+    fn mixed_picture_crops_keep_insets_and_outsets_on_both_axes() {
+        assert_picture_outset(
+            PictureCrop {
+                left: 7_795,
+                top: -36_890,
+                right: -5_518,
+                bottom: 36_890,
+            },
+            (100.0, 86.89, 200.0 * 0.92205 / 0.97723, 63.11),
+            ImageCrop {
+                left: 0.07795,
+                bottom: 0.3689,
+                ..ImageCrop::default()
+            },
+        );
+        assert_picture_outset(
+            PictureCrop {
+                left: -25_000,
+                top: 20_000,
+                right: 50_000,
+                bottom: -20_000,
+            },
+            (100.0 + 200.0 / 3.0, 50.0, 400.0 / 3.0, 80.0),
+            ImageCrop {
+                top: 0.2,
+                right: 0.5,
+                ..ImageCrop::default()
+            },
+        );
+    }
+
+    fn assert_picture_outset(crop: PictureCrop, dest: (f32, f32, f32, f32), kept: ImageCrop) {
+        let fixture = include_bytes!("../tests/fixtures/picture-crop-mask.pptx");
+        let mut package = pptx_parse::parse_pptx(fixture).unwrap();
+        let picture = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find_map(|node| match node {
+                ShapeNode::Picture(picture) if picture.base.id == 90 => Some(picture),
+                _ => None,
+            })
+            .unwrap();
+        picture.crop = crop;
+        let session = DeckSession::from_package_with_source(package, fixture, 289).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| matches!(primitive, Primitive::Image { object_id: 90, .. }))
+            .unwrap();
+        let Primitive::Image {
+            x,
+            y,
+            w,
+            h,
+            crop,
+            destination,
+            path,
+            ..
+        } = image
+        else {
+            unreachable!()
+        };
+        assert_eq!((*x, *y, *w, *h), (100.0, 50.0, 200.0, 100.0));
+        let destination = destination.unwrap();
+        for (actual, expected) in [
+            (destination.x, dest.0),
+            (destination.y, dest.1),
+            (destination.w, dest.2),
+            (destination.h, dest.3),
+        ] {
+            assert!((actual - expected).abs() < 0.001, "{actual} != {expected}");
+        }
+        assert_eq!(*crop, kept);
+        assert_eq!(
+            path.as_ref().unwrap()[0],
+            GeometryPathCommand::Move { x: 1.0, y: 0.5 }
+        );
+    }
+
+    #[test]
     fn a_fixture_picture_keeps_its_crop_mask_and_outline_through_layout() {
         let session = DeckSession::open(
             include_bytes!("../tests/fixtures/picture-crop-mask.pptx"),
@@ -5691,6 +6096,12 @@ mod tests {
             .iter()
             .find(|primitive| matches!(primitive, Primitive::Image { object_id: 90, .. }))
             .unwrap();
+        assert!(
+            serde_json::to_value(image)
+                .unwrap()
+                .get("destination")
+                .is_none()
+        );
         let Primitive::Image {
             x,
             y,
@@ -7421,6 +7832,7 @@ mod tests {
         let picture = PictureFill {
             relationship_id: None,
             media_part_path: Some("ppt/media/image1.png".to_owned()),
+            effects: Vec::new(),
             tile: None,
             crop: PictureCrop::default(),
             fill_rect: PictureCrop {
@@ -7469,6 +7881,151 @@ mod tests {
             referenced.display_list.primitives[0],
             rendered.display_list.primitives[0]
         );
+    }
+
+    #[test]
+    fn a_theme_background_picture_resolves_effects_with_the_master_reference_color() {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        for (path, bytes) in &mut parts {
+            if path == "ppt/slides/slide1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, "");
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/slideMasters/slideMaster1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<p:bg>").unwrap();
+                let end = xml.find("</p:bg>").unwrap() + "</p:bg>".len();
+                xml.replace_range(start..end, r#"<p:bg><p:bgRef idx="1001"><a:schemeClr val="accent1"><a:shade val="50000"/><a:alpha val="50000"/></a:schemeClr></p:bgRef></p:bg>"#);
+                *bytes = xml.into_bytes();
+            } else if path == "ppt/theme/theme1.xml" {
+                let mut xml = String::from_utf8(bytes.clone()).unwrap();
+                let start = xml.find("<a:bgFillStyleLst>").unwrap();
+                let end = xml.find("</a:bgFillStyleLst>").unwrap() + "</a:bgFillStyleLst>".len();
+                xml.replace_range(start..end, r#"<a:bgFillStyleLst><a:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="background"><a:duotone><a:schemeClr val="phClr"><a:shade val="50000"/></a:schemeClr><a:schemeClr val="phClr"><a:tint val="50000"/><a:alpha val="25000"/></a:schemeClr></a:duotone><a:clrChange><a:clrFrom><a:schemeClr val="phClr"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"/></a:clrTo></a:clrChange></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill></a:bgFillStyleLst>"#);
+                *bytes = xml.into_bytes();
+            }
+        }
+        parts.push((
+            "ppt/theme/_rels/theme1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="background" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"#.to_vec(),
+        ));
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut package = pptx_parse::parse_pptx(&source).unwrap();
+        package.themes[0].theme.color_scheme.accent1 = "808080".to_owned();
+        let session = DeckSession::open(&source, 8_321).unwrap();
+        let rendered = renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the theme background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Duotone {
+                    shadow: "#20202080".to_owned(),
+                    highlight: "#9F9F9F40".to_owned(),
+                },
+                ImageEffect::ColorChange {
+                    from: "#40404080".to_owned(),
+                    to: "#FFFFFFFF".to_owned(),
+                    use_alpha: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_318).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "effects": [
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.1, "contrast": -0.2 }
+            ]
+        }))
+        .unwrap();
+        package.slides[0].background_picture = Some(Box::new(picture));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let Primitive::Image { effects, .. } = &rendered.display_list.primitives[0] else {
+            panic!("the background paints before every shape")
+        };
+        assert_eq!(
+            *effects,
+            vec![
+                ImageEffect::Alpha { amount: 0.2 },
+                ImageEffect::Luminance {
+                    brightness: 0.1,
+                    contrast: -0.2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shape_picture_fill_keeps_its_blip_effects() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_319).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture: PictureFill = serde_json::from_value(serde_json::json!({
+            "mediaPartPath": "ppt/media/image1.png",
+            "tile": { "scaleX": 0.5, "scaleY": 0.5 },
+            "effects": [{ "type": "alpha", "amount": 0.2 }]
+        }))
+        .unwrap();
+        package.masters[0]
+            .shapes
+            .push(ShapeNode::Shape(pptx_parse::Shape {
+                has_preset_geometry: true,
+                effects: None,
+                base: pptx_parse::ShapeBase {
+                    id: 9_002,
+                    name: "Filled".to_owned(),
+                    description: None,
+                    hidden: false,
+                    placeholder: None,
+                    transform: ShapeTransform {
+                        x: 0,
+                        y: 0,
+                        width: 1_000_000,
+                        height: 1_000_000,
+                        ..ShapeTransform::default()
+                    },
+                },
+                geometry: "rect".to_owned(),
+                adjust_values: BTreeMap::new(),
+                paths: Vec::new(),
+                style: None,
+                fill: Some(ShapeFill::named("picture")),
+                picture_fill: Some(Box::new(picture)),
+                outline: None,
+                text: None,
+            }));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let image = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::Image {
+                        object_id: 9_002,
+                        ..
+                    }
+                )
+            })
+            .expect("the picture-filled master shape paints as an image");
+        let Primitive::Image { effects, tile, .. } = image else {
+            unreachable!()
+        };
+        assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
+        assert!(tile.is_some());
     }
 
     #[test]
@@ -9189,6 +9746,7 @@ mod tests {
             media_part_path: Some("ppt/media/logo.emf".to_owned()),
             crop,
             geometry: "rect".to_owned(),
+            paths: Vec::new(),
             adjust_values: BTreeMap::new(),
             style: None,
             fill: None,

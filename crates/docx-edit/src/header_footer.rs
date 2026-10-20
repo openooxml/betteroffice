@@ -78,9 +78,8 @@ impl EditingDoc {
                 let root = story_id(alias);
                 let prefix = format!("{root}:");
                 stories.as_ref().is_some_and(|stories| {
-                    stories
-                        .keys(&txn)
-                        .any(|key| key == root || key.starts_with(&prefix))
+                    crate::live_stories(stories, &txn)
+                        .any(|(key, _)| key == root || key.starts_with(&prefix))
                 })
             });
             if !inactive {

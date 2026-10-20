@@ -87,7 +87,9 @@ fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return false;
     };
-    let mut pending: Vec<Out> = stories.iter(txn).map(|(_, value)| value).collect();
+    let mut pending: Vec<Out> = crate::live_stories(&stories, txn)
+        .map(|(_, value)| value)
+        .collect();
     let mut anys: Vec<Any> = Vec::new();
     while let Some(value) = pending.pop() {
         match value {
@@ -3332,6 +3334,16 @@ fn paragraph_attrs(
                 .unwrap_or(Value::Null),
         );
     }
+    if field(formatting, "frame").is_some_and(|frame| !frame.is_null())
+        || (styles.enabled
+            && field(
+                styles.resolve_paragraph_style(style_id).paragraph.as_ref(),
+                "frame",
+            )
+            .is_some_and(|frame| !frame.is_null()))
+    {
+        attrs.insert("hasSourceContent".to_owned(), Value::Bool(true));
+    }
     if let Some(section) = field(Some(paragraph), "sectionProperties") {
         attrs.insert("_sectionProperties".to_owned(), section.clone());
         if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage" | "nextColumn")) =
@@ -5977,10 +5989,10 @@ fn seed_lowered(
     } = lowered;
     let scan_sequences = context.opaque_sequences.is_empty() && {
         let txn = document.yrs_doc().transact();
-        txn.get_map(crate::STORIES)
-            .expect("stories root is declared by EditingDoc::new")
-            .len(&txn)
-            == 0
+        let stories = txn
+            .get_map(crate::STORIES)
+            .expect("stories root is declared by EditingDoc::new");
+        crate::live_stories(&stories, &txn).next().is_none()
             && txn
                 .get_map(crate::identity::SESSION)
                 .expect("session root is declared by EditingDoc::new")

@@ -5071,8 +5071,7 @@ impl EditSession {
     /// Whether the document has a story with this id.
     pub fn has_story(&self, story: &str) -> bool {
         let txn = self.engine.doc().yrs_doc().transact();
-        txn.get_map(STORIES)
-            .is_some_and(|stories| stories.contains_key(&txn, story))
+        crate::story_ref(&txn, story).is_ok()
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted
@@ -5089,7 +5088,9 @@ impl EditSession {
         let Some(stories) = txn.get_map(STORIES) else {
             return Vec::new();
         };
-        let mut ids: Vec<String> = stories.iter(&txn).map(|(id, _)| id.to_string()).collect();
+        let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_string())
+            .collect();
         ids.sort();
         ids
     }

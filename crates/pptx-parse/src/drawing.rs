@@ -9,6 +9,7 @@ use crate::PptxError;
 use crate::custom_geometry::parse_custom_geometry;
 use crate::model::*;
 use crate::relationships::Relationship;
+use crate::theme::system_color_value;
 use crate::xml::{ParseBudget, XmlElement, XmlNode, alternate_content_branch};
 
 const MAX_SAFE_EMU: i64 = 1_000_000_000_000_000;
@@ -538,7 +539,7 @@ fn layout_linear(
     let count = items.len() as f64;
     let gap = (frame_width * 0.04)
         .min(182_880.0)
-        .min(frame_width / (count + 1.0));
+        .min(frame_width * 0.5 / (count + 1.0));
     let width = ((frame_width - gap * (count + 1.0)) / count).max(1.0);
     let height = (frame_height * 0.45).max(1.0);
     let y = ((frame_height - height) / 2.0).max(0.0);
@@ -594,7 +595,7 @@ fn layout_hierarchy(
     let count = children.len() as f64;
     let gap = (frame_width * 0.04)
         .min(182_880.0)
-        .min(frame_width / (count + 1.0));
+        .min(frame_width * 0.5 / (count + 1.0));
     let child_width = ((frame_width - gap * (count + 1.0)) / count).max(1.0);
     let y = frame_height * 0.58;
     for (index, child) in children.iter().enumerate() {
@@ -839,6 +840,13 @@ fn parse_picture(
         .and_then(|id| relationship_target(relationships, id));
     let transform = properties.and_then(|value| value.child("xfrm"));
     Ok(Picture {
+        paths: properties
+            .filter(|value| value.child("prstGeom").is_none())
+            .and_then(|value| value.child("custGeom"))
+            .and_then(|custom| {
+                parse_custom_geometry(custom, parse_custom_shape_extent(transform), budget)
+            })
+            .unwrap_or_default(),
         base: parse_base(element.child("nvPicPr"), transform),
         aspect_ratio_locked: element
             .child("nvPicPr")
@@ -1001,6 +1009,7 @@ fn parse_graphic_frame(
                     crop: PictureCrop::default(),
                     effects: Vec::new(),
                     geometry: "rect".to_owned(),
+                    paths: Vec::new(),
                     adjust_values: BTreeMap::new(),
                     fill: None,
                     outline: None,
@@ -1562,6 +1571,7 @@ pub(crate) fn picture_fill_element(
     Some(PictureFill {
         media_part_path: relationship_target(relationships, &relationship_id),
         relationship_id: Some(relationship_id),
+        effects: parse_blip_effects(fill.child("blip")),
         crop: parse_crop(fill.child("srcRect")),
         fill_rect: parse_crop(
             fill.child("stretch")
@@ -1756,10 +1766,7 @@ fn parse_color_element(color: &XmlElement) -> Option<ColorValue> {
             ..ColorValue::default()
         },
         "sysClr" => ColorValue {
-            rgb: color
-                .attribute("lastClr")
-                .or_else(|| system_color(color.attribute("val")))
-                .map(str::to_owned),
+            rgb: system_color_value(color).map(str::to_owned),
             ..ColorValue::default()
         },
         "prstClr" => ColorValue {
@@ -1789,16 +1796,6 @@ fn normalize_scheme_color(value: &str) -> String {
         value => value,
     }
     .to_owned()
-}
-
-fn system_color(value: Option<&str>) -> Option<&'static str> {
-    match value? {
-        "windowText" | "menuText" | "captionText" | "btnText" => Some("000000"),
-        "window" | "menu" | "btnFace" | "btnHighlight" | "highlightText" => Some("FFFFFF"),
-        "highlight" => Some("0078D7"),
-        "grayText" => Some("808080"),
-        _ => None,
-    }
 }
 
 fn preset_color(value: &str) -> Option<&'static str> {
@@ -2346,6 +2343,74 @@ mod tests {
             panic!("expected a shape");
         };
         assert!(solid.picture_fill.is_none());
+    }
+
+    #[test]
+    fn a_background_blip_fill_keeps_its_blip_effects() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:blipFill><a:blip r:embed="rId7"><a:alphaModFix amt="20000"/><a:lum bright="10000" contrast="-20000"/></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg><p:spTree/></p:cSld></p:sld>"#,
+            "ppt/slideMasters/slideMaster1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[image_relationship("rId7", "image1.png")],
+            "ppt/slideMasters/slideMaster1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let picture = data
+            .background_picture
+            .expect("background picture resolves");
+        assert_eq!(
+            serde_json::to_value(&*picture).unwrap()["effects"],
+            serde_json::json!([
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.1, "contrast": -0.2 }
+            ])
+        );
+    }
+
+    #[test]
+    fn a_shape_blip_fill_keeps_its_blip_effects() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Filled"/><p:nvPr/></p:nvSpPr><p:spPr><a:blipFill><a:blip r:embed="rId7"><a:alphaModFix amt="20000"/><a:lum/></a:blip><a:tile sx="50000" sy="50000"/></a:blipFill></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[image_relationship("rId7", "image1.png")],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(filled) = &data.shapes[0] else {
+            panic!("expected a shape");
+        };
+        let picture = filled.picture_fill.as_ref().expect("blip resolves");
+        assert_eq!(
+            picture.tile,
+            Some(PictureTile {
+                scale_x: 0.5,
+                scale_y: 0.5
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&**picture).unwrap()["effects"],
+            serde_json::json!([
+                { "type": "alpha", "amount": 0.2 },
+                { "type": "luminance", "brightness": 0.0, "contrast": 0.0 }
+            ])
+        );
     }
 
     fn image_relationship(id: &str, file: &str) -> Relationship {
@@ -3224,6 +3289,67 @@ mod tests {
         assert_eq!(picture.crop.bottom, 16_720);
         assert_eq!(picture.crop.left, 0);
         assert_eq!(picture.geometry, "ellipse");
+        let json = serde_json::to_value(picture).unwrap();
+        assert!(json.get("paths").is_none());
+        assert_eq!(serde_json::from_value::<Picture>(json).unwrap(), *picture);
+    }
+
+    #[test]
+    fn custom_geometry_picture_paths_are_normalized() {
+        for dimensions in [r#"w="100" h="100""#, ""] {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(
+                r#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Triangle"/></p:nvPicPr><p:spPr><a:xfrm><a:ext cx="100" cy="100"/></a:xfrm><a:custGeom><a:pathLst><a:path {dimensions}><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#
+            );
+            let root = parse_xml(xml.as_bytes(), "slide.xml", &mut budget).unwrap();
+            let data = common_slide_data(
+                &root,
+                &[],
+                "slide.xml",
+                &mut budget,
+                ShapeElements::WithConnectors,
+            )
+            .unwrap();
+            let ShapeNode::Picture(picture) = &data.shapes[0] else {
+                panic!("expected picture");
+            };
+            assert_eq!(picture.geometry, "custom");
+            let json = serde_json::to_value(picture).unwrap();
+            let paths: Vec<CustomGeometryPath> =
+                serde_json::from_value(json.get("paths").cloned().expect("custom picture paths"))
+                    .unwrap();
+            assert_eq!(paths.len(), 1);
+            assert_eq!(
+                paths[0].commands,
+                vec![
+                    GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                    GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                    GeometryPathCommand::Close,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_picture_preset_takes_precedence_over_custom_geometry() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let element = parse_xml(
+            br#"<p:pic><p:spPr><a:custGeom><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom><a:prstGeom prst="ellipse"/></p:spPr></p:pic>"#,
+            "slide.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let picture = parse_picture(&element, &[], "slide.xml", &mut budget).unwrap();
+        assert_eq!(picture.geometry, "ellipse");
+        assert!(
+            serde_json::to_value(picture)
+                .unwrap()
+                .get("paths")
+                .is_none()
+        );
     }
 
     #[test]
