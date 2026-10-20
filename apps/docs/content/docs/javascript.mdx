@@ -23,7 +23,7 @@ import "@betteroffice/docx-react/styles.css";
 ```
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
-`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` currently uses the hybrid runtime until worker-only collaboration is available.
+`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. `collaboration` runs on the worker-only editor too.
 Without `onSave`, File > Save downloads the edited bytes. Configure
 [fonts](./packages#fonts) before mounting the DOCX editor for consistent text
 measurement and pagination.
@@ -39,6 +39,9 @@ import { PptxEditor } from "@betteroffice/pptx-react";
 ```
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
+Both default to the worker-owned async editor, whose `onReady` API answers reads
+and exports with promises; deprecated `legacySyncApi` selects the sync hybrid
+runtime and is removed in 0.6.0.
 
 ## Compose the DOCX toolbar
 
@@ -336,8 +339,8 @@ use them too.
 ## Host PPTX editor plugins
 
 `PptxEditor` installs host-owned tools through the same `plugins`,
-`pluginGrants` and `onPluginError` props as the DOCX editor, with
-`legacySyncApi={true}` required. A plugin created with `definePptxPlugin`
+`pluginGrants` and `onPluginError` props as the DOCX editor, on the default
+editor and with `legacySyncApi`. A plugin created with `definePptxPlugin`
 contributes a docked panel, an overlay on the slide and
 commands, and works through restricted clients. The plugin API is experimental
 and may change in minor releases:
@@ -381,7 +384,6 @@ const review = definePptxPlugin<{ slides: number }>({
 });
 
 <PptxEditor
-  legacySyncApi
   file={bytes}
   fonts={fonts}
   plugins={[review]}

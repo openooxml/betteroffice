@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-Fixes Ctrl/Meta+Arrow data edges, two-stage Ctrl/Meta+A selection, and navigation through hidden tracks, enabled by default in editors. `selectionKeyReducer` accepts optional `SelectionData` and `SelectionHidden`; `moveFocus` accepts `hidden`; `GridMeta` includes optional `hiddenRowSpans` and `hiddenColSpans`. Rust: `SelectionDirection` is `#[non_exhaustive]`.
+Fixes Ctrl/Meta+Arrow data edges, two-stage Ctrl/Meta+A selection and navigation through hidden rows and columns in editors, on by default. `selectionKeyReducer`, `moveFocus` and `GridMeta` take optional selection data and hidden spans, and Rust `SelectionDirection` is `#[non_exhaustive]`.

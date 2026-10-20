@@ -7,7 +7,7 @@ BetterOffice editors synchronize through a Yrs CRDT. Each editor exposes its
 replica to a collaboration provider, which exchanges updates over a transport
 you supply. A relay routes those updates between peers in the same room.
 
-`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. Passing `collaboration` currently selects the hybrid runtime until worker-only collaboration is available.
+`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. Passing `collaboration` keeps the worker-only editor.
 
 ## How updates flow
 
