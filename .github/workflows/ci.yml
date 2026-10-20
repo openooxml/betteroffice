@@ -209,6 +209,7 @@ jobs:
           cargo clippy -p betteroffice-drawingml --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-metafile --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-docx-parse --all-targets --features tiff,metafile -- -D warnings
+          cargo clippy -p betteroffice-docx-edit --all-targets --features wasm -- -D warnings
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
