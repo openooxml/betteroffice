@@ -21,7 +21,7 @@ jobs:
       matrix:
         app: [web, demo, docs, relay, fidelity, evals]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: oven-sh/setup-bun@v2
         with:

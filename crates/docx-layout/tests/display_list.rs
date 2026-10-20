@@ -2110,7 +2110,11 @@ fn nested_floating_table_offsets_are_relative_to_the_cell_content() {
 fn carried_table_borders_preserve_cell_content_across_slices() {
     use serde_json::json;
 
-    for (alignment, first_baseline) in [("top", 12.0), ("center", 40.0), ("bottom", 68.0)] {
+    for (alignment, fragment_heights, first_baseline) in [
+        ("top", [90.0, 60.0, 80.0], 12.0),
+        ("center", [90.0, 88.0, 52.0], 40.0),
+        ("bottom", [90.0, 96.0, 44.0], 68.0),
+    ] {
         let paragraphs: Vec<_> = (0..4)
             .map(|index| {
                 json!({ "kind": "paragraph", "id": 70 + index,
@@ -2144,11 +2148,35 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
         )
         .unwrap();
         let dl = build_dl(&input.to_string());
-        assert_eq!(dl.pages.len(), 3, "{alignment}");
+        assert_eq!(dl.pages.len(), fragment_heights.len(), "{alignment}");
+        for (page_index, expected_height) in fragment_heights.iter().enumerate() {
+            let fragment = &input["layout"]["pages"][page_index]["fragments"][0];
+            assert_eq!(
+                fragment["height"].as_f64(),
+                Some(*expected_height),
+                "{alignment}, page {page_index}"
+            );
+        }
+        assert!(
+            text_prims(&dl.pages[0].primitives).is_empty(),
+            "{alignment}"
+        );
+        assert_eq!(input["layout"]["pages"][0]["fragments"][0]["rowEnd"], 1);
         assert_eq!(input["layout"]["pages"][1]["fragments"][0]["rowStart"], 1);
+        assert_eq!(
+            input["layout"]["pages"][1]["fragments"][0]["clipTop"]
+                .as_f64()
+                .unwrap_or(0.0),
+            0.0,
+            "{alignment}"
+        );
         assert!(dl.pages[1].primitives.iter().any(|primitive| {
             matches!(primitive, Primitive::Line(line)
-                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true))
+                if line.role == Some(docx_layout::display_list::LineRole::TableBorder)
+                    && line.attrs.cell.as_ref().is_some_and(|cell|
+                        cell.row == 1 && cell.col == 0
+                            && cell.owns_top_border == Some(true))
+                    && line.stroke_width.as_f64() == Some(8.0)
                     && line.y1 == line.y2 && line.y1.as_f64() == Some(0.0))
         }));
         let last_fragment =

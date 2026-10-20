@@ -9,6 +9,7 @@ use crate::PptxError;
 use crate::custom_geometry::parse_custom_geometry;
 use crate::model::*;
 use crate::relationships::Relationship;
+use crate::theme::system_color_value;
 use crate::xml::{ParseBudget, XmlElement, XmlNode, alternate_content_branch};
 
 const MAX_SAFE_EMU: i64 = 1_000_000_000_000_000;
@@ -1759,10 +1760,7 @@ fn parse_color_element(color: &XmlElement) -> Option<ColorValue> {
             ..ColorValue::default()
         },
         "sysClr" => ColorValue {
-            rgb: color
-                .attribute("lastClr")
-                .or_else(|| system_color(color.attribute("val")))
-                .map(str::to_owned),
+            rgb: system_color_value(color).map(str::to_owned),
             ..ColorValue::default()
         },
         "prstClr" => ColorValue {
@@ -1792,16 +1790,6 @@ fn normalize_scheme_color(value: &str) -> String {
         value => value,
     }
     .to_owned()
-}
-
-fn system_color(value: Option<&str>) -> Option<&'static str> {
-    match value? {
-        "windowText" | "menuText" | "captionText" | "btnText" => Some("000000"),
-        "window" | "menu" | "btnFace" | "btnHighlight" | "highlightText" => Some("FFFFFF"),
-        "highlight" => Some("0078D7"),
-        "grayText" => Some("808080"),
-        _ => None,
-    }
 }
 
 fn preset_color(value: &str) -> Option<&'static str> {
