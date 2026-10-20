@@ -1856,6 +1856,7 @@ function XlsxEditorContent({
     const handle = handleRef.current;
     const selection = selectionRef.current;
     if (!handle || !selection || readOnly) return Promise.resolve();
+    const accepted = cellClipboard.current;
     const reading = (async () => {
       try {
         return await readCellClipboard();
@@ -1871,7 +1872,7 @@ function XlsxEditorContent({
       if (data === null || readOnlyRef.current || handleRef.current !== handle) return;
       try {
         const { text, html } = data;
-        const pasted = cellClipboard.paste(handle, text, r, html, sheet);
+        const pasted = cellClipboard.paste(handle, text, r, html, sheet, accepted);
         const grid = pasted ? [] : parseCellClipboardText(text);
         if (!pasted && grid.length === 0) return;
         const edits: CellInputEdit[] = pasted?.edits ?? [];

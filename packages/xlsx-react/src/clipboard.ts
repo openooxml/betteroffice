@@ -8,6 +8,7 @@ const MAX_CLIPBOARD_BYTES = 16 * 1024 * 1024;
 type ClipboardCells = { input: string; isFormula: boolean; isArrayFormula?: boolean }[][];
 type Capture = { owner: object; sheet: number; range: CellRange; cells: ClipboardCells; cut: boolean };
 type Token = { revision: number; cancellation: number; escapes: number; marker: string };
+export type CellCapture = Capture & { text: string; marker: string };
 export type CellPaste = Capture & { edits: CellInputEdit[]; bottom: number; right: number };
 
 export class CellClipboard {
@@ -16,10 +17,14 @@ export class CellClipboard {
   private cancellation = 0;
   private escapes = 0;
   private watching: Token | null = null;
-  private captured: (Capture & { text: string; marker: string }) | null = null;
+  private captured: CellCapture | null = null;
 
   get escaped(): number {
     return this.escapes;
+  }
+
+  get current(): CellCapture | null {
+    return this.captured;
   }
 
   begin(escapes = this.escapes, marker = newClipboardMarker()): Token {
@@ -54,9 +59,13 @@ export class CellClipboard {
     if (this.captured?.cut) this.captured = null;
   }
 
-  paste(owner: object, text: string, target: CellRange, html?: string | null, sheet?: number): CellPaste | null {
-    const source = this.captured;
-    if (!source || source.owner !== owner || source.text !== text || !source.marker || !html?.includes(source.marker)) {
+  paste(
+    owner: object, text: string, target: CellRange, html?: string | null, sheet?: number, accepted?: CellCapture | null
+  ): CellPaste | null {
+    const matches = (capture: CellCapture | null | undefined): capture is CellCapture => Boolean(capture &&
+      capture.owner === owner && capture.text === text && capture.marker && html?.includes(capture.marker));
+    const source = [accepted?.cut ? null : accepted, this.captured].find(matches);
+    if (!source) {
       this.cancelCut();
       return null;
     }

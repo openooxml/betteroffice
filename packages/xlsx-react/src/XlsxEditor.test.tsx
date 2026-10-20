@@ -914,8 +914,9 @@ describe('XlsxEditor host integration', () => {
       configurable: true,
       value: {
         readText: async () => {
-          if (first) { first = false; await gate; return ''; }
-          return state.items[0] ? (await state.items[0].getType('text/plain')).text() : '';
+          const items = state.items;
+          if (first) { first = false; await gate; }
+          return items[0] ? (await items[0].getType('text/plain')).text() : '';
         },
         read: async () => state.items,
         write: async (next: GatedItem[]) => { state.items = next; },
@@ -1005,6 +1006,32 @@ describe('XlsxEditor host integration', () => {
       fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
       await waitFor(() => expect(api!.handle.cell(0, destination.row, destination.col).input).toBe('Cut value'));
       expect(api!.handle.cell(0, copied.row, copied.col).input).toBe('Copied value');
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('rebases a pending paste from the copy it read after a newer copy', async () => {
+    let api: XlsxEditorApi | undefined;
+    const clipboard = gatedClipboard();
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const surface = view.getByTestId('xlsx-scroll');
+      await act(async () => {
+        api!.handle.editCells(0, [{ row: 40, col: 10, input: '=K40' }, { row: 40, col: 14, input: 'Newer' }]);
+      });
+
+      await act(async () => { api!.selectCells(0, selectionAt({ row: 40, col: 10 })); });
+      await act(async () => { fireEvent.keyDown(surface, { key: 'c', ctrlKey: true }); });
+      await act(async () => { api!.selectCells(0, selectionAt({ row: 41, col: 10 })); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => { api!.selectCells(0, selectionAt({ row: 40, col: 14 })); });
+      await act(async () => { fireEvent.keyDown(surface, { key: 'c', ctrlKey: true }); });
+      await act(async () => clipboard.release());
+
+      await waitFor(() => expect(api!.handle.cell(0, 41, 10).input).toBe('=K41'));
     } finally {
       clipboard.restore();
     }
