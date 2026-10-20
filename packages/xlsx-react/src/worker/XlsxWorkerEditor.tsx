@@ -1,6 +1,6 @@
 import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
-  extendTo, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
+  extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, localNowSerial, moveFocus, normalizeRange,
   paintDisplayList, parseHyperlinkLocation, rangeRect, safeExternalHyperlink, selectionAt,
   selectionKeyReducer, toTsv, WorkbookEditPeerFailedError, WorkbookRecoveryRefusal,
   workbookEditPeerOperations, workbookSessionInternals,
@@ -13,7 +13,6 @@ import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, us
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
-import { CellClipboard, clipboardHtml, parseCellClipboardText, readCellClipboard, type CellPaste } from '../clipboard';
 import { commandForEvent } from '../commands/descriptors';
 
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
@@ -161,7 +160,6 @@ export function XlsxWorkerEditor(props: XlsxWorkerEditorProps) {
 }
 
 function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
-  const [cellClipboard] = useState(() => new CellClipboard());
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -589,7 +587,6 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         previewState.request = null;
         setPreviewDraft(null);
       }
-      if ((!('ok' in result) || result.ok) && result.applied) cellClipboard.changed();
       trackCommit(op);
       mutationRef.current += 1;
       const info = owner.peer.sheetInfo();
@@ -603,7 +600,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     } catch (error) {
       owner.fail(error);
     }
-  }, [run, commands, peerPaint, refreshProposals, trackCommit, previewState, cellClipboard]);
+  }, [run, commands, peerPaint, refreshProposals, trackCommit, previewState]);
 
   const afterPaint = useCallback((): Promise<boolean> => {
     const owner = runRef.current;
@@ -1022,7 +1019,6 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!owner?.current || owner.failure || !selected || kind !== 'copy' && !acceptInput()) return;
     const sheet = activeRef.current;
     const range = normalizeRange(selected);
-    const token = kind === 'paste' ? null : cellClipboard.begin();
     let clipboardWrite: { resolve(payload: Blob): void; reject(error: unknown): void; done: Promise<boolean> } | undefined;
     if (kind !== 'paste') {
       if (typeof ClipboardItem !== 'function' || typeof navigator.clipboard.write !== 'function') {
@@ -1033,7 +1029,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const payload = new Promise<Blob>((done, failed) => { resolve = done; reject = failed; });
         void payload.catch(() => {});
         try {
-          const done = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload, 'text/html': clipboardHtml(token!, payload) })]).then(
+          const done = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload })]).then(
             () => true, (error) => { reject(error); throw new WorkerInputRefusal(error instanceof Error ? error.message : 'Clipboard write failed', kind === 'cut'); }
           );
           void done.catch(() => {});
@@ -1041,67 +1037,66 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         } catch (error) { reject(error); reportInputError(new WorkerInputRefusal(error instanceof Error ? error.message : 'Clipboard write failed')); return; }
       }
     }
+    const captureClipboard = () => kind === 'paste' ? navigator.clipboard.readText() : '';
+    let mutation: Extract<WorkbookReplayOp, { method: 'editCells' }> | undefined;
     let discardPreview: (() => Promise<void>) | undefined;
-    let pasted: CellPaste | null = null;
-    let mutation: WorkbookReplayOp | undefined;
-    let edits: CellInputEdit[] = [];
-    const pendingWrite = cellClipboard.pending;
-    const preparePaste = async ({ text, html }: Awaited<ReturnType<typeof readCellClipboard>>) => {
-      await pendingWrite;
-      const source = cellClipboard.paste(owner, text, range, html, sheet);
-      if (mutation && source?.cells === pasted?.cells) return;
-      await discardPreview?.();
-      pasted = source;
-      edits = pasted?.edits ?? [];
-      if (!pasted) parseCellClipboardText(text).forEach((row, dr) => row.forEach((input, dc) =>
-        edits.push({ row: range.top + dr, col: range.left + dc, input })));
-      mutation = pasted?.cut ? { method: 'moveRange', args: [sheet,
-        selectedRange({ anchor: { row: pasted.range.top, col: pasted.range.left },
-          focus: { row: pasted.range.bottom, col: pasted.range.right } }),
-        address({ row: range.top, col: range.left })] } : { method: 'editCells', args: [sheet, edits] };
-      discardPreview = mutation.method === 'editCells' ? await previewEdits(sheet, edits, mutation) : undefined;
+    let clipboardRefusal: unknown;
+    void clipboardWrite?.done.catch((error) => {
+      clipboardRefusal = error;
+      if (kind === 'cut' && discardPreview) void discardPreview().catch(reportInputError);
+      reportInputError(error);
+    });
+    const prepareMutation = async (text: string) => {
+      if (kind !== 'copy' && !mutation) {
+        const edits: CellInputEdit[] = [];
+        if (kind === 'paste') {
+          fromTsv(text).forEach((row, dr) => row.forEach((input, dc) =>
+            edits.push({ row: range.top + dr, col: range.left + dc, input })));
+        } else {
+          for (let row = range.top; row <= range.bottom; row++) {
+            for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
+          }
+        }
+        mutation = { method: 'editCells', args: [sheet, edits] };
+      }
+      if (mutation) discardPreview = await previewEdits(sheet, mutation.args[1], mutation);
+      if (clipboardRefusal) { await discardPreview?.(); throw clipboardRefusal; }
     };
-    void clipboardWrite?.done.catch(reportInputError);
-    const captureClipboard = (): ReturnType<typeof readCellClipboard> | Awaited<ReturnType<typeof readCellClipboard>> =>
-      kind === 'paste' ? readCellClipboard() : { text: '' };
-    const completion = coordinator.clipboard(captureClipboard, async (data, _, markApplied) => {
+    void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
+      if (kind !== 'copy' && !mutation) await prepareMutation(text);
       if (kind !== 'paste') {
-        const cells = owner.peer!.rangeCells(sheet, selectedRange(selected));
-        if (kind === 'cut') cellClipboard.watch(token!);
-        const copied = toTsv(cells);
+        const copied = toTsv(owner.peer!.rangeCells(sheet, selectedRange(selected)));
+        let written: boolean;
         if (clipboardWrite) {
           clipboardWrite.resolve(new Blob([copied], { type: 'text/plain' }));
-          await clipboardWrite.done;
+          written = await clipboardWrite.done;
         } else {
-          try { await navigator.clipboard.writeText(copied); }
+          try { await navigator.clipboard.writeText(copied); written = true; }
           catch (error) { throw new WorkerInputRefusal(error instanceof Error ? error.message : 'Clipboard write failed'); }
         }
         if (!owner.current) throw new XlsxCommandAdmissionError('document-replaced');
         markApplied.check();
-        cellClipboard.capture(token!, { owner, sheet, range, cells, cut: kind === 'cut' }, Boolean(clipboardWrite));
-        return;
+        if (!written) throw new WorkerInputRefusal('Clipboard write was refused', kind === 'cut');
+        if (kind === 'copy') return;
       }
-      await preparePaste(data);
-      if (edits.length === 0) return;
       const op = mutation!;
+      const edits = op.args[1];
+      if (edits.length === 0) return;
       markApplied.check();
       const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer!);
       const result = (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied();
-      if (pasted) cellClipboard.consume(pasted, result.applied && (!('ok' in result) || result.ok === true));
       apply(result, op);
-      if (selectionRef.current === selected && activeRef.current === sheet) {
+      if (kind === 'paste' && selectionRef.current === selected && activeRef.current === sheet) {
         setSelection({ anchor: { row: range.top, col: range.left }, focus: {
-          row: edits.reduce((last, edit) => Math.max(last, edit.row), range.top),
-          col: edits.reduce((last, edit) => Math.max(last, edit.col), range.left),
+          row: Math.max(...edits.map((edit) => edit.row)), col: Math.max(...edits.map((edit) => edit.col)),
         } });
       }
-    }, { sheet, target: JSON.stringify(range) }, kind === 'paste' ? preparePaste : undefined, kind !== 'copy').catch(async (error) => {
+    }, { sheet, target: JSON.stringify(range) }, kind !== 'copy' ? prepareMutation : undefined, kind !== 'copy').catch(async (error) => {
       clipboardWrite?.reject(error);
       if (inputRefusal(error)) await discardPreview?.();
       reportInputError(error);
     });
-    if (kind !== 'paste') cellClipboard.pending = completion;
   };
 
   const clearCells = () => {
@@ -1597,7 +1592,6 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     <EditorChromeContext.Provider value={true}>
       <FormulaBarContext.Provider value={formulaBar}>
         <div ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
-          onKeyDownCapture={(event) => { if (!fromPlugin(event) && event.key === 'Escape') cellClipboard.cancelCut(); }}
           style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
             minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
           {toolbar != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbar}</div>}

@@ -894,6 +894,76 @@ describe('XlsxEditor host integration', () => {
     }
   });
 
+  for (const escape of [true, false]) it(`${escape ? 'escape cancels' : 'without escape, runs'} a cut queued behind a pending paste`, async () => {
+    const file = plain.bytes.slice();
+    let api: XlsxEditorApi | undefined;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    type Item = { types: string[]; getType(type: string): Promise<Blob> };
+    let items: Item[] = [];
+    let first = true;
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    Object.defineProperty(globalThis, 'ClipboardItem', {
+      configurable: true,
+      value: class {
+        constructor(private readonly data: Record<string, Blob>) {}
+        get types() { return Object.keys(this.data); }
+        async getType(type: string) { return this.data[type]!; }
+      },
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: async () => {
+          if (first) { first = false; await gate; return ''; }
+          return items[0] ? (await items[0].getType('text/plain')).text() : '';
+        },
+        read: async () => items,
+        write: async (next: Item[]) => { items = next; },
+        writeText: async (text: string) => {
+          items = [{ types: ['text/plain'], getType: async () => new Blob([text], { type: 'text/plain' }) }];
+        },
+      },
+    });
+
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const surface = view.getByTestId('xlsx-scroll');
+      const source = { row: 40, col: 10 };
+      const destination = { row: 40, col: 12 };
+      const value = 'Moved value';
+      await act(async () => { api!.handle.editCells(0, [{ ...source, input: value }]); });
+      expect(api!.handle.cell(0, source.row, source.col).input).toBe(value);
+      expect(api!.handle.cell(0, destination.row, destination.col).input).toBe('');
+
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => { api!.selectCells(0, selectionAt(source)); });
+      fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
+      if (escape) fireEvent.keyDown(surface, { key: 'Escape' });
+      await act(async () => release());
+      if (escape) {
+        await act(async () => {});
+        expect(items).toHaveLength(1);
+        expect(api!.handle.cell(0, source.row, source.col).input).toBe(value);
+        return;
+      }
+      await waitFor(() => expect(api!.handle.cell(0, source.row, source.col).input).toBe(''));
+      expect(items).toHaveLength(1);
+      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await waitFor(() => expect(api!.handle.cell(0, destination.row, destination.col).input).toBe(value));
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+      if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+      else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+    }
+  });
+
   it('does not finish an asynchronous paste after entering viewing mode', async () => {
     const file = plain.bytes.slice();
     let api: XlsxEditorApi | undefined;
@@ -930,67 +1000,6 @@ describe('XlsxEditor host integration', () => {
       } else {
         Reflect.deleteProperty(navigator, 'clipboard');
       }
-    }
-  });
-  for (const escape of [true, false]) it(`${escape ? 'escape cancels' : 'without escape, keeps'} a cut queued behind a pending paste`, async () => {
-    const file = plain.bytes.slice();
-    let api: XlsxEditorApi | undefined;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    type Item = { types: string[]; getType(type: string): Promise<Blob> };
-    let items: Item[] = [];
-    let first = true;
-    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
-    Object.defineProperty(globalThis, 'ClipboardItem', {
-      configurable: true,
-      value: class {
-        constructor(private readonly data: Record<string, Blob>) {}
-        get types() { return Object.keys(this.data); }
-        async getType(type: string) { return this.data[type]!; }
-      },
-    });
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        readText: async () => {
-          if (first) { first = false; await gate; return ''; }
-          return items[0] ? (await items[0].getType('text/plain')).text() : '';
-        },
-        read: async () => items,
-        write: async (next: Item[]) => { items = next; },
-      },
-    });
-
-    try {
-      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
-        onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
-      const surface = view.getByTestId('xlsx-scroll');
-      const source = { row: 40, col: 10 };
-      const destination = { row: 40, col: 12 };
-      const value = 'Moved value';
-      await act(async () => { api!.handle.editCells(0, [{ ...source, input: value }]); });
-      expect(api!.handle.cell(0, source.row, source.col).input).toBe(value);
-      expect(api!.handle.cell(0, destination.row, destination.col).input).toBe('');
-
-      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
-      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
-      await act(async () => { api!.selectCells(0, selectionAt(source)); });
-      fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
-      if (escape) fireEvent.keyDown(surface, { key: 'Escape' });
-      await act(async () => release());
-      await waitFor(() => expect(items.length).toBe(1));
-
-      await act(async () => { api!.selectCells(0, selectionAt(destination)); });
-      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
-      await waitFor(() => expect(api!.handle.cell(0, destination.row, destination.col).input).toBe(value));
-      expect(api!.handle.cell(0, source.row, source.col).input).toBe(escape ? value : '');
-    } finally {
-      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
-      else Reflect.deleteProperty(navigator, 'clipboard');
-      if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
-      else Reflect.deleteProperty(globalThis, 'ClipboardItem');
     }
   });
 });
@@ -1660,20 +1669,12 @@ describe('XlsxEditor commands', () => {
     }
   });
 
-  function holdClipboardWrite(marked = false) {
-    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
-    class Item {
-      constructor(readonly data: Record<string, Blob>) {}
-    }
-    if (marked) Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
+  function holdClipboardWrite() {
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     const writes: { text: string; resolve: () => void }[] = [];
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: {
-        ...(marked ? { write: (items: Item[]) => new Promise<void>((resolve) => {
-          void items[0].data['text/plain'].text().then((text) => writes.push({ text, resolve }));
-        }) } : {}),
         writeText: (text: string) =>
           new Promise<void>((resolve) => writes.push({ text, resolve })),
       },
@@ -1681,18 +1682,14 @@ describe('XlsxEditor commands', () => {
     return {
       writes,
       restore: () => {
-        if (marked) {
-          if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
-          else Reflect.deleteProperty(globalThis, 'ClipboardItem');
-        }
         if (original) Object.defineProperty(navigator, 'clipboard', original);
         else Reflect.deleteProperty(navigator, 'clipboard');
       },
     };
   }
 
-  it('keeps cut ranges intact when selection and sheets change', async () => {
-    const clipboard = holdClipboardWrite(true);
+  it('clears only the range and sheet a cut started on', async () => {
+    const clipboard = holdClipboardWrite();
     try {
       const editor = await mountCommands();
       const api = editor.api();
@@ -1709,22 +1706,18 @@ describe('XlsxEditor commands', () => {
       await act(async () => {
         api.selectCells(0, selectionAt({ row: 3, col: 1 }));
       });
-      expect(api.handle.cell(0, 0, 0).input).toBe('Cut me');
-      expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
       await act(async () => clipboard.writes[0].resolve());
       expect(clipboard.writes[0].text).toBe('Cut me');
-      expect(api.handle.cell(0, 0, 0).input).toBe('Cut me');
+      expect(api.handle.cell(0, 0, 0).input).toBe('');
       expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
 
       fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
       await act(async () => {
         api.selectCells(1, selectionAt({ row: 0, col: 0 }));
       });
-      expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
-      expect(api.handle.cell(1, 0, 0).input).toBe('Other sheet');
       await act(async () => clipboard.writes[1].resolve());
       expect(clipboard.writes[1].text).toBe('Keep me');
-      expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
+      expect(api.handle.cell(0, 3, 1).input).toBe('');
       expect(api.handle.cell(1, 0, 0).input).toBe('Other sheet');
     } finally {
       clipboard.restore();
@@ -2694,7 +2687,7 @@ describe('XlsxEditor edit batches', () => {
     };
   }
 
-  it('keeps cut nonmutating when a later batch edit is queued', async () => {
+  it('clears the accepted cut target once the clipboard write settles', async () => {
     const clipboard = deferredClipboardWrite();
     try {
       const { view, api } = await mountApi();
@@ -2711,8 +2704,9 @@ describe('XlsxEditor edit batches', () => {
         clipboard.settle();
         return pending;
       });
-      expect(result.ok).toBe(true);
-      expect(api.handle.cell(0, 2, 1).input).toBe('batch');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failure.code).toBe('stale-version');
+      expect(api.handle.cell(0, 2, 1).input).toBe('');
       expect(api.handle.cell(0, 3, 1).input).toBe('200');
     } finally {
       clipboard.restore();
@@ -3034,63 +3028,3 @@ describe('clipboard access failure recovery', () => {
     } finally { navigator.clipboard.writeText = write; }
   });
 });
-
-function markedCellClipboard() {
-  const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
-  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-  class Item {
-    constructor(readonly data: Record<string, Blob | Promise<Blob>>) {}
-  }
-  let current: Item;
-  Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
-  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
-    write: async (items: Item[]) => { current = items[0]; },
-    readText: async () => (await current.data['text/plain']).text(),
-    read: async () => [{ types: ['text/plain', 'text/html'], getType: async (type: string) => current.data[type] }],
-  } });
-  return () => {
-    if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
-    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
-    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
-    else Reflect.deleteProperty(navigator, 'clipboard');
-  };
-}
-
-for (const outcome of ['refused', 'noop'] as const) {
-  it(`in-thread editor retains a cut after a ${outcome} move`, async () => {
-    const restore = markedCellClipboard();
-    let restoreMove = () => {};
-    try {
-      let api!: XlsxEditorApi;
-      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
-        onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined());
-      const before = api.handle.cell(0, 0, 0).input;
-      const moving = spyOn(api.handle, 'moveRange').mockImplementation(() => {
-        if (outcome === 'refused') throw new Error('Move refused');
-        return { applied: false, sheetInfo: api.handle.sheetInfo() };
-      });
-      restoreMove = () => moving.mockRestore();
-      const scroll = view.getByTestId('xlsx-scroll');
-      fireEvent.keyDown(scroll, { key: 'x', ctrlKey: true });
-      await act(async () => { await api.flushPendingInput(); });
-      fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
-      await act(async () => {
-        await api.flushPendingInput().catch((error) => {
-          expect(outcome).toBe('refused');
-          expect(error).toMatchObject({ code: 'input-failed' });
-        });
-      });
-      expect(moving).toHaveBeenCalledTimes(1);
-      fireEvent.keyDown(scroll, { key: 'v', ctrlKey: true });
-      await act(async () => {
-        await api.flushPendingInput().catch((error) => {
-          expect(outcome).toBe('refused');
-          expect(error).toMatchObject({ code: 'input-failed' });
-        });
-      });
-      expect(moving).toHaveBeenCalledTimes(2);
-      expect(api.handle.cell(0, 0, 0).input).toBe(before);
-    } finally { restoreMove(); restore(); }
-  });
-}

@@ -1815,24 +1815,24 @@ function XlsxEditorContent({
     if (target && !readOnly) void coordinator.input(() => writeClear(target));
   }, [captureTarget, writeClear, readOnly, coordinator]);
 
-  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget, cut = false, escapes?: number) => {
-    const token = cellClipboard.begin(escapes);
+  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget, cut = false) => {
+    const token = cellClipboard.begin();
     try {
       const from = handle.cell(sheet, range.top, range.left).a1;
       const to = handle.cell(sheet, range.bottom, range.right).a1;
       const cells = handle.rangeCells(sheet, `${from}:${to}`);
-      if (cut) cellClipboard.watch(token);
-      const marked = typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function';
-      if (cut && !marked) throw new Error('Cut requires clipboard write access');
+      const marked = !cut && typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function';
       if (marked) await navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob([toTsv(cells)], { type: 'text/plain' }), 'text/html': clipboardMarker(token, toTsv(cells)),
       })]);
       else await navigator.clipboard.writeText(toTsv(cells));
-      if (handleRef.current === handle && (!cut || !readOnlyRef.current)) {
-        cellClipboard.capture(token, { owner: handle, sheet, range, cells, cut }, marked);
+      if (marked && handleRef.current === handle) {
+        cellClipboard.capture(token, { owner: handle, sheet, range, cells, cut: false }, marked);
       }
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     }
   }, [cellClipboard]);
 
@@ -1843,10 +1843,12 @@ function XlsxEditorContent({
 
   const cutSelection = useCallback(() => {
     const target = captureTarget();
-    if (!target || readOnly) return;
+    if (!target) return;
     const escapes = cellClipboard.escaped;
-    void coordinator.input(() => copyTarget(target, true, escapes));
-  }, [captureTarget, cellClipboard, copyTarget, readOnly, coordinator]);
+    const copied = copyTarget(target, true);
+    if (readOnly) return;
+    void coordinator.input(async () => (cellClipboard.escaped === escapes && (await copied) ? writeClear(target) : undefined));
+  }, [captureTarget, cellClipboard, copyTarget, writeClear, readOnly, coordinator]);
 
   const pasteSelection = useCallback(() => {
     const handle = handleRef.current;
@@ -1876,14 +1878,7 @@ function XlsxEditorContent({
           width = Math.max(width, rowArr.length);
           rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
         });
-        if (pasted?.cut) {
-          const from = handle.cell(sheet, pasted.range.top, pasted.range.left).a1;
-          const to = handle.cell(sheet, pasted.range.bottom, pasted.range.right).a1;
-          const destination = handle.cell(sheet, r.top, r.left).a1;
-          const result = handle.moveRange(sheet, `${from}:${to}`, destination);
-          applyResult(result);
-          cellClipboard.consume(pasted, result.applied);
-        } else applyResult(handle.editCells(sheet, edits));
+        applyResult(handle.editCells(sheet, edits));
         if (selectionRef.current === selection && activeSheetRef.current === sheet) {
           setSelection({
             anchor: { row: r.top, col: r.left },
