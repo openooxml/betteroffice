@@ -243,6 +243,28 @@ test('xlsx selection: Ctrl or Meta A first selects the current data region', asy
   await saveAndCheck(page, info, buffer, 'select-region');
 });
 
+test('xlsx selection: sheet tabs retain independent selections', async ({ page }, info) => {
+  const { buffer, grid } = await open(page);
+  await clickCell(page, grid, 3, 3);
+  await expectActiveCell(page, 'C3', '303');
+  await page.getByRole('tab', { name: 'Second', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Second', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expectActiveCell(page, 'A1', '100101');
+  await clickCell(page, grid, 4, 2);
+  await expectActiveCell(page, 'B4', '100402');
+  await expectRange(page, grid, 4, 2);
+  await page.getByRole('tab', { name: 'First', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'First', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expectActiveCell(page, 'C3', '303');
+  await expectRange(page, grid, 3, 3);
+  await page.getByRole('tab', { name: 'Second', exact: true }).click();
+  await expectActiveCell(page, 'B4', '100402');
+  await expectRange(page, grid, 4, 2);
+  await page.getByRole('tab', { name: 'First', exact: true }).click();
+  await expectActiveCell(page, 'C3', '303');
+  await saveAndCheck(page, info, buffer, 'sheet-selections');
+});
+
 test('xlsx selection: Home returns to column A and Ctrl or Meta Home returns to A1', async ({ page }, info) => {
   const { buffer, grid } = await open(page);
   await clickCell(page, grid, 5, 4);
