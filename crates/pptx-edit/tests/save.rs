@@ -619,13 +619,38 @@ fn deleting_a_paragraph_break_merges_and_survives_reopen() {
         (receipt.start, receipt.end, receipt.text.as_str()),
         (1, 2, "\n")
     );
-    assert_eq!(session.story(&story_id).unwrap(), before);
+    let joined = session.story(&story_id).unwrap();
+    assert_eq!(joined.plain_text(), before.plain_text());
+    assert_eq!(joined.length, before.length);
+    assert_eq!(joined.paragraphs[0].id, split.paragraphs[0].id);
+    assert_eq!(
+        joined.paragraphs[0].alignment,
+        split.paragraphs[0].alignment
+    );
+    assert_eq!(joined.paragraphs[0].level, split.paragraphs[0].level);
+    assert_eq!(
+        joined.paragraphs[0].bullet_json,
+        split.paragraphs[0].bullet_json
+    );
+    assert_eq!(joined.paragraphs[0].runs, before.paragraphs[0].runs);
     assert!(session.undo());
     assert_eq!(session.story(&story_id).unwrap(), split);
     assert!(session.redo());
+    assert_eq!(session.story(&story_id).unwrap(), joined);
 
     let reopened = reopen(&session);
-    assert_eq!(reopened.story(&story_id).unwrap(), before);
+    let restored = reopened.story(&story_id).unwrap();
+    assert_eq!(restored.plain_text(), joined.plain_text());
+    assert_eq!(
+        restored.paragraphs[0].alignment,
+        joined.paragraphs[0].alignment
+    );
+    assert_eq!(restored.paragraphs[0].level, joined.paragraphs[0].level);
+    assert_eq!(
+        restored.paragraphs[0].bullet_json,
+        joined.paragraphs[0].bullet_json
+    );
+    assert_eq!(restored.paragraphs[0].runs, joined.paragraphs[0].runs);
 }
 
 #[test]

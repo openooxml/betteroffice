@@ -440,6 +440,7 @@ impl DeckSession {
                     .insert(&mut txn, id.as_str(), value)
                     .cast::<TextRef>()
                     .map_err(|_| EditError::StoryNotFound(id.clone()))?;
+                crate::story::materialize_paragraph_joins(&text, &mut txn, &source_id)?;
                 let prefix = format!("para:{source_id}:");
                 for diff in text.diff(&txn, YChange::identity) {
                     if let Out::YMap(marker) = diff.insert {
@@ -1381,6 +1382,10 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
             (ShapeNode::Picture(target), ShapeNode::Picture(source)) => {
                 if target.effects.is_empty() && !source.effects.is_empty() {
                     target.effects.clone_from(&source.effects);
+                    changed = true;
+                }
+                if target.paths.is_empty() && !source.paths.is_empty() {
+                    target.paths.clone_from(&source.paths);
                     changed = true;
                 }
             }
@@ -4052,6 +4057,55 @@ mod tests {
         assert!(merge_source_chart_properties(&mut target, &source));
         assert_eq!(target, source);
         assert!(!merge_source_chart_properties(&mut target, &source));
+    }
+
+    #[test]
+    fn a_reattached_source_restores_picture_paths_a_stored_package_lacks() {
+        let source = vec![ShapeNode::Picture(pptx_parse::Picture {
+            base: ShapeBase {
+                id: 42,
+                name: "Custom picture".to_owned(),
+                description: None,
+                hidden: false,
+                placeholder: None,
+                transform: pptx_parse::ShapeTransform::default(),
+            },
+            aspect_ratio_locked: false,
+            relationship_id: None,
+            media_part_path: None,
+            crop: pptx_parse::PictureCrop::default(),
+            effects: Vec::new(),
+            geometry: "custom".to_owned(),
+            paths: vec![pptx_parse::CustomGeometryPath {
+                commands: vec![
+                    ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                    ooxml_drawingml::GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                ],
+                no_fill: true,
+                no_stroke: false,
+            }],
+            adjust_values: BTreeMap::new(),
+            fill: None,
+            outline: None,
+            shape_effects: None,
+            style: None,
+        })];
+        let mut target = source.clone();
+        let ShapeNode::Picture(picture) = &mut target[0] else {
+            panic!("expected picture");
+        };
+        picture.paths.clear();
+
+        assert!(merge_source_render_shapes(&mut target, &source));
+        assert_eq!(target, source);
+        assert!(!merge_source_render_shapes(&mut target, &source));
+        let ShapeNode::Picture(picture) = &mut target[0] else {
+            panic!("expected picture");
+        };
+        picture.paths[0].no_stroke = true;
+        let before = target.clone();
+        assert!(!merge_source_render_shapes(&mut target, &source));
+        assert_eq!(target, before);
     }
 
     #[test]

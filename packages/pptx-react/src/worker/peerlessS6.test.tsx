@@ -154,6 +154,43 @@ test('shape_border', async () => {
   await waitFor(() => expect(view.queryByTestId('pptx-resize-nw')).toBeNull());
 });
 
+for (const kind of ['shape', 'text']) test(`empty_slide_space_clears_${kind}_selection`, async () => {
+  const { view, stage, canvas, box, point, select, list } = await open();
+  await select();
+  if (kind === 'text') {
+    const line = box.lines[0]!;
+    const stop = line.caretStops.find((stop) => stop.position === 2)!;
+    const textPoint = point(stop.x, line.y + line.height / 2);
+    act(() => { fireEvent.pointerDown(canvas, textPoint); fireEvent.pointerUp(stage, textPoint); });
+    await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
+  }
+  const since = commands.length;
+  const blank = point(list.width - 10, list.height - 10);
+  act(() => { fireEvent.pointerDown(canvas, blank); fireEvent.pointerUp(stage, blank); });
+  await waitFor(() => expect(client.state.selection).toBeNull());
+  expect(commands.slice(since)).toMatchObject([{ kind: 'setSelection', payload: { selection: null } }]);
+  await waitFor(() => {
+    expect(view.queryByTestId('pptx-shape-selection')).toBeNull();
+    expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(0);
+    expect(view.queryByTestId('pptx-text-edit-outline')).toBeNull();
+  });
+});
+
+test('outside_slide_and_non_primary_presses_keep_selection', async () => {
+  const { stage, point, select, list } = await open();
+  await select();
+  const selected = client.state.selection;
+  const since = commands.length;
+  const blank = point(list.width - 10, list.height - 10);
+  for (const press of [point(-10, -10), point(list.width + 10, list.height + 10),
+    { ...blank, button: 2 }, { ...blank, isPrimary: false }]) {
+    act(() => { fireEvent.pointerDown(stage, press); fireEvent.pointerUp(stage, press); });
+  }
+  await bounded(client.flush());
+  expect(client.state.selection).toEqual(selected);
+  expect(commands.slice(since)).toEqual([]);
+});
+
 test('drag_release', async () => {
   const { view, stage, canvas, point, select, list } = await open();
   await select();

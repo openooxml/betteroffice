@@ -20,6 +20,7 @@
 //! when the content cannot fit the region even across all columns, or when the
 //! snapped height is not actually shorter than the region.
 
+use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::types::{BlockExtent, ColumnLayout, LayoutBlock, MeasuredBlock};
 
@@ -47,12 +48,16 @@ fn get_balanced_section_height(
     measured: &[MeasuredBlock],
     start: usize,
     end: usize,
+    section_marks: &[bool],
 ) -> Option<SectionBalance> {
     let mut total_height = 0.0_f64;
     let mut has_content = false;
     let mut legal_breaks = Vec::new();
 
-    for mb in &measured[start..end] {
+    for (index, mb) in measured.iter().enumerate().take(end).skip(start) {
+        if section_marks[index] {
+            continue;
+        }
         if let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
             (&mb.block, &mb.measure)
         {
@@ -161,7 +166,18 @@ pub fn balance_terminal_continuous_text_columns<P: ColumnBalancePaginator>(
     start: usize,
     end: usize,
 ) {
-    if let Some(balance) = get_balanced_section_height(measured, start, end) {
+    let marks = measured_section_break_marks(measured, None, None);
+    balance_terminal_continuous_text_columns_with_marks(measured, paginator, start, end, &marks);
+}
+
+pub(crate) fn balance_terminal_continuous_text_columns_with_marks<P: ColumnBalancePaginator>(
+    measured: &[MeasuredBlock],
+    paginator: &mut P,
+    start: usize,
+    end: usize,
+    section_marks: &[bool],
+) {
+    if let Some(balance) = get_balanced_section_height(measured, start, end, section_marks) {
         balance_current_column_region(paginator, balance.total_height, &balance.legal_breaks);
     }
 }

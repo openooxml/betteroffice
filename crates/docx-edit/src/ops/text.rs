@@ -188,7 +188,10 @@ pub(crate) fn suggest_delete(
         let overlap = overlap_end - overlap_start;
         match &chunk.kind {
             ChunkKind::Pilcrow(map) => {
-                if Some(chunk.start) == final_pilcrow || chunk.attr_active(DEL) {
+                if Some(chunk.start) == final_pilcrow
+                    || chunk.attr_active(DEL)
+                    || matches!(map.get(txn, crate::PPR_DEL), Some(Out::Any(value)) if value != Any::Null)
+                {
                     continue;
                 }
                 story.format(
