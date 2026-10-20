@@ -133,6 +133,7 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
 
 fn shade_fill(paint: &mut Paint, mode: PresetPathFill) {
     let (factor, offset) = match mode {
+        PresetPathFill::Darken => (0.6, 0.0),
         PresetPathFill::DarkenLess => (0.8, 0.0),
         PresetPathFill::LightenLess => (0.8, 51.0),
         PresetPathFill::Lighten => (0.6, 102.0),
@@ -208,12 +209,120 @@ mod tests {
     }
 
     #[test]
+    fn action_buttons_preserve_icon_shading_and_alpha() {
+        for (geometry, colors) in [
+            ("actionButtonBlank", &[Some("#32649680")][..]),
+            (
+                "actionButtonHome",
+                &[
+                    Some("#32649680"),
+                    Some("#28507880"),
+                    Some("#1e3c5a80"),
+                    None,
+                ][..],
+            ),
+            (
+                "actionButtonHelp",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+            (
+                "actionButtonInformation",
+                &[
+                    Some("#32649680"),
+                    Some("#1e3c5a80"),
+                    Some("#84a2c080"),
+                    None,
+                ][..],
+            ),
+            (
+                "actionButtonForwardNext",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+            (
+                "actionButtonBackPrevious",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+            (
+                "actionButtonEnd",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+            (
+                "actionButtonBeginning",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+            (
+                "actionButtonReturn",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+            (
+                "actionButtonSound",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+            (
+                "actionButtonDocument",
+                &[
+                    Some("#32649680"),
+                    Some("#28507880"),
+                    Some("#1e3c5a80"),
+                    None,
+                ][..],
+            ),
+            (
+                "actionButtonMovie",
+                &[Some("#32649680"), Some("#1e3c5a80"), None][..],
+            ),
+        ] {
+            let source = serde_json::from_value(serde_json::json!({
+                "kind": "shape", "objectId": 1, "name": geometry, "geometry": geometry,
+                "x": 0, "y": 0, "w": 200, "h": 100, "path": [], "geometryFallback": true,
+                "fill": { "kind": "solid", "color": "#32649680" },
+                "stroke": { "color": "#000000", "width": 1 }
+            }))
+            .unwrap();
+            let parts = preset_primitives(source);
+            assert_eq!(parts.len(), colors.len(), "{geometry}");
+            for ((part, has_fill), expected) in parts.iter().zip(colors) {
+                let Primitive::Shape {
+                    fill,
+                    stroke,
+                    geometry_fallback,
+                    ..
+                } = part
+                else {
+                    panic!()
+                };
+                assert!(!geometry_fallback, "{geometry}");
+                assert_eq!(*has_fill, expected.is_some());
+                match (fill, expected) {
+                    (Some(Paint::Solid { color }), Some(expected)) => {
+                        assert_eq!(color, expected, "{geometry}")
+                    }
+                    (None, None) => {}
+                    _ => panic!("{geometry}: unexpected fill"),
+                }
+                assert_eq!(
+                    stroke.is_some(),
+                    expected.is_none() || geometry == "actionButtonBlank"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn callout_leader_lines_are_stroke_only() {
         for (geometry, body_stroked) in [
             ("callout1", false),
             ("borderCallout1", true),
             ("accentCallout1", false),
             ("accentCallout2", false),
+            ("accentCallout3", false),
+            ("accentBorderCallout1", true),
+            ("accentBorderCallout2", true),
+            ("accentBorderCallout3", true),
+            ("borderCallout2", true),
+            ("borderCallout3", true),
+            ("callout2", false),
+            ("callout3", false),
         ] {
             let source = serde_json::from_value(serde_json::json!({
                 "kind": "shape", "objectId": 1, "name": geometry, "geometry": geometry,
@@ -251,6 +360,25 @@ mod tests {
     #[test]
     fn layered_presets_cast_one_shadow_with_every_fill_and_open_stroke() {
         for geometry in [
+            "accentCallout3",
+            "accentBorderCallout1",
+            "accentBorderCallout2",
+            "accentBorderCallout3",
+            "borderCallout2",
+            "borderCallout3",
+            "callout2",
+            "callout3",
+            "actionButtonBackPrevious",
+            "actionButtonBeginning",
+            "actionButtonDocument",
+            "actionButtonEnd",
+            "actionButtonForwardNext",
+            "actionButtonHelp",
+            "actionButtonHome",
+            "actionButtonInformation",
+            "actionButtonMovie",
+            "actionButtonReturn",
+            "actionButtonSound",
             "arc",
             "cube",
             "leftBrace",

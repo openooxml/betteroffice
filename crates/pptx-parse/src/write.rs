@@ -135,6 +135,7 @@ pub enum TextTarget {
 pub struct ParagraphWrite {
     /// Index of the paragraph in the source text body, when it survives.
     pub source_index: Option<usize>,
+    pub source_paragraphs: Vec<Option<String>>,
     pub preserved_xml: Option<String>,
     /// `false` keeps the source paragraph verbatim.
     pub rebuild: bool,
@@ -2414,13 +2415,38 @@ fn rebuild_paragraphs(
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
     for paragraph in paragraphs {
-        let source = if let Some(xml) = &paragraph.preserved_xml {
+        let source = if let Some(first) = paragraph.source_paragraphs.first() {
+            first
+                .as_ref()
+                .map(|xml| parse_xml(xml.as_bytes(), "paragraph", &mut budget))
+                .transpose()?
+        } else if let Some(xml) = &paragraph.preserved_xml {
             Some(parse_xml(xml.as_bytes(), "paragraph", &mut budget)?)
         } else {
             paragraph
                 .source_index
                 .and_then(|index| originals.get(index).cloned())
         };
+        let mut source = source;
+        for xml in paragraph.source_paragraphs.iter().skip(1) {
+            let source = source.get_or_insert_with(|| XmlElement::new(prefixes.drawing("p")));
+            if let Some(xml) = xml {
+                let next = parse_xml(xml.as_bytes(), "paragraph", &mut budget)?;
+                if next.child("endParaRPr").is_some() {
+                    source.children.retain(|child| {
+                        !matches!(child, XmlNode::Element(element) if element.local_name() == "endParaRPr")
+                    });
+                }
+                source.children.extend(
+                    next.child_elements()
+                        .filter(|child| {
+                            is_run_element(child.local_name()) || child.local_name() == "endParaRPr"
+                        })
+                        .cloned()
+                        .map(XmlNode::Element),
+                );
+            }
+        }
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
             source => build_paragraph(paragraph, source, theme, prefixes),
@@ -4041,6 +4067,7 @@ mod tests {
         let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
         let prefixes = Prefixes::from_root(&mut root);
         let write = ParagraphWrite {
+            source_paragraphs: Vec::new(),
             source_index: Some(0),
             preserved_xml: None,
             rebuild: true,

@@ -499,6 +499,7 @@ dependencies = [
  "png",
  "rustybuzz",
  "tiny-skia",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -46,6 +46,7 @@ export interface PresentationCommandObjectSelection extends Omit<PresentationCom
   rect: ShapeRect | null;
   canMove: boolean;
   canResize: boolean;
+  aspectRatioLocked?: boolean;
   units: { x: number; y: number };
 }
 

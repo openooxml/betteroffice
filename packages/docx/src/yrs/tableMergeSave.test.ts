@@ -107,3 +107,64 @@ describe('saving merged table cells after an earlier save', () => {
     }
   });
 });
+
+describe('saving deleted table cells', () => {
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+
+  it('retains deleted cells through a save until a fresh seed replaces the session', async () => {
+    const session = await opened(docx(table(paragraph('CellA')) + paragraph('After')));
+    try {
+      session.deleteTable({ story: 'body', tableIndex: 0 });
+      const saved = await saveYrsDocx(session);
+      expect(new TextDecoder().decode(session.encodeState())).toContain('CellA');
+      expect(session.storyIds()).toEqual(['body']);
+      const reseeded = await opened(saved.bytes);
+      try {
+        expect(new TextDecoder().decode(reseeded.encodeState())).not.toContain('CellA');
+        expect(reseeded.storyIds()).toEqual(['body']);
+      } finally {
+        reseeded.destroy();
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
+  for (const removal of ['table', 'row', 'column'] as const) {
+    it(`excludes deleted cells after deleting a ${removal}, undoing and redoing`, async () => {
+      const secondRow = `<w:tr>${cell(paragraph('CellC'))}${cell(paragraph('CellD'))}</w:tr>`;
+      const content = table(paragraph('CellA'), paragraph('CellB')).replace(
+        '</w:tbl>',
+        `${secondRow}</w:tbl>`
+      );
+      const session = await opened(docx(paragraph('Before') + content + paragraph('After')));
+      try {
+        await saveYrsDocx(session);
+        const first = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+        if (removal === 'table') session.deleteTable(first);
+        else if (removal === 'row') session.deleteRow({ anchor: first, head: first });
+        else session.deleteColumn({ anchor: first, head: first });
+        const expected = {
+          table: [],
+          row: [['CellC'], ['CellD']],
+          column: [['CellB'], ['CellD']],
+        }[removal];
+        for (let cycle = 0; cycle < 2; cycle += 1) {
+          const saved = await saveYrsDocx(session);
+          expect(Object.values(await reopenedStoryTexts(saved.bytes))).toEqual(expected);
+          expect(session.undo()).toBe(true);
+          const restored = await saveYrsDocx(session);
+          expect(Object.values(await reopenedStoryTexts(restored.bytes))).toEqual([
+            ['CellA'],
+            ['CellB'],
+            ['CellC'],
+            ['CellD'],
+          ]);
+          expect(session.redo()).toBe(true);
+        }
+      } finally {
+        session.destroy();
+      }
+    });
+  }
+});

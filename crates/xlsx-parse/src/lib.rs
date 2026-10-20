@@ -11,6 +11,9 @@ mod package_facts;
 mod patch;
 mod read;
 mod reference;
+mod rich_text;
+#[cfg(test)]
+mod rich_text_tests;
 #[cfg(any(test, feature = "test-oracle"))]
 mod save_oracle;
 mod styles;
@@ -21,7 +24,7 @@ mod xml;
 pub use axis::SheetAxes;
 pub use chart::{ChartRefresh, ChartRefreshPlan, chart_space, preserved_chart_space};
 #[cfg(feature = "test-counters")]
-pub use chart::{chart_counters, reset_chart_counters};
+pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use formula::translate_formula;
 pub use inventory::{
@@ -32,6 +35,7 @@ pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::keeps_source;
 pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
 pub use reference::UnpatchableReference;
+pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TEXT_STYLE_BYTES};
 #[cfg(any(test, feature = "test-oracle"))]
 #[doc(hidden)]
 pub use save_oracle::with_legacy_save_path;

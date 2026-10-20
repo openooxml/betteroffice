@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-PPTX slides can declare their own background: solid or gradient `ShapeFill` values now write `p:bg` through `SlideWrite`, `DeckSession::set_slide_background` and the `setSlideBackground` batch step. Invalid fills are refused before they reach the save.
+PPTX slides can set or clear their own solid or gradient background through `DeckSession::set_slide_background` and the `setSlideBackground` batch step. Edits paint before saving, clearing removes any `p:bg`, and invalid fills, including a peer's, are refused or ignored.

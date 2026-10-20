@@ -248,7 +248,10 @@ impl<'a> RowBreaks<'a> {
                             })
                             || row.cells.iter().any(|cell| {
                                 cell.row_span.is_some_and(|span| span != 1.0)
-                                    || !matches!(cell.vertical_align.as_deref(), None | Some("top"))
+                                    || !matches!(
+                                        cell.vertical_align.as_deref(),
+                                        None | Some("top" | "center" | "bottom")
+                                    )
                                     || !matches!(
                                         cell.text_direction.as_deref(),
                                         None | Some("lrTb")
@@ -287,6 +290,11 @@ impl<'a> RowBreaks<'a> {
                                 Some(CellBreaks {
                                     kept: cell_offsets(&kept, end),
                                     lines: cell_offsets(&lines, end),
+                                    start: kept.ranges.first().map_or(end, |&(top, _)| top),
+                                    aligned: matches!(
+                                        cell.vertical_align.as_deref(),
+                                        Some("center" | "bottom")
+                                    ),
                                     end,
                                 })
                             })
@@ -327,6 +335,9 @@ impl<'a> RowBreaks<'a> {
                 .iter()
                 .filter_map(|cell| {
                     let top = consumed.min(cell.end);
+                    if cell.waiting(top) {
+                        return Some((cell.start - top).min(capacity));
+                    }
                     cell.kept
                         .iter()
                         .copied()
@@ -355,6 +366,9 @@ impl<'a> RowBreaks<'a> {
             .iter()
             .filter_map(|cell| {
                 let top = consumed.min(cell.end);
+                if cell.waiting(top) {
+                    return None;
+                }
                 let offsets = if cell.kept_oversized(top, capacity) {
                     &cell.lines
                 } else {
@@ -418,6 +432,22 @@ impl<'a> RowBreaks<'a> {
                 .map(|clip| clip.bottom - clip.top)
                 .fold(0.0, f64::max)
         };
+        let advance_gaps = |clips: &mut [CellClip], height: f64| {
+            for (cell, clip) in cells.iter().zip(clips) {
+                if cell.waiting(clip.top) && clip.bottom <= cell.start {
+                    clip.bottom = (clip.top + height).min(cell.start);
+                }
+            }
+        };
+        let first_height = height(&clips);
+        advance_gaps(
+            &mut clips,
+            if first_height > 0.0 {
+                first_height
+            } else {
+                budget
+            },
+        );
         if height(&clips) <= 0.0
             || (tops.is_none()
                 && !cells.iter().zip(&clips).any(|(cell, clip)| {
@@ -434,20 +464,25 @@ impl<'a> RowBreaks<'a> {
             }
         }
         let starved = tops.is_none()
-            && cells
-                .iter()
-                .zip(&clips)
-                .any(|(cell, clip)| clip.bottom == clip.top && cell.end > clip.top);
+            && cells.iter().zip(&clips).any(|(cell, clip)| {
+                clip.bottom == clip.top && cell.end > clip.top && !cell.waiting(clip.top)
+            });
         let height = height(&clips);
+        advance_gaps(&mut clips, height);
         let complete = cells
             .iter()
             .zip(&clips)
             .all(|(cell, clip)| clip.bottom == cell.end);
+        let gap_only = cells
+            .iter()
+            .zip(&clips)
+            .all(|(cell, clip)| clip.bottom == clip.top || clip.bottom <= cell.start);
         Some(CellRowSlice {
             clips,
             height,
             complete,
             starved,
+            gap_only,
         })
     }
 
@@ -458,6 +493,9 @@ impl<'a> RowBreaks<'a> {
                 .flatten()
                 .zip(tops)
                 .filter_map(|(cell, top)| {
+                    if cell.waiting(*top) {
+                        return Some((cell.start - top).min(capacity));
+                    }
                     let offsets = if whole_lines { &cell.lines } else { &cell.kept };
                     offsets
                         .iter()
@@ -491,6 +529,7 @@ impl<'a> RowBreaks<'a> {
             height: self.cell_remaining(row, tops),
             complete: true,
             starved: false,
+            gap_only: false,
         }
     }
 
@@ -524,10 +563,16 @@ impl<'a> RowBreaks<'a> {
 struct CellBreaks {
     kept: Vec<f64>,
     lines: Vec<f64>,
+    start: f64,
+    aligned: bool,
     end: f64,
 }
 
 impl CellBreaks {
+    fn waiting(&self, top: f64) -> bool {
+        self.aligned && top < self.start
+    }
+
     /// Whether the paragraph rules leave this cell no break from `top` on in a
     /// fresh column `capacity` tall while whole lines still break it sooner, so
     /// the cell falls back to whole lines as an oversized row does.
@@ -549,6 +594,7 @@ pub(crate) struct CellRowSlice {
     pub(crate) complete: bool,
     /// A first slice that leaves a cell with content left no line on the page.
     pub(crate) starved: bool,
+    pub(crate) gap_only: bool,
 }
 
 fn cell_offsets(geometry: &CellRowGeometry, end: f64) -> Vec<f64> {
@@ -1167,6 +1213,74 @@ mod tests {
         assert_eq!(continuation.clips[0].top, continuation.clips[0].bottom);
         assert_eq!(continuation.clips[1].top, 30.0);
         assert_eq!(continuation.clips[1].bottom, 60.0);
+    }
+
+    #[test]
+    fn aligned_cell_gaps_advance_without_starving_or_requiring_a_line_bottom() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [
+                { "id": 0, "blocks": [para()] },
+                { "id": 1, "verticalAlign": "center", "blocks": [para()] },
+                { "id": 2, "verticalAlign": "bottom", "blocks": [para()] }
+            ] }],
+            "columnWidths": [100, 100, 100],
+        }))
+        .unwrap();
+        let measure: TableExtent = serde_json::from_value(json!({
+            "rows": [{ "height": 500, "cells": [
+                { "blocks": [para_measure(25)], "width": 100, "height": 500 },
+                { "blocks": [para_measure(1)], "width": 100, "height": 20 },
+                { "blocks": [para_measure(1)], "width": 100, "height": 20 }
+            ] }],
+            "columnWidths": [100, 100, 100], "totalWidth": 300, "totalHeight": 500,
+        }))
+        .unwrap();
+        let breaks = RowBreaks::new(&block, &measure);
+        assert_eq!(breaks.every_cell_start(0, 0.0, 100.0), Some(20.0));
+        assert_eq!(breaks.first_cell_slice(0, 0.0, 100.0), Some(20.0));
+        let slice = breaks
+            .cell_slice(0, 0.0, None, 90.0, 0.0, false, 100.0)
+            .unwrap();
+        assert!(!slice.starved);
+        assert_eq!(slice.height, 80.0);
+        assert_eq!(
+            slice
+                .clips
+                .iter()
+                .map(|clip| clip.bottom)
+                .collect::<Vec<_>>(),
+            [80.0, 80.0, 80.0]
+        );
+        let tops = [500.0, 100.0, 100.0];
+        assert_eq!(breaks.cell_fresh_slice(0, &tops, 100.0), 100.0);
+        let slice = breaks
+            .cell_slice(0, 100.0, Some(&tops), 100.0, 0.0, false, 100.0)
+            .unwrap();
+        assert_eq!(slice.height, 100.0);
+        assert!(!slice.complete);
+        assert_eq!(
+            slice
+                .clips
+                .iter()
+                .map(|clip| clip.bottom)
+                .collect::<Vec<_>>(),
+            [500.0, 200.0, 200.0]
+        );
+        let tops = [500.0, 150.0, 390.0];
+        assert_eq!(breaks.cell_fresh_slice(0, &tops, 100.0), 90.0);
+        let slice = breaks
+            .cell_slice(0, 200.0, Some(&tops), 100.0, 0.0, false, 100.0)
+            .unwrap();
+        assert_eq!(slice.height, 90.0);
+        assert_eq!(
+            slice
+                .clips
+                .iter()
+                .map(|clip| clip.bottom)
+                .collect::<Vec<_>>(),
+            [500.0, 240.0, 480.0]
+        );
     }
 
     #[test]

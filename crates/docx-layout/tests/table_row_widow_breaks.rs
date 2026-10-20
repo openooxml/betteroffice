@@ -104,6 +104,19 @@ fn shortened_column_fragments(table: Value) -> Vec<(usize, Value)> {
 }
 
 #[test]
+fn an_alignment_gap_only_starts_in_a_fresh_column() {
+    let (block, measure) = paragraph(1, 4, json!({}));
+    let mut table = table(4, json!({"widowControl": false}));
+    table["block"]["rows"][0]["cells"][0]["verticalAlign"] = json!("bottom");
+    table["measure"]["rows"][0]["height"] = json!(300);
+    table["measure"]["totalHeight"] = json!(300);
+    assert_eq!(
+        fragments(vec![json!({"block": block, "measure": measure}), table]),
+        [(1, 100.0), (2, 100.0), (3, 100.0)]
+    );
+}
+
+#[test]
 fn a_two_line_widow_controlled_row_skips_shortened_columns() {
     let result = shortened_column_fragments(table(2, json!({"widowControl": true})));
     assert_eq!(result.len(), 1);
@@ -827,8 +840,6 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
         "minimum",
         "header",
         "span",
-        "center",
-        "bottom",
         "rotated",
         "footnote",
         "endnote",
@@ -859,9 +870,6 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
             }
             "header" => table["block"]["rows"][0]["isHeader"] = json!(true),
             "span" => table["block"]["rows"][0]["cells"][0]["rowSpan"] = json!(2),
-            "center" | "bottom" => {
-                table["block"]["rows"][0]["cells"][0]["verticalAlign"] = json!(exclusion)
-            }
             "rotated" => table["block"]["rows"][0]["cells"][0]["textDirection"] = json!("tbRl"),
             "footnote" | "endnote" => {
                 let key = if exclusion == "footnote" {
@@ -977,6 +985,32 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
         );
         assert_eq!(result[0].0, 1, "{exclusion}");
         assert_eq!(result[0].1["height"], height, "{exclusion}");
+    }
+}
+
+#[test]
+fn centred_and_bottom_aligned_cells_split_at_whole_line_windows() {
+    for alignment in ["center", "bottom"] {
+        let mut table = two_cell_table(&[(4, 0.0, json!({})), (4, 4.0, json!({}))]);
+        table["block"]["rows"][0]["cells"][0]["verticalAlign"] = json!(alignment);
+        let result = table_fragments(after_filler(2, table), None);
+        assert_eq!(result.len(), 2, "{alignment}");
+        assert_eq!(result[0].0, 0, "{alignment}");
+        assert_eq!(result[1].0, 1, "{alignment}");
+        if alignment == "center" {
+            assert_eq!(cell_windows(&result[0].1), [(0.0, 42.0), (0.0, 44.0)]);
+            assert_eq!(cell_windows(&result[1].1), [(42.0, 82.0), (44.0, 84.0)]);
+        } else {
+            assert_eq!(result[0].1["clipBottom"], 44);
+            assert_eq!(result[1].1["clipTop"], 44);
+            assert_eq!(result[0].1["height"], 44);
+            assert_eq!(result[1].1["height"], 40);
+            assert!(
+                result
+                    .iter()
+                    .all(|(_, fragment)| fragment["cellClips"].is_null())
+            );
+        }
     }
 }
 

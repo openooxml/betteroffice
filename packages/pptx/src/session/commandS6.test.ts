@@ -37,7 +37,7 @@ test('command_host_does_not_import_react_source', async () => {
   expect(source).not.toMatch(/from ['"][^'"]*pptx-react/);
 });
 
-async function open() {
+async function open(bytes?: Uint8Array) {
   const pair = createInProcessPair();
   const registration = registerPresentationCommandHandlers({ initWasm: async () => {
     await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
@@ -55,7 +55,7 @@ async function open() {
     { methods: PRESENTATION_COMMAND_METHODS });
   try {
     const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
-    const state = await bounded(rpc.call.openCommandEditor(new Uint8Array(await bounded(deck(['alpha']))).buffer,
+    const state = await bounded(rpc.call.openCommandEditor(new Uint8Array(bytes ?? await bounded(deck(['alpha']))).buffer,
       { ...identity, fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font).buffer }] }));
     const result = (await bounded(rpc.call.readEditor({ ...identity, seq: 0 }))).result;
     if (!result.ok) throw new Error(result.failure.message);
@@ -147,4 +147,34 @@ test('shape_identity_selection_checks_target_and_frame', async () => {
     } });
     expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-basis', committed: false });
   } finally { await session.dispose(); }
+});
+
+test('picture aspect locks reach the worker selection and survive resize and save', async () => {
+  for (const lock of ['1', 'true', '0', 'false', null]) {
+    const zip = await JSZip.loadAsync(await deck(['alpha']));
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="2" name="Picture"/><p:cNvPicPr>${lock === null ? '' : `<a:picLocks noChangeAspect="${lock}"/>`}</p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="3000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic></p:spTree></p:cSld></p:sld>`);
+    const session = await open(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      const slide = session.handle().snapshot().slides[0]!;
+      const shape = slide.shapes[0]!;
+      const locked = lock === '1' || lock === 'true';
+      expect(shape).toMatchObject(locked ? { aspectRatioLocked: true } : {});
+      const selected = await session.command(session.state, 1, { kind: 'selectObject', payload: {
+        ...input, frame: session.state.frame, shapeId: shape.id,
+      } });
+      expect(selected.selection).toMatchObject({ kind: 'object', aspectRatioLocked: locked });
+      const object = selected.selection;
+      if (object?.kind !== 'object') throw new Error('Object selection required');
+      const resized = await session.command(selected, 2, { kind: 'setShapeRect', payload: {
+        ...input, frame: selected.frame,
+        target: { slideId: slide.id, shapeId: shape.id, token: object.token },
+        rect: { x: shape.x, y: shape.y, width: 8000000, height: 4000000 },
+      } });
+      expect(resized.outcomes[0]?.status).toBe('applied');
+      const saved = await JSZip.loadAsync(session.handle().save());
+      const xml = await saved.file('ppt/slides/slide1.xml')!.async('string');
+      if (lock !== null) expect(xml).toContain(`noChangeAspect="${lock}"`);
+      else expect(xml).not.toContain('noChangeAspect');
+    } finally { await session.dispose(); }
+  }
 });

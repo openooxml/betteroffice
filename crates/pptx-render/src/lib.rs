@@ -230,6 +230,8 @@ fn compile(slide: ComposedSlide) -> Result<SurfaceDisplayList, String> {
                 stroke,
             } => {
                 let transform = transform(&base);
+                let (crop, destination) =
+                    crop.placement(base.rect.x, base.rect.y, base.rect.w, base.rect.h);
                 primitives.push(Primitive::Image {
                     geometry_fallback: false,
                     object_id: base.id,
@@ -242,6 +244,7 @@ fn compile(slide: ComposedSlide) -> Result<SurfaceDisplayList, String> {
                     asset_id: image_part_path,
                     effects,
                     crop,
+                    destination,
                     tile: None,
                     path,
                     stroke: stroke.map(Into::into),

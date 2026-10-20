@@ -526,6 +526,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny-skia",
+ "unicode-segmentation",
 ]
 
 [[package]]
