@@ -107,23 +107,24 @@ const proposalResult = <T extends { ok: boolean }>(result: T) => {
   if (!result.ok) throw new Error(JSON.stringify(result));
   return result as Extract<T, { ok: true }>;
 };
-const reopen = async (text?: string) => {
+const reopen = async (source?: string | Uint8Array) => {
   const generations = slots.map(slot => slot.generation);
-  const update = text === undefined ? await asyncSide(0).encodeStateAsUpdate() : undefined;
-  if (text !== undefined) {
-    const bytes = await syntheticDocument(text);
+  const update = source === undefined ? await asyncSide(0).encodeStateAsUpdate() : undefined;
+  if (source !== undefined) {
+    const bytes = typeof source === 'string' ? await syntheticDocument(source) : source;
     for (const slot of slots) slot.file = bytes;
     count = 1;
   }
   for (const slot of slots) { slot.clientId += 100; slot.initialUpdate = update?.slice(); }
   render();
   await waitReplica(0, generations[0]);
-  if (text !== undefined) { slots[1]!.initialUpdate = await asyncSide(0).encodeStateAsUpdate(); count = 2; render(); }
+  if (source !== undefined) { slots[1]!.initialUpdate = await asyncSide(0).encodeStateAsUpdate(); count = 2; render(); }
   await waitReplica(1, generations[1]);
 };
 export const probe: DocxPeerlessCollaborationProbe = {
   errors,
   ready: Promise.resolve(),
+  load: bytes => reopen(new Uint8Array(bytes)),
   async text(index: number, view: 'accepted' | 'original' = 'accepted') {
     for (let attempt = 0; attempt < 20; attempt++) {
       try {
