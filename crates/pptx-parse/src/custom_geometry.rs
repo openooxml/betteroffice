@@ -5,13 +5,15 @@ use ooxml_drawingml::GeometryPathCommand;
 
 use crate::CustomGeometryPath;
 use crate::drawing::{GuideValue, evaluate_guide_formula, guide_operand, standard_guide_values};
-use crate::xml::XmlElement;
+use crate::xml::{ParseBudget, XmlElement};
 
-const MAX_CUSTOM_PATH_COMMANDS: usize = 2_048;
+const MAX_CUSTOM_PATH_COMMANDS: usize = 16_384;
+const MAX_ARC_SEGMENTS: usize = 64;
 
 pub(crate) fn parse_custom_geometry(
     custom: &XmlElement,
     extent: Option<(f64, f64)>,
+    budget: &mut ParseBudget<'_>,
 ) -> Option<Vec<CustomGeometryPath>> {
     let definitions = guide_definitions(custom);
     let path_list = custom.child("pathLst")?;
@@ -30,7 +32,8 @@ pub(crate) fn parse_custom_geometry(
         None => BTreeMap::new(),
     };
     let mut paths = Vec::new();
-    let mut remaining = MAX_CUSTOM_PATH_COMMANDS;
+    let available = MAX_CUSTOM_PATH_COMMANDS.min(budget.geometry_commands_left());
+    let mut remaining = available;
     for path in path_list.child_elements() {
         if path.local_name() != "path" || remaining == 0 {
             continue;
@@ -47,6 +50,7 @@ pub(crate) fn parse_custom_geometry(
             paths.push(parsed);
         }
     }
+    budget.spend_geometry_commands(available - remaining);
     (!paths.is_empty()).then_some(paths)
 }
 
@@ -200,6 +204,7 @@ fn arc_to_cubics(
     let start =
         (coordinate(arc, "stAng", guides)?.rem_euclid(21_600_000.0) / 60_000.0).to_radians();
     let sweep = (coordinate(arc, "swAng", guides)? / 60_000.0).to_radians();
+    let remaining = remaining.min(MAX_ARC_SEGMENTS);
     if rx <= 0.0 || ry <= 0.0 || sweep.abs() > remaining as f64 * FRAC_PI_2 {
         return None;
     }
@@ -261,13 +266,22 @@ mod tests {
     ) -> Option<Vec<CustomGeometryPath>> {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
+        parse_in(paths, guides, extent, &mut budget)
+    }
+
+    fn parse_in(
+        paths: &str,
+        guides: &str,
+        extent: Option<(f64, f64)>,
+        budget: &mut ParseBudget<'_>,
+    ) -> Option<Vec<CustomGeometryPath>> {
         let xml = parse_xml(
             format!("<a:custGeom>{guides}<a:pathLst>{paths}</a:pathLst></a:custGeom>").as_bytes(),
             "custom.xml",
-            &mut budget,
+            budget,
         )
         .unwrap();
-        parse_custom_geometry(&xml, extent)
+        parse_custom_geometry(&xml, extent, budget)
     }
 
     fn assert_cubic(command: &GeometryPathCommand, expected: [f64; 6]) {
@@ -357,6 +371,62 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn traced_outlines_with_thousands_of_points_keep_every_point() {
+        let points: String = (0..6_000)
+            .map(|index| {
+                format!(
+                    "<a:lnTo><a:pt x=\"{}\" y=\"{}\"/></a:lnTo>",
+                    index % 200,
+                    index % 100
+                )
+            })
+            .collect();
+        let paths = parse(&format!(
+            "<a:path w=\"200\" h=\"100\"><a:moveTo><a:pt x=\"0\" y=\"0\"/></a:moveTo>{points}<a:close/></a:path>"
+        ))
+        .expect("a long freeform keeps its path");
+        assert_eq!(paths[0].commands.len(), 6_002);
+    }
+
+    #[test]
+    fn a_package_stops_expanding_geometry_once_its_budget_is_spent() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let path = |points: usize| {
+            let lines = "<a:lnTo><a:pt x=\"10\" y=\"10\"/></a:lnTo>".repeat(points - 1);
+            format!(
+                "<a:path w=\"200\" h=\"100\"><a:moveTo><a:pt x=\"0\" y=\"0\"/></a:moveTo>{lines}</a:path>"
+            )
+        };
+        let left = budget.geometry_commands_left();
+        budget.spend_geometry_commands(left - 10);
+        assert!(parse_in(&path(11), "", Some((400.0, 200.0)), &mut budget).is_none());
+        assert_eq!(budget.geometry_commands_left(), 0);
+
+        let mut budget = ParseBudget::new(&limits);
+        budget.spend_geometry_commands(left - 10);
+        assert_eq!(
+            parse_in(&path(10), "", Some((400.0, 200.0)), &mut budget).unwrap()[0]
+                .commands
+                .len(),
+            10
+        );
+        assert_eq!(budget.geometry_commands_left(), 0);
+    }
+
+    #[test]
+    fn one_arc_cannot_expand_past_its_segment_bound() {
+        let path = |turns: i64| {
+            format!(
+                r#"<a:path w="200" h="100"><a:moveTo><a:pt x="180" y="20"/></a:moveTo><a:arcTo wR="80" hR="30" stAng="0" swAng="{}"/></a:path>"#,
+                turns * 21_600_000
+            )
+        };
+        assert_eq!(parse(&path(16)).unwrap()[0].commands.len(), 65);
+        assert!(parse(&path(17)).is_none());
     }
 
     #[test]

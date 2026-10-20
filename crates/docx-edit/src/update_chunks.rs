@@ -689,7 +689,11 @@ mod tests {
         let ids: Vec<String> = {
             let txn = doc.yrs_doc().transact();
             txn.get_map(crate::STORIES)
-                .map(|stories| stories.keys(&txn).map(str::to_owned).collect())
+                .map(|stories| {
+                    crate::live_stories(&stories, &txn)
+                        .map(|(id, _)| id.to_owned())
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         ids.into_iter()

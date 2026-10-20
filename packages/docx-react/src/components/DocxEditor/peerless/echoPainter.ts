@@ -221,7 +221,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     if (disposed || disabled || !context || staged?.pages.find((item) =>
       item.page.pageId === context!.page.pageId && item.page.pageIndex === context!.page.pageIndex
     )?.frameEpoch !== context.frameEpoch) return undefined;
-    if (intent.kind === 'paragraphBreak' ||
+    if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak' ||
       (('text' in intent.payload) && !simpleText(intent.payload.text))) {
       disable('unsupported');
       return undefined;
@@ -255,7 +255,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     if (!draft) { disable('missing-boundary'); return; }
     for (const entry of pending) {
       const intent = entry.value.intent;
-      if (intent.kind === 'paragraphBreak' || entry.value.contextFrameEpoch > context.frameEpoch) {
+      if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak' || entry.value.contextFrameEpoch > context.frameEpoch) {
         disable('unsupported'); return;
       }
       const next = applyIntent(draft, intent);
@@ -353,7 +353,7 @@ function contextDraft(context: DocxCommandEchoContext): EchoDraft | undefined {
 }
 
 function applyIntent(draft: EchoDraft, intent: PeerlessTextIntent): EchoDraft | undefined {
-  if (intent.kind === 'paragraphBreak') return undefined;
+  if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak') return undefined;
   let start = Math.min(draft.anchor, draft.focus);
   let end = Math.max(draft.anchor, draft.focus);
   let replacement = '';

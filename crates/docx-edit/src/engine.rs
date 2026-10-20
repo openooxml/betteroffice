@@ -5989,7 +5989,7 @@ impl EngineSession {
         notes: &docx_layout::footnotes::NoteLayoutInput,
         env: &RenderEnv,
     ) -> bool {
-        use yrs::{Map, ReadTxn};
+        use yrs::ReadTxn;
         let single_column =
             |columns: Option<&ColumnLayout>| columns.is_none_or(|columns| columns.count == 1.0);
         if !notes.contents.is_empty()
@@ -6006,8 +6006,7 @@ impl EngineSession {
         let notes_present = {
             let txn = self.doc.yrs_doc().transact();
             txn.get_map(crate::STORIES).is_some_and(|stories| {
-                stories
-                    .iter(&txn)
+                crate::live_stories(&stories, &txn)
                     .any(|(id, _)| id.starts_with("fn:") || id.starts_with("en:"))
             })
         };
@@ -6233,7 +6232,7 @@ impl EngineSession {
             let mut global_ids = BTreeSet::new();
             let txn = self.doc.yrs_doc().transact();
             if let Some(stories) = txn.get_map(crate::STORIES) {
-                for (id, value) in stories.iter(&txn) {
+                for (id, value) in crate::live_stories(&stories, &txn) {
                     let Ok(story) = value.cast::<yrs::TextRef>() else {
                         continue;
                     };
@@ -8030,14 +8029,13 @@ impl EngineSession {
         if changed.is_empty() {
             return Ok(paragraphs);
         }
-        use yrs::{Map, ReadTxn, Transact};
+        use yrs::{ReadTxn, Transact};
         let stories: Vec<String> = {
             let txn = self.doc.yrs_doc().transact();
             txn.get_map(crate::STORIES)
                 .map_or_else(Vec::new, |stories| {
-                    stories
-                        .iter(&txn)
-                        .filter(|(_, value)| value.clone().cast::<yrs::TextRef>().is_ok())
+                    crate::live_stories(&stories, &txn)
+                        .filter(|(_, value)| matches!(value, yrs::Out::YText(_)))
                         .map(|(story, _)| story.to_owned())
                         .collect()
                 })
@@ -14550,9 +14548,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
-    fn relayout_runs_before_a_deleted_table_is_collected() {
-        use yrs::{ReadTxn, StateVector};
+    fn relayout_observes_table_deletion_while_removed_cells_stay_retained() {
+        use yrs::{Map, ReadTxn, StateVector};
 
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
         let engine = EngineSession::new(9390);
         let doc = engine.doc();
         let ctx = crate::EditCtx::local("", "");
@@ -14560,14 +14561,32 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let table = doc
             .insert_table(&ctx, crate::Position::new("body", 0), 1, 1)
             .unwrap();
-        let marker = "text only the deleted table holds";
+        let cell = &table.created_story_ids[0];
+        let marker = "DeletedTableCell";
         doc.insert_text(
             &ctx,
-            crate::Position::new(&table.created_story_ids[0], 0),
+            crate::Position::new(cell, 0),
             marker,
             crate::FormatPolicy::Inherit,
         )
         .unwrap();
+        let request = small_page_request(font);
+        assert!(
+            engine
+                .lower_story_json(cell, &RenderEnv::default())
+                .unwrap()
+                .contains(marker)
+        );
+        assert_eq!(doc.search_text(marker, true, None).unwrap().len(), 1);
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        assert!(
+            engine
+                .retained_kernel_inputs_json()
+                .unwrap()
+                .contains(marker)
+        );
         let epoch = Rc::clone(&engine.doc_epoch);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let probe = Rc::clone(&seen);
@@ -14584,7 +14603,50 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, before + 1);
         assert!(holds(&seen[0].1));
-        assert!(!holds(&doc.encode_state_as_update_v1()));
+        assert!(!doc.keeps_deleted());
+        assert!(doc.delete_story(cell).is_err());
+        assert!(holds(&doc.encode_state_as_update_v1()));
+        {
+            let txn = doc.yrs_doc().transact();
+            let stories = txn.get_map(crate::STORIES).unwrap();
+            let removed = txn.get_map(crate::REMOVED_STORIES).unwrap();
+            assert!(matches!(stories.get(&txn, cell), Some(yrs::Out::YText(_))));
+            assert_eq!(
+                removed.get(&txn, cell),
+                Some(yrs::Out::Any(Any::Bool(true)))
+            );
+        }
+        assert!(doc.table_payload(&table.table).is_err());
+        assert!(doc.story_len(cell).is_err());
+        assert_eq!(
+            doc.list_stories()
+                .stories
+                .into_iter()
+                .map(|info| info.story)
+                .collect::<Vec<_>>(),
+            ["body"]
+        );
+        assert!(doc.search_text(marker, true, None).unwrap().is_empty());
+        assert!(
+            engine
+                .lower_story_json(cell, &RenderEnv::default())
+                .is_err()
+        );
+        assert!(
+            !engine
+                .lower_story_json("body", &RenderEnv::default())
+                .unwrap()
+                .contains(marker)
+        );
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        assert!(
+            !engine
+                .retained_kernel_inputs_json()
+                .unwrap()
+                .contains(marker)
+        );
     }
 
     #[test]

@@ -376,6 +376,18 @@ describe('pptx resize handles', () => {
     expect(box.x).toBe(picture.x);
   });
 
+  it('preserves a locked picture aspect ratio on every corner drag', () => {
+    const locked = { ...picture, width: 3_000_000, height: 1_500_000, aspectRatioLocked: true };
+    for (const handle of ['nw', 'ne', 'sw', 'se'] as const) {
+      const box = resizedShapeBox(deck, frame, locked, handle, { x: 80, y: 10 })!;
+      expect(box.width / box.height).toBeCloseTo(2, 5);
+      expect(handle.includes('w') ? box.x + box.width : box.x)
+        .toBe(handle.includes('w') ? locked.x + locked.width : locked.x);
+      expect(handle.startsWith('n') ? box.y + box.height : box.y)
+        .toBe(handle.startsWith('n') ? locked.y + locked.height : locked.y);
+    }
+  });
+
   it('uses the same EMU floor for preview and commit', () => {
     const box = resizedShapeBox(deck, frame, picture, 'e', { x: -1_000, y: 0 });
     const preview = resizedShapeBounds(deck, frame, picture, 'e', { x: -1_000, y: 0 });

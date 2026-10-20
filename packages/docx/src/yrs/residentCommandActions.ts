@@ -232,7 +232,7 @@ const DOCX_COMMAND_POLICIES = {
   selectTableCells: { keys: ['target'] },
   selectPoint: { keys: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'], exact: true },
   extendSelection: { keys: ['page', 'x', 'y', 'layoutRevision', 'frameEpoch', 'clickCount', 'modifiers', 'story', 'cellId'], exact: true },
-  deleteBackward: { keys: ['count'] }, deleteForward: { keys: ['count'] }, paragraphBreak: { keys: [] },
+  deleteBackward: { keys: ['count'] }, deleteForward: { keys: ['count'] }, paragraphBreak: { keys: [] }, lineBreak: { keys: [] },
   toggleMark: { keys: ['mark'] }, formatRange: { keys: ['delta'] }, clearFormatting: { keys: [] },
   setParagraphAttrs: { keys: ['attrs'] }, applyParagraphStyle: { keys: ['styleId'] },
   setReadOnly: { keys: ['readOnly'], exact: true },
@@ -410,22 +410,28 @@ function collapsed(range: YrsStoryRange): boolean {
   return range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
 }
 
-function deleteRange(engine: ResidentDocxCommandEngine, range: YrsStoryRange, backward: boolean, count: number): YrsStoryRange | null {
+function deleteRange(engine: ResidentDocxCommandEngine, range: YrsStoryRange, backward: boolean, count: number, skipDeleted: boolean): YrsStoryRange | null {
   if (!collapsed(range)) return range;
   const spans = engine.geometryReader.paragraphSpans(range.story);
   let index = spans.findIndex(({ paraId }) => paraId === range.start.paraId);
   if (index < 0) return null;
   let offset = range.start.offset;
-  const paragraphs = new Map<number, string>();
-  const textAt = (index: number): string => {
-    let text = paragraphs.get(index);
-    if (text === undefined) {
-      text = (engine.paragraphSegments(range.story, [index])[0] ?? []).map((segment) =>
-        segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC'
-      ).join('');
-      paragraphs.set(index, text);
+  const paragraphs = new Map<number, { text: string; deleted: Array<[number, number]> }>();
+  const paragraphAt = (index: number) => {
+    let paragraph = paragraphs.get(index);
+    if (paragraph === undefined) {
+      paragraph = { text: '', deleted: [] };
+      for (const segment of engine.paragraphSegments(range.story, [index])[0] ?? []) {
+        const text = segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC';
+        if (skipDeleted && (segment.attributes.del != null ||
+          (segment.kind === 'pilcrow' && segment.properties.pPrDel != null))) {
+          paragraph.deleted.push([paragraph.text.length, paragraph.text.length + text.length]);
+        }
+        paragraph.text += text;
+      }
+      paragraphs.set(index, paragraph);
     }
-    return text;
+    return paragraph;
   };
   for (let left = count; left > 0; left -= 1) {
     if (backward) {
@@ -433,17 +439,32 @@ function deleteRange(engine: ResidentDocxCommandEngine, range: YrsStoryRange, ba
         if (index === 0) break;
         offset = spans[--index]!.length;
       } else {
-        const text = textAt(index);
+        const { text } = paragraphAt(index);
         offset -= 1;
         if (offset > 0 && /[\uDC00-\uDFFF]/u.test(text[offset]!) && /[\uD800-\uDBFF]/u.test(text[offset - 1]!)) offset -= 1;
       }
     } else {
+      if (skipDeleted) {
+        for (;;) {
+          const deleted = paragraphAt(index).deleted.find(([start, end]) => start <= offset && offset < end);
+          if (!deleted) break;
+          offset = deleted[1];
+          if (offset > spans[index]!.length) {
+            if (index === spans.length - 1) {
+              offset = spans[index]!.length;
+              break;
+            }
+            index += 1;
+            offset = 0;
+          }
+        }
+      }
       if (offset === spans[index]!.length) {
         if (index === spans.length - 1) break;
         index += 1;
         offset = 0;
       } else {
-        offset += textAt(index).codePointAt(offset)! > 0xffff ? 2 : 1;
+        offset += paragraphAt(index).text.codePointAt(offset)! > 0xffff ? 2 : 1;
       }
     }
   }
@@ -633,10 +654,11 @@ export function preflightDocxCommand(
     paragraphChanges: planResidentListChanges(engine, resolved.range, command.payload),
   } };
   let range = resolved.range;
-  if ((command.kind === 'insertText' || command.kind === 'replaceSelection') && state.storedMarks &&
+  if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
   if (command.kind === 'deleteBackward' || command.kind === 'deleteForward') {
-    const expanded = deleteRange(engine, range, command.kind === 'deleteBackward', command.payload.count ?? 1);
+    const expanded = deleteRange(engine, range, command.kind === 'deleteBackward', command.payload.count ?? 1,
+      command.kind === 'deleteForward' && command.payload.suggesting !== undefined);
     if (!expanded) return refuse('unsupported-delete-target');
     range = expanded;
   }
@@ -650,7 +672,7 @@ function sameSelection(left: DocxCommandSelection | null, right: DocxCommandSele
     left[key].paraId === right[key].paraId && left[key].offset === right[key].offset);
 }
 
-const CELL_RESET_KINDS = new Set(['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak']);
+const CELL_RESET_KINDS = new Set(['insertText', 'replaceSelection', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'lineBreak']);
 
 function resetCellSelectionForEdit(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState, kind: string): void {
   if (state.selection && CELL_RESET_KINDS.has(kind)) writeCellSelection(engine, cellsForCaret(engine, state.selection.focus.story));
@@ -1007,7 +1029,7 @@ function applyPreparedDocxCommand(
   if (command.kind === 'setParagraphAttrs' && Object.keys(command.payload.attrs).length === 0) return result('noop');
   const version = engine.proposalEngine.version();
   engine.beginUndoCapture();
-  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak'].includes(command.kind) ||
+  const discrete = ['setTabStops', 'removeTabStop', 'toggleList', 'changeIndent', 'insertImage', 'insertTable', 'pasteFragment', 'insertPageBreak', 'insertSectionBreak', 'lineBreak'].includes(command.kind) ||
     isTableCommandKind(command.kind);
   if (discrete) engine.addUndoBoundary();
   const caret = (at: YrsLoc) => publish({ anchor: at, focus: at }, true);
@@ -1045,7 +1067,27 @@ function applyPreparedDocxCommand(
       if (!receipt.range) throw new Error('Delete receipt lacks range');
       if (state.storedMarks && (state.storedMarks.story !== receipt.range.story ||
         state.storedMarks.paraId !== receipt.range.start.paraId)) state.storedMarks = null;
-      caret({ story: receipt.range.story, ...receipt.range.start });
+      const advance = command.kind === 'deleteForward' && command.payload.suggesting !== undefined &&
+        selection.anchor.story === selection.focus.story && selection.anchor.paraId === selection.focus.paraId &&
+        selection.anchor.offset === selection.focus.offset;
+      caret({ story: receipt.range.story, ...(advance ? receipt.range.end : receipt.range.start) });
+      break;
+    }
+    case 'lineBreak': {
+      let at = { story: range.story, ...range.start };
+      if (!collapsed(range)) {
+        const removed = engine.deleteRange(range, command.payload.suggesting);
+        if (!removed.range) throw new Error('Delete receipt lacks range');
+        at = { story: removed.range.story, ...removed.range.start };
+      }
+      const receipt = engine.insertLineBreak(at, command.payload.suggesting);
+      if (!receipt.range) throw new Error('Line break receipt lacks range');
+      const stored = state.storedMarks;
+      if (stored) {
+        if (stored.clear) engine.clearFormatting(receipt.range);
+        if (Object.keys(stored.delta).length) engine.formatRange(receipt.range, stored.delta);
+      }
+      caret({ story: receipt.range.story, ...receipt.range.end });
       break;
     }
     case 'paragraphBreak': {

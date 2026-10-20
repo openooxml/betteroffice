@@ -63,7 +63,9 @@ fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)
     let stories = txn
         .get_map(crate::STORIES)
         .ok_or_else(|| OpError::UnknownEmbed(embed_id.to_owned()))?;
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
+    let mut story_ids: Vec<String> = crate::live_stories(&stories, txn)
+        .map(|(id, _)| id.to_owned())
+        .collect();
     story_ids.sort();
     for story_id in story_ids {
         let Some(Out::YText(story)) = stories.get(txn, &story_id) else {
