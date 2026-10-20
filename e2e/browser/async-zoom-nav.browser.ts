@@ -395,6 +395,36 @@ test('xlsx: zoom persists across sheet switches and viewport resize', async ({ p
   await unchanged(page, 'xlsx', info, original);
 });
 
+test('xlsx: keyboard navigation reaches row 10000 and column ZZ and returns to A1', async ({ page }, info) => {
+  await open(page, 'xlsx');
+  const original = await save(page, 'xlsx', info, 'original');
+  const scroll = page.getByTestId('xlsx-scroll');
+  await scroll.press('ControlOrMeta+End');
+  await expect(page.getByTestId('xlsx-name-box')).toHaveValue('ZZ10000');
+  await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('Far corner 1');
+  await expect(page.getByRole('gridcell').filter({ hasText: 'Far corner 1' })).toHaveCount(1);
+  await inside(page.getByTestId('xlsx-selection'), scroll);
+  await preset(page, 'xlsx', '150%');
+  await expect(page.getByTestId('xlsx-name-box')).toHaveValue('ZZ10000');
+  await inside(page.getByTestId('xlsx-selection'), scroll);
+  await scroll.press('ControlOrMeta+Home');
+  await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
+  await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('Origin 1');
+  await inside(page.getByTestId('xlsx-selection'), scroll);
+  for (const [key, address, value] of [
+    ['ArrowDown', 'A10000', 'Far row 1'],
+    ['ArrowRight', 'ZZ10000', 'Far corner 1'],
+    ['ArrowUp', 'ZZ1', 'Far column 1'],
+    ['ArrowLeft', 'A1', 'Origin 1'],
+  ] as const) {
+    await scroll.press(`ControlOrMeta+${key}`);
+    await expect(page.getByTestId('xlsx-name-box')).toHaveValue(address);
+    await expect(page.getByTestId('xlsx-formula-input')).toHaveValue(value);
+    await inside(page.getByTestId('xlsx-selection'), scroll);
+  }
+  await unchanged(page, 'xlsx', info, original);
+});
+
 test('pptx: typed zoom preserves the selected shape and hit testing follows its scaled bounds', async ({ page }, info) => {
   await open(page, 'pptx');
   const original = await save(page, 'pptx', info, 'original');

@@ -214,6 +214,86 @@ async function saveAndCheck(page: Page, info: TestInfo, original: Buffer, label:
   }
 }
 
+test('xlsx selection: clicking cells updates the name box and preserves edit undo and redo', async ({ page }, info) => {
+  const { buffer, grid } = await open(page);
+  await clickCell(page, grid, 3, 3);
+  await expectActiveCell(page, 'C3', '303');
+  await expectRange(page, grid, 3, 3);
+  await page.keyboard.press('F2');
+  await page.getByTestId('xlsx-cell-editor').fill('4242');
+  await page.getByTestId('xlsx-cell-editor').press('Enter');
+  await expectActiveCell(page, 'C4', '403');
+  await expectRange(page, grid, 4, 3);
+  await saveAndCheck(page, info, buffer, 'edited', true);
+  await clickCell(page, grid, 2, 2);
+  await expectActiveCell(page, 'B2', '202');
+  await expectRange(page, grid, 2, 2);
+  await page.getByTestId('xlsx-scroll').press('ControlOrMeta+z');
+  await clickCell(page, grid, 3, 3);
+  await expectActiveCell(page, 'C3', '303');
+  await saveAndCheck(page, info, buffer, 'undone');
+  await page.getByTestId('xlsx-scroll').press('ControlOrMeta+Shift+z');
+  await expectActiveCell(page, 'C3', '4242');
+  await expectRange(page, grid, 3, 3);
+  await saveAndCheck(page, info, buffer, 'redone', true, true);
+});
+
+test('xlsx selection: dragging a range paints every selected cell and reverses cleanly', async ({ page }, info) => {
+  const { buffer, grid } = await open(page);
+  const start = await point(page, grid, 2, 2);
+  const end = await point(page, grid, 5, 4);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps: 8 });
+  await page.mouse.up();
+  await expectActiveCell(page, 'B2', '202');
+  await expectRange(page, grid, 2, 2, 5, 4);
+  await expect(page.locator('[role="gridcell"][aria-selected="true"]')).toHaveCount(12);
+  await page.mouse.move(end.x, end.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x, start.y, { steps: 8 });
+  await page.mouse.up();
+  await expectActiveCell(page, 'D5', '504');
+  await expectRange(page, grid, 2, 2, 5, 4);
+  await saveAndCheck(page, info, buffer, 'dragged');
+});
+
+test('xlsx selection: shift-click extends and shrinks a range while preserving its anchor', async ({ page }, info) => {
+  const { buffer, grid } = await open(page);
+  await clickCell(page, grid, 2, 2);
+  await expectActiveCell(page, 'B2', '202');
+  await page.keyboard.down('Shift');
+  await clickCell(page, grid, 5, 4);
+  await page.keyboard.up('Shift');
+  await expectRange(page, grid, 2, 2, 5, 4);
+  await expectActiveCell(page, 'B2', '202');
+  await page.keyboard.down('Shift');
+  await clickCell(page, grid, 3, 3);
+  await page.keyboard.up('Shift');
+  await expectRange(page, grid, 2, 2, 3, 3);
+  await expectActiveCell(page, 'B2', '202');
+  await saveAndCheck(page, info, buffer, 'shift-clicked');
+});
+
+test('xlsx selection: shift-arrow grows and shrinks a range without moving its anchor', async ({ page }, info) => {
+  const { buffer, grid } = await open(page);
+  await clickCell(page, grid, 2, 2);
+  for (const [key, bottom, right] of [
+    ['Shift+ArrowRight', 2, 3],
+    ['Shift+ArrowDown', 3, 3],
+    ['Shift+ArrowLeft', 3, 2],
+    ['Shift+ArrowUp', 2, 2],
+  ] as const) {
+    await page.keyboard.press(key);
+    await expectActiveCell(page, 'B2', '202');
+    await expectRange(page, grid, 2, 2, bottom, right);
+  }
+  await page.keyboard.press('ArrowRight');
+  await expectActiveCell(page, 'C2', '203');
+  await expectRange(page, grid, 2, 3);
+  await saveAndCheck(page, info, buffer, 'shift-arrows');
+});
+
 test('xlsx selection: Ctrl or Meta horizontal arrows stop at the next contiguous data edge', async ({ page }, info) => {
   const { buffer, grid } = await open(page);
   await clickCell(page, grid, 3, 3);
