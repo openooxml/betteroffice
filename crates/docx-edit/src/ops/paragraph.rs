@@ -198,7 +198,9 @@ fn all_targets<T: ReadTxn>(txn: &T) -> Vec<TargetPara> {
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return Vec::new();
     };
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
+    let mut story_ids: Vec<String> = crate::live_stories(&stories, txn)
+        .map(|(id, _)| id.to_owned())
+        .collect();
     story_ids.sort();
     let mut result = Vec::new();
     for story_id in story_ids {

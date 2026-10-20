@@ -350,6 +350,7 @@ export interface DocxCommandPayloads {
   deleteBackward: DocxSelectionIntent & { count?: number };
   deleteForward: DocxSelectionIntent & { count?: number };
   paragraphBreak: DocxSelectionIntent;
+  lineBreak: DocxSelectionIntent;
   toggleMark: DocxSelectionIntent & { mark: YrsRunMark };
   formatRange: DocxSelectionIntent & { selection: DocxCommandSelection; delta: YrsInlineFormatDelta };
   clearFormatting: DocxSelectionIntent;
@@ -596,7 +597,7 @@ export interface ResidentDocxCommandState {
 
 export type ResidentDocxCommandEngine = ResidentEngineSession & Pick<YrsSession,
   | 'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'tablePayload'
-  | 'insertText' | 'replaceRange' | 'deleteRange' | 'splitParagraph'
+  | 'insertText' | 'insertLineBreak' | 'replaceRange' | 'deleteRange' | 'splitParagraph'
   | 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle'
   | 'insertColumn' | 'deleteRow' | 'deleteColumn' | 'deleteTable'
   | 'mergeCells' | 'splitCell' | 'setCellShading'

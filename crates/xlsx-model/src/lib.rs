@@ -5,6 +5,7 @@ pub mod addr;
 pub mod chart;
 pub mod date;
 pub mod numfmt;
+pub mod rich_text;
 pub mod styles;
 pub mod value;
 pub mod workbook;
@@ -15,6 +16,7 @@ pub use chart::{
     SheetChart,
 };
 pub use date::DateSystem;
+pub use rich_text::{RichRun, RunBaseline, RunStyle, RunUnderline};
 pub use styles::{
     Alignment, Border, BorderEdge, BorderStyle, CellFormat, Color, Fill, Font, FormatCode, HAlign,
     NumFmtTableFull, NumberFormat, PatternType, PoolMarks, Protection, Stylesheet, Theme, VAlign,

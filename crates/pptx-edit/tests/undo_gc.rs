@@ -130,6 +130,7 @@ fn a_peer_removing_a_shape_this_replica_edited_undid_and_edited_again_leaves_its
         .observe_update_v1(move |event| sink.lock().unwrap().push(event.update))
         .unwrap();
     seed.remove_shape(&peer);
+    peer.clear_undo_history();
     for update in sent.lock().unwrap().iter() {
         local.apply_update_v1(update).unwrap();
     }
@@ -206,8 +207,14 @@ fn a_replica_whose_undo_history_emptied_keeps_what_it_kept_after_a_peer_removes_
 
     seed.remove_shape(&peer);
     sync(&peer, &local);
-    assert!(!local.undo());
-    assert!(!local.can_redo());
+    while local.undo() {}
+    assert!(!local.can_undo());
+    assert!(
+        local.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .all(|shape| shape.id != seed.shape_id)
+    );
 
     assert_converged(&[&local, &peer]);
 }
@@ -252,9 +259,45 @@ fn a_joiner_synced_from_a_collected_replica_converges_when_the_removal_is_undone
     peer.add_undo_barrier();
     sync(&peer, &passive);
     let joiner = DeckSession::open_from_update(&passive.encode_state_as_update_v1(), 404).unwrap();
+    passive.clear_undo_history();
+    joiner.clear_undo_history();
 
     assert!(peer.undo());
     assert_converged(&[&peer, &passive, &joiner]);
     let restored = &peer.snapshot().unwrap().slides[0].shapes;
     assert!(restored.iter().any(|shape| shape.id == seed.shape_id));
+}
+
+#[test]
+fn clearing_one_peers_history_preserves_another_peers_undo_of_concurrent_slide_deletion() {
+    let seed = Seed::new();
+    let local = seed.open(202);
+    let peer = seed.open(303);
+    let initial = peer.snapshot().unwrap();
+    local
+        .delete_slide(&EditCtx::local("local"), &seed.slide_id)
+        .unwrap();
+    peer.delete_slide(&EditCtx::local("peer"), &seed.slide_id)
+        .unwrap();
+    sync(&local, &peer);
+    sync(&peer, &local);
+
+    local.clear_undo_history();
+    assert!(!local.can_undo());
+    assert!(!local.can_redo());
+    sync(&local, &peer);
+    assert!(
+        peer.snapshot()
+            .unwrap()
+            .slides
+            .iter()
+            .all(|slide| slide.id != seed.slide_id)
+    );
+
+    assert!(peer.undo());
+    let restored = peer.snapshot().unwrap();
+    assert_eq!(restored.slides.len(), initial.slides.len());
+    assert_eq!(restored, initial);
+    assert_converged(&[&local, &peer]);
+    assert_eq!(local.snapshot().unwrap(), initial);
 }
